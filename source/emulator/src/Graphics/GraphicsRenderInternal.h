@@ -926,7 +926,8 @@ struct RenderColorInfo
 {
 	static constexpr uint32_t TARGETS_MAX = 8;
 	uint32_t                  targets_num = 0;
-	RenderColorAttachmentInfo attachment[TARGETS_MAX] {};
+	// Elements initialize through their own member defaults; GCC 13 fails on "{}" for this array member.
+	RenderColorAttachmentInfo attachment[TARGETS_MAX];
 };
 
 enum class VulkanColorAttachmentBlendAdmission

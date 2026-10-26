@@ -54,6 +54,12 @@ namespace {
 		case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return ControllerButton::DpadDown;
 		case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return ControllerButton::DpadLeft;
 		case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return ControllerButton::DpadRight;
+		case SDL_GAMEPAD_BUTTON_MISC1: return ControllerButton::Misc1;
+		case SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1: return ControllerButton::Paddle1;
+		case SDL_GAMEPAD_BUTTON_LEFT_PADDLE1: return ControllerButton::Paddle2;
+		case SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2: return ControllerButton::Paddle3;
+		case SDL_GAMEPAD_BUTTON_LEFT_PADDLE2: return ControllerButton::Paddle4;
+		case SDL_GAMEPAD_BUTTON_TOUCHPAD: return ControllerButton::Touchpad;
 		default: return ControllerButton::Invalid;
 	}
 }
@@ -229,6 +235,49 @@ void TranslateEvent(const SDL_Event& native, InputEvent* event)
 			event->controller.remapped    = native.gdevice.type == SDL_EVENT_GAMEPAD_REMAPPED;
 			break;
 
+		case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
+			if (native.gsensor.sensor != SDL_SENSOR_ACCEL && native.gsensor.sensor != SDL_SENSOR_GYRO)
+			{
+				break;
+			}
+			event->type                           = InputEventType::ControllerSensor;
+			event->controller.id                  = static_cast<int>(native.gsensor.which);
+			event->controller.sensor_timestamp_ns = native.gsensor.sensor_timestamp;
+			if (native.gsensor.sensor == SDL_SENSOR_ACCEL)
+			{
+				// SDL reports m/s^2; the pad record wants G.
+				event->controller.sensor = ControllerSensor::Acceleration;
+				for (int i = 0; i < 3; i++)
+				{
+					event->controller.sensor_data[i] = native.gsensor.data[i] / SDL_STANDARD_GRAVITY;
+				}
+			} else
+			{
+				event->controller.sensor = ControllerSensor::AngularVelocity;
+				for (int i = 0; i < 3; i++)
+				{
+					event->controller.sensor_data[i] = native.gsensor.data[i];
+				}
+			}
+			break;
+
+		case SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN:
+		case SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION:
+		case SDL_EVENT_GAMEPAD_TOUCHPAD_UP:
+			// The guest pad has a single touch surface.
+			if (native.gtouchpad.touchpad != 0)
+			{
+				break;
+			}
+			event->type                    = InputEventType::ControllerTouchpad;
+			event->controller.id           = static_cast<int>(native.gtouchpad.which);
+			event->controller.touchpad     = true;
+			event->controller.touch_down   = native.gtouchpad.type != SDL_EVENT_GAMEPAD_TOUCHPAD_UP;
+			event->controller.touch_finger = native.gtouchpad.finger;
+			event->controller.touch_x      = native.gtouchpad.x;
+			event->controller.touch_y      = native.gtouchpad.y;
+			break;
+
 		default: break;
 	}
 }
@@ -306,12 +355,30 @@ bool HostInput::OpenController(int device_id, int* instance_id)
 		return false;
 	}
 	*instance_id = 0;
-	if (device_id <= 0 || SDL_OpenGamepad(static_cast<SDL_JoystickID>(device_id)) == nullptr)
+	SDL_Gamepad* gamepad = device_id <= 0 ? nullptr : SDL_OpenGamepad(static_cast<SDL_JoystickID>(device_id));
+	if (gamepad == nullptr)
 	{
 		return false;
 	}
+	// SDL delivers sensor events only for enabled sensors; a gamepad without
+	// them reports a motionless pad.
+	for (SDL_SensorType sensor: {SDL_SENSOR_ACCEL, SDL_SENSOR_GYRO})
+	{
+		if (SDL_GamepadHasSensor(gamepad, sensor) && !SDL_SetGamepadSensorEnabled(gamepad, sensor, true))
+		{
+			SDL_CloseGamepad(gamepad);
+			return false;
+		}
+	}
 	*instance_id = device_id;
 	return true;
+}
+
+std::string HostInput::ControllerGuid(int device_id)
+{
+	char text[33] = {};
+	SDL_GUIDToString(SDL_GetGamepadGUIDForID(static_cast<SDL_JoystickID>(device_id)), text, sizeof(text));
+	return text;
 }
 
 void HostInput::CloseController(int instance_id)
@@ -322,19 +389,27 @@ void HostInput::CloseController(int instance_id)
 	}
 }
 
+void HostInput::RumbleController(int instance_id, uint16_t low_frequency, uint16_t high_frequency)
+{
+	// SDL caps the duration at about 65 s; within that the strength holds until the guest's next call.
+	constexpr Uint32 kUntilNextCall = 0xFFFFFFFFu;
+	if (SDL_Gamepad* gamepad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(instance_id)); gamepad != nullptr)
+	{
+		SDL_RumbleGamepad(gamepad, low_frequency, high_frequency, kUntilNextCall);
+	}
+}
+
+void HostInput::SetControllerLed(int instance_id, uint8_t red, uint8_t green, uint8_t blue)
+{
+	if (SDL_Gamepad* gamepad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(instance_id)); gamepad != nullptr)
+	{
+		SDL_SetGamepadLED(gamepad, red, green, blue);
+	}
+}
+
 const char* HostInput::LastError() const
 {
 	return SDL_GetError();
-}
-
-int HostInput::NormalizeAxis(ControllerAxis axis, int value)
-{
-	const bool trigger = axis == ControllerAxis::TriggerLeft || axis == ControllerAxis::TriggerRight;
-	const int  min     = trigger ? 0 : -32768;
-	const int  max     = 32767;
-	const int  clamped = std::clamp(value, min, max);
-	const int  scaled  = (255 * (clamped - min)) / (max - min);
-	return std::clamp(scaled, 0, 255);
 }
 
 bool HostInput::IsEscapeKey(int key_code)
@@ -367,6 +442,36 @@ bool HostInput::IsTextEntryToggleKey(int key_code)
 	return key_code == SDLK_F2;
 }
 
+bool HostInput::IsMouseCaptureKey(int key_code)
+{
+	return key_code == SDLK_F3;
+}
+
+bool HostInput::IsReservedScanCode(int scan_code)
+{
+	switch (scan_code)
+	{
+		case SDL_SCANCODE_ESCAPE:
+		case SDL_SCANCODE_F1:
+		case SDL_SCANCODE_F2:
+		case SDL_SCANCODE_F3:
+		case SDL_SCANCODE_F9:
+		case SDL_SCANCODE_F11: return true;
+		default: return false;
+	}
+}
+
+int HostInput::ScanCodeFromName(const char* name)
+{
+	return static_cast<int>(SDL_GetScancodeFromName(name));
+}
+
+ControllerButton HostInput::ControllerButtonFromName(const char* name)
+{
+	const SDL_GamepadButton button = SDL_GetGamepadButtonFromString(name);
+	return button == SDL_GAMEPAD_BUTTON_INVALID ? ControllerButton::Invalid : TranslateControllerButton(static_cast<Uint8>(button));
+}
+
 uint16_t HostInput::KeyboardHidUsage(int scan_code)
 {
 	// SDL scancodes are the USB HID keyboard usages (usage page 0x07).
@@ -394,31 +499,6 @@ uint16_t HostInput::KeyboardTextCharacter(int key_code, uint16_t modifiers)
 bool HostInput::HasAltModifier(uint16_t modifiers)
 {
 	return (modifiers & SDL_KMOD_ALT) != 0;
-}
-
-KeyboardAction HostInput::ClassifyKeyboardAction(int key_code)
-{
-	switch (key_code)
-	{
-		case SDLK_RETURN:
-		case SDLK_SPACE:
-		case SDLK_Z: return KeyboardAction::Cross;
-		case SDLK_ESCAPE:
-		case SDLK_X: return KeyboardAction::Circle;
-		case SDLK_C: return KeyboardAction::Square;
-		case SDLK_V: return KeyboardAction::Triangle;
-		case SDLK_UP: return KeyboardAction::Up;
-		case SDLK_DOWN: return KeyboardAction::Down;
-		case SDLK_LEFT: return KeyboardAction::Left;
-		case SDLK_RIGHT: return KeyboardAction::Right;
-		case SDLK_Q: return KeyboardAction::L1;
-		case SDLK_E: return KeyboardAction::R1;
-		case SDLK_1: return KeyboardAction::L2;
-		case SDLK_3: return KeyboardAction::R2;
-		case SDLK_TAB:
-		case SDLK_BACKSPACE: return KeyboardAction::Options;
-		default: return KeyboardAction::None;
-	}
 }
 
 } // namespace Kyty::Emulator::Host

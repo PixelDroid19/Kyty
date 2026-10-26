@@ -13,15 +13,44 @@ following commands are edge-triggered; keyboard repeat cannot toggle state:
 | --- | --- |
 | `F11` | Toggle fullscreen |
 | `Alt+Enter` | Toggle fullscreen without forwarding Enter to the guest |
-| Primary-button double click | Toggle fullscreen |
+| Primary-button double click | Toggle fullscreen, unless the mouse is captured |
 | `F9` | Pause or resume guest presentation and host audio |
 | `F2` | Toggle text entry for a guest IME keyboard |
+| `F3` | Capture or release the mouse for camera look |
 | `Escape` | Request a clean runtime exit |
 
 Fullscreen hides the cursor after two seconds of inactivity and restores it
 on motion, focus loss or exit from fullscreen. Minimized windows suspend the
 render loop. Resize, restore and focus events update runtime state instead of
-being inferred from frame failures.
+being inferred from frame failures. Focus loss releases the mouse capture and
+every key and mouse button held on the virtual pad.
+
+### Keyboard virtual pad
+
+Outside text entry the keyboard and the captured mouse drive a connected
+virtual pad, and gamepads drive their own. The active
+[input profile](input-profiles.md) maps both: keys by physical position, mouse
+buttons, mouse look on the right stick, gamepad buttons, stick deadzones and the
+gamepad to use. Its default profile is:
+
+| Key | Pad input |
+| --- | --- |
+| `Z`, `Space`, `Enter` | Cross |
+| `X` | Circle |
+| `C` | Square |
+| `V` | Triangle |
+| Arrow keys | D-pad |
+| `Q` / `E` | L1 / R1 |
+| `1`, right mouse button / `3`, left mouse button | L2 / R2 |
+| `F` / `H` | L3 / R3 |
+| `Tab`, `Backspace` | Options |
+| `T` | Touchpad |
+| `W`, `A`, `S`, `D` | Left stick |
+| `I`, `J`, `K`, `L`, mouse motion | Right stick |
+
+A held L2 or R2 key reports the trigger button and full analog travel (255), so
+titles that read either the button bit or the analog value see a pressed
+trigger.
 
 ### Keyboard virtual pad
 

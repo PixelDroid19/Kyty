@@ -547,13 +547,35 @@ void SubsystemsList::SetActive(SubsystemsList* list) noexcept
 	g_active_subsystems.store(list, std::memory_order_release);
 }
 
+static constexpr int           kMaxQuickExitHandlers = 8;
+static std::atomic<void (*)()> g_quick_exit_handlers[kMaxQuickExitHandlers] {};
+static std::atomic<int>        g_quick_exit_handler_count {0};
+
+bool AtQuickExit(void (*handler)()) noexcept
+{
+	const int slot = g_quick_exit_handler_count.fetch_add(1, std::memory_order_acq_rel);
+	if (slot >= kMaxQuickExitHandlers)
+	{
+		return false;
+	}
+	g_quick_exit_handlers[slot].store(handler, std::memory_order_release);
+	return true;
+}
+
 void ShutdownActiveAndQuickExit(int code)
 {
 	if (auto* list = SubsystemsList::Active(); list != nullptr)
 	{
 		list->ShutdownAll();
 	}
-	std::quick_exit(code);
+	for (int slot = std::min(g_quick_exit_handler_count.load(std::memory_order_acquire), kMaxQuickExitHandlers) - 1; slot >= 0; --slot)
+	{
+		if (auto* handler = g_quick_exit_handlers[slot].load(std::memory_order_acquire); handler != nullptr)
+		{
+			handler();
+		}
+	}
+	std::_Exit(code);
 }
 
 ScopedSubsystemsList::ScopedSubsystemsList(SubsystemsList& list) noexcept: m_previous(SubsystemsList::Active())

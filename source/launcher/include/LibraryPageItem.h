@@ -11,15 +11,19 @@
 class ActionMenuItem;
 class FocusButtonItem;
 class FolderTabsItem;
+class GamePageItem;
 class GameGridItem;
 class GameTableItem;
 class HeroRowItem;
 class TextFieldItem;
 class TextPadItem;
+class TileRowItem;
 
 // Main page: recently played, the folders as tabs and the games of the selected folder as a grid or a table,
-// narrowed by the search box. Everything sits straight on the focused game's artwork, without panels. Keys the
-// page does not use, such as Left from the first column, are left to the window.
+// narrowed by the search box. Opening a game shows its page in their place until it is closed. In the Console
+// layout the games are one row of tiles instead, with the selected game's page always below it; Down opens it and
+// Up goes back to the row. Everything sits straight on the focused game's artwork, without panels. Keys the page
+// does not use, such as Left from the first column, are left to the window.
 class LibraryPageItem: public QQuickItem
 {
 	Q_OBJECT
@@ -32,19 +36,30 @@ signals:
 	void ActionRequested(const QString& action, int row);
 	// The game the user is looking at changed; the window backdrop follows it.
 	void FocusedGameChanged();
+	// A game's page opened or closed, so Hints() and FocusTarget() changed.
+	void HintsChanged();
 
 public:
 	explicit LibraryPageItem(QQuickItem* parent = nullptr);
 	~LibraryPageItem() override = default;
 
 	// What the page's keys do, for the hint bar; see HintBarItem.
-	[[nodiscard]] static QVariantList Hints();
-	// The game in the recently played row while it has the focus, otherwise the one selected in the list.
+	[[nodiscard]] QVariantList Hints() const;
+	// The game whose page is open, else the game in the recently played row while it has the focus, otherwise the
+	// one selected in the list.
 	[[nodiscard]] QVariantMap FocusedGame() const { return m_focused_game; }
 	// The grid or the table, whichever shows the games.
 	[[nodiscard]] QQuickItem* GameView() const;
+	// Where Right from the sidebar goes: the open game's page, otherwise the game view.
+	[[nodiscard]] QQuickItem* FocusTarget() const;
+	// The row of the game whose page is open, or -1.
+	[[nodiscard]] int GamePageRow() const;
+	// Opens the page of the game in row in place of the list.
+	void OpenGamePage(int row);
 
 	void FocusDefault();
+	// Puts the focus on the search: the search box, or the on-screen pad in the Console layout.
+	void FocusSearch();
 	// Shows the game with this row, switching to "All games" when it is not in the current folder.
 	void SelectRow(int row);
 
@@ -64,7 +79,7 @@ private:
 	{
 		QRectF title;
 		QRectF details;
-		QRectF status;
+		QRectF row_label;
 		QRectF hero_label;
 		QRectF search;
 		QRectF search_icon;
@@ -73,6 +88,8 @@ private:
 	};
 
 	void Refresh();
+	void CloseGamePage();
+	[[nodiscard]] bool ShowsGamePage() const;
 	void Filter();
 	static void SortGames(QVariantList* games);
 	void UpdateFocusedGame();
@@ -84,10 +101,14 @@ private:
 	[[nodiscard]] static QStringList SectionNames();
 	void ToggleView();
 	void ChangeFolder(int delta);
-	void FocusSearch();
 	// The game view when it shows games, otherwise the add button when there is one.
 	void FocusGames();
 	void SearchReturn();
+	void OpenSearchPad();
+	// The row's selection moved: the page below it shows the newly selected game.
+	void ShowRowGame();
+	[[nodiscard]] QVariantList RowHints() const;
+	bool                       RowKey(QKeyEvent* event);
 	bool NavigateKey(QKeyEvent* event);
 	bool GameKey(QKeyEvent* event);
 
@@ -96,7 +117,6 @@ private:
 	[[nodiscard]] bool        ShowsRecent() const { return m_shows_recent; }
 	[[nodiscard]] QString    EmptyText() const;
 	[[nodiscard]] QString    SearchText() const;
-	[[nodiscard]] QStringList StatusTexts() const;
 
 	QVariantList     m_games;
 	QVariantList     m_recent;
@@ -116,6 +136,13 @@ private:
 	FocusButtonItem* m_add            = nullptr;
 	ActionMenuItem*  m_menu           = nullptr;
 	TextPadItem*     m_pad            = nullptr;
+	// Holds the list's items, so a game's page hides them all at once.
+	QQuickItem*   m_browse    = nullptr;
+	GamePageItem* m_game_page = nullptr;
+	// The Console layout's row, and whether its game's page has the focus.
+	bool         m_console  = false;
+	bool         m_hub_open = false;
+	TileRowItem* m_row      = nullptr;
 	// Search, grid and table icons, painted for the current size.
 	QImage m_icons[3];
 	qreal  m_icon_scale = 0;

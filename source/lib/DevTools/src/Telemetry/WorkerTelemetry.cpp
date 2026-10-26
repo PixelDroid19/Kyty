@@ -4,6 +4,7 @@
 #include "Kyty/DevTools/Time/MonotonicClock.h"
 
 #include <cstring>
+#include <mutex>
 #include <new>
 
 namespace Kyty::DevTools {
@@ -71,6 +72,7 @@ struct WorkerTelemetry::State
 	MutableMappingView    mapping {};
 	WriterRegistry        writers {};
 	ProgressRegistry      progress {};
+	std::mutex            progress_mutex {};
 	ThreadInstanceAllocator thread_instances {};
 	TelemetryWriterToken  writer_token {};
 	RecordingMode         mode = RecordingMode::MetricsOnly;
@@ -191,13 +193,19 @@ bool WorkerTelemetry::Publish() noexcept
 	(void)state_->writers.Drain(drained, kTimelineMaxEvents);
 
 	ProgressPublication publication {};
-	if (!state_->progress.SnapshotAll(&publication.progress) ||
-	    !state_->writers.SnapshotInventory(&publication.writer_inventory))
+	{
+		std::lock_guard<std::mutex> lock(state_->progress_mutex);
+		if (!state_->progress.SnapshotAll(&publication.progress))
+		{
+			return false;
+		}
+		publication.progress_loss = state_->progress.SnapshotLoss();
+	}
+	if (!state_->writers.SnapshotInventory(&publication.writer_inventory))
 	{
 		return false;
 	}
 	publication.writer_loss  = state_->writers.SnapshotLoss();
-	publication.progress_loss = state_->progress.SnapshotLoss();
 	publication.gpu_fault    = {};
 	if (PublishProgress(state_->mapping, publication) != ProtocolResult::Ok)
 	{
@@ -227,14 +235,73 @@ bool WorkerTelemetry::Stop() noexcept
 	}
 	const bool published = Publish();
 	const bool closed = CloseWorkerHandshake(state_->mapping) == ProtocolResult::Ok;
-	state_->active        = false;
-	state_->mapping       = {};
+	{
+		std::lock_guard<std::mutex> lock(state_->progress_mutex);
+		state_->active = false;
+	}
+	state_->mapping = {};
 	return published && closed;
 }
 
 bool WorkerTelemetry::Active() const noexcept
 {
 	return state_ != nullptr && state_->active;
+}
+
+bool WorkerTelemetry::RegisterProgress(ProgressKey key, ProgressToken* out) noexcept
+{
+	if (!state_)
+	{
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(state_->progress_mutex);
+	return state_->active && state_->progress.Register(key, out);
+}
+
+bool WorkerTelemetry::SubmitProgress(ProgressToken token, const ProgressUpdate& update) noexcept
+{
+	if (!state_)
+	{
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(state_->progress_mutex);
+	return state_->active && state_->progress.Submit(token, update);
+}
+
+bool WorkerTelemetry::CompleteProgress(ProgressToken token, uint64_t epoch) noexcept
+{
+	if (!state_)
+	{
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(state_->progress_mutex);
+	return state_->active && state_->progress.Complete(token, epoch, 0);
+}
+
+void WorkerTelemetry::CloseProgress(ProgressToken token) noexcept
+{
+	if (!state_)
+	{
+		return;
+	}
+	std::lock_guard<std::mutex> lock(state_->progress_mutex);
+	if (state_->active)
+	{
+		state_->progress.Close(token);
+	}
+}
+
+void WorkerTelemetry::NoteUntrackedProgress(Domain domain) noexcept
+{
+	if (!state_)
+	{
+		return;
+	}
+	std::lock_guard<std::mutex> lock(state_->progress_mutex);
+	if (state_->active)
+	{
+		state_->progress.NoteUntracked(domain);
+	}
 }
 
 } // namespace Kyty::DevTools

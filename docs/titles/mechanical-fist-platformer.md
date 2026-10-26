@@ -1,8 +1,10 @@
 # Mechanical-fist platformer
 
+Title: PPSA03969 - F.I.S.T.: Forged In Shadow Torch.
+
 Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
-record. Titles are named descriptively only (`AGENTS.md`).
+record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
 ## Mechanical-fist platformer startup frontier (2026-10-08, not gameplay)
 

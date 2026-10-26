@@ -29,6 +29,7 @@
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/ProgressPort.h"
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
@@ -2625,6 +2626,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 	{
 		auto* device = g_render_ctx->GetGraphicCtx()->device;
 
+		const ::Kyty::Emulator::Ports::ScopedProgress progress(::Kyty::Emulator::Ports::ProgressLane::FenceWait);
 		const auto wait_start  = DebugStatsClock::now();
 		const auto wait_result = VulkanCallAndPublishOnSuccess(
 		    [&]

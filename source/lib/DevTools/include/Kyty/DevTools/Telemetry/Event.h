@@ -102,6 +102,7 @@ enum class OperationCode: uint32_t
 	HleCall                = 0x0201u,
 	CommandSubmit          = 0x0301u,
 	CommandPacket          = 0x0302u,
+	PipelineCompile        = 0x0303u,
 	RenderFrame            = 0x0401u,
 	RenderDraw             = 0x0402u,
 	RenderDispatch         = 0x0403u,
@@ -118,7 +119,12 @@ enum class OperationCode: uint32_t
 	EventFlagWait          = 0x0801u,
 	SemaphoreWait          = 0x0802u,
 	EventQueueWait         = 0x0803u,
-	RegisterMemoryWait     = 0x0804u
+	RegisterMemoryWait     = 0x0804u,
+	MutexWait              = 0x0805u,
+	CondWait               = 0x0806u,
+	ThreadJoin             = 0x0807u,
+	RwlockWait             = 0x0808u,
+	AddressWait            = 0x0809u
 };
 
 struct WriterKey

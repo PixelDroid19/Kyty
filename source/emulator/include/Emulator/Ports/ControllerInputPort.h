@@ -46,6 +46,12 @@ enum class Axis
 	AxisMax
 };
 
+enum class MotionSensor
+{
+	Acceleration,
+	AngularVelocity,
+};
+
 struct ControllerInputCallbacks
 {
 	void (*connect)(int id)                          = nullptr;
@@ -55,6 +61,12 @@ struct ControllerInputCallbacks
 	// The user ended the session (window close or the host quit key), as
 	// opposed to a fault or a signal.
 	void (*session_end)()                            = nullptr;
+	// One motion sample of a gamepad: acceleration in G, angular velocity in
+	// rad/s, in the gamepad's own frame; the timestamp is the sensor clock.
+	void (*motion)(int id, MotionSensor sensor, float x, float y, float z, uint64_t timestamp_ns) = nullptr;
+	// A finger (0 or 1) on the gamepad touch surface, normalized to [0, 1]
+	// from the top-left corner; `down` is false once the finger lifts.
+	void (*touch)(int id, int finger, bool down, float x, float y) = nullptr;
 };
 
 // Function-pointer bridge, mirroring GuestRuntimePort: the composition root
@@ -70,6 +82,26 @@ public:
 	static void Button(int id, uint32_t button, bool down);
 	static void Axis(int id, ::Kyty::Emulator::Ports::Axis axis, int value);
 	static void SessionEnd();
+	static void Motion(int id, MotionSensor sensor, float x, float y, float z, uint64_t timestamp_ns);
+	static void Touch(int id, int finger, bool down, float x, float y);
+};
+
+// The opposite direction: the guest pad HLE asks for gamepad feedback and the
+// host window, which owns the gamepads, installs the implementation. Values
+// are the guest's: motor strengths 0..255 and an RGB light-bar colour.
+struct ControllerFeedbackCallbacks
+{
+	void (*vibration)(uint8_t large_motor, uint8_t small_motor) = nullptr;
+	void (*light_bar)(uint8_t red, uint8_t green, uint8_t blue) = nullptr;
+};
+
+class ControllerFeedbackPort final
+{
+public:
+	static void Install(ControllerFeedbackCallbacks callbacks);
+
+	static void Vibration(uint8_t large_motor, uint8_t small_motor);
+	static void LightBar(uint8_t red, uint8_t green, uint8_t blue);
 };
 
 } // namespace Kyty::Emulator::Ports

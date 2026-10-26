@@ -29,7 +29,7 @@
     </message>
     <message>
         <source>Double-click</source>
-        <translation>Двойной щелчок</translation>
+        <translation type="vanished">Двойной щелчок</translation>
     </message>
     <message>
         <source>Options</source>
@@ -123,6 +123,22 @@
         <source>Games are started by the Kyty emulator. The launcher only keeps the list of games and their settings.</source>
         <translation>Игры запускает эмулятор Kyty. Лаунчер хранит только список игр и их настройки.</translation>
     </message>
+    <message>
+        <source>Open a game&apos;s page</source>
+        <translation>Открыть страницу игры</translation>
+    </message>
+    <message>
+        <source>Enter on its page</source>
+        <translation>Enter на её странице</translation>
+    </message>
+    <message>
+        <source>✕ on its page</source>
+        <translation>✕ на её странице</translation>
+    </message>
+    <message>
+        <source>Play on its page</source>
+        <translation>«Играть» на её странице</translation>
+    </message>
 </context>
 <context>
     <name>ActionMenuItem</name>
@@ -137,6 +153,264 @@
     <message>
         <source>Game files on disk are not deleted.</source>
         <translation>Файлы игры на диске не удаляются.</translation>
+    </message>
+</context>
+<context>
+    <name>BindingCaptureItem</name>
+    <message>
+        <source>No controller is connected.</source>
+        <translation>Геймпад не подключён.</translation>
+    </message>
+    <message>
+        <source>Press a button on the controller.</source>
+        <translation>Нажмите кнопку на геймпаде.</translation>
+    </message>
+    <message>
+        <source>Press a key on the keyboard, or click a mouse button.</source>
+        <translation>Нажмите клавишу на клавиатуре или кнопку мыши.</translation>
+    </message>
+    <message>
+        <source>%1 is kept for the emulator&apos;s own commands.</source>
+        <translation>%1 зарезервирована для команд эмулятора.</translation>
+    </message>
+    <message>
+        <source>Press a controller button for %1</source>
+        <translation>Нажмите кнопку геймпада для «%1»</translation>
+    </message>
+    <message>
+        <source>Press a key or click for %1</source>
+        <translation>Нажмите клавишу или кнопку мыши для «%1»</translation>
+    </message>
+    <message numerus="yes">
+        <source>Esc on the keyboard cancels · %n s left</source>
+        <translation>
+            <numerusform>Esc на клавиатуре — отмена · осталась %n с</numerusform>
+            <numerusform>Esc на клавиатуре — отмена · осталось %n с</numerusform>
+            <numerusform>Esc на клавиатуре — отмена · осталось %n с</numerusform>
+        </translation>
+    </message>
+    <message numerus="yes">
+        <source>Esc cancels · %n s left</source>
+        <translation>
+            <numerusform>Esc — отмена · осталась %n с</numerusform>
+            <numerusform>Esc — отмена · осталось %n с</numerusform>
+            <numerusform>Esc — отмена · осталось %n с</numerusform>
+        </translation>
+    </message>
+</context>
+<context>
+    <name>ControlsPanelItem</name>
+    <message>
+        <source>✕ Cross</source>
+        <translation>✕ Крест</translation>
+    </message>
+    <message>
+        <source>○ Circle</source>
+        <translation>○ Круг</translation>
+    </message>
+    <message>
+        <source>□ Square</source>
+        <translation>□ Квадрат</translation>
+    </message>
+    <message>
+        <source>△ Triangle</source>
+        <translation>△ Треугольник</translation>
+    </message>
+    <message>
+        <source>D-pad ↑</source>
+        <translation>Крестовина ↑</translation>
+    </message>
+    <message>
+        <source>D-pad up</source>
+        <translation>Крестовина вверх</translation>
+    </message>
+    <message>
+        <source>D-pad ↓</source>
+        <translation>Крестовина ↓</translation>
+    </message>
+    <message>
+        <source>D-pad down</source>
+        <translation>Крестовина вниз</translation>
+    </message>
+    <message>
+        <source>D-pad ←</source>
+        <translation>Крестовина ←</translation>
+    </message>
+    <message>
+        <source>D-pad left</source>
+        <translation>Крестовина влево</translation>
+    </message>
+    <message>
+        <source>D-pad →</source>
+        <translation>Крестовина →</translation>
+    </message>
+    <message>
+        <source>D-pad right</source>
+        <translation>Крестовина вправо</translation>
+    </message>
+    <message>
+        <source>Options</source>
+        <translation>Options</translation>
+    </message>
+    <message>
+        <source>Touchpad</source>
+        <translation>Сенсорная панель</translation>
+    </message>
+    <message>
+        <source>Left stick left</source>
+        <translation>Левый стик влево</translation>
+    </message>
+    <message>
+        <source>Left stick right</source>
+        <translation>Левый стик вправо</translation>
+    </message>
+    <message>
+        <source>Left stick up</source>
+        <translation>Левый стик вверх</translation>
+    </message>
+    <message>
+        <source>Left stick down</source>
+        <translation>Левый стик вниз</translation>
+    </message>
+    <message>
+        <source>Right stick left</source>
+        <translation>Правый стик влево</translation>
+    </message>
+    <message>
+        <source>Right stick right</source>
+        <translation>Правый стик вправо</translation>
+    </message>
+    <message>
+        <source>Right stick up</source>
+        <translation>Правый стик вверх</translation>
+    </message>
+    <message>
+        <source>Right stick down</source>
+        <translation>Правый стик вниз</translation>
+    </message>
+    <message>
+        <source>Profile name</source>
+        <translation>Название профиля</translation>
+    </message>
+    <message>
+        <source>Controller</source>
+        <translation>Геймпад</translation>
+    </message>
+    <message>
+        <source>Keyboard and mouse</source>
+        <translation>Клавиатура и мышь</translation>
+    </message>
+    <message>
+        <source>Sticks and triggers</source>
+        <translation>Стики и курки</translation>
+    </message>
+    <message>
+        <source>Mouse</source>
+        <translation>Мышь</translation>
+    </message>
+    <message>
+        <source>Profile</source>
+        <translation>Профиль</translation>
+    </message>
+    <message>
+        <source>Left stick</source>
+        <translation>Левый стик</translation>
+    </message>
+    <message>
+        <source>Right stick</source>
+        <translation>Правый стик</translation>
+    </message>
+    <message>
+        <source>%1 dead zone</source>
+        <translation>%1: мёртвая зона</translation>
+    </message>
+    <message>
+        <source>Invert %1 across</source>
+        <translation>%1: инверсия по горизонтали</translation>
+    </message>
+    <message>
+        <source>Invert %1 up and down</source>
+        <translation>%1: инверсия по вертикали</translation>
+    </message>
+    <message>
+        <source>Trigger press point</source>
+        <translation>Порог нажатия курков</translation>
+    </message>
+    <message>
+        <source>Look with the mouse</source>
+        <translation>Обзор мышью</translation>
+    </message>
+    <message>
+        <source>Mouse sensitivity</source>
+        <translation>Чувствительность мыши</translation>
+    </message>
+    <message>
+        <source>Invert the mouse up and down</source>
+        <translation>Инверсия Y мыши</translation>
+    </message>
+    <message>
+        <source>Trigger</source>
+        <translation>Курок</translation>
+    </message>
+    <message>
+        <source>Not bound</source>
+        <translation>Не назначено</translation>
+    </message>
+    <message>
+        <source>%1, controller</source>
+        <translation>%1, геймпад</translation>
+    </message>
+    <message>
+        <source>%1, keyboard and mouse</source>
+        <translation>%1, клавиатура и мышь</translation>
+    </message>
+    <message>
+        <source>Choose a box, then press the key or button to use. Delete or □ clears it.</source>
+        <translation>Выберите поле и нажмите нужную клавишу или кнопку. Delete или □ очищает его.</translation>
+    </message>
+    <message>
+        <source>Default is the emulator&apos;s own layout and can&apos;t be changed; duplicate it to make a profile of your own.</source>
+        <translation>Default — раскладка самого эмулятора, её нельзя изменить; сделайте копию, чтобы создать свой профиль.</translation>
+    </message>
+    <message>
+        <source>Dead zone</source>
+        <translation>Мёртвая зона</translation>
+    </message>
+    <message>
+        <source>Invert across</source>
+        <translation>Инверсия по горизонтали</translation>
+    </message>
+    <message>
+        <source>Invert up and down</source>
+        <translation>Инверсия по вертикали</translation>
+    </message>
+    <message>
+        <source>Press point</source>
+        <translation>Порог нажатия</translation>
+    </message>
+    <message>
+        <source>L2 and R2</source>
+        <translation>L2 и R2</translation>
+    </message>
+    <message>
+        <source>How far L2 and R2 must be pulled to count as pressed. Movements of a stick smaller than its dead zone are ignored, so a worn stick does not drift.</source>
+        <translation>Насколько нужно нажать L2 и R2, чтобы нажатие засчиталось. Движения стика меньше его мёртвой зоны игнорируются, чтобы изношенный стик не дрейфовал.</translation>
+    </message>
+    <message>
+        <source>In the game, F3 captures the mouse; while it is captured, moving it moves the right stick.</source>
+        <translation>В игре F3 захватывает мышь; пока она захвачена, её движение двигает правый стик.</translation>
+    </message>
+    <message>
+        <source>Mouse look</source>
+        <translation>Обзор мышью</translation>
+    </message>
+    <message>
+        <source>Sensitivity</source>
+        <translation>Чувствительность</translation>
+    </message>
+    <message>
+        <source>Name</source>
+        <translation>Название</translation>
     </message>
 </context>
 <context>
@@ -354,6 +628,170 @@
         <translation>Окно лаунчера</translation>
     </message>
     <message>
+        <source>Profile</source>
+        <translation type="vanished">Профиль</translation>
+    </message>
+    <message>
+        <source>Profile name</source>
+        <translation type="vanished">Название профиля</translation>
+    </message>
+    <message>
+        <source>Controller</source>
+        <translation type="vanished">Геймпад</translation>
+    </message>
+    <message>
+        <source>Left stick</source>
+        <translation type="vanished">Левый стик</translation>
+    </message>
+    <message>
+        <source>Left stick dead zone</source>
+        <translation type="vanished">Мёртвая зона левого стика</translation>
+    </message>
+    <message>
+        <source>Invert left stick across</source>
+        <translation type="vanished">Инверсия X левого стика</translation>
+    </message>
+    <message>
+        <source>Invert left stick up and down</source>
+        <translation type="vanished">Инверсия Y левого стика</translation>
+    </message>
+    <message>
+        <source>Right stick</source>
+        <translation type="vanished">Правый стик</translation>
+    </message>
+    <message>
+        <source>Right stick dead zone</source>
+        <translation type="vanished">Мёртвая зона правого стика</translation>
+    </message>
+    <message>
+        <source>Invert right stick across</source>
+        <translation type="vanished">Инверсия X правого стика</translation>
+    </message>
+    <message>
+        <source>Invert right stick up and down</source>
+        <translation type="vanished">Инверсия Y правого стика</translation>
+    </message>
+    <message>
+        <source>Trigger press point</source>
+        <translation type="vanished">Порог нажатия курков</translation>
+    </message>
+    <message>
+        <source>Look with the mouse</source>
+        <translation type="vanished">Обзор мышью</translation>
+    </message>
+    <message>
+        <source>Mouse</source>
+        <translation type="vanished">Мышь</translation>
+    </message>
+    <message>
+        <source>Mouse sensitivity</source>
+        <translation type="vanished">Чувствительность мыши</translation>
+    </message>
+    <message>
+        <source>Invert mouse up and down</source>
+        <translation type="vanished">Инверсия Y мыши</translation>
+    </message>
+    <message>
+        <source>✕ Cross</source>
+        <translation type="vanished">✕ Крест</translation>
+    </message>
+    <message>
+        <source>Buttons</source>
+        <translation type="vanished">Кнопки</translation>
+    </message>
+    <message>
+        <source>○ Circle</source>
+        <translation type="vanished">○ Круг</translation>
+    </message>
+    <message>
+        <source>□ Square</source>
+        <translation type="vanished">□ Квадрат</translation>
+    </message>
+    <message>
+        <source>△ Triangle</source>
+        <translation type="vanished">△ Треугольник</translation>
+    </message>
+    <message>
+        <source>D-pad up</source>
+        <translation type="vanished">Крестовина вверх</translation>
+    </message>
+    <message>
+        <source>D-pad down</source>
+        <translation type="vanished">Крестовина вниз</translation>
+    </message>
+    <message>
+        <source>D-pad left</source>
+        <translation type="vanished">Крестовина влево</translation>
+    </message>
+    <message>
+        <source>D-pad right</source>
+        <translation type="vanished">Крестовина вправо</translation>
+    </message>
+    <message>
+        <source>L1</source>
+        <translation type="vanished">L1</translation>
+    </message>
+    <message>
+        <source>R1</source>
+        <translation type="vanished">R1</translation>
+    </message>
+    <message>
+        <source>L2</source>
+        <translation type="vanished">L2</translation>
+    </message>
+    <message>
+        <source>R2</source>
+        <translation type="vanished">R2</translation>
+    </message>
+    <message>
+        <source>L3</source>
+        <translation type="vanished">L3</translation>
+    </message>
+    <message>
+        <source>R3</source>
+        <translation type="vanished">R3</translation>
+    </message>
+    <message>
+        <source>Options</source>
+        <translation type="vanished">Options</translation>
+    </message>
+    <message>
+        <source>Touchpad</source>
+        <translation type="vanished">Сенсорная панель</translation>
+    </message>
+    <message>
+        <source>Left stick left</source>
+        <translation type="vanished">Левый стик влево</translation>
+    </message>
+    <message>
+        <source>Left stick right</source>
+        <translation type="vanished">Левый стик вправо</translation>
+    </message>
+    <message>
+        <source>Left stick up</source>
+        <translation type="vanished">Левый стик вверх</translation>
+    </message>
+    <message>
+        <source>Left stick down</source>
+        <translation type="vanished">Левый стик вниз</translation>
+    </message>
+    <message>
+        <source>Right stick left</source>
+        <translation type="vanished">Правый стик влево</translation>
+    </message>
+    <message>
+        <source>Right stick right</source>
+        <translation type="vanished">Правый стик вправо</translation>
+    </message>
+    <message>
+        <source>Right stick up</source>
+        <translation type="vanished">Правый стик вверх</translation>
+    </message>
+    <message>
+        <source>Right stick down</source>
+        <translation type="vanished">Правый стик вниз</translation>
+    </message>
+    <message>
         <source>The folder that holds the game&apos;s files.</source>
         <translation>Папка с файлами игры.</translation>
     </message>
@@ -426,6 +864,34 @@
         <translation>Как открывается лаунчер. Полноэкранный режим подходит для телевизора.</translation>
     </message>
     <message>
+        <source>Every game uses the profile chosen here. Default is the emulator&apos;s own layout and can&apos;t be changed; duplicate it to make a profile of your own.</source>
+        <translation type="vanished">Все игры используют выбранный здесь профиль. Default — раскладка самого эмулятора, её нельзя изменить; сделайте копию, чтобы создать свой профиль.</translation>
+    </message>
+    <message>
+        <source>Any controller uses the first one connected. Choosing one keeps the game on it while it is connected.</source>
+        <translation type="vanished">«Любой геймпад» — первый подключённый. Если выбрать конкретный, игра использует его, пока он подключён.</translation>
+    </message>
+    <message>
+        <source>Move the stick: the outer dot is where it is, the filled dot what the game sees after the dead zone. On this page the left stick does not move between settings; the D-pad does.</source>
+        <translation type="vanished">Подвигайте стик: внешняя точка — его положение, закрашенная — то, что видит игра после мёртвой зоны. На этой странице левый стик не переключает настройки; это делает крестовина.</translation>
+    </message>
+    <message>
+        <source>Movements smaller than this are ignored, so a worn stick does not drift.</source>
+        <translation type="vanished">Движения меньше этого значения игнорируются, чтобы изношенный стик не дрейфовал.</translation>
+    </message>
+    <message>
+        <source>How far L2 and R2 must be pulled to count as pressed.</source>
+        <translation type="vanished">Насколько нужно нажать L2 и R2, чтобы нажатие засчиталось.</translation>
+    </message>
+    <message>
+        <source>In the game, F3 captures the mouse; while it is captured, moving it moves the right stick.</source>
+        <translation type="vanished">В игре F3 захватывает мышь; пока она захвачена, её движение двигает правый стик.</translation>
+    </message>
+    <message>
+        <source>Choose a box, then press the key or button to use. Delete or □ clears it.</source>
+        <translation type="vanished">Выберите поле и нажмите нужную клавишу или кнопку. Delete или □ очищает его.</translation>
+    </message>
+    <message>
         <source>Language</source>
         <translation>Язык</translation>
     </message>
@@ -456,6 +922,46 @@
     <message>
         <source>This game runs with the emulator settings from Settings. Turn on custom emulator settings to change them for this game only.</source>
         <translation>Эта игра использует настройки эмулятора из раздела «Настройки». Включите свои настройки, чтобы изменить их только для этой игры.</translation>
+    </message>
+    <message>
+        <source>Style</source>
+        <translation>Стиль</translation>
+    </message>
+    <message>
+        <source>Layout</source>
+        <translation>Макет</translation>
+    </message>
+    <message>
+        <source>Opens on</source>
+        <translation>Открывать</translation>
+    </message>
+    <message>
+        <source>Interface sounds</source>
+        <translation>Звуки интерфейса</translation>
+    </message>
+    <message>
+        <source>Sound</source>
+        <translation>Звук</translation>
+    </message>
+    <message>
+        <source>Sound volume</source>
+        <translation>Громкость звуков</translation>
+    </message>
+    <message>
+        <source>Add-on themes are folders with a theme.ini inside the themes folder above, found when the launcher starts. Their colours win over the accent colour.</source>
+        <translation>Темы-дополнения — это папки с файлом theme.ini внутри папки тем, указанной выше; они находятся при запуске лаунчера. Их цвета важнее цвета акцента.</translation>
+    </message>
+    <message>
+        <source>The last game played opens on its page, ready to continue.</source>
+        <translation>Последняя игра открывается на своей странице, готовая к продолжению.</translation>
+    </message>
+    <message>
+        <source>Console puts the pages in tabs on top and the games in one row, the selected game&apos;s page below it. An add-on theme may choose the layout.</source>
+        <translation>«Консоль» размещает страницы во вкладках сверху, а игры — в одном ряду, со страницей выбранной игры под ним. Тема-дополнение может выбрать макет.</translation>
+    </message>
+    <message>
+        <source>Short sounds when you move, select, go back and start a game.</source>
+        <translation>Короткие звуки при перемещении, выборе, возврате и запуске игры.</translation>
     </message>
 </context>
 <context>
@@ -673,12 +1179,48 @@
         <translation>Полный экран</translation>
     </message>
     <message>
+        <source>Left click</source>
+        <translation>Левая кнопка мыши</translation>
+    </message>
+    <message>
+        <source>Middle click</source>
+        <translation>Средняя кнопка мыши</translation>
+    </message>
+    <message>
+        <source>Right click</source>
+        <translation>Правая кнопка мыши</translation>
+    </message>
+    <message>
+        <source>Mouse back button</source>
+        <translation>Кнопка мыши «Назад»</translation>
+    </message>
+    <message>
+        <source>Mouse forward button</source>
+        <translation>Кнопка мыши «Вперёд»</translation>
+    </message>
+    <message>
         <source>Rescan files</source>
         <translation>Пересканировать</translation>
     </message>
     <message>
         <source>Browse…</source>
         <translation>Обзор…</translation>
+    </message>
+    <message>
+        <source>Trigger</source>
+        <translation type="vanished">Курок</translation>
+    </message>
+    <message>
+        <source>Not bound</source>
+        <translation type="vanished">Не назначено</translation>
+    </message>
+    <message>
+        <source>%1, keyboard and mouse</source>
+        <translation type="vanished">%1, клавиатура и мышь</translation>
+    </message>
+    <message>
+        <source>%1, controller</source>
+        <translation type="vanished">%1, геймпад</translation>
     </message>
     <message>
         <source>No modules found yet. Set the game folder, then rescan.</source>
@@ -688,12 +1230,139 @@
         <source>No parameters file selected.</source>
         <translation>Файл параметров не выбран.</translation>
     </message>
+    <message>
+        <source>Left stick</source>
+        <translation type="vanished">Левый стик</translation>
+    </message>
+    <message>
+        <source>Right stick</source>
+        <translation type="vanished">Правый стик</translation>
+    </message>
+    <message>
+        <source>%1 on the controller</source>
+        <translation type="vanished">%1 на геймпаде</translation>
+    </message>
+    <message>
+        <source>Keyboard and mouse</source>
+        <translation type="vanished">Клавиатура и мышь</translation>
+    </message>
+    <message>
+        <source>Controller</source>
+        <translation type="vanished">Геймпад</translation>
+    </message>
+    <message>
+        <source>The last game played</source>
+        <translation>Последняя игра</translation>
+    </message>
+    <message>
+        <source>Sidebar</source>
+        <translation>Боковая панель</translation>
+    </message>
+    <message>
+        <source>Quiet</source>
+        <translation>Тихо</translation>
+    </message>
+    <message>
+        <source>Loud</source>
+        <translation>Громко</translation>
+    </message>
+    <message>
+        <source>The library</source>
+        <translation>Библиотеку</translation>
+    </message>
 </context>
 <context>
     <name>GameGridItem</name>
     <message>
         <source>Running</source>
         <translation>Запущена</translation>
+    </message>
+</context>
+<context>
+    <name>GamePageItem</name>
+    <message>
+        <source>Not recorded yet</source>
+        <translation>Ещё не записано</translation>
+    </message>
+    <message>
+        <source>Not played yet</source>
+        <translation>Ещё не запускалась</translation>
+    </message>
+    <message>
+        <source>Under a minute</source>
+        <translation>Меньше минуты</translation>
+    </message>
+    <message>
+        <source>%1 min</source>
+        <translation>%1 мин</translation>
+    </message>
+    <message>
+        <source>%1 h %2 min</source>
+        <translation>%1 ч %2 мин</translation>
+    </message>
+    <message>
+        <source>Select</source>
+        <translation>Выбрать</translation>
+    </message>
+    <message>
+        <source>Options</source>
+        <translation>Параметры</translation>
+    </message>
+    <message>
+        <source>Game settings</source>
+        <translation>Настройки игры</translation>
+    </message>
+    <message>
+        <source>Back</source>
+        <translation>Назад</translation>
+    </message>
+    <message>
+        <source>Continue where you left off</source>
+        <translation>Продолжить с того же места</translation>
+    </message>
+    <message>
+        <source>Last played %1</source>
+        <translation>Последний запуск %1</translation>
+    </message>
+    <message>
+        <source>Play time</source>
+        <translation>Время в игре</translation>
+    </message>
+    <message>
+        <source>Its own settings</source>
+        <translation>Собственные настройки</translation>
+    </message>
+    <message>
+        <source>The global settings</source>
+        <translation>Общие настройки</translation>
+    </message>
+    <message>
+        <source>Screen %1</source>
+        <translation>Экран %1</translation>
+    </message>
+    <message>
+        <source>Folder and data</source>
+        <translation>Папка и данные</translation>
+    </message>
+    <message>
+        <source>In no section</source>
+        <translation>Ни в одном разделе</translation>
+    </message>
+    <message>
+        <source>Stop game</source>
+        <translation>Остановить игру</translation>
+    </message>
+    <message>
+        <source>Continue</source>
+        <translation>Продолжить</translation>
+    </message>
+    <message>
+        <source>Play</source>
+        <translation>Играть</translation>
+    </message>
+    <message>
+        <source>Open game folder</source>
+        <translation>Открыть папку игры</translation>
     </message>
 </context>
 <context>
@@ -713,6 +1382,105 @@
     <message>
         <source>Version</source>
         <translation>Версия</translation>
+    </message>
+</context>
+<context>
+    <name>InputProfiles</name>
+    <message>
+        <source>%1.%2 is not a known field</source>
+        <translation>%1.%2 — неизвестное поле</translation>
+    </message>
+    <message>
+        <source>%1.%2 is missing</source>
+        <translation>Отсутствует %1.%2</translation>
+    </message>
+    <message>
+        <source>%1.%2 must be true or false</source>
+        <translation>%1.%2 должно быть true или false</translation>
+    </message>
+    <message>
+        <source>%1.%2 must be a number from %3 to %4</source>
+        <translation>%1.%2 должно быть числом от %3 до %4</translation>
+    </message>
+    <message>
+        <source>%1: &apos;%2&apos; is not a key name</source>
+        <translation>%1: «%2» — не название клавиши</translation>
+    </message>
+    <message>
+        <source>%1: &apos;%2&apos; is reserved for a host command</source>
+        <translation>%1: «%2» зарезервирована для команды эмулятора</translation>
+    </message>
+    <message>
+        <source>%1: &apos;%2&apos; is not a gamepad button name</source>
+        <translation>%1: «%2» — не название кнопки геймпада</translation>
+    </message>
+    <message>
+        <source>%1 must be a list of names</source>
+        <translation>%1 должно быть списком названий</translation>
+    </message>
+    <message>
+        <source>gamepad.device must be a string</source>
+        <translation>gamepad.device должно быть строкой</translation>
+    </message>
+    <message>
+        <source>gamepad.%1 must be an object</source>
+        <translation>gamepad.%1 должно быть объектом</translation>
+    </message>
+    <message>
+        <source>profile.schema must be &apos;%1&apos;</source>
+        <translation>profile.schema должно быть «%1»</translation>
+    </message>
+    <message>
+        <source>profile.name must be a non-empty string</source>
+        <translation>profile.name должно быть непустой строкой</translation>
+    </message>
+    <message>
+        <source>profile.%1 must be an object</source>
+        <translation>profile.%1 должно быть объектом</translation>
+    </message>
+    <message>
+        <source>Cannot create the profiles folder %1.</source>
+        <translation>Не удаётся создать папку профилей %1.</translation>
+    </message>
+    <message>
+        <source>The file is larger than %1 KB.</source>
+        <translation>Файл больше %1 КБ.</translation>
+    </message>
+    <message>
+        <source>The file cannot be read.</source>
+        <translation>Не удаётся прочитать файл.</translation>
+    </message>
+    <message>
+        <source>Not valid JSON: %1</source>
+        <translation>Недопустимый JSON: %1</translation>
+    </message>
+    <message>
+        <source>profile must be an object</source>
+        <translation>профиль должен быть объектом</translation>
+    </message>
+    <message>
+        <source>Cannot write %1.</source>
+        <translation>Не удаётся записать %1.</translation>
+    </message>
+    <message>
+        <source>A profile name has at most %1 characters.</source>
+        <translation>Название профиля — не более %1 символов.</translation>
+    </message>
+    <message>
+        <source>There are already %1 profiles.</source>
+        <translation>Профилей уже %1.</translation>
+    </message>
+    <message>
+        <source>%1 copy</source>
+        <translation>%1 копия</translation>
+    </message>
+    <message>
+        <source>The Default profile cannot be deleted.</source>
+        <translation>Профиль Default нельзя удалить.</translation>
+    </message>
+    <message>
+        <source>Cannot delete %1.</source>
+        <translation>Не удаётся удалить %1.</translation>
     </message>
 </context>
 <context>
@@ -775,6 +1543,22 @@
         <translation>Без раздела</translation>
     </message>
     <message>
+        <source>The profiles folder cannot be written.</source>
+        <translation>Нет доступа на запись к папке профилей.</translation>
+    </message>
+    <message>
+        <source>The profile %1 is no longer there.</source>
+        <translation>Профиля %1 больше нет.</translation>
+    </message>
+    <message>
+        <source>This profile can&apos;t be used. Restore defaults to repair it.</source>
+        <translation>Этот профиль нельзя использовать. Сбросьте настройки, чтобы исправить его.</translation>
+    </message>
+    <message>
+        <source>Default can&apos;t be changed. Duplicate it to make a profile of your own.</source>
+        <translation>Default нельзя изменить. Сделайте копию, чтобы создать свой профиль.</translation>
+    </message>
+    <message>
         <source>A game is running. Changes can be saved after it closes.</source>
         <translation>Идёт игра. Изменения можно сохранить после её закрытия.</translation>
     </message>
@@ -785,6 +1569,14 @@
     <message>
         <source>A game is already running.</source>
         <translation>Игра уже запущена.</translation>
+    </message>
+    <message>
+        <source>The controls profile %1 can&apos;t be used: %2 Choose another one or repair it in Settings › Controls.</source>
+        <translation>Профиль управления %1 нельзя использовать: %2 Выберите другой или исправьте его в разделе «Настройки › Управление».</translation>
+    </message>
+    <message>
+        <source>its file is missing.</source>
+        <translation>его файл отсутствует.</translation>
     </message>
     <message>
         <source>The game stopped unexpectedly.</source>
@@ -805,6 +1597,114 @@
     <message>
         <source>A game started while the folder was read; nothing was added.</source>
         <translation>Во время чтения папки запустилась игра; ничего не добавлено.</translation>
+    </message>
+    <message>
+        <source>Kyty</source>
+        <translation>Kyty</translation>
+    </message>
+    <message>
+        <source>%1 · Add-on</source>
+        <translation>%1 · Дополнение</translation>
+    </message>
+    <message>
+        <source>%1 · Can&apos;t be used</source>
+        <translation>%1 · Нельзя использовать</translation>
+    </message>
+    <message>
+        <source>A profile needs a name.</source>
+        <translation>У профиля должно быть название.</translation>
+    </message>
+    <message>
+        <source>Unknown control %1.</source>
+        <translation>Неизвестный элемент управления %1.</translation>
+    </message>
+    <message>
+        <source>Unknown controls setting %1.</source>
+        <translation>Неизвестная настройка управления %1.</translation>
+    </message>
+    <message>
+        <source>Back</source>
+        <translation>Назад</translation>
+    </message>
+    <message>
+        <source>Guide</source>
+        <translation>Гид</translation>
+    </message>
+    <message>
+        <source>Start</source>
+        <translation>Start</translation>
+    </message>
+    <message>
+        <source>Left stick press</source>
+        <translation>Нажатие левого стика</translation>
+    </message>
+    <message>
+        <source>Right stick press</source>
+        <translation>Нажатие правого стика</translation>
+    </message>
+    <message>
+        <source>D-pad up</source>
+        <translation>Крестовина вверх</translation>
+    </message>
+    <message>
+        <source>D-pad down</source>
+        <translation>Крестовина вниз</translation>
+    </message>
+    <message>
+        <source>D-pad left</source>
+        <translation>Крестовина влево</translation>
+    </message>
+    <message>
+        <source>D-pad right</source>
+        <translation>Крестовина вправо</translation>
+    </message>
+    <message>
+        <source>Extra button</source>
+        <translation>Дополнительная кнопка</translation>
+    </message>
+    <message>
+        <source>Touchpad</source>
+        <translation>Сенсорная панель</translation>
+    </message>
+    <message>
+        <source>Paddle 1</source>
+        <translation>Лепесток 1</translation>
+    </message>
+    <message>
+        <source>Paddle 2</source>
+        <translation>Лепесток 2</translation>
+    </message>
+    <message>
+        <source>Paddle 3</source>
+        <translation>Лепесток 3</translation>
+    </message>
+    <message>
+        <source>Paddle 4</source>
+        <translation>Лепесток 4</translation>
+    </message>
+    <message>
+        <source>%1 %</source>
+        <translation>%1 %</translation>
+    </message>
+    <message>
+        <source>Any controller</source>
+        <translation>Любой геймпад</translation>
+    </message>
+    <message>
+        <source>A controller that is not connected</source>
+        <translation>Неподключённый геймпад</translation>
+    </message>
+    <message>
+        <source>The theme %1 is no longer installed.</source>
+        <translation>Тема %1 больше не установлена.</translation>
+    </message>
+    <message>
+        <source>The theme %1 can&apos;t be used: %2</source>
+        <translation>Тему %1 нельзя использовать: %2</translation>
+    </message>
+    <message>
+        <source>The theme %1 can&apos;t be used: its font cannot be read.</source>
+        <translation>Тему %1 нельзя использовать: не удаётся прочитать её шрифт.</translation>
     </message>
 </context>
 <context>
@@ -844,6 +1744,46 @@
     <message>
         <source>Added %1 of the %2 games found.</source>
         <translation>Добавлено %1 из %2 найденных игр.</translation>
+    </message>
+    <message>
+        <source>Games</source>
+        <translation>Игры</translation>
+    </message>
+    <message>
+        <source>Settings</source>
+        <translation>Настройки</translation>
+    </message>
+    <message>
+        <source>About</source>
+        <translation>О программе</translation>
+    </message>
+    <message>
+        <source>Quit</source>
+        <translation>Выйти</translation>
+    </message>
+    <message>
+        <source>Leave full screen</source>
+        <translation>Выйти из полноэкранного режима</translation>
+    </message>
+    <message>
+        <source>Full screen</source>
+        <translation>Полный экран</translation>
+    </message>
+    <message>
+        <source>Restart the launcher</source>
+        <translation>Перезапустить лаунчер</translation>
+    </message>
+    <message>
+        <source>Close</source>
+        <translation>Закрыть</translation>
+    </message>
+    <message>
+        <source>Power</source>
+        <translation>Питание</translation>
+    </message>
+    <message>
+        <source>The launcher could not be started again.</source>
+        <translation>Не удалось снова запустить лаунчер.</translation>
     </message>
 </context>
 <context>
@@ -926,15 +1866,15 @@
     </message>
     <message>
         <source>Emulator ready</source>
-        <translation>Эмулятор готов</translation>
+        <translation type="vanished">Эмулятор готов</translation>
     </message>
     <message>
         <source>Emulator not found</source>
-        <translation>Эмулятор не найден</translation>
+        <translation type="vanished">Эмулятор не найден</translation>
     </message>
     <message>
         <source>No controller</source>
-        <translation>Нет геймпада</translation>
+        <translation type="vanished">Нет геймпада</translation>
     </message>
     <message>
         <source>No games yet. Add a game folder to start your library.</source>
@@ -964,6 +1904,10 @@
         <source>Search by name or serial</source>
         <translation>Поиск по названию или номеру</translation>
     </message>
+    <message>
+        <source>Open</source>
+        <translation>Открыть</translation>
+    </message>
 </context>
 <context>
     <name>ModuleRowItem</name>
@@ -991,6 +1935,10 @@
         <translation>Эмулятор</translation>
     </message>
     <message>
+        <source>Controls</source>
+        <translation>Управление</translation>
+    </message>
+    <message>
         <source>Interface</source>
         <translation>Интерфейс</translation>
     </message>
@@ -1011,6 +1959,14 @@
         <translation>Сбросить настройки</translation>
     </message>
     <message>
+        <source>Duplicate profile</source>
+        <translation>Копировать профиль</translation>
+    </message>
+    <message>
+        <source>Delete profile</source>
+        <translation>Удалить профиль</translation>
+    </message>
+    <message>
         <source>Select</source>
         <translation>Выбрать</translation>
     </message>
@@ -1019,8 +1975,16 @@
         <translation>Назад</translation>
     </message>
     <message>
+        <source>Delete “%1”? Select again</source>
+        <translation>Удалить «%1»? Выберите ещё раз</translation>
+    </message>
+    <message>
         <source>Saved. Games without custom settings use these from their next start.</source>
         <translation>Сохранено. Игры без своих настроек применят их при следующем запуске.</translation>
+    </message>
+    <message>
+        <source>The profile has the default controls again.</source>
+        <translation>В профиле снова управление по умолчанию.</translation>
     </message>
     <message>
         <source>Settings</source>
@@ -1063,6 +2027,18 @@
         <translation>Программа</translation>
     </message>
     <message>
+        <source>The keys, mouse and controller buttons every game gets, kept in profiles. Games use the chosen profile from their next start; changes are saved as you make them.</source>
+        <translation>Клавиши, мышь и кнопки геймпада для всех игр, сохранённые в профилях. Игры используют выбранный профиль со следующего запуска; изменения сохраняются сразу.</translation>
+    </message>
+    <message>
+        <source>None connected</source>
+        <translation>Не подключён</translation>
+    </message>
+    <message>
+        <source>Profiles folder</source>
+        <translation>Папка профилей</translation>
+    </message>
+    <message>
         <source>How the launcher looks and behaves. Every change applies at once.</source>
         <translation>Внешний вид и поведение лаунчера. Изменения применяются сразу.</translation>
     </message>
@@ -1077,6 +2053,18 @@
     <message>
         <source>Settings file</source>
         <translation>Файл настроек</translation>
+    </message>
+    <message>
+        <source>Themes folder</source>
+        <translation>Папка тем</translation>
+    </message>
+    <message>
+        <source>by %1</source>
+        <translation>автор: %1</translation>
+    </message>
+    <message>
+        <source>Style</source>
+        <translation>Стиль</translation>
     </message>
 </context>
 <context>
@@ -1103,6 +2091,17 @@
     </message>
 </context>
 <context>
+    <name>StickPreviewItem</name>
+    <message>
+        <source>Connect a controller to try the stick.</source>
+        <translation>Подключите геймпад, чтобы проверить стик.</translation>
+    </message>
+    <message>
+        <source>%1 · the game sees %2, %3</source>
+        <translation>%1 · игра видит %2, %3</translation>
+    </message>
+</context>
+<context>
     <name>TextPadItem</name>
     <message>
         <source>Shift</source>
@@ -1122,6 +2121,88 @@
     </message>
 </context>
 <context>
+    <name>ThemePack</name>
+    <message>
+        <source>Line %1 of theme.ini is not a key = value inside a [section].</source>
+        <translation>Строка %1 в theme.ini — не «ключ = значение» внутри [раздела].</translation>
+    </message>
+    <message>
+        <source>The file %1 is missing.</source>
+        <translation>Файл %1 отсутствует.</translation>
+    </message>
+    <message>
+        <source>The file %1 is outside the theme&apos;s folder.</source>
+        <translation>Файл %1 находится вне папки темы.</translation>
+    </message>
+    <message>
+        <source>The file %1 must be one of: %2.</source>
+        <translation>Файл %1 должен быть одного из типов: %2.</translation>
+    </message>
+    <message>
+        <source>The file %1 is larger than %2 MB.</source>
+        <translation>Файл %1 больше %2 МБ.</translation>
+    </message>
+    <message>
+        <source>[%1] has an unknown colour %2.</source>
+        <translation>В [%1] неизвестный цвет %2.</translation>
+    </message>
+    <message>
+        <source>%1 in [%2] is not a colour like #rrggbb or #aarrggbb.</source>
+        <translation>%1 в [%2] — не цвет вида #rrggbb или #aarrggbb.</translation>
+    </message>
+    <message>
+        <source>theme.ini has an unknown section [%1].</source>
+        <translation>В theme.ini неизвестный раздел [%1].</translation>
+    </message>
+    <message>
+        <source>The theme is made for another version of the launcher (api %1).</source>
+        <translation>Тема сделана для другой версии лаунчера (api %1).</translation>
+    </message>
+    <message>
+        <source>[Theme] has an unknown key %1.</source>
+        <translation>В [Theme] неизвестный ключ %1.</translation>
+    </message>
+    <message>
+        <source>%1 is longer than %2 characters.</source>
+        <translation>%1 длиннее %2 символов.</translation>
+    </message>
+    <message>
+        <source>[Theme] has no name.</source>
+        <translation>В [Theme] нет имени.</translation>
+    </message>
+    <message>
+        <source>layout must be Sidebar or Console.</source>
+        <translation>layout должен быть Sidebar или Console.</translation>
+    </message>
+    <message>
+        <source>The picture %1 cannot be read or is larger than %2 × %2.</source>
+        <translation>Изображение %1 не читается или больше %2 × %2.</translation>
+    </message>
+    <message>
+        <source>[Sounds] has an unknown sound %1.</source>
+        <translation>В [Sounds] неизвестный звук %1.</translation>
+    </message>
+    <message>
+        <source>The folder name may only hold letters, digits, dots, dashes and underscores.</source>
+        <translation>Имя папки может содержать только буквы, цифры, точки, дефисы и подчёркивания.</translation>
+    </message>
+    <message>
+        <source>theme.ini is larger than %1 KB.</source>
+        <translation>theme.ini больше %1 КБ.</translation>
+    </message>
+    <message>
+        <source>theme.ini cannot be read.</source>
+        <translation>Не удаётся прочитать theme.ini.</translation>
+    </message>
+</context>
+<context>
+    <name>TileRowItem</name>
+    <message>
+        <source>Add game</source>
+        <translation>Добавить игру</translation>
+    </message>
+</context>
+<context>
     <name>ToggleItem</name>
     <message>
         <source>On</source>
@@ -1130,6 +2211,36 @@
     <message>
         <source>Off</source>
         <translation>Выкл.</translation>
+    </message>
+</context>
+<context>
+    <name>TopBarItem</name>
+    <message>
+        <source>Emulator ready</source>
+        <translation>Эмулятор готов</translation>
+    </message>
+    <message>
+        <source>Emulator not found</source>
+        <translation>Эмулятор не найден</translation>
+    </message>
+    <message>
+        <source>Controller %1%</source>
+        <translation>Геймпад %1%</translation>
+    </message>
+    <message>
+        <source>Search</source>
+        <translation>Поиск</translation>
+    </message>
+    <message>
+        <source>Power</source>
+        <translation>Питание</translation>
+    </message>
+</context>
+<context>
+    <name>UiSounds</name>
+    <message>
+        <source>%1 holds no sound.</source>
+        <translation>%1 не содержит звука.</translation>
     </message>
 </context>
 </TS>

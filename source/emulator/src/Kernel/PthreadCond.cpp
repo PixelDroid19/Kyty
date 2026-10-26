@@ -250,7 +250,7 @@ bool PthreadGetThreadDiagnostics(PthreadThreadDiagnostics* out)
 	{
 		return false;
 	}
-	*out = {};
+	*out = PthreadThreadDiagnostics {};
 
 	if (g_pthread_context == nullptr)
 	{

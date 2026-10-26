@@ -43,6 +43,7 @@
 #include "Emulator/Graphics/VulkanVertexInputLayout.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/ProgressPort.h"
 #include "Emulator/Profiler.h"
 
 #include "spirv/unified1/spirv.hpp"
@@ -1606,6 +1607,33 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	return passes;
 }
 
+namespace {
+
+// Another command thread may hold the cache through a long compile; waiting
+// for it counts as compiling, not as a stuck command batch.
+class PipelineCacheLock
+{
+public:
+	// NOLINTNEXTLINE(google-runtime-references)
+	explicit PipelineCacheLock(Core::Mutex& mutex): m_mutex(mutex)
+	{
+		if (!m_mutex.TryLock())
+		{
+			const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
+			m_mutex.Lock();
+		}
+	}
+
+	~PipelineCacheLock() { m_mutex.Unlock(); }
+
+	KYTY_CLASS_NO_COPY(PipelineCacheLock);
+
+private:
+	Core::Mutex& m_mutex;
+};
+
+} // namespace
+
 VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color,
                                               RenderDepthInfo* depth,
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
@@ -1619,7 +1647,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	EXIT_IF(depth == nullptr);
 	EXIT_IF(color == nullptr);
 
-	Core::LockGuard lock(m_mutex);
+	const PipelineCacheLock lock(m_mutex);
 
 	const auto&                vs_regs = sh_ctx->GetVs();
 	const auto&                ps_regs = sh_ctx->GetPs();
@@ -1834,6 +1862,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	}
 
 	const auto miss_start = DebugStatsClock::now();
+	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
 	for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
 	{
 		if (!RenderColorSlotActive(*color, rt))
@@ -2022,7 +2051,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 	EXIT_IF(cs_regs == nullptr);
 	EXIT_IF(sh_regs == nullptr);
 
-	Core::LockGuard lock(m_mutex);
+	const PipelineCacheLock lock(m_mutex);
 
 	if (Log::ShouldLog(Log::Level::Debug) && Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
@@ -2058,6 +2087,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 	}
 
 	const auto miss_start = DebugStatsClock::now();
+	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
 
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
@@ -2108,7 +2138,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 
 	EXIT_IF(recording_buffer == nullptr || input_info == nullptr || vs_regs == nullptr || sh_regs == nullptr);
 
-	Core::LockGuard lock(m_mutex);
+	const PipelineCacheLock lock(m_mutex);
 
 	auto id = ShaderGetIdVS(vs_regs, input_info);
 	id.ids.Add(0x47454f31u); // GEO1: merged ES+GS compute pass.
@@ -2134,6 +2164,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 	}
 
 	const auto miss_start = DebugStatsClock::now();
+	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
 	const auto code       = ShaderParseVS(vs_regs, sh_regs, input_info);
 	const auto host       = SpirvGeometryComputeHostInfo(code, *input_info, geometry);
 

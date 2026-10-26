@@ -1,5 +1,6 @@
 #include "HintBarItem.h"
 
+#include "LauncherBackend.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -102,7 +103,7 @@ QSGNode* HintBarItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*
 	{
 		const auto    hint  = value.toMap();
 		const bool    glyph = m_pad && hint.contains("pad");
-		const QString cap   = hint.value(glyph ? "pad" : "key").toString();
+		const QString cap   = glyph ? LauncherBackend::Instance()->PadText(hint.value("pad").toString()) : hint.value("key").toString();
 		const QString text  = hint.value("text").toString();
 		const auto&   font  = glyph ? glyph_font : key_font;
 

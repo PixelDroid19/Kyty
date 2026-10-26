@@ -1,6 +1,7 @@
 #include "LauncherWindow.h"
 
 #include "AboutPageItem.h"
+#include "ActionMenuItem.h"
 #include "BackgroundItem.h"
 #include "EditorPageItem.h"
 #include "GameBackdropItem.h"
@@ -12,9 +13,13 @@
 #include "SettingsPageItem.h"
 #include "SidebarItem.h"
 #include "Theme.h"
+#include "TopBarItem.h"
+#include "UiSounds.h"
 
+#include <QCoreApplication>
 #include <QEasingCurve>
 #include <QKeyEvent>
+#include <QProcess>
 
 #include <algorithm>
 
@@ -33,6 +38,7 @@ constexpr qreal KIT_TOP       = 30;
 constexpr qreal KIT_WIDTH     = 44;
 constexpr qreal KIT_GAP       = 18;
 constexpr qreal HINTS_HEIGHT  = 56;
+constexpr qreal TOP_BAR       = 64;
 constexpr qreal NOTICE_GAP    = 12;
 
 namespace {
@@ -45,6 +51,26 @@ Item* AddItem(QQuickItem* parent)
 	item->setParent(parent);
 	item->setParentItem(parent);
 	return item;
+}
+
+// The sound of a key the window used: arrows move, Enter accepts, Escape goes back.
+void PlayKeySound(int key)
+{
+	auto* sounds = LauncherBackend::Instance()->Sounds();
+	switch (key)
+	{
+		case Qt::Key_Up:
+		case Qt::Key_Down:
+		case Qt::Key_Left:
+		case Qt::Key_Right:
+		case Qt::Key_PageUp:
+		case Qt::Key_PageDown: sounds->Play(UiSounds::Sound::Move); break;
+		case Qt::Key_Return:
+		case Qt::Key_Enter:
+		case Qt::Key_PowerOff: sounds->Play(UiSounds::Sound::Accept); break;
+		case Qt::Key_Escape: sounds->Play(UiSounds::Sound::Back); break;
+		default: break;
+	}
 }
 
 } // namespace
@@ -60,6 +86,7 @@ LauncherWindow::LauncherWindow()
 	connect(backend, &LauncherBackend::FolderImported, this, &LauncherWindow::ReportFolderImported);
 	connect(backend, &LauncherBackend::SaveFailed, this,
 	        [this](const QString& file) { m_notice->Show(tr("The settings could not be saved to %1.").arg(file)); });
+	connect(backend, &LauncherBackend::ThemeFailed, this, [this](const QString& message) { m_notice->Show(message); });
 	// Queued: the change may come from a key the page being replaced is still handling.
 	connect(backend, &LauncherBackend::LanguageChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
 	connect(backend, &LauncherBackend::AppearanceChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
@@ -108,6 +135,22 @@ LauncherWindow::LauncherWindow()
 	Layout();
 	StateChanged();
 	FocusPage();
+	OpenLastGame();
+}
+
+// Continue where you left off: the launcher opens on the page of the game played last.
+void LauncherWindow::OpenLastGame()
+{
+	auto* backend = LauncherBackend::Instance();
+	if (backend->Look("start_on") != QLatin1String("LastGame"))
+	{
+		return;
+	}
+	const auto recent = backend->Recent();
+	if (!recent.isEmpty())
+	{
+		m_library->OpenGamePage(recent.first().toMap().value("row").toInt());
+	}
 }
 
 // The items bake the palette and the texts into their nodes, so a new theme or language builds them again.
@@ -132,14 +175,42 @@ void LauncherWindow::BuildItems()
 	m_sidebar = AddItem<SidebarItem>(root);
 	m_kit     = AddItem<KitMascotItem>(m_sidebar);
 	m_kit->SetFloating(false);
+	m_topbar = AddItem<TopBarItem>(root);
 	m_notice = AddItem<NoticeItem>(root);
+	m_power  = AddItem<ActionMenuItem>(root);
+	m_console = LauncherBackend::Instance()->LayoutName() == QLatin1String("Console");
+	m_sidebar->setVisible(!m_console);
+	if (m_console)
+	{
+		m_topbar->SetTabs({tr("Games"), tr("Settings"), tr("About")});
+	}
 
 	const auto add_title = tr("Choose a game folder or a folder of games");
 	connect(m_sidebar, &SidebarItem::LibraryRequested, this, [this]() { ShowPage(Page::Library); });
 	connect(m_sidebar, &SidebarItem::AddGameRequested, this, [this, add_title]() { m_add_chooser.ChooseFolder(add_title); });
 	connect(m_sidebar, &SidebarItem::SettingsRequested, this, [this]() { ShowPage(Page::Settings); });
 	connect(m_sidebar, &SidebarItem::AboutRequested, this, [this]() { ShowPage(Page::About); });
-	connect(m_sidebar, &SidebarItem::QuitRequested, this, &QWindow::close);
+	connect(m_sidebar, &SidebarItem::QuitRequested, this, &LauncherWindow::OpenPowerMenu);
+	connect(m_topbar, &TopBarItem::TabRequested, this,
+	        [this](int index) { ShowPage(index == 1 ? Page::Settings : index == 2 ? Page::About : Page::Library, false); });
+	connect(m_topbar, &TopBarItem::SearchRequested, this,
+	        [this]()
+	        {
+		        ShowPage(Page::Library, false);
+		        // After the page is shown, since a hidden item cannot take the focus.
+		        QTimer::singleShot(0, m_library, &LibraryPageItem::FocusSearch);
+	        });
+	connect(m_topbar, &TopBarItem::PowerRequested, this, &LauncherWindow::OpenPowerMenu);
+	connect(m_topbar, &TopBarItem::DownRequested, this, &LauncherWindow::FocusPage);
+	connect(m_power, &ActionMenuItem::Chosen, this, [this](const QString& action, int /*row*/) { PowerChosen(action); });
+	connect(m_power, &ActionMenuItem::ShownChanged, this,
+	        [this]()
+	        {
+		        if (!m_power->Shown() && m_power_return != nullptr)
+		        {
+			        m_power_return->forceActiveFocus();
+		        }
+	        });
 	connect(m_kit, &QQuickItem::heightChanged, this, &LauncherWindow::Layout);
 
 	connect(m_library, &LibraryPageItem::RunRequested, this, &LauncherWindow::RunGame);
@@ -147,6 +218,7 @@ void LauncherWindow::BuildItems()
 	connect(m_library, &LibraryPageItem::AddRequested, this, [this, add_title]() { m_add_chooser.ChooseFolder(add_title); });
 	connect(m_library, &LibraryPageItem::ActionRequested, this, &LauncherWindow::HandleAction);
 	connect(m_library, &LibraryPageItem::FocusedGameChanged, this, &LauncherWindow::UpdateBackdrop);
+	connect(m_library, &LibraryPageItem::HintsChanged, this, &LauncherWindow::UpdatePage);
 
 	connect(m_editor, &EditorPageItem::Saved, this,
 	        [this](int row)
@@ -176,6 +248,9 @@ void LauncherWindow::Rebuild()
 	m_rebuild_pending = false;
 	const auto place  = m_settings->CurrentPlace();
 	const int  row    = m_library->FocusedGame().value("row", -1).toInt();
+	const int  opened = m_library->GamePageRow();
+	// A notice shown just before, such as why a theme was turned back, outlives the old items.
+	const auto notice = m_notice->ShownText();
 	for (QQuickItem* item: contentItem()->childItems())
 	{
 		item->setParentItem(nullptr);
@@ -184,7 +259,14 @@ void LauncherWindow::Rebuild()
 	BuildItems();
 	Layout();
 	StateChanged();
-	if (row >= 0)
+	if (!notice.isEmpty())
+	{
+		m_notice->Show(notice);
+	}
+	if (opened >= 0)
+	{
+		m_library->OpenGamePage(opened);
+	} else if (row >= 0)
 	{
 		m_library->SelectRow(row);
 	}
@@ -246,13 +328,19 @@ void LauncherWindow::Layout()
 
 	m_background->setSize(QSizeF(w, h));
 	m_backdrop->setSize(QSizeF(w, h));
-	const qreal sidebar = SIDEBAR_WIDTH * u;
+	m_power->setSize(QSizeF(w, h));
+	const qreal sidebar = m_console ? 0 : SIDEBAR_WIDTH * u;
 	m_sidebar->setSize(QSizeF(sidebar, h));
 	m_kit->setWidth(KIT_WIDTH * u);
 	m_kit->setPosition(QPointF((sidebar - m_kit->width()) / 2, KIT_TOP * u));
 	m_sidebar->SetEntriesTop(m_kit->y() + m_kit->height() + KIT_GAP * u);
 
-	const QRectF page(sidebar, 0, std::max<qreal>(0, w - sidebar), std::max<qreal>(0, h - HINTS_HEIGHT * u));
+	// The Sidebar layout's pages keep their whole height and the bar lies over their top right corner.
+	const qreal  bar  = TOP_BAR * u;
+	const qreal  top  = m_console ? bar : 0;
+	const QRectF page(sidebar, top, std::max<qreal>(0, w - sidebar), std::max<qreal>(0, h - top - HINTS_HEIGHT * u));
+	m_topbar->setPosition(QPointF(sidebar, 0));
+	m_topbar->setSize(QSizeF(page.width(), bar));
 	for (QQuickItem* item: {static_cast<QQuickItem*>(m_library), static_cast<QQuickItem*>(m_editor), static_cast<QQuickItem*>(m_settings),
 	                        static_cast<QQuickItem*>(m_about)})
 	{
@@ -290,6 +378,7 @@ void LauncherWindow::StateChanged()
 		}
 	}
 	m_hints->SetPad(!LauncherBackend::Instance()->ControllerName().isEmpty());
+	m_topbar->Refresh();
 	UpdateLive();
 	UpdatePage();
 	UpdateBackdrop();
@@ -315,13 +404,16 @@ void LauncherWindow::UpdatePage()
 	m_editor->setVisible(m_page == Page::Editor);
 	m_settings->setVisible(m_page == Page::Settings);
 	m_about->setVisible(m_page == Page::About);
+	m_topbar->SetCurrentTab(m_page == Page::Settings ? 1 : m_page == Page::About ? 2 : 0);
+	// The Sidebar layout's editor keeps its own buttons where the bar would lie.
+	m_topbar->setVisible(m_console || m_page != Page::Editor);
 
 	switch (m_page)
 	{
 		case Page::Library:
 			m_sidebar->SetCurrent(QStringLiteral("library"));
-			m_sidebar->SetRightTarget(m_library->GameView());
-			m_hints->SetHints(LibraryPageItem::Hints());
+			m_sidebar->SetRightTarget(m_library->FocusTarget());
+			m_hints->SetHints(m_library->Hints());
 			break;
 		case Page::Editor:
 			m_sidebar->SetCurrent(QStringLiteral("library"));
@@ -341,7 +433,7 @@ void LauncherWindow::UpdatePage()
 	}
 }
 
-void LauncherWindow::ShowPage(Page page)
+void LauncherWindow::ShowPage(Page page, bool focus_page)
 {
 	const Page previous = m_page;
 	m_page              = page;
@@ -352,8 +444,11 @@ void LauncherWindow::ShowPage(Page page)
 	}
 	UpdatePage();
 	Reveal(previous);
-	// After the page is shown, since a hidden item cannot take the focus.
-	QTimer::singleShot(0, this, &LauncherWindow::FocusPage);
+	if (focus_page)
+	{
+		// After the page is shown, since a hidden item cannot take the focus.
+		QTimer::singleShot(0, this, &LauncherWindow::FocusPage);
+	}
 }
 
 void LauncherWindow::FocusPage()
@@ -417,11 +512,14 @@ void LauncherWindow::AddFolder(const QString& folder)
 
 void LauncherWindow::RunGame(int row)
 {
-	const auto error = LauncherBackend::Instance()->RunGame(row);
+	auto*      backend = LauncherBackend::Instance();
+	const auto error   = backend->RunGame(row);
 	if (!error.isEmpty())
 	{
 		m_notice->Show(error);
+		return;
 	}
+	backend->Sounds()->Play(UiSounds::Sound::Start);
 }
 
 void LauncherWindow::HandleAction(const QString& action, int row)
@@ -477,13 +575,65 @@ void LauncherWindow::ReportFolderImported(int added, int found, const QString& e
 	m_notice->Show(message);
 }
 
+// Opened by the power buttons and by holding the controller's back button.
+void LauncherWindow::OpenPowerMenu()
+{
+	if (m_power->Shown())
+	{
+		return;
+	}
+	m_power_return              = activeFocusItem();
+	const bool         full     = (windowStates() & Qt::WindowFullScreen) != 0;
+	const QVariantList items {QVariantMap {{"label", tr("Quit")}, {"action", "quit"}},
+	                          QVariantMap {{"label", full ? tr("Leave full screen") : tr("Full screen")}, {"action", "full-screen"}},
+	                          QVariantMap {{"label", tr("Restart the launcher")}, {"action", "restart"}},
+	                          QVariantMap {{"label", tr("Close")}, {"action", "close"}}};
+	m_power->OpenFor({{"title", tr("Power")}}, -1, items);
+}
+
+void LauncherWindow::PowerChosen(const QString& action)
+{
+	if (action == QLatin1String("quit"))
+	{
+		close();
+	} else if (action == QLatin1String("full-screen"))
+	{
+		setWindowStates(windowStates() ^ Qt::WindowFullScreen);
+	} else if (action == QLatin1String("restart"))
+	{
+		if (QProcess::startDetached(QCoreApplication::applicationFilePath(), QCoreApplication::arguments().mid(1)))
+		{
+			close();
+			return;
+		}
+		m_notice->Show(tr("The launcher could not be started again."));
+	}
+}
+
 void LauncherWindow::keyPressEvent(QKeyEvent* event)
 {
 	QQuickWindow::keyPressEvent(event);
-	// The editor uses Left inside its fields, so only the other pages hand it to the sidebar.
-	if (!event->isAccepted() && event->key() == Qt::Key_Left && m_page != Page::Editor)
+	const int key = event->key();
+	if (event->isAccepted())
+	{
+		PlayKeySound(key);
+		return;
+	}
+	// The editor uses Left and Up inside its fields, so only the other pages hand them on.
+	const bool editing = m_page == Page::Editor;
+	if (key == Qt::Key_PowerOff)
+	{
+		OpenPowerMenu();
+	} else if (key == Qt::Key_Left && !editing && !m_console)
 	{
 		m_sidebar->forceActiveFocus(Qt::TabFocusReason);
-		event->accept();
+	} else if (key == Qt::Key_Up && !editing && !m_power->Shown())
+	{
+		m_topbar->forceActiveFocus(Qt::TabFocusReason);
+	} else
+	{
+		return;
 	}
+	event->accept();
+	PlayKeySound(key);
 }

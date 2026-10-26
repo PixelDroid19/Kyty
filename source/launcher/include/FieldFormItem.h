@@ -46,7 +46,8 @@ public:
 
 	// Scrolls to the top and focuses the first control.
 	void FocusFirst();
-	void FocusKey(const QString& key);
+	// Focuses the field's control at index among its controls, or its first one.
+	void FocusKey(const QString& key, int index = 0);
 	void ScrollToTop();
 
 protected:

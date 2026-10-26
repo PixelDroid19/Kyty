@@ -26,6 +26,7 @@
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/ProgressPort.h"
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <atomic>
@@ -41,8 +42,16 @@
 // Host libgcc unwinder registration. Guest modules execute natively on the
 // host; publishing each module's .eh_frame lets the host unwinder find FDEs for
 // guest PCs so C++ exceptions can unwind guest frames (required by IL2CPP
-// titles, which throw/catch managed exceptions through __cxa_throw).
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+// titles, which throw/catch managed exceptions through __cxa_throw). MinGW's
+// libgcc unwinds with SEH and has no such registry, so guest frames stay opaque
+// to host exceptions on Windows.
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__)) && KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+#define KYTY_HOST_FRAME_REGISTRY 1
+#else
+#define KYTY_HOST_FRAME_REGISTRY 0
+#endif
+
+#if KYTY_HOST_FRAME_REGISTRY
 extern "C" void __register_frame(const void* begin);
 extern "C" void __deregister_frame(const void* begin);
 #endif
@@ -454,6 +463,7 @@ static uint8_t g_tls_spinlock = 0;
 
 static KYTY_SYSV_ABI void run_entry(uint64_t addr, EntryParams* params, atexit_func_t atexit_func, void* stack_top)
 {
+	const Emulator::Ports::ScopedProgress guest(Emulator::Ports::ProgressLane::GuestThread);
 	GuestCall::InvokeOnStack(addr, reinterpret_cast<uint64_t>(params), reinterpret_cast<uint64_t>(atexit_func), 0, stack_top);
 }
 
@@ -3236,7 +3246,7 @@ static void InstallRelocateHandler(Program* program)
 // relocations so the CIE personality indirection through the GOT is resolved.
 void RuntimeLinker::RegisterProgramEhFrame(Program* program)
 {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if KYTY_HOST_FRAME_REGISTRY
 	if (program == nullptr || program->elf == nullptr || program->eh_frame_registered)
 	{
 		return;
@@ -3283,7 +3293,7 @@ void RuntimeLinker::RegisterProgramEhFrame(Program* program)
 
 void RuntimeLinker::UnregisterProgramEhFrame(Program* program)
 {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if KYTY_HOST_FRAME_REGISTRY
 	if (program == nullptr || !program->eh_frame_registered || program->eh_frame_vaddr == 0)
 	{
 		return;

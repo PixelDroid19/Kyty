@@ -129,19 +129,21 @@ const ChoiceText CHOICE_TEXTS[] = {
     {"Windowed", QT_TRANSLATE_NOOP("FieldRowItem", "A window")},
     {"Maximized", QT_TRANSLATE_NOOP("FieldRowItem", "Maximized")},
     {"FullScreen", QT_TRANSLATE_NOOP("FieldRowItem", "Full screen")},
+    {"LastGame", QT_TRANSLATE_NOOP("FieldRowItem", "The last game played")},
+    {"Sidebar", QT_TRANSLATE_NOOP("FieldRowItem", "Sidebar")},
+    {"Console", QT_TRANSLATE_NOOP("FieldRowItem", "Console")},
+    {"Quiet", QT_TRANSLATE_NOOP("FieldRowItem", "Quiet")},
+    {"Loud", QT_TRANSLATE_NOOP("FieldRowItem", "Loud")},
+    {"Library", QT_TRANSLATE_NOOP("FieldRowItem", "The library")},
 };
 
-QString ChoiceDisplay(const QString& value)
-{
-	for (const auto& choice: CHOICE_TEXTS)
-	{
-		if (value == QLatin1String(choice.value))
-		{
-			return choice.translated ? QCoreApplication::translate("FieldRowItem", choice.text) : QString::fromUtf8(choice.text);
-		}
-	}
-	return value;
-}
+const ChoiceText MOUSE_TEXTS[] = {
+    {"Mouse Left", QT_TRANSLATE_NOOP("FieldRowItem", "Left click")},
+    {"Mouse Middle", QT_TRANSLATE_NOOP("FieldRowItem", "Middle click")},
+    {"Mouse Right", QT_TRANSLATE_NOOP("FieldRowItem", "Right click")},
+    {"Mouse X1", QT_TRANSLATE_NOOP("FieldRowItem", "Mouse back button")},
+    {"Mouse X2", QT_TRANSLATE_NOOP("FieldRowItem", "Mouse forward button")},
+};
 
 QFont SmallFont()
 {
@@ -160,6 +162,35 @@ PageLayout::Text Line(const QRectF& rect, const QString& text, const QFont& font
 }
 
 } // namespace
+
+// The backend names the values of its own lists first, so an input profile called Normal is not shown as a size.
+QString ChoiceDisplay(const char* list, const QString& value)
+{
+	if (const auto label = LauncherBackend::Instance()->ChoiceLabel(QString::fromLatin1(list), value); !label.isEmpty())
+	{
+		return label;
+	}
+	for (const auto& choice: CHOICE_TEXTS)
+	{
+		if (value == QLatin1String(choice.value))
+		{
+			return choice.translated ? QCoreApplication::translate("FieldRowItem", choice.text) : QString::fromUtf8(choice.text);
+		}
+	}
+	return value;
+}
+
+QString KeyDisplay(const QString& name)
+{
+	for (const auto& mouse: MOUSE_TEXTS)
+	{
+		if (name == QLatin1String(mouse.value))
+		{
+			return QCoreApplication::translate("FieldRowItem", mouse.text);
+		}
+	}
+	return name;
+}
 
 FieldRowItem::FieldRowItem(const EditorField& field, QQuickItem* parent): QQuickItem(parent), m_field(field)
 {
@@ -180,8 +211,7 @@ FieldRowItem::FieldRowItem(const EditorField& field, QQuickItem* parent): QQuick
 			connect(m_toggle, &FieldControlItem::Activated, this, [this, key]() { emit Edited(key, !m_value.toBool()); });
 			break;
 		case FieldType::Choice:
-			m_choices = LauncherBackend::Instance()->Choices().value(field.choices).toStringList();
-			m_choice  = new ChoiceItem(this);
+			m_choice = new ChoiceItem(this);
 			connect(m_choice, &FieldControlItem::Activated, this, &FieldRowItem::Step);
 			connect(m_choice, &FieldControlItem::ListRequested, this, [this, key]() { emit ListRequested(key); });
 			break;
@@ -235,7 +265,7 @@ QStringList FieldRowItem::ChoiceTexts() const
 	QStringList texts;
 	for (const auto& choice: m_choices)
 	{
-		texts << ChoiceDisplay(choice);
+		texts << ChoiceDisplay(m_field.choices, choice);
 	}
 	return texts;
 }
@@ -274,6 +304,11 @@ void FieldRowItem::SetValues(const QVariantMap& values, bool shown)
 	m_shown   = shown;
 	m_value   = values.value(m_field.key);
 	m_basedir = values.value("basedir").toString();
+	if (m_field.type == FieldType::Choice)
+	{
+		// Some lists change while the form is open, such as the connected controllers.
+		m_choices = LauncherBackend::Instance()->Choices().value(m_field.choices).toStringList();
+	}
 	setVisible(shown);
 	ShowValue();
 }
@@ -302,10 +337,12 @@ void FieldRowItem::ShowValue()
 			m_toggle->SetOn(m_value.toBool());
 			break;
 		case FieldType::Choice:
-			SetAccessible(m_choice, QAccessible::ComboBox, Translated(m_field.label),
-			              help.isEmpty() ? ChoiceDisplay(m_value.toString()) : ChoiceDisplay(m_value.toString()) + ". " + help);
-			m_choice->SetValue(ChoiceDisplay(m_value.toString()));
+		{
+			const auto shown = ChoiceDisplay(m_field.choices, m_value.toString());
+			SetAccessible(m_choice, QAccessible::ComboBox, Translated(m_field.label), help.isEmpty() ? shown : shown + ". " + help);
+			m_choice->SetValue(shown);
 			break;
+		}
 		case FieldType::Modules: ShowModules(m_value.toList()); break;
 		case FieldType::Params:
 			// Read again only when the file changes, since every edit in the form passes through here.

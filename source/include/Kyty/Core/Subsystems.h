@@ -83,9 +83,14 @@ private:
 	SubsystemPrivate* m_p;
 };
 
+// Registers a handler for ShutdownActiveAndQuickExit, which runs them newest
+// first. Kyty keeps its own table because MinGW's C runtime has no
+// at_quick_exit. Returns false when the table is full.
+bool AtQuickExit(void (*handler)()) noexcept;
+
 // Ends the process after the active subsystems have shut down. Host atexit
 // handlers and static destructors are skipped, because guest threads may still
-// run; at_quick_exit handlers still run.
+// run; AtQuickExit handlers still run.
 [[noreturn]] void ShutdownActiveAndQuickExit(int code);
 
 } // namespace Kyty::Core

@@ -4,7 +4,9 @@
 #include "Common.h"
 
 #include <QColor>
+#include <QHash>
 #include <QObject>
+#include <QString>
 
 // Colours and sizes shared by every page and scene item. Sizes scale with u, which is 1 at 720 lines high.
 class Theme: public QObject
@@ -62,30 +64,32 @@ public:
 	// Items keep the accent and the motion in their nodes, so whoever changes them rebuilds the items.
 	void SetAccent(AccentColor accent) { m_accent = accent; }
 	void SetMotion(Motion motion);
+	// Colours of an add-on theme for each palette, by ThemePack::ColorKeys(); empty maps give the launcher's own.
+	void SetCustomColors(const QHash<QString, QColor>& dark, const QHash<QString, QColor>& light);
 
 	// The website's palette, so Kit and the launcher look like the rest of the project; the light one mirrors it.
-	[[nodiscard]] QColor Background() const { return m_dark ? QColor(0x09, 0x09, 0x0b) : QColor(0xf4, 0xf4, 0xf6); }
-	[[nodiscard]] QColor Surface() const { return m_dark ? QColor(0x10, 0x10, 0x13) : QColor(0xff, 0xff, 0xff); }
+	[[nodiscard]] QColor Background() const { return Pick("background", m_dark ? QColor(0x09, 0x09, 0x0b) : QColor(0xf4, 0xf4, 0xf6)); }
+	[[nodiscard]] QColor Surface() const { return Pick("surface", m_dark ? QColor(0x10, 0x10, 0x13) : QColor(0xff, 0xff, 0xff)); }
 	// Modal panels, opaque enough that the page under them does not show through their text.
-	[[nodiscard]] QColor Panel() const { return m_dark ? QColor(0x15, 0x15, 0x19, 0xf5) : QColor(0xff, 0xff, 0xff, 0xf8); }
+	[[nodiscard]] QColor Panel() const { return Pick("panel", m_dark ? QColor(0x15, 0x15, 0x19, 0xf5) : QColor(0xff, 0xff, 0xff, 0xf8)); }
 	[[nodiscard]] QColor Accent() const;
-	[[nodiscard]] QColor GlitchRed() const { return {0xff, 0x00, 0x3c}; }
-	[[nodiscard]] QColor GlitchCyan() const { return {0x00, 0xe5, 0xff}; }
-	[[nodiscard]] QColor TextPrimary() const { return m_dark ? QColor(0xf4, 0xf4, 0xf5) : QColor(0x18, 0x18, 0x1b); }
-	[[nodiscard]] QColor TextSecondary() const { return m_dark ? QColor(0xa1, 0xa1, 0xaa) : QColor(0x4b, 0x4b, 0x55); }
-	[[nodiscard]] QColor TextMuted() const { return m_dark ? QColor(0x8a, 0x8a, 0x94) : QColor(0x63, 0x63, 0x6e); }
+	[[nodiscard]] QColor GlitchRed() const { return Pick("glitch_red", {0xff, 0x00, 0x3c}); }
+	[[nodiscard]] QColor GlitchCyan() const { return Pick("glitch_cyan", {0x00, 0xe5, 0xff}); }
+	[[nodiscard]] QColor TextPrimary() const { return Pick("text_primary", m_dark ? QColor(0xf4, 0xf4, 0xf5) : QColor(0x18, 0x18, 0x1b)); }
+	[[nodiscard]] QColor TextSecondary() const { return Pick("text_secondary", m_dark ? QColor(0xa1, 0xa1, 0xaa) : QColor(0x4b, 0x4b, 0x55)); }
+	[[nodiscard]] QColor TextMuted() const { return Pick("text_muted", m_dark ? QColor(0x8a, 0x8a, 0x94) : QColor(0x63, 0x63, 0x6e)); }
 	// Text over game artwork, which sits under a dark shade in both palettes.
-	[[nodiscard]] QColor TextOnArt() const { return {0xf4, 0xf4, 0xf5}; }
-	[[nodiscard]] QColor Glass() const { return Ink(m_dark ? 0.05F : 0.04F); }
-	[[nodiscard]] QColor GlassStrong() const { return Ink(m_dark ? 0.12F : 0.08F); }
-	[[nodiscard]] QColor GlassBorder() const { return Ink(m_dark ? 0.12F : 0.16F); }
-	[[nodiscard]] QColor Scrim() const { return QColor::fromRgbF(0, 0, 0, m_dark ? 0.6F : 0.32F); }
+	[[nodiscard]] QColor TextOnArt() const { return Pick("text_on_art", {0xf4, 0xf4, 0xf5}); }
+	[[nodiscard]] QColor Glass() const { return Pick("glass", Ink(m_dark ? 0.05F : 0.04F)); }
+	[[nodiscard]] QColor GlassStrong() const { return Pick("glass_strong", Ink(m_dark ? 0.12F : 0.08F)); }
+	[[nodiscard]] QColor GlassBorder() const { return Pick("glass_border", Ink(m_dark ? 0.12F : 0.16F)); }
+	[[nodiscard]] QColor Scrim() const { return Pick("scrim", QColor::fromRgbF(0, 0, 0, m_dark ? 0.6F : 0.32F)); }
 	// Hairline around game artwork.
-	[[nodiscard]] QColor ArtEdge() const { return Ink(0.14F); }
+	[[nodiscard]] QColor ArtEdge() const { return Pick("art_edge", Ink(0.14F)); }
 	// Faint light at the bottom of the window background.
-	[[nodiscard]] QColor Glow() const { return m_dark ? QColor(0x10, 0x1e, 0x3c, 0x14) : QColor(0x2f, 0x62, 0xd8, 0x10); }
-	[[nodiscard]] QColor Danger() const { return m_dark ? QColor(0xff, 0x8a, 0x95) : QColor(0xc4, 0x28, 0x3c); }
-	[[nodiscard]] QColor Ok() const { return m_dark ? QColor(0x3e, 0xcf, 0x8e) : QColor(0x15, 0x80, 0x3d); }
+	[[nodiscard]] QColor Glow() const { return Pick("glow", m_dark ? QColor(0x10, 0x1e, 0x3c, 0x14) : QColor(0x2f, 0x62, 0xd8, 0x10)); }
+	[[nodiscard]] QColor Danger() const { return Pick("danger", m_dark ? QColor(0xff, 0x8a, 0x95) : QColor(0xc4, 0x28, 0x3c)); }
+	[[nodiscard]] QColor Ok() const { return Pick("ok", m_dark ? QColor(0x3e, 0xcf, 0x8e) : QColor(0x15, 0x80, 0x3d)); }
 
 	[[nodiscard]] qreal Gap() const { return 16 * m_u; }
 	[[nodiscard]] qreal Margin() const { return 28 * m_u; }
@@ -101,6 +105,11 @@ public:
 	[[nodiscard]] qreal FocusGap() const { return 5 * m_u; }
 
 private:
+	// The add-on theme's colour for key in the current palette, otherwise the launcher's own.
+	[[nodiscard]] QColor Pick(const char* key, const QColor& own) const
+	{
+		return (m_dark ? m_custom_dark : m_custom_light).value(QString::fromLatin1(key), own);
+	}
 	// The text colour at this opacity: white on the dark palette, black on the light one.
 	[[nodiscard]] QColor Ink(float alpha) const { return m_dark ? QColor::fromRgbF(1, 1, 1, alpha) : QColor::fromRgbF(0, 0, 0, alpha); }
 	void                 UpdateDark();
@@ -111,6 +120,8 @@ private:
 	bool   m_dark   = true;
 	AccentColor m_accent = AccentColor::Blue;
 	Motion      m_motion = Motion::Full;
+	QHash<QString, QColor> m_custom_dark;
+	QHash<QString, QColor> m_custom_light;
 };
 
 #endif /* LAUNCHER_INCLUDE_THEME_H_ */

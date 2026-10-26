@@ -1,9 +1,10 @@
 #include "Emulator/Graphics/GraphicsOperationTrace.h"
 
+#include "Kyty/Core/Subsystems.h"
+#include "Kyty/Math/Crypto.h"
+
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Log.h"
-
-#include "Kyty/Math/Crypto.h"
 
 #include <algorithm>
 #include <atomic>
@@ -299,9 +300,9 @@ void FlushAtExit()
 OperationTraceCollector& ProcessCollector()
 {
 	static OperationTraceCollector collector(ProcessDirectory());
-	// atexit covers return from main and exit(); at_quick_exit covers the guest
-	// exit path and window close, which end through quick_exit.
-	static const bool armed = collector.Enabled() && std::atexit(FlushAtExit) == 0 && std::at_quick_exit(FlushAtExit) == 0;
+	// atexit covers return from main and exit(); AtQuickExit covers the guest
+	// exit path and window close, which end through ShutdownActiveAndQuickExit.
+	static const bool armed = collector.Enabled() && std::atexit(FlushAtExit) == 0 && Core::AtQuickExit(FlushAtExit);
 	(void)armed;
 	return collector;
 }
