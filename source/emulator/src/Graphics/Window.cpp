@@ -30,7 +30,8 @@
 #include "Emulator/Host/HostInput.h"
 #include "Emulator/Host/HostVulkanWindow.h"
 #include "Emulator/Host/HostWindow.h"
-#include "Emulator/Host/KeyboardInput.h"
+#include "Emulator/Host/InputMapper.h"
+#include "Emulator/Host/InputProfile.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
 #include "Emulator/Ports/AudioPausePort.h"
@@ -43,6 +44,7 @@
 #include "KytyBuildInfo.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -708,6 +710,133 @@ static bool RenderAndUpdate(GameApi* game)
 	return ok;
 }
 
+// Input profile and the sources that apply it.  Only the window event loop touches them.
+static ::Kyty::Emulator::Host::InputProfile        g_input_profile;
+static ::Kyty::Emulator::Host::KeyboardMouseMapper g_keyboard_mouse(&g_input_profile);
+static ::Kyty::Emulator::Host::GamepadMapper       g_gamepads(&g_input_profile);
+static std::set<int>                               g_connected_gamepads;
+static ::Kyty::Emulator::Host::StickAxes           g_keyboard_left_stick;
+static ::Kyty::Emulator::Host::StickAxes           g_keyboard_right_stick;
+
+// Guest pad button of each PadControl before LeftStickLeft.
+static constexpr std::array<uint32_t, ::Kyty::Emulator::Host::PAD_BUTTON_CONTROL_COUNT> PAD_CONTROL_BUTTONS = {
+    ::Kyty::Emulator::Ports::PAD_BUTTON_CROSS,     ::Kyty::Emulator::Ports::PAD_BUTTON_CIRCLE, ::Kyty::Emulator::Ports::PAD_BUTTON_SQUARE,
+    ::Kyty::Emulator::Ports::PAD_BUTTON_TRIANGLE,  ::Kyty::Emulator::Ports::PAD_BUTTON_UP,     ::Kyty::Emulator::Ports::PAD_BUTTON_DOWN,
+    ::Kyty::Emulator::Ports::PAD_BUTTON_LEFT,      ::Kyty::Emulator::Ports::PAD_BUTTON_RIGHT,  ::Kyty::Emulator::Ports::PAD_BUTTON_L1,
+    ::Kyty::Emulator::Ports::PAD_BUTTON_R1,        ::Kyty::Emulator::Ports::PAD_BUTTON_L2,     ::Kyty::Emulator::Ports::PAD_BUTTON_R2,
+    ::Kyty::Emulator::Ports::PAD_BUTTON_L3,        ::Kyty::Emulator::Ports::PAD_BUTTON_R3,     ::Kyty::Emulator::Ports::PAD_BUTTON_OPTIONS,
+    ::Kyty::Emulator::Ports::PAD_BUTTON_TOUCH_PAD,
+};
+
+static void LoadInputProfile()
+{
+	const std::string path = Config::GetInputProfileFile().utf8_str().GetData();
+	if (path.empty())
+	{
+		g_input_profile = ::Kyty::Emulator::Host::DefaultInputProfile();
+		return;
+	}
+	if (auto error = ::Kyty::Emulator::Host::LoadInputProfile(path, &g_input_profile); !error.empty())
+	{
+		EXIT("Input profile '%s': %s\n", path.c_str(), error.c_str());
+	}
+	KYTY_LOG_INFO("Input profile '%s' loaded from %s\n", g_input_profile.name.c_str(), path.c_str());
+}
+
+static void ApplyPadButtons(int id, const ::Kyty::Emulator::Host::ControlChange& change)
+{
+	for (size_t control = 0; control < PAD_CONTROL_BUTTONS.size(); ++control)
+	{
+		const uint32_t bit = 1u << control;
+		if (((change.before ^ change.after) & bit) != 0)
+		{
+			::Kyty::Emulator::Ports::ControllerInputPort::Button(id, PAD_CONTROL_BUTTONS[control], (change.after & bit) != 0);
+		}
+	}
+}
+
+static void ApplyStick(int id, ::Kyty::Emulator::Ports::Axis axis_x, ::Kyty::Emulator::Ports::Axis axis_y,
+                       const ::Kyty::Emulator::Host::StickAxes& axes)
+{
+	::Kyty::Emulator::Ports::ControllerInputPort::Axis(id, axis_x, axes.x);
+	::Kyty::Emulator::Ports::ControllerInputPort::Axis(id, axis_y, axes.y);
+}
+
+// Latest gamepad feedback the guest asked for. Guest threads write it; the window event loop applies it, because that
+// thread owns the gamepads. Vibration packs large << 8 | small; the light bar packs a set flag and r << 16 | g << 8 | b.
+struct PadFeedback
+{
+	static constexpr uint32_t LIGHT_BAR_SET = 1u << 24;
+
+	std::atomic<uint32_t> vibration {0};
+	std::atomic<uint32_t> light_bar {0};
+	std::atomic<uint64_t> generation {0};
+};
+
+static PadFeedback g_pad_feedback;
+static uint64_t    g_applied_pad_feedback = 0;
+
+static void SetPadVibration(uint8_t large_motor, uint8_t small_motor)
+{
+	g_pad_feedback.vibration.store((static_cast<uint32_t>(large_motor) << 8u) | small_motor);
+	g_pad_feedback.generation.fetch_add(1);
+}
+
+static void SetPadLightBar(uint8_t red, uint8_t green, uint8_t blue)
+{
+	g_pad_feedback.light_bar.store(PadFeedback::LIGHT_BAR_SET | (static_cast<uint32_t>(red) << 16u) |
+	                               (static_cast<uint32_t>(green) << 8u) | blue);
+	g_pad_feedback.generation.fetch_add(1);
+}
+
+static void ApplyPadFeedback(int id)
+{
+	const uint32_t vibration = g_pad_feedback.vibration.load();
+	const uint32_t light_bar = g_pad_feedback.light_bar.load();
+	// 257 maps 0..255 onto SDL's 0..0xFFFF; the large motor is the low-frequency one.
+	::Kyty::Emulator::Host::HostInput::RumbleController(id, static_cast<uint16_t>((vibration >> 8u) * 257u),
+	                                                    static_cast<uint16_t>((vibration & 0xffu) * 257u));
+	if ((light_bar & PadFeedback::LIGHT_BAR_SET) != 0)
+	{
+		::Kyty::Emulator::Host::HostInput::SetControllerLed(id, static_cast<uint8_t>(light_bar >> 16u),
+		                                                    static_cast<uint8_t>(light_bar >> 8u), static_cast<uint8_t>(light_bar));
+	}
+}
+
+static void UpdatePadFeedback()
+{
+	const uint64_t generation = g_pad_feedback.generation.load();
+	if (generation == g_applied_pad_feedback)
+	{
+		return;
+	}
+	g_applied_pad_feedback = generation;
+	for (const int id: g_connected_gamepads)
+	{
+		ApplyPadFeedback(id);
+	}
+}
+
+// Forwards the keyboard source's button changes and any stick movement, keys and mouse look alike.
+static void ApplyKeyboardControls(const ::Kyty::Emulator::Host::ControlChange& change)
+{
+	ApplyPadButtons(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, change);
+	const auto left  = g_keyboard_mouse.LeftStick();
+	const auto right = g_keyboard_mouse.RightStick();
+	if (left.x != g_keyboard_left_stick.x || left.y != g_keyboard_left_stick.y)
+	{
+		g_keyboard_left_stick = left;
+		ApplyStick(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, ::Kyty::Emulator::Ports::Axis::LeftX,
+		           ::Kyty::Emulator::Ports::Axis::LeftY, left);
+	}
+	if (right.x != g_keyboard_right_stick.x || right.y != g_keyboard_right_stick.y)
+	{
+		g_keyboard_right_stick = right;
+		ApplyStick(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, ::Kyty::Emulator::Ports::Axis::RightX,
+		           ::Kyty::Emulator::Ports::Axis::RightY, right);
+	}
+}
+
 bool game_init(GameApi* game, const Core::Timer& timer, void* data)
 {
 	EXIT_IF(game == nullptr);
@@ -723,6 +852,8 @@ bool game_init(GameApi* game, const Core::Timer& timer, void* data)
 
 	game->data1 = pdata;
 	game->data2 = ::Kyty::Emulator::Host::HostInput::Create();
+	LoadInputProfile();
+	::Kyty::Emulator::Ports::ControllerFeedbackPort::Install({&SetPadVibration, &SetPadLightBar});
 
 	game->m_screen_width  = ctx->screen_width;
 	game->m_screen_height = ctx->screen_height;
@@ -736,6 +867,7 @@ bool game_init(GameApi* game, const Core::Timer& timer, void* data)
 
 bool game_render_and_update(GameApi* game, const Core::Timer& /*timer*/)
 {
+	UpdatePadFeedback();
 	return RenderAndUpdate(game);
 }
 
@@ -745,6 +877,7 @@ bool game_close(GameApi* game)
 
 	EXIT_IF(!game->data1 || !game->data2);
 
+	::Kyty::Emulator::Ports::ControllerFeedbackPort::Install({});
 	delete (static_cast<GameApiPrivateStruct*>(game->data1));
 	delete (static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2));
 
@@ -759,6 +892,8 @@ void game_show_window(GameApi* game, const Core::Timer& timer)
 
 	EXIT_IF(!p);
 	UpdateHostCursorPolicy();
+	g_keyboard_mouse.Tick(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+	ApplyKeyboardControls({});
 
 	p->mutex.Lock();
 	{
@@ -793,33 +928,32 @@ void game_event_terminate(GameApi* game)
 	game->m_game_need_exit = true;
 }
 
-static ::Kyty::Emulator::Host::KeyboardLeftStickState g_keyboard_left_stick;
-
-static void ApplyKeyboardLeftStickControllerAxes(const ::Kyty::Emulator::Host::KeyboardLeftStickUpdate& update)
-{
-	if (!update.changed)
-	{
-		return;
-	}
-	::Kyty::Emulator::Ports::ControllerInputPort::Axis(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, ::Kyty::Emulator::Ports::Axis::LeftX, update.axes.x);
-	::Kyty::Emulator::Ports::ControllerInputPort::Axis(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, ::Kyty::Emulator::Ports::Axis::LeftY, update.axes.y);
-}
-
 // Text entry (F2, and always while a guest IME dialog runs): keys reach only the
 // guest IME, so letters bound to pad buttons or to the stick type instead of pressing them.
 static std::atomic<bool> g_keyboard_text_entry {false};
 
+static bool KeyboardTextEntryActive()
+{
+	return g_keyboard_text_entry.load() || ::Kyty::Emulator::Ports::KeyboardTextPort::DialogOpen();
+}
+
 static void ReleaseKeyboardPad()
 {
-	ApplyKeyboardLeftStickControllerAxes(::Kyty::Emulator::Host::ResetKeyboardLeftStick(g_keyboard_left_stick));
-	for (const uint32_t button:
-	     {::Kyty::Emulator::Ports::PAD_BUTTON_CROSS, ::Kyty::Emulator::Ports::PAD_BUTTON_CIRCLE, ::Kyty::Emulator::Ports::PAD_BUTTON_SQUARE,
-	      ::Kyty::Emulator::Ports::PAD_BUTTON_TRIANGLE, ::Kyty::Emulator::Ports::PAD_BUTTON_UP, ::Kyty::Emulator::Ports::PAD_BUTTON_DOWN,
-	      ::Kyty::Emulator::Ports::PAD_BUTTON_LEFT, ::Kyty::Emulator::Ports::PAD_BUTTON_RIGHT, ::Kyty::Emulator::Ports::PAD_BUTTON_L1,
-	      ::Kyty::Emulator::Ports::PAD_BUTTON_R1, ::Kyty::Emulator::Ports::PAD_BUTTON_OPTIONS})
+	ApplyKeyboardControls(g_keyboard_mouse.ReleaseAll());
+}
+
+static void SetMouseCapture(bool on)
+{
+	if (g_window_ctx == nullptr || g_window_ctx->host_window == nullptr || g_keyboard_mouse.MouseCaptured() == on)
 	{
-		::Kyty::Emulator::Ports::ControllerInputPort::Button(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, button, false);
+		return;
 	}
+	if (!g_window_ctx->host_window->SetMouseCaptured(on))
+	{
+		return;
+	}
+	ApplyKeyboardControls(g_keyboard_mouse.SetMouseCaptured(on));
+	KYTY_LOG_INFO("Mouse capture %s (F3 toggles)\n", on ? "on" : "off");
 }
 
 static void SetKeyboardTextEntry(bool on)
@@ -892,7 +1026,15 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 		}
 		return;
 	}
-	const bool text_entry = g_keyboard_text_entry.load() || ::Kyty::Emulator::Ports::KeyboardTextPort::DialogOpen();
+	if (::Kyty::Emulator::Host::HostInput::IsMouseCaptureKey(key->key_code))
+	{
+		if (key->down && !key->repeat)
+		{
+			SetMouseCapture(!g_keyboard_mouse.MouseCaptured());
+		}
+		return;
+	}
+	const bool text_entry = KeyboardTextEntryActive();
 	static bool s_text_entry = false;
 	if (text_entry != s_text_entry)
 	{
@@ -909,34 +1051,10 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 		return;
 	}
 
-	// Virtual pad (id 0): keyboard maps to DualShock buttons so splash/menus are skippable
-	// without a physical controller. Repeat is ignored to avoid stuck buttons.
+	// Keyboard virtual pad: the input profile maps physical keys to pad controls.  Repeat is ignored to avoid stuck buttons.
 	if (!key->repeat && (key->down || key->up) && !suppress_guest_enter)
 	{
-		const bool down = key->down;
-		ApplyKeyboardLeftStickControllerAxes(::Kyty::Emulator::Host::ApplyKeyboardLeftStickKey(g_keyboard_left_stick, key->key_code, down));
-		uint32_t button = 0;
-		switch (::Kyty::Emulator::Host::HostInput::ClassifyKeyboardAction(key->key_code))
-		{
-			case ::Kyty::Emulator::Host::KeyboardAction::Cross: button = ::Kyty::Emulator::Ports::PAD_BUTTON_CROSS; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Circle: button = ::Kyty::Emulator::Ports::PAD_BUTTON_CIRCLE; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Square: button = ::Kyty::Emulator::Ports::PAD_BUTTON_SQUARE; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Triangle: button = ::Kyty::Emulator::Ports::PAD_BUTTON_TRIANGLE; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Up: button = ::Kyty::Emulator::Ports::PAD_BUTTON_UP; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Down: button = ::Kyty::Emulator::Ports::PAD_BUTTON_DOWN; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Left: button = ::Kyty::Emulator::Ports::PAD_BUTTON_LEFT; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Right: button = ::Kyty::Emulator::Ports::PAD_BUTTON_RIGHT; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::L1: button = ::Kyty::Emulator::Ports::PAD_BUTTON_L1; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::R1: button = ::Kyty::Emulator::Ports::PAD_BUTTON_R1; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::L2: button = ::Kyty::Emulator::Ports::PAD_BUTTON_L2; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::R2: button = ::Kyty::Emulator::Ports::PAD_BUTTON_R2; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::Options: button = ::Kyty::Emulator::Ports::PAD_BUTTON_OPTIONS; break;
-			case ::Kyty::Emulator::Host::KeyboardAction::None: break;
-		}
-		if (button != 0)
-		{
-			::Kyty::Emulator::Ports::ControllerInputPort::Button(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, button, down);
-		}
+		ApplyKeyboardControls(g_keyboard_mouse.SetInput(key->scan_code, key->down));
 	}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS || KYTY_PLATFORM == KYTY_PLATFORM_LINUX
@@ -967,6 +1085,28 @@ void game_event_mouse([[maybe_unused]] GameApi* game, [[maybe_unused]] const Eve
 		       (mb->pressed ? "pressed" : ""), (mb->released ? "released" : ""), mb->x, mb->y);
 	}
 #endif
+	if (g_keyboard_mouse.MouseCaptured())
+	{
+		if (mb->motion)
+		{
+			g_keyboard_mouse.AddMouseMotion(mb->motion_x, mb->motion_y);
+		} else if (mb->down || mb->up)
+		{
+			const int code = mb->left     ? ::Kyty::Emulator::Host::MOUSE_BUTTON_LEFT
+			                 : mb->middle ? ::Kyty::Emulator::Host::MOUSE_BUTTON_MIDDLE
+			                 : mb->right  ? ::Kyty::Emulator::Host::MOUSE_BUTTON_RIGHT
+			                 : mb->x1     ? ::Kyty::Emulator::Host::MOUSE_BUTTON_X1
+			                 : mb->x2     ? ::Kyty::Emulator::Host::MOUSE_BUTTON_X2
+			                              : 0;
+			// Text entry keeps mouse buttons off the pad, as it does keys.
+			if (code != 0 && (mb->up || !KeyboardTextEntryActive()))
+			{
+				ApplyKeyboardControls(g_keyboard_mouse.SetInput(code, mb->down));
+			}
+		}
+		// A captured mouse plays the guest, so clicks never reach the window controls.
+		return;
+	}
 	if (mb->motion || mb->down)
 	{
 		UpdateHostCursorPolicy(true);
@@ -1017,6 +1157,22 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 		       static_cast<int>(f->button), f->timestamp_seconds);
 	}
 #endif
+	if (f->sensor != ::Kyty::Emulator::Host::ControllerSensor::Invalid)
+	{
+		const auto sensor = (f->sensor == ::Kyty::Emulator::Host::ControllerSensor::Acceleration
+		                         ? ::Kyty::Emulator::Ports::MotionSensor::Acceleration
+		                         : ::Kyty::Emulator::Ports::MotionSensor::AngularVelocity);
+		::Kyty::Emulator::Ports::ControllerInputPort::Motion(f->id, sensor, f->sensor_data[0], f->sensor_data[1], f->sensor_data[2],
+		                                                     f->sensor_timestamp_ns);
+		return;
+	}
+
+	if (f->touchpad)
+	{
+		::Kyty::Emulator::Ports::ControllerInputPort::Touch(f->id, f->touch_finger, f->touch_down, f->touch_x, f->touch_y);
+		return;
+	}
+
 	if (f->remapped)
 	{
 		// SDL has already updated the active mapping. Subsequent axis/button
@@ -1026,6 +1182,12 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 
 	if (f->added)
 	{
+		const std::string guid = ::Kyty::Emulator::Host::HostInput::ControllerGuid(f->id);
+		if (!g_input_profile.gamepad_device.empty() && !::Kyty::Emulator::Host::ControllerGuidMatches(guid, g_input_profile.gamepad_device))
+		{
+			KYTY_LOG_INFO("Gamepad %s ignored: the input profile selects %s\n", guid.c_str(), g_input_profile.gamepad_device.c_str());
+			return;
+		}
 		auto* input = static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2);
 		int   id    = 0;
 		if (input == nullptr || !input->OpenController(f->id, &id))
@@ -1034,11 +1196,18 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 			             input == nullptr ? "host input unavailable" : input->LastError());
 			return;
 		}
+		g_connected_gamepads.insert(id);
 		::Kyty::Emulator::Ports::ControllerInputPort::Connect(id);
+		ApplyPadFeedback(id);
 	}
 
 	if (f->removed)
 	{
+		if (g_connected_gamepads.erase(f->id) == 0)
+		{
+			return;
+		}
+		g_gamepads.Remove(f->id);
 		::Kyty::Emulator::Ports::ControllerInputPort::Disconnect(f->id);
 		if (auto* input = static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2); input != nullptr)
 		{
@@ -1048,52 +1217,32 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 
 	if (f->down || f->up)
 	{
-		uint32_t button = 0;
-		switch (f->button)
-		{
-			case ::Kyty::Emulator::Host::ControllerButton::A: button = ::Kyty::Emulator::Ports::PAD_BUTTON_CROSS; break;
-			case ::Kyty::Emulator::Host::ControllerButton::B: button = ::Kyty::Emulator::Ports::PAD_BUTTON_CIRCLE; break;
-			case ::Kyty::Emulator::Host::ControllerButton::X: button = ::Kyty::Emulator::Ports::PAD_BUTTON_SQUARE; break;
-			case ::Kyty::Emulator::Host::ControllerButton::Y: button = ::Kyty::Emulator::Ports::PAD_BUTTON_TRIANGLE; break;
-			case ::Kyty::Emulator::Host::ControllerButton::Back: button = ::Kyty::Emulator::Ports::PAD_BUTTON_TOUCH_PAD; break;
-			case ::Kyty::Emulator::Host::ControllerButton::Guide: break;
-			case ::Kyty::Emulator::Host::ControllerButton::Start: button = ::Kyty::Emulator::Ports::PAD_BUTTON_OPTIONS; break;
-			case ::Kyty::Emulator::Host::ControllerButton::LeftStick: button = ::Kyty::Emulator::Ports::PAD_BUTTON_L3; break;
-			case ::Kyty::Emulator::Host::ControllerButton::RightStick: button = ::Kyty::Emulator::Ports::PAD_BUTTON_R3; break;
-			case ::Kyty::Emulator::Host::ControllerButton::LeftShoulder: button = ::Kyty::Emulator::Ports::PAD_BUTTON_L1; break;
-			case ::Kyty::Emulator::Host::ControllerButton::RightShoulder: button = ::Kyty::Emulator::Ports::PAD_BUTTON_R1; break;
-			case ::Kyty::Emulator::Host::ControllerButton::DpadUp: button = ::Kyty::Emulator::Ports::PAD_BUTTON_UP; break;
-			case ::Kyty::Emulator::Host::ControllerButton::DpadDown: button = ::Kyty::Emulator::Ports::PAD_BUTTON_DOWN; break;
-			case ::Kyty::Emulator::Host::ControllerButton::DpadLeft: button = ::Kyty::Emulator::Ports::PAD_BUTTON_LEFT; break;
-			case ::Kyty::Emulator::Host::ControllerButton::DpadRight: button = ::Kyty::Emulator::Ports::PAD_BUTTON_RIGHT; break;
-			case ::Kyty::Emulator::Host::ControllerButton::Invalid: break;
-			default: break;
-		}
-		if (button != 0)
-		{
-			::Kyty::Emulator::Ports::ControllerInputPort::Button(f->id, button, f->down);
-		}
+		ApplyPadButtons(f->id, g_gamepads.SetButton(f->id, f->button, f->down));
 	}
 
 	if (f->axis)
 	{
-		const int value = ::Kyty::Emulator::Host::HostInput::NormalizeAxis(f->axis_id, f->axis_value);
-
-		::Kyty::Emulator::Ports::Axis axis = ::Kyty::Emulator::Ports::Axis::AxisMax;
+		g_gamepads.SetAxis(f->id, f->axis_id, f->axis_value);
 		switch (f->axis_id)
 		{
-			case ::Kyty::Emulator::Host::ControllerAxis::LeftX: axis = ::Kyty::Emulator::Ports::Axis::LeftX; break;
-			case ::Kyty::Emulator::Host::ControllerAxis::LeftY: axis = ::Kyty::Emulator::Ports::Axis::LeftY; break;
-			case ::Kyty::Emulator::Host::ControllerAxis::RightX: axis = ::Kyty::Emulator::Ports::Axis::RightX; break;
-			case ::Kyty::Emulator::Host::ControllerAxis::RightY: axis = ::Kyty::Emulator::Ports::Axis::RightY; break;
-			case ::Kyty::Emulator::Host::ControllerAxis::TriggerLeft: axis = ::Kyty::Emulator::Ports::Axis::TriggerLeft; break;
-			case ::Kyty::Emulator::Host::ControllerAxis::TriggerRight: axis = ::Kyty::Emulator::Ports::Axis::TriggerRight; break;
+			case ::Kyty::Emulator::Host::ControllerAxis::LeftX:
+			case ::Kyty::Emulator::Host::ControllerAxis::LeftY:
+				ApplyStick(f->id, ::Kyty::Emulator::Ports::Axis::LeftX, ::Kyty::Emulator::Ports::Axis::LeftY, g_gamepads.LeftStick(f->id));
+				break;
+			case ::Kyty::Emulator::Host::ControllerAxis::RightX:
+			case ::Kyty::Emulator::Host::ControllerAxis::RightY:
+				ApplyStick(f->id, ::Kyty::Emulator::Ports::Axis::RightX, ::Kyty::Emulator::Ports::Axis::RightY,
+				           g_gamepads.RightStick(f->id));
+				break;
+			case ::Kyty::Emulator::Host::ControllerAxis::TriggerLeft:
+				::Kyty::Emulator::Ports::ControllerInputPort::Axis(f->id, ::Kyty::Emulator::Ports::Axis::TriggerLeft,
+				                                                   g_gamepads.Trigger(f->id, f->axis_id));
+				break;
+			case ::Kyty::Emulator::Host::ControllerAxis::TriggerRight:
+				::Kyty::Emulator::Ports::ControllerInputPort::Axis(f->id, ::Kyty::Emulator::Ports::Axis::TriggerRight,
+				                                                   g_gamepads.Trigger(f->id, f->axis_id));
+				break;
 			case ::Kyty::Emulator::Host::ControllerAxis::Invalid: break;
-		}
-
-		if (axis != ::Kyty::Emulator::Ports::Axis::AxisMax)
-		{
-			::Kyty::Emulator::Ports::ControllerInputPort::Axis(f->id, axis, value);
 		}
 	}
 }
@@ -1235,7 +1384,9 @@ static void process_window_event(GameApi* game, const ::Kyty::Emulator::Host::Wi
 				g_window_ctx->controls.SetFocused(false);
 				SetHostCursorVisible(true);
 			}
-			ApplyKeyboardLeftStickControllerAxes(::Kyty::Emulator::Host::ResetKeyboardLeftStick(g_keyboard_left_stick));
+			// Keys and buttons released while unfocused never report their release.
+			SetMouseCapture(false);
+			ReleaseKeyboardPad();
 			break;
 		case ::Kyty::Emulator::Host::WindowEvent::Close:
 			KYTY_LOG_DEBUG("Window %" PRIu32 " closed\n", window.window_id);
@@ -1481,6 +1632,8 @@ void game_process_event(GameApi* game, double time_s)
 		}
 
 		case ::Kyty::Emulator::Host::InputEventType::ControllerDevice:
+		case ::Kyty::Emulator::Host::InputEventType::ControllerSensor:
+		case ::Kyty::Emulator::Host::InputEventType::ControllerTouchpad:
 		{
 			EventController c = event->controller;
 			c.timestamp_seconds = time_s;

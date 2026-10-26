@@ -4,6 +4,7 @@
 #include "Kyty/Core/Common.h"
 
 #include <cstdint>
+#include <string>
 
 namespace Kyty::Emulator::Host {
 
@@ -29,6 +30,8 @@ enum class InputEventType : uint8_t
 	ControllerAxis,
 	ControllerButton,
 	ControllerDevice,
+	ControllerSensor,
+	ControllerTouchpad,
 };
 
 enum class WindowEvent : uint8_t
@@ -80,6 +83,12 @@ enum class ControllerButton : uint8_t
 	DpadDown,
 	DpadLeft,
 	DpadRight,
+	Misc1,
+	Paddle1,
+	Paddle2,
+	Paddle3,
+	Paddle4,
+	Touchpad,
 };
 
 enum class ControllerAxis : uint8_t
@@ -93,22 +102,11 @@ enum class ControllerAxis : uint8_t
 	TriggerRight,
 };
 
-enum class KeyboardAction : uint8_t
+enum class ControllerSensor : uint8_t
 {
-	None,
-	Cross,
-	Circle,
-	Square,
-	Triangle,
-	Up,
-	Down,
-	Left,
-	Right,
-	L1,
-	R1,
-	L2,
-	R2,
-	Options,
+	Invalid,
+	Acceleration,
+	AngularVelocity,
 };
 
 struct KeyboardEvent
@@ -175,6 +173,18 @@ struct ControllerEvent
 	bool             axis              = false;
 	bool             pressed           = false;
 	bool             released          = false;
+	// Motion sample: acceleration in G, angular velocity in rad/s; the
+	// timestamp is the sensor's own clock.
+	ControllerSensor sensor              = ControllerSensor::Invalid;
+	float            sensor_data[3]      = {};
+	uint64_t         sensor_timestamp_ns = 0;
+	bool             touchpad          = false;
+	// Touchpad finger, normalized to [0, 1] from the top-left corner;
+	// touch_down stays true while the finger moves and is false once it lifts.
+	bool             touch_down        = false;
+	int              touch_finger      = 0;
+	float            touch_x           = 0.0f;
+	float            touch_y           = 0.0f;
 	double           timestamp_seconds = 0.0;
 };
 
@@ -222,9 +232,14 @@ public:
 	[[nodiscard]] bool       EnterPressed() const;
 
 	[[nodiscard]] bool OpenController(int device_id, int* instance_id);
+	// SDL GUID string of a connected controller.
+	[[nodiscard]] static std::string ControllerGuid(int device_id);
 	void               CloseController(int instance_id);
+	// Motor strengths 0..0xFFFF; the effect holds until the next call. A
+	// gamepad without motors or without a light bar ignores the request.
+	static void RumbleController(int instance_id, uint16_t low_frequency, uint16_t high_frequency);
+	static void SetControllerLed(int instance_id, uint8_t red, uint8_t green, uint8_t blue);
 	[[nodiscard]] const char* LastError() const;
-	[[nodiscard]] static int NormalizeAxis(ControllerAxis axis, int value);
 
 	[[nodiscard]] static bool IsEscapeKey(int key_code);
 	[[nodiscard]] static bool IsPauseKey(int key_code);
@@ -233,13 +248,21 @@ public:
 	[[nodiscard]] static bool IsF1Key(int key_code);
 	// F2 switches the keyboard between the virtual pad and text entry for the guest IME keyboard.
 	[[nodiscard]] static bool IsTextEntryToggleKey(int key_code);
+	// F3 captures or releases the mouse for camera look.
+	[[nodiscard]] static bool IsMouseCaptureKey(int key_code);
+	// Physical keys of the host commands (Escape, F1, F2, F3, F9, F11), which an input profile may not bind.
+	[[nodiscard]] static bool IsReservedScanCode(int scan_code);
+	// Scan code for an SDL scancode name ("Z", "Space", "Left Shift"), 0 when the name is unknown.  Profiles bind
+	// physical keys so a binding keeps its position under any keyboard layout.
+	[[nodiscard]] static int ScanCodeFromName(const char* name);
+	// Controller button for an SDL gamepad button name ("a", "leftshoulder"), Invalid when unknown.
+	[[nodiscard]] static ControllerButton ControllerButtonFromName(const char* name);
 	// USB HID keyboard usage of a key, 0 when it has none.
 	[[nodiscard]] static uint16_t KeyboardHidUsage(int scan_code);
 	// UTF-16 code unit the key types under the host layout, 0 when it types none or only a
 	// layout-dependent shifted symbol.
 	[[nodiscard]] static uint16_t KeyboardTextCharacter(int key_code, uint16_t modifiers);
 	[[nodiscard]] static bool HasAltModifier(uint16_t modifiers);
-	[[nodiscard]] static KeyboardAction ClassifyKeyboardAction(int key_code);
 
 	KYTY_CLASS_NO_COPY(HostInput);
 
