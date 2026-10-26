@@ -31,6 +31,7 @@ using ::Kyty::Emulator::Ports::PAD_BUTTON_CROSS;
 using ::Kyty::Emulator::Ports::PAD_BUTTON_SQUARE;
 using ::Kyty::Emulator::Ports::PAD_BUTTON_TOUCH_PAD;
 using ::Kyty::Emulator::Ports::Axis;
+using ::Kyty::Emulator::Ports::MotionSensor;
 
 class ControllerSubsystem: public Core::Subsystem
 {
@@ -59,6 +60,8 @@ void ControllerDisconnect(int id);
 void ControllerButton(int id, uint32_t button, bool down);
 void ControllerAxis(int id, Axis axis, int value);
 void ControllerSessionEnd();
+void ControllerMotion(int id, MotionSensor sensor, float x, float y, float z, uint64_t timestamp_ns);
+void ControllerTouch(int id, int finger, bool down, float x, float y);
 
 // A diagnostic tap may request one or two advancing guest press samples. The
 // two-sample default preserves existing behavior and does not use host timing.

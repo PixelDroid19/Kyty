@@ -24,7 +24,8 @@ Set `KYTY_PAD_RECORD` to a file to record a route from a manual session. The
 host keyboard and controller input the guest reads is written in the same
 format and on the same clock (seconds from the first pad read), one line per
 completed press. A stick is written as its full-travel direction while it is
-past half deflection, and a press shorter than a poll is kept for 50 ms so a
+past half deflection, mouse look included, so slow camera turns are not
+recorded and recorded ones replay at full speed; a press shorter than a poll is kept for 50 ms so a
 replay delivers it to a read. Script and agent input are not recorded. The
 file is written only when the user ends the session by closing the window or
 with the host quit key; a session that ends in a fault or a signal, or that
@@ -64,5 +65,6 @@ see [graphics captures](graphics-captures.md#playable-scene-and-action-checkpoin
 
 Keyboard and active physical-controller button holds have separate ownership.
 Releasing or disconnecting one source preserves a button held by the other,
-including its transition history. Stick axes retain active-controller priority;
-script and agent overlays continue to merge after the host state.
+including its transition history. Each stick and trigger axis follows the
+source moved farthest from rest; script and agent overlays continue to merge
+after the host state.

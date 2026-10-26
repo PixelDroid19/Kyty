@@ -38,6 +38,8 @@ struct Config
 	String                 printf_output_folder        = U"_Logs";
 	ProfilerDirection      profiler_direction          = ProfilerDirection::None;
 	String                 profiler_output_file        = U"_profile.prof";
+	// Empty selects the built-in input profile.
+	String                 input_profile_file;
 	bool                   spirv_debug_printf_enabled  = false;
 	bool                   pipeline_dump_enabled       = false;
 	String                 pipeline_dump_folder        = U"_Pipelines";
@@ -138,6 +140,7 @@ void Load(const ConfigSource& cfg)
 	LoadEnum(g_config->printf_level, cfg, U"PrintfLevel");
 	LoadStr(g_config->printf_output_file, cfg, U"PrintfOutputFile");
 	LoadStr(g_config->printf_output_folder, cfg, U"PrintfOutputFolder");
+	LoadStr(g_config->input_profile_file, cfg, U"InputProfileFile");
 	LoadEnum(g_config->profiler_direction, cfg, U"ProfilerDirection");
 	LoadStr(g_config->profiler_output_file, cfg, U"ProfilerOutputFile");
 	LoadBool(g_config->spirv_debug_printf_enabled, cfg, U"SpirvDebugPrintfEnabled");
@@ -223,6 +226,11 @@ ShaderLogDirection GetShaderLogDirection()
 String GetShaderLogFolder()
 {
 	return g_config->shader_log_folder;
+}
+
+String GetInputProfileFile()
+{
+	return g_config->input_profile_file;
 }
 
 bool CommandBufferDumpEnabled()

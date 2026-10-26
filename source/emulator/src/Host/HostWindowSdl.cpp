@@ -183,6 +183,20 @@ void HostWindow::UpdateCursorPolicy(bool temporary_visibility)
 	}
 }
 
+bool HostWindow::SetMouseCaptured(bool captured)
+{
+	if (m_window == nullptr)
+	{
+		return false;
+	}
+	if (!SDL_SetWindowRelativeMouseMode(static_cast<SDL_Window*>(m_window), captured))
+	{
+		KYTY_LOG_WARN("Kyty mouse capture %s failed: %s\n", captured ? "on" : "off", SDL_GetError());
+		return false;
+	}
+	return true;
+}
+
 bool HostWindow::ToggleFullscreen()
 {
 	if (m_window == nullptr)

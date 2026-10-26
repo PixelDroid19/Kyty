@@ -11,7 +11,8 @@ namespace Kyty::Emulator::Ports {
 
 namespace {
 
-std::atomic<ControllerInputCallbacks> g_callbacks {ControllerInputCallbacks {}};
+std::atomic<ControllerInputCallbacks>    g_callbacks {ControllerInputCallbacks {}};
+std::atomic<ControllerFeedbackCallbacks> g_feedback {ControllerFeedbackCallbacks {}};
 
 } // namespace
 
@@ -62,6 +63,47 @@ void ControllerInputPort::SessionEnd()
 	if (callbacks.session_end != nullptr)
 	{
 		callbacks.session_end();
+	}
+}
+
+void ControllerInputPort::Motion(int id, MotionSensor sensor, float x, float y, float z, uint64_t timestamp_ns)
+{
+	auto callbacks = g_callbacks.load();
+	if (callbacks.motion != nullptr)
+	{
+		callbacks.motion(id, sensor, x, y, z, timestamp_ns);
+	}
+}
+
+void ControllerInputPort::Touch(int id, int finger, bool down, float x, float y)
+{
+	auto callbacks = g_callbacks.load();
+	if (callbacks.touch != nullptr)
+	{
+		callbacks.touch(id, finger, down, x, y);
+	}
+}
+
+void ControllerFeedbackPort::Install(ControllerFeedbackCallbacks callbacks)
+{
+	g_feedback.store(callbacks);
+}
+
+void ControllerFeedbackPort::Vibration(uint8_t large_motor, uint8_t small_motor)
+{
+	auto callbacks = g_feedback.load();
+	if (callbacks.vibration != nullptr)
+	{
+		callbacks.vibration(large_motor, small_motor);
+	}
+}
+
+void ControllerFeedbackPort::LightBar(uint8_t red, uint8_t green, uint8_t blue)
+{
+	auto callbacks = g_feedback.load();
+	if (callbacks.light_bar != nullptr)
+	{
+		callbacks.light_bar(red, green, blue);
 	}
 }
 
