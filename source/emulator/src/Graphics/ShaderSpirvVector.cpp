@@ -3782,10 +3782,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 		return true;
 	}
 
+	// The lane is S1 % the guest wave size (ISA 12.12), which the host subgroup matches here.
 	static const char* text = R"(
         <load0>
         <load1>
-        %readlane_<index> = OpGroupNonUniformShuffle %uint %uint_3 %t0_<index> %t1_<index>
+        %readlane_sel_<index> = OpBitwiseAnd %uint %t1_<index> %<lane_mask>
+        %readlane_<index> = OpGroupNonUniformShuffle %uint %uint_3 %t0_<index> %readlane_sel_<index>
                OpStore %<dst> %readlane_<index>
 )";
 	static const char* split_text = R"(
@@ -3798,6 +3800,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 	*dst_source += String8(spirv->UsesSplitComputeWave() ? split_text : text)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<lane_mask>", spirv->GetConstantUint(spirv->NativeWave32() ? 31u : 63u))
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);
 
@@ -3988,16 +3991,14 @@ KYTY_RECOMPILER_FUNC(Recompile_VWritelaneB32_SVdstSVsrc0SVsrc1)
 		return true;
 	}
 
-	// The lane is S1 % 64 for a split guest wave64 (%gl_SubgroupInvocationID holds the guest lane).
-	const char* selector = spirv->UsesSplitComputeWave() ? "%writelane_sel_<index> = OpBitwiseAnd %uint %t1_<index> %split_c63" : "";
-	const char* lane     = spirv->UsesSplitComputeWave() ? "writelane_sel_<index>" : "t1_<index>";
-
+	// The lane is S1 % the guest wave size (ISA 12.12); a split guest wave64
+	// keeps the guest lane in %gl_SubgroupInvocationID.
 	static const char* text = R"(
         <load0>
         <load1>
-        <selector>
+        %writelane_sel_<index> = OpBitwiseAnd %uint %t1_<index> %<lane_mask>
         %writelane_id_<index> = OpLoad %uint %gl_SubgroupInvocationID
-        %writelane_match_<index> = OpIEqual %bool %writelane_id_<index> %<lane>
+        %writelane_match_<index> = OpIEqual %bool %writelane_id_<index> %writelane_sel_<index>
         %writelane_value_<index> = OpBitcast %float %t0_<index>
         %writelane_old_<index> = OpLoad %float %<dst>
         %writelane_result_<index> = OpSelect %float %writelane_match_<index> %writelane_value_<index> %writelane_old_<index>
@@ -4007,8 +4008,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VWritelaneB32_SVdstSVsrc0SVsrc1)
 	*dst_source += String8(text)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<selector>", selector)
-	                   .ReplaceStr("<lane>", lane)
+	                   .ReplaceStr("<lane_mask>", spirv->GetConstantUint(spirv->NativeWave32() ? 31u : 63u))
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);
 
