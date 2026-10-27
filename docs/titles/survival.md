@@ -6,6 +6,31 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Survival title: boot stop on a native display with a depth-only pass (2026-10-27, fixed)
+
+- **Observed** (Intel Arc A770, Mesa 26.2.5, strict run at the 60 fps
+  present limit): the title stopped at boot, before its first present, with
+  `Render resolution plan unsupported: guest=3840x2160 selected=3840x2160
+  reason=mismatched_host_extent(6)`, on the branch and on `main` (cd7f8f50).
+- **Cause.** The display buffers were already registered at their native
+  3840x2160 extent when a depth-only pass at the display extent asked for a
+  scaled extent. `PrepareDepthOnlyDisplayResolutionCohort` refused any
+  registered extent other than the requested one, so the native display it
+  had to follow was reported as unsupported.
+- **Fix** (`PrepareDepthOnlyDisplayResolutionCohort` in
+  `GraphicsRenderAttachments.cpp`): a registered extent equal to the depth
+  target's guest extent is accepted, and the depth-only pass follows the
+  display at native resolution. A registered extent that is neither native
+  nor the requested scaled one is still refused.
+- **Verified.** Strict route from boot driven with agent pad taps: menus,
+  Host Game, world generation, character selection and day one, then 90 s
+  in the world (presents 920 to 6,413; 28 fps in the menus, 10 to 22 fps in
+  the world). Native captures show the expected scenes. Strict
+  `games-matrix` sweep: this title and `PPSA17221`, which stopped with the
+  same message at 1920x1080, now reach the interactive frontier; no case
+  regressed (`docs/bringup/cross-title.md`, small `DMA_DATA` stores,
+  2026-10-27).
+
 ## Survival title: hosting an offline world (2026-10-15, open)
 
 - Symptom: Host Game showed "Network Connection Lost". With the connection

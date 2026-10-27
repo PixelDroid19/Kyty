@@ -16,6 +16,81 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Small `DMA_DATA` stores behind a consolidated wait (2026-10-27, fixed)
+
+- **Observed** (`PPSA03061 - void tRrLM();++ //Void Terrarium++`, Intel Arc
+  A770, Mesa 26.2.5, strict runs without the present limit): the title menu
+  froze with the last frame on screen. 2 of 4 runs froze, one after about
+  2 s; `kyty_agent status` showed presents stopped and the submitter parked
+  in the decode-completion hold of 32b27516.
+- **Cause.** Each frame the guest submits a small command buffer that clears
+  a scratch dword inside the command buffer itself, releases 1 to it at end
+  of pipe, waits on it with `WAIT_REG_MEM`, and then copies an 8-byte token
+  with `DMA_DATA` to its "command buffer consumed" marker. The wait's
+  producer is a plain label store of the same queue, so the command
+  processor consolidates it and goes on; the label store becomes visible at
+  fence completion. `DMA_DATA` was executed at parse time, so the marker
+  was visible before the label. The guest then reused the ring memory for
+  its next large command buffer, and the late label store wrote 1 over the
+  address dword of that buffer's `RELEASE_MEM` (the scratch dword and that
+  dword share an address). The release went to `0x2000000001`, the
+  following `WAIT_REG_MEM` never resolved, and the submitter stayed held.
+- **Evidence.** A conditional hardware watchpoint (`== 1`) on the address
+  dword of the three large command-buffer slots caught
+  `LabelManager::FireCallbacks` (from `CompleteSubmission`) writing it; a
+  breakpoint on `LabelManager::Create32` for that address showed the label
+  created by `cp_op_release_mem` of the small buffer. The watchpoint was
+  checked on the legitimate value first. This is the `DMA_DATA` form of the
+  `WRITE_DATA` ordering fixed for `PPSA03706 - My Friend Peppa Pig`
+  (`docs/titles/preschool-unity.md`, 2026-10-25).
+- **Excluded.** The decode-completion hold (32b27516) is not the root: it
+  only keeps the submitter parked once the corrupted wait cannot resolve.
+- **Fix** (`cp_op_dma_data` and `cp_op_custom_dma_data` in
+  `GraphicsRunOpParsers.cpp`, `CommandProcessor::DeferWriteBehindPendingStore`
+  in `GraphicsRun.cpp`): a `DMA_DATA` store of one or two dwords, immediate
+  or copied, that follows a consolidated wait or a pending deferred store to
+  the same bytes, is published at end of pipe like `WRITE_DATA`. The source
+  is read when the packet is parsed, as the CP does; larger copies still run
+  immediately.
+- **Verified.** Five strict runs without the present limit (3 x 60 s,
+  2 x 90 s) on the menu: no stall, 20,000 to 31,000 presents each. Repository
+  gates and the packet, `DMA_DATA`, `WRITE_DATA`, wait and command-processor
+  unit suites (355 tests) pass. Strict `games-matrix` sweep at the 60 fps
+  present limit, with this fix and the survival-title depth-only fix
+  (`docs/titles/survival.md`, 2026-10-27): 26 of 32 cases interactive
+  against 23 of 32; the three changed cases all improved (the frozen menu
+  case, and the two cases that stopped on the render resolution plan) and
+  no case regressed.
+
+## Open: index objects over pending storage (2026-10-27, found by inspection)
+
+- **State.** The index bind has the shape the vertex bind had before the
+  beat 'em up black-frame fix (`docs/titles/beat-em-up.md`, 2026-10-27):
+  writable storage in use refuses the transient index snapshot, and the
+  fallback `IndexBufferGpuObject` is seeded from guest bytes
+  (`GraphicsRenderDraw.cpp`, the `GpuMemoryCreateObject(..., IndexBufferGpuObject())`
+  calls in `GraphicsRenderDrawIndex`, its fragment-transport branch and
+  `GraphicsRenderDepthStencilCopy`). An index range written by a dispatch
+  that has not been written back would be drawn with stale indices, and the
+  vertex range resolved from them on the CPU (`ResolveIndexedVertexRecords`)
+  would be stale as well.
+- **Not observed.** No title is known to draw GPU-written indices through
+  this path; no fix was made without a reproducer.
+- **Direction.** Because the CPU reads the indices to size the vertex range,
+  a device copy is not enough: draw preparation would write back the
+  completed results over the index range and make any pending one a
+  dependency, as `GpuMemoryWriteBackStorageForGuestSeed` does for results of
+  another queue.
+
+## Open: `KYTY_DUMP_VIDEOOUT` stops on a display image without a guest address (2026-10-27)
+
+- **Observed** (beat 'em up intro, strict run with `KYTY_DUMP_VIDEOOUT=1`):
+  the run stops in `UtilImageToBuffer` (`Utils.cpp:347`,
+  `RequireGuestAddressableImage`, "image-to-buffer readback") when the dump
+  reads back a present source. Diagnostics only; normal runs are unaffected.
+- **Direction.** Read the present source back through the host image the
+  presenter uses instead of the guest-addressable readback.
+
 ## A declared unsigned sampled bank is left unwritten (2026-10-26)
 
 - **Observed.** A validation run of robot platformer (PPSA21567) at
