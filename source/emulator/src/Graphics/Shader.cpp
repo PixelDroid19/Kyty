@@ -3693,15 +3693,6 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		}
 	}
 
-	for (int i = 0; i < HW::UserSgprInfo::SGPRS_MAX; i++)
-	{
-		if (direct_sgprs[i])
-		{
-			ShaderGetDirectSgpr(&bind->direct_sgprs, i, user_sgpr, user_data);
-			info->direct_sgprs++;
-		}
-	}
-
 	for (int i = 0; i < bind->storage_buffers.buffers_num; ++i)
 	{
 		const bool local_dynamic_sload = bind->storage_buffers.dynamic_sload[i];
@@ -3763,6 +3754,22 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		bind->storage_buffers.unbased_matches[i]         = evidence.unbased_match;
 		bind->storage_buffers.decoded_unknown[i]         = exact_evidence.decoded_unknown;
 		bind->storage_buffers.indirect_descriptor_use[i] = exact_evidence.indirect_descriptor_use;
+		// A metadata V# that no instruction consumes as a descriptor, but whose
+		// words are read as data (for example copied to other SGPRs that a
+		// runtime descriptor resolves), is not a binding: binding it rewrites
+		// its base to a slot index, so its SGPRs keep the guest words instead.
+		const int start_register = bind->storage_buffers.start_register[i];
+		if (evidence.reason == ShaderStorageUnknownReason::MetadataOnlyBinding && exact_evidence.indirect_descriptor_use &&
+		    !exact_evidence.decoded_unknown && !bind->storage_buffers.extended[i] && !local_dynamic_sload && !has_dynamic_sload &&
+		    start_register >= 0)
+		{
+			bind->storage_buffers.accesses[i] = ShaderStorageAccess::UnusedMetadata;
+			for (int r = start_register; r < start_register + 4 && r < user_sgpr_num; r++)
+			{
+				direct_sgprs[r] = true;
+			}
+			continue;
+		}
 		const auto& matched_evidence = evidence.exact_match ? exact_evidence : unbased_evidence;
 		bind->storage_buffers.raw_vmem_oob_guarded[i]    = matched_evidence.raw_vmem_oob_guarded;
 		bind->storage_buffers.raw_smem_use[i]            = matched_evidence.raw_smem_use;
@@ -3791,6 +3798,16 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 		}
 	}
+
+	for (int i = 0; i < HW::UserSgprInfo::SGPRS_MAX; i++)
+	{
+		if (direct_sgprs[i])
+		{
+			ShaderGetDirectSgpr(&bind->direct_sgprs, i, user_sgpr, user_data);
+			info->direct_sgprs++;
+		}
+	}
+
 	if (code != nullptr)
 	{
 		for (int i = 0; i < bind->textures2D.textures_num; ++i)
