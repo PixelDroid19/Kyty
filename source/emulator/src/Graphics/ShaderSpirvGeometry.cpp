@@ -90,6 +90,14 @@ bool Spirv::EmitGeometryProlog(String8* output) const
 %geo_slices = OpLoad %uint %geo_slices_ptr
 %geo_first_vertex = OpLoad %uint %geo_first_vertex_ptr
 %geo_first_instance = OpLoad %uint %geo_first_instance_ptr
+%geo_index_lo_ptr = OpAccessChain %<ptr> %vsharp %int_0 %<row1> %int_2
+%geo_index_hi_ptr = OpAccessChain %<ptr> %vsharp %int_0 %<row1> %int_3
+%geo_index_lo = OpLoad %uint %geo_index_lo_ptr
+%geo_index_hi = OpLoad %uint %geo_index_hi_ptr
+%geo_index_lo64 = OpUConvert %ulong %geo_index_lo
+%geo_index_hi64 = OpUConvert %ulong %geo_index_hi
+%geo_index_his = OpShiftLeftLogical %ulong %geo_index_hi64 %uint_32
+%geo_index_base = OpBitwiseOr %ulong %geo_index_his %geo_index_lo64
 %geo_output_lo64 = OpUConvert %ulong %geo_output_lo
 %geo_output_hi64 = OpUConvert %ulong %geo_output_hi
 %geo_output_his = OpShiftLeftLogical %ulong %geo_output_hi64 %uint_32
@@ -149,12 +157,43 @@ bool Spirv::EmitGeometryProlog(String8* output) const
 	                                "%geo_offset2 = OpIAdd %uint %geo_offset1 %<scale>\n"
 	                                "%geo_offset1_field = OpShiftLeftLogical %uint %geo_offset1 %uint_16\n"
 	                                "%geo_offsets01 = OpBitwiseOr %uint %geo_offset0 %geo_offset1_field\n");
+	// An indexed draw reads each slot vertex from the guest index buffer at the
+	// guest address in row 1, through the device-address table like every other
+	// guest load of the pass; the block's first vertex is the draw's base vertex
+	// added to every fetched index. A 16-bit index is read from its aligned word,
+	// which never leaves the page holding the index.
+	String8 vertex_id;
+	if (geometry.indexed)
+	{
+		const String8 element = geometry.index_format == 0u ? String8(R"(%geo_ibytes = OpShiftLeftLogical %ulong %geo_islot64 %uint_2
+%geo_iguest = OpIAdd %ulong %geo_index_base %geo_ibytes
+)")
+		                                                    : String8(R"(%geo_ibytes = OpShiftLeftLogical %ulong %geo_islot64 %uint_1
+%geo_ielement = OpIAdd %ulong %geo_index_base %geo_ibytes
+%geo_iwords = OpShiftRightLogical %ulong %geo_ielement %uint_2
+%geo_iguest = OpShiftLeftLogical %ulong %geo_iwords %uint_2
+%geo_ihalf64 = OpShiftRightLogical %ulong %geo_ielement %uint_1
+%geo_ihalf32 = OpUConvert %uint %geo_ihalf64
+%geo_ihalf = OpBitwiseAnd %uint %geo_ihalf32 %uint_1
+%geo_ishift = OpIMul %uint %geo_ihalf %uint_16
+)");
+		const String8 extract = geometry.index_format == 0u
+		                            ? String8("%geo_fetched = OpCopyObject %uint %geo_iword\n")
+		                            : String8("%geo_fetched = OpBitFieldUExtract %uint %geo_iword %geo_ishift %uint_16\n");
+		vertex_id = "%geo_islot64 = OpUConvert %ulong %geo_vertex\n" + element +
+		            "%geo_idevice = OpFunctionCall %ulong %guest_device_address %geo_iguest %gda_u64_4\n"
+		            "%geo_ipointer = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %geo_idevice\n"
+		            "%geo_iword = OpLoad %uint %geo_ipointer Aligned 4\n" +
+		            extract + "%geo_vertex_id = OpIAdd %uint %geo_fetched %geo_first_vertex\n";
+	} else
+	{
+		vertex_id = "%geo_vertex_id = OpIAdd %uint %geo_first_vertex %geo_vertex\n";
+	}
 	*output += String8(R"(
 %geo_local = OpUDiv %uint %native_wave_logical_index %<corners>
 %geo_corner = OpUMod %uint %native_wave_logical_index %<corners>
 %geo_input = OpIAdd %uint %geo_base %geo_local
-<vertex>%geo_vertex_id = OpIAdd %uint %geo_first_vertex %geo_vertex
-%geo_vertex_float = OpBitcast %float %geo_vertex_id
+<vertex><vertex_id>%geo_vertex_float = OpBitcast %float %geo_vertex_id
                OpStore %v5 %geo_vertex_float
                OpStore %v8 %geo_instance_float
 %geo_offset0 = OpIMul %uint %native_wave_logical_index %<stride>
@@ -169,6 +208,7 @@ bool Spirv::EmitGeometryProlog(String8* output) const
                OpStore %v4 %geo_zero_float
 )")
 	               .ReplaceStr("<vertex>", vertex)
+	               .ReplaceStr("<vertex_id>", vertex_id)
 	               .ReplaceStr("<offsets>", offsets)
 	               .ReplaceStr("<corners>", corners)
 	               .ReplaceStr("<stride>", stride)

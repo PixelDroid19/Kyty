@@ -1559,6 +1559,26 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
 
 } // namespace
 
+// An indexed draw can run the merged ES+GS program as a compute geometry pass
+// (ResolveGeometryDraw) and draw its output through a pull vertex stage. The
+// plan and its helpers are defined below the draw entry points.
+struct GeometryDrawPlan
+{
+	ShaderGeometryComputeInfo info;
+	uint32_t                  primitives          = 0; // input primitives per instance
+	uint32_t                  groups_per_instance = 0;
+	uint32_t                  groups              = 0;
+};
+static bool                ResolveGeometryDraw(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx,
+                                               uint32_t index_count, uint32_t instance_count, GeometryDrawPlan* plan);
+static ShaderVertexInputInfo MakeGeometryFrontInput(const ShaderVertexInputInfo& front);
+static ShaderVertexInputInfo MakeGeometryPullInput(const ShaderVertexInputInfo& front, const GeometryDrawPlan& plan);
+static void                  RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& ctx,
+                                                const HW::Shader& sh_ctx, ShaderVertexInputInfo* front, const GeometryDrawPlan& plan,
+                                                int32_t first_vertex, uint32_t first_instance,
+                                                const GuestDeviceAddressTable* device_address_table, ShaderVertexInputInfo* pull,
+                                                uint64_t index_address);
+
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                              uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
@@ -1588,7 +1608,9 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 	DebugStatsRecordDrawRenderLockWait(DrawStageElapsedNs(render_lock_start));
 	const auto state_setup_start = DrawStageClock::now();
-	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx, false))
+	GeometryDrawPlan geometry_plan;
+	const bool       geometry_pass = ResolveGeometryDraw(*ctx, *ucfg, *sh_ctx, index_count, instance_count, &geometry_plan);
+	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx, geometry_pass))
 	{
 		MaybeDumpIndexDrawSkip("invalid-vs-or-ge", index_count, draw_modifier, type);
 		return;
@@ -1723,6 +1745,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 			break;
 		default: if (index_type_and_size != 0 && index_type_and_size != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index_type_and_size != 0 && index_type_and_size != 1 condition ignored (continuing)\n"); }
 	}
+	geometry_plan.info.indexed      = true;
+	geometry_plan.info.index_format = index_type == VK_INDEX_TYPE_UINT16 ? 1u : 0u;
 
 	if (!AutoDrawModifierSupported(draw_modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !AutoDrawModifierSupported(draw_modifier) condition ignored (continuing)\n"); }
 	if (type != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: type != 1 condition ignored (continuing)\n"); }
@@ -1753,9 +1777,20 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		MaybeDumpIndexDrawSkip("invalid-vs-resources", index_count, draw_modifier, type);
 		return;
 	}
+	// A geometry pass runs the guest program; the host vertex stage draws its output.
+	ShaderVertexInputInfo geometry_front;
+	if (geometry_pass)
+	{
+		geometry_front = MakeGeometryFrontInput(vs_input_info);
+		vs_input_info  = MakeGeometryPullInput(vs_input_info, geometry_plan);
+	}
 
 	PrimitiveDrawPlan primitive_plan {};
-	if (!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true, &primitive_plan))
+	if (geometry_pass)
+	{
+		primitive_plan.topology   = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+		primitive_plan.draw_count = geometry_plan.groups * geometry_plan.info.GroupLanes() * 3u;
+	} else if (!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true, &primitive_plan))
 	{
 		static std::atomic_uint32_t unsupported_indexed_draws {0};
 		if (unsupported_indexed_draws.fetch_add(1, std::memory_order_relaxed) < 16u)
@@ -1779,8 +1814,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	}
 	ValidatePixelProbeSelection(sh_ctx->GetPs(), ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
 	GuestDeviceAddressTable device_address_table {};
-	if (PrepareGuestDeviceAddressForRead(buffer, vs_input_info.bind, &ps_input_info.bind, &device_address_table,
-	                                     pending_submission) != GuestDeviceAddressReadPreparation::Ready)
+	if (PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front.bind : vs_input_info.bind, &ps_input_info.bind,
+	                                     &device_address_table, pending_submission) != GuestDeviceAddressReadPreparation::Ready)
 	{
 		return;
 	}
@@ -1820,12 +1855,31 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	auto* vk_buffer = buffer->RecordState();
 
 	int32_t vertex_offset = 0;
-	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info, &vertex_offset, vertex_offset_add))
+	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), geometry_pass ? geometry_front : vs_input_info, &vertex_offset,
+	                               vertex_offset_add))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indexed vertex offset is outside int32 range; draw skipped\n");
 		return;
 	}
-	const auto vertex_requirement = ResolveIndexedVertexRecords(index_addr, index_count, index_type, vertex_offset);
+	// The geometry pass reads the guest index buffer itself, through the
+	// device-address table, so GPU-written indexes are seen in queue order; the
+	// pull stage then draws the output records without an index buffer.
+	if (geometry_pass)
+	{
+		RecordGeometryPass(submit_id, buffer, *ctx, *sh_ctx, &geometry_front, geometry_plan, vertex_offset, first_instance,
+		                   &device_address_table, &vs_input_info, reinterpret_cast<uint64_t>(index_addr));
+		vertex_offset  = 0;
+		instance_count = 1;
+		first_instance = 0;
+	}
+	VertexRecordRequirement vertex_requirement {};
+	if (geometry_pass)
+	{
+		vertex_requirement = ResolveLinearVertexRecords(0u, primitive_plan.draw_count);
+	} else
+	{
+		vertex_requirement = ResolveIndexedVertexRecords(index_addr, index_count, index_type, vertex_offset);
+	}
 	if (!vertex_requirement.valid)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indexed vertex range is invalid; draw skipped\n");
@@ -1884,20 +1938,26 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	SetDynamicParams(vk_buffer, pipeline);
 
 	// The vertex range was resolved from the guest indexes; only their snapshot is
-	// guaranteed to hold the same values when the GPU reads them.
-	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
-	const auto     index_buffer_binding_start = DrawStageClock::now();
-	VulkanBuffer*  indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-	const bool     indices_snapshotted = indices != nullptr;
-	if (indices == nullptr)
+	// guaranteed to hold the same values when the GPU reads them. A geometry pass
+	// already consumed the indexes on the GPU; the pull stage draws without them.
+	bool indices_snapshotted = true;
+	if (!geometry_pass)
 	{
-		indices = static_cast<VulkanBuffer*>(
-		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
-	}
-	if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
+		const uint64_t index_addr_u64              = reinterpret_cast<uint64_t>(index_addr);
+		const auto     index_buffer_binding_start = DrawStageClock::now();
+		VulkanBuffer*  indices =
+		    TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		indices_snapshotted = indices != nullptr;
+		if (indices == nullptr)
+		{
+			indices = static_cast<VulkanBuffer*>(
+			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
+		}
+		if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
 
-	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
-	DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start));
+		vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
+		DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start));
+	}
 
 	const auto     vertex_buffer_binding_start = DrawStageClock::now();
 	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records, indices_snapshotted,
@@ -1997,8 +2057,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
-	GraphicsOperationTraceIndexedDraw(index_addr_u64, index_size, index_type_and_size <= 1u, vs_input_info, ps_input_info,
-	                                  OperationTraceColorOutputs(color_info), OperationTraceDepthOf(depth_info));
+	GraphicsOperationTraceIndexedDraw(reinterpret_cast<uint64_t>(index_addr), index_size, index_type_and_size <= 1u, vs_input_info,
+	                                  ps_input_info, OperationTraceColorOutputs(color_info), OperationTraceDepthOf(depth_info));
 
 	const auto command_emission_start = DrawStageClock::now();
 	if (vertex_clip_probe != nullptr)
@@ -2013,7 +2073,13 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		vertex_clip_probe->BeginDepthPassQuery(buffer);
 	}
 	uint32_t host_draws = 0;
-	if (primitive_plan.chunked)
+	if (geometry_pass)
+	{
+		// The pull stage reads the pass output records; no index buffer applies.
+		vkCmdDraw(pass_buffer, primitive_plan.draw_count, instance_count, 0u, first_instance);
+		DebugStatsRecordDraw();
+		host_draws++;
+	} else if (primitive_plan.chunked)
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
@@ -2585,14 +2651,6 @@ bool AutoDrawModifierSupported(uint64_t draw_modifier)
 // A merged ES+GS (NGG) auto draw run as a geometry compute pass: one guest
 // subgroup of up to four Wave64s per group of input primitives of one instance,
 // one ES thread per corner, triangle output of one export per subgroup thread.
-struct GeometryDrawPlan
-{
-	ShaderGeometryComputeInfo info;
-	uint32_t                  primitives          = 0; // input primitives per instance
-	uint32_t                  groups_per_instance = 0;
-	uint32_t                  groups              = 0;
-};
-
 static bool ResolveGeometryDraw(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx, uint32_t index_count,
                                 uint32_t instance_count, GeometryDrawPlan* plan)
 {
@@ -2691,7 +2749,7 @@ static ShaderVertexInputInfo MakeGeometryPullInput(const ShaderVertexInputInfo& 
 static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& ctx, const HW::Shader& sh_ctx,
                                ShaderVertexInputInfo* front, const GeometryDrawPlan& plan, int32_t first_vertex,
                                uint32_t first_instance, const GuestDeviceAddressTable* device_address_table,
-                               ShaderVertexInputInfo* pull)
+                               ShaderVertexInputInfo* pull, uint64_t index_address)
 {
 	const uint64_t bytes  = static_cast<uint64_t>(plan.groups) * plan.info.GroupDwords() * 4u;
 	auto*          output = buffer->AllocateTransientDeviceBuffer(
@@ -2706,7 +2764,16 @@ static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const 
 	const uint64_t address = vkGetBufferDeviceAddress(g_render_ctx->GetGraphicCtx()->device, &address_info);
 	const uint32_t lo      = static_cast<uint32_t>(address);
 	const uint32_t hi      = static_cast<uint32_t>(address >> 32u);
-	const uint32_t block[8] = {lo, hi, plan.primitives, plan.groups_per_instance, static_cast<uint32_t>(first_vertex), first_instance, 0u, 0u};
+	// Row 1 carries the base vertex, the first instance and, for an indexed
+	// draw, the guest address of its index buffer.
+	const uint32_t block[8] = {lo,
+	                           hi,
+	                           plan.primitives,
+	                           plan.groups_per_instance,
+	                           static_cast<uint32_t>(first_vertex),
+	                           first_instance,
+	                           static_cast<uint32_t>(index_address),
+	                           static_cast<uint32_t>(index_address >> 32u)};
 	std::memcpy(front->bind.geometry_block, block, sizeof(block));
 	std::memcpy(pull->bind.geometry_block, block, sizeof(block));
 
@@ -2997,7 +3064,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	if (geometry_pass)
 	{
 		RecordGeometryPass(submit_id, buffer, *ctx, *sh_ctx, &geometry_front, geometry_plan, resolved_first_vertex, first_instance,
-		                   &device_address_table, &vs_input_info);
+		                   &device_address_table, &vs_input_info, 0u);
 		resolved_first_vertex = 0;
 		instance_count        = 1;
 		first_instance        = 0;

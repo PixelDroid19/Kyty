@@ -2160,6 +2160,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 	id.ids.Add(geometry.parameter_count);
 	id.ids.Add(geometry.lds_dwords);
 	id.ids.Add(geometry.waves);
+	id.ids.Add(geometry.indexed ? geometry.index_format + 1u : 0u);
 
 	Pipeline p {};
 	p.cs_shader_id   = id;

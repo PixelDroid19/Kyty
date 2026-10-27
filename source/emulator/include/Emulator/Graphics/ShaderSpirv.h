@@ -70,7 +70,9 @@ enum class ShaderGeometryInputTopology
 // Exports and the allocation request land in an output buffer addressed by
 // the geometry push block (ShaderBindResources::geometry_offset_dw):
 // row 0 = {output_lo, output_hi, primitives per instance, groups per instance},
-// row 1 = {first vertex, first instance, 0, 0}.
+// row 1 = {first vertex, first instance, guest index address lo, hi}.
+// An indexed draw resolves each slot vertex through the guest index buffer at
+// that address; a non-indexed draw numbers its vertices from the first vertex.
 // Output group g holds one header word (the GS_ALLOC_REQ payload), one
 // primitive word per subgroup thread, then one record per thread: pos0, pos1, params.
 struct ShaderGeometryComputeInfo
@@ -81,6 +83,10 @@ struct ShaderGeometryComputeInfo
 	// Guest LDS allocation of the merged stage, in dwords.
 	uint32_t                    lds_dwords           = 0;
 	uint32_t                    waves                = 1;
+	// The draw is indexed: slot vertices come from the guest index buffer
+	// (address in row 1) whose elements are 32-bit unless index_format says 16.
+	bool                        indexed              = false;
+	uint32_t                    index_format         = 0;
 
 	static constexpr uint32_t kLanes                    = 64;
 	// An NGG subgroup holds at most 256 threads.
