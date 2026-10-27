@@ -51,7 +51,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Robot platformer: paired compute compile cost (2026-10-21, closed 2026-10-22)
   - Robot platformer: worldmap stall and dark top-left quadrant (2026-10-17)
   - Robot platformer: intro frame cost on Intel (2026-10-18)
-  - Robot platformer: title screen save cards (2026-10-14, open)
+  - Robot platformer: title screen save cards (2026-10-14, fixed 2026-10-27)
   - Robot platformer: vertex attribute format words (2026-10-14)
   - Robot platformer: exposure fill and DCC metadata clears (2026-10-14)
   - Robot platformer: Gen5 dispatch TUNNEL_ENABLE (2026-10-13)

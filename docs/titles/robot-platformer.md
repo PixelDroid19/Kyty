@@ -983,7 +983,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Directory iteration in `Path::MatchCaseInsensitive` on the file thread
     during loads.
 
-## Robot platformer: title screen save cards (2026-10-14, open)
+## Robot platformer: title screen save cards (2026-10-14, fixed 2026-10-27)
 
 - Observed (Intel A770, strict, `generic` route, 390 s, no error): the title
   screen shows the warp background, the logo and the top save card with its
@@ -1084,6 +1084,44 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     through the same current-bytes path as 6d1b178d.
   - Exact storage views are not separated by image type; a 2D/3D filter was
     tried and dropped because no failure needs it.
+
+- Fixed 2026-10-27 (70a42245). Cause: a light-list walk compute kernel
+  (wave32) reads its list head and its nodes through pc-keyed scalar loads
+  (`s_buffer_load_dword` on a V# loaded with `s_load_dwordx4`). Excluding
+  unused metadata storage compacted the storage buffer list after the
+  dynamic scalar-load records had captured their indices, and the records
+  were not renumbered. Every load behind an excluded entry read the next
+  descriptor: the head came from the node buffer and the nodes from a
+  16-byte buffer, node 0 read as `{1, 0}`, the walk never reached its `-1`
+  terminator, and the hang ended in device loss with black cards. The
+  guest head and node buffers, written back by their producer dispatch,
+  hold well-formed lists; the writer trace (`KYTY_TRACE_GPU_WRITER_RANGE`)
+  and an offline chain walk of both buffers confirmed it. The records are
+  now remapped through the compaction's active-index table.
+- Changes made in the same pass: 9938819b (a metadata-only storage V# keeps
+  its guest words in its user SGPRs instead of being bound), da9a9bf9
+  (`DB_SHADER_CONTROL` decides whether an output-free pixel shader runs;
+  EXEC_ON_NOOP shaders with no attachment run in a scissor-sized
+  attachment-less pass), 1253b21b (readlane and writelane select their
+  lane modulo the wave size).
+- Verified (Intel A770, strict, 160 s, cross pressed at 100 s on PRESS ANY
+  BUTTON): no device loss and no fence timeout; the title renders and the
+  three save cards are lit, matching the reference video. Unit tests: 2,652
+  pass. The architecture-boundary, archive-DAG and checked-in host-shader
+  gates pass; the graphics diagnostics suite passes 15 of 15 with the
+  unrelated EVENT_WRITE check below skipped locally.
+- Excluded while localizing: a zero head grid as cause. The 128x128 grid
+  and its node pool filled by a pixel shader with `ds_append` are a
+  different structure, not the one the looping kernel walks. Bounds of the
+  scalar-load stride, and a missing high-word clear in wave32 vector
+  compares (the native path already drops it).
+- Open: the reference video shows the flying ship with robots on the title
+  screen; Kyty shows only the background and the logo. The graphics
+  diagnostics `EVENT_WRITE` contract fails on the current tree: the test
+  expects event 0x38 to keep the short packet form, while
+  `GraphicsDcbEventWrite` and `GraphicsDcbEventWriteGetSize`
+  (`Graphics.cpp`, since febdc198) treat 0x38 and 0x39 as addressed. One of
+  the two needs evidence before either changes.
 
 ## Robot platformer: vertex attribute format words (2026-10-14)
 

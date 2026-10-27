@@ -374,20 +374,20 @@ against the same correct gameplay capture.
   asphalt colour of a strict Intel capture (96, 80, 63) and of that footage
   (98, 84, 52) agree within a few percent. Do not chase it as a lighting or
   exposure bug without a reference of the same scene that differs.
-- Robot-platformer title screen save cards (2026-10-14, open). The two lower
-  save cards render black because the tiled light classifier writes an
-  empty list for every tile. Excluded so far: dispatch ordering, the
-  classifier's control-flow, append and lane-count translation, a
-  render-target/storage alias of its normal input, and the G-buffer exports,
-  write masks and depth-stencil state. The debug image dump does not submit
-  the recording in progress, so states read through it are from earlier in
-  the frame: the constant normal input and the black temporal
-  antialiasing and HDR images are unverified, not exclusions. The lighting
-  stencil plane is excluded: with d72457e5 and 55cd634d the lighting reads
-  the device stencil, cleared each frame and written by the G-buffer, and
-  the screen does not change. Details, fixes found on the
-  way and open defects: "Robot platformer: title screen save cards" in
-  `docs/BRINGUP.md`.
+- Robot-platformer title screen save cards (2026-10-14, fixed 2026-10-27,
+  70a42245). The cards were black because a light-list walk kernel looped
+  until device loss: excluding unused metadata storage compacted the
+  storage list after the dynamic scalar-load records captured their
+  indices, so its pc-keyed head and node loads read the next descriptor.
+  The records now follow the compaction. Earlier leads are superseded, not
+  causes: the empty light lists of the tiled classifier, the constant
+  normal input, and a zero 128x128 head grid (a different structure filled
+  by a pixel shader). The earlier exclusions (dispatch ordering, the
+  classifier's control-flow, append and lane-count translation, the normal
+  buffer alias, the G-buffer exports and the lighting stencil plane) stand.
+  The debug image dump still does not submit the recording in progress.
+  Details: "Robot platformer: title screen save cards" in
+  `docs/titles/robot-platformer.md`.
 - Racing-title shadows (2026-10-11, partly open). The two shadow-receiver
   pixel shaders take one `image_sample_c_lz` against a 2048x1024 D16 atlas
   (two 1024x1024 cascades chosen from squared camera distance) with a GEQUAL
