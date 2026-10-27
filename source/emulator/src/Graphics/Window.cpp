@@ -2533,7 +2533,10 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugMessengerCallback(VkDebugUtilsM
 			break;
 		case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT:
 			if ((message_types & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) != 0 && Config::SpirvDebugPrintfEnabled() &&
-			    strcmp(callback_data->pMessageIdName, "UNASSIGNED-DEBUG-PRINTF") == 0)
+			    callback_data->pMessageIdName != nullptr &&
+			    // The 1.4 validation layer tags printf output with either id; 1.4.363 sends WARNING-DEBUG-PRINTF.
+			    (strcmp(callback_data->pMessageIdName, "UNASSIGNED-DEBUG-PRINTF") == 0 ||
+			     strcmp(callback_data->pMessageIdName, "WARNING-DEBUG-PRINTF") == 0))
 			{
 				debug_printf   = true;
 				severity_color = FG_BRIGHT_YELLOW;
