@@ -2371,7 +2371,8 @@ RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffer* buff
 		native.reason         = RenderResolutionPlanReason::MismatchedHostExtent;
 		return native;
 	}
-	if (registered_selected && registered_extent != requested)
+	// A display already selected native keeps the depth-only pass native too.
+	if (registered_selected && registered_extent != requested && registered_extent != depth_extent)
 	{
 		native.classification = ResolutionClassification::Unsupported;
 		native.reason         = RenderResolutionPlanReason::MismatchedHostExtent;
