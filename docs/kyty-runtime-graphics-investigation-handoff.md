@@ -388,6 +388,17 @@ against the same correct gameplay capture.
   The debug image dump still does not submit the recording in progress.
   Details: "Robot platformer: title screen save cards" in
   `docs/titles/robot-platformer.md`.
+- Robot-platformer title ship and robots absent (2026-10-27, open). The
+  guest loads and starts its title-ship level but submits no ship or robot
+  draw; the G-buffer holds only the logo letters. Excluded: a regression
+  (absent since at least 2026-10-18), GPU predication, synthetic
+  occlusion-query magnitude (a 2^20 step per query changes nothing) and
+  skipped draws. The all-zero output of the title's merged ES/GS effect
+  draws matches emitters with no live particles and is not, by itself, a
+  geometry-pass defect. Untested leads: the unproduced `GET_LOD_STATS`
+  report and ignored mip-statistics counters, and the title timeline
+  clock. Details: "Robot platformer: title ship and robots absent" in
+  `docs/titles/robot-platformer.md`.
 - Racing-title shadows (2026-10-11, partly open). The two shadow-receiver
   pixel shaders take one `image_sample_c_lz` against a 2048x1024 D16 atlas
   (two 1024x1024 cascades chosen from squared camera distance) with a GEQUAL

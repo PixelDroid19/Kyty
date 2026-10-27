@@ -256,6 +256,55 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   10-25 fps. It is a guest allocation failure and is not yet shown to be an
   emulator defect; a native-rate run must show whether it persists.
 
+## Robot platformer: title ship and robots absent (2026-10-27, open)
+
+- **Setup.** `PPSA21567 - Astro Bot`, Intel Arc A770, Mesa ANV, strict,
+  `KYTY_PRESENT_FPS_LIMIT=60`, idle title route, branch tip `8e4c0799`
+  plus temporary diagnostics (not committed). RenderDoc capture of
+  present 1500; native captures every 60 s.
+- **Observed.** In the reference video the controller-shaped ship with
+  the robots flies in with the title letters and stays under the logo.
+  Kyty draws the background, the letters (including their flight with
+  warp streaks) and the logo, never the ship or the robots.
+- **The title-ship level loads.** At `KYTY_PRINTF_LEVEL=Info` the guest
+  reports `LoadLevelResources: title_controller_ship` (0.9 s),
+  `Level has started: title_controller_ship` and `StartLevel title`,
+  then loads `bg_layer` and `worldmap`. No guest error line follows.
+- **The ship is not submitted.** In the present-1500 capture the
+  G-buffer pass (five colour targets plus D32S8) holds only the logo
+  letter meshes (17 draws, all projecting to the upper centre). Apart
+  from the sky and background geometry, no draw of the frame projects onto
+  the lower-left area where the ship sits in the video, except seven draws
+  into a separate 1536x1536 colour target. The guest omits the ship's
+  draws; the renderer does not lose or skip them (no skipped-draw report
+  entry).
+- **Zero-output effect draws.** 62 draws of the frame have an all-zero
+  post-vertex output, among them the merged ES/GS draws that run as the
+  geometry compute pass in the HDR forward pass and in the 1920x1080
+  `R16G16` distortion pass (60 or 30 guest vertices expanded to 768 or
+  384, and 576 to 24,576 vertex records elsewhere). Their GS user data names
+  structured buffers (strides 128, 276, 704) that are zero in guest memory
+  at record time. The same geometry pass renders the studio-logo particle
+  dissolve, so the pass itself is not excluded but not implicated either:
+  emitters with no live particles produce exactly this output, consistent
+  with the ship's trail emitters having nothing to emit.
+- **Excluded.**
+  - A regression: captures from 2026-10-18 show no title ship either;
+    the "lit ship" of those runs is the warp-tunnel ship.
+  - GPU predication: `SET_PREDICATION` never removes a packet in these
+    runs, and no draw is skipped.
+  - Occlusion-query magnitude: the title issues about five synthetic
+    occlusion `EVENT_WRITE` 0x39 queries per frame; stepping the counter
+    by 2^20 per query instead of 1 leaves the title unchanged.
+  - Asset loading: the level reports loaded and started.
+- **Remaining leads, untested.** `IT_GET_LOD_STATS` is consumed without
+  writing its report (`GraphicsRunOpParsers.cpp`, `cp_op_get_lod_stats`),
+  and title textures enable mip statistics counters (`MipStatsCntEn`)
+  that the binder ignores; a feedback-driven streamer that reads stale
+  reports could hold back the ship. A real report needs a producer for the
+  counters, not invented counts. The ship's placement also depends on the
+  title timeline; whether its clock advances was not checked.
+
 ## Robot platformer: logo particles through a split geometry pass (2026-10-22)
 
 - **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, `generic.pad`,
@@ -1116,7 +1165,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   scalar-load stride, and a missing high-word clear in wave32 vector
   compares (the native path already drops it).
 - Open: the reference video shows the flying ship with robots on the title
-  screen; Kyty shows only the background and the logo. The graphics
+  screen; Kyty shows only the background and the logo (localized in
+  "Robot platformer: title ship and robots absent", 2026-10-27). The graphics
   diagnostics `EVENT_WRITE` contract fails on the current tree: the test
   expects event 0x38 to keep the short packet form, while
   `GraphicsDcbEventWrite` and `GraphicsDcbEventWriteGetSize`
@@ -1894,7 +1944,10 @@ Known approximations and debt recorded by this chain:
 - **Visual state and rate after the DS fixes.** Native captures at present 1343
   (intro flyby) and 2985 (tutorial loading, ship scene) both score healthy
   (first: entropy 4.03, 739 colour bins, no stripe, white 0.33%, sparkle 1.1%)
-  and show the logo, ship and asteroid field without visible corruption. The
+  and show the logo, ship and asteroid field without visible corruption.
+  Corrected on 2026-10-27: the present-1343 capture shows the flying title
+  letters and warp streaks, not the ship; the title ship and its robots are
+  absent there (see "Robot platformer: title ship and robots absent"). The
   same agent sample reports 5.6 fps at present 1343; performance is a separate
   open item. The tutorial still stops at the mixed-view storage alias above.
 - **Measured load-window cost.** An agent performance window over present
