@@ -1363,7 +1363,10 @@ struct ShaderVertexProgramKeyHash
 using ShaderVertexProgramCache =
     std::unordered_map<ShaderVertexProgramKey, std::shared_ptr<const ShaderVertexProgram>, ShaderVertexProgramKeyHash>;
 static constexpr size_t   kVertexProgramCacheEntries = 256u;
-static constexpr uint64_t kVertexProgramCacheBytes   = 64u * 1024u * 1024u;
+// A 3D scene keeps more than 64 MiB of vertex IR live (measured: 45 fused fronts
+// of up to 5.5 MiB each); a smaller budget empties the cache every few frames and
+// each draw re-parses its program and re-proves its NGG front.
+static constexpr uint64_t kVertexProgramCacheBytes   = 256u * 1024u * 1024u;
 static ShaderVertexProgramCache* g_vs_isa_cache = nullptr;
 static std::mutex                g_vs_isa_cache_mutex;
 static uint64_t                  g_vs_isa_cache_bytes = 0;
