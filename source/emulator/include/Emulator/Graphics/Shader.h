@@ -2037,7 +2037,8 @@ struct ShaderStorageImageTileCoverage
                                                                                    bool group_xy_enabled = false,
                                                                                    bool paired_xy_thread_ids = false);
 [[nodiscard]] State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register);
-void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
+void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources,
+                                                                       ShaderDynamicSLoadMappings* dynamic_sloads = nullptr);
 
 struct ShaderTextureDescriptor
 {

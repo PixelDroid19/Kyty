@@ -3039,14 +3039,24 @@ void VerifyUnusedMetadataExclusionPreservesActiveOrdering()
 	resources.accesses[0]       = ShaderStorageAccess::Raw;
 	resources.accesses[1]       = ShaderStorageAccess::UnusedMetadata;
 	resources.accesses[2]       = ShaderStorageAccess::Typed;
+	ShaderDynamicSLoadMappings dynamic_sloads {};
+	ShaderDynamicSLoadMapping  storage_load {};
+	storage_load.resource_index = 2;
+	ShaderDynamicSLoadMapping texture_load {};
+	texture_load.kind           = ShaderDynamicSLoadResourceKind::Texture;
+	texture_load.resource_index = 2;
+	dynamic_sloads.records.Add(storage_load);
+	dynamic_sloads.records.Add(texture_load);
 
-	ExcludeUnusedMetadataStorage(&resources);
+	ExcludeUnusedMetadataStorage(&resources, &dynamic_sloads);
 
 	Expect(resources.buffers_num == 2, "unused metadata excluded before binding");
 	Expect(resources.slots[0] == 2 && resources.slots[1] == 9, "active slot ordering preserved");
 	Expect(resources.start_register[0] == 16 && resources.start_register[1] == 48, "active resource identity preserved");
 	Expect(resources.accesses[0] == ShaderStorageAccess::Raw && resources.accesses[1] == ShaderStorageAccess::Typed,
 	       "active access classifications preserved");
+	Expect(dynamic_sloads.records.At(0).resource_index == 1, "scalar load follows its compacted storage descriptor");
+	Expect(dynamic_sloads.records.At(1).resource_index == 2, "texture scalar load index unchanged");
 }
 
 void VerifyResidualStencilPm4Boundary()

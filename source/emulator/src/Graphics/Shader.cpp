@@ -3835,7 +3835,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		                          &bind->zero_image_resources);
 	}
 
-	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
+	ExcludeUnusedMetadataStorage(&bind->storage_buffers, &bind->dynamic_sloads);
 	// After compaction, so the recorded resource indices stay final.
 	if (code != nullptr && !vertex_resource_types)
 	{

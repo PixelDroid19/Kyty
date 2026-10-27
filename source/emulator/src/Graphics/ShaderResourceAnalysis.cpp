@@ -205,7 +205,7 @@ ShaderStorageAccessEvidence ResolveShaderStorageAccessEvidence(bool code_availab
 	return {ShaderStorageAccess::Unknown, ShaderStorageUnknownReason::NoMatchingInstruction, true, false, false};
 }
 
-void ExcludeUnusedMetadataStorage(ShaderStorageResources* resources)
+void ExcludeUnusedMetadataStorage(ShaderStorageResources* resources, ShaderDynamicSLoadMappings* dynamic_sloads)
 {
 	EXIT_IF(resources == nullptr);
 
@@ -247,6 +247,21 @@ void ExcludeUnusedMetadataStorage(ShaderStorageResources* resources)
 		++active_count;
 	}
 	resources->buffers_num = active_count;
+	if (dynamic_sloads == nullptr)
+	{
+		return;
+	}
+	// Scalar loads name their storage descriptor by list index, so they follow the compaction.
+	for (auto& record: dynamic_sloads->records)
+	{
+		if (record.kind != ShaderDynamicSLoadResourceKind::StorageBuffer)
+		{
+			continue;
+		}
+		EXIT_IF(record.resource_index < 0 || record.resource_index >= ShaderStorageResources::BUFFERS_MAX ||
+		        active_indices[record.resource_index] < 0);
+		record.resource_index = active_indices[record.resource_index];
+	}
 }
 
 bool ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format)
