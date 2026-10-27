@@ -16,13 +16,25 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   default 1280-edge capture uses `SDL_SCALEMODE_NEAREST`
   (`CaptureImageCodec.cpp`), which aliases thin lines further; judge thin
   features on full-resolution captures.
-- **Scene structure** (draw census `KYTY_TRACE_DRAW_PS=all` from present
-  1100): every draw of the logo background is a full-screen pass; there is no
-  streak geometry. The 1080p HDR target is followed by a velocity pass
-  (R16G16 1920x1080), a tile-velocity image (160x560 R16G16) and a 64x16 R8
-  pattern texture read by loads, then a reconstruction pass, a bloom chain
-  (1920, 960, 480), an additive composite into the 2432x1368 scene target and
-  an upscale to 3840x2160.
+- **Scene structure** (RenderDoc capture of present 1110, Intel A770; the
+  earlier draw census missed this): the streaks are geometry. One indexed draw
+  (72000 indices over 24001 vertices, sampling a 1024x1024 BC6H star atlas)
+  writes the 1080p HDR target and a second RGBA16F target, and the dashes are
+  already in the HDR target right after it, before any post pass. Its quads are
+  mostly long and thin (aspect up to 20:1). Later passes: object draws into a
+  1920x1080 R16G16 float velocity target; an R8G8 edge image from the HDR
+  target, combined with a 160x560 R8G8 and a 64x16 R8 lookup into an RGBA8
+  weight image and blended back (sizes and order match a morphological
+  anti-aliasing chain); a temporal composite into the 2432x1368 scene target;
+  a draw that reads that target and the velocity target; bloom; and an
+  upscale to 3840x2160.
+- **Velocity is near zero.** Every texel of the velocity target is below
+  1e-5 in magnitude, and the star draw's second exported clip-space position
+  (laid out like a previous-frame position) lies within 0.1 px of the first on
+  screen for all 6316 quads with four distinct vertices in front of the
+  camera. The velocity pass changes 2985 of 3.3 million pixels. In
+  this frame no post pass would join the dashes unless the guest's camera
+  motion between frames is wrong.
 - **Excluded:**
   - NGG primitive edge flags read as index bits: fixed (8518fc7e, 9-bit
     indices, agreed by three independent implementations), streaks unchanged.
@@ -35,13 +47,15 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - The 64x16 pattern texture is read with the linear 256-element pitch that
     its 4096-byte guest size implies; its content is a structured
     three-value pattern (0, 0x7f, 0xfe), not random noise.
-- **Tooling limit:** `KYTY_AB_SKIP_PS_ADDR` on the reconstruction pass stops
-  the run in `GpuMemoryCreate.cpp:2582` (the skipped producer leaves a
-  contained render texture without a writer), so the pass cannot be isolated
-  that way.
-- **Next:** read the velocity and reconstruction passes per draw (a frame
-  debugger or bound-image dumps of the 1080p velocity and tile images) to test
-  whether the reconstruction samples a valid velocity.
+  - Missing mips on the star atlas: the guest T# declares one level
+    (`max_mip=0`, `last_level=0`, tile 9), and Kyty creates one level.
+- **Tooling:** `KYTY_AB_SKIP_PS_ADDR` cannot isolate the reconstruction pass
+  (the run stops in `GpuMemoryCreate.cpp:2582`); RenderDoc captures replace it
+  (`docs/graphics-captures.md`).
+- **Next:** check whether the guest camera really moves less than 0.1 px
+  between presents here (guest frame time against the presented interval), and
+  compare a reference frame at the same moment of the logo to decide whether
+  the dashes are the geometry's own density.
 
 ## Robot platformer: Gen5 AGC HLE run reaches the tutorial level load (2026-10-26)
 
