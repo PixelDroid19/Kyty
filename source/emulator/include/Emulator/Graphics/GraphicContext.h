@@ -201,10 +201,13 @@ struct GraphicContext
 	// Extension advertisement is diagnostic only; wave execution consumes the
 	// separate support and enabled fields in compute_wave_vulkan_state.
 	bool subgroup_size_control_supported = false;
-	// Guest memory is importable as device-addressable buffers (host pointer
-	// import, buffer device address and 64-bit shader integers).
+	// Guest memory is reachable through device-addressable buffers (buffer
+	// device address, 64-bit shader integers and a host pointer or dma-buf
+	// import for direct memory).
 	bool guest_device_address_supported = false;
-	// Device-addressable buffers can also import dma-buf descriptors.
+	// Device-addressable buffers can import host pointers.
+	bool guest_host_pointer_import_supported = false;
+	// Device-addressable buffers can import dma-buf descriptors.
 	bool guest_dma_buf_import_supported = false;
 	ShaderComputeWaveVulkanState compute_wave_vulkan_state {};
 

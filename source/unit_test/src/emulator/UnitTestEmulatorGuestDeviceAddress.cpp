@@ -110,6 +110,7 @@ struct Device
 			if (vkCreateDevice(physical, &device_info, nullptr, &context.device) != VK_SUCCESS) { continue; }
 			context.physical_device = physical;
 			context.guest_device_address_supported = true;
+			context.guest_host_pointer_import_supported = true;
 			context.guest_dma_buf_import_supported = dma_buf;
 			timeline_semaphore_supported = supports_timeline_semaphore;
 			vkGetDeviceQueue(context.device, family, 0, &queue);
@@ -719,7 +720,7 @@ int ExpectOwnerReleased(LifecycleBridge* bridge, uint64_t base)
 // GPU from reading that copy and keep following every later CPU write there,
 // while the read-only neighbour on the adjacent resident page keeps its own
 // contents and preparation stays stable, until the whole owner becomes writable.
-int WritableTransitionProbe()
+int WritableTransitionFlow(bool host_pointer_import)
 {
 	static LifecycleBridge bridge;
 	GuestLoad              load;
@@ -728,6 +729,7 @@ int WritableTransitionProbe()
 	if (base == 0) { return 40; }
 	auto* const    owner     = reinterpret_cast<void*>(base);
 	auto* const    ctx       = &bridge.device.context;
+	ctx->guest_host_pointer_import_supported = host_pointer_import;
 	const uint64_t writable  = base + kWritableOffset;
 	const uint64_t neighbour = base + kNeighbourOffset;
 	uint64_t       table     = 0;
@@ -777,6 +779,11 @@ int WritableTransitionProbe()
 	}
 	return ExpectOwnerReleased(&bridge, base);
 }
+
+int WritableTransitionProbe() { return WritableTransitionFlow(true); }
+
+// A device that does not import host pointers keeps snapshots in mapped device memory.
+int MappedSnapshotTransitionProbe() { return WritableTransitionFlow(false); }
 
 // CPU-only protection keeps the owner's GPU cleanup obligation and lets the CPU
 // write it; once GPU read access returns, the GPU reads those writes.
@@ -1725,6 +1732,7 @@ TEST(EmulatorGuestDeviceAddress, RepeatedPrepareDoesNotImportUntouchedNeighbours
 TEST(EmulatorGuestDeviceAddress, VulkanLoadPreservesWordsAcrossImportedPageBoundary) { RunIsolated(PageBoundaryLoadProbe); }
 TEST(EmulatorGuestDeviceAddress, AnAnonymousRangeImportsATouchedPageOnTheNextPreparation) { RunIsolated(AnonymousResidencyProbe); }
 TEST(EmulatorGuestDeviceAddress, AWritableGpuProtectionStopsReadingTheReadOnlyCopy) { RunIsolated(WritableTransitionProbe); }
+TEST(EmulatorGuestDeviceAddress, MappedSnapshotsFollowTheSameProtectionTransitions) { RunIsolated(MappedSnapshotTransitionProbe); }
 TEST(EmulatorGuestDeviceAddress, RestoredGpuReadAfterCpuOnlyProtectionSeesCpuWrites) { RunIsolated(CpuOnlyTransitionProbe); }
 TEST(EmulatorGuestDeviceAddress, RecordedGuestDeviceAddressReadRetainsSnapshot) { RunIsolated(RecordedGuestDeviceAddressReadRetainsSnapshotProbe); }
 TEST(EmulatorGuestDeviceAddress, PendingGuestDeviceAddressReaderDefersRefresh) { RunIsolated(PendingGuestDeviceAddressReaderDefersRefreshProbe); }

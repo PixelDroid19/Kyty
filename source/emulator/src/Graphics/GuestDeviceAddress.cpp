@@ -57,6 +57,7 @@ struct Chunk
 	uint64_t       window   = 0;
 	void*          copy   = nullptr; // tracked snapshot that was imported
 	std::size_t    copy_alignment = 0;
+	bool           mapped     = false; // `copy` is the mapping of `memory`, not a host allocation
 	uint64_t       generation = 0;   // dirty-tracker generation of the snapshot
 	bool           tracked    = false; // snapshot is refreshed from tracker generations
 	bool           registered = false; // this chunk holds a dirty-tracker registration
@@ -200,7 +201,10 @@ void DestroyImport(VkDevice device, const Chunk& chunk)
 	vkDestroyBuffer(device, chunk.buffer, nullptr);
 	vkFreeMemory(device, chunk.memory, nullptr);
 	Kernel::Memory::KernelUnmapPhysicalAlias(chunk.alias);
-	FreeHostSnapshot(chunk.copy, chunk.copy_alignment);
+	if (!chunk.mapped)
+	{
+		FreeHostSnapshot(chunk.copy, chunk.copy_alignment);
+	}
 	if (chunk.registered)
 	{
 		(void)GpuDirtyPageTracker::Instance().UnregisterRange(chunk.guest, chunk.span);
@@ -392,8 +396,7 @@ VkBuffer CreateAddressBuffer(const GraphicContext* ctx, uint64_t size, VkExterna
 	info.pNext       = external ? &external_info : nullptr;
 	info.size        = size;
 	// Imports also receive device-side publications of GPU results.
-	info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-	             (external ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : 0u);
+	info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 	VulkanApplyResourceSharing(*ctx, &info.sharingMode, &info.queueFamilyIndexCount, &info.pQueueFamilyIndices);
 	VkBuffer buffer = nullptr;
 	return vkCreateBuffer(ctx->device, &info, nullptr, &buffer) == VK_SUCCESS ? buffer : nullptr;
@@ -453,16 +456,23 @@ struct PreparedHostImport
 	             VkExternalMemoryHandleTypeFlags handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)
 	{
 		device = ctx->device;
-		VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_properties {};
-		host_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT;
-		VkPhysicalDeviceProperties2 physical_properties {};
-		physical_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-		physical_properties.pNext = &host_properties;
-		vkGetPhysicalDeviceProperties2(ctx->physical_device, &physical_properties);
-		min_pointer_alignment = host_properties.minImportedHostPointerAlignment;
-		if (!GuestHostImportPlan::IsPowerOfTwo(min_pointer_alignment))
+		if (handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)
 		{
-			return false;
+			if (!ctx->guest_host_pointer_import_supported)
+			{
+				return false;
+			}
+			VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_properties {};
+			host_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT;
+			VkPhysicalDeviceProperties2 physical_properties {};
+			physical_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+			physical_properties.pNext = &host_properties;
+			vkGetPhysicalDeviceProperties2(ctx->physical_device, &physical_properties);
+			min_pointer_alignment = host_properties.minImportedHostPointerAlignment;
+			if (!GuestHostImportPlan::IsPowerOfTwo(min_pointer_alignment))
+			{
+				return false;
+			}
 		}
 
 		buffer = CreateAddressBuffer(ctx, size, handle_type);
@@ -642,8 +652,9 @@ enum class PhysicalImport
 PhysicalImport ProbePhysicalImport(GraphicContext* ctx)
 {
 	PreparedHostImport prepared;
-	auto*              backing = prepared.Prepare(ctx, kPageBytes) ? Core::VirtualMemory::CreateSharedBacking(kPageBytes) : nullptr;
-	const uint64_t     view    = backing == nullptr ? 0
+	auto*              backing      = Core::VirtualMemory::CreateSharedBacking(kPageBytes);
+	const bool         host_pointer = backing != nullptr && prepared.Prepare(ctx, kPageBytes);
+	const uint64_t     view         = !host_pointer ? 0
 	                                                : Core::VirtualMemory::MapSharedAligned(
 	                                                      backing, 0, 0, kPageBytes, Core::VirtualMemory::Mode::ReadWrite,
 	                                                      std::max(prepared.min_pointer_alignment, kPageBytes));
@@ -787,6 +798,78 @@ bool ImportPhysicalRun(GraphicContext* ctx, Registry* registry, Range* range, ui
 	return true;
 }
 
+// Backs a snapshot with mapped device-addressable memory, for devices that do
+// not import host pointers. CPU-cached memory keeps write-back reads fast.
+bool AllocateMappedSnapshot(GraphicContext* ctx, uint64_t span, Chunk* out)
+{
+	VkBuffer buffer = CreateAddressBuffer(ctx, span, 0);
+	if (buffer == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	VkMemoryRequirements requirements {};
+	vkGetBufferMemoryRequirements(ctx->device, buffer, &requirements);
+	VkPhysicalDeviceMemoryProperties properties {};
+	vkGetPhysicalDeviceMemoryProperties(ctx->physical_device, &properties);
+	uint32_t flags[VK_MAX_MEMORY_TYPES] {};
+	for (uint32_t i = 0; i < properties.memoryTypeCount && i < VK_MAX_MEMORY_TYPES; i++)
+	{
+		flags[i] = properties.memoryTypes[i].propertyFlags;
+	}
+	constexpr uint32_t coherent  = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	uint32_t           type_index = 0;
+	const bool         typed =
+	    GuestHostImportPlan::SelectMemoryType(requirements.memoryTypeBits, flags, properties.memoryTypeCount,
+	                                          coherent | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, &type_index) ||
+	    GuestHostImportPlan::SelectMemoryType(requirements.memoryTypeBits, flags, properties.memoryTypeCount, coherent, &type_index);
+	VkMemoryAllocateFlagsInfo allocate_flags {};
+	allocate_flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+	allocate_flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+	VkMemoryAllocateInfo allocate {};
+	allocate.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocate.pNext           = &allocate_flags;
+	allocate.allocationSize  = requirements.size;
+	allocate.memoryTypeIndex = type_index;
+	VkDeviceMemory memory  = VK_NULL_HANDLE;
+	void*          mapping = nullptr;
+	if (!typed || vkAllocateMemory(ctx->device, &allocate, nullptr, &memory) != VK_SUCCESS ||
+	    vkBindBufferMemory(ctx->device, buffer, memory, 0) != VK_SUCCESS ||
+	    vkMapMemory(ctx->device, memory, 0, VK_WHOLE_SIZE, 0, &mapping) != VK_SUCCESS)
+	{
+		vkDestroyBuffer(ctx->device, buffer, nullptr);
+		vkFreeMemory(ctx->device, memory, nullptr);
+		return false;
+	}
+	out->buffer = buffer;
+	out->memory = memory;
+	out->device = BufferDeviceAddress(ctx->device, buffer);
+	out->copy   = mapping;
+	out->mapped = true;
+	return true;
+}
+
+// ImportChunk for devices that do not import host pointers: the snapshot is
+// the mapping itself, tracked or immutable under the same rules.
+bool ImportMappedChunk(GraphicContext* ctx, uint64_t guest, uint64_t span, Chunk* out)
+{
+	if (!AllocateMappedSnapshot(ctx, span, out))
+	{
+		return false;
+	}
+	auto&      tracker   = GpuDirtyPageTracker::Instance();
+	const bool writable  = Core::VirtualMemory::IsRangeWritable(guest, span);
+	out->registered      = writable && tracker.RegisterRange(guest, span);
+	out->tracked         = out->registered && SnapshotGuest(out->copy, guest, span, &out->generation);
+	const bool immutable = !writable && Core::VirtualMemory::CopyFromGuest(out->copy, guest, span);
+	if (out->tracked || immutable)
+	{
+		return true;
+	}
+	DestroyImport(ctx->device, *out);
+	*out = {};
+	return false;
+}
+
 // Imports [guest, guest + span) for a chunk mapping [guest, guest + size)
 // from a snapshot of flexible memory.
 // The guest view itself is never imported: dirty tracking and guest mprotect
@@ -803,6 +886,10 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 	out->guest = guest;
 	out->size  = size;
 	out->span  = span;
+	if (!ctx->guest_host_pointer_import_supported)
+	{
+		return ImportMappedChunk(ctx, guest, span, out);
+	}
 	PreparedHostImport prepared;
 	if (!prepared.Prepare(ctx, span))
 	{

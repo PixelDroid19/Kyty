@@ -3239,12 +3239,13 @@ static void VulkanCreate(WindowContext* ctx)
 				host_buffer_features = external_buffer_properties.externalMemoryProperties.externalMemoryFeatures;
 				host_buffer_compatible_types = external_buffer_properties.externalMemoryProperties.compatibleHandleTypes;
 			}
-			ctx->graphic_ctx.guest_device_address_supported =
-			    host_memory_extension && (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
-			    (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0 &&
-			    (host_buffer_compatible_types & VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT) != 0 &&
+			const bool device_addressing =
 			    address_features.bufferDeviceAddress == VK_TRUE && features2.features.shaderInt64 == VK_TRUE;
-			if (ctx->graphic_ctx.guest_device_address_supported &&
+			ctx->graphic_ctx.guest_host_pointer_import_supported =
+			    device_addressing && host_memory_extension && (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
+			    (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0 &&
+			    (host_buffer_compatible_types & VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT) != 0;
+			if (ctx->graphic_ctx.guest_host_pointer_import_supported &&
 			    !device_extensions.Contains(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, [](auto s, auto l) { return strcmp(s, l) == 0; }))
 			{
 				device_extensions.Add(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
@@ -3252,7 +3253,7 @@ static void VulkanCreate(WindowContext* ctx)
 			// Some drivers import only private anonymous host pointers; guest
 			// physical memory is shared, so it is imported as a dma-buf there.
 			VkExternalMemoryFeatureFlags dma_buf_features = 0;
-			if (ctx->graphic_ctx.guest_device_address_supported && has_ext(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+			if (device_addressing && has_ext(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
 			    has_ext(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME))
 			{
 				VkPhysicalDeviceExternalBufferInfo external_buffer_info {};
@@ -3269,6 +3270,9 @@ static void VulkanCreate(WindowContext* ctx)
 			ctx->graphic_ctx.guest_dma_buf_import_supported =
 			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
 			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0;
+			// Flexible memory is snapshotted either way; direct memory needs one of the imports.
+			ctx->graphic_ctx.guest_device_address_supported =
+			    ctx->graphic_ctx.guest_host_pointer_import_supported || ctx->graphic_ctx.guest_dma_buf_import_supported;
 			for (const char* extension: {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME})
 			{
 				if (ctx->graphic_ctx.guest_dma_buf_import_supported &&
