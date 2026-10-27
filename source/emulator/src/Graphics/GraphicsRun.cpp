@@ -1234,6 +1234,25 @@ void CommandProcessor::DeferWriteData(uint32_t* dst, const uint32_t* src, uint32
 	require_submission_success(register_result, "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
 }
 
+// A one- or two-dword DMA_DATA store follows the WRITE_DATA ordering below: behind a
+// consolidated wait, or behind a deferred store to the same bytes, it becomes visible
+// at end of pipe instead of at parse time.
+bool CommandProcessor::DeferWriteBehindPendingStore(uint32_t* dst, const uint32_t* src, uint32_t dw_num)
+{
+	Core::LockGuard lock(m_mutex);
+
+	if (dw_num != 1u && dw_num != 2u)
+	{
+		return false;
+	}
+	if (!m_consolidated_plain_wait && !HasPendingDeferredWrite(dst, dw_num * 4u))
+	{
+		return false;
+	}
+	DeferWriteData(dst, src, dw_num);
+	return true;
+}
+
 void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom,
                                  bool matching_wait_mem64)
 {

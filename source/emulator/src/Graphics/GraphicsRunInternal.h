@@ -380,6 +380,7 @@ public:
 	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom, bool matching_wait_mem64);
 	[[nodiscard]] bool HasPendingDeferredWrite(const uint32_t* dst, uint32_t size_bytes) const;
 	void DeferWriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num);
+	[[nodiscard]] bool DeferWriteBehindPendingStore(uint32_t* dst, const uint32_t* src, uint32_t dw_num);
 
 	void Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data);
 	[[nodiscard]] bool TakeSuspendedRun(SuspendedRun* run);
