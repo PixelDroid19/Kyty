@@ -5023,3 +5023,29 @@ matched on all of them. Failures shared with main, not caused by this branch:
   `GraphicsRenderAttachments.cpp`.
 - PPSA07393 crashes at boot (exit 139) on main and on this branch.
 - PPSA01341 reaches 2 presents on base and head; main was not run.
+
+## Intermittent guest write fault at boot (2026-10-27, open)
+
+- **Observed.** `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` sometimes
+  exits with 139 before or soon after its first present in bounded 120 s
+  strict runs (Intel Arc A770, xe). The same binary otherwise reaches 664
+  presents and the known `SLoadDwordx4` shader-emitter refusal. Counts on
+  the same host and day: branch head e712b190 crashed in 5 of 7 runs, its
+  parent 66bee914 in 1 of 6, and the head without 46156a93 in 2 of 4. The
+  crashes came in streaks: the last four runs, alternating head and parent,
+  all passed. The strict `games-matrix` sweep reported this as
+  `host_crash` at 17 presents. It is not a regression of the branch.
+- **Fault.** A guest thread in a bulk-write loop (destination register at the
+  start of a 208 MiB block, end register 0xd000000 bytes further) takes
+  SIGSEGV with `si_code` 2 (SEGV_ACCERR) on its first page. The page is
+  mapped but write-protected. Under gdb, with SIGSEGV passed to the
+  emulator's handler, the run completed normally, so most such faults are
+  claimed write watches; the fatal one is a protected page that the
+  handler (`source/lib/Core/src/VirtualMemory.cpp`, the POSIX
+  `sigaction(SIGSEGV)` path) does not claim.
+- **Excluded.** The tile-mode redescription of 46156a93: an env-gated trace
+  in both changed predicates never fired before the crash.
+- **Direction.** Log, for the unclaimed fault, the page's protection and
+  owner (GPU write watch, demand range, guest mapping) as the handler sees
+  it. The streaks suggest a race between a watch being installed or
+  released and the guest write, rather than a wrong mapping.
