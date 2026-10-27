@@ -4960,3 +4960,27 @@ acceptance remains open.
   verifying later: sharing SMEM load results across emulated wave64 halves and
   allocating split-wave dispatcher spill IDs in program order. Both overlap
   files we own; treat them as leads, never as patches.
+
+## EVENT_WRITE 0x38 packet form disagrees with its test (2026-10-27, open)
+
+- **Observed.** `KytyGraphicsDiagnosticsIntegration.SerializationAndBounds`
+  and `.EventWrite` fail on the current tree at "unsupported addressed event
+  follows the ordinary packet" (`VerifyEventWritePacketContract`,
+  `source/integration_test/src/GraphicsDiagnosticsIntegration.cpp`). The test
+  expects event type 0x38 with an address to keep the two-dword form, as
+  the addressed occlusion record in the graphics handoff states.
+- **Code.** `GraphicsDcbEventWrite` and `GraphicsDcbEventWriteGetSize`
+  (`source/emulator/src/Graphics/Graphics.cpp`) treat
+  `(event_type & 0xfe) == 0x38`, that is 0x38 and 0x39, as addressed.
+  `GetSize` came with the import closure in febdc198. The encoder predicate
+  was aligned to it in the merge 3868181f, without new evidence for 0x38
+  and without updating the test. The command processor publishes counters
+  only for 0x39, so a four-dword 0x38 packet is parsed and its address
+  ignored.
+- **Why it is not simply reverted.** The guest reserves command space from
+  `GetSize`; the encoder and `GetSize` must agree. Reverting only the
+  encoder would leave reserved words unwritten.
+- **Direction.** Find whether a title calls the size query or the writer
+  with 0x38 and an address (a bounded trace of both entry points), and what
+  the guest expects in the reserved words. Then make the encoder, `GetSize`
+  and the test follow that evidence together.
