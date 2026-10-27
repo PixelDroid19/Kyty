@@ -6,6 +6,43 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: dashed warp streaks on the studio logo (2026-10-26, open)
+
+- **Observed** (Intel A770, strict, branch `agent/astro-split-wave64`,
+  presents 1020-1140): the radial streaks behind the studio logo are drawn as
+  rows of short dashes instead of continuous lines; reference footage shows
+  continuous lines. A full-resolution capture (`KYTY_NATIVE_CAPTURE_MAX_EDGE=0`,
+  3840x2160) shows the same dashes, so it is not the capture downscale. The
+  default 1280-edge capture uses `SDL_SCALEMODE_NEAREST`
+  (`CaptureImageCodec.cpp`), which aliases thin lines further; judge thin
+  features on full-resolution captures.
+- **Scene structure** (draw census `KYTY_TRACE_DRAW_PS=all` from present
+  1100): every draw of the logo background is a full-screen pass; there is no
+  streak geometry. The 1080p HDR target is followed by a velocity pass
+  (R16G16 1920x1080), a tile-velocity image (160x560 R16G16) and a 64x16 R8
+  pattern texture read by loads, then a reconstruction pass, a bloom chain
+  (1920, 960, 480), an additive composite into the 2432x1368 scene target and
+  an upscale to 3840x2160.
+- **Excluded:**
+  - NGG primitive edge flags read as index bits: fixed (8518fc7e, 9-bit
+    indices, agreed by three independent implementations), streaks unchanged.
+  - Point size: the only point-list draws in the logo stretch are single
+    points with `PA_SU_POINT_SIZE = 0x00080008` (1 px), `PA_SU_POINT_MINMAX =
+    0xffff0000` and no vertex-exported size (`PA_CL_VS_OUT_CNTL = 0`), so the
+    ignored point registers do not change this scene.
+  - The instanced additive draw (48 indices x 150 instances): skipping it
+    leaves the dashes.
+  - The 64x16 pattern texture is read with the linear 256-element pitch that
+    its 4096-byte guest size implies; its content is a structured
+    three-value pattern (0, 0x7f, 0xfe), not random noise.
+- **Tooling limit:** `KYTY_AB_SKIP_PS_ADDR` on the reconstruction pass stops
+  the run in `GpuMemoryCreate.cpp:2582` (the skipped producer leaves a
+  contained render texture without a writer), so the pass cannot be isolated
+  that way.
+- **Next:** read the velocity and reconstruction passes per draw (a frame
+  debugger or bound-image dumps of the 1080p velocity and tile images) to test
+  whether the reconstruction samples a valid velocity.
+
 ## Robot platformer: Gen5 AGC HLE run reaches the tutorial level load (2026-10-26)
 
 - **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, `fc_script` with
