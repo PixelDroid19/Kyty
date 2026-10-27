@@ -170,6 +170,55 @@ a timeout also occurred. `within_deadline` and `final_error_observed` are separa
 requirements. Reports retain actual child return, timeout and stop provenance.
 New material baselines are written only after all acceptance gates pass.
 
+## RenderDoc frame captures
+
+A RenderDoc capture shows every pass of one host frame: the images each draw
+or dispatch writes and reads, their contents at any event, pipeline state and
+post-vertex-shader data. Use it when a native capture shows a wrong image and
+the pass that produced it is unknown. No emulator code is involved: the
+RenderDoc Vulkan layer is enabled through the environment and a script asks it
+for a capture from outside.
+
+Launch the run as usual (strict, bounded, frame-rate limited) with three
+extra variables:
+
+```bash
+ENABLE_VULKAN_RENDERDOC_CAPTURE=1 SDL_VIDEODRIVER=x11 RENDERDOC_CAPFILE=<evidence>/frame
+```
+
+The layer hides `VK_KHR_wayland_surface`, so the window must use X11
+(XWayland on Wayland desktops). It also hides `VK_EXT_external_memory_host`;
+guest device addressing then imports direct memory as a dma-buf and keeps
+flexible-memory snapshots in mapped device memory, so the strict path still
+runs. While the title runs, queue the capture of a host present:
+
+```bash
+RDOC_FRAMES=1110 RDOC_TIMEOUT=330 RDOC_STOP=1 RDOC_LOG=<evidence>/queue.log qrenderdoc --python scripts/renderdoc/queue_capture.py
+```
+
+`RDOC_FRAMES` takes a comma-separated list of present numbers, `RDOC_STOP=1`
+ends the title once the captures are written, and the log names each `.rdc`.
+List the frame's passes, and save chosen images as EXR, with:
+
+```bash
+RDOC_CAPTURE=<evidence>/frame_frame1110.rdc RDOC_OUT=<evidence>/passes RDOC_SAVE=<eid>:<resource> qrenderdoc --python scripts/renderdoc/frame_passes.py
+```
+
+`frame_passes.txt` has one line per draw or dispatch: event id, index and
+instance counts, written images (`rw` marks storage images) and sampled images,
+each as `resource:WxH:format`; resource ids differ between captures, so take
+them from the same capture's table. Follow an image from the pass that writes it to
+the passes that read it, then save it at the events around the suspect pass.
+Open the `.rdc` in `qrenderdoc` for interactive inspection; the same Python
+API (`SetFrameEvent`, `GetPipelineState`, `GetPostVSData`) answers narrower
+questions in a few lines.
+
+Limits: a capture of a 4K title frame is about 2.5 GB and replays in a few
+minutes; keep captures in the evidence directory, not in `/tmp` (tmpfs on most
+hosts) or the repository. Capture and replay run on the host driver, so a
+capture shows Kyty's translation of the guest frame, not the console's output;
+compare it with a reference before calling a pass wrong.
+
 ## Extending the system
 
 Add new evidence in one of three places:
