@@ -256,7 +256,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   10-25 fps. It is a guest allocation failure and is not yet shown to be an
   emulator defect; a native-rate run must show whether it persists.
 
-## Robot platformer: title ship and robots absent (2026-10-27, open)
+## Robot platformer: title ship and robots absent (2026-10-27, expected without a save)
 
 - **Setup.** `PPSA21567 - Astro Bot`, Intel Arc A770, Mesa ANV, strict,
   `KYTY_PRESENT_FPS_LIMIT=60`, idle title route, branch tip `8e4c0799`
@@ -297,13 +297,72 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     occlusion `EVENT_WRITE` 0x39 queries per frame; stepping the counter
     by 2^20 per query instead of 1 leaves the title unchanged.
   - Asset loading: the level reports loaded and started.
-- **Remaining leads, untested.** `IT_GET_LOD_STATS` is consumed without
+- **Cause: no gameplay save.** The maintainer confirmed that the title
+  screen shows the ship and its robots only after the first gameplay save
+  exists; the reference video was recorded with one, and these runs start
+  from empty save data. The missing draws are guest behavior, not a
+  renderer defect. Re-check the title after a run has reached gameplay and
+  written its first save.
+- **Not a lead any more.** `IT_GET_LOD_STATS` is still consumed without
   writing its report (`GraphicsRunOpParsers.cpp`, `cp_op_get_lod_stats`),
-  and title textures enable mip statistics counters (`MipStatsCntEn`)
-  that the binder ignores; a feedback-driven streamer that reads stale
-  reports could hold back the ship. A real report needs a producer for the
-  counters, not invented counts. The ship's placement also depends on the
-  title timeline; whether its clock advances was not checked.
+  and the binder ignores `MipStatsCntEn`; neither explains the title, and
+  a real report needs a producer for the counters, not invented counts.
+
+## Robot platformer: crash-site hub stops and intro cost (2026-10-27)
+
+- **Setup.** `PPSA21567 - Astro Bot`, Intel Arc A770, Mesa ANV, strict,
+  `KYTY_PRESENT_FPS_LIMIT=60`, `scripts/input/reach_first_gameplay.pad`,
+  branch `agent/astro-split-wave64` over `66bee914`, runs of 160-600 s.
+- **Stop 1, fragment transport budget.** Loading `hub_crashsite_tutorial`
+  ended in `fragment transport could not reserve host storage` for a
+  1920x1080 draw of 4343 primitives with 45 lane words: one band of the
+  whole draw needs more than the 40 MiB the transport took from the
+  64 MiB per-recording scratch pool. Fixed by planning a draw as ordered
+  primitive chunks replayed per band (`PlanDraw`; strip chunks start on an
+  even primitive so the winding holds), and by moving the transport
+  storage to one 128 MiB block per command pool (`TransportStorage`),
+  which the tile barriers order across recordings of the same queue. With
+  40 MiB, planned passes for that draw were 720 (543-primitive chunks,
+  12-row bands); with 128 MiB they are 50. The pool block also replaces
+  up to eight 40 MiB scratch entries per queue.
+- **Stop 2, linear storage over tiled targets.** The next run exited at
+  `!create_all_the_same` for a 960x540 linear six-level storage texture
+  created over tiled render targets and storage textures at the same
+  address. A view whose tile mode differs from the existing object's is a
+  recycled allocation, not a view of the same texels: a tile-mode mismatch
+  now counts as a redescription (`StorageTextureRedescribesRange`,
+  `StorageTextureRedescribesRenderTarget`). The run passed the object
+  without an exit.
+- **Intro cost, vertex program cache.** The slow windows before the hub
+  (1.3-1.7 fps) were CP bound: draw state setup took 1.2-1.6 ms per draw,
+  almost all in `ShaderGetInputInfoVS`, and inside it 1.9 ms per call in
+  the NGG front proof, which is memoized per cached program. The program
+  cache emptied itself 78 times in 160 s on its 64 MiB byte budget (about
+  45 fused fronts, up to 5.5 MiB of IR each), so every draw re-parsed its
+  program and re-proved its front. With a 256 MiB budget the cache never
+  empties on the route: the pre-hub window went from 1.7 to 6.5 fps, the
+  ship cutscene from 1.3 to 5.6-7.2 fps, and frame 3169 is reached at
+  270 s instead of 360 s. Peak host RSS was 10.8 GB at frame 3321, against
+  10.2 GB at frame 3190 before the change (not the same point).
+- **Verified.** No transport or alias exit through the hub load in three
+  runs; `kyty_unit_test` 2653 tests pass; the boundary, archive and
+  checked-in shader gates pass.
+- **Open.**
+  - The hub runs at 0.7 fps and is GPU bound: 18.6 s of each 30 s window
+    are fence waits (791 waits, up to 395 ms each). Which passes cost GPU
+    time needs per-event timings.
+  - In the ship cutscene the ship's silhouette ends in 16x16-pixel blocks
+    (at the 2432x1368 internal resolution) where the background should
+    show. Not localized yet.
+  - One earlier run (before the pool block) lost the device on an xe
+    `Timedout job` while hundreds of transport passes were recorded per
+    draw; it did not recur in three later runs, so the cause is open.
+  - `EmulatorGraphicsState.StorageTextureArrayDescriptorsAreViewsOfTheLiveArray`
+    (`source/unit_test/src/emulator/UnitTestEmulatorGraphicsState.cpp`,
+    line 6296) fails when run alone and passes in its suite:
+    `StorageTextureObject::Equal` reads the process-wide guest generation
+    (`GuestIsGen5`), which an earlier test sets. The test should set the
+    generation itself.
 
 ## Robot platformer: logo particles through a split geometry pass (2026-10-22)
 
@@ -1164,9 +1223,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   different structure, not the one the looping kernel walks. Bounds of the
   scalar-load stride, and a missing high-word clear in wave32 vector
   compares (the native path already drops it).
-- Open: the reference video shows the flying ship with robots on the title
-  screen; Kyty shows only the background and the logo (localized in
-  "Robot platformer: title ship and robots absent", 2026-10-27). The graphics
+- Resolved as expected behavior: the reference video shows the flying ship
+  with robots on the title screen because it was recorded with a gameplay
+  save; with empty save data the guest submits neither ("Robot platformer:
+  title ship and robots absent", 2026-10-27). The graphics
   diagnostics `EVENT_WRITE` contract fails on the current tree: the test
   expects event 0x38 to keep the short packet form, while
   `GraphicsDcbEventWrite` and `GraphicsDcbEventWriteGetSize`
@@ -1947,7 +2007,8 @@ Known approximations and debt recorded by this chain:
   and show the logo, ship and asteroid field without visible corruption.
   Corrected on 2026-10-27: the present-1343 capture shows the flying title
   letters and warp streaks, not the ship; the title ship and its robots are
-  absent there (see "Robot platformer: title ship and robots absent"). The
+  absent there because no gameplay save exists yet (see "Robot platformer:
+  title ship and robots absent"). The
   same agent sample reports 5.6 fps at present 1343; performance is a separate
   open item. The tutorial still stops at the mixed-view storage alias above.
 - **Measured load-window cost.** An agent performance window over present

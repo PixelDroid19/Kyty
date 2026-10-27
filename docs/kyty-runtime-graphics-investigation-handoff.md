@@ -388,16 +388,25 @@ against the same correct gameplay capture.
   The debug image dump still does not submit the recording in progress.
   Details: "Robot platformer: title screen save cards" in
   `docs/titles/robot-platformer.md`.
-- Robot-platformer title ship and robots absent (2026-10-27, open). The
-  guest loads and starts its title-ship level but submits no ship or robot
-  draw; the G-buffer holds only the logo letters. Excluded: a regression
-  (absent since at least 2026-10-18), GPU predication, synthetic
-  occlusion-query magnitude (a 2^20 step per query changes nothing) and
-  skipped draws. The all-zero output of the title's merged ES/GS effect
-  draws matches emitters with no live particles and is not, by itself, a
-  geometry-pass defect. Untested leads: the unproduced `GET_LOD_STATS`
-  report and ignored mip-statistics counters, and the title timeline
-  clock. Details: "Robot platformer: title ship and robots absent" in
+- Robot-platformer crash-site hub (2026-10-27). Two hub-load stops fixed:
+  the fragment transport now plans a draw as primitive chunks over one
+  128 MiB storage block per command pool (a 4343-primitive full-screen
+  draw went from no plan to 50 passes), and a tile-mode mismatch between
+  a storage view and an existing object counts as a redescription. The
+  vertex program cache emptied every few frames on a 64 MiB budget and
+  each draw re-proved its NGG front; at 256 MiB the ship cutscene went
+  from 1.3 to about 6 fps. Open: the hub is GPU bound at 0.7 fps, and the
+  cutscene ship ends in 16x16 blocks. Details: "Robot platformer:
+  crash-site hub stops and intro cost" in `docs/titles/robot-platformer.md`.
+- Robot-platformer title ship and robots absent (2026-10-27, expected
+  without a save). The guest loads and starts its title-ship level but
+  submits no ship or robot draw; the title shows them only once a gameplay
+  save exists, and these runs start from empty save data. Excluded as
+  renderer causes: GPU predication, synthetic occlusion-query magnitude
+  (a 2^20 step per query changes nothing) and skipped draws. The all-zero
+  output of the title's merged ES/GS effect draws matches emitters with no
+  live particles and is not, by itself, a geometry-pass defect. Details:
+  "Robot platformer: title ship and robots absent" in
   `docs/titles/robot-platformer.md`.
 - Racing-title shadows (2026-10-11, partly open). The two shadow-receiver
   pixel shaders take one `image_sample_c_lz` against a 2048x1024 D16 atlas
