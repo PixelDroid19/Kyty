@@ -323,9 +323,7 @@ FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, co
 	// guest source lanes. When the device pins the exact guest width every lane
 	// is a real host invocation, so the refusal does not apply; semantic
 	// refusals (a mask used as a number and the like) still do.
-	// DIAG-WAVEEXACT: temporary switch to isolate the exact-width acceptance.
-	const bool  diag_exact_off = std::getenv("KYTY_DIAG_EXACT_WAVE_OFF") != nullptr;
-	const bool  exact_host = !diag_exact_off && native.proof == ShaderNativeWaveProof::ExactSubgroup && mapping.supported &&
+	const bool  exact_host = native.proof == ShaderNativeWaveProof::ExactSubgroup && mapping.supported &&
 	                        mapping.size == native.guest_wave_size;
 	const char* refusal = exact_host && ShaderNativeWaveParticipationRefusal(native.refusal_reason) ? nullptr
 	                                                                                               : native.refusal_reason;
