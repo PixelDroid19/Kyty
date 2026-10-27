@@ -6,56 +6,49 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
-## Robot platformer: dashed warp streaks on the studio logo (2026-10-26, open)
+## Robot platformer: dashed warp streaks on the studio logo (2026-10-26, fixed 2026-10-27)
 
 - **Observed** (Intel A770, strict, branch `agent/astro-split-wave64`,
-  presents 1020-1140): the radial streaks behind the studio logo are drawn as
-  rows of short dashes instead of continuous lines; reference footage shows
-  continuous lines. A full-resolution capture (`KYTY_NATIVE_CAPTURE_MAX_EDGE=0`,
-  3840x2160) shows the same dashes, so it is not the capture downscale. The
-  default 1280-edge capture uses `SDL_SCALEMODE_NEAREST`
-  (`CaptureImageCodec.cpp`), which aliases thin lines further; judge thin
-  features on full-resolution captures.
-- **Scene structure** (RenderDoc capture of present 1110, Intel A770; the
-  earlier draw census missed this): the streaks are geometry. One indexed draw
-  (72000 indices over 24001 vertices, sampling a 1024x1024 BC6H star atlas)
-  writes the 1080p HDR target and a second RGBA16F target, and the dashes are
-  already in the HDR target right after it, before any post pass. Its quads are
-  mostly long and thin (aspect up to 20:1). Later passes: object draws into a
-  1920x1080 R16G16 float velocity target; an R8G8 edge image from the HDR
-  target, combined with a 160x560 R8G8 and a 64x16 R8 lookup into an RGBA8
-  weight image and blended back (sizes and order match a morphological
-  anti-aliasing chain); a temporal composite into the 2432x1368 scene target;
-  a draw that reads that target and the velocity target; bloom; and an
-  upscale to 3840x2160.
-- **Velocity is near zero.** Every texel of the velocity target is below
-  1e-5 in magnitude, and the star draw's second exported clip-space position
-  (laid out like a previous-frame position) lies within 0.1 px of the first on
-  screen for all 6316 quads with four distinct vertices in front of the
-  camera. The velocity pass changes 2985 of 3.3 million pixels. In
-  this frame no post pass would join the dashes unless the guest's camera
-  motion between frames is wrong.
-- **Excluded:**
-  - NGG primitive edge flags read as index bits: fixed (8518fc7e, 9-bit
-    indices, agreed by three independent implementations), streaks unchanged.
-  - Point size: the only point-list draws in the logo stretch are single
-    points with `PA_SU_POINT_SIZE = 0x00080008` (1 px), `PA_SU_POINT_MINMAX =
-    0xffff0000` and no vertex-exported size (`PA_CL_VS_OUT_CNTL = 0`), so the
-    ignored point registers do not change this scene.
-  - The instanced additive draw (48 indices x 150 instances): skipping it
-    leaves the dashes.
-  - The 64x16 pattern texture is read with the linear 256-element pitch that
-    its 4096-byte guest size implies; its content is a structured
-    three-value pattern (0, 0x7f, 0xfe), not random noise.
-  - Missing mips on the star atlas: the guest T# declares one level
-    (`max_mip=0`, `last_level=0`, tile 9), and Kyty creates one level.
-- **Tooling:** `KYTY_AB_SKIP_PS_ADDR` cannot isolate the reconstruction pass
-  (the run stops in `GpuMemoryCreate.cpp:2582`); RenderDoc captures replace it
-  (`docs/graphics-captures.md`).
-- **Next:** check whether the guest camera really moves less than 0.1 px
-  between presents here (guest frame time against the presented interval), and
-  compare a reference frame at the same moment of the logo to decide whether
-  the dashes are the geometry's own density.
+  presents 1020-1140): radial dashed streaks covered the screen behind the
+  studio logo. Reference footage of the same moment shows the logo on a calm
+  star field with no streaks. A full-resolution capture
+  (`KYTY_NATIVE_CAPTURE_MAX_EDGE=0`) showed the same streaks, so the capture
+  downscale was not involved.
+- **Scene structure** (RenderDoc capture of present 1110): the streaks were
+  geometry. One indexed draw of the title skybox mesh (72000 indices, star
+  atlas, 1080p HDR target) already held them before any post pass.
+- **Cause.** The mesh file is read whole by AMPR into guest memory and stores
+  72000 32-bit indices (6484..54483, two triangles per quad). The guest draws
+  them with `INDEX_BUFFER_SIZE = 72000` and `DRAW_INDEX_OFFSET_2`, after
+  `sceAgcDcbSetIndexSize_0600(buf, 1, 0, 0)` (NID `-KRzWekV120`; the NID is the
+  hash of that name). Kyty handled the NID as a fixed "default" packet that
+  returned null for any non-zero argument, so the 32-bit request emitted
+  nothing and the previous 16-bit `VGT_INDEX_TYPE = 0x400` stayed active. Read
+  as 16-bit, every second index is 0, and half the triangles fan to vertex 0.
+  The live run issued 519 size-1 calls and 57885 size-0 calls in 100 s.
+- **Fix** (25467eb0): the NID emits `SET_UCONFIG_REG_INDEX VGT_INDEX_TYPE`
+  with `0x400 | size | cache_policy << 6 | per_instance_object_id << 14`. The
+  16-bit value matches the packet the guest stream already carried. The field
+  layout agrees with two independent secondary implementations. Out-of-range
+  arguments now stop the run.
+- **Verified:** a strict 150 s run of the clean binary shows the logo at
+  present 1195 on a clean star field, matching the reference footage. The
+  72000-index draw now resolves to 32-bit indices. `EmulatorGraphicsPackets.*`
+  (337) and the full `kyty_unit_test` (2652 passed, 3 skipped) pass, and so do
+  the three CTest gates.
+- **How it was found** (for similar bugs): a temporary trace dumped the PM4
+  packets before the draw and the index memory at draw time. A CPU hardware
+  watchpoint under gdb never fired, which pointed at a kernel or GPU writer,
+  and the AMPR read hook found the file. `perf` hardware breakpoints need
+  `perf_event_paranoid <= 1`.
+- **Excluded before the cause was found** (each left the streaks unchanged):
+  NGG primitive edge flags as index bits (8518fc7e), point size, the instanced
+  additive draw, the 64x16 pattern texture pitch, and missing atlas mips (the
+  guest T# declares one level).
+- **Open:** `sceAgcDcbSetIndexSize` (NID `GIIW2J37e70`) still emits
+  `IT_INDEX_TYPE`, which yields the same Kyty state. An index size of 2 (8-bit)
+  reaches `GraphicsRenderDrawIndex`, which only maps 16- and 32-bit and warns
+  otherwise.
 
 ## Robot platformer: Gen5 AGC HLE run reaches the tutorial level load (2026-10-26)
 
