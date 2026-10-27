@@ -1269,9 +1269,9 @@ static bool ShouldSkipUnsupportedGeShader(const HW::Context& ctx, const HW::User
 	{
 		char detail[160] {};
 		std::snprintf(detail, sizeof(detail),
-		              "stages=0x%08" PRIx32 " es=%d gs_back=%d gs_legacy=%d max_vert=0x%x out_prim=0x%x ge_ngg=0x%x"
+		              "stages=0x%08" PRIx32 " prim=0x%x es=%d gs_back=%d gs_legacy=%d max_vert=0x%x out_prim=0x%x ge_ngg=0x%x"
 		              " max_out=0x%08" PRIx32 " prim_group=0x%04" PRIx32 " vert_group=0x%04" PRIx32,
-		              stages, vertex_info.es_regs.data_addr != 0 ? 1 : 0, vertex_info.gs_back_addr != 0 ? 1 : 0,
+		              stages, ucfg.GetPrimType(), vertex_info.es_regs.data_addr != 0 ? 1 : 0, vertex_info.gs_back_addr != 0 ? 1 : 0,
 		              vertex_info.gs_regs.data_addr != 0 ? 1 : 0,
 		              sh_regs.m_vgtGsMaxVertOut, sh_regs.m_vgtGsOutPrimType, sh_regs.m_geNggSubgrpCntl,
 		              sh_regs.m_geMaxOutputPerSubgroup, static_cast<uint32_t>(ge_cntl.primitive_group_size),
@@ -1283,11 +1283,11 @@ static bool ShouldSkipUnsupportedGeShader(const HW::Context& ctx, const HW::User
 		{
 			++logs;
 			KYTY_LOG_INFO(
-			             "KYTY_GRAPHICS: skip unsupported GE draw stages=0x%08" PRIx32 " es=0x%012" PRIx64
+			             "KYTY_GRAPHICS: skip unsupported GE draw stages=0x%08" PRIx32 " prim=0x%x es=0x%012" PRIx64
 			             " gs_back=0x%012" PRIx64 " gs_legacy=0x%012" PRIx64 " max_vert=0x%08" PRIx32 " out_prim=0x%08" PRIx32
 			             " ge_ngg=0x%08" PRIx32 " max_out=0x%08" PRIx32 "\n",
-			             stages, vertex_info.es_regs.data_addr, vertex_info.gs_back_addr, vertex_info.gs_regs.data_addr, sh_regs.m_vgtGsMaxVertOut,
-			             sh_regs.m_vgtGsOutPrimType, sh_regs.m_geNggSubgrpCntl, sh_regs.m_geMaxOutputPerSubgroup);
+			             stages, ucfg.GetPrimType(), vertex_info.es_regs.data_addr, vertex_info.gs_back_addr, vertex_info.gs_regs.data_addr,
+			             sh_regs.m_vgtGsMaxVertOut, sh_regs.m_vgtGsOutPrimType, sh_regs.m_geNggSubgrpCntl, sh_regs.m_geMaxOutputPerSubgroup);
 		}
 		return true;
 	}
