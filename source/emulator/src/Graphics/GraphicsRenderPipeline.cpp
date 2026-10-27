@@ -115,7 +115,7 @@ VulkanColorAttachmentBlendAdmission VulkanValidateColorAttachmentBlendRequest(Vk
 }
 
 uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized,
-                                    bool uses_r_coordinate)
+                                    bool uses_r_coordinate, bool integer_border)
 {
 	if (operation == State::ImageSampleOperation::Mixed)
 	{
@@ -142,7 +142,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 		const auto& s = m_samplers.At(i);
 		if (s.r.fields[0] == r.fields[0] && s.r.fields[1] == r.fields[1] && s.r.fields[2] == r.fields[2] &&
 		    s.r.fields[3] == r.fields[3] && s.operation == operation && s.allow_unnormalized == allow_unnormalized &&
-		    s.uses_r_coordinate == uses_r_coordinate)
+		    s.uses_r_coordinate == uses_r_coordinate && s.integer_border == integer_border)
 		{
 			return i;
 		}
@@ -152,6 +152,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	s.operation           = operation;
 	s.allow_unnormalized  = allow_unnormalized;
 	s.uses_r_coordinate   = uses_r_coordinate;
+	s.integer_border      = integer_border;
 	s.vk                  = nullptr;
 
 	auto mag_filter = r.XyMagFilter();
@@ -187,15 +188,12 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 		return VK_COMPARE_OP_NEVER;
 	};
 
-	VkBorderColor border = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
+	VkBorderColor border = integer_border ? VK_BORDER_COLOR_INT_TRANSPARENT_BLACK : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
 	switch (r.BorderColorType())
 	{
-		case 0: border = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK; break;
-		case 1: border = VK_BORDER_COLOR_INT_OPAQUE_BLACK; break;
-		case 2:
-			border = VK_BORDER_COLOR_INT_OPAQUE_WHITE;
-			break;
-			KYTY_LOG_DEBUG("WARNING: unknown border color (continuing)\n");
+		case 1: border = integer_border ? VK_BORDER_COLOR_INT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK; break;
+		case 2: border = integer_border ? VK_BORDER_COLOR_INT_OPAQUE_WHITE : VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; break;
+		default: break;
 	}
 
 	sampler_info.sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;

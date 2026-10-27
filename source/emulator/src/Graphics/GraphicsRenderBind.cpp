@@ -4721,6 +4721,28 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 	                sampled_3d_uint_padding_image, sampled_3d_uint_padding_view);
 }
 
+// A Vulkan border color is an integer or a floating-point value and must match the numeric type of
+// the image whose texels it replaces. Samples read floating-point views and integer images are read
+// by loads, so the border is an integer only when every image the shader pairs with this sampler is.
+static bool SamplerBorderIsInteger(const ShaderTextureResources& textures, int sampler_index)
+{
+	bool paired   = false;
+	bool floating = false;
+	for (int i = 0; i < textures.textures_num; ++i)
+	{
+		const auto& descriptor = textures.desc[i];
+		if (descriptor.usage != ShaderTextureUsage::ReadOnly ||
+		    (descriptor.sampler_indices_mask & (1u << static_cast<uint32_t>(sampler_index))) == 0u)
+		{
+			continue;
+		}
+		const auto numeric = VulkanGen5ImageNumericType(descriptor.texture.Format());
+		paired             = true;
+		floating = floating || (numeric != GuestImageNumericType::UnsignedInteger && numeric != GuestImageNumericType::SignedInteger);
+	}
+	return paired && !floating;
+}
+
 static void PrepareSamplers(const ShaderSamplerResources& samplers, const ShaderTextureResources& textures,
                             uint64_t* sampler_ids, uint32_t** sgprs)
 {
@@ -4780,7 +4802,8 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, const Shader
 		const bool comparison_eligible = ShaderSamplerDepthComparisonEligible(textures, samplers, i);
 		const auto sampler_operation = State::ResolveSamplerBindingOperation(samplers.operations[i], comparison_eligible);
 		sampler_ids[i] = g_render_ctx->GetSamplerCache()->GetSamplerId(r, sampler_operation, allow_unnormalized,
-		                                                               BindSamplerUsesRCoordinate(textures, samplers.slots[i]));
+		                                                               BindSamplerUsesRCoordinate(textures, samplers.slots[i]),
+		                                                               SamplerBorderIsInteger(textures, i));
 
 		r.UpdateIndex(i);
 

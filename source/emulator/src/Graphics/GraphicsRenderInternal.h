@@ -507,7 +507,7 @@ public:
 
 	VkSampler GetSampler(uint64_t id);
 	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized,
-	                       bool uses_r_coordinate);
+	                       bool uses_r_coordinate, bool integer_border);
 	void      DeleteAllForTesting(GraphicContext* ctx);
 
 private:
@@ -517,6 +517,7 @@ private:
 		State::ImageSampleOperation operation {};
 		bool                  allow_unnormalized = true;
 		bool                  uses_r_coordinate  = true;
+		bool                  integer_border     = false;
 		VkSampler             vk = nullptr;
 	};
 

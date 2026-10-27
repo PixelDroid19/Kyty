@@ -5810,9 +5810,9 @@ void VerifyComparisonSamplerCacheIdentity()
 	Expect(vulkan.Initialize(), "Vulkan sampler context must initialize");
 	VerifyDepthStencilAttachmentAccess(vulkan.context.load_store_op_none_supported);
 	ShaderSamplerResource descriptor {};
-	const auto regular      = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::Regular, true, false);
-	const auto depth        = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference, true, false);
-	const auto depth_reused = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference, true, false);
+	const auto regular      = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::Regular, true, false, false);
+	const auto depth        = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference, true, false, false);
+	const auto depth_reused = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference, true, false, false);
 	Expect(regular != depth, "regular and depth-reference samplers must not alias");
 	Expect(depth == depth_reused, "identical depth-reference samplers must reuse the cache entry");
 	Expect(g_render_ctx->GetSamplerCache()->GetSampler(regular) != VK_NULL_HANDLE, "regular sampler must be created");
