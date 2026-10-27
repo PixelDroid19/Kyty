@@ -684,6 +684,9 @@ void Body::SetScope(const ShaderOperand& op, int node)
 
 bool Body::Branch(const ShaderInstruction& inst)
 {
+	// EXEC node 0 is the entry vertex-count mask, never empty: a launch has a vertex and a host subgroup a live
+	// invocation. An EXECZ branch under it is never taken, so its edge adds no path.
+	if (inst.type == Type::SCbranchExecz && m_shape.exec == 0) { return true; }
 	// A branch on EXEC is decided per host subgroup but per guest wave. It skips a region only for lanes that are all
 	// inactive, so the region's vector writes are masked either way; its scalar writes are not (see OpenRegion).
 	// A VCC branch leaves EXEC alone: a non-uniform one would run vector writes for lanes chosen by other lanes.

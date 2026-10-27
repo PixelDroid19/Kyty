@@ -119,6 +119,40 @@ Words FetchBody(bool uniform_compare = true, bool lane_data_to_vector = false, u
 	return body;
 }
 
+// A Wave32 front that takes its counts from gs_tg_info (s2), allocates only on wave 0 of
+// the subgroup and masks lanes by their subgroup position (wave id * 32 + lane).
+// Independently authored; `export_lane_position` exports that position as vertex data.
+Words SubgroupCountFront(bool export_lane_position)
+{
+	Words words;
+	Sop2(words, 39, 30, 3, 255, (4u << 16u) | 24u);  // s_bfe_u32 s30, s3, wave id [27:24]
+	Sop1(words, 3, kExecLoReg, Inline(-1));           // s_mov_b32 exec_lo, -1
+	Sop2(words, 39, 31, 2, 255, (9u << 16u) | 22u);  // s_bfe_u32 s31, s2, primitives [30:22]
+	Sop2(words, 39, 32, 2, 255, (9u << 16u) | 12u);  // s_bfe_u32 s32, s2, vertices [20:12]
+	Sopp(words, 10);                                  // s_barrier
+	Append(words, Sopc(7, Inline(0), 30));            // s_cmp_lg_u32 0, s30
+	Sopp(words, 5, 3);                                // s_cbranch_scc1 over the allocation
+	Sop2(words, 30, 34, 31, Inline(12));              // s_lshl_b32 s34, s31, 12
+	Sop2(words, 16, 124, 32, 34);                     // s_or_b32 m0, s32, s34
+	Sopp(words, 16, 9);                               // s_sendmsg GS_ALLOC_REQ
+	Sop2(words, 30, 33, 30, Inline(5));               // s_lshl_b32 s33, s30, 5
+	words.push_back(0xd4000000u | (0x365u << 16u) | 2u);  // v_mbcnt_lo_u32_b32 v2, -1, s33
+	words.push_back(Inline(-1) | (33u << 9u));
+	Append(words, Vopc(0xd4, 31, 2));                 // v_cmpx_gt_u32 s31, v2
+	Sopp(words, 8, 2);                                // s_cbranch_execz over the primitive export
+	Exp(words, 20, 1, true, 0, 0, 0, 0);              // exp prim v0 done
+	Sopp(words, 12, 0xff0f);                          // s_waitcnt expcnt(0)
+	Sop1(words, 3, kExecLoReg, Inline(-1));           // s_mov_b32 exec_lo, -1
+	Append(words, Vopc(0xd4, 32, 2));                 // v_cmpx_gt_u32 s32, v2
+	Sopp(words, 8, 4);                                // s_cbranch_execz to the terminator
+	Vop1(words, 1, 13, 256u + 5u);                    // v_mov_b32 v13, v5
+	Vop1(words, 1, 14, 256u + 8u);                    // v_mov_b32 v14, v8
+	const uint32_t x = export_lane_position ? 2u : 13u;
+	Exp(words, 12, 15, true, x, 13, 14, 14);          // exp pos0 done
+	Sopp(words, 1);                                   // s_endpgm
+	return words;
+}
+
 Words FetchBodyWithPositionAfterDone()
 {
 	Words body = FetchBody();
@@ -404,6 +438,20 @@ TEST(EmulatorNggFront, ProvesEveryLaunchOfBothArchitecturalWidths)
 			Check(front.lane_local && front.rejection == ShaderNggPassthroughRejection::None && front.reason.IsEmpty(),
 			      "universal proof for the wave width");
 		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggFront, ProvesAWave32FrontThatReadsSubgroupCountsAndWaveId)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto code  = Parse(SubgroupCountFront(false));
+		const auto front = ShaderProveNggFrontLaneLocal(code, 32u);
+		if (!front.lane_local) { std::fprintf(stderr, "refused pc=0x%x: %s\n", front.refusal_pc, front.reason.c_str()); }
+		Check(front.lane_local, "one wave per subgroup: counts from s2, allocation on wave 0, lanes masked by position");
+		Check(!ShaderProveNggFrontLaneLocal(Parse(SubgroupCountFront(true)), 32u).lane_local,
+		      "a lane position exported as vertex data is not lane local");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }

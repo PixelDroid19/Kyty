@@ -3187,7 +3187,12 @@ KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty)
 {
 	if (spirv->GetCsInputInfo() == nullptr)
 	{
-		return false;
+		// A fused NGG front made lane local from exact wave state passed the front proof, which
+		// models one guest wave per host subgroup and admits a barrier only outside any memory
+		// access (ShaderNggPassthroughProof.cpp): the barrier has nothing to wait for or order.
+		const auto* vs = spirv->GetVsInputInfo();
+		return vs != nullptr && vs->gs_prolog && vs->native_wave.proof == ShaderNativeWaveProof::LaneLocal &&
+		       ShaderUsesNativeWaveState(spirv->GetCode());
 	}
 
 	const auto execution_scope = spirv->GetConstantUint(SPIRV_SCOPE_WORKGROUP);

@@ -1253,11 +1253,15 @@ static bool ShouldSkipUnsupportedGeShader(const HW::Context& ctx, const HW::User
 	// Supported NGG vertex path: passthrough stages mask with ES program, GS
 	// checksum, zero max-vert-out (hardware NGG passthrough), and a known
 	// GS output primitive type. Wider GE/NGG configurations remain unmodeled.
-	const bool ngg_vertex_path = stages == 0x02002000u && vertex_info.es_regs.data_addr != 0 &&
+	// The verified passthrough shape, in Wave64 or Wave32 (GS_W32_EN, bit 22).
+	constexpr uint32_t kGsWave32   = 1u << 22u;
+	const auto&        stages_raw  = ctx.GetShaderStagesRaw();
+	const bool         passthrough = stages_raw.known && (stages_raw.value & ~kGsWave32) == 0x02002000u;
+	const bool ngg_vertex_path = passthrough && vertex_info.es_regs.data_addr != 0 &&
 	                             vertex_info.gs_regs.chksum != 0 && sh_regs.m_vgtGsMaxVertOut == 0x00000000u &&
 	                             is_known_gs_out_prim_type(sh_regs.m_vgtGsOutPrimType);
 
-	const bool unsupported_stage_mask = (stages != 0 && stages != 0x02002000u);
+	const bool unsupported_stage_mask = (stages != 0 && !passthrough);
 	const bool unsupported_gs_stage =
 	    (vertex_info.es_regs.data_addr != 0 && vertex_info.gs_regs.data_addr != 0 && !ngg_vertex_path);
 	const bool ge_group_size = ge_cntl.primitive_group_size > 0x0040 || ge_cntl.vertex_group_size > 0x0040;

@@ -3,6 +3,8 @@
 #include "Emulator/Graphics/ShaderNggFrontBody.h"
 #include "Emulator/Log.h"
 
+#include <algorithm>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -38,31 +40,50 @@ static ShaderNggFrontProof ProveWholeProgram(const ShaderCode& code, uint32_t gu
 	return front;
 }
 
+// Every launch must end its prologue at one shared instruction. A launch whose EXEC
+// reaches the count mask early (every lane live) is walked on to the latest end.
+static ShaderNggFrontProof ProveSharedPrologue(const ShaderCode& code, uint32_t guest_wave_size, uint32_t first_end,
+                                               uint32_t* end, ShaderNggScalarDependencies* wave_scalars)
+{
+	*end = ShaderNggPassthroughNoInstruction;
+	for (uint32_t vertices = 1; vertices <= guest_wave_size; ++vertices)
+	{
+		for (uint32_t primitives = 1; primitives <= guest_wave_size; ++primitives)
+		{
+			const ShaderNggPassthroughCounts counts {guest_wave_size, vertices, primitives};
+			const auto                       proof = ShaderAnalyzeNggPassthroughPrologue(code, counts, first_end);
+			if (!proof.prologue_proven) { return Refusal(counts, proof); }
+			if (*end != ShaderNggPassthroughNoInstruction && *end != proof.prologue_end_index)
+			{
+				ShaderNggFrontProof front;
+				front.refused_counts = counts;
+				front.rejection      = ShaderNggPassthroughRejection::ExecMaskMismatch;
+				front.reason         = "the prologue ends at a different instruction for another launch";
+				*end                 = std::max(*end, proof.prologue_end_index); // The latest end seen, to retry from.
+				return front;
+			}
+			*end = proof.prologue_end_index;
+			*wave_scalars |= proof.wave_dependent_scalars;
+		}
+	}
+	ShaderNggFrontProof front;
+	front.lane_local = true;
+	return front;
+}
+
 // The scalar prologue is proved exactly for every launch; what follows it is proved
 // lane local once, from the scalar words the prologue leaves launch dependent.
 static ShaderNggFrontProof ProvePrologueAndBody(const ShaderCode& code, uint32_t guest_wave_size)
 {
 	uint32_t                    end = ShaderNggPassthroughNoInstruction;
 	ShaderNggScalarDependencies wave_scalars;
-	for (uint32_t vertices = 1; vertices <= guest_wave_size; ++vertices)
+	auto prologue = ProveSharedPrologue(code, guest_wave_size, 0, &end, &wave_scalars);
+	if (!prologue.lane_local && prologue.rejection == ShaderNggPassthroughRejection::ExecMaskMismatch)
 	{
-		for (uint32_t primitives = 1; primitives <= guest_wave_size; ++primitives)
-		{
-			const ShaderNggPassthroughCounts counts {guest_wave_size, vertices, primitives};
-			const auto                       proof = ShaderAnalyzeNggPassthroughPrologue(code, counts);
-			if (!proof.prologue_proven) { return Refusal(counts, proof); }
-			if (end != ShaderNggPassthroughNoInstruction && end != proof.prologue_end_index)
-			{
-				ShaderNggFrontProof front;
-				front.refused_counts = counts;
-				front.rejection      = ShaderNggPassthroughRejection::ExecMaskMismatch;
-				front.reason         = "the prologue ends at a different instruction for another launch";
-				return front;
-			}
-			end = proof.prologue_end_index;
-			wave_scalars |= proof.wave_dependent_scalars;
-		}
+		wave_scalars.reset();
+		prologue = ProveSharedPrologue(code, guest_wave_size, end, &end, &wave_scalars);
 	}
+	if (!prologue.lane_local) { return prologue; }
 	const auto body = ShaderProveNggFrontBodyLaneLocal(code, end + 1u, guest_wave_size, wave_scalars);
 	ShaderNggFrontProof front;
 	front.lane_local = body.lane_local;

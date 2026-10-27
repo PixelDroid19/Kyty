@@ -3387,6 +3387,19 @@ KYTY_RECOMPILER_FUNC(Recompile_VCubeMaF32_VdstVsrc0Vsrc1Vsrc2)
 	return true;
 }
 
+// Numeric counting uses the same logical-lane contract in every native-wave stage. A vertex
+// stage counts lanes only as a fused NGG front whose proof maps one guest wave to one host subgroup.
+static bool MbcntStageAdmitted(const ShaderCode& code, Spirv* spirv)
+{
+	if (code.GetType() == ShaderType::Pixel || code.GetType() == ShaderType::Compute)
+	{
+		return true;
+	}
+	const auto* vs = spirv->GetVsInputInfo();
+	return code.GetType() == ShaderType::Vertex && vs != nullptr && vs->gs_prolog &&
+	       vs->native_wave.proof == ShaderNativeWaveProof::LaneLocal;
+}
+
 static bool RecompileNativeMbcnt(const ShaderCode& code, uint32_t index, bool low_half, Spirv* spirv, String8* dst_source)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -3458,8 +3471,7 @@ static bool RecompileNativeMbcnt(const ShaderCode& code, uint32_t index, bool lo
 
 KYTY_RECOMPILER_FUNC(Recompile_VMbcntHiU32B32_SVdstSVsrc0SVsrc1)
 {
-	// Numeric counting uses the same logical-lane contract in both stages.
-	if (code.GetType() != ShaderType::Pixel && code.GetType() != ShaderType::Compute)
+	if (!MbcntStageAdmitted(code, spirv))
 	{
 		return false;
 	}
@@ -3468,8 +3480,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VMbcntHiU32B32_SVdstSVsrc0SVsrc1)
 
 KYTY_RECOMPILER_FUNC(Recompile_VMbcntLoU32B32_SVdstSVsrc0SVsrc1)
 {
-	// Numeric counting uses the same logical-lane contract in both stages.
-	if (code.GetType() != ShaderType::Pixel && code.GetType() != ShaderType::Compute)
+	if (!MbcntStageAdmitted(code, spirv))
 	{
 		return false;
 	}

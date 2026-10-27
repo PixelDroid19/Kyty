@@ -2405,12 +2405,17 @@ void Spirv::WriteLocalVariables()
 	if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog && !UsesGeometryCompute())
 	{
 		// One host subgroup is one guest wave (see ShaderNggFront.h): s3 counts every lane
-		// up to the highest live one, as vertices [7:0] and as primitives [15:8].
+		// up to the highest live one, as vertices [7:0] and as primitives [15:8]; s2 holds
+		// the same counts as the subgroup's, vertices [20:12] and primitives [30:22].
 		m_source += "%ngg_wave_msb = OpGroupNonUniformBallotFindMSB %uint %uint_3 %native_initial_ballot\n"
 		            "%ngg_wave_lanes = OpIAdd %uint %ngg_wave_msb %uint_1\n"
 		            "%ngg_wave_primitives = OpShiftLeftLogical %uint %ngg_wave_lanes %uint_8\n"
 		            "%ngg_wave_info = OpBitwiseOr %uint %ngg_wave_primitives %ngg_wave_lanes\n"
-		            "OpStore %s3 %ngg_wave_info\n";
+		            "OpStore %s3 %ngg_wave_info\n"
+		            "%ngg_group_vertices = OpShiftLeftLogical %uint %ngg_wave_lanes %uint_12\n"
+		            "%ngg_group_primitives = OpShiftLeftLogical %uint %ngg_wave_lanes %uint_22\n"
+		            "%ngg_group_info = OpBitwiseOr %uint %ngg_group_primitives %ngg_group_vertices\n"
+		            "OpStore %s2 %ngg_group_info\n";
 	}
 	if (UsesFragmentCompute())
 	{
@@ -3204,7 +3209,7 @@ void Spirv::FindConstants()
 		}
 	}
 
-	if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog) { AddConstantUint(8u); }
+	if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog) { for (uint32_t value: {8u, 12u, 22u}) { AddConstantUint(value); } }
 	if (UsesGeometryCompute() && m_bind != nullptr)
 	{
 		const auto& geometry = *m_geometry_compute_info;
@@ -3752,9 +3757,9 @@ void Spirv::FindVariables()
 	{
 		if (m_vs_input_info->gs_prolog)
 		{
-			// The fused vertex prolog always initializes its packed system SGPR,
-			// even if no guest instruction otherwise names that register.
-			AddVariable(ShaderOperandType::Sgpr, 3, 1);
+			// The fused vertex prolog always initializes its packed system SGPRs s2
+			// and s3, even if no guest instruction otherwise names those registers.
+			AddVariable(ShaderOperandType::Sgpr, 2, 2);
 			AddVariable(ShaderOperandType::Vgpr, 5, 1);
 			AddVariable(ShaderOperandType::Vgpr, 8, 1);
 		} else

@@ -151,8 +151,9 @@ struct ShaderNggPassthroughProof
 // lane mapping. The caller must establish the actual NGG-passthrough launch,
 // input identities, counts, program completeness/generation and output modes.
 //
-// Initial knowledge is ONLY s3[15:0] = {GSPrimCount, ESVertCount}; all other
-// scalar/EXEC bits are unknown. v0 is the original packed primitive on the
+// Initial knowledge is ONLY the counts of one guest wave per subgroup:
+// s2 = {ESVertCount [20:12], GSPrimCount [30:22]} and s3 = {ESVertCount [7:0],
+// GSPrimCount [15:8], wave id 0 [27:24]}; all other scalar/EXEC bits are unknown. v0 is the original packed primitive on the
 // primitive lanes; v5/v8 are symbolic vertex/instance IDs on the vertex lanes.
 // No scalar representative or s3 seed is produced. The retained instructions
 // read only defined per-vertex VGPRs, encoded constants and scalar words derived
@@ -174,8 +175,11 @@ struct ShaderNggPassthroughProof
 // leaves EXEC equal to the vertex-count mask, all made of instructions in the proof's
 // closed subset. Instructions after it (loads, branches, selects) are NOT examined;
 // the caller must prove them lane local given wave_dependent_scalars.
+// No end is taken before instruction first_end_index, so launches whose EXEC reaches
+// the count mask at different writes can share the latest one.
 [[nodiscard]] ShaderNggPassthroughProof ShaderAnalyzeNggPassthroughPrologue(const ShaderCode& code,
-	                                                                        const ShaderNggPassthroughCounts& counts);
+	                                                                        const ShaderNggPassthroughCounts& counts,
+	                                                                        uint32_t first_end_index = 0);
 
 } // namespace Kyty::Libs::Graphics
 
