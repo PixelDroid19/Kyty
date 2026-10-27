@@ -861,6 +861,7 @@ uint32_t StorageTextureMipBackingLevels(const uint64_t* params, bool gen5)
 bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming, bool exact_range)
 {
 	return existing[StorageTextureObject::PARAM_FORMAT] != incoming[StorageTextureObject::PARAM_FORMAT] ||
+	       existing[StorageTextureObject::PARAM_TILE] != incoming[StorageTextureObject::PARAM_TILE] ||
 	       (exact_range && existing[StorageTextureObject::PARAM_WIDTH_HEIGHT] != incoming[StorageTextureObject::PARAM_WIDTH_HEIGHT]);
 }
 
@@ -894,7 +895,9 @@ bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_
 	    VulkanResolveRenderTextureFormat(static_cast<RenderTextureFormat>(render[RenderTextureObject::PARAM_FORMAT])));
 	const uint32_t storage_bytes =
 	    ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(storage[StorageTextureObject::PARAM_FORMAT] >> 16u));
-	return VulkanColorTexelBytes(render_format) != storage_bytes ||
+	const bool render_tiled  = render[RenderTextureObject::PARAM_TILED] != 0u;
+	const bool storage_tiled = storage[StorageTextureObject::PARAM_TILE] != 0u;
+	return VulkanColorTexelBytes(render_format) != storage_bytes || render_tiled != storage_tiled ||
 	       (exact_range && (render[RenderTextureObject::PARAM_WIDTH] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u) ||
 	                        render[RenderTextureObject::PARAM_HEIGHT] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu)));
 }
