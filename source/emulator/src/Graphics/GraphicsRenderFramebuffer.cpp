@@ -61,7 +61,7 @@ static void DestroyCachedFramebuffer(GraphicContext* context, VulkanFramebuffer*
 }
 
 VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, RenderDepthInfo* depth,
-                                                        DepthStencilAttachmentAccess depth_stencil_access)
+                                                        DepthStencilAttachmentAccess depth_stencil_access, VkExtent2D attachmentless_extent)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -118,6 +118,18 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	// A sampled depth plane leaves the pass read-only, like the fully read-only form.
 	const auto depth_final_layout   = (depth_read_only ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : depth_stencil_layout);
 	const auto depth_initial_layout = (depth_read_only ? depth_tracked_layout : depth_load_ops.initial_layout);
+	const bool attachmentless       = !with_color && !with_depth;
+	if (attachmentless && (attachmentless_extent.width == 0 || attachmentless_extent.height == 0))
+	{
+		EXIT("attachment-less framebuffer requires a non-empty extent\n");
+	}
+	if (attachmentless)
+	{
+		VkPhysicalDeviceProperties properties {};
+		vkGetPhysicalDeviceProperties(g_render_ctx->GetGraphicCtx()->physical_device, &properties);
+		attachmentless_extent.width  = std::min(attachmentless_extent.width, properties.limits.maxFramebufferWidth);
+		attachmentless_extent.height = std::min(attachmentless_extent.height, properties.limits.maxFramebufferHeight);
+	}
 
 	for (auto& f: m_framebuffers)
 	{
@@ -145,7 +157,9 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		if (f.framebuffer != nullptr && same_colors && f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) &&
 		    f.depth_clear_enable == depth->depth_clear_enable && f.stencil_clear_enable == depth->stencil_clear_enable &&
 		    f.depth_stencil_access == access && f.depth_load_op == depth_load_ops.depth_load &&
-		    f.depth_initial_layout == depth_initial_layout)
+		    f.depth_initial_layout == depth_initial_layout &&
+		    (!attachmentless || (f.framebuffer->extent.width == attachmentless_extent.width &&
+		                         f.framebuffer->extent.height == attachmentless_extent.height)))
 		{
 			return f.framebuffer;
 		}
@@ -163,14 +177,16 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		EXIT("read-only sampled depth attachments require load-store-op-none support\n");
 	}
 
-	if (!with_depth && !with_color) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !with_depth && !with_color condition ignored (continuing)\n"); }
-
+	// A depth-only pass binds one dummy color image; an attachment-less pass binds none.
 	VulkanImage* vulkan_buffer =
 	    (with_color ? RenderColorFirstActiveImage(*color)
-	                : CreateDummyBuffer(VK_FORMAT_B8G8R8A8_SRGB, depth->vulkan_buffer->extent.width, depth->vulkan_buffer->extent.height,
-	                                    attachment_samples));
-	VkExtent2D framebuffer_extent {vulkan_buffer->extent.width, vulkan_buffer->extent.height};
-	const uint32_t color_count      = (with_color ? color->targets_num : 1);
+	     : with_depth
+	         ? CreateDummyBuffer(VK_FORMAT_B8G8R8A8_SRGB, depth->vulkan_buffer->extent.width, depth->vulkan_buffer->extent.height,
+	                             attachment_samples)
+	         : nullptr);
+	VkExtent2D framebuffer_extent =
+	    (vulkan_buffer != nullptr ? VkExtent2D {vulkan_buffer->extent.width, vulkan_buffer->extent.height} : attachmentless_extent);
+	const uint32_t color_count      = (with_color ? color->targets_num : (with_depth ? 1u : 0u));
 	uint32_t       attachment_count = 0;
 
 	VkAttachmentDescription attachments[RenderColorInfo::TARGETS_MAX + 1]       = {};

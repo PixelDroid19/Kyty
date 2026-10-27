@@ -4786,9 +4786,16 @@ TEST(EmulatorGraphicsState, RequiresPixelShaderOnlyForObservableFragmentWork)
 	shader.db_shader_control.shader_execute_on_noop = true;
 	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
 
+	// Stencil test value export.
 	shader.db_shader_control            = {};
-	shader.db_shader_control.other_bits = 1u;
+	shader.db_shader_control.other_bits = 1u << 1u;
 	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
+
+	// EXEC_ON_HIER_FAIL, DEPTH_BEFORE_SHADER and EXEC_IF_OVERLAPPED schedule a
+	// running shader; without outputs or EXEC_ON_NOOP it does not execute.
+	shader.db_shader_control            = {};
+	shader.db_shader_control.other_bits = (1u << 9u) | (1u << 12u) | (1u << 17u);
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, false));
 }
 
 TEST(EmulatorGraphicsState, RejectsUnsafeNoopPixelElision)

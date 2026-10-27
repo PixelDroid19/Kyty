@@ -4553,7 +4553,6 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 			    pixel_analysis->has_only_null_exports        = ShaderHasOnlyNullPixelExports(*code);
 			    pixel_analysis->color_exports                = ShaderSummarizePixelColorExports(*code);
 			    pixel_analysis->uses_native_wave_state      = ShaderUsesNativeWaveState(*code);
-			    pixel_analysis->prevents_noop_pixel_elision = ShaderPreventsNoopPixelElision(*code);
 			    pixel_analysis->has_getpc                   = code->HasAnyOf({ShaderInstructionType::SGetpcB64});
 			    pixel_analysis->has_global_memory_load      = ShaderHasGlobalMemoryLoad(*code);
 			    pixel_analysis->descriptor_load_indices     = ShaderFindDescriptorLoadIndices(*code);
@@ -4571,7 +4570,9 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->required_subgroup_size = analysis.pixel_analysis->uses_native_wave_state ? ps_info->native_wave.guest_wave_size : 0u;
 		ps_info->has_only_null_exports = analysis.pixel_analysis->has_only_null_exports;
 		ps_info->color_exports         = analysis.pixel_analysis->color_exports;
-		if (allow_noop_stage_disable && !analysis.pixel_analysis->prevents_noop_pixel_elision)
+		// DB_SHADER_CONTROL decides whether an output-free shader runs; its memory
+		// writes stay unexecuted unless EXEC_ON_NOOP requests them.
+		if (allow_noop_stage_disable)
 		{
 			ps_info->stage_enabled = false;
 			return;

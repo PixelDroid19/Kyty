@@ -475,8 +475,12 @@ bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& s
 	{
 		return true;
 	}
-	const auto& control = shader.db_shader_control;
-	return control.shader_kill_enable || control.shader_z_export_enable || control.shader_execute_on_noop || control.other_bits != 0;
+	// DB_SHADER_CONTROL stencil test/op value, coverage-to-mask and mask exports. The remaining
+	// bits order or schedule a running shader and never make an output-free one execute.
+	constexpr uint32_t kExportBits = (1u << 1u) | (1u << 2u) | (1u << 7u) | (1u << 8u);
+	const auto&        control     = shader.db_shader_control;
+	return control.shader_kill_enable || control.shader_z_export_enable || control.shader_execute_on_noop ||
+	       (control.other_bits & kExportBits) != 0;
 }
 
 Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exact_render_target_found)

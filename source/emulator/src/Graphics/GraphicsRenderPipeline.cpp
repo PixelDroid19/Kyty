@@ -1782,9 +1782,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	{
 		// Depth-only: FramebufferCache attaches one dummy color image so the
 		// Vulkan render pass stays valid; the pipeline must match that count
-		// with a zero write mask (no color output).
-		if (!p.static_params->with_depth) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !p.static_params->with_depth condition ignored (continuing)\n"); }
-		p.static_params->color_targets_num = 1;
+		// with a zero write mask (no color output). An attachment-less pass,
+		// which only runs the pixel shader's memory effects, has no color slot.
+		p.static_params->color_targets_num = p.static_params->with_depth ? 1u : 0u;
 		p.static_params->color_mask[0]     = 0;
 		p.static_params->blend_enable[0]   = false;
 	} else

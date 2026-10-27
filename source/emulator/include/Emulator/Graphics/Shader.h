@@ -2575,7 +2575,6 @@ struct ShaderImmutablePixelAnalysis
 	bool has_only_null_exports = false;
 	ShaderPixelColorExports color_exports;
 	bool uses_native_wave_state = false;
-	bool prevents_noop_pixel_elision = false;
 	bool has_getpc = false;
 	bool has_global_memory_load = false;
 	// Buffer, typed buffer and scalar loads, in instruction order: the only

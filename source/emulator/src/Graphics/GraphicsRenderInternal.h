@@ -563,8 +563,11 @@ public:
 	virtual ~FramebufferCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(FramebufferCache);
 
+	// attachmentless_extent sizes the pass of a draw with neither color nor depth
+	// attachments, whose pixel shader runs only for its memory effects.
 	VulkanFramebuffer* CreateFramebuffer(RenderColorInfo* color, RenderDepthInfo* depth,
-	                                     DepthStencilAttachmentAccess depth_stencil_access = DepthStencilAttachmentAccess::Writable);
+	                                     DepthStencilAttachmentAccess depth_stencil_access = DepthStencilAttachmentAccess::Writable,
+	                                     VkExtent2D                   attachmentless_extent = {});
 	void               FreeFramebufferByColor(VulkanImage* image);
 	void               FreeFramebufferByDepth(DepthStencilVulkanImage* image);
 

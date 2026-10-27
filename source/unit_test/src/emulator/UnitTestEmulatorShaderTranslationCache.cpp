@@ -249,7 +249,6 @@ TEST(EmulatorShaderTranslationCache, PixelLdsInputsInvalidateShaderUsageAnalysis
 		auto pixel_analysis = std::make_shared<ShaderImmutablePixelAnalysis>();
 		pixel_analysis->color_exports = color_exports;
 		pixel_analysis->uses_native_wave_state = true;
-		pixel_analysis->prevents_noop_pixel_elision = true;
 		pixel_analysis->has_getpc = (analysis_number == 1u);
 		pixel_analysis->has_global_memory_load = true;
 
@@ -274,7 +273,6 @@ TEST(EmulatorShaderTranslationCache, PixelLdsInputsInvalidateShaderUsageAnalysis
 	EXPECT_EQ(hit.pixel_analysis->color_exports.partial_targets, 0x1u);
 	EXPECT_FALSE(hit.pixel_analysis->has_only_null_exports);
 	EXPECT_TRUE(hit.pixel_analysis->uses_native_wave_state);
-	EXPECT_TRUE(hit.pixel_analysis->prevents_noop_pixel_elision);
 	EXPECT_TRUE(hit.pixel_analysis->has_getpc);
 	EXPECT_TRUE(hit.pixel_analysis->has_global_memory_load);
 

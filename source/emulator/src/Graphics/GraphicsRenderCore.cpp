@@ -101,8 +101,6 @@ VkSampleCountFlagBits resolve_render_attachment_sample_count(const RenderColorIn
 {
 	const bool with_color = RenderColorHasActiveTarget(color);
 	const bool with_depth = depth.format != VK_FORMAT_UNDEFINED;
-	if (!with_color && !with_depth) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !with_color && !with_depth condition ignored (continuing)\n"); }
-
 	const auto* first_color = RenderColorFirstConfiguredAttachment(color);
 	const auto  samples     = with_color ? first_color->samples : depth.samples;
 	for (uint32_t slot = 0; slot < color.targets_num; slot++)

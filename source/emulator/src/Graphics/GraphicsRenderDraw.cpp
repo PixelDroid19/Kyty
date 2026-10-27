@@ -1583,6 +1583,19 @@ static void                  RecordGeometryPass(uint64_t submit_id, CommandBuffe
                                                 const GuestDeviceAddressTable* device_address_table, ShaderVertexInputInfo* pull,
                                                 uint64_t index_address);
 
+// Without attachments only the scissors bound the rasterized area; an empty
+// scissor leaves no pixel for the shader. The pass starts at the origin, so
+// its extent reaches the scissor's far edges.
+static VkExtent2D AttachmentlessDrawExtent(const HW::Context& ctx)
+{
+	const auto scissor = State::ResolveScissor(ctx.GetScreenViewport(), ctx.GetScanModeControl(), 0);
+	if (scissor.right <= scissor.left || scissor.bottom <= scissor.top || scissor.right <= 0 || scissor.bottom <= 0)
+	{
+		return {};
+	}
+	return {static_cast<uint32_t>(scissor.right), static_cast<uint32_t>(scissor.bottom)};
+}
+
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                              uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
@@ -1759,9 +1772,13 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	RenderColorInfo color_info;
 	DescribeRenderDepthInfo(*ctx, &depth_info);
 	DescribeRenderColorInfo(buffer, *ctx, &color_info);
-	if (!RenderColorHasActiveTarget(color_info) && depth_info.format == VK_FORMAT_UNDEFINED)
+	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters(), ctx->GetAlphaToMaskEnable());
+	// Without color or depth, the draw has an effect only through a pixel
+	// shader the DB executes for its memory writes (EXEC_ON_NOOP).
+	const bool       no_attachment         = !RenderColorHasActiveTarget(color_info) && depth_info.format == VK_FORMAT_UNDEFINED;
+	const VkExtent2D attachmentless_extent = no_attachment && ps_required ? AttachmentlessDrawExtent(*ctx) : VkExtent2D {};
+	if (no_attachment && attachmentless_extent.width == 0)
 	{
-		// A zero target mask with depth disabled is a valid no-output draw.
 		MaybeDumpIndexDrawSkip("no-output", index_count, draw_modifier, type);
 		return;
 	}
@@ -1808,7 +1825,6 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	MaybeDumpPrimitiveDrawPlan("indexed", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
-	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters(), ctx->GetAlphaToMaskEnable());
 	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info, !ps_required);
 	ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count);
 	if (ShaderPixelInput0ProbeEligible(Config::IsNextGen(), sh_ctx->GetPs().ps_embedded))
@@ -1849,7 +1865,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	const auto pipeline_setup_start = DrawStageClock::now();
 	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind, *sh_ctx);
-	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access);
+	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access, attachmentless_extent);
 	const VulkanImage* stencil_attached_depth =
 	    depth_access == DepthStencilAttachmentAccess::DepthReadOnly ? depth_info.vulkan_buffer : nullptr;
 
@@ -2933,9 +2949,13 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	RenderColorInfo color_info;
 	DescribeRenderDepthInfo(*ctx, &depth_info);
 	DescribeRenderColorInfo(buffer, *ctx, &color_info);
-	if (!RenderColorHasActiveTarget(color_info) && depth_info.format == VK_FORMAT_UNDEFINED)
+	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters(), ctx->GetAlphaToMaskEnable());
+	// Without color or depth, the draw has an effect only through a pixel
+	// shader the DB executes for its memory writes (EXEC_ON_NOOP).
+	const bool       no_attachment         = !RenderColorHasActiveTarget(color_info) && depth_info.format == VK_FORMAT_UNDEFINED;
+	const VkExtent2D attachmentless_extent = no_attachment && ps_required ? AttachmentlessDrawExtent(*ctx) : VkExtent2D {};
+	if (no_attachment && attachmentless_extent.width == 0)
 	{
-		// A zero target mask with depth disabled is a valid no-output draw.
 		return;
 	}
 	VulkanSampleLocationState sample_locations {};
@@ -3005,7 +3025,6 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	MaybeDumpPrimitiveDrawPlan("auto", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
-	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), shader_regs, ctx->GetAlphaToMaskEnable());
 	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info, !ps_required);
 	ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(pixel_shader_info.ps_regs.chksum, false, index_count);
 	if (ShaderPixelInput0ProbeEligible(Config::IsNextGen(), pixel_shader_info.ps_embedded))
@@ -3046,7 +3065,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	const auto pipeline_setup_start = DrawStageClock::now();
 	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind, *sh_ctx);
-	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access);
+	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access, attachmentless_extent);
 	const VulkanImage* stencil_attached_depth =
 	    depth_access == DepthStencilAttachmentAccess::DepthReadOnly ? depth_info.vulkan_buffer : nullptr;
 
