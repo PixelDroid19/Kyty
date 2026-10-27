@@ -4990,8 +4990,9 @@ acceptance remains open.
 - **Observed.** In bounded 120 s strict runs, `PPSA03969 - F.I.S.T.: Forged
   In Shadow Torch` and `PPSA09809 - OCTOPATH TRAVELER II` crashed at boot
   (exit 139, no present) on this branch. Main (cd7f8f50) reached 664 and 4451
-  presents on the same host. gdb placed the fault inside guest code that
-  consumed the result of a `vswprintf` call.
+  presents on the same host. gdb placed the fault in the `%s` conversion of
+  `FormatWide` under `vswprintf`, which dereferenced 0xf00 (3840, an integer
+  argument already consumed by the previous call) as a string pointer.
 - **Cause.** 63ccc027 made the narrow and wide formatters work from a copy of
   the caller's va_list. These titles format one va_list in successive
   `vswprintf` calls, each continuing after the arguments the previous call
