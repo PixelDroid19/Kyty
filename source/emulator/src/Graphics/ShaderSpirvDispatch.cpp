@@ -109,6 +109,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_DsAtomic_XXX_VaddrVdataOffset,              ShaderInstructionType::DsXorB32,            ShaderInstructionFormat::VaddrVdataOffset,               {"OpAtomicXor"}},
 	{Recompile_DsReadB32_VdstVaddrOffset,                  ShaderInstructionType::DsReadB32,           ShaderInstructionFormat::VdstVaddrOffset,                {""}},
     {Recompile_DsBpermuteB32_VdstVsrc0Vsrc1,          ShaderInstructionType::DsBpermuteB32,       ShaderInstructionFormat::SVdstSVsrc0SVsrc1,             {""}},
+    {Recompile_DsSwizzleB32_VdstVsrc0,                ShaderInstructionType::DsSwizzleB32,        ShaderInstructionFormat::SVdstSVsrc0,                   {""}},
     {Recompile_DsWriteB32_VaddrVdataOffset,                ShaderInstructionType::DsWriteB32,          ShaderInstructionFormat::VaddrVdataOffset,                {""}},
     {Recompile_DsWriteB32_VaddrVdataOffsetGds,             ShaderInstructionType::DsWriteB32,          ShaderInstructionFormat::VaddrVdataOffsetGds,             {""}},
     {Recompile_DsRead2B32_Vdst2VaddrOffset01,              ShaderInstructionType::DsRead2B32,          ShaderInstructionFormat::Vdst2VaddrOffset01,              {""}},

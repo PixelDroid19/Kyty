@@ -666,7 +666,7 @@ void Spirv::WriteHeader()
 		const bool pixel_append =
 		    m_code.GetType() == ShaderType::Pixel && m_code.HasAnyOf({ShaderInstructionType::DsAppend, ShaderInstructionType::DsConsume});
 		if ((spirv_uses_dpp(m_code) && m_code.GetType() != ShaderType::Pixel) || spirv_uses_dpp_row(m_code) ||
-		    spirv_uses_lane_exchange(m_code) || m_code.HasAnyOf({ShaderInstructionType::DsBpermuteB32}) || UsesFragmentWaveTier() ||
+		    spirv_uses_lane_exchange(m_code) || m_code.HasAnyOf({ShaderInstructionType::DsBpermuteB32, ShaderInstructionType::DsSwizzleB32}) || UsesFragmentWaveTier() ||
 		    pixel_append)
 		{
 			capabilities.Add("OpCapability GroupNonUniformShuffle");
@@ -3562,6 +3562,10 @@ void Spirv::FindConstants()
 				AddConstantUint(base + 4u);
 			}
 			AddConstantUint(1u);
+		}
+		else if (inst.type == ShaderInstructionType::DsSwizzleB32)
+		{
+			for (uint32_t value: ShaderDsSwizzleConstants(inst.ds_offset)) { AddConstantUint(value); }
 		}
 		else if (inst.ds_offset != 0)
 		{

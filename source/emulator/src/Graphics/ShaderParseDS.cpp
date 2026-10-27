@@ -244,7 +244,18 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 		case 0x32: KYTY_NI("ds_min_rtn_f32"); break;
 		case 0x33: KYTY_NI("ds_max_rtn_f32"); break;
 		case 0x34: KYTY_NI("ds_wrap_rtn_b32"); break;
-		case 0x35: KYTY_NI("ds_swizzle_b32"); break;
+		case 0x35:
+			// ds_swizzle_b32: every lane reads ADDR of the lane the 16-bit offset
+			// selects (ISA 12.13.1); a disabled source lane reads zero.
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			inst.type      = ShaderInstructionType::DsSwizzleB32;
+			inst.format    = ShaderInstructionFormat::SVdstSVsrc0;
+			inst.dst       = operand_parse(vdst + 256);
+			inst.dst.size  = 1;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src_num   = 1;
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
+			break;
 		case 0x36:
 			DecodeDsRead(&inst, vdst, addr, DsSingleOffset(offset0, offset1), 1);
 			break;

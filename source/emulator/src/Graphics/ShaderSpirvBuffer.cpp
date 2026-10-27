@@ -2744,6 +2744,163 @@ OpStore %<dst> %<t>_stored_typed
 	return true;
 }
 
+namespace {
+
+// The source-lane formula of ds_swizzle_b32 (ISA 12.13.1), applied to each half wave. The
+// rotate mode wraps inside the 32 lanes, as the ISA's examples show.
+enum class DsSwizzleMode
+{
+	Fft,
+	Rotate,
+	Quad,
+	Bitmask,
+};
+
+DsSwizzleMode DsSwizzleModeOf(uint16_t offset)
+{
+	if (offset >= 0xe000u)
+	{
+		return DsSwizzleMode::Fft;
+	}
+	if (offset >= 0xc000u)
+	{
+		return DsSwizzleMode::Rotate;
+	}
+	return (offset & 0x8000u) != 0u ? DsSwizzleMode::Quad : DsSwizzleMode::Bitmask;
+}
+
+uint32_t DsSwizzleRotation(uint16_t offset)
+{
+	const uint32_t rotate = (offset >> 5u) & 31u;
+	return (offset & 0x400u) != 0u ? (32u - rotate) & 31u : rotate;
+}
+
+} // namespace
+
+std::array<uint32_t, 8> ShaderDsSwizzleConstants(uint16_t offset)
+{
+	const uint32_t mask = offset & 31u;
+	switch (DsSwizzleModeOf(offset))
+	{
+		case DsSwizzleMode::Fft:
+			return {27u, static_cast<uint32_t>(__builtin_popcount(mask)), mask, 31u, 32u, 32u, 32u, 32u};
+		case DsSwizzleMode::Rotate: return {mask, ~mask, DsSwizzleRotation(offset), 31u, 32u, 32u, 32u, 32u};
+		case DsSwizzleMode::Quad: return {0xfffffffcu, 3u, 1u, offset & 0xffu, 32u, 32u, 32u, 32u};
+		case DsSwizzleMode::Bitmask: return {mask, (offset >> 5u) & 31u, (offset >> 10u) & 31u, 31u, 32u, 32u, 32u, 32u};
+	}
+	return {};
+}
+
+static String8 DsSwizzleSourceLane(const Spirv* spirv, uint16_t offset)
+{
+	const auto c    = ShaderDsSwizzleConstants(offset);
+	const auto name = [spirv, &c](int slot) { return spirv->GetConstantUint(c[slot]); };
+	String8    text;
+	switch (DsSwizzleModeOf(offset))
+	{
+		case DsSwizzleMode::Fft:
+			text = R"(
+%<t>_reversed = OpBitReverse %uint %<t>_guest
+%<t>_reversed5 = OpShiftRightLogical %uint %<t>_reversed %<c0>
+%<t>_spread = OpShiftRightLogical %uint %<t>_reversed5 %<c1>
+%<t>_kept = OpBitwiseAnd %uint %<t>_guest %<c2>
+%<t>_low = OpBitwiseOr %uint %<t>_spread %<t>_kept
+)";
+			break;
+		case DsSwizzleMode::Rotate:
+			text = R"(
+%<t>_kept = OpBitwiseAnd %uint %<t>_guest %<c0>
+%<t>_moved = OpIAdd %uint %<t>_guest %<c2>
+%<t>_moved_bits = OpBitwiseAnd %uint %<t>_moved %<c1>
+%<t>_joined = OpBitwiseOr %uint %<t>_kept %<t>_moved_bits
+%<t>_low = OpBitwiseAnd %uint %<t>_joined %<c3>
+)";
+			break;
+		case DsSwizzleMode::Quad:
+			text = R"(
+%<t>_quad = OpBitwiseAnd %uint %<t>_guest %<c0>
+%<t>_member = OpBitwiseAnd %uint %<t>_guest %<c1>
+%<t>_select_shift = OpShiftLeftLogical %uint %<t>_member %<c2>
+%<t>_selects = OpShiftRightLogical %uint %<c3> %<t>_select_shift
+%<t>_select = OpBitwiseAnd %uint %<t>_selects %<c1>
+%<t>_lane = OpBitwiseOr %uint %<t>_quad %<t>_select
+)";
+			break;
+		case DsSwizzleMode::Bitmask:
+			text = R"(
+%<t>_kept = OpBitwiseAnd %uint %<t>_guest %<c0>
+%<t>_set = OpBitwiseOr %uint %<t>_kept %<c1>
+%<t>_low = OpBitwiseXor %uint %<t>_set %<c2>
+)";
+			break;
+	}
+	if (DsSwizzleModeOf(offset) != DsSwizzleMode::Quad)
+	{
+		text += R"(%<t>_half = OpBitwiseAnd %uint %<t>_guest %<c4>
+%<t>_lane = OpBitwiseOr %uint %<t>_half %<t>_low
+)";
+	}
+	return text.ReplaceStr("<c0>", name(0))
+	    .ReplaceStr("<c1>", name(1))
+	    .ReplaceStr("<c2>", name(2))
+	    .ReplaceStr("<c3>", name(3))
+	    .ReplaceStr("<c4>", name(4));
+}
+
+// ds_swizzle_b32 gathers ADDR from the lane its offset selects, as ds_bpermute_b32 does from a
+// lane a register names, so it lowers to the same subgroup shuffle or split-wave read.
+KYTY_RECOMPILER_FUNC(Recompile_DsSwizzleB32_VdstVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.src_num != 1 || inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 ||
+	    inst.src[0].type != ShaderOperandType::Vgpr || inst.src[0].dpp)
+	{
+		return false;
+	}
+	const auto destination = operand_variable_to_str(inst.dst);
+	if (destination.type != SpirvType::Float || destination.value.IsEmpty())
+	{
+		return false;
+	}
+	const auto index_str = String8::FromPrintf("%u", index);
+	const auto tag       = String8("swizzle_") + index_str;
+	String8    value;
+	if (!operand_load_uint(spirv, inst.src[0], tag + "_value", index_str, &value))
+	{
+		return false;
+	}
+	const auto exchange = spirv->UsesSplitComputeWave() ? String8(R"(
+%<t>_own = OpLoad %uint %exec_lane_lo
+%<t>_active = OpINotEqual %bool %<t>_own %uint_0
+%<t>_published = OpSelect %uint %<t>_active %<t>_value %uint_0
+%<t>_result = OpFunctionCall %uint %split_read %<t>_published %<t>_lane
+)")
+	                                                    : String8(R"(
+%<t>_own = OpLoad %uint %exec_lane_lo
+%<t>_active = OpINotEqual %bool %<t>_own %uint_0
+%<t>_fetch = OpGroupNonUniformShuffle %uint %uint_3 %<t>_value %<t>_lane
+%<t>_live = OpGroupNonUniformShuffle %uint %uint_3 %<t>_own %<t>_lane
+%<t>_live_bit = OpINotEqual %bool %<t>_live %uint_0
+%<t>_result = OpSelect %uint %<t>_live_bit %<t>_fetch %uint_0
+)");
+	const auto text = String8(R"(
+%<t>_guest = OpLoad %uint %gl_SubgroupInvocationID
+<lane>
+<exchange>
+%<t>_old_typed = OpLoad %float %<dst>
+%<t>_old = OpBitcast %uint %<t>_old_typed
+%<t>_stored = OpSelect %uint %<t>_active %<t>_result %<t>_old
+%<t>_stored_typed = OpBitcast %float %<t>_stored
+OpStore %<dst> %<t>_stored_typed
+)")
+	                      .ReplaceStr("<lane>", DsSwizzleSourceLane(spirv, inst.ds_offset))
+	                      .ReplaceStr("<exchange>", exchange)
+	                      .ReplaceStr("<t>", tag)
+	                      .ReplaceStr("<dst>", destination.value);
+	*dst_source += value + text;
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_DsAddU32_VaddrVdataOffset)
 {
 	const auto& inst       = code.GetInstructions().At(index);

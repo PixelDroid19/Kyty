@@ -599,6 +599,8 @@ String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, bool bound_buffers);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
 const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFormat::Format format);
+// Every constant the ds_swizzle_b32 lane formula for this offset names.
+std::array<uint32_t, 8> ShaderDsSwizzleConstants(uint16_t offset);
 
 } // namespace Kyty::Libs::Graphics
 

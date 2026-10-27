@@ -92,6 +92,8 @@ enum class ShaderInstructionType : uint32_t
 	DsXorB32,
 	DsReadB32,
 	DsBpermuteB32,
+	// ds_swizzle_b32: a lane permute fixed by the offset; it does not access LDS.
+	DsSwizzleB32,
 	DsRead2B32,
 	DsRead2St64B32,
 	DsWriteB32,
