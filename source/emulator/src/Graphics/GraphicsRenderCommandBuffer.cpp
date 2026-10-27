@@ -2244,6 +2244,25 @@ VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32
 	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true, allow_reuse);
 }
 
+VulkanBuffer* CommandBuffer::TransportStorage(uint64_t size, uint32_t usage)
+{
+	EXIT_IF(IsInvalid());
+	EXIT_IF(size == 0u);
+	Core::LockGuard lock(m_pool->mutex);
+	if (m_pool->transport_storage == nullptr)
+	{
+		auto* storage            = new VulkanBuffer;
+		storage->usage           = usage;
+		storage->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		VulkanCreateBuffer(g_render_ctx->GetGraphicCtx(), size, storage);
+		storage->descriptor_range = size;
+		m_pool->transport_storage = storage;
+	}
+	auto* storage = m_pool->transport_storage;
+	EXIT_IF(storage->usage != usage);
+	return size <= storage->descriptor_range ? storage : nullptr;
+}
+
 VkDescriptorSet CommandBuffer::AllocateTransportDescriptorSet(VkDescriptorSetLayout layout)
 {
 	EXIT_IF(IsInvalid());

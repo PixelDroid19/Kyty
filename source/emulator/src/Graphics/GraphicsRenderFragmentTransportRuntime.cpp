@@ -20,10 +20,10 @@ namespace {
 
 constexpr uint32_t kTransportBindings = 5;
 constexpr uint32_t kTransportPushBytes = sizeof(FragmentTransport::KernelParameters);
-// The device-local scratch pool caps one recording at 64 MiB. Every transport
-// draw allocates this fixed block, so later draws of the recording reuse the
-// same entry instead of accumulating one block each.
-constexpr uint64_t kTransportAllocationBytes = 40ull * 1024u * 1024u;
+// Every transport draw of a command pool uses one storage block of the layout
+// maximum: each band replays its whole chunk, so a band's rows, and with them the
+// pass count of a draw, scale with this size.
+constexpr uint64_t kTransportAllocationBytes = FragmentTransport::MAX_TRANSIENT_BYTES;
 
 struct HostKernels
 {
@@ -152,9 +152,7 @@ FragmentTransport::Limits HostLimits(const GraphicContext& context)
 {
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(context.physical_device, &properties);
-	// Other passes share the pool, so a draw plans below its layout maximum.
-	return {properties.limits.maxStorageBufferRange, std::min(FragmentTransport::MAX_TRANSIENT_BYTES, kTransportAllocationBytes),
-	        properties.limits.maxComputeWorkGroupCount[0]};
+	return {properties.limits.maxStorageBufferRange, kTransportAllocationBytes, properties.limits.maxComputeWorkGroupCount[0]};
 }
 
 // The capture records one quad per rasterized 2x2 tile and per primitive. A
@@ -196,6 +194,44 @@ bool PlanBand(VkExtent2D extent, uint32_t primitive_count, uint32_t lane_words, 
 	return best != 0u;
 }
 
+// Every band replays its whole chunk and any primitive may open its own wave,
+// so a draw records ceil(primitives / chunk) * ceil(height / band) passes.
+// Halving the chunk until the pass count stops improving keeps large draws
+// inside the budget with tall bands.
+bool PlanDraw(VkExtent2D extent, uint32_t primitive_count, bool strip_chunks, uint32_t lane_words, const FragmentTransport::Limits& limits,
+              uint32_t* chunk_primitives, uint32_t* band_height, FragmentTransport::Layout* layout)
+{
+	const uint32_t min_chunk   = strip_chunks ? 2u : 1u;
+	const uint64_t height      = std::max<uint32_t>(extent.height, 1u);
+	uint64_t       best_passes = UINT64_MAX;
+	for (uint32_t chunks = 1;; chunks *= 2u)
+	{
+		uint32_t chunk = (primitive_count + chunks - 1u) / chunks;
+		if (strip_chunks && chunk < primitive_count)
+		{
+			chunk = (chunk + 1u) & ~1u;
+		}
+		FragmentTransport::Layout candidate;
+		uint32_t                  rows = 0;
+		if (PlanBand(extent, chunk, lane_words, limits, &rows, &candidate))
+		{
+			const uint64_t passes = ((primitive_count + chunk - 1u) / chunk) * ((height + rows - 1u) / rows);
+			if (passes < best_passes)
+			{
+				best_passes       = passes;
+				*chunk_primitives = chunk;
+				*band_height      = rows;
+				*layout           = candidate;
+			}
+		}
+		if (chunk <= min_chunk)
+		{
+			break;
+		}
+	}
+	return best_passes != UINT64_MAX;
+}
+
 } // namespace
 
 VkDescriptorSetLayout FragmentTransportDescriptorSetLayout()
@@ -213,8 +249,8 @@ VkPipeline FragmentTransportPackPipeline()
 	return EnsureKernels() ? Kernels().pack : VK_NULL_HANDLE;
 }
 
-bool FragmentTransportPrepareResources(CommandBuffer* buffer, VkExtent2D extent, uint32_t primitive_count, uint32_t lane_words,
-                                       FragmentTransportResources* resources)
+bool FragmentTransportPrepareResources(CommandBuffer* buffer, VkExtent2D extent, uint32_t primitive_count, bool strip_chunks,
+                                       uint32_t lane_words, FragmentTransportResources* resources)
 {
 	EXIT_IF(buffer == nullptr || resources == nullptr || lane_words == 0u || primitive_count == 0u);
 	if (!EnsureKernels())
@@ -224,8 +260,9 @@ bool FragmentTransportPrepareResources(CommandBuffer* buffer, VkExtent2D extent,
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	const auto limits = HostLimits(*gctx);
 	FragmentTransport::Layout layout;
-	uint32_t band_height = 0;
-	if (!PlanBand(extent, primitive_count, lane_words, limits, &band_height, &layout))
+	uint32_t band_height      = 0;
+	uint32_t chunk_primitives = 0;
+	if (!PlanDraw(extent, primitive_count, strip_chunks, lane_words, limits, &chunk_primitives, &band_height, &layout))
 	{
 		return false;
 	}
@@ -233,10 +270,8 @@ bool FragmentTransportPrepareResources(CommandBuffer* buffer, VkExtent2D extent,
 	constexpr uint32_t kBufferCount = static_cast<uint32_t>(FragmentTransport::Buffer::Count);
 	constexpr uint64_t kAlignment   = 256u;
 
-	// All five regions live in one device-local allocation: the scratch pool
-	// caps a recording at 64 MiB and a draw needs most of it, while a second
-	// draw must still fit. One buffer per draw can be reused by the next draw
-	// because the tile barriers order every write after the previous reads.
+	// All five regions live in the command pool's transport storage; every draw
+	// reuses it because the tile barriers order each write after the previous reads.
 	uint64_t offsets[kBufferCount] = {};
 	uint64_t sizes[kBufferCount]   = {};
 	uint64_t total                 = 0;
@@ -251,8 +286,8 @@ bool FragmentTransportPrepareResources(CommandBuffer* buffer, VkExtent2D extent,
 	{
 		return false;
 	}
-	VulkanBuffer* combined = buffer->AllocateTransientDeviceBuffer(
-	    kTransportAllocationBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	VulkanBuffer* combined =
+	    buffer->TransportStorage(kTransportAllocationBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 	if (combined == nullptr)
 	{
 		return false;
@@ -268,6 +303,7 @@ bool FragmentTransportPrepareResources(CommandBuffer* buffer, VkExtent2D extent,
 	resources->references_bytes  = sizes[static_cast<uint32_t>(FragmentTransport::Buffer::References)];
 	resources->layout            = layout;
 	resources->band_height       = band_height;
+	resources->chunk_primitives  = chunk_primitives;
 	resources->extent            = extent;
 
 	resources->set = buffer->AllocateTransportDescriptorSet(Kernels().set_layout);

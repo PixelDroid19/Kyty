@@ -73,6 +73,7 @@ struct PresentationEncodeStage;
 struct PresentationDownscaleStage;
 struct PresentationFsrStage;
 struct TransientSnapshotPool;
+struct VulkanBuffer;
 
 struct VulkanSwapchain
 {
@@ -104,6 +105,8 @@ struct VulkanCommandPool
 	uint32_t         buffers_count = 0;
 	// Guest snapshots shared by the command buffers of this pool; owned by the command buffer code.
 	TransientSnapshotPool* snapshots = nullptr;
+	// Fragment-transport storage shared by the command buffers of this pool; owned by the command buffer code.
+	VulkanBuffer* transport_storage = nullptr;
 };
 
 struct VulkanQueueInfo

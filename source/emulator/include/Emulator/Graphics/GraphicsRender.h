@@ -718,6 +718,10 @@ public:
 	// when the recording starts, so its sets live exactly as long as the commands
 	// that bind them.
 	VkDescriptorSet AllocateTransportDescriptorSet(VkDescriptorSetLayout layout);
+	// Device-local fragment-transport storage shared by every command buffer of this pool, created on the first
+	// request. They all submit to one queue, so the tile barriers order each use after the previous one, also
+	// across recordings. Returns nullptr when `size` exceeds the storage created first.
+	VulkanBuffer* TransportStorage(uint64_t size, uint32_t usage);
 	// Host-visible copy of data that only this recording reads, destroyed when the buffer next begins. For uploads
 	// too large for the transient pools' budget.
 	VulkanBuffer* UploadRecordingBuffer(const void* data, uint64_t size, uint32_t usage);

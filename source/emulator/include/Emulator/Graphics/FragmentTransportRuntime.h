@@ -40,6 +40,7 @@ struct FragmentTransportResources
 	VulkanBuffer*             wave_output = nullptr;
 	VkDescriptorSet           set         = VK_NULL_HANDLE;
 	uint32_t                  band_height = 0;
+	uint32_t                  chunk_primitives = 0;
 	uint64_t                  control_offset      = 0;
 	uint64_t                  control_bytes       = 0;
 	uint64_t                  references_offset   = 0;
@@ -52,8 +53,10 @@ struct FragmentTransportResources
 // the split shade pass at set 2.
 [[nodiscard]] VkDescriptorSetLayout FragmentTransportDescriptorSetLayout();
 
+// Plans the draw as ordered primitive chunks replayed per band. Strip chunks
+// keep an even length so every chunk starts with the strip's winding.
 [[nodiscard]] bool FragmentTransportPrepareResources(CommandBuffer* buffer, VkExtent2D extent, uint32_t primitive_count,
-                                                     uint32_t lane_words, FragmentTransportResources* resources);
+                                                     bool strip_chunks, uint32_t lane_words, FragmentTransportResources* resources);
 // Invalidates the per-tile control structures and orders them before the
 // capture draw.
 void FragmentTransportBeginTile(CommandBuffer* buffer, const FragmentTransportResources& resources);

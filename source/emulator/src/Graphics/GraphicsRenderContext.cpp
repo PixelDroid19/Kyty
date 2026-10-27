@@ -671,6 +671,11 @@ void CommandPool::DeleteAll()
 			vkDestroyCommandPool(ctx->device, pool->pool, nullptr);
 
 			TransientSnapshotPoolDestroy(ctx, pool);
+			if (pool->transport_storage != nullptr)
+			{
+				VulkanDeleteBuffer(ctx, pool->transport_storage);
+				delete pool->transport_storage;
+			}
 
 			delete[] pool->semaphores;
 			delete[] pool->fences;
