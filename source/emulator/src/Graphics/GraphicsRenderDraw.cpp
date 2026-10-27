@@ -1412,6 +1412,24 @@ static GuestDeviceAddressReadPreparation PrepareGuestDeviceAddressForRead(
 	return GuestDeviceAddressReadPreparation::PendingWriteBack;
 }
 
+// A vertex stream over writable storage binds an object seeded from guest bytes
+// (BindVertexBuffers), which copies in the storage results of the draw's queue the
+// guest bytes do not hold yet. A result of another queue is a dependency.
+static bool PrepareVertexStreamsForRead(CommandBuffer* buffer, const ShaderVertexInputInfo& input, SubmissionId* pending_submission)
+{
+	const GpuQueueId consumer(static_cast<uint32_t>(buffer->GetQueueIndex()));
+	for (int i = 0; i < input.buffers_num; i++)
+	{
+		const auto& stream = input.buffers[i];
+		if (GpuMemoryWriteBackStorageForGuestSeed(g_render_ctx->GetGraphicCtx(), stream.addr,
+		                                          ShaderBufferByteSize(stream.stride, stream.num_records), consumer, pending_submission))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 // The display cohort owns display buffers and depth-only display passes; the
 // render-target cohort owns scaled offscreen color targets and their depth.
 static const RenderResolutionPlan& SelectMaterializationResolution(const RenderColorInfo&      color,
@@ -1848,7 +1866,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	}
 	ValidatePixelProbeSelection(sh_ctx->GetPs(), ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
 	GuestDeviceAddressTable device_address_table {};
-	if (PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front.bind : vs_input_info.bind, &ps_input_info.bind,
+	if (!PrepareVertexStreamsForRead(buffer, vs_input_info, pending_submission) ||
+	    PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front.bind : vs_input_info.bind, &ps_input_info.bind,
 	                                     &device_address_table, pending_submission) != GuestDeviceAddressReadPreparation::Ready)
 	{
 		return;
@@ -2473,7 +2492,8 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		{
 			return;
 		}
-		if (PrepareGuestDeviceAddressForRead(buffer, guest_vertex_input.bind, nullptr, &device_address_table,
+		if (!PrepareVertexStreamsForRead(buffer, guest_vertex_input, pending_submission) ||
+		    PrepareGuestDeviceAddressForRead(buffer, guest_vertex_input.bind, nullptr, &device_address_table,
 		                                     pending_submission) != GuestDeviceAddressReadPreparation::Ready)
 		{
 			return;
@@ -3048,7 +3068,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	}
 	ValidatePixelProbeSelection(pixel_shader_info, shader_regs, &vs_input_info, &ps_input_info);
 	GuestDeviceAddressTable device_address_table {};
-	if (PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front.bind : vs_input_info.bind, &ps_input_info.bind,
+	if (!PrepareVertexStreamsForRead(buffer, vs_input_info, pending_submission) ||
+	    PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front.bind : vs_input_info.bind, &ps_input_info.bind,
 	                                     &device_address_table, pending_submission) != GuestDeviceAddressReadPreparation::Ready)
 	{
 		return;

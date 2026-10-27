@@ -1326,6 +1326,27 @@ struct GpuMemoryStoragePublication
 // there instead of being reported.
 [[nodiscard]] bool GpuMemoryPendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
                                                     std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
+// An object seeded from guest bytes in [vaddr, vaddr + size) on the host misses the
+// writable StorageBuffer results overlapping it until they are written back, even
+// when they are also published to the device-address view. Writes back the completed
+// results; a result with incomplete uses only on the consumer's queue is left for a
+// device copy (GpuMemoryCollectStorageForGuestSeed). Reports one incomplete use of
+// any other result.
+[[nodiscard]] bool GpuMemoryWriteBackStorageForGuestSeed(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuQueueId consumer,
+                                                         SubmissionId* dependency);
+// The part [vaddr, vaddr + size) of a writable StorageBuffer result, at `offset` in `buffer`.
+struct GpuMemoryStorageSeedSource
+{
+	const VulkanBuffer* buffer = nullptr;
+	uint64_t            offset = 0;
+	uint64_t            vaddr  = 0;
+	uint64_t            size   = 0;
+};
+// The results the guest bytes of [vaddr, vaddr + size) do not hold yet, oldest device
+// write first, for `reader` to copy over an object seeded from those bytes. `reader`
+// becomes a use of each, so its write-back and release follow the copy.
+void GpuMemoryCollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, SubmissionId reader,
+                                         std::vector<GpuMemoryStorageSeedSource>* sources);
 // The caller recorded in `publication`, after the object's last write, a device
 // copy of its whole content into the guest device-address view. Device-address
 // consumers on that queue then read the result in GPU order and skip the CPU

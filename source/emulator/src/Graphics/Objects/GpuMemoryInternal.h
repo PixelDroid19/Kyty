@@ -292,6 +292,9 @@ public:
 	void               WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer);
 	[[nodiscard]] bool PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
 	                                           std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
+	[[nodiscard]] bool WriteBackStorageForGuestSeed(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuQueueId consumer,
+	                                                SubmissionId* dependency);
+	void CollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, SubmissionId reader, std::vector<GpuMemoryStorageSeedSource>* sources);
 	[[nodiscard]] bool PendingStorageHasAliases();
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
 	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
@@ -459,6 +462,7 @@ private:
 	// whose writes are not published to the guest device-address view on `consumer`.
 	// `ranges` answers whether a block meets one of the queried guest ranges.
 	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const;
+	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorageIn(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] static bool StorageIsWholeGuestContent(const Object& object);
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);

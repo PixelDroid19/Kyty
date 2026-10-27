@@ -45,7 +45,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	auto* vk_obj = new VulkanBuffer;
 
-	vk_obj->usage           = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+	// Storage results the guest bytes do not hold yet are copied in on the device.
+	vk_obj->usage           = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 	vk_obj->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 	                          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	vk_obj->buffer          = nullptr;

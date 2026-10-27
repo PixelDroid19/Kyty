@@ -991,6 +991,21 @@ bool GpuMemoryPendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueI
 	return g_gpu_memory->PendingStorageWriteBack(ranges, consumer, publishable, dependency);
 }
 
+bool GpuMemoryWriteBackStorageForGuestSeed(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuQueueId consumer,
+                                           SubmissionId* dependency)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	EXIT_IF(ctx == nullptr);
+	return g_gpu_memory->WriteBackStorageForGuestSeed(ctx, vaddr, size, consumer, dependency);
+}
+
+void GpuMemoryCollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, SubmissionId reader,
+                                         std::vector<GpuMemoryStorageSeedSource>* sources)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	g_gpu_memory->CollectStorageForGuestSeed(vaddr, size, reader, sources);
+}
+
 bool GpuMemoryPendingStorageHasAliases()
 {
 	EXIT_IF(g_gpu_memory == nullptr);

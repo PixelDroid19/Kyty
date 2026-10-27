@@ -2577,6 +2577,44 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 	return result;
 }
 
+// The vertex object over [vaddr, vaddr + size) was seeded from guest bytes; storage
+// results of this queue the guest does not hold yet are copied over it before the draw.
+static void CopyPendingStorageIntoVertices(CommandBuffer* buffer, VulkanBuffer* vertices, uint64_t vaddr, uint64_t size)
+{
+	SubmissionId reader;
+	EXIT_IF(!buffer->GetSubmissionId(&reader));
+	std::vector<GpuMemoryStorageSeedSource> sources;
+	GpuMemoryCollectStorageForGuestSeed(vaddr, size, reader, &sources);
+	if (sources.empty())
+	{
+		return;
+	}
+
+	auto*           cmd = buffer->RecordOutsideRenderPass();
+	VkMemoryBarrier before {};
+	before.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	VkMemoryBarrier after {};
+	after.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	after.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+	for (size_t i = 0; i < sources.size(); i++)
+	{
+		// Overlapping results land oldest first, so the newest write wins.
+		if (i != 0)
+		{
+			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0,
+			                     nullptr);
+		}
+		const auto&  source = sources[i];
+		VkBufferCopy region {source.offset, source.vaddr - vaddr, source.size};
+		vkCmdCopyBuffer(cmd, source.buffer->buffer, vertices->buffer, 1, &region);
+	}
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+}
+
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
 	                   uint32_t first_record, uint32_t required_records, bool records_exact, uint32_t first_instance,
 	                   uint32_t instance_count)
@@ -2620,9 +2658,14 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 			const uint64_t declared     = ShaderBufferByteSize(buffer_info.stride, buffer_info.num_records);
 			const bool     whole_stream = declared != 0u && declared <= kGpuMemoryMaxTransientReadOnlyBytes;
 			const uint64_t object_addr  = whole_stream ? buffer_info.addr : address;
+			const uint64_t object_size  = whole_stream ? declared : size;
 			vertices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, object_addr,
-			                                                            whole_stream ? declared : size, VertexBufferGpuObject()));
+			                                                            object_size, VertexBufferGpuObject()));
 			offset   = address - object_addr;
+			if (vertices != nullptr)
+			{
+				CopyPendingStorageIntoVertices(buffer, vertices, object_addr, object_size);
+			}
 		}
 		if (vertices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vertices == nullptr condition ignored (continuing)\n"); }
 
