@@ -731,6 +731,43 @@ TEST(EmulatorLibcCxxLocale, VswprintfFormatsGuestUtf16SignedInteger)
 	EXPECT_EQ(std::char_traits<char16_t>::compare(reinterpret_cast<const char16_t*>(output), expected, std::size(expected)), 0);
 }
 
+// Guests format one va_list in successive calls; each call continues after the
+// arguments the previous one consumed.
+TEST(EmulatorLibcCxxLocale, VswprintfConsumesTheCallersArguments)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"u0XOsuOmOzc");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Vswprintf = KYTY_SYSV_ABI int (*)(uint16_t* output, size_t output_count, const uint16_t* format, Libs::VaList* arguments);
+	auto* vswprintf = reinterpret_cast<Vswprintf>(rec->vaddr);
+
+	Libs::VaRegSave registers {};
+	Libs::VaList    arguments {};
+	registers.gp[0]         = 1;
+	registers.gp[1]         = 2;
+	registers.gp[2]         = 3840;
+	registers.gp[3]         = 2160;
+	arguments.gp_offset     = 0;
+	arguments.fp_offset     = offsetof(Libs::VaRegSave, fp);
+	arguments.reg_save_area = &registers;
+
+	uint16_t       first[16]  = {};
+	uint16_t       second[16] = {};
+	const char16_t prefix[]   = u"%d.%d ";
+	const char16_t extent[]   = u"%dx%d";
+	ASSERT_EQ(vswprintf(first, std::size(first), reinterpret_cast<const uint16_t*>(prefix), &arguments), 4);
+	ASSERT_EQ(vswprintf(second, std::size(second), reinterpret_cast<const uint16_t*>(extent), &arguments), 9);
+
+	const char16_t expected[] = u"3840x2160";
+	EXPECT_EQ(std::char_traits<char16_t>::compare(reinterpret_cast<const char16_t*>(second), expected, std::size(expected)), 0);
+}
+
 TEST(EmulatorLibcCxxLocale, ClassicLocimpFacetLookupMatchesGuestUseFacetLayout)
 {
 	void* facets[kCxxLocimpFacetCount] = {nullptr, reinterpret_cast<void*>(0x1)};

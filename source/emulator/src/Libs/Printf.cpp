@@ -551,7 +551,7 @@ static inline unsigned int _strnlen_s(const char* str, size_t maxsize)
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* format, VaList* caller_args)
+static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* format, VaList* va_list)
 {
 	// A null format is invalid input from the guest; report the C error return
 	// instead of dereferencing it.
@@ -559,11 +559,6 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 	{
 		return -1;
 	}
-
-	// The guest library formats from a copy of the caller's va_list, so callers
-	// may reuse one va_list, e.g. vsnprintf(nullptr, 0, ...) to size a buffer.
-	VaList  args    = *caller_args;
-	VaList* va_list = &args;
 
 	Vector<char> buffer;
 
@@ -976,9 +971,13 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 	return static_cast<int>(idx);
 }
 
+// The guest library's narrow entries format from a copy of the caller's
+// va_list, so callers may reuse one list, e.g. vsnprintf(nullptr, 0, ...) to
+// size a buffer.
 static int kyty_vprintf(const char* format, VaList* va_list)
 {
-	return kyty_printf_internal(false, nullptr, 0, format, va_list);
+	VaList args = *va_list;
+	return kyty_printf_internal(false, nullptr, 0, format, &args);
 }
 
 static int kyty_printf_ctx(VaContext* ctx)
@@ -1026,7 +1025,8 @@ libc_vprintf_func_t GetVprintfFunc()
 
 int Format(char* out, size_t out_size, const char* format, VaList* va_list)
 {
-	return kyty_printf_internal(true, out, out_size, format, va_list);
+	VaList args = *va_list;
+	return kyty_printf_internal(true, out, out_size, format, &args);
 }
 
 namespace {
@@ -1195,7 +1195,7 @@ void PutNarrowString(WideSink* sink, const WideField& field, const char* text)
 void PutNumericConversion(WideSink* sink, const WideSpec& spec, VaList* va_list)
 {
 	char      narrow[4096];
-	const int length = Format(narrow, sizeof(narrow), spec.text, va_list);
+	const int length = kyty_printf_internal(true, narrow, sizeof(narrow), spec.text, va_list);
 	if (length < 0)
 	{
 		return;
@@ -1237,15 +1237,14 @@ void PutConversion(WideSink* sink, const WideSpec& spec, VaList* va_list)
 
 } // namespace
 
-int FormatWide(uint16_t* out, size_t out_count, const uint16_t* format, VaList* caller_args)
+int FormatWide(uint16_t* out, size_t out_count, const uint16_t* format, VaList* va_list)
 {
 	if (format == nullptr)
 	{
 		return -1;
 	}
-	// Formats from a copy of the caller's va_list, as the narrow engine does.
-	VaList  args    = *caller_args;
-	VaList* va_list = &args;
+	// Consumes the caller's va_list: guests format one list in successive
+	// vswprintf calls, each continuing after the arguments of the previous one.
 	WideSink sink(out, out_count);
 	for (const uint16_t* cursor = format; *cursor != 0;)
 	{

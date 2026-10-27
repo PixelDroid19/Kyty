@@ -4984,3 +4984,41 @@ acceptance remains open.
   with 0x38 and an address (a bounded trace of both entry points), and what
   the guest expects in the reserved words. Then make the encoder, `GetSize`
   and the test follow that evidence together.
+
+## Wide formatting consumes the caller's va_list (2026-10-27, fixed)
+
+- **Observed.** In bounded 120 s strict runs, `PPSA03969 - F.I.S.T.: Forged
+  In Shadow Torch` and `PPSA09809 - OCTOPATH TRAVELER II` crashed at boot
+  (exit 139, no present) on this branch. Main (cd7f8f50) reached 664 and 4451
+  presents on the same host. gdb placed the fault inside guest code that
+  consumed the result of a `vswprintf` call.
+- **Cause.** 63ccc027 made the narrow and wide formatters work from a copy of
+  the caller's va_list. These titles format one va_list in successive
+  `vswprintf` calls, each continuing after the arguments the previous call
+  consumed, so with the copy every call restarted at the first argument. The
+  wide engine delegates each numeric conversion to the narrow engine, so that
+  path copied as well.
+- **Fix.** `FormatWide` and its numeric conversions now consume the caller's
+  list. The narrow `vsnprintf`/`vprintf` entries keep formatting from a copy, as
+  63ccc027 introduced. `EmulatorLibcCxxLocale.VswprintfConsumesTheCallersArguments`
+  covers two successive calls on one list.
+- **Verified.** Strict 120 s runs: PPSA03969 reaches 664 presents and stops at
+  the same `SLoadDwordx4` shader-emitter refusal as main; PPSA09809 runs the
+  whole window (4350 presents). Unit tests 2653/2653 and the repository gates
+  pass.
+- **Open.** The narrow copy still has no recorded guest trace; it should be
+  confirmed or replaced by the same successive-call evidence.
+
+## Strict sweep against main (2026-10-27)
+
+All 23 titles of the strict `games-matrix` sweep behave as on main. The
+titles the matrix skips were run directly for 120 s on main, on this branch
+before the day's graphics commits (14a95c57) and on its head; base and head
+matched on all of them. Failures shared with main, not caused by this branch:
+
+- `PPSA02070 - Don't Starve Together: Console Edition` and `PPSA17221 -
+  Minecraft` stop before the first present at "Render resolution plan
+  unsupported ... mismatched_host_extent" on the depth-only path of
+  `GraphicsRenderAttachments.cpp`.
+- PPSA07393 crashes at boot (exit 139) on main and on this branch.
+- PPSA01341 reaches 2 presents on base and head; main was not run.
