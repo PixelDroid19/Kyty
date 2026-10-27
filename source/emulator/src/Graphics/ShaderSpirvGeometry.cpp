@@ -354,6 +354,7 @@ String8 SpirvGenerateGeometryComputeSource(const ShaderCode& code, const ShaderV
 
 String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometry, bool layer)
 {
+	// A primitive export word holds three 10-bit corners: a 9-bit vertex index under that vertex's edge flag.
 	static const char* head = R"(               OpCapability Shader
                OpCapability Int64
                OpCapability PhysicalStorageBufferAddresses
@@ -385,7 +386,7 @@ String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometr
     %uint_32 = OpConstant %uint 32
  %uint_lanes = OpConstant %uint <lanes>
 %uint_group_corners = OpConstant %uint <group_corners>
- %uint_index_mask = OpConstant %uint 1023
+ %uint_index_mask = OpConstant %uint 511
  %uint_layer_mask = OpConstant %uint 2047
  %uint_count_mask = OpConstant %uint 4095
  %uint_null = OpConstant %uint 2147483648
