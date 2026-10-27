@@ -477,6 +477,7 @@ std::string GraphicsSkippedGeStateJson(const GraphicsSkippedGeState& s)
 		       ",\"known\":" + (raw.known ? "true" : "false") + '}';
 	};
 	std::string report = "{\"stages\":" + std::to_string(s.stages) +
+	                     ",\"input_primitive\":" + std::to_string(s.input_primitive) +
 	                     ",\"raw_registers\":{\"stages\":" + raw_register(s.stages_raw) +
 	                     ",\"ge_control\":" + raw_register(s.ge_control_raw) +
 	                     ",\"ge_user_vgpr_en\":" + raw_register(s.ge_user_vgpr_raw) +
@@ -640,6 +641,7 @@ struct SkippedProgramCensusEntry
 	uint64_t es_program      = 0;
 	uint64_t gs_back_program = 0;
 	uint32_t stages          = 0;
+	uint32_t input_primitive = 0;
 	uint32_t max_vertex_out  = 0;
 	uint32_t output_primitive = 0;
 	uint32_t primitive_group = 0;
@@ -661,7 +663,8 @@ void CountSkippedProgram(const GraphicsSkippedGeState& state)
 	{
 		auto& entry = g_skipped_census[i];
 		if (entry.gs_checksum == state.gs_checksum && entry.es_program == state.es_program &&
-		    entry.gs_back_program == state.gs_back_program && entry.stages == state.stages)
+		    entry.gs_back_program == state.gs_back_program && entry.stages == state.stages &&
+		    entry.input_primitive == state.input_primitive)
 		{
 			++entry.draws;
 			return;
@@ -673,8 +676,8 @@ void CountSkippedProgram(const GraphicsSkippedGeState& state)
 		return;
 	}
 	g_skipped_census[g_skipped_census_size++] = {state.gs_checksum, state.es_program, state.gs_back_program, state.stages,
-	                                              state.max_vertex_out, state.output_primitive, state.primitive_group_size,
-	                                              state.vertex_group_size, 1u};
+	                                              state.input_primitive, state.max_vertex_out, state.output_primitive,
+	                                              state.primitive_group_size, state.vertex_group_size, 1u};
 }
 
 // Opt-in KYTY_SKIPPED_DRAW_REPORT=<prefix>: <prefix>-skipped-census.json is
@@ -691,7 +694,7 @@ void WriteSkippedProgramCensus()
 	{
 		return;
 	}
-	std::string report = "{\"schema\":\"guest_draw_skipped_census\",\"version\":1,\"programs\":[";
+	std::string report = "{\"schema\":\"guest_draw_skipped_census\",\"version\":2,\"programs\":[";
 	{
 		std::lock_guard<std::mutex> lock(g_skipped_census_mutex);
 		for (size_t i = 0; i < g_skipped_census_size; ++i)
@@ -700,10 +703,11 @@ void WriteSkippedProgramCensus()
 			char        row[384] {};
 			std::snprintf(row, sizeof(row),
 			              "%s{\"gs_checksum\":\"0x%016llx\",\"es\":\"0x%llx\",\"gs_back\":\"0x%llx\",\"stages\":%u,"
-			              "\"max_vertex_out\":%u,\"output_primitive\":%u,\"primitive_group\":%u,\"vertex_group\":%u,\"draws\":%llu}",
+			              "\"input_primitive\":%u,\"max_vertex_out\":%u,\"output_primitive\":%u,\"primitive_group\":%u,"
+			              "\"vertex_group\":%u,\"draws\":%llu}",
 			              i == 0 ? "" : ",", static_cast<unsigned long long>(e.gs_checksum), static_cast<unsigned long long>(e.es_program),
-			              static_cast<unsigned long long>(e.gs_back_program), e.stages, e.max_vertex_out, e.output_primitive,
-			              e.primitive_group, e.vertex_group, static_cast<unsigned long long>(e.draws));
+			              static_cast<unsigned long long>(e.gs_back_program), e.stages, e.input_primitive, e.max_vertex_out,
+			              e.output_primitive, e.primitive_group, e.vertex_group, static_cast<unsigned long long>(e.draws));
 			report += row;
 		}
 		report += "],\"overflow\":" + std::to_string(g_skipped_census_overflow) + "}\n";

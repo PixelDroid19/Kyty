@@ -466,6 +466,7 @@ struct GraphicsSkippedGeState
 	GraphicsGeRawRegister gs_resource2_raw;
 	GraphicsGeRawRegister gs_resource3_raw;
 	uint32_t stages = 0;
+	uint32_t input_primitive = 0;
 	uint64_t es_program = 0;
 	uint64_t gs_back_program = 0;
 	uint64_t legacy_gs_program = 0;

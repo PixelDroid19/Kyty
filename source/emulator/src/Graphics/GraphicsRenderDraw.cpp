@@ -1147,6 +1147,7 @@ GraphicsSkippedGeState GraphicsDescribeSkippedGeState(const HW::Context& ctx, co
 	state.gs_resource2_raw = shader.GetGsShaderResource2Raw();
 	state.gs_resource3_raw = shader.GetGsRsrc3Raw();
 	state.stages = ctx.GetShaderStages();
+	state.input_primitive = ucfg.GetPrimType();
 	state.es_program = vs.es_regs.data_addr;
 	state.gs_back_program = vs.gs_back_addr;
 	state.legacy_gs_program = vs.gs_regs.data_addr;
