@@ -998,8 +998,11 @@ constexpr uint32_t VGT_PRIMITIVE_TYPE_PRIM_TYPE_SHIFT = 0;
 constexpr uint32_t VGT_PRIMITIVE_TYPE_PRIM_TYPE_MASK  = 0x3F;
 constexpr uint32_t VGT_INDEX_TYPE                     = 0x243;
 constexpr uint32_t VGT_INDEX_TYPE_INDEXED_UCONFIG_SELECTOR = (2u << 28u) | VGT_INDEX_TYPE;
-constexpr uint32_t VGT_INDEX_TYPE_DEFAULT_VALUE            = 0x00000400u;
+// Bit 10 is always set by the Agc index-size encoder; its hardware meaning is not modelled.
+constexpr uint32_t VGT_INDEX_TYPE_AGC_BASE_VALUE           = 0x00000400u;
 constexpr uint32_t VGT_INDEX_TYPE_SIZE_MASK                = 0x3u;
+constexpr uint32_t VGT_INDEX_TYPE_CACHE_POLICY_SHIFT       = 6u;
+constexpr uint32_t VGT_INDEX_TYPE_PER_INSTANCE_OBJECT_ID_SHIFT = 14u;
 
 constexpr uint32_t VGT_OBJECT_ID             = 0x248;
 constexpr uint32_t GE_INDX_OFFSET            = 0x24A;

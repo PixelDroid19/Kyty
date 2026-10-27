@@ -10684,7 +10684,7 @@ TEST(EmulatorGraphicsPackets, EncodesCbNopAsFullType3Packet)
 	EXPECT_EQ(Gen5::GraphicsGetDataPacketSizeDw(cmd), 4u);
 }
 
-TEST(EmulatorGraphicsPackets, RegistersAndEncodesDefaultIndexedUconfig)
+TEST(EmulatorGraphicsPackets, RegistersAndEncodesDcbSetIndexSize0600)
 {
 	struct AlignasCommandBuffer
 	{
@@ -10719,9 +10719,9 @@ TEST(EmulatorGraphicsPackets, RegistersAndEncodesDefaultIndexedUconfig)
 	const auto* record = symbols.Find(query);
 	ASSERT_NE(record, nullptr);
 
-	using EmitIndexedUconfig = uint32_t* (KYTY_SYSV_ABI*)(Gen5::CommandBuffer*, uint32_t, uint32_t);
-	auto emit_indexed_uconfig = reinterpret_cast<EmitIndexedUconfig>(record->vaddr);
-	ASSERT_NE(emit_indexed_uconfig, nullptr);
+	using SetIndexSize = uint32_t* (KYTY_SYSV_ABI*)(Gen5::CommandBuffer*, uint8_t, uint8_t, uint8_t);
+	auto set_index_size = reinterpret_cast<SetIndexSize>(record->vaddr);
+	ASSERT_NE(set_index_size, nullptr);
 
 	uint32_t             storage[16] = {};
 	AlignasCommandBuffer cb {};
@@ -10730,16 +10730,25 @@ TEST(EmulatorGraphicsPackets, RegistersAndEncodesDefaultIndexedUconfig)
 	cb.cursor_up   = storage;
 	cb.cursor_down = storage + 16;
 
-	EXPECT_EQ(emit_indexed_uconfig(nullptr, 0u, 0u), nullptr);
-	EXPECT_EQ(emit_indexed_uconfig(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 0u), nullptr);
+	EXPECT_EQ(set_index_size(nullptr, 0u, 0u, 0u), nullptr);
 
-	uint32_t* cmd = emit_indexed_uconfig(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0u);
+	uint32_t* cmd = set_index_size(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0u, 0u);
 	ASSERT_NE(cmd, nullptr);
 	EXPECT_EQ(cmd, storage);
 	EXPECT_EQ(cb.cursor_up, storage + 3);
 	EXPECT_EQ(cmd[0], 0xc0017a00u);
 	EXPECT_EQ(cmd[1], 0x20000243u);
 	EXPECT_EQ(cmd[2], 0x00000400u);
+
+	// 32-bit indices, cache policy 2, per-instance object id set.
+	cmd = set_index_size(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 2u, 1u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cmd, storage + 3);
+	EXPECT_EQ(cmd[2], 0x00004481u);
+
+	uint32_t index_type = 0xffffffffu;
+	EXPECT_TRUE(Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(cmd[0], cmd + 1, 2u, &index_type));
+	EXPECT_EQ(index_type, 1u);
 }
 
 TEST(EmulatorGraphicsPackets, DecodesIndexedUconfigVgtIndexType)

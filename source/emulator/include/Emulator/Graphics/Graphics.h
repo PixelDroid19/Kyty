@@ -151,10 +151,10 @@ int KYTY_SYSV_ABI   GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, u
 uint32_t* KYTY_SYSV_ABI GraphicsCbNop(CommandBuffer* buf, uint32_t num_dw);
 // Legacy name used by older call sites; same entry as GraphicsCbNop.
 uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t num_dw);
-// Emits the fixed indexed UCONFIG command used during Gen5 command-buffer
-// initialization. The established ABI supplies zero for both controls; other
-// encodings are rejected until their hardware fields are verified.
-uint32_t* KYTY_SYSV_ABI GraphicsCbEmitDefaultIndexedUconfig(CommandBuffer* buf, uint32_t control0, uint32_t control1);
+// sceAgcDcbSetIndexSize_0600 (NID -KRzWekV120): writes VGT_INDEX_TYPE through
+// SET_UCONFIG_REG_INDEX. index_size: 0 = 16-bit, 1 = 32-bit, 2 = 8-bit.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize0600(CommandBuffer* buf, uint8_t index_size, uint8_t cache_policy,
+                                                    uint8_t per_instance_object_id);
 // Decodes the indexed UCONFIG form that writes VGT_INDEX_TYPE. available_dwords
 // includes the selector and value, and may include later PM4 packets.
 bool GraphicsDecodeIndexedUconfigVgtIndexType(uint32_t header, const uint32_t* body, uint32_t available_dwords,
@@ -287,8 +287,6 @@ int KYTY_SYSV_ABI GraphicsUpdatePrimState(volatile uint32_t* cx_regs, volatile u
 // sceAgcDcbCondExec / sceAgcAcbCondExec (NIDs BIPexNBSGog, qyM2bxYFPAk).
 uint32_t* KYTY_SYSV_ABI GraphicsDcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t block_dwords);
 uint32_t* KYTY_SYSV_ABI GraphicsAcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t block_dwords);
-// libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
-int KYTY_SYSV_ABI   GraphicsAgcDriverUnknownKRzWekV120();
 // PS5 Pro / Trinity GPU mode query (NID BfBDZGbti7A). Base Prospero reports 0.
 uint64_t KYTY_SYSV_ABI GraphicsGetIsTrinityMode();
 // Debug exception raise used by titles as a soft breakpoint; returns OK.

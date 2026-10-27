@@ -3348,11 +3348,17 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbAllocateDwords(CommandBuffer* buf, uint32_t nu
 	return GraphicsCbNop(buf, num_dw);
 }
 
-uint32_t* KYTY_SYSV_ABI GraphicsCbEmitDefaultIndexedUconfig(CommandBuffer* buf, uint32_t control0, uint32_t control1)
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize0600(CommandBuffer* buf, uint8_t index_size, uint8_t cache_policy,
+                                                    uint8_t per_instance_object_id)
 {
 	PRINT_NAME();
 
-	if (buf == nullptr || control0 != 0u || control1 != 0u)
+	if (index_size > 2u || cache_policy > 3u || per_instance_object_id > 1u)
+	{
+		EXIT("invalid sceAgcDcbSetIndexSize_0600 arguments: index_size=%u cache_policy=%u per_instance_object_id=%u\n", index_size,
+		     cache_policy, per_instance_object_id);
+	}
+	if (buf == nullptr)
 	{
 		return nullptr;
 	}
@@ -3363,10 +3369,11 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbEmitDefaultIndexedUconfig(CommandBuffer* buf, 
 		return nullptr;
 	}
 
-	// SET_UCONFIG_REG_INDEX selects the indexed UCONFIG bootstrap register.
 	cmd[0] = KYTY_PM4(3, Pm4::IT_SET_UCONFIG_REG_INDEX, 0u);
 	cmd[1] = Pm4::VGT_INDEX_TYPE_INDEXED_UCONFIG_SELECTOR;
-	cmd[2] = Pm4::VGT_INDEX_TYPE_DEFAULT_VALUE;
+	cmd[2] = Pm4::VGT_INDEX_TYPE_AGC_BASE_VALUE | index_size |
+	         (static_cast<uint32_t>(cache_policy) << Pm4::VGT_INDEX_TYPE_CACHE_POLICY_SHIFT) |
+	         (static_cast<uint32_t>(per_instance_object_id) << Pm4::VGT_INDEX_TYPE_PER_INSTANCE_OBJECT_ID_SHIFT);
 	return cmd;
 }
 
@@ -4362,14 +4369,6 @@ int KYTY_SYSV_ABI GraphicsUpdatePrimState(volatile uint32_t* cx_regs, volatile u
 }
 
 
-
-int KYTY_SYSV_ABI GraphicsAgcDriverUnknownKRzWekV120()
-{
-	// Called immediately before the first indexed draw on observed Gen5 boots.
-	// Real semantics unknown; return success so the draw path continues.
-	PRINT_NAME();
-	return OK;
-}
 
 uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, uint32_t offset, const uint32_t* values, uint32_t num_values)
 {
