@@ -1017,9 +1017,9 @@ bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryS
 	return g_gpu_memory != nullptr && identity != nullptr && g_gpu_memory->FindExactWritableStorage(vaddr, size, identity);
 }
 
-bool GpuMemoryFindWritableStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size)
+bool GpuMemoryFindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size)
 {
-	return g_gpu_memory != nullptr && g_gpu_memory->FindWritableStorageContaining(vaddr, size, object_vaddr, object_size);
+	return g_gpu_memory != nullptr && g_gpu_memory->FindStorageContaining(vaddr, size, object_vaddr, object_size);
 }
 
 bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,

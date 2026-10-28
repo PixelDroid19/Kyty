@@ -706,17 +706,36 @@ bool GpuMemory::FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemor
 	return false;
 }
 
-bool GpuMemory::FindWritableStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size)
+bool GpuMemory::FindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size)
 {
 	EXIT_IF(object_vaddr == nullptr || object_size == nullptr);
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
-	const auto found = CollectWritableStorageIn(vaddr, size);
-	if (found.size() != 1)
+	const int       heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
 	{
 		return false;
 	}
-	const auto& block = m_heaps[found[0].first].objects[found[0].second].block;
+	int found = -1;
+	for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1))
+	{
+		const auto& object = m_heaps[heap_id].objects[block.object_id];
+		if (object.free || object.info.object.type != GpuMemoryObjectType::StorageBuffer || !object.info.in_use ||
+		    object.info.object.obj == nullptr)
+		{
+			continue;
+		}
+		if (found >= 0 && found != block.object_id)
+		{
+			return false;
+		}
+		found = block.object_id;
+	}
+	if (found < 0)
+	{
+		return false;
+	}
+	const auto& block = m_heaps[heap_id].objects[found].block;
 	if (block.vaddr_num != 1 || vaddr < block.vaddr[0] || vaddr + size > block.vaddr[0] + block.size[0])
 	{
 		return false;

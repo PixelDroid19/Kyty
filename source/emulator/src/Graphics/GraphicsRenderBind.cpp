@@ -2653,11 +2653,12 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 		VkDeviceSize offset   = 0;
 		uint64_t     storage_addr = 0;
 		uint64_t     storage_size = 0;
-		if (vertices == nullptr && GpuMemoryFindWritableStorageContaining(address, size, &storage_addr, &storage_size))
+		if (vertices == nullptr && GpuMemoryFindStorageContaining(address, size, &storage_addr, &storage_size))
 		{
-			// The stream lies in memory a shader writes: fetch it from that storage
-			// object, as the guest GPU reads the same memory. The guest's own cache
-			// flushes order the writes before the fetch.
+			// The stream lies in memory a storage object holds: fetch it from that
+			// object, as the guest GPU reads the same memory. A vertex object over it
+			// would reclaim the storage object, and the next dispatch the vertex one.
+			// The guest's own cache flushes order shader writes before the fetch.
 			vertices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, storage_addr,
 			                                                            storage_size, StorageBufferGpuObject(1, storage_size, true)));
 			offset   = address - storage_addr;

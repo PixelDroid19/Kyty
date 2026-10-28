@@ -298,7 +298,7 @@ public:
 	void CollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, SubmissionId reader, std::vector<GpuMemoryStorageSeedSource>* sources);
 	[[nodiscard]] bool PendingStorageHasAliases();
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
-	[[nodiscard]] bool FindWritableStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
+	[[nodiscard]] bool FindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
 	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
 	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
 	[[nodiscard]] GpuMemoryGdsSource AcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
