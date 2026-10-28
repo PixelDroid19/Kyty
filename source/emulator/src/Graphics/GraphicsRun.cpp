@@ -1329,6 +1329,21 @@ void CommandProcessor::WaitProducer(SubmissionId producer)
 // label lands, and after an earlier store to the same bytes deferred to end of pipe. Retiring
 // those producers first makes the store visible in that order, and still before any later work
 // of this batch reads it.
+// A one-dword immediate DMA_DATA store is ordered like a one-dword WRITE_DATA: behind a
+// consolidated wait not yet passed on the GPU, or behind an earlier deferred store to the same
+// bytes, it is deferred to end of pipe instead of waiting for the GPU. False: store it now.
+bool CommandProcessor::DeferImmediateStore(uint64_t dst, uint32_t value)
+{
+	Core::LockGuard lock(m_mutex);
+	auto*           dst_dword = reinterpret_cast<uint32_t*>(dst);
+	if ((dst & 3u) != 0u || (!m_consolidated_plain_wait && !HasPendingDeferredWrite(dst_dword, sizeof(value))))
+	{
+		return false;
+	}
+	DeferWriteData(dst_dword, &value, 1u);
+	return true;
+}
+
 void CommandProcessor::RetireBeforeStore(uint64_t dst, uint32_t size_bytes)
 {
 	if (m_consolidated_plain_wait)

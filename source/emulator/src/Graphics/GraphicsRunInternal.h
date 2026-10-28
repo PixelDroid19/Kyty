@@ -387,6 +387,7 @@ public:
 	[[nodiscard]] bool HasPendingDeferredWrite(const uint32_t* dst, uint32_t size_bytes) const;
 	void DeferWriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num);
 	void RetireBeforeStore(uint64_t dst, uint32_t size_bytes);
+	[[nodiscard]] bool DeferImmediateStore(uint64_t dst, uint32_t value);
 
 	void Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data);
 	[[nodiscard]] bool TakeSuspendedRun(SuspendedRun* run);
