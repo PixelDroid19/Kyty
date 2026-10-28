@@ -328,7 +328,6 @@ public:
 	void FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr, uint32_t value);
 	void QueueQueuedGraphicsInterrupt();
 	void WriteBack();
-	void WaitDeviceAddressWriteBacks();
 	// Copies guest bytes the processor reads at record time once no GPU writer owns newer content.
 	[[nodiscard]] bool ReadCurrentGuestBytes(uint64_t vaddr, void* dst, uint64_t size);
 	void MemoryBarrier();

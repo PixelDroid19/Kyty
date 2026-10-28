@@ -2520,9 +2520,6 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 {
 	SubmitRecordedDispatchesBeforeDraw();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
-	// This precedes the CPU snapshot of indirect arguments; renderer preflight
-	// runs later and cannot provide freshness for this host-side read.
-	WaitDeviceAddressWriteBacks();
 	uint64_t submit_id = 0;
 	uint32_t index_type_and_size = 0;
 	uint32_t index_count = 0;
@@ -2630,9 +2627,6 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
 {
 	SubmitRecordedDispatchesBeforeDraw();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
-	// This precedes the CPU snapshot of indirect arguments; renderer preflight
-	// runs later and cannot provide freshness for this host-side read.
-	WaitDeviceAddressWriteBacks();
 	struct DrawIndirectArgs
 	{
 		uint32_t vertex_count_per_instance;
@@ -3332,24 +3326,6 @@ void CommandProcessor::QueueQueuedGraphicsInterrupt()
 
 	GraphicsRenderQueueQueuedGraphicsInterrupt(m_buffer[m_current_buffer]);
 	m_completion_callback_sources |= kGraphicsCompletionQueuedInterrupt;
-}
-
-void CommandProcessor::WaitDeviceAddressWriteBacks()
-{
-	// Mirrors the DispatchDirect protocol: a storage buffer whose GPU writes
-	// are still in flight must complete before the device-address bind can
-	// publish its guest copy. Waiting must run without the recording mutex —
-	// completion of the pending submission can publish resources that need it.
-	SubmissionId pending;
-	for (uint32_t attempt = 0; GuestDeviceAddressPendingWriteBack(GpuQueueId(static_cast<uint32_t>(m_queue)), {}, nullptr, &pending);)
-	{
-		g_gpu->WaitSubmission(pending);
-		if (++attempt >= 64u)
-		{
-			EXIT("device-address write-back did not stabilize: queue=%u sequence=%" PRIu64 "\n", pending.queue.Value(),
-			     pending.sequence);
-		}
-	}
 }
 
 bool CommandProcessor::ReadCurrentGuestBytes(uint64_t vaddr, void* dst, uint64_t size)
