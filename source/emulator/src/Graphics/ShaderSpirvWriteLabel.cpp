@@ -134,6 +134,7 @@ void Spirv::WriteLabel(int index)
 	// Partition guest labels at this PC.
 	Vector<ShaderLabel*> loop_merges;
 	Vector<ShaderLabel*> guest_labels;
+	Vector<ShaderLabel*> back_edges;
 	for (uint32_t i = labels.Size(); i > 0; i--)
 	{
 		auto& label = labels[i - 1];
@@ -144,10 +145,21 @@ void Spirv::WriteLabel(int index)
 		if (ScJoinIsLoopMergeLabel(m_code, label))
 		{
 			loop_merges.Add(&label);
+		} else if (label.GetSrc() > label.GetDst())
+		{
+			back_edges.Add(&label);
 		} else
 		{
 			guest_labels.Add(&label);
 		}
+	}
+	// The back edge targets the loop header, which must be the last block opened
+	// at this PC: it hosts the guest body and OpLoopMerge, and forward entries
+	// fall through into it. A header opened earlier is reachable only from its
+	// own back edge, which leaves the loop without a dominating entry.
+	for (uint32_t i = 0; i < back_edges.Size(); i++)
+	{
+		guest_labels.Add(back_edges[i]);
 	}
 
 	Vector<uint32_t> sc_join_srcs;
