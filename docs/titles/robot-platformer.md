@@ -6,7 +6,7 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
-## Robot platformer: dune waits on aliased storage and DMA stores (2026-10-28)
+## Robot platformer: dune waits on aliased storage, DMA stores and pipeline churn (2026-10-28)
 
 - **Observed** (Intel A770, strict 340 s route to the crash-site dunes,
   60 fps limit, warm pipeline cache): the dunes ran at 6.4 fps with
@@ -33,24 +33,32 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   `WRITE_DATA` (0.003 s per run). Loading windows got faster: the first
   window went from 25.5 to 33.5 fps, and the dunes were reached about 400
   frames earlier.
-- **Result.** The dunes are still at 6.7-6.8 fps: the command processor is
-  busy about 175 ms per frame and the GPU about 83 ms. Fence waits per
-  340 s run are now led by CPU reads of indirect arguments
+- **Result after fix 3.** The dunes were still at 6.7-6.8 fps: the
+  command processor was busy about 175 ms per frame and the GPU about 83 ms.
+  Fence waits per 340 s run are now led by CPU reads of indirect arguments
   (`ReadCurrentGuestBytes` waiting on their producer): 31 s for
   `DISPATCH_INDIRECT` and 11 s for `DRAW_INDEX_INDIRECT`, then 10.5 s for
   32-bit `WAIT_REG_MEM` and 6 s for indexed draws over pending ranges.
-- **Open: pipelines re-created with transient targets.** A diagnostic count
-  over one run found 2118 framebuffers created and 2969 pipelines deleted
-  with them. The render pass id is a per-framebuffer sequence, so a target
-  recreated every frame also recreates its pipelines. Misses: 2165 with no
-  cached twin, 1011 whose twin differed only in static state, 137 whose twin
-  differed only in render pass. That is about 15-20 ms of command processing
-  per frame. Lead: key pipelines by render pass compatibility (formats and
-  samples), not framebuffer identity.
-- **Verified.** Focused `kyty_unit_test` suites (1147 passed), the three
-  repository CTest gates (4 tests passed), four strict 340 s runs with no
-  fatal stop; the dune captures at frames 3797 and 4207 match the previous
-  build's captures of the same scene.
+- **Fix 4** (`5e4d4a964`): pipelines re-created with transient targets. A
+  diagnostic count over one run found 2118 framebuffers created and 2969
+  pipelines deleted with them: pipelines were keyed by a per-framebuffer
+  sequence, so a target recreated every frame also recreated its pipelines
+  (3313 misses per run, about 2.6 s of each 30 s dune window). Pipelines are
+  now keyed by Vulkan render pass compatibility (attachment formats and
+  sample counts), the extent, and whether the pass begins without a clear,
+  which fragment transport requires; a freed framebuffer no longer deletes
+  them. Misses fell to 293 per run and to none in the last dune window;
+  the dunes went from 6.7-6.8 to 7.2-7.5 fps.
+- **Verified.** Focused `kyty_unit_test` suites (1152 passed with fix 4),
+  the three repository CTest gates (4 tests passed), five strict 340 s runs
+  with no fatal stop; the dune captures at frames 3797 and 4207 match the
+  previous build's captures of the same scene. The strict games matrix on
+  Intel A770 with fix 4 reached 25 of 32 cases interactive (24 of 32 on
+  2026-10-27). Its one new non-interactive case, `PPSA03969 - F.I.S.T.`
+  (host crash after 30 presents), is the startup race recorded in
+  `docs/titles/mechanical-fist-platformer.md` (guest mutex at offset 0x58 in
+  `PthreadMutexLock`); it also crashed in three of six matrix runs on
+  2026-10-27, before these fixes.
 
 ## Robot platformer: dune compute cost and split-wave rendezvous (2026-10-28)
 

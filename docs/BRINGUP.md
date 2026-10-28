@@ -48,7 +48,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Robot platformer: composite raw path admits a linear multi-level destination (2026-10-25, fixed)
   - Robot platformer: load-window cost per draw stage (2026-10-24)
   - Robot platformer: dune compute cost and split-wave rendezvous (2026-10-28)
-  - Robot platformer: dune waits on aliased storage and DMA stores (2026-10-28)
+  - Robot platformer: dune waits on aliased storage, DMA stores and pipeline churn (2026-10-28)
   - Robot platformer: hub ground samples mips below the T# MIN_LOD (2026-10-28, fixed)
   - Robot platformer: hub vertex streams re-uploaded every frame (2026-10-28, fixed)
   - Robot platformer: packed half arithmetic in a hub compute program (2026-10-27)
