@@ -6,6 +6,52 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: dune waits on aliased storage and DMA stores (2026-10-28)
+
+- **Observed** (Intel A770, strict 340 s route to the crash-site dunes,
+  60 fps limit, warm pipeline cache): the dunes ran at 6.4 fps with
+  `WAIT_REG_MEM` taking 6.5-6.7 s and fence waits 9.1-9.4 s of each 30 s
+  window. Nearly all of the `WAIT_REG_MEM` time was 64-bit waits kept
+  synchronous by the pending-alias check (1020 waits, 28.8 s per run).
+- **Localized.** A diagnostic census of the aliases of each pending
+  writable storage buffer at those waits found only skipped parents and
+  textures created with `PARAM_SKIP_GUEST_UPLOAD`. Their write-back refresh
+  writes transparent black or copies from the device and never reads the
+  published guest bytes, so the write-back does not have to run before them.
+- **Fix 1** (`e44b49060`): the pending-alias check counts only aliases whose
+  refresh reads guest bytes. Those waits fell from 1020 (28.8 s) to 5
+  (0.009 s) per run, and `WAIT_REG_MEM` to 0.65 s per dune window.
+- **Fix 2** (`467401517`): consolidating those waits exposed a strict
+  `create_all_the_same` stop at about 150 s. A storage texture over a
+  recycled 1920x1080 range met a storage buffer whose last writable use
+  (still in flight) came before render targets drew over that range. Its
+  write-back publishes bytes the targets replaced, so the buffer is now
+  redescribed like a superseded storage texture.
+- **Fix 3** (`a8c76062a`): the wait then moved to one-dword immediate
+  `DMA_DATA` stores, which retired the consolidated producer on the host
+  (58 s per run). They are now deferred to end of pipe like a one-dword
+  `WRITE_DATA` (0.003 s per run). Loading windows got faster: the first
+  window went from 25.5 to 33.5 fps, and the dunes were reached about 400
+  frames earlier.
+- **Result.** The dunes are still at 6.7-6.8 fps: the command processor is
+  busy about 175 ms per frame and the GPU about 83 ms. Fence waits per
+  340 s run are now led by CPU reads of indirect arguments
+  (`ReadCurrentGuestBytes` waiting on their producer): 31 s for
+  `DISPATCH_INDIRECT` and 11 s for `DRAW_INDEX_INDIRECT`, then 10.5 s for
+  32-bit `WAIT_REG_MEM` and 6 s for indexed draws over pending ranges.
+- **Open: pipelines re-created with transient targets.** A diagnostic count
+  over one run found 2118 framebuffers created and 2969 pipelines deleted
+  with them. The render pass id is a per-framebuffer sequence, so a target
+  recreated every frame also recreates its pipelines. Misses: 2165 with no
+  cached twin, 1011 whose twin differed only in static state, 137 whose twin
+  differed only in render pass. That is about 15-20 ms of command processing
+  per frame. Lead: key pipelines by render pass compatibility (formats and
+  samples), not framebuffer identity.
+- **Verified.** Focused `kyty_unit_test` suites (1147 passed), the three
+  repository CTest gates (4 tests passed), four strict 340 s runs with no
+  fatal stop; the dune captures at frames 3797 and 4207 match the previous
+  build's captures of the same scene.
+
 ## Robot platformer: dune compute cost and split-wave rendezvous (2026-10-28)
 
 - **Observed** (Intel A770, strict route to the crash-site dunes, 60 fps
@@ -56,6 +102,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   therefore still wait in most cases. The lead is to propagate storage
   writes to their image aliases on the device in queue order, so they no
   longer depend on the host write-back.
+  Narrowed by the dune waits record above: the aliases at the dune waits never read
+  the guest bytes, so those waits now consolidate.
 - **Open.** The title writes many end-of-pipe clock-counter timestamps,
   which Kyty records at host completion; whether its dynamic resolution reads
   them is not verified.
