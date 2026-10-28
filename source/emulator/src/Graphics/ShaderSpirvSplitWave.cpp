@@ -219,16 +219,41 @@ OpAtomicStore %split_publish_sequence_ptr %split_scope_workgroup %split_release 
 OpBranch %split_publish_published
 %split_publish_published = OpLabel
 )";
-	// XOR with 1 .. P-1 names every other part once.
-	for (uint32_t other = 1; other < parts; ++other)
+	// One spin reads every part's sequence, so the parts' latencies overlap
+	// instead of adding up; every seen value is n or n + 1. The loads acquire:
+	// a relaxed spin whose result a caller ignores has no effect and the
+	// compiler drops it.
+	text += R"(OpBranch %split_publish_header
+%split_publish_header = OpLabel
+%split_publish_spins = OpPhi %uint %split_c0 %split_publish_published %split_publish_next %split_publish_continue
+OpLoopMerge %split_publish_merge %split_publish_continue None
+OpBranch %split_publish_body
+%split_publish_body = OpLabel
+)";
+	String8 sequence = "%split_publish_n";
+	for (uint32_t part = 0; part < parts; ++part)
 	{
-		text += String8::FromPrintf("%%split_publish_other%u = OpBitwiseXor %%uint %%split_publish_part %%split_c%u\n"
-		                            "%%split_publish_other_sequence%u = OpIAdd %%uint %%split_publish_base %%split_publish_other%u\n"
-		                            "%%split_publish_seen%u = OpFunctionCall %%uint %%split_wait %%split_publish_other_sequence%u "
-		                            "%%split_publish_n\n",
-		                            other, other, other, other, other, other);
+		text += String8::FromPrintf("%%split_publish_sequence_index%u = OpIAdd %%uint %%split_publish_base %%split_c%u\n"
+		                            "%%split_publish_sequence%u_ptr = OpAccessChain %%_ptr_Workgroup_split_uint %%split_exchange "
+		                            "%%split_publish_sequence_index%u\n"
+		                            "%%split_publish_seen%u = OpAtomicLoad %%uint %%split_publish_sequence%u_ptr %%split_scope_workgroup "
+		                            "%%split_acquire\n"
+		                            "%%split_publish_upto%u = OpExtInst %%uint %%GLSL_std_450 UMin %s %%split_publish_seen%u\n",
+		                            part, part, part, part, part, part, part, sequence.c_str(), part);
+		sequence = String8::FromPrintf("%%split_publish_upto%u", part);
 	}
-	text += "OpReturnValue %split_publish_n\nOpFunctionEnd\n";
+	text += String8::FromPrintf(R"(%%split_publish_ready = OpIEqual %%bool %s %%split_publish_n
+%%split_publish_next = OpIAdd %%uint %%split_publish_spins %%split_c1
+%%split_publish_late = OpUGreaterThanEqual %%bool %%split_publish_next %%split_spin_limit
+%%split_publish_done = OpLogicalOr %%bool %%split_publish_ready %%split_publish_late
+OpBranchConditional %%split_publish_done %%split_publish_merge %%split_publish_continue
+%%split_publish_continue = OpLabel
+OpBranch %%split_publish_header
+%%split_publish_merge = OpLabel
+OpReturnValue %s
+OpFunctionEnd
+)",
+	                            sequence.c_str(), sequence.c_str());
 	return text;
 }
 
@@ -310,31 +335,7 @@ String8 Spirv::SplitWaveFunctions() const
 	const uint32_t parts = 64u / lanes;
 	// %function_u_u is (uint, uint) -> uint and %function_gen5_buffer_format_bytes
 	// is (uint) -> uint; SPIR-V forbids declaring a function type twice.
-	String8 text = R"(
-%split_wait = OpFunction %uint None %function_u_u
-%split_wait_index = OpFunctionParameter %uint
-%split_wait_n = OpFunctionParameter %uint
-%split_wait_entry = OpLabel
-%split_wait_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_wait_index
-OpBranch %split_wait_header
-%split_wait_header = OpLabel
-%split_wait_spins = OpPhi %uint %split_c0 %split_wait_entry %split_wait_next %split_wait_continue
-OpLoopMerge %split_wait_merge %split_wait_continue None
-OpBranch %split_wait_body
-%split_wait_body = OpLabel
-%split_wait_seen = OpAtomicLoad %uint %split_wait_ptr %split_scope_workgroup %split_acquire
-%split_wait_ready = OpUGreaterThanEqual %bool %split_wait_seen %split_wait_n
-%split_wait_next = OpIAdd %uint %split_wait_spins %split_c1
-%split_wait_late = OpUGreaterThanEqual %bool %split_wait_next %split_spin_limit
-%split_wait_done = OpLogicalOr %bool %split_wait_ready %split_wait_late
-OpBranchConditional %split_wait_done %split_wait_merge %split_wait_continue
-%split_wait_continue = OpLabel
-OpBranch %split_wait_header
-%split_wait_merge = OpLabel
-OpReturnValue %split_wait_seen
-OpFunctionEnd
-)";
-	text += SplitWavePublishFunction(parts);
+	String8 text = SplitWavePublishFunction(parts);
 	text += SplitWaveBallotFunction(parts, lanes);
 	// This part's bits of the wave mask, the other parts' bits zero: enough
 	// for a mask whose every reader takes only its own lane's bit.
