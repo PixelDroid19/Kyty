@@ -26,9 +26,29 @@ struct GpuMemoryStoragePublication;
 //   {guest_base_lo, guest_base_hi, size_lo, size_hi, device_lo, device_hi, span_lo, span_hi}
 // `size` is the guest byte count and `span` the imported byte count. Chunks
 // cover whole pages; translated multiword loads resolve each page separately.
-constexpr uint32_t kGuestDeviceAddressEntryDwords = 8;
-constexpr uint32_t kGuestDeviceAddressNullBytes   = 256;
-constexpr uint32_t kGuestDeviceAddressPageBytes   = 4096;
+// A miss reads at most 128 bytes of the zero prefix, so the prefix also holds,
+// at kGuestDeviceAddressDirectoryHeaderOffset, the directory header
+//   {base_lo, base_hi, shift, last_region}
+// and the directory words follow the entries (GuestDeviceAddressBuildDirectory).
+constexpr uint32_t kGuestDeviceAddressEntryDwords           = 8;
+constexpr uint32_t kGuestDeviceAddressNullBytes             = 256;
+constexpr uint32_t kGuestDeviceAddressPageBytes             = 4096;
+constexpr uint32_t kGuestDeviceAddressDirectoryHeaderOffset = 128;
+
+// Bounds the device binary search to the entries of one region of guest space:
+// regions are 2^shift bytes from `base`, and an address past the last region
+// belongs to it. words[r] counts the entries whose guest base is at most the
+// start of region r; the final word is the entry count. Entries are disjoint
+// and sorted, so for an address in region r the count of entries whose base is
+// at most the address, which the search returns, lies in [words[r], words[r + 1]].
+struct GuestDeviceAddressDirectory
+{
+	uint64_t              base  = 0;
+	uint32_t              shift = 0;
+	std::vector<uint32_t> words;
+};
+
+[[nodiscard]] GuestDeviceAddressDirectory GuestDeviceAddressBuildDirectory(const uint64_t* sorted_bases, uint32_t count);
 
 struct GuestDeviceAddressTable
 {

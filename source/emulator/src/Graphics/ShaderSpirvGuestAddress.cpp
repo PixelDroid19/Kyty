@@ -24,6 +24,7 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 	String8 types = ulong_declared ? "" : "\n %ulong = OpTypeInt 64 0\n %slong = OpTypeInt 64 1\n";
 	types += R"(
 %_ptr_PhysicalStorageBuffer_uint = OpTypePointer PhysicalStorageBuffer %uint
+%_ptr_PhysicalStorageBuffer_v4uint = OpTypePointer PhysicalStorageBuffer %v4uint
 %_ptr_Function_ulong_gda = OpTypePointer Function %ulong
 %_ptr_Function_uint_gda = OpTypePointer Function %uint
 %function_gda = OpTypeFunction %ulong %ulong %ulong
@@ -35,6 +36,7 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 	types += String8::FromPrintf("%%gda_u64_null = OpConstant %%ulong %u\n", kGuestDeviceAddressNullBytes);
 	types += String8::FromPrintf("%%gda_u64_page = OpConstant %%ulong %u\n", kGuestDeviceAddressPageBytes);
 	types += String8::FromPrintf("%%gda_u64_page_mask = OpConstant %%ulong %u\n", kGuestDeviceAddressPageBytes - 1u);
+	types += "%gda_u64_vec4_mask = OpConstant %ulong 15\n";
 	return types;
 }
 
@@ -43,7 +45,10 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 // whole access (GuestDeviceAddressAccessFits). Entries are sorted by guest
 // base, so a binary search finds the only candidate: the last entry whose
 // base is not above `guest`. A linear scan made each load cost hundreds of
-// table reads, enough for a large dispatch to outlast GPU preemption.
+// table reads, enough for a large dispatch to outlast GPU preemption. The
+// directory (GuestDeviceAddressBuildDirectory) narrows the search to the
+// entries of the address's region, a few dependent reads instead of one per
+// halving of the whole table.
 String8 Spirv::GuestDeviceAddressFunction() const
 {
 	static const char* text = R"(
@@ -64,8 +69,39 @@ String8 Spirv::GuestDeviceAddressFunction() const
 %gda_this = OpShiftLeftLogical %ulong %gda_thi64 %uint_32
 %gda_table = OpBitwiseOr %ulong %gda_this %gda_tlo64
 %gda_entries = OpIAdd %ulong %gda_table %gda_u64_null
-OpStore %gda_lo_v %uint_0
-OpStore %gda_hi_v %gda_count
+%gda_hdr0 = OpIAdd %ulong %gda_table %gda_u64_<header>
+%gda_hdr1 = OpIAdd %ulong %gda_hdr0 %gda_u64_4
+%gda_hdr2 = OpIAdd %ulong %gda_hdr0 %gda_u64_8
+%gda_hdr3 = OpIAdd %ulong %gda_hdr0 %gda_u64_12
+%gda_hdr0_p = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %gda_hdr0
+%gda_hdr1_p = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %gda_hdr1
+%gda_hdr2_p = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %gda_hdr2
+%gda_hdr3_p = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %gda_hdr3
+%gda_dbase_lo = OpLoad %uint %gda_hdr0_p Aligned 4
+%gda_dbase_hi = OpLoad %uint %gda_hdr1_p Aligned 4
+%gda_dshift = OpLoad %uint %gda_hdr2_p Aligned 4
+%gda_dlast = OpLoad %uint %gda_hdr3_p Aligned 4
+%gda_dbase_lo64 = OpUConvert %ulong %gda_dbase_lo
+%gda_dbase_hi64 = OpUConvert %ulong %gda_dbase_hi
+%gda_dbase_his = OpShiftLeftLogical %ulong %gda_dbase_hi64 %uint_32
+%gda_dbase = OpBitwiseOr %ulong %gda_dbase_his %gda_dbase_lo64
+%gda_drel = OpISub %ulong %gda_addr %gda_dbase
+%gda_dregion = OpShiftRightLogical %ulong %gda_drel %gda_dshift
+%gda_dlast64 = OpUConvert %ulong %gda_dlast
+%gda_dpast = OpUGreaterThan %bool %gda_dregion %gda_dlast64
+%gda_dpick = OpSelect %ulong %gda_dpast %gda_dlast64 %gda_dregion
+%gda_dpick_bytes = OpIMul %ulong %gda_dpick %gda_u64_4
+%gda_count64 = OpUConvert %ulong %gda_count
+%gda_entry_bytes = OpIMul %ulong %gda_count64 %gda_u64_32
+%gda_dir = OpIAdd %ulong %gda_entries %gda_entry_bytes
+%gda_dlo_a = OpIAdd %ulong %gda_dir %gda_dpick_bytes
+%gda_dhi_a = OpIAdd %ulong %gda_dlo_a %gda_u64_4
+%gda_dlo_p = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %gda_dlo_a
+%gda_dhi_p = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %gda_dhi_a
+%gda_dlo = OpLoad %uint %gda_dlo_p Aligned 4
+%gda_dhi = OpLoad %uint %gda_dhi_p Aligned 4
+OpStore %gda_lo_v %gda_dlo
+OpStore %gda_hi_v %gda_dhi
 OpBranch %gda_header
 %gda_header = OpLabel
 OpLoopMerge %gda_merge %gda_continue None
@@ -131,7 +167,10 @@ OpFunctionEnd
 		                           name, entry, offset, name, entry, offset + 4, name, name, name, name, name, name, name, name, name, name,
 		                           name, name, name, name, name, name, name);
 	};
+	static_assert(kMaxLoadBytes <= kGuestDeviceAddressDirectoryHeaderOffset && kGuestDeviceAddressDirectoryHeaderOffset + 16u <= kGuestDeviceAddressNullBytes,
+	              "a miss must read zeros below the directory header");
 	return String8(text)
+	    .ReplaceStr("<header>", String8::FromPrintf("%u", kGuestDeviceAddressDirectoryHeaderOffset))
 	    .ReplaceStr("<load64 mbase m 0>", load64("mbase", "m", 0))
 	    .ReplaceStr("<load64 base e 0>", load64("base", "e", 0))
 	    .ReplaceStr("<load64 size e 8>", load64("size", "e", 8))
@@ -179,6 +218,43 @@ bool Spirv::EmitGuestLoad(const String8& lo, const String8& hi, int dwords, cons
 		    "%%%s_next_device = OpPhi %%ulong %%%s_next_device_raw %%%s_split_load %%%s_device %%%s_split_skip\n",
 		    p, p, p, p, static_cast<uint32_t>(dwords - 1) * 4u, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p);
 	}
+	// One page, 16-byte aligned: the words are contiguous, so they load as
+	// vec4s. Per-word scalar loads behind per-word address selects cannot be
+	// merged by the driver and cost a memory message each.
+	const int  vectors = dwords / 4;
+	const bool wide    = vectors > 0;
+	if (wide)
+	{
+		*output += String8::FromPrintf("%%%s_misaligned = OpBitwiseAnd %%ulong %%%s_device %%gda_u64_vec4_mask\n"
+		                               "%%%s_aligned = OpIEqual %%bool %%%s_misaligned %%gda_u64_0\n"
+		                               "%%%s_one_page = OpLogicalNot %%bool %%%s_crosses\n"
+		                               "%%%s_vector = OpLogicalAnd %%bool %%%s_aligned %%%s_one_page\n"
+		                               "OpSelectionMerge %%%s_load_end None\n"
+		                               "OpBranchConditional %%%s_vector %%%s_vector_load %%%s_word_load\n"
+		                               "%%%s_vector_load = OpLabel\n",
+		                               p, p, p, p, p, p, p, p, p, p, p, p, p, p);
+		for (int word = 0; word < dwords; word++)
+		{
+			if (word % 4 == 0 && word / 4 < vectors)
+			{
+				*output += String8::FromPrintf("%%%s_v%d_a = OpIAdd %%ulong %%%s_device %%gda_u64_%d\n"
+				                               "%%%s_v%d_p = OpConvertUToPtr %%_ptr_PhysicalStorageBuffer_v4uint %%%s_v%d_a\n"
+				                               "%%%s_v%d = OpLoad %%v4uint %%%s_v%d_p Aligned 16\n",
+				                               p, word / 4, p, word * 4, p, word / 4, p, word / 4, p, word / 4, p, word / 4);
+			}
+			if (word / 4 < vectors)
+			{
+				*output += String8::FromPrintf("%%%s_w%d = OpCompositeExtract %%uint %%%s_v%d %d\n", p, word, p, word / 4, word % 4);
+				continue;
+			}
+			*output += String8::FromPrintf("%%%s_w%d_a = OpIAdd %%ulong %%%s_device %%gda_u64_%d\n"
+			                               "%%%s_w%d_p = OpConvertUToPtr %%_ptr_PhysicalStorageBuffer_uint %%%s_w%d_a\n"
+			                               "%%%s_w%d = OpLoad %%uint %%%s_w%d_p Aligned 4\n",
+			                               p, word, p, word * 4, p, word, p, word, p, word, p, word);
+		}
+		*output += String8::FromPrintf("OpBranch %%%s_load_end\n%%%s_word_load = OpLabel\n", p, p);
+	}
+	const char* word_suffix = wide ? "_s" : "_d";
 	for (int word = 0; word < dwords; word++)
 	{
 		if (word == 0)
@@ -197,8 +273,17 @@ bool Spirv::EmitGuestLoad(const String8& lo, const String8& hi, int dwords, cons
 			    p, word, p, word * 4, p, word, p, word, p, word, p, word);
 		}
 		*output += String8::FromPrintf("%%%s_p%d = OpConvertUToPtr %%_ptr_PhysicalStorageBuffer_uint %%%s_a%d\n"
-		                               "%%%s_d%d = OpLoad %%uint %%%s_p%d Aligned 4\n",
-		                               p, word, p, word, p, word, p, word);
+		                               "%%%s%s%d = OpLoad %%uint %%%s_p%d Aligned 4\n",
+		                               p, word, p, word, p, word_suffix, word, p, word);
+	}
+	if (wide)
+	{
+		*output += String8::FromPrintf("OpBranch %%%s_load_end\n%%%s_load_end = OpLabel\n", p, p);
+		for (int word = 0; word < dwords; word++)
+		{
+			*output += String8::FromPrintf("%%%s_d%d = OpPhi %%uint %%%s_w%d %%%s_vector_load %%%s_s%d %%%s_word_load\n", p, word, p, word, p,
+			                               p, word, p);
+		}
 	}
 	return true;
 }

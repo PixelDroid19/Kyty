@@ -1176,10 +1176,17 @@ bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
 // registered reader may still reference it.
 bool RebuildTable(GraphicContext* ctx, Registry* registry)
 {
-	// The device lookup binary-searches entries by guest base.
+	// The device lookup binary-searches entries by guest base within one directory region.
 	static_assert(sizeof(TableEntry) == kGuestDeviceAddressEntryDwords * 4u);
-	const uint64_t entry_bytes = registry->entries.size() * sizeof(TableEntry);
-	const uint64_t bytes       = kGuestDeviceAddressNullBytes + entry_bytes;
+	std::vector<uint64_t> bases(registry->entries.size());
+	for (std::size_t i = 0; i < bases.size(); ++i)
+	{
+		bases[i] = registry->entries[i].guest;
+	}
+	const auto     directory       = GuestDeviceAddressBuildDirectory(bases.data(), static_cast<uint32_t>(bases.size()));
+	const uint64_t entry_bytes     = registry->entries.size() * sizeof(TableEntry);
+	const uint64_t directory_bytes = directory.words.size() * sizeof(uint32_t);
+	const uint64_t bytes           = kGuestDeviceAddressNullBytes + entry_bytes + directory_bytes;
 	Table          table;
 	table.buffer = CreateAddressBuffer(ctx, bytes, 0);
 	VkMemoryRequirements requirements {};
@@ -1214,10 +1221,14 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 	// Each entry is the guest base, size, device address and span as
 	// little-endian 64-bit words, the layout TableEntry already has.
 	std::memset(mapped, 0, kGuestDeviceAddressNullBytes);
+	const uint32_t header[4] = {static_cast<uint32_t>(directory.base), static_cast<uint32_t>(directory.base >> 32u), directory.shift,
+	                            static_cast<uint32_t>(directory.words.size() - 2u)};
+	std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressDirectoryHeaderOffset, header, sizeof(header));
 	if (entry_bytes != 0)
 	{
 		std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes, registry->entries.data(), entry_bytes);
 	}
+	std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes + entry_bytes, directory.words.data(), directory_bytes);
 	vkUnmapMemory(ctx->device, table.memory);
 	table.device  = BufferDeviceAddress(ctx->device, table.buffer);
 	table.entries = static_cast<uint32_t>(registry->entries.size());
@@ -1231,6 +1242,38 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 }
 
 } // namespace
+
+GuestDeviceAddressDirectory GuestDeviceAddressBuildDirectory(const uint64_t* sorted_bases, uint32_t count)
+{
+	// Few enough regions to rebuild with every table, fine enough that a region holds few entries.
+	constexpr uint32_t kMaxRegions = 16384;
+	constexpr uint32_t kMinShift   = 12;
+	GuestDeviceAddressDirectory directory;
+	directory.shift = kMinShift;
+	if (count != 0)
+	{
+		const uint64_t extent = sorted_bases[count - 1u] - sorted_bases[0];
+		while ((extent >> directory.shift) >= kMaxRegions)
+		{
+			++directory.shift;
+		}
+		directory.base = sorted_bases[0] & ~((uint64_t {1} << directory.shift) - 1u);
+	}
+	const uint64_t regions = count == 0 ? 1u : ((sorted_bases[count - 1u] - directory.base) >> directory.shift) + 1u;
+	directory.words.resize(regions + 1u);
+	uint32_t entry = 0;
+	for (uint64_t region = 0; region < regions; ++region)
+	{
+		const uint64_t start = directory.base + (region << directory.shift);
+		while (entry < count && sorted_bases[entry] <= start)
+		{
+			++entry;
+		}
+		directory.words[region] = entry;
+	}
+	directory.words[regions] = count;
+	return directory;
+}
 
 void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physical_backing)
 {

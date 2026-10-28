@@ -304,7 +304,7 @@ int PageBoundaryLoadProbe()
 		return 10;
 	}
 	Buffer first, second, table, output;
-	if (!first.Init(device, 4096) || !second.Init(device, 4096) || !table.Init(device, 320) || !output.Init(device, 128)) { return 11; }
+	if (!first.Init(device, 4096) || !second.Init(device, 4096) || !table.Init(device, 336) || !output.Init(device, 128)) { return 11; }
 	for (unsigned word = 0; word < 1024; ++word) { first.words[word] = 1000 + word; second.words[word] = 3000 + word; }
 	const uint64_t entries[] = {0x100000, 4096, first.address, 4096, 0x101000, 4096, second.address, 4096};
 	std::memcpy(table.words + 64, entries, sizeof(entries));
@@ -344,7 +344,14 @@ int PageBoundaryLoadProbe()
 	for (unsigned test = 0; test < 3; ++test)
 	{
 		const uint64_t guest = test == 2 ? 0x100f80 : 0x100fc0;
-		const uint32_t push[] = {static_cast<uint32_t>(table.address), static_cast<uint32_t>(table.address >> 32), test == 1 ? 1u : 2u, 0,
+		const uint32_t count = test == 1 ? 1u : 2u;
+		const uint64_t bases[] = {entries[0], entries[4]};
+		const auto     directory = GuestDeviceAddressBuildDirectory(bases, count);
+		const uint32_t header[]  = {static_cast<uint32_t>(directory.base), static_cast<uint32_t>(directory.base >> 32u), directory.shift,
+		                            static_cast<uint32_t>(directory.words.size() - 2u)};
+		std::memcpy(table.words + kGuestDeviceAddressDirectoryHeaderOffset / 4u, header, sizeof(header));
+		std::memcpy(table.words + 64 + count * kGuestDeviceAddressEntryDwords, directory.words.data(), directory.words.size() * sizeof(uint32_t));
+		const uint32_t push[] = {static_cast<uint32_t>(table.address), static_cast<uint32_t>(table.address >> 32), count, 0,
 		                         static_cast<uint32_t>(guest), 0, static_cast<uint32_t>(output.address), static_cast<uint32_t>(output.address >> 32)};
 		std::fill(output.words, output.words + 32, 0xdeadbeefu);
 		VkCommandBufferBeginInfo begin {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1727,6 +1734,38 @@ void RunIsolated(int (*probe)())
 }
 
 } // namespace
+
+// The device lookup searches [words[r], words[r + 1]) for region r =
+// min((address - base) >> shift, last region), with unsigned wrap below base.
+TEST(EmulatorGuestDeviceAddress, DirectoryRegionHoldsTheEntryOfEveryAddress)
+{
+	std::vector<uint64_t> bases = {0x10000, 0x11000, 0x2000000};
+	for (uint64_t i = 0; i < 5000; ++i)
+	{
+		bases.push_back(0x800000000ull + i * 0x3000u);
+	}
+	bases.push_back(0x7f00000000ull);
+	const auto directory = GuestDeviceAddressBuildDirectory(bases.data(), static_cast<uint32_t>(bases.size()));
+	ASSERT_GE(directory.words.size(), 2u);
+	ASSERT_LE(directory.words.size(), 16385u);
+	EXPECT_EQ(directory.words.back(), bases.size());
+	const uint64_t last = directory.words.size() - 2u;
+	for (uint32_t index = 0; index < bases.size(); ++index)
+	{
+		for (const uint64_t address: {bases[index], bases[index] + 0xfffu})
+		{
+			const uint64_t region = std::min((address - directory.base) >> directory.shift, last);
+			// The search result for an address inside entry `index` is index + 1.
+			EXPECT_LE(directory.words[region], index + 1u) << std::hex << address;
+			EXPECT_GE(directory.words[region + 1u], index + 1u) << std::hex << address;
+		}
+	}
+	// The search for the isolated far entry has at most one candidate.
+	const uint64_t far = std::min((bases.back() - directory.base) >> directory.shift, last);
+	EXPECT_LE(directory.words[far + 1u] - directory.words[far], 1u);
+	const auto empty = GuestDeviceAddressBuildDirectory(nullptr, 0);
+	EXPECT_EQ(empty.words, (std::vector<uint32_t> {0u, 0u}));
+}
 
 TEST(EmulatorGuestDeviceAddress, RepeatedPrepareDoesNotImportUntouchedNeighbours) { RunIsolated(StableResidencyProbe); }
 TEST(EmulatorGuestDeviceAddress, VulkanLoadPreservesWordsAcrossImportedPageBoundary) { RunIsolated(PageBoundaryLoadProbe); }
