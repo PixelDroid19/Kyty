@@ -87,6 +87,8 @@ struct ShaderGeometryComputeInfo
 	// (address in row 1) whose elements are 32-bit unless index_format says 16.
 	bool                        indexed              = false;
 	uint32_t                    index_format         = 0;
+	// Host subgroup width of each guest wave's parts (ShaderSplitWavePartLanes).
+	uint32_t                    part_lanes           = 32;
 
 	static constexpr uint32_t kLanes                    = 64;
 	// An NGG subgroup holds at most 256 threads.

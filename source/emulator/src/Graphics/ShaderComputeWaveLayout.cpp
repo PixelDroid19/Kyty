@@ -50,6 +50,12 @@ bool ShaderNativeWave32PhysicalLocal(const uint32_t (&guest_local)[3], uint32_t 
 	return true;
 }
 
+uint32_t ShaderSplitWavePartLanes(const ShaderComputeWaveCapabilities& capabilities) noexcept
+{
+	return capabilities.min_subgroup_size <= kSplitNarrowLanes && capabilities.max_subgroup_size >= kSplitNarrowLanes ? kSplitNarrowLanes
+	                                                                                                                  : kNativeSubgroupSize;
+}
+
 ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComputeWaveRequest&      request,
                                                                 const ShaderComputeWaveCapabilities& capabilities,
                                                                 ShaderComputeWaveLayout*             layout)
@@ -78,12 +84,7 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	// GFX10.3's ORDER_MODE selects ordered versus out-of-order wave launch. Both
 	// values preserve the dispatch grid and do not alter this layout decision.
 
-	// 16-lane subgroups halve the host registers each guest value occupies:
-	// on Intel a large kernel at width 32 spends minutes in register
-	// allocation, at width 16 seconds.
-	const uint32_t part_lanes = capabilities.min_subgroup_size <= kSplitNarrowLanes && capabilities.max_subgroup_size >= kSplitNarrowLanes
-	                                ? kSplitNarrowLanes
-	                                : kNativeSubgroupSize;
+	const uint32_t part_lanes = ShaderSplitWavePartLanes(capabilities);
 	if (!capabilities.size_control_enabled || !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
 	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > part_lanes ||
 	    capabilities.max_subgroup_size < part_lanes)

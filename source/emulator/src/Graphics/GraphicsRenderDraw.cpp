@@ -2755,6 +2755,8 @@ static bool ResolveGeometryDraw(const HW::Context& ctx, const HW::UserConfig& uc
 	plan->info.primitives_per_group = primitives;
 	plan->info.parameter_count      = regs.GetExportCount();
 	plan->info.lds_dwords           = vs.gs_regs.rsrc2.GetLdsSizeDwords();
+	plan->info.part_lanes =
+	    ShaderSplitWavePartLanes(ShaderComputeWaveVulkanBuildCapabilities(g_render_ctx->GetGraphicCtx()->compute_wave_vulkan_state));
 	plan->primitives                = prim_type == kPointListPrimType ? index_count
 	                                  : strip                         ? (index_count >= 3u ? index_count - 2u : 0u)
 	                                                                  : index_count / 3u;

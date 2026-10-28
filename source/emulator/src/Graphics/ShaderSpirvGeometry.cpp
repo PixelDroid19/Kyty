@@ -316,11 +316,11 @@ ShaderComputeInputInfo SpirvGeometryComputeHostInfo(const ShaderCode& code, cons
 	host.threads_num[0] = geometry.GroupLanes();
 	host.threads_num[1] = host.threads_num[2] = 1u;
 	host.lds_dwords  = geometry.lds_dwords;
-	// One guest lane per invocation: each guest wave64 spans two host subgroups of 32.
-	host.wave_layout = {ShaderComputeWaveStrategy::Split64On32, {geometry.GroupLanes(), 1u, 1u}, {geometry.GroupLanes(), 1u, 1u}, 64u, 32u, 1u,
-	                    geometry.waves, host.lds_dwords};
+	// One guest lane per invocation: each guest wave64 spans 64 / part_lanes host subgroups.
+	host.wave_layout = {ShaderComputeWaveStrategy::Split64On32, {geometry.GroupLanes(), 1u, 1u}, {geometry.GroupLanes(), 1u, 1u}, 64u,
+	                    geometry.part_lanes, 1u, geometry.waves, host.lds_dwords};
 	host.native_wave_sensitive    = true;
-	host.required_subgroup_size   = 32u;
+	host.required_subgroup_size   = geometry.part_lanes;
 	host.bind        = vs_input_info.bind;
 	host.float_mode  = vs_input_info.float_mode;
 	host.dx10_clamp  = vs_input_info.dx10_clamp;

@@ -79,6 +79,12 @@ struct ShaderComputeWaveLayout
 	return 64u / part_lanes * 3u + (part_lanes == 16u ? 64u : 0u);
 }
 
+// Host subgroup width of each split guest wave's parts: 16 lanes where the host
+// allows exact width 16, else 32. At width 16 each guest value takes half the
+// host registers; on Intel a large kernel at width 32 spends minutes in
+// register allocation and spills, at width 16 seconds.
+[[nodiscard]] uint32_t ShaderSplitWavePartLanes(const ShaderComputeWaveCapabilities& capabilities) noexcept;
+
 // Split wave64 runs each guest wave as whole host subgroups of 16 lanes where
 // the host allows exact width 16, else of 32 lanes (SubgroupId P*w .. P*w+P-1
 // with P = 64 / lanes); the workgroup keeps guest lane order, padded to whole
