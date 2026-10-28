@@ -16,7 +16,7 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
-## Small `DMA_DATA` stores behind a consolidated wait (2026-10-27, fixed)
+## Small `DMA_DATA` stores behind a consolidated wait retire it first (2026-10-27, fixed)
 
 - **Observed** (`PPSA03061 - void tRrLM();++ //Void Terrarium++`, Intel Arc
   A770, Mesa 26.2.5, strict runs without the present limit): the title menu
@@ -45,22 +45,44 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   (`docs/titles/preschool-unity.md`, 2026-10-25).
 - **Excluded.** The decode-completion hold (32b27516) is not the root: it
   only keeps the submitter parked once the corrupted wait cannot resolve.
-- **Fix** (`cp_op_dma_data` and `cp_op_custom_dma_data` in
-  `GraphicsRunOpParsers.cpp`, `CommandProcessor::DeferWriteBehindPendingStore`
-  in `GraphicsRun.cpp`): a `DMA_DATA` store of one or two dwords, immediate
-  or copied, that follows a consolidated wait or a pending deferred store to
-  the same bytes, is published at end of pipe like `WRITE_DATA`. The source
-  is read when the packet is parsed, as the CP does; larger copies still run
-  immediately.
-- **Verified.** Five strict runs without the present limit (3 x 60 s,
-  2 x 90 s) on the menu: no stall, 20,000 to 31,000 presents each. Repository
-  gates and the packet, `DMA_DATA`, `WRITE_DATA`, wait and command-processor
-  unit suites (355 tests) pass. Strict `games-matrix` sweep at the 60 fps
-  present limit, with this fix and the survival-title depth-only fix
-  (`docs/titles/survival.md`, 2026-10-27): 26 of 32 cases interactive
-  against 23 of 32; the three changed cases all improved (the frozen menu
-  case, and the two cases that stopped on the render resolution plan) and
-  no case regressed.
+- **First fix, withdrawn** (52d28b6f): one- and two-dword `DMA_DATA` stores
+  behind a consolidated wait or a pending deferred store were published at
+  end of pipe like `WRITE_DATA`. It fixed the menu, but it regressed
+  `PPSA21567 - Astro Bot`: its frames open with a consolidated drain wait,
+  so every small store later in the batch reached memory only at fence
+  completion, after the GPU work of the same batch that reads it. At the
+  first crash-site hub frame the GPU job timed out (`xe` "Timedout job" on
+  the render ring, then `vkWaitForFences` -4) in 3 of 5 route runs; 0 of 9
+  runs of the binaries before it hung there.
+- **Cause of the regression.** End-of-pipe publication is later than the
+  CP order: the CP passes the wait once the label lands and then stores at
+  once, before it reaches the following work. Deferring the store to the
+  fence moves it behind that work.
+- **Fix** (`CommandProcessor::RetireBeforeStore` in `GraphicsRun.cpp`,
+  called from `cp_op_dma_data` and `cp_op_custom_dma_data`): a `DMA_DATA`
+  store that follows a consolidated wait first waits for that wait's
+  producer submission, and a one- or two-dword store over bytes that an
+  end-of-pipe store still targets waits for that producer; then it stores
+  at parse time. It submits the work recorded so far only when the producer
+  is still in the command buffer being recorded. The store lands after the
+  label, as on the CP, and before any later work of the batch reads it.
+  `WRITE_DATA` keeps its end-of-pipe deferral (2b17707f,
+  `docs/titles/preschool-unity.md`).
+- **Cost.** A first version submitted on every such store: it tripled the
+  buffer flushes and slowed the robot platformer's intro by 25-30 %. The
+  fix submits only for a producer that is still being recorded.
+- **Verified.** Void menu, five strict 80 s runs without the present limit:
+  no stall, about 52,000 presents each. Repository gates and the packet,
+  `DMA_DATA`, `WRITE_DATA`, wait and command-processor unit suites
+  (355 tests) pass. A strict 480 s robot platformer run on Intel A770
+  reached the crash-site hub and stayed there with no GPU timeout, together
+  with the native hub OR reductions (`docs/titles/robot-platformer.md`,
+  "hub OR reductions run natively"), which removed a second cause of a hub
+  GPU timeout; the two causes were not separated by a run.
+- The first fix's strict `games-matrix` sweep at the 60 fps present limit,
+  together with the survival-title depth-only fix
+  (`docs/titles/survival.md`, 2026-10-27), had 26 of 32 cases interactive
+  against 23 of 32. The sweep has not been repeated with this fix.
 
 ## Open: index objects over pending storage (2026-10-27, found by inspection)
 

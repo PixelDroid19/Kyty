@@ -6,6 +6,136 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: whole-dword half selects and a recycled 4K storage allocation (2026-10-27)
+
+- **Observed** (Intel A770, strict route through the intro into the first
+  crash-site hub, 60 fps limit), each stop after the previous fix:
+  - About 1670 presents: a compute program stopped at its emission,
+    `v_add_f16` in SDWA form at pc `0x32c` with `DST_SEL = DWORD` and
+    `SRC0_SEL = DWORD`; the half destination admitted only `WORD_0` and
+    `WORD_1`.
+  - About 1910 presents: a 3840x2160 tile-27 storage image (format `0x47`)
+    was created over a range that crosses two 2432x1368 render targets and a
+    2432-pitch storage image; the overlap set did not fit any admitted rule
+    and the run stopped at the `create_all_the_same` refusal.
+  - After both fixes the run passed 3200 presents into the hub.
+- **Contract.** A 16-bit operand under a `DWORD` source select reads bits
+  15:0 of the register, and `DST_SEL = DWORD` is the instruction's own
+  unmodified store (RDNA2 ISA, SDWA fields). A storage view whose format,
+  tile mode, texel size, extent or pitch differ from a view over an equal or
+  crossing range cannot address the same texels: the guest has recycled the
+  allocation, so the new view seeds from guest memory instead of a texel
+  copy. A contained range may still be a sub-view of the same image, so it
+  keeps the layout-insensitive comparison.
+- **Fix.** The half SDWA destination admits the three word selects (4-6) for
+  the destination and every source; byte selects, sign extension, `DST_U`
+  above 2 and SDWA clamp or OMOD stay refused. The storage redescription
+  predicates compare pitch as well, and compare the layout for equal and
+  crossing ranges (before, only equal ones). A new storage image whose every
+  parent is such a redescribed storage image or render target links all of
+  them as one recycled allocation.
+- **Packed min and max.** VOP3P opcodes 17 and 18 are `V_PK_MIN_F16` and
+  `V_PK_MAX_F16`; each half follows the scalar `V_MIN_F16`/`V_MAX_F16` rule
+  with `IEEE_MODE = 0` (a NaN operand yields the other input). They reuse the
+  packed half emitter.
+- **Verified.** `Fp16SdwaHalfDestinationReadsAndPreservesHalves` runs the
+  whole-dword encoding for both lane states; the refusal test now uses SDWA
+  clamp, still unmodeled. `PackedHalfArithmeticSelectsAndNegatesEachHalf`
+  checks min, max, negation and the NaN rule. The arithmetic, half and
+  storage suites pass (121 tests). The next strict run passed both stops
+  and reached the hub.
+
+## Robot platformer: packed half arithmetic in a hub compute program (2026-10-27)
+
+- **Observed** (Intel A770, strict route runs past the first crash-site
+  hub): a compute program (stage 4) stopped the run with
+  `unknown vop3p opcode: 0xf` at pc `0x324` (about 300 s); with that opcode
+  decoded, the next run stopped at `0x10`, pc `0x3c8` (about 240 s), and
+  then at VOP2 opcode `0x3c`, pc `0x400` (about 450 s). With that decoded,
+  the program stopped at its emission: `v_cndmask_b32` in SDWA form at pc
+  `0x56c` (`DST_SEL = WORD_1`, `DST_U = 2`, both sources `WORD_0`) failed
+  the lowering preconditions.
+- **Contract.** VOP3P opcodes 14, 15 and 16 are `V_PK_FMA_F16`,
+  `V_PK_ADD_F16` and `V_PK_MUL_F16`, and VOP2 opcode 60 is
+  `V_PK_FMAC_F16`, the packed FMA accumulating into VDST (RDNA2 ISA, VOP2
+  and VOP3P opcodes, packed math): two independent half operations in one
+  VGPR. `OP_SEL` and `NEG`
+  select the source halves and their negation for the low result,
+  `OP_SEL_HI` and `NEG_HI` for the high one; packed math has no ABS or OMOD.
+- **Fix.** The VOP3P decoder admits the three opcodes and keeps `NEG_HI` in
+  the field the mixed FMA reads as ABS; the VOP2 decoder gives
+  `V_PK_FMAC_F16` the packed FMA with VDST as its addend and both halves
+  read in place. The SDWA partial destination (whole-dword result, then
+  the merge into the kept bits) now admits `V_CNDMASK_B32`, VOP2 with VCC as
+  its implicit third source, when it has no float source modifiers; before,
+  only two-source VOP2 and VOP1 forms were admitted. The emitter loads each half through
+  the engine's half contract, operates in binary32 and narrows once to half:
+  binary32 holds at least 2 x 11 + 2 significand bits, so a sum or product
+  rounded twice equals one half rounding, and the fused form recovers its
+  addition residue as `V_FMA_F16` does. Inactive lanes keep the VGPR.
+  Constant sources are refused, because the ISA does not state how packed
+  math reads an inline constant; clamp is refused as well.
+- **Verified.** `EmulatorShaderArithmetic.PackedHalfArithmeticSelectsAndNegatesEachHalf`
+  (pixel and compute) checks add, multiply, FMA and FMAC values, `OP_SEL`/
+  `OP_SEL_HI`, `NEG`/`NEG_HI` and inactive lanes;
+  `Fp16SdwaHalfDestinationReadsAndPreservesHalves` runs the guest's
+  `v_cndmask_b32` encoding for both VCC values. `kyty_unit_test` 2656 passed
+  and the three CTest gates pass. The next strict run decoded the program
+  and stopped later, at the SDWA destination of the record above.
+
+## Robot platformer: hub OR reductions run natively (2026-10-27)
+
+- **Observed** (Intel A770, strict route runs to the first crash-site hub):
+  three hub pixel programs ran through the fragment wave transport (banded
+  execution), the main cost at about 0.5-0.7 fps there. Each holds the
+  whole-wave OR reduction that `FragmentPartialWave` already admits, but in
+  forms the proof did not accept.
+- **Causes**, found by replaying the dumped programs through the analysis
+  offline:
+  - The entry is `s_orn2_saveexec_b64 vcc, exec` with the condition taken
+    as `exec & launch mask` just before it. The region proof accepted only
+    an SGPR copy of EXEC as the entry source.
+  - A `s_mov_b32 m0, s32` (restoring M0 after an ADD_TID spill) sits between
+    the entry and the initializer. The region admitted only scalar loads
+    there.
+  - The network registers are first rewritten by `v_mul_f32` in SDWA form
+    with `DST_SEL = DWORD`, and by `v_sub_f32` with a DPP `quad_perm` source
+    and `BOUND_CTRL = 1` (a screen-space derivative). The liveness proof
+    treated every SDWA and every DPP instruction as keeping old lanes.
+- **Fix.** The region entry may save EXEC itself; its condition is then
+  proven from the last EXEC write, branch or label before the entry. A
+  scalar copy into M0 counts like a scalar load inside the region: it reads
+  no lane and the emitter runs it as written. A write ends a network
+  register when SDWA selects the whole destination dword, or when a DPP16
+  source cannot skip a lane: full row and bank masks, and `BOUND_CTRL` set
+  or a quad permutation, whose source lane is always in range (RDNA2 ISA,
+  DPP16 fields: an inactive source lane reads zero, an out-of-range one
+  skips the write only without `BOUND_CTRL`).
+- **Second pair (2026-10-28).** Two more hub pixel programs stayed on the
+  transport. Their tiles, recorded into one submission, ran past the 5 s
+  GPU job timeout of the `xe` driver, which reset the render engine and
+  stopped the run in the hub ("hub GPU hang"). Their reductions differ in
+  two forms: the saved mask is written by the `s_orn2_saveexec` itself (an
+  `S_*_SAVEEXEC` stores the EXEC it replaces into its destination, as a
+  copy of EXEC does), and an `s_waitcnt` for the scalar loads sits between
+  the entry and the initializer. The proof now accepts the saving
+  instruction as the allocation of the saved mask and holds `S_WAITCNT`
+  among the region's scalar steps, since it waits only for those loads.
+- **Excluded for the hang.** A compute-queue fault: the reset named the
+  render engine. Cross-queue device waits: a run with every such wait on the
+  host hung the same way. The hang ended only when the programs left the
+  transport.
+- **Verified.** All five dumped programs now prove `FragmentPartialWave`
+  with one reduction each. The `EmulatorNativeWaveAdmission` tests cover
+  the guest entry form with the M0 copy, the self-saving entry, and whole
+  versus partial SDWA and DPP writes; the full `kyty_unit_test` (2661
+  passed, 11 skipped by the environment) and the three CTest gates pass.
+  A strict 480 s run on Intel A770 (60 fps limit, scripted intro skip)
+  reached controllable gameplay in the crash-site hub with no fatal stop;
+  hub fps went from about 0.2 to 11-25.
+- **Open.** The hub ground draws as blocky orange and red rectangles, and
+  the frame rate decays to 1.3-1.6 fps after about 4 minutes in the hub.
+
 ## Robot platformer: dashed warp streaks on the studio logo (2026-10-26, fixed 2026-10-27)
 
 - **Observed** (Intel A770, strict, branch `agent/astro-split-wave64`,
