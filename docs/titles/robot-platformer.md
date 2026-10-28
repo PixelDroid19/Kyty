@@ -6,7 +6,7 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
-## Robot platformer: dune waits on aliased storage, DMA stores and pipeline churn (2026-10-28)
+## Robot platformer: dune waits on aliased storage, DMA stores, pipeline churn and indirect arguments (2026-10-28)
 
 - **Observed** (Intel A770, strict 340 s route to the crash-site dunes,
   60 fps limit, warm pipeline cache): the dunes ran at 6.4 fps with
@@ -59,6 +59,24 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   `docs/titles/mechanical-fist-platformer.md` (guest mutex at offset 0x58 in
   `PthreadMutexLock`); it also crashed in three of six matrix runs on
   2026-10-27, before these fixes.
+- **Excluded for now: indirect dispatch arguments read on the device.**
+  A `DISPATCH_INDIRECT` recorded as `vkCmdDispatchIndirect` from the
+  argument buffer (with a barrier to indirect command reads) removed the
+  host reads of dispatch arguments, but the dune windows stayed at
+  7.2-7.5 fps: the fence waits moved to the `DRAW_INDEX_INDIRECT` argument
+  reads and the queue-wide device-address wait before them. Two of four
+  strict runs lost the device on queue 8 (`KYTY_SUBMIT_FAULT stage=fence_wait
+  result=-4`). The change was reverted; it needs indirect draws on the device
+  as well and the cause of the device loss found first.
+- **Fix 5** (`1fd051d50`): indirect draws waited for every pending
+  device-address write-back on their queue before reading their arguments,
+  although `ReadCurrentGuestBytes` already waits only for writers of the
+  argument range and direct draws never used the queue-wide wait. It was
+  removed. One strict 340 s run: dunes at 7.6-7.8 fps (7.2-7.5 before),
+  fence waits still about 9.3 s per 30 s window. Fence waits per run, led by
+  host reads of indirect arguments: `DISPATCH_INDIRECT` 40 s,
+  32-bit `WAIT_REG_MEM` 12.8 s, `DRAW_INDEX_INDIRECT` 12.6 s, indexed draws
+  over pending ranges 7.8 s, `DMA_DATA` image fills 2.8 s.
 
 ## Robot platformer: dune compute cost and split-wave rendezvous (2026-10-28)
 
