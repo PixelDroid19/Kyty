@@ -886,7 +886,7 @@ bool Flow::UniformVectorResult(const ShaderInstruction& inst) const
 	if (inst.type == Type::ImageLoad)
 	{
 		const bool nsa       = inst.mimg_address_num > 0;
-		const int  addresses = ImageLoadAddressCount(inst);
+		const int  addresses = ImageReadAddressCount(inst);
 		if (nsa && inst.mimg_address_num < addresses) { return false; }
 		for (int address = 0; address < (nsa ? addresses : 1); ++address)
 		{

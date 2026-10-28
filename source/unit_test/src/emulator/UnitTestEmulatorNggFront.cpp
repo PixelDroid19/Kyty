@@ -244,7 +244,7 @@ Words VccBranchWithOneUniformWordBody(bool varying_high_word)
 	return body;
 }
 
-Words CompareMaskAnd64Body(bool partial_vcc, bool varying_sgpr_mask)
+Words CompareMaskAnd64Body(bool partial_vcc, bool varying_sgpr_mask, uint32_t combine = 0x0f)
 {
 	Words body;
 	body.push_back(0xb0000000u | (24u << 16u) | 3u); // s_movk_i32 s24, 3
@@ -266,7 +266,7 @@ Words CompareMaskAnd64Body(bool partial_vcc, bool varying_sgpr_mask)
 		                                    Inline(0), false);
 		body.insert(body.end(), scalar_mask.begin(), scalar_mask.end()); // v_cmp_eq_f32 s[40:41], s46-or-v5, 0
 	}
-	Sop2(body, 0x0f, 106u, 106u, 40u); // s_and_b64 vcc, vcc, s[40:41]
+	Sop2(body, combine, 106u, 106u, 40u); // s_and_b64 (0x0f) or s_or_b64 (0x11) vcc, vcc, s[40:41]
 	Vop1(body, 1, 13, Inline(0));
 	Sopp(body, 6, 0);
 	Exp(body, 12, 15, true, 13, 13, 13, 13);
@@ -318,9 +318,10 @@ uint32_t InstructionIndex(const ShaderCode& code, ShaderInstructionType type, un
 	return 0;
 }
 
-void CheckAnd64VccTuple(const ShaderCode& code, ShaderOperandType rhs_type, int rhs_register)
+void CheckAnd64VccTuple(const ShaderCode& code, ShaderOperandType rhs_type, int rhs_register,
+                        ShaderInstructionType combine = ShaderInstructionType::SAndB64)
 {
-	const auto& and_inst = code.GetInstructions().At(InstructionIndex(code, ShaderInstructionType::SAndB64));
+	const auto& and_inst = code.GetInstructions().At(InstructionIndex(code, combine));
 	Check(and_inst.dst.type == ShaderOperandType::VccLo && and_inst.dst.size == 2 && and_inst.src_num == 2 &&
 	          and_inst.src[0].type == ShaderOperandType::VccLo && and_inst.src[0].size == 2 && and_inst.src[1].type == rhs_type &&
 	          and_inst.src[1].size == 2 && and_inst.src[1].register_id == rhs_register,
@@ -887,17 +888,20 @@ TEST(EmulatorNggFront, And64OfTwoFullExecUniformCompareMasksPreservesUniformity)
 {
 	ASSERT_EXIT(([] {
 		Initialize();
-		const auto code = Parse(PrologueThenBody(CompareMaskAnd64Body(false, false)));
-		const auto& vcc_compare = code.GetInstructions().At(InstructionIndex(code, ShaderInstructionType::VCmpGeF32));
-		const auto& sgpr_compare = code.GetInstructions().At(InstructionIndex(code, ShaderInstructionType::VCmpEqF32));
-		Check(vcc_compare.dst.type == ShaderOperandType::VccLo && vcc_compare.dst.size == 2 &&
-		          sgpr_compare.dst.type == ShaderOperandType::Sgpr && sgpr_compare.dst.register_id == 40 && sgpr_compare.dst.size == 2,
-		      "the fixture defines a two-word VCC comparison and an independent SGPR mask comparison");
-		CheckAnd64VccTuple(code, ShaderOperandType::Sgpr, 40);
-		for (uint32_t width: {32u, 64u})
+		for (const auto combine: {ShaderInstructionType::SAndB64, ShaderInstructionType::SOrB64})
 		{
-			const auto front = ShaderProveNggFrontLaneLocal(code, width);
-			Check(front.lane_local, front.reason.IsEmpty() ? "AND64 of two uniform masks remains uniform" : front.reason.c_str());
+			const auto code = Parse(PrologueThenBody(CompareMaskAnd64Body(false, false, combine == ShaderInstructionType::SOrB64 ? 0x11u : 0x0fu)));
+			const auto& vcc_compare = code.GetInstructions().At(InstructionIndex(code, ShaderInstructionType::VCmpGeF32));
+			const auto& sgpr_compare = code.GetInstructions().At(InstructionIndex(code, ShaderInstructionType::VCmpEqF32));
+			Check(vcc_compare.dst.type == ShaderOperandType::VccLo && vcc_compare.dst.size == 2 &&
+			          sgpr_compare.dst.type == ShaderOperandType::Sgpr && sgpr_compare.dst.register_id == 40 && sgpr_compare.dst.size == 2,
+			      "the fixture defines a two-word VCC comparison and an independent SGPR mask comparison");
+			CheckAnd64VccTuple(code, ShaderOperandType::Sgpr, 40, combine);
+			for (uint32_t width: {32u, 64u})
+			{
+				const auto front = ShaderProveNggFrontLaneLocal(code, width);
+				Check(front.lane_local, front.reason.IsEmpty() ? "AND64 or OR64 of two uniform masks remains uniform" : front.reason.c_str());
+			}
 		}
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
@@ -916,6 +920,11 @@ TEST(EmulatorNggFront, And64DoesNotProveUniformityFromAVaryingOrPartialCompareMa
 		const auto varying_front = ShaderProveNggFrontLaneLocal(varying, 64u);
 		Check(!varying_front.lane_local && varying_front.reason.ContainsStr("not wave-uniform"),
 		      "AND64 cannot make a varying compare mask uniform");
+		const auto varying_or = Parse(PrologueThenBody(CompareMaskAnd64Body(false, true, 0x11u)));
+		CheckAnd64VccTuple(varying_or, ShaderOperandType::Sgpr, 40, ShaderInstructionType::SOrB64);
+		const auto varying_or_front = ShaderProveNggFrontLaneLocal(varying_or, 64u);
+		Check(!varying_or_front.lane_local && varying_or_front.reason.ContainsStr("not wave-uniform"),
+		      "OR64 cannot make a varying compare mask uniform");
 
 		const auto partial = Parse(PrologueThenBody(CompareMaskAnd64Body(true, false)));
 		const auto& partial_compare = partial.GetInstructions().At(InstructionIndex(partial, ShaderInstructionType::VCmpGeF32));
@@ -926,6 +935,29 @@ TEST(EmulatorNggFront, And64DoesNotProveUniformityFromAVaryingOrPartialCompareMa
 		const auto partial_front = ShaderProveNggFrontLaneLocal(partial, 64u);
 		Check(!partial_front.lane_local && partial_front.reason.ContainsStr("not wave-uniform"),
 		      "AND64 cannot make a partial-EXEC compare mask uniform after EXEC is restored");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggFront, ASelectByAUniformMaskIsUniform)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		for (const bool varying: {false, true})
+		{
+			Words body;
+			body.push_back(0xb0000000u | (24u << 16u) | 3u); // s_movk_i32 s24, 3
+			const auto mask = VopcSdwaF32(0x06, true, 0u, varying ? 5u : 24u, varying, Inline(0), false);
+			body.insert(body.end(), mask.begin(), mask.end()); // v_cmp_ge_f32 vcc, s24-or-v5, 0
+			Vop1(body, 1, 14, Inline(0));                      // v_mov_b32 v14, 0
+			Vop2(body, 1, 13, Inline(1), 14);                  // v_cndmask_b32 v13, 1, v14, vcc
+			Append(body, Vopc(0xc5, Inline(0), 13u));          // v_cmp_ne_u32 vcc, 0, v13
+			Sopp(body, 6, 0);                                  // s_cbranch_vccz
+			Exp(body, 12, 15, true, 13, 13, 13, 13);
+			Sopp(body, 1);
+			const auto front = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(body)), 64u);
+			Check(front.lane_local == !varying, varying ? "a varying mask selects per lane" : front.reason.c_str());
+		}
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -1186,6 +1218,38 @@ TEST(EmulatorNggFront, ABufferAddressNeedsOneVgprPerEnabledPart)
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorNggFront, ASampleAddressNeedsOnlyTheCoordinatesOfItsDim)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Words body;
+		Vop1(body, 1, 0, Inline(0)); // v_mov_b32 v0, 0
+		Vop1(body, 1, 1, Inline(0)); // v_mov_b32 v1, 0: v2 stays undefined
+		Exp(body, 12, 15, true, 0, 0, 0, 0);
+		Sopp(body, 1);
+		for (const uint8_t dim: {uint8_t {1}, uint8_t {5}})
+		{
+			// The decoded vaddr range is v[0:2] for both; a 2D sample reads x, y and a 2D-array one also the slice.
+			auto code = Parse(PrologueThenBody(body));
+			ShaderInstruction sample {};
+			sample.type           = ShaderInstructionType::ImageSampleLz;
+			sample.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 4};
+			sample.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 3};
+			sample.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 32, .size = 8};
+			sample.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 40, .size = 4};
+			sample.src_num        = 3;
+			sample.mimg_dimension = dim;
+			sample.mimg_dmask     = 0xfu;
+			const auto export_index = InstructionIndex(code, ShaderInstructionType::VMovB32, 1u) + 1u;
+			sample.pc               = code.GetInstructions().At(export_index).pc;
+			code.GetInstructions().InsertAt(export_index, sample);
+			const auto front = ShaderProveNggFrontLaneLocal(code, 64u);
+			Check(front.lane_local == (dim == 1u), dim == 1u ? "a 2D sample does not read the third word" : "a 2D-array sample reads its slice");
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorNggFront, APrologueThatIsNotCountExactIsRefusedBeforeTheBody)
 {
 	ASSERT_EXIT(([] {
@@ -1377,6 +1441,21 @@ TEST(EmulatorNggFront, AUniformCompareUnderPartialExecSteersAVccBranchForTheLane
 		Vop1(read_vector, 1, 13, 256u + 14u);                   // v_mov_b32 v13, v14
 		const auto one_edge = branch_over(vector_arm, read_vector, 12u);
 		Check(!one_edge.lane_local && one_edge.reason.ContainsStr("before it is defined"), "the lanes of EXEC take either edge");
+
+		const auto copied_over = [](uint32_t compare_vgpr) {
+			Words under;
+			under.push_back(0xd4000000u | (0xc5u << 16u) | 50u); // v_cmp_ne_u32 s[50:51], s24, v<compare_vgpr>
+			under.push_back(24u | ((256u + compare_vgpr) << 9u));
+			Sop1(under, 4, kVccReg, 50);                          // s_mov_b64 vcc, s[50:51]
+			Sopp(under, 6, 1);                                    // s_cbranch_vccz over one word
+			Vop1(under, 1, 13, 256u + 5u);                        // v_mov_b32 v13, v5
+			return ProvePartialExec(under);
+		};
+		const auto copied = copied_over(12u);
+		if (!copied.lane_local) { std::fprintf(stderr, "refused: %s\n", copied.reason.c_str()); }
+		Check(copied.lane_local, "a copy of the compare pair steers the branch as the compare does");
+		const auto copied_varying = copied_over(5u);
+		Check(!copied_varying.lane_local && copied_varying.reason.ContainsStr("not wave-uniform"), "a copied per-lane compare is still refused");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -1494,7 +1573,44 @@ Words LaneExitLoopBody(const Words& narrowed, uint32_t exported)
 	return body;
 }
 
+// s24 = 3 iterations; each one adds 1.0 to v13 in the lanes where it is below float(v5), under a saved EXEC that it
+// restores before the back edge when `restores`. v13 is exported after the loop.
+Words NarrowingLoopBody(bool restores)
+{
+	Words body;
+	body.push_back(0xb0000000u | (24u << 16u) | 3u); // s_movk_i32 s24, 3
+	Vop1(body, 5, 12, 256u + 5u);                     // v_cvt_f32_i32 v12, v5
+	Vop1(body, 1, 13, Inline(0));                     // v_mov_b32 v13, 0
+	Words loop;
+	Sop1(loop, 4, 40, kExecLoReg);                    // header: s_mov_b64 s[40:41], exec
+	Append(loop, Vopc(0x11, 256u + 13u, 12u));        // v_cmpx_lt_f32 v13, v12
+	Vop2(loop, 3, 13, 242, 13);                       // v_add_f32 v13, 1.0, v13
+	if (restores) { Sop1(loop, 4, kExecLoReg, 40); }  // s_mov_b64 exec, s[40:41]
+	Sop2(loop, 2, 24, 24, Inline(-1));                // s_add_i32 s24, s24, -1
+	Append(loop, Sopc(7, 24, Inline(0)));             // s_cmp_lg_u32 s24, 0
+	Sopp(loop, 4, 1);                                 // s_cbranch_scc0 over the back edge
+	Sopp(loop, 2, static_cast<uint16_t>(-static_cast<int>(loop.size() + 1u))); // s_branch header
+	Append(body, loop);
+	Exp(body, 12, 15, true, 13, 13, 13, 13);          // exp pos0 v13 done
+	Sopp(body, 1);                                    // s_endpgm
+	return body;
+}
+
 } // namespace
+
+TEST(EmulatorNggFront, ALoopThatRestoresItsExecEveryIterationLeavesUnderTheEntryExec)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto restoring = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(NarrowingLoopBody(true))), 64u);
+		if (!restoring.lane_local) { std::fprintf(stderr, "refused: %s\n", restoring.reason.c_str()); }
+		Check(restoring.lane_local, "every iteration runs the lanes that entered, so the position export is under full EXEC");
+		const auto narrowing = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(NarrowingLoopBody(false))), 64u);
+		Check(!narrowing.lane_local && narrowing.reason.ContainsStr("position export under partial"),
+		      "lanes that stop looping leave the export under a partial EXEC");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
 
 TEST(EmulatorNggFront, LoopsWithAUniformCounterOrALaneExitAreLaneLocal)
 {

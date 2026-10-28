@@ -495,6 +495,7 @@ private:
 	bool FindLoops();
 	bool EnterLoop(uint32_t header);
 	bool CloseLoop(uint32_t header, bool* again);
+	void RestartLoop(uint32_t header);
 	void ExitLoops(uint32_t join);
 	[[nodiscard]] const MaxReduction* ReductionAt(uint32_t index) const;
 	bool MaxReductionPart(const ShaderInstruction& inst, const MaxReduction& unit, bool* done);
@@ -518,6 +519,7 @@ private:
 	{
 		uint32_t                      back  = 0;  // index of the back edge
 		int                           lanes = -1; // EXEC node of the lanes still looping
+		bool                          entry_lanes = false; // `lanes` is the entry EXEC: no back edge has narrowed it
 		unsigned                      passes = 0;
 		FlowState                     state;
 		ExecShape                     shape;
@@ -605,7 +607,7 @@ bool Body::VgprUniformHere(unsigned vgpr) const
 }
 
 // Sources holding one number in every lane of the current EXEC: constants, launch-free scalars, scoped scalars
-// read under an ancestor of it, VGPRs uniform under an ancestor of it.
+// read under an ancestor of it, VGPRs uniform under an ancestor of it, lane bits of a uniform mask.
 bool Body::SourcesAreUniformClean(const ShaderInstruction& inst) const
 {
 	for (int source = 0; source < inst.src_num; ++source)
@@ -622,6 +624,8 @@ bool Body::SourcesAreUniformClean(const ShaderInstruction& inst) const
 			}
 			continue;
 		}
+		// Every launched lane holds the same bit of a uniform mask.
+		if (IsLaneBit(inst, source) && IsUniformMask(op)) { continue; }
 		if (!ScalarRange(op, &first, &count) || (Taint(op) != kClean && !InScope(op))) { return false; }
 	}
 	if (inst.type == Type::VMacF32)
@@ -813,7 +817,8 @@ bool Body::FindLoops()
 
 // On entry the loop's lanes are EXEC; inside, a node below it stands for the lanes still looping, so what holds for
 // the entry lanes holds for them and every split inside the body divides them. A loop that never writes EXEC runs
-// every iteration and leaves under the EXEC it entered with.
+// every iteration and leaves under the EXEC it entered with, and so does one whose back edge always restores the EXEC
+// of its header: no lane leaves it before the others. The proof assumes the latter first (see CloseLoop).
 bool Body::EnterLoop(uint32_t header)
 {
 	const auto& instructions = m_code->GetInstructions();
@@ -823,8 +828,8 @@ bool Body::EnterLoop(uint32_t header)
 	loop.back = m_back_edges.at(header);
 	bool writes_exec = false;
 	for (uint32_t index = header; index <= loop.back; ++index) { writes_exec = writes_exec || ShaderInstructionWritesExec(instructions.At(index)); }
-	loop.lanes           = writes_exec ? m_partition.Child(m_shape.exec, inst.pc | 1u, true) : m_shape.exec; // odd: no compare has this pc
-	m_shape.exec         = loop.lanes;
+	loop.lanes           = m_shape.exec;
+	loop.entry_lanes     = writes_exec;
 	loop.state           = m_state;
 	loop.shape           = m_shape;
 	loop.pending         = m_pending;
@@ -844,6 +849,18 @@ bool Body::CloseLoop(uint32_t header, bool* again)
 {
 	auto&       loop = m_loops.at(header);
 	const auto& inst = m_code->GetInstructions().At(loop.back);
+	if (loop.entry_lanes && m_shape.exec >= 0 && m_shape.exec != loop.lanes && m_partition.Descends(m_shape.exec, loop.lanes))
+	{
+		// A back edge under fewer lanes: some lanes leave before others, so the body is analysed again under a node for
+		// the lanes still looping.
+		const auto& header_inst = m_code->GetInstructions().At(header);
+		loop.entry_lanes = false;
+		loop.lanes       = m_partition.Child(loop.lanes, header_inst.pc | 1u, true); // odd: no compare has this pc
+		loop.shape.exec  = loop.lanes;
+		RestartLoop(header);
+		*again = true;
+		return true;
+	}
 	if (m_shape.exec < 0 || !m_partition.Descends(m_shape.exec, loop.lanes))
 	{
 		return Fail(inst, "loop iterates under an EXEC outside the lanes that entered it");
@@ -892,20 +909,27 @@ bool Body::CloseLoop(uint32_t header, bool* again)
 	}
 	constexpr unsigned kPassesMax = 64;
 	if (++loop.passes > kPassesMax) { return Fail(inst, "loop proof does not converge"); }
+	loop.state = state;
+	loop.shape = shape;
+	RestartLoop(header);
+	return true;
+}
+
+// The walk resumes at the header from the state the loop now assumes there; loops nested in it are entered anew.
+void Body::RestartLoop(uint32_t header)
+{
+	auto& loop = m_loops.at(header);
 	for (auto it = m_loops.begin(); it != m_loops.end();)
 	{
 		it = it->first > header && it->first <= loop.back ? m_loops.erase(it) : std::next(it);
 	}
-	loop.state        = state;
-	loop.shape        = shape;
 	loop.spills       = m_spills;
-	m_state           = state;
-	m_shape           = shape;
+	m_state           = loop.state;
+	m_shape           = loop.shape;
 	m_pending         = loop.pending;
 	m_pending_shape   = loop.pending_shape;
 	m_regions         = loop.regions;
 	m_uniform_targets = loop.uniform_targets;
-	return true;
 }
 
 // A branch out of loops: the guest wave leaves after the iterations of its slowest lane, the host subgroup after
@@ -1272,13 +1296,23 @@ bool Body::ScalarAlu(const ShaderInstruction& inst)
 	                          ((inst.type == Type::SAndB64 || inst.type == Type::SAndB32) && inst.src_num == 2 && m_shape.exec == 0 &&
 	                           ((inst.src[0].type == Operand::ExecLo && IsUniformMask(inst.src[1])) ||
 	                            (inst.src[1].type == Operand::ExecLo && IsUniformMask(inst.src[0]))));
-	// A scalar intersection keeps two complete uniform masks uniform, including when the destination aliases a source.
-	const bool uniform_and = inst.type == Type::SAndB64 && inst.src_num == 2 && inst.dst.size == 2 &&
+	// Each complete uniform mask holds every launched lane or none, so their intersection or union does too, including
+	// when the destination aliases a source.
+	const bool uniform_and = (inst.type == Type::SAndB64 || inst.type == Type::SOrB64) && inst.src_num == 2 && inst.dst.size == 2 &&
 	                         inst.src[0].size == 2 && inst.src[1].size == 2 &&
 	                         IsUniformMask(inst.src[0]) && IsUniformMask(inst.src[1]);
 	const int   scope = (taint & kDiverged) != 0u ? SourceScope(inst) : -1;
 	CompareMask exec_compare {};
 	const bool  restricted = ExecRestrictedCompare(inst, &exec_compare);
+	// A copy of a compare pair holds the same lane bits, so it names the same split.
+	CompareMask copied_compare {};
+	bool        compare_copy = false;
+	if (unsigned first = 0, count = 0; inst.type == Type::SMovB64 && inst.src_num == 1 && ScalarRange(inst.src[0], &first, &count) && count == 2u)
+	{
+		const auto found = m_shape.compare.find(first);
+		compare_copy     = found != m_shape.compare.end();
+		if (compare_copy) { copied_compare = found->second; }
+	}
 	Define(inst.dst, taint);
 	Define(inst.dst2, taint);
 	SetScope(inst.dst, scope);
@@ -1295,6 +1329,12 @@ bool Body::ScalarAlu(const ShaderInstruction& inst)
 		unsigned first = 0;
 		unsigned count = 0;
 		if (ScalarRange(inst.dst, &first, &count) && count == 2u) { m_shape.compare[first] = exec_compare; }
+	}
+	if (compare_copy)
+	{
+		unsigned first = 0;
+		unsigned count = 0;
+		if (ScalarRange(inst.dst, &first, &count) && count == 2u) { m_shape.compare[first] = copied_compare; }
 	}
 	if (WritesScc(inst.type)) { m_state.scalar[kSccWord] = taint; }
 	return true;
@@ -1454,8 +1494,7 @@ bool Body::Vector(const ShaderInstruction& inst)
 bool Body::ImageRead(const ShaderInstruction& inst)
 {
 	const bool nsa       = inst.mimg_address_num > 0;
-	const int  addresses =
-	    inst.type == Type::ImageLoad ? std::min(inst.src[0].size, ImageLoadAddressCount(inst)) : inst.src[0].size;
+	const int  addresses = std::min(inst.src[0].size, ImageReadAddressCount(inst));
 	if (nsa && addresses > inst.mimg_address_num) { return Fail(inst, "image address list shorter than its format"); }
 	for (int address = 0; address < addresses; ++address)
 	{
@@ -1714,7 +1753,10 @@ ShaderNggFrontBodyProof Body::Run(const ShaderCode& code, uint32_t first_index, 
 			m_state.reachable = false; // the back edge holds: the joined header state covers it
 			continue;
 		}
-		if (!Step(inst)) { return m_result; }
+		if (!Step(inst))
+		{
+			return m_result;
+		}
 	}
 	m_result.lane_local = m_state.reachable && m_pending.empty() && m_regions.empty() && m_loops.empty();
 	if (!m_result.lane_local) { m_result.reason = "program does not reach its terminator"; }

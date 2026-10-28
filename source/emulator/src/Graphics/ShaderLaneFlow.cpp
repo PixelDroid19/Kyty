@@ -114,10 +114,21 @@ bool IsLaneLocalImageRead(Type type)
 	}
 }
 
-int ImageLoadAddressCount(const ShaderInstruction& inst)
+int ImageReadAddressCount(const ShaderInstruction& inst)
 {
 	static constexpr int kCoordinates[8] = {1, 2, 3, 3, 2, 3, 3, 4};
-	return kCoordinates[inst.mimg_dimension & 7u] + (inst.mimg_explicit_lod ? 1 : 0);
+	static constexpr int kDerivatives[8] = {2, 4, 6, 4, 2, 4, 4, 4};
+	const int            coordinates     = kCoordinates[inst.mimg_dimension & 7u];
+	switch (inst.type)
+	{
+		case Type::ImageSampleL:
+		case Type::ImageSampleLzO:
+		case Type::ImageSampleDrefLz: return coordinates + 1;
+		case Type::ImageSampleCd:
+		case Type::ImageSampleD: return kDerivatives[inst.mimg_dimension & 7u] + coordinates;
+		case Type::ImageSampleLz: return coordinates;
+		default: return coordinates + (inst.mimg_explicit_lod ? 1 : 0);
+	}
 }
 
 bool IsLaneExchange(Type type)
