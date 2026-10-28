@@ -198,6 +198,9 @@ struct GraphicContext
 	// guest wave64 neutral region sees all lanes a partial wave carries.
 	bool shader_maximal_reconvergence_supported = false;
 	bool shader_maximal_reconvergence_enabled   = false;
+	// VK_EXT_image_view_min_lod clamps sampled LOD per view; it carries the
+	// guest T# MIN_LOD, which streaming titles raise above non-resident mips.
+	bool image_view_min_lod_supported = false;
 
 	// Vulkan subgroup limits used to validate shaders that require an exact guest
 	// wave width. A zero maximum means the physical-device query was unavailable.
@@ -273,6 +276,9 @@ struct VulkanImageViewDescriptor
 	// Zero inherits the image usage; a view in another format of a mutable
 	// image restricts itself to the usage its format supports.
 	VkImageUsageFlags usage = 0;
+	// Minimum sampled LOD in image levels, unsigned 4.8 fixed point (the T#
+	// MIN_LOD encoding); zero leaves the view unclamped.
+	uint32_t min_lod = 0;
 };
 
 struct VulkanImage
@@ -425,6 +431,10 @@ struct DepthStencilVulkanImage: public VulkanImage
 struct TextureVulkanImage: public VulkanImage
 {
 	TextureVulkanImage(): VulkanImage(VulkanImageType::Texture) {}
+
+	// Descriptors of the sampled views created with the image, indexed by view
+	// id; a MIN_LOD-clamped variant copies one and caches it.
+	VulkanImageViewDescriptor standard_view_descriptors[VIEW_DEPTH_TEXTURE_ARRAY + 1] {};
 };
 
 struct StorageTextureVulkanImage: public VulkanImage

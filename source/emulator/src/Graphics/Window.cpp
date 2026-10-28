@@ -2235,7 +2235,7 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
                                    bool depth_clip_control_supported,
                                    ShaderComputeWaveVulkanState* compute_wave_state, bool guest_device_address,
                                    bool compute_derivative_group_linear, bool maximal_reconvergence_supported,
-                                   VulkanBlendFeatures* enabled_blend_features, VulkanSamplerFeatures* enabled_sampler_features)
+                                   bool image_view_min_lod_supported, VulkanBlendFeatures* enabled_blend_features, VulkanSamplerFeatures* enabled_sampler_features)
 {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(r == nullptr);
@@ -2352,6 +2352,14 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	{
 		maximal_reconvergence.pNext = device_feature_chain;
 		device_feature_chain        = &maximal_reconvergence;
+	}
+	VkPhysicalDeviceImageViewMinLodFeaturesEXT image_view_min_lod {};
+	image_view_min_lod.sType  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT;
+	image_view_min_lod.minLod = VK_TRUE;
+	if (image_view_min_lod_supported)
+	{
+		image_view_min_lod.pNext = device_feature_chain;
+		device_feature_chain     = &image_view_min_lod;
 	}
 	device_features_12.pNext = device_feature_chain;
 	device_feature_chain = &device_features_12;
@@ -3116,6 +3124,8 @@ static void VulkanCreate(WindowContext* ctx)
 		derivatives.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
 		VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR maximal_reconvergence {};
 		maximal_reconvergence.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR;
+		VkPhysicalDeviceImageViewMinLodFeaturesEXT image_view_min_lod {};
+		image_view_min_lod.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT;
 
 		void* query_chain = &features_13;
 		if (has_ext(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME))
@@ -3143,6 +3153,11 @@ static void VulkanCreate(WindowContext* ctx)
 			maximal_reconvergence.pNext = query_chain;
 			query_chain                 = &maximal_reconvergence;
 		}
+		if (has_ext(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME))
+		{
+			image_view_min_lod.pNext = query_chain;
+			query_chain              = &image_view_min_lod;
+		}
 		VkPhysicalDeviceFeatures2 available_features {};
 		available_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 		available_features.pNext = query_chain;
@@ -3162,6 +3177,12 @@ static void VulkanCreate(WindowContext* ctx)
 		                                [](auto s, auto l) { return strcmp(s, l) == 0; }))
 		{
 			device_extensions.Add(VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME);
+		}
+		ctx->graphic_ctx.image_view_min_lod_supported =
+		    has_ext(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME) && image_view_min_lod.minLod == VK_TRUE;
+		if (ctx->graphic_ctx.image_view_min_lod_supported)
+		{
+			device_extensions.Add(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
 		}
 
 		ctx->graphic_ctx.color_write_enable_supported =
@@ -3383,6 +3404,7 @@ static void VulkanCreate(WindowContext* ctx)
 	                       &ctx->graphic_ctx.compute_wave_vulkan_state, ctx->graphic_ctx.guest_device_address_supported,
 	                       ctx->graphic_ctx.compute_derivative_group_linear_supported,
 	                       ctx->graphic_ctx.shader_maximal_reconvergence_supported,
+	                       ctx->graphic_ctx.image_view_min_lod_supported,
 	                       &ctx->graphic_ctx.blend_capabilities.enabled, &ctx->graphic_ctx.enabled_sampler_features);
 	if (ctx->graphic_ctx.device == nullptr)
 	{

@@ -3285,6 +3285,38 @@ static ShaderSampledImageViewKind ResolveBoundSampledImageView(const VulkanImage
 
 // A storage view of a single-sample depth plane: one layer at level 0 whose format holds the depth texel bits
 // unchanged (R32F over 32-bit float depth, R16 UNORM over 16-bit depth), at the plane's guest extent or at a
+// T# MIN_LOD clamps the sampled LOD in image levels (u4.8), the encoding a view
+// minLod carries to the same descriptor field; streaming raises it above mips
+// that are not resident yet. Zero when the clamp cannot exceed the view's base.
+static uint32_t SampledViewMinLod(uint32_t min_lod, const VulkanImageViewDescriptor& view, uint32_t image_levels)
+{
+	const uint32_t level_count =
+	    view.level_count == VK_REMAINING_MIP_LEVELS ? image_levels - view.base_mip_level : view.level_count;
+	if (min_lod <= view.base_mip_level * 256u || level_count == 0u)
+	{
+		return 0u;
+	}
+	// The view minLod may not exceed its last accessible level.
+	return std::min(min_lod, (view.base_mip_level + level_count - 1u) * 256u);
+}
+
+// A view of the bound image clamped to the T# MIN_LOD; `view` when no clamp applies.
+static int BindSampledMinLodView(VulkanImage* image, int view, VulkanImageViewDescriptor descriptor, uint32_t min_lod)
+{
+	descriptor.min_lod = SampledViewMinLod(min_lod, descriptor, image->mip_levels);
+	if (descriptor.min_lod == 0u)
+	{
+		return view;
+	}
+	const int clamped = VulkanGetOrCreateCachedImageView(g_render_ctx->GetGraphicCtx()->device, image, descriptor);
+	if (clamped < 0)
+	{
+		EXIT("failed to create MIN_LOD sampled view: min_lod=0x%03x mips=%u cached_views=%zu\n", min_lod,
+		     image->mip_levels, image->cached_view_descriptors.size());
+	}
+	return clamped;
+}
+
 // smaller extent with the plane's width as pitch. Same pitch, texel size and swizzle give every texel of the
 // smaller view the address it has in the plane (captured: a 240x135 R16 view, pitch 256, over a 256x256 D16
 // target of the same size).
@@ -3507,7 +3539,6 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			if (r.MemoryType() != 0x10 && r.MemoryType() != 0x6d) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MemoryType() != 0x10 && r.MemoryType() != 0x6d condition ignored (continuing)\n"); }
 		}
 		if ((gen5 ? r.Base40() : r.Base38()) == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (gen5 ? r.Base40() : r.Base38()) == 0 condition ignored (continuing)\n"); }
-		if (r.MinLod() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MinLod() != 0 condition ignored (continuing)\n"); }
 		if (r.Type() != 8 && r.Type() != 9 && !arrayed_2d && !three_dimensional)
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sampled texture type %u is bound as 2D: format=%u tile=%u %ux%u\n",
@@ -4600,6 +4631,25 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			{
 				sampled_views[*sampled_index] |= VulkanImage::VIEW_STENCIL_ATTACHED_DEPTH;
 			}
+			const bool min_lod_views = r.MinLod() != 0u && g_render_ctx->GetGraphicCtx()->image_view_min_lod_supported;
+			if (r.MinLod() != 0u && !min_lod_views)
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: T# MIN_LOD 0x%03x unclamped: VK_EXT_image_view_min_lod unavailable\n",
+				               static_cast<unsigned>(r.MinLod()));
+			}
+			if (min_lod_views && tex->type == VulkanImageType::Texture && !depth_texture && !stencil_texture)
+			{
+				const int   view    = sampled_views[*sampled_index];
+				const auto* texture = static_cast<const TextureVulkanImage*>(tex);
+				EXIT_IF(view < 0 || view > VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY ||
+				        texture->standard_view_descriptors[view].image != tex->image);
+				sampled_views[*sampled_index] = BindSampledMinLodView(tex, view, texture->standard_view_descriptors[view], r.MinLod());
+			} else if (min_lod_views && depth_texture)
+			{
+				// Descriptor layouts classify depth reads by their standard view id.
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: T# MIN_LOD 0x%03x unclamped on a sampled depth view\n",
+				               static_cast<unsigned>(r.MinLod()));
+			}
 			if (!depth_texture && (tex->type == VulkanImageType::RenderTexture || tex->type == VulkanImageType::StorageTexture ||
 			                       tex->type == VulkanImageType::VideoOut))
 			{
@@ -4631,6 +4681,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				{
 					sampled_descriptor.format = reinterpret_format;
 					sampled_descriptor.usage  = VK_IMAGE_USAGE_SAMPLED_BIT;
+				}
+				if (min_lod_views)
+				{
+					sampled_descriptor.min_lod = SampledViewMinLod(r.MinLod(), sampled_descriptor, tex->mip_levels);
 				}
 				const int sampled_view = VulkanGetOrCreateCachedImageView(g_render_ctx->GetGraphicCtx()->device, tex,
 				                                                         sampled_descriptor);

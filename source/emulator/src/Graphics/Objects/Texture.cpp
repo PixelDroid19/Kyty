@@ -1609,6 +1609,7 @@ static void create_texture_image_views(GraphicContext* ctx, TextureVulkanImage* 
 		{
 			EXIT("failed to create sampled-depth image view\n");
 		}
+		vk_obj->standard_view_descriptors[VulkanImage::VIEW_DEPTH_TEXTURE] = descriptor;
 		if (config.arrayed_2d && config.depth > 1u)
 		{
 			// Layered depth arrays sample through the array view; layers stack
@@ -1621,18 +1622,21 @@ static void create_texture_image_views(GraphicContext* ctx, TextureVulkanImage* 
 			{
 				EXIT("failed to create sampled-depth array image view\n");
 			}
+			vk_obj->standard_view_descriptors[VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY] = descriptor;
 		}
 		return;
 	}
 
 	const int view_index = config.three_dimensional ? VulkanImage::VIEW_3D : VulkanImage::VIEW_DEFAULT;
 	if (!VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[view_index])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[view_index]) condition ignored (continuing)\n"); }
+	vk_obj->standard_view_descriptors[view_index] = descriptor;
 	if (!config.three_dimensional)
 	{
 		descriptor.view_type        = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
 		descriptor.base_array_layer = config.arrayed_2d ? config.base_array : 0u;
 		descriptor.layer_count      = config.arrayed_2d ? config.depth - config.base_array : 1u;
 		if (!VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[VulkanImage::VIEW_ARRAY])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]) condition ignored (continuing)\n"); }
+		vk_obj->standard_view_descriptors[VulkanImage::VIEW_ARRAY] = descriptor;
 	}
 }
 
