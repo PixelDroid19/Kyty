@@ -1210,6 +1210,82 @@ TEST(EmulatorNativeWaveAdmission, Wave32OrReductionMayHoldScalarLoadsAmongItsSte
 	refused(with_loads(other, load(Operand(ShaderOperandType::ExecLo))));
 }
 
+// The guest form of the entry: the launch mask saved before WQM, the condition taken as EXEC & launch, an
+// ORN2_SAVEEXEC of EXEC itself, and M0 saved for the region's interpolation-free span.
+TEST(EmulatorNativeWaveAdmission, PartialWaveEntryMaySaveExecItselfAndCopyM0)
+{
+	const auto exec   = Operand(ShaderOperandType::ExecLo, 0, 2);
+	const auto launch = Operand(ShaderOperandType::Sgpr, 30, 2);
+	const auto mask   = Operand(ShaderOperandType::Sgpr, 36, 2);
+	ShaderInstruction condition {};
+	condition.type    = ShaderInstructionType::SAndB64;
+	condition.format  = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+	condition.dst     = mask;
+	condition.src[0]  = exec;
+	condition.src[1]  = launch;
+	condition.src_num = 2;
+	const auto plain = Reduction({Clear(9), Clear(10)});
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	const auto add = [&code](ShaderInstruction inst)
+	{
+		inst.pc = code.GetInstructions().Size() * 4u;
+		code.GetInstructions().Add(inst);
+	};
+	add(Unary(ShaderInstructionType::SMovB64, launch, exec, true));
+	add(Unary(ShaderInstructionType::SWqmB64, exec, exec, true));
+	add(condition);
+	add(Unary(ShaderInstructionType::SOrn2SaveexecB64, Operand(ShaderOperandType::VccLo, 0, 2), exec, true));
+	add(Unary(ShaderInstructionType::SMovB32, Operand(ShaderOperandType::M0), Operand(ShaderOperandType::Sgpr, 32)));
+	for (uint32_t index = 2; index < plain.GetInstructions().Size(); ++index) { add(plain.GetInstructions().At(index)); }
+	EXPECT_EQ(ShaderAnalyzeNativeWave(code, 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	const auto reductions = ShaderFindFragmentLaneReductions(code, ShaderAnalyzeFragmentMaskFlow(code, 64u));
+	ASSERT_EQ(reductions.reductions.size(), 1u);
+	EXPECT_EQ(reductions.reductions[0].seed_index, 5u);
+	EXPECT_FALSE(reductions.IsStep(4)); // the M0 copy runs as written
+	EXPECT_TRUE(reductions.IsStep(6));
+}
+
+// The first write after the reads ends a network register only when it replaces every lane EXEC holds.
+TEST(EmulatorNativeWaveAdmission, PartialWaveNetworkEndsOnlyAtWholeDestinationWrites)
+{
+	const auto exec    = Operand(ShaderOperandType::ExecLo, 0, 2);
+	const auto widen   = Unary(ShaderInstructionType::SWqmB64, exec, exec, true);
+	const auto partial = [](const ShaderCode& code)
+	{
+		const auto info = ShaderAnalyzeNativeWave(code, 64);
+		EXPECT_NE(info.proof, ShaderNativeWaveProof::FragmentPartialWave);
+		ASSERT_NE(info.refusal_reason, nullptr);
+		EXPECT_NE(std::strstr(info.refusal_reason, "row DPP"), nullptr) << info.refusal_reason;
+		EXPECT_EQ(info.refusal_pc, 12u);
+	};
+	// SDWA with DST_SEL DWORD writes the whole register; WORD_0 with UNUSED_PRESERVE keeps its high half.
+	const auto sdwa = [](uint32_t dst_sel, uint32_t dst_unused)
+	{
+		auto inst = Vector(ShaderInstructionType::VMulF32, 9, Operand(ShaderOperandType::Vgpr, 11), Operand(ShaderOperandType::Vgpr, 12));
+		inst.vop_sdwa      = true;
+		inst.vop_sdwa_ctrl = (6u << 24u) | (6u << 16u) | (dst_unused << 11u) | (dst_sel << 8u);
+		inst.src[0].swizzle = inst.src[1].swizzle = 6;
+		return inst;
+	};
+	EXPECT_EQ(ShaderAnalyzeNativeWave(Reduction({sdwa(6, 0), Clear(10)}), 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	partial(Reduction({sdwa(4, 2), Clear(10)}));
+	// A quad permutation always has its source lane, so it writes every lane the row and bank masks enable.
+	const auto quad = [](bool bound_ctrl, uint8_t row_mask)
+	{
+		auto inst = Vector(ShaderInstructionType::VSubF32, 9, Operand(ShaderOperandType::Vgpr, 11), Operand(ShaderOperandType::Vgpr, 11));
+		inst.src[0].dpp            = true;
+		inst.src[0].dpp_ctrl       = 0x55u;
+		inst.src[0].dpp_bound_ctrl = bound_ctrl;
+		inst.src[0].dpp_row_mask   = row_mask;
+		inst.src[0].dpp_bank_mask  = 15;
+		return inst;
+	};
+	EXPECT_EQ(ShaderAnalyzeNativeWave(Reduction({widen, quad(true, 15), Clear(10)}), 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	EXPECT_EQ(ShaderAnalyzeNativeWave(Reduction({widen, quad(false, 15), Clear(10)}), 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	partial(Reduction({widen, quad(true, 3), Clear(10)}));
+}
+
 TEST(EmulatorNativeWaveAdmission, PartialWaveKeepsStaleLanesOutsideTheRestoredExec)
 {
 	const auto exec  = Operand(ShaderOperandType::ExecLo, 0, 2);

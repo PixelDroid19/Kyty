@@ -210,20 +210,31 @@ bool Independent(const ShaderInstruction& inst, const VectorSet& network)
 	return (named & network).none();
 }
 
+// A DPP16 source skips the write only where its source lane is out of range and bound control is off (an
+// inactive source lane reads zero), and the row and bank masks gate the write; a quad permutation is always
+// in range.
+bool DppWritesEveryLane(const ShaderOperand& source)
+{
+	return source.dpp_row_mask == 0xfu && source.dpp_bank_mask == 0xfu && source.dpp_unmodeled_bits == 0u &&
+	       (source.dpp_bound_ctrl || source.dpp_ctrl <= 0xffu);
+}
+
 // A VALU write of every lane EXEC holds, reading nothing of its destination: no accumulator, interpolation,
-// lane write or relative form, no 16-bit result that could keep the other half, no DPP (a lane without a
-// source keeps its old value) and no SDWA or OP_SEL destination selection.
+// lane write or relative form, no 16-bit result that could keep the other half, no DPP that can skip a lane
+// (it keeps its old value there) and no SDWA selection of part of the destination (DST_SEL other than DWORD)
+// or OP_SEL destination selection.
 bool OverwritesDestination(const ShaderInstruction& inst)
 {
-	const auto name = ShaderInstructionTypeName(inst.type);
-	if (name.substr(0, 1) != "V" || name.find("16") != std::string_view::npos || inst.vop_sdwa || inst.vop3_op_sel != 0u) { return false; }
+	const auto name         = ShaderInstructionTypeName(inst.type);
+	const bool partial_sdwa = inst.vop_sdwa && ((inst.vop_sdwa_ctrl >> 8u) & 7u) != 6u;
+	if (name.substr(0, 1) != "V" || name.find("16") != std::string_view::npos || partial_sdwa || inst.vop3_op_sel != 0u) { return false; }
 	for (const char* prefix: {"VCmp", "VMac", "VFmac", "VInterp", "VWritelane", "VReadlane", "VReadfirstlane", "VMovrel"})
 	{
 		if (ShaderInstructionTypeStartsWith(inst.type, prefix)) { return false; }
 	}
 	for (const auto& source: inst.src)
 	{
-		if (source.dpp) { return false; }
+		if (source.dpp && !DppWritesEveryLane(source)) { return false; }
 	}
 	return inst.dst.type == Operand::Vgpr && (inst.dst2.type != Operand::Vgpr);
 }
@@ -498,7 +509,7 @@ bool ShaderProveLaneReductionNetwork(const ShaderCode& code, uint32_t guest_wave
 	for (uint32_t index = seed_index + 1u; index < restore; ++index)
 	{
 		const auto& inst = instructions.At(index);
-		if (ShaderReductionRegionScalarLoad(inst) && !ShaderInstructionWritesExec(inst)) { continue; }
+		if (ShaderReductionRegionScalarInstruction(inst) && !ShaderInstructionWritesExec(inst)) { continue; }
 		if (!Step(inst, reduction->op, guest_wave_size, &network)) { return false; }
 		reduction->steps.push_back(index);
 	}

@@ -91,8 +91,9 @@ struct ShaderComputeWaveAnalysisResult
 // the unconditional entry prefix; an observable M0 read rejects this route.
 [[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentVirtualParameterState(const ShaderCode& code,
                                                                                          uint32_t          parameter_register);
-// A scalar memory load ignores EXEC and names no VGPR, so a lane reduction may hold it among its steps.
-[[nodiscard]] bool ShaderReductionRegionScalarLoad(const ShaderInstruction& instruction);
+// A scalar memory load, a scalar copy into M0 or an S_WAITCNT (which only waits for those loads) ignores EXEC
+// and names no VGPR, so a lane reduction may hold it among its steps.
+[[nodiscard]] bool ShaderReductionRegionScalarInstruction(const ShaderInstruction& instruction);
 // The same proof for a lane reduction, giving the index of its initializer and of the EXEC restore that closes
 // the region. The initializer is the first instruction after `index` that is not a scalar load; every other
 // instruction before the restore is a scalar load or a bitwise or permutation step that reads only registers
