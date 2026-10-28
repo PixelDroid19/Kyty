@@ -160,6 +160,86 @@ OpStore %<dst> %fh_stored_float_<index>
 	return true;
 }
 
+// V_PK_FMA_F16, V_PK_ADD_F16 and V_PK_MUL_F16: two independent half
+// operations. OPSEL and NEG select the source halves and their signs for the
+// low result, OPSEL_HI and NEG_HI for the high one. binary32 holds
+// 24 >= 2 * 11 + 2 bits, so a binary32 sum or product of two halves rounded
+// once more to half equals the directly rounded half result; the fused form
+// recovers its addition residue as V_FMA_F16 does.
+KYTY_RECOMPILER_FUNC(Recompile_VPkF16)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	const bool  fused = inst.type == ShaderInstructionType::VPkFmaF16;
+	const auto  sources = static_cast<uint32_t>(fused ? 3 : 2);
+	if (inst.src_num != static_cast<int>(sources) || inst.vop3p_op_sel_hi > 7u || inst.vop3_op_sel > 7u ||
+	    inst.vop3_omod != 0u || inst.vop_sdwa || inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 ||
+	    inst.dst.register_id < 0 || inst.dst.register_id > 255 || inst.dst.multiplier != 1.0f || inst.dst.clamp ||
+	    inst.dst.absolute || inst.dst.negate || inst.dst.dpp || inst.dst.swizzle != 6u)
+	{
+		return false;
+	}
+	for (uint32_t operand = 0; operand < sources; ++operand)
+	{
+		if (operand_is_constant(inst.src[operand])) { return false; }
+	}
+	F16Arithmetic::Mode mode;
+	if (!F16Arithmetic::ReadMode(spirv, &mode) || !mode.fp16_overflow_known)
+	{
+		return false;
+	}
+	// As for the other half arithmetic: nearest-even without IEEE exception state.
+	if (((mode.value >> 2u) & 3u) != 0u || mode.ieee)
+	{
+		return false;
+	}
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8       source;
+	for (uint32_t high = 0; high < 2u; ++high)
+	{
+		ShaderInstruction half = inst;
+		half.vop3_op_sel = high != 0u ? inst.vop3p_op_sel_hi : inst.vop3_op_sel;
+		for (uint32_t operand = 0; operand < sources; ++operand)
+		{
+			half.src[operand].negate = high != 0u ? inst.src[operand].absolute : inst.src[operand].negate;
+			half.src[operand].absolute = false;
+		}
+		const String8 half_index = index_str + (high != 0u ? "_hi" : "_lo");
+		for (uint32_t operand = 0; operand < sources; ++operand)
+		{
+			if (!F16Arithmetic::LoadHalf(spirv, half, operand, half_index, (mode.value & 0x40u) == 0u, false, &source))
+			{
+				return false;
+			}
+		}
+		if (fused)
+		{
+			source += String8(R"(
+%fh_product_<index> = OpFMul %float %h0_<index> %h1_<index>
+%t_<index> = OpFAdd %float %fh_product_<index> %h2_<index>
+)").ReplaceStr("<index>", half_index);
+			source += F16Arithmetic::FmaResidue(half_index);
+		} else if (inst.type == ShaderInstructionType::VPkMinF16 || inst.type == ShaderInstructionType::VPkMaxF16)
+		{
+			source += F16Arithmetic::MinMax("h0_" + half_index, "h1_" + half_index, "t_" + half_index, half_index,
+			                                inst.type == ShaderInstructionType::VPkMaxF16);
+		} else
+		{
+			source += String8(param[0]).ReplaceStr("<index>", half_index) + "\n";
+		}
+		source += String8("%fh_value_bits_<index> = OpBitcast %uint %t_<index>\n").ReplaceStr("<index>", half_index);
+		source += F16Arithmetic::Narrow(spirv, "fh_value_bits_" + half_index, "fh_result_" + half_index, half_index, 0u,
+		                                (mode.value & 0x80u) == 0u, mode.fp16_overflow,
+		                                fused ? "fh_residue_" + half_index : String8());
+	}
+	source += String8("%fh_packed_<index> = OpBitFieldInsert %uint %fh_result_<index>_lo %fh_result_<index>_hi %uint_16 %uint_16\n")
+	              .ReplaceStr("<index>", index_str);
+	source += F16Arithmetic::Store(inst, index_str, "fh_packed_" + index_str);
+	*dst_source += source.ReplaceStr("<float_zero>", spirv->GetConstantFloat(0.0f))
+	                   .ReplaceStr("uint_112", spirv->GetConstantUint(112))
+	                   .ReplaceStr("uint_255", spirv->GetConstantUint(255));
+	return true;
+}
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

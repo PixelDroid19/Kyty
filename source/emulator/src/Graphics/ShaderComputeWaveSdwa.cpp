@@ -149,7 +149,12 @@ bool ShaderSdwaPartialDestinationSupported(const ShaderInstruction& instruction)
 	const uint32_t dst_u   = (control >> 11u) & 3u;
 	const bool     vop1    = instruction.format == ShaderInstructionFormat::SVdstSVsrc0 && instruction.src_num == 1;
 	const bool     vop2    = instruction.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1 && instruction.src_num == 2;
-	if (!instruction.vop_sdwa || (!vop1 && !vop2) || dst_sel > 5u || dst_u > 2u || (control & 0xe000u) != 0u)
+	// V_CNDMASK_B32 is VOP2 with VCC as an implicit third source. It selects
+	// raw bits, so float source modifiers are not admitted here.
+	const bool select = instruction.type == ShaderInstructionType::VCndmaskB32 &&
+	                    instruction.format == ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2 && instruction.src_num == 3 &&
+	                    (control & ((3u << 20u) | (3u << 28u))) == 0u;
+	if (!instruction.vop_sdwa || (!vop1 && !vop2 && !select) || dst_sel > 5u || dst_u > 2u || (control & 0xe000u) != 0u)
 	{
 		return false;
 	}

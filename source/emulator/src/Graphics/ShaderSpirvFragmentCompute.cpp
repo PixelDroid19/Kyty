@@ -337,9 +337,15 @@ bool Spirv::EmitFragmentExport(const ShaderInstruction& instruction, uint32_t in
 		if (CanLoadPackedHalfForExport(static_cast<int>(index), instruction.src[pair]))
 		{
 			*output += String8::FromPrintf("%%%s_raw = OpLoad %%uint %%v%d_packed_half\n", id.c_str(), instruction.src[pair].register_id);
-		} else if (!operand_load_uint(this, instruction.src[pair], id + "_raw", String8(), output))
+		} else
 		{
-			return false;
+			// The loader replaces its output, so it fills its own buffer.
+			String8 load;
+			if (!operand_load_uint(this, instruction.src[pair], id + "_raw", String8(), &load))
+			{
+				return false;
+			}
+			*output += load + "\n";
 		}
 		*output += String8::FromPrintf("%%%s = OpExtInst %%v2float %%GLSL_std_450 UnpackHalf2x16 %%%s_raw\n", id.c_str(), id.c_str());
 	}

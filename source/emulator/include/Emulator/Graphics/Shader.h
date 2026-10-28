@@ -460,6 +460,12 @@ enum class ShaderInstructionType : uint32_t
 	VFmaMixF32,
 	VFmaMixLoF16,
 	VFmaMixHiF16,
+	// VOP3P packed half arithmetic: two independent operations in one VGPR.
+	VPkFmaF16,
+	VPkAddF16,
+	VPkMulF16,
+	VPkMinF16,
+	VPkMaxF16,
 	// RDNA2 dot-product with accumulation in destination register
 	VDot2cF32F16,
 	VDot4cI32I8,
@@ -616,6 +622,8 @@ enum class ShaderInstructionType : uint32_t
 	SBitset0B32,
 	ImageGather4C,
 	VFfblB32,
+	VFfbhU32,
+	VFfbhI32,
 
 	ZMax
 };

@@ -3185,6 +3185,7 @@ void Spirv::FindConstants()
 		}
 	}
 	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU16U32})) { AddConstantUint(0xffffu); }
+	if (m_code.HasAnyOf({ShaderInstructionType::VFfbhU32, ShaderInstructionType::VFfbhI32})) { AddConstantUint(31u); }
 	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkI16I32}))
 	{
 		AddConstantUint(0x7fffu);

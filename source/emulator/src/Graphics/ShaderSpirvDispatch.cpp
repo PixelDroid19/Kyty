@@ -409,6 +409,10 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_V_XXX_B32_SVdstSVsrc0,          ShaderInstructionType::VBfrevB32,           ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpBitReverse %uint %t0_<index>"}},
     // FindILsb of a zero word is -1, the no-ones result of V_FFBL_B32.
     {Recompile_V_XXX_B32_SVdstSVsrc0,          ShaderInstructionType::VFfblB32,            ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpExtInst %uint %GLSL_std_450 FindILsb %t0_<index>"}},
+    // V_FFBH_U32 counts the zeros above the first one from the MSB: 31 - FindUMsb, and -1 for a zero word.
+    {Recompile_V_XXX_B32_SVdstSVsrc0,          ShaderInstructionType::VFfbhU32,            ShaderInstructionFormat::SVdstSVsrc0, {"%ffbh_msb_<index> = OpExtInst %uint %GLSL_std_450 FindUMsb %t0_<index>\n%ffbh_count_<index> = OpISub %uint %uint_31 %ffbh_msb_<index>\n%ffbh_zero_<index> = OpIEqual %bool %t0_<index> %uint_0\n%t_<index> = OpSelect %uint %ffbh_zero_<index> %uint_0xffffffff %ffbh_count_<index>"}},
+    // V_FFBH_I32 counts the bits below the sign that equal it: 31 - FindSMsb, and -1 when every bit does.
+    {Recompile_V_XXX_B32_SVdstSVsrc0,          ShaderInstructionType::VFfbhI32,            ShaderInstructionFormat::SVdstSVsrc0, {"%ffbh_signed_<index> = OpBitcast %int %t0_<index>\n%ffbh_smsb_<index> = OpExtInst %int %GLSL_std_450 FindSMsb %ffbh_signed_<index>\n%ffbh_msb_<index> = OpBitcast %uint %ffbh_smsb_<index>\n%ffbh_count_<index> = OpISub %uint %uint_31 %ffbh_msb_<index>\n%ffbh_none_<index> = OpIEqual %bool %ffbh_msb_<index> %uint_0xffffffff\n%t_<index> = OpSelect %uint %ffbh_none_<index> %uint_0xffffffff %ffbh_count_<index>"}},
     {Recompile_V_XXX_B32_SVdstSVsrc0,          ShaderInstructionType::VNotB32,             ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpNot %uint %t0_<index>"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0,          ShaderInstructionType::VCeilF32,            ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpExtInst %float %GLSL_std_450 Ceil %t0_<index>"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0,          ShaderInstructionType::VCosF32,             ShaderInstructionFormat::SVdstSVsrc0, {"%tr_<index> = OpFMul %float %t0_<index> %float_2pi", "%t_<index> = OpExtInst %float %GLSL_std_450 Cos %tr_<index>"}},
@@ -719,6 +723,11 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VFmaMixF32, ShaderInstructionType::VFmaMixF32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {}},
     {Recompile_VFmaMixLoF16, ShaderInstructionType::VFmaMixLoF16, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {}},
     {Recompile_VFmaMixLoF16, ShaderInstructionType::VFmaMixHiF16, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {"hi"}},
+    {Recompile_VPkF16, ShaderInstructionType::VPkFmaF16, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {"fma"}},
+    {Recompile_VPkF16, ShaderInstructionType::VPkAddF16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {"%t_<index> = OpFAdd %float %h0_<index> %h1_<index>"}},
+    {Recompile_VPkF16, ShaderInstructionType::VPkMulF16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {"%t_<index> = OpFMul %float %h0_<index> %h1_<index>"}},
+    {Recompile_VPkF16, ShaderInstructionType::VPkMinF16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
+    {Recompile_VPkF16, ShaderInstructionType::VPkMaxF16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
     {Recompile_VDot2cF32F16_VdstVsrc0Vsrc1Vsrc2, ShaderInstructionType::VDot2cF32F16, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {""}},
     {Recompile_VDot4cI32I8_VdstVsrc0Vsrc1Vsrc2,  ShaderInstructionType::VDot4cI32I8,  ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {""}},
 	{Recompile_VCubetcF32_VdstVsrc0Vsrc1Vsrc2,   ShaderInstructionType::VCubetcF32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {""}},

@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/FragmentTransportResolve.h"
 #include "Emulator/Graphics/FragmentTransportShade.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderParse.h"
 #include "NggPassthroughFixture.h"
 
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
@@ -83,6 +84,35 @@ void SplitShadeModuleValidates()
 	Check(binary.Size() > 8u, "split shade module has code");
 }
 
+// A compressed export reads each half pair either from the packed-half shadow or
+// from the plain VGPR; a plain VGPR pair must not drop what the export emitted before it.
+void SplitShadeCompressedExportValidates()
+{
+	ScopedShaderValidation validation;
+
+	Vector<uint32_t> words;
+	words.Add(0x7e0002f2u); // v_mov_b32 v0, 1.0
+	words.Add(0x7e0202f2u); // v_mov_b32 v1, 1.0
+	words.Add(0xf8001c0fu); // exp mrt0, v0, v1, compr, vm, done, en:0xf
+	words.Add(0x00000100u);
+	words.Add(0xbf810000u); // s_endpgm
+	for (uint32_t pad = 0; pad < 64u; ++pad)
+	{
+		words.Add(0xbf9f0000u); // s_code_end
+	}
+	ShaderCode code;
+	Check(ShaderTryParseBounded(words.GetDataConst(), words.Size() * 4u, &code), "program parses");
+	code.SetType(ShaderType::Pixel);
+
+	ShaderPixelInputInfo pixel {};
+	pixel.target_output_mode[0] = 4u;
+
+	Vector<uint32_t> binary;
+	String8          error;
+	Check(FragmentTransportBuildShadeModule(code, pixel, 0u, 0u, &binary, &error), error.c_str());
+	Check(binary.Size() > 8u, "split shade module has code");
+}
+
 void ResolveModuleValidates()
 {
 	ScopedShaderValidation validation;
@@ -147,6 +177,11 @@ void LaneWordsPackOnlyObservedForms()
 TEST(EmulatorFragmentTransport, SplitShadeModuleValidates)
 {
 	ASSERT_EXIT(([] { Initialize(); SplitShadeModuleValidates(); std::_Exit(0); })(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentTransport, SplitShadeCompressedExportValidates)
+{
+	ASSERT_EXIT(([] { Initialize(); SplitShadeCompressedExportValidates(); std::_Exit(0); })(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorFragmentTransport, ResolveModuleValidates)

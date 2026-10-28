@@ -855,6 +855,88 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	// DST_SEL=WORD_1 writes the high half; DST_U=2 preserves the low half.
 	const Program high(Emit(Parse({0x741000f9u, (0x05051403u & ~(7u << 8u)) | (5u << 8u), kEnd}, stage)).c_str());
 	Equal(run(high, 1u), 0x3800beefu, "sdwa high half destination preserves the low half");
+	// DWORD selects: src0 reads v3's bits 15:0 (2), src1 still reads v0's WORD_1 (1), and DST_SEL
+	// DWORD stores like the plain instruction.
+	const uint32_t whole_control = (0x05051403u & ~((7u << 8u) | (7u << 16u))) | (6u << 8u) | (6u << 16u);
+	const Program whole(Emit(Parse({0x741000f9u, whole_control, kEnd}, stage)).c_str());
+	Equal(run(whole, 1u), 0x00003c00u, "sdwa dword selects read the low half and store the whole word");
+	Equal(run(whole, 0u), 0xdeadbeefu, "inactive sdwa dword destination");
+	// V_CNDMASK_B32 v15, v11, v8 with VCC as the hub's compute program encodes it: both sources
+	// read WORD_0, the selected word fills WORD_1 and DST_U=2 preserves WORD_0.
+	const Program select(Emit(Parse({0x021e10f9u, 0x0404150bu, kEnd}, stage)).c_str());
+	const auto run_select = [&](uint32_t vcc)
+	{
+		return select.Run({{"%v11", 0x11112222u}, {"%v8", 0x33334444u}, {"%v15", 0xdeadbeefu}, {"%vcc_lo", vcc}, {"%vcc_hi", 0u},
+		                   {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", UINT32_MAX}, {"%exec_hi", 0u}, {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}},
+		                  "%v15");
+	};
+	Equal(run_select(1u), 0x4444beefu, "sdwa select writes vsrc1's word into the high half");
+	Equal(run_select(0u), 0x2222beefu, "sdwa select writes src0's word into the high half");
+	std::_Exit(0);
+}
+
+[[noreturn]] void RunPackedHalfArithmetic(ShaderType stage)
+{
+	Initialize();
+	const auto run = [](const Program& program, uint32_t exec_lane)
+	{
+		return program.Run({{"%v0", 0x3c004000u}, {"%v3", 0x38004000u}, {"%v8", 0xdeadbeefu},
+		                    {"%exec_lo", exec_lane != 0u ? UINT32_MAX : 0u}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", exec_lane}, {"%exec_lane_hi", 0u}},
+		                   "%v8");
+	};
+	// V_PK_ADD_F16 v8, v0, v3 with the default OPSEL_HI: low halves 2 + 2, high halves 1 + 0.5.
+	constexpr uint32_t kWord0 = 0xcc0f4008u;
+	constexpr uint32_t kWord1 = 0x18020700u;
+	const Program plain(Emit(Parse({kWord0, kWord1, kEnd}, stage)).c_str());
+	Equal(run(plain, 1u), 0x3e004400u, "packed add adds each half");
+	Equal(run(plain, 0u), 0xdeadbeefu, "inactive packed add");
+	// OPSEL feeds the low result from v0's high half (1 + 2); a cleared OPSEL_HI
+	// feeds the high result from v0's low half (2 + 0.5).
+	const Program selected(Emit(Parse({kWord0 | (1u << 11u), kWord1 & ~(1u << 27u), kEnd}, stage)).c_str());
+	Equal(run(selected, 1u), 0x41004200u, "packed add selects each result's source halves");
+	// NEG_HI negates v3 for the high result only (1 - 0.5); NEG negates v0 for the low one (-2 + 2).
+	const Program negated(Emit(Parse({kWord0 | (1u << 9u), kWord1 | (1u << 29u), kEnd}, stage)).c_str());
+	Equal(run(negated, 1u), 0x38000000u, "packed add negates each result's sources separately");
+	// V_PK_MUL_F16 v8, v0, v3: 2 * 2 and 1 * 0.5.
+	const Program product(Emit(Parse({(kWord0 & ~(0x7fu << 16u)) | (0x10u << 16u), kWord1, kEnd}, stage)).c_str());
+	Equal(run(product, 1u), 0x38004400u, "packed multiply multiplies each half");
+	// V_PK_MIN_F16 / V_PK_MAX_F16 v8, v0, v3: min(2, 2), min(1, 0.5) and max(2, 2), max(1, 0.5);
+	// NEG on v0 gives min(-2, 2) for the low result only.
+	const uint32_t min0 = (kWord0 & ~(0x7fu << 16u)) | (0x11u << 16u);
+	const uint32_t max0 = (kWord0 & ~(0x7fu << 16u)) | (0x12u << 16u);
+	const Program minimum(Emit(Parse({min0, kWord1, kEnd}, stage)).c_str());
+	Equal(run(minimum, 1u), 0x38004000u, "packed min takes each half's minimum");
+	Equal(run(minimum, 0u), 0xdeadbeefu, "inactive packed min");
+	const Program maximum(Emit(Parse({max0, kWord1, kEnd}, stage)).c_str());
+	Equal(run(maximum, 1u), 0x3c004000u, "packed max takes each half's maximum");
+	const Program minimum_negated(Emit(Parse({min0, kWord1 | (1u << 29u), kEnd}, stage)).c_str());
+	Equal(run(minimum_negated, 1u), 0x3800c000u, "packed min negates the low source only");
+	// IEEE_MODE=0: a quiet NaN in v3's high half yields v0's high half (1).
+	const auto run_nan = [](const Program& program)
+	{
+		return program.Run({{"%v0", 0x3c004000u}, {"%v3", 0x7e004000u}, {"%v8", 0xdeadbeefu}, {"%exec_lo", UINT32_MAX},
+		                    {"%exec_hi", 0u}, {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}},
+		                   "%v8");
+	};
+	Equal(run_nan(maximum), 0x3c004000u, "packed max with one NaN half yields the other input");
+	// V_PK_FMA_F16 v8, v0, v3, v0: 2 * 2 + 2 and 1 * 0.5 + 1; NEG_HI on the addend gives 1 * 0.5 - 1.
+	const uint32_t fma0 = (kWord0 & ~(0x7fu << 16u)) | (0xeu << 16u);
+	const uint32_t fma1 = kWord1 | (256u << 18u);
+	const Program fused(Emit(Parse({fma0, fma1, kEnd}, stage)).c_str());
+	Equal(run(fused, 1u), 0x3e004600u, "packed fma fuses each half");
+	const Program fused_negated(Emit(Parse({fma0 | (1u << 10u), fma1, kEnd}, stage)).c_str());
+	Equal(run(fused_negated, 1u), 0xb8004600u, "packed fma negates the high addend only");
+	Equal(run(fused_negated, 0u), 0xdeadbeefu, "inactive packed fma");
+	// V_PK_FMAC_F16 v8, v0, v3 (VOP2 60) accumulates into v8 = 0x3c003c00: 2 * 2 + 1 and 1 * 0.5 + 1.
+	const auto run_accumulate = [](const Program& program)
+	{
+		return program.Run({{"%v0", 0x3c004000u}, {"%v3", 0x38004000u}, {"%v8", 0x3c003c00u}, {"%exec_lo", UINT32_MAX},
+		                    {"%exec_hi", 0u}, {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}},
+		                   "%v8");
+	};
+	const Program accumulate(Emit(Parse({(0x3cu << 25u) | (8u << 17u) | (3u << 9u) | 256u, kEnd}, stage)).c_str());
+	Equal(run_accumulate(accumulate), 0x3e004500u, "packed fmac accumulates each half into the destination");
 	std::_Exit(0);
 }
 
@@ -957,6 +1039,9 @@ enum class Rejected
 	UnknownOverflowConversion, UnknownOverflowInteger, UnknownOverflowArithmetic, IntClamp, BfeClamp, DenormClamp
 };
 
+// Whole-word selects with the SDWA CLMP bit: SDWA clamping stays unmodeled.
+constexpr uint32_t kRejectedSdwaControl = (6u << 8u) | (6u << 16u) | (1u << 13u);
+
 Core::String8 RejectionDiagnostic(Rejected rejected, ShaderType stage)
 {
 	if (rejected == Rejected::BfeClamp)
@@ -999,8 +1084,9 @@ Core::String8 RejectionDiagnostic(Rejected rejected, ShaderType stage)
 		case Rejected::DenormClamp: reason = "unsupported-output-denorm-clamp"; break;
 		default: Fail("missing rejection diagnostic contract");
 	}
-	return Core::String8::FromPrintf("shader fp16 unsupported: stage=%u instruction=%u pc=0x00000000 reason=%s\n",
-	                                 static_cast<unsigned>(stage), static_cast<unsigned>(type), reason);
+	return Core::String8::FromPrintf("shader fp16 unsupported: stage=%u instruction=%u pc=0x00000000 reason=%s sdwa=0x%08x\n",
+	                                 static_cast<unsigned>(stage), static_cast<unsigned>(type), reason,
+	                                 rejected == Rejected::Sdwa ? kRejectedSdwaControl : 0u);
 }
 
 void CaptureRejectionStdout()
@@ -1033,7 +1119,7 @@ void CaptureRejectionStdout()
 		case Rejected::OpSel: inst.vop3_op_sel = 1u; break;
 		case Rejected::Sdwa:
 			inst.vop_sdwa = true;
-			inst.vop_sdwa_ctrl = (6u << 8u) | (6u << 16u);
+			inst.vop_sdwa_ctrl = kRejectedSdwaControl;
 			break;
 		case Rejected::Dpp: inst.src[0].dpp = true; break;
 		case Rejected::Omod: inst.dst.multiplier = 2.0f; inst.vop3_omod = 1u; break;
@@ -1258,6 +1344,13 @@ TEST(EmulatorShaderArithmetic, Fp16SdwaHalfDestinationReadsAndPreservesHalves)
 	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
 	{
 		ASSERT_EXIT(RunSdwaHalfDestination(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, PackedHalfArithmeticSelectsAndNegatesEachHalf)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunPackedHalfArithmetic(stage), ::testing::ExitedWithCode(0), "");
 	}
 }
 TEST(EmulatorShaderArithmetic, HalfCompareWritesOnlyTheMaskWordsTheDestinationNames)

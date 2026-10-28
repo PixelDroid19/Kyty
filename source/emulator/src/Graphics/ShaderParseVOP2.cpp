@@ -389,6 +389,20 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x39: inst.type = ShaderInstructionType::VMaxF16; break;
 		case 0x3A: inst.type = ShaderInstructionType::VMinF16; break;
 		case 0x3B: KYTY_NI("v_ldexp_f16"); break;
+		case 0x3C:
+			if (!next_gen)
+			{
+				KYTY_UNKNOWN_OP();
+			}
+			// V_PK_FMAC_F16 accumulates into VDST: each half of dst = fma(src0, src1, dst), the
+			// packed FMA with both halves read in place.
+			inst.type            = ShaderInstructionType::VPkFmaF16;
+			inst.format          = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+			inst.src_num         = 3;
+			inst.src[2]          = inst.dst;
+			inst.vop3_op_sel     = 0u;
+			inst.vop3p_op_sel_hi = 7u;
+			break;
 
 		default: KYTY_UNKNOWN_OP();
 	}

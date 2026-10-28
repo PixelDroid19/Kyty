@@ -191,10 +191,11 @@ inline bool SdwaWholeWordSupported(const ShaderInstruction& inst)
 }
 
 // The sub-dword form of a half operation (ISA SDWA fields): the sources read
-// WORD_0 or WORD_1 and DST_SEL names the half the 16-bit result fills. The
-// operand loader already applies the source selects; the generator's per-lane
-// pass merges the whole-dword result into DST_SEL under DST_U. This predicate
-// admits only the half form that pass can merge: byte/DWORD selects, source
+// WORD_0, WORD_1 or DWORD (a 16-bit operand is bits 15:0 of data[31:0]) and
+// DST_SEL names the half the 16-bit result fills. The operand loader already
+// applies the source selects; the generator's per-lane pass merges the
+// whole-dword result into DST_SEL under DST_U. DST_SEL DWORD selects every bit,
+// so the write is the instruction's own unmodified store. Byte selects, source
 // sign extension and CLMP/OMOD stay refused.
 inline bool SdwaHalfDestinationSupported(const ShaderInstruction& inst)
 {
@@ -208,12 +209,12 @@ inline bool SdwaHalfDestinationSupported(const ShaderInstruction& inst)
 	const uint32_t src0_sel = (control >> 16u) & 7u;
 	const uint32_t src1_sel = (control >> 24u) & 7u;
 	const bool     sext     = (control & (1u << 19u)) != 0u;
-	if (sext || dst_u > 2u || (control & 0xe000u) != 0u || (dst_sel != 4u && dst_sel != 5u) ||
-	    (src0_sel != 4u && src0_sel != 5u))
+	const auto half_select = [](uint32_t select) { return select >= 4u && select <= 6u; };
+	if (sext || dst_u > 2u || (control & 0xe000u) != 0u || !half_select(dst_sel) || !half_select(src0_sel))
 	{
 		return false;
 	}
-	return inst.src_num < 2 || src1_sel == 4u || src1_sel == 5u;
+	return inst.src_num < 2 || half_select(src1_sel);
 }
 
 inline bool HasHalfDestinationSelect(ShaderInstructionType type)
@@ -550,8 +551,9 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	{
 		// Keep the failed contract alongside the generator's final diagnostic.
 		// A generic missing-emitter exit alone cannot identify a mode refusal.
-		std::fprintf(stderr, "shader fp16 unsupported: stage=%u instruction=%u pc=0x%08" PRIx32 " reason=%s\n",
-		             static_cast<unsigned>(code.GetType()), static_cast<unsigned>(inst.type), inst.pc, reason);
+		std::fprintf(stderr, "shader fp16 unsupported: stage=%u instruction=%u pc=0x%08" PRIx32 " reason=%s sdwa=0x%08" PRIx32 "\n",
+		             static_cast<unsigned>(code.GetType()), static_cast<unsigned>(inst.type), inst.pc, reason,
+		             inst.vop_sdwa ? inst.vop_sdwa_ctrl : 0u);
 		return false;
 	};
 	const String8 index = String8::FromPrintf("%u", instruction_index);
