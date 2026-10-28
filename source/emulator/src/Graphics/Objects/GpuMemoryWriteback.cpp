@@ -661,7 +661,13 @@ bool GpuMemory::PendingStorageHasAliases()
 		{
 			continue;
 		}
-		if (!m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()))
+		const bool refreshes_alias = std::any_of(object.others.begin(), object.others.end(),
+		                                         [&](const auto& other)
+		                                         {
+			                                         const auto& parent = m_heaps[heap_id].objects[other.object_id].info;
+			                                         return GpuMemoryWriteBackRefreshReadsGuestBytes(parent.object.type, parent.params);
+		                                         });
+		if (refreshes_alias && !m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()))
 		{
 			return true;
 		}

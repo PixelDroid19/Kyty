@@ -967,6 +967,19 @@ inline bool GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType parent_ty
 	return parent_type == GpuMemoryObjectType::RenderTexture && GpuMemoryIsGpuOwnedRenderTextureParams(parent_params);
 }
 
+// True when a parent's write-back refresh reads the guest bytes the write-back
+// publishes, so it must run before the parent's next use. A skipped parent is
+// not refreshed, and a skip-guest Texture (TextureObject::PARAM_SKIP_GUEST_UPLOAD
+// = 8) refreshes to transparent black or from the device, never from guest bytes.
+inline bool GpuMemoryWriteBackRefreshReadsGuestBytes(GpuMemoryObjectType parent_type, const uint64_t* parent_params)
+{
+	if (GpuMemorySkipWriteBackParentInvalidate(parent_type, parent_params))
+	{
+		return false;
+	}
+	return parent_type != GpuMemoryObjectType::Texture || parent_params[8] == 0;
+}
+
 enum class GpuMemoryWriteBackParentAction : uint8_t
 {
 	PropagateEquals, // full hash recompute via Update (Equals alias)
@@ -1323,8 +1336,9 @@ using GpuMemoryGuestRangeQuery = bool (*)(uint64_t vaddr, uint64_t size);
 // the consumer's queue order.
 void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer);
 // True when a writable StorageBuffer with an incomplete submission use shares
-// guest bytes with another GPU object. Its write-back refreshes or invalidates
-// those aliases, so a wait that publishes it must stay synchronous.
+// guest bytes with another GPU object whose write-back refresh reads them. The
+// write-back must refresh those aliases first, so a wait that publishes it must
+// stay synchronous.
 [[nodiscard]] bool GpuMemoryPendingStorageHasAliases();
 // True when an object other than a writable StorageBuffer still owes guest bytes
 // over one of the ranges: only processor write-back carries its results there.
