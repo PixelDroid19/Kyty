@@ -41,11 +41,24 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 - **Test gap.** The 1147 focused unit tests passed with the broken spin; no
   test executes a split rendezvous on a GPU. Only a strict run or an offline
   NIR check of a recorded pipeline shows it.
-- **Open.** `WAIT_REG_MEM` waits on aliased storage are serialized by the
-  global pending-alias check; a per-resource dependency is the lead. The
-  title writes many end-of-pipe clock-counter timestamps, which Kyty records
-  at host completion; whether its dynamic resolution reads them is not
-  verified.
+- **Excluded: consolidating write-back waits over aliased storage.** A wait
+  on a current-submission label whose `RELEASE_MEM` also writes back stays
+  synchronous while a pending writable storage buffer shares bytes with
+  another GPU object. In a 480 s dune run those waits took 98 s (32-bit
+  32 s, 64-bit 66 s at about 39 ms each), against 0.03 s for the same waits
+  without an alias. A diagnostic build that consolidated them as well
+  removed the `WAIT_REG_MEM` time, but it stopped at about 90 s on a strict
+  `create_all_the_same` refusal: a storage texture contained in and
+  crossing objects still owed by the pending write-back. Until that write-back,
+  59 % of the consolidations (5172 of 8789) looked up an alias that was not
+  storage: mostly the depth target's exact HTILE range (221k lookups), then
+  render textures (14k) and textures (2.6k). A lazy per-resource wait would
+  therefore still wait in most cases. The lead is to propagate storage
+  writes to their image aliases on the device in queue order, so they no
+  longer depend on the host write-back.
+- **Open.** The title writes many end-of-pipe clock-counter timestamps,
+  which Kyty records at host completion; whether its dynamic resolution reads
+  them is not verified.
 - **Verified.** Focused `kyty_unit_test` suites (1147 passed), the three
   repository CTest gates (4 tests passed), strict 340 s runs on Intel A770
   (cold and warm) with no submit fault.
