@@ -430,6 +430,9 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 	EXIT_IF(!buffer->GetSubmissionId(&recording));
 	for (const auto& publication: publishable)
 	{
+		if (!GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
+		                                         *publication.identity.buffer, publication.vaddr, publication.size) ||
+		    !GpuMemoryMarkStorageGuestPublished(publication.identity, recording, nullptr))
 		{
 			*dependency = publication.dependency;
 			return true;
