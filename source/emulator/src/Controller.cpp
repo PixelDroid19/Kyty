@@ -610,9 +610,10 @@ constexpr std::size_t kPadRecordActionCount = sizeof(kPadRecordActions) / sizeof
 // KYTY_PAD_SCRIPT route on the same clock: seconds from the first pad read.
 // Each completed press becomes one line; a stick counts as its full-travel
 // direction past half deflection. A press shorter than a guest poll is kept
-// for 50 ms so the replay delivers it to a read. The route is written only
-// when the user ends the session, so a session cut short by a fault or a
-// signal, or longer than a route can hold, leaves no file. A press still held
+// for 50 ms so the replay delivers it to a read. Completed presses stream to
+// <file>.partial, so a session cut short by a fault or a signal keeps them
+// there; the route moves to <file> only when the user ends the session. A
+// session longer than a route can hold leaves no file, and a press still held
 // at the end is not written.
 class PadRecordRuntime
 {
@@ -652,17 +653,18 @@ public:
 		{
 			return;
 		}
-		m_finished = true;
+		m_finished                = true;
+		const std::string staging = m_path + ".partial";
 		if (m_lines > kPadRecordLinesMax)
 		{
 			KYTY_LOG_DEBUG("KYTY_PAD_RECORD wrote nothing: the session exceeded the route entry limit\n");
+			m_staging.close();
+			std::remove(staging.c_str());
 			return;
 		}
-		const std::string staging = m_path + ".partial";
-		std::ofstream     file(staging, std::ios::out | std::ios::trunc);
-		file << "# Host pad input recorded by KYTY_PAD_RECORD; replay with KYTY_PAD_SCRIPT.\n" << m_route;
-		file.close();
-		if (!file || std::rename(staging.c_str(), m_path.c_str()) != 0)
+		OpenStagingLocked();
+		m_staging.close();
+		if (!m_staging || std::rename(staging.c_str(), m_path.c_str()) != 0)
 		{
 			KYTY_LOG_DEBUG("KYTY_PAD_RECORD cannot write the route file\n");
 			std::remove(staging.c_str());
@@ -702,12 +704,23 @@ private:
 		}
 		char line[96];
 		std::snprintf(line, sizeof(line), "%.3f-%.3f:%s\n", start, std::max(end, start + 0.050), name);
-		m_route += line;
+		OpenStagingLocked();
+		m_staging << line << std::flush;
+	}
+
+	void OpenStagingLocked()
+	{
+		if (m_staging.is_open())
+		{
+			return;
+		}
+		m_staging.open(m_path + ".partial", std::ios::out | std::ios::trunc);
+		m_staging << "# Host pad input recorded by KYTY_PAD_RECORD; replay with KYTY_PAD_SCRIPT.\n" << std::flush;
 	}
 
 	std::mutex                            m_mutex;
 	std::string                           m_path;
-	std::string                           m_route;
+	std::ofstream                         m_staging;
 	std::chrono::steady_clock::time_point m_origin {};
 	double                                m_press_start[kPadRecordActionCount] = {};
 	uint32_t                              m_lines       = 0;
