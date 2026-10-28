@@ -6,7 +6,7 @@
 namespace Kyty::Libs::Graphics {
 
 // A split guest wave64 runs as P host subgroups of L lanes each (P = 64 / L,
-// L = 32 or 16): subgroup P*w + p holds guest lanes p*L .. p*L+L-1 of wave w.
+// L = 32, 16 or 8): subgroup P*w + p holds guest lanes p*L .. p*L+L-1 of wave w.
 // The per-lane emitters see the guest lane in %gl_SubgroupInvocationID and
 // call the helpers below for every wave-wide value; each helper call is a
 // rendezvous of the parts, which execute the same sequence of calls because
@@ -14,10 +14,10 @@ namespace Kyty::Libs::Graphics {
 //
 // Per guest wave the exchange area (ShaderSplitWaveExchangeDwords) holds
 // [0..P-1] the number of exchanges each part has published, [P..3P-1] the
-// words they published (P + part * 2 + parity) and, with 16-lane parts, one
-// dword per guest lane for exchanges that cross parts. Two parities suffice: a
-// part reuses a slot only after every other part reached the following
-// exchange.
+// words they published (P + part * 2 + parity) and, with parts under 32
+// lanes, one dword per guest lane for exchanges that cross parts. Two parities
+// suffice: a part reuses a slot only after every other part reached the
+// following exchange.
 
 bool Spirv::UsesSplitComputeWave() const
 {
@@ -65,8 +65,15 @@ String8 Spirv::SplitWaveTypes() const
 %%split_c2 = OpConstant %%uint 2
 %%split_c3 = OpConstant %%uint 3
 %%split_c4 = OpConstant %%uint 4
+%%split_c5 = OpConstant %%uint 5
 %%split_c6 = OpConstant %%uint 6
+%%split_c7 = OpConstant %%uint 7
+%%split_c8 = OpConstant %%uint 8
+%%split_c10 = OpConstant %%uint 10
+%%split_c12 = OpConstant %%uint 12
+%%split_c14 = OpConstant %%uint 14
 %%split_c16 = OpConstant %%uint 16
+%%split_c24 = OpConstant %%uint 24
 %%split_c31 = OpConstant %%uint 31
 %%split_c48 = OpConstant %%uint 48
 %%split_c63 = OpConstant %%uint 63
@@ -92,7 +99,8 @@ String8 Spirv::SplitWaveTypes() const
 %%function_split_b = OpTypeFunction %%bool
 %%function_split_ballot = OpTypeFunction %%v4uint %%bool
 )",
-	                           parts, parts - 1u, parts == 4u ? 2u : 1u, lanes - 1u, lanes == 16u ? 4u : 5u, parts * 3u, stride,
+	                           parts, parts - 1u, parts == 8u ? 3u : parts == 4u ? 2u : 1u, lanes - 1u, lanes == 8u ? 3u : lanes == 16u ? 4u : 5u,
+	                           parts * 3u, stride,
 	                           m_cs_input_info->wave_layout.waves * stride);
 }
 
@@ -240,16 +248,21 @@ static String8 SplitWaveBallotFunction(uint32_t parts, uint32_t lanes)
 %split_ballot_base = OpIMul %uint %split_ballot_wave %split_stride
 )";
 	text += SplitWavePartWords(parts, "split_ballot");
-	if (lanes == 32u)
+	// Mask word w collects the parts whose lanes start in bits 32w .. 32w+31.
+	const uint32_t per_word = 32u / lanes;
+	for (uint32_t word = 0; word < 2u; ++word)
 	{
-		text += "%split_ballot_lo = OpCopyObject %uint %split_ballot_word0\n"
-		        "%split_ballot_hi = OpCopyObject %uint %split_ballot_word1\n";
-	} else
-	{
-		text += "%split_ballot_word1_shifted = OpShiftLeftLogical %uint %split_ballot_word1 %split_c16\n"
-		        "%split_ballot_word3_shifted = OpShiftLeftLogical %uint %split_ballot_word3 %split_c16\n"
-		        "%split_ballot_lo = OpBitwiseOr %uint %split_ballot_word0 %split_ballot_word1_shifted\n"
-		        "%split_ballot_hi = OpBitwiseOr %uint %split_ballot_word2 %split_ballot_word3_shifted\n";
+		const char* name   = word == 0u ? "lo" : "hi";
+		String8     merged = String8::FromPrintf("split_ballot_word%u", word * per_word);
+		for (uint32_t slot = 1; slot < per_word; ++slot)
+		{
+			const uint32_t part = word * per_word + slot;
+			text += String8::FromPrintf("%%split_ballot_word%u_shifted = OpShiftLeftLogical %%uint %%split_ballot_word%u %%split_c%u\n"
+			                            "%%split_ballot_%s_%u = OpBitwiseOr %%uint %%%s %%split_ballot_word%u_shifted\n",
+			                            part, part, slot * lanes, name, slot, merged.c_str(), part);
+			merged = String8::FromPrintf("split_ballot_%s_%u", name, slot);
+		}
+		text += String8::FromPrintf("%%split_ballot_%s = OpCopyObject %%uint %%%s\n", name, merged.c_str());
 	}
 	text += "%split_ballot_result = OpCompositeConstruct %v4uint %split_ballot_lo %split_ballot_hi %split_c0 %split_c0\n"
 	        "OpReturnValue %split_ballot_result\nOpFunctionEnd\n";
@@ -404,7 +417,7 @@ OpFunctionEnd
 OpReturnValue %split_first_result
 OpFunctionEnd
 )";
-	if (lanes == 16u)
+	if (lanes < 32u)
 	{
 		text += SplitWaveLaneReadFunction();
 	}

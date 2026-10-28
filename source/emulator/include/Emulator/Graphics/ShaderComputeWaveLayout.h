@@ -36,6 +36,8 @@ struct ShaderComputeWaveRequest
 	uint32_t             dispatch_mode;
 	uint32_t             lds_dwords;
 	ShaderGuestLaneOrder lane_order;
+	// VGPRs the guest program allocates per lane.
+	uint32_t vgprs;
 };
 
 struct ShaderComputeWaveCapabilities
@@ -72,11 +74,11 @@ struct ShaderComputeWaveLayout
 
 // Workgroup dwords each split guest wave reserves to exchange wave-wide values
 // between its host subgroups of <part_lanes> lanes: a sequence and two words
-// per subgroup, and with 16-lane subgroups one dword per guest lane for the
-// lane exchanges that cross them.
+// per subgroup, and with 16- or 8-lane subgroups one dword per guest lane for
+// the lane exchanges that cross them.
 [[nodiscard]] constexpr uint32_t ShaderSplitWaveExchangeDwords(uint32_t part_lanes) noexcept
 {
-	return 64u / part_lanes * 3u + (part_lanes == 16u ? 64u : 0u);
+	return 64u / part_lanes * 3u + (part_lanes < 32u ? 64u : 0u);
 }
 
 // Host subgroup width of each split guest wave's parts: 16 lanes where the host
@@ -86,9 +88,10 @@ struct ShaderComputeWaveLayout
 [[nodiscard]] uint32_t ShaderSplitWavePartLanes(const ShaderComputeWaveCapabilities& capabilities) noexcept;
 
 // Split wave64 runs each guest wave as whole host subgroups of 16 lanes where
-// the host allows exact width 16, else of 32 lanes (SubgroupId P*w .. P*w+P-1
-// with P = 64 / lanes); the workgroup keeps guest lane order, padded to whole
-// guest waves.
+// the host allows exact width 16, of 8 lanes when the host also allows width 8
+// and the guest allocates more VGPRs than a 16-lane part holds, else of 32
+// lanes (SubgroupId P*w .. P*w+P-1 with P = 64 / lanes); the workgroup keeps
+// guest lane order, padded to whole guest waves.
 [[nodiscard]] ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComputeWaveRequest&      request,
                                                                               const ShaderComputeWaveCapabilities& capabilities,
                                                                               ShaderComputeWaveLayout*             layout);

@@ -370,7 +370,7 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 	// exchange wave-wide values through workgroup memory.
 	const uint32_t part_lanes = layout.native_subgroup_size;
 	if (!require_size || layout.strategy != ShaderComputeWaveStrategy::Split64On32 || layout.guest_wave_size != kGuestWaveSize ||
-	    (part_lanes != 16u && part_lanes != 32u) || layout.banks != 1u || layout.waves == 0 ||
+	    (part_lanes != 8u && part_lanes != 16u && part_lanes != 32u) || layout.banks != 1u || layout.waves == 0 ||
 	    !capabilities.size_control_enabled || !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
 	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > part_lanes ||
 	    capabilities.max_subgroup_size < part_lanes)

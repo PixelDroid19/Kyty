@@ -28,7 +28,7 @@ bool NativeComputeWaveInputIsValid(const ShaderComputeInputInfo* input)
 	{
 		return false;
 	}
-	if (split ? layout.guest_wave_size != kGuestWaveSize || (layout.native_subgroup_size != 16u && layout.native_subgroup_size != 32u) ||
+	if (split ? layout.guest_wave_size != kGuestWaveSize || (layout.native_subgroup_size != 8u && layout.native_subgroup_size != 16u && layout.native_subgroup_size != 32u) ||
 	                layout.waves == 0u
 	          : layout.strategy != ShaderComputeWaveStrategy::Native || layout.guest_wave_size != kNativeSubgroupSize ||
 	                (layout.native_subgroup_size != 0u && layout.native_subgroup_size != kNativeSubgroupSize) || layout.waves != 0u)

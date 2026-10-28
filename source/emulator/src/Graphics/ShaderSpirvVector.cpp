@@ -3814,9 +3814,9 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 // of the guest wave64) read the proven zero. FI and BOUND_CTRL are irrelevant
 // there: the region runs with full EXEC and every target stays inside a row.
 // Split compute holds one guest lane per invocation, so PERMLANE follows a
-// selector in guest lane space: inside a 32-lane part it is a shuffle, and
-// v_permlanex16 between 16-lane parts reads the other part through
-// %split_lane_read.
+// selector in guest lane space: inside one part it is a shuffle, and a target
+// in another part (v_permlanex16 between 16-lane parts, any target of 8-lane
+// parts) is read through %split_lane_read.
 static bool RecompileSplitPermlane16(uint32_t index, const ShaderCode& code, String8* dst_source, Spirv* spirv, bool x16)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -3861,7 +3861,7 @@ static bool RecompileSplitPermlane16(uint32_t index, const ShaderCode& code, Str
 )";
 	const uint32_t part_lanes = spirv->SplitWavePartLanes();
 	const String8  exchange =
-	    x16 && part_lanes == 16u
+	    part_lanes < 32u && (x16 || part_lanes < 16u)
 	        ? String8("%dpp_perm_value_<index> = OpFunctionCall %uint %split_lane_read %perm_src0_<index> %perm_target_<index>\n")
 	        : String8("%perm_host_target_<index> = OpBitwiseAnd %uint %perm_target_<index> %split_lanes_mask\n"
 	                  "%dpp_perm_value_<index> = OpGroupNonUniformShuffle %uint %uint_3 %perm_src0_<index> %perm_host_target_<index>\n");

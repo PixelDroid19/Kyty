@@ -3526,6 +3526,7 @@ static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint
 	request.local_size[2]         = cs_regs.cs_regs.num_thread_z;
 	request.lds_dwords            = ShaderComputeLdsDwords(cs_regs.cs_regs.lds_size);
 	request.tg_size_en            = cs_regs.cs_regs.tg_size_en != 0u;
+	request.vgpr_granules         = cs_regs.cs_regs.vgprs;
 	// These are the ordinary GFX10.3 group-count modes. Unknown scheduling or
 	// partial controls never inherit a verified guest lane order.
 	request.lane_order =

@@ -877,7 +877,7 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 {
 	String8 head = input_is_uint ? String8("\n        %dpp_bits_<result> = OpCopyObject %uint %<in>\n")
 	                             : String8("\n        %dpp_bits_<result> = OpBitcast %uint %<in>\n");
-	static const char* permutation = R"(      %dpp_lane_<result> = OpLoad %uint %<host_lane>
+	const char* permutation = R"(      %dpp_lane_<result> = OpLoad %uint %<host_lane>
       %dpp_ssize_<result> = OpLoad %uint %gl_SubgroupSize
       %dpp_last_<result> = OpISub %uint %dpp_ssize_<result> %uint_1
      %dpp_local_<result> = OpBitwiseAnd %uint %dpp_lane_<result> %<lane_15>
@@ -892,7 +892,7 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 	// %exec_lane_lo holds this lane's bit (exec_lo is a mask word in compute and
 	// split waves); shuffling the bit by the source lane index yields the source
 	// lane's bit.
-	static const char* exec_guard_text =
+	const char* exec_guard_text =
 	    R"( %dpp_exlo_<result> = OpLoad %uint %exec_lane_lo
  %dpp_srclive_<result> = OpGroupNonUniformShuffle %uint %uint_3 %dpp_exlo_<result> %dpp_clamped_<result>
     %dpp_srcon_<result> = OpINotEqual %bool %dpp_srclive_<result> %<zero>
@@ -923,6 +923,24 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 		target += rotate     ? "    %dpp_bounds_<result> = OpCopyObject %bool %true\n"
 		          : left     ? "    %dpp_bounds_<result> = OpULessThan %bool %dpp_offset_<result> %<lane_16>\n"
 		                     : "    %dpp_bounds_<result> = OpUGreaterThanEqual %bool %dpp_local_<result> %<step>\n";
+	}
+	// Parts narrower than a 16-lane row read the row's lanes in guest lane
+	// space through %split_lane_read; every target stays inside the wave.
+	if (spirv->UsesSplitComputeWave() && spirv->SplitWavePartLanes() < 16u)
+	{
+		permutation = R"(      %dpp_lane_<result> = OpLoad %uint %gl_SubgroupInvocationID
+     %dpp_local_<result> = OpBitwiseAnd %uint %dpp_lane_<result> %<lane_15>
+<target>
+       %dpp_ok_<result> = OpCopyObject %bool %dpp_bounds_<result>
+  %dpp_clamped_<result> = OpCopyObject %uint %dpp_target_<result>
+<exec_guard>    %dpp_fetch_<result> = OpFunctionCall %uint %split_lane_read %dpp_bits_<result> %dpp_clamped_<result>
+    %dpp_value_<result> = OpSelect %uint <ok> %dpp_fetch_<result> %<fallback>
+)";
+		exec_guard_text = R"( %dpp_exlo_<result> = OpLoad %uint %exec_lane_lo
+ %dpp_srclive_<result> = OpFunctionCall %uint %split_lane_read %dpp_exlo_<result> %dpp_clamped_<result>
+    %dpp_srcon_<result> = OpINotEqual %bool %dpp_srclive_<result> %<zero>
+      %dpp_okg_<result> = OpLogicalAnd %bool %dpp_ok_<result> %dpp_srcon_<result>
+)";
 	}
 	*text = (head + String8(permutation))
 	            .ReplaceStr("<host_lane>", spirv->HostLaneVariable())

@@ -139,6 +139,8 @@ constexpr uint32_t kGen5AllowedNativeBits = kComputeShaderEnable | kOrderMode | 
 	layout_request.dispatch_mode = request.dispatch_mode;
 	layout_request.lds_dwords    = request.lds_dwords;
 	layout_request.lane_order    = request.lane_order;
+	// Wave64 allocates VGPRs in granules of 4.
+	layout_request.vgprs = (request.vgpr_granules + 1u) * 4u;
 
 	ShaderComputeWaveLayout split {};
 	auto                    result = LayoutResult(ShaderBuildSplitComputeWaveLayout(layout_request, capabilities, &split));

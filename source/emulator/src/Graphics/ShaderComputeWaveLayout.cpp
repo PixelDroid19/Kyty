@@ -18,10 +18,15 @@ constexpr uint32_t kKnownDispatchBits   = kComputeShaderEnable | kPartialThreadg
                                           kOrderedAppendMode | kUseThreadDimensions | kOrderMode | kWave32Enable;
 constexpr uint32_t kDeferredDispatchControl =
     kPartialThreadgroup | kForceStartAtZero | kOrderedAppendEnable | kOrderedAppendMode | kUseThreadDimensions;
-constexpr uint32_t kGuestWaveSize      = 64u;
-constexpr uint32_t kNativeSubgroupSize = 32u;
-constexpr uint32_t kSplitNarrowLanes   = 16u;
-constexpr uint32_t kLdsDwordBytes      = 4u;
+constexpr uint32_t kGuestWaveSize       = 64u;
+constexpr uint32_t kNativeSubgroupSize  = 32u;
+constexpr uint32_t kSplitNarrowLanes    = 16u;
+constexpr uint32_t kSplitNarrowestLanes = 8u;
+// Hosts whose subgroups go down to 8 lanes give a 16-lane hardware thread 64
+// dwords of registers per lane; a guest allocating more spills there, and its
+// cost outweighs the extra rendezvous of twice as many 8-lane parts.
+constexpr uint32_t kSplitNarrowVgprs = 64u;
+constexpr uint32_t kLdsDwordBytes    = 4u;
 
 [[nodiscard]] bool MultiplyU32(uint32_t a, uint32_t b, uint32_t* product) noexcept
 {
@@ -84,7 +89,11 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	// GFX10.3's ORDER_MODE selects ordered versus out-of-order wave launch. Both
 	// values preserve the dispatch grid and do not alter this layout decision.
 
-	const uint32_t part_lanes = ShaderSplitWavePartLanes(capabilities);
+	uint32_t part_lanes = ShaderSplitWavePartLanes(capabilities);
+	if (part_lanes == kSplitNarrowLanes && capabilities.min_subgroup_size <= kSplitNarrowestLanes && request.vgprs > kSplitNarrowVgprs)
+	{
+		part_lanes = kSplitNarrowestLanes;
+	}
 	if (!capabilities.size_control_enabled || !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
 	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > part_lanes ||
 	    capabilities.max_subgroup_size < part_lanes)

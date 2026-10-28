@@ -42,6 +42,8 @@ struct ShaderComputeWavePreflightRequest
 	uint32_t             lds_dwords = 0;
 	ShaderGuestLaneOrder lane_order = ShaderGuestLaneOrder::Unverified;
 	bool                 tg_size_en = false;
+	// COMPUTE_PGM_RSRC1.VGPRS: allocated VGPRs in granules, minus one.
+	uint32_t vgpr_granules = 0;
 };
 
 struct ShaderComputeWaveDispatchPlan
