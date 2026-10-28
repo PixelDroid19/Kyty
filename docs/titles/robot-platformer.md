@@ -6,6 +6,50 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: dune compute cost and split-wave rendezvous (2026-10-28)
+
+- **Observed** (Intel A770, strict route to the crash-site dunes, 60 fps
+  limit, warm pipeline cache): about 6 fps. A native GPU timestamp census
+  put about 83 ms of GPU work in each frame with the GPU busy about half the
+  time: compute 36 ms, of which one program (`0x3666fa39`) took 24 ms per
+  call, indexed draws 20 ms, the geometry pass 7 ms. The processor waits
+  about 46 ms per frame on fences and 36 ms on `WAIT_REG_MEM`.
+- **Localized.** `0x3666fa39` is dispatched as a single 16x16 workgroup
+  (four guest waves; 3316 instructions, 72 VGPRs, scalar find-first-set and
+  `v_readlane` loops ending in an image store), so its cost is latency, not
+  occupancy. As split wave64 on 16-lane host subgroups it spilled heavily:
+  offline ANV compiles of the recorded pipeline gave 1574:9325
+  spills:fills at SIMD16 and 470:2397 at SIMD8.
+- **Fix 1** (`6242d13ac`): guest programs over 64 VGPRs split into eight
+  8-lane parts where the host allows width 8; others keep 16-lane parts.
+  `0x3666fa39` went from 36.9 to 24.4 ms per call.
+- **Fix 2** (`acd44a7f8`, translator 181): a rendezvous waited for the other
+  parts one after another; one spin now reads every part's sequence, so
+  their latencies overlap. `0x3666fa39` went from 24.4 to 21.5 ms per call;
+  dune windows from 6.0-6.1 to 6.4-7.0 fps. The frame-3280 capture shows
+  clean dunes.
+- **Excluded: relaxed loads in the spin.** With relaxed loads and one
+  acquire fence after the spin, Mesa removes the loop wherever the caller
+  ignores the returned sequence (`split_sync`): the final NIR of an 8-lane
+  pipeline had 32 of 188 rendezvous with no loop between the release store
+  and the acquire fence. The parts then ran unsynchronised and the device
+  was lost on the worldmap at 43-46 s (translators 178 and 180). Acquire
+  loads keep every loop (200 of 200 at translator 181).
+- **Excluded: GDA address translation cache** (translator 174): some
+  compute pipelines took 13-16 s each to compile on ANV and the worldmap
+  stopped on a strict storage refusal at 72 s.
+- **Test gap.** The 1147 focused unit tests passed with the broken spin; no
+  test executes a split rendezvous on a GPU. Only a strict run or an offline
+  NIR check of a recorded pipeline shows it.
+- **Open.** `WAIT_REG_MEM` waits on aliased storage are serialized by the
+  global pending-alias check; a per-resource dependency is the lead. The
+  title writes many end-of-pipe clock-counter timestamps, which Kyty records
+  at host completion; whether its dynamic resolution reads them is not
+  verified.
+- **Verified.** Focused `kyty_unit_test` suites (1147 passed), the three
+  repository CTest gates (4 tests passed), strict 340 s runs on Intel A770
+  (cold and warm) with no submit fault.
+
 ## Robot platformer: hub ground samples mips below the T# MIN_LOD (2026-10-28, fixed)
 
 - **Observed** (Intel A770, strict route to the first crash-site hub, 60 fps
