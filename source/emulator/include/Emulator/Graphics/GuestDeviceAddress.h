@@ -96,6 +96,12 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 // Results already published to the imported view on that queue are skipped.
 void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
 
+// True when a registered range still waits for GPU results held outside storage
+// buffers (GpuMemoryPendingWriteBackOutsideStorage). Storage results reach
+// device-address readers through GuestDeviceAddressPendingWriteBack; these need
+// the processor write-back before the reader is recorded.
+[[nodiscard]] bool GuestDeviceAddressPendingWriteBackOutsideStorage();
+
 // The caller holds the render recording lock through the later write-back.
 // Wait for a returned dependency only after releasing recording locks, then retry.
 // With `publishable`, results the caller can publish in the consumer's queue order

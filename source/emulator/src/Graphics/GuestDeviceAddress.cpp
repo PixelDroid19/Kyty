@@ -1388,6 +1388,11 @@ void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer)
 	GpuMemoryWriteBackStorageRanges(ctx, OverlapsRegisteredRange, consumer);
 }
 
+bool GuestDeviceAddressPendingWriteBackOutsideStorage()
+{
+	return GpuMemoryPendingWriteBackOutsideStorage(OverlapsRegisteredRange);
+}
+
 struct PublicationPiece
 {
 	VkBuffer     target        = nullptr;

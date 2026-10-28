@@ -669,6 +669,28 @@ bool GpuMemory::PendingStorageHasAliases()
 	return false;
 }
 
+bool GpuMemory::PendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges)
+{
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	for (const auto& key: m_pending_write_back)
+	{
+		if (m_writable_storage.count(key) != 0u)
+		{
+			continue;
+		}
+		const auto& block = m_heaps[key.first].objects[key.second].block;
+		for (int vi = 0; vi < block.vaddr_num; vi++)
+		{
+			if (block.size[vi] != 0 && ranges(block.vaddr[vi], block.size[vi]))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer)
 {
 	EXIT_IF(ctx == nullptr);

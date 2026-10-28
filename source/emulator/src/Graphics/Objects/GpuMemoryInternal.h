@@ -297,6 +297,7 @@ public:
 	                                                SubmissionId* dependency);
 	void CollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, SubmissionId reader, std::vector<GpuMemoryStorageSeedSource>* sources);
 	[[nodiscard]] bool PendingStorageHasAliases();
+	[[nodiscard]] bool PendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges);
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
 	[[nodiscard]] bool FindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
 	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,

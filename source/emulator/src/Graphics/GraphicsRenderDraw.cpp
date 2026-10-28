@@ -3574,7 +3574,9 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	{
 		return ComputeDispatchResult::Completed;
 	}
-	if (input_info.bind.device_address_used && !processor_writeback_complete)
+	// Storage results reach the reader through the device-address preparation
+	// below, in queue order; only other objects need the draining write-back.
+	if (input_info.bind.device_address_used && !processor_writeback_complete && GuestDeviceAddressPendingWriteBackOutsideStorage())
 	{
 		return ComputeDispatchResult::ProcessorWriteBackRequired;
 	}

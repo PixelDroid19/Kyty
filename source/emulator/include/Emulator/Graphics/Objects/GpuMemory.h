@@ -1326,6 +1326,9 @@ void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQue
 // guest bytes with another GPU object. Its write-back refreshes or invalidates
 // those aliases, so a wait that publishes it must stay synchronous.
 [[nodiscard]] bool GpuMemoryPendingStorageHasAliases();
+// True when an object other than a writable StorageBuffer still owes guest bytes
+// over one of the ranges: only processor write-back carries its results there.
+[[nodiscard]] bool GpuMemoryPendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges);
 // An in-use writable StorageBuffer whose single block is exactly a requested range.
 struct GpuMemoryStorageWriteIdentity
 {
