@@ -6,6 +6,54 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: hub ground samples mips below the T# MIN_LOD (2026-10-28, fixed)
+
+- **Observed** (Intel A770, strict route to the first crash-site hub, 60 fps
+  limit): the sand dunes drew as power-of-two orange and yellow rectangles
+  with noisy patches, a different pattern in each run.
+- **Localized.** A native draw census (`KYTY_TRACE_DRAW_PS=all` with
+  `KYTY_TRACE_DRAW_PS_MIN_PRESENT` and `KYTY_TRACE_DRAW_PS_LOG`) named the
+  terrain draw: a G-buffer pass (five colour targets) sampling 2048x2048
+  tile-9 textures with 12 mips in BC7 sRGB, BC5 and BC4. The shader log of
+  that pixel program carried the bind warning that `T# MIN_LOD != 0` was
+  ignored.
+- **Cause.** The title streams terrain mips and raises T# `MIN_LOD`
+  (word 1 bits 19:8, unsigned 4.8, in image levels; RDNA2 ISA image resource
+  table) above the levels it has not loaded yet. Kyty bound views of every
+  level, so the sampler read non-resident mips holding stale bytes, one
+  rectangle per terrain page.
+- **Fix.** `VK_EXT_image_view_min_lod` carries the same field: a view's
+  `minLod` is absolute in image levels and Mesa's AMD driver writes it into
+  that T# field unchanged. The device enables the extension and its `minLod`
+  feature when present (Intel A770 and the AMD Raphael iGPU both expose it).
+  Image view descriptors carry the u4.8 value; a guest texture or sampled
+  alias bound with a `MIN_LOD` above the view's base level gets a cached view
+  clamped to it, limited to the view's last level.
+- **Limits.** Sampled depth and stencil views stay unclamped (descriptor
+  layouts are chosen from their standard view id) and log a bounded warning,
+  as does a device without the extension. Clamped views use the per-image
+  view cache (256 views); a title that sweeps many fractional values per
+  image would stop at its explicit refusal.
+- **Verified.** Focused `kyty_unit_test` suites (1100 passed). Strict 270 s
+  run on Intel A770 (60 fps limit, scripted intro skip): the hub capture at
+  frame 3086 shows clean sand dunes where frame 3030 of the previous build
+  showed the rectangles; no MIN_LOD warning, no fatal stop. Hub fps is
+  unchanged (about 6).
+
+## Robot platformer: hub vertex streams re-uploaded every frame (2026-10-28, fixed)
+
+- **Observed** (Intel A770, crash-site hub): about 1.4 fps, with about
+  860 MB per frame copied between storage and vertex objects of the same
+  ranges.
+- **Cause.** Vertex streams over ranges also held by read-only storage
+  objects created their own vertex objects; each one reclaimed the other's
+  range, so every frame re-uploaded both.
+- **Fix** (`5ff4a6a3e`): vertex streams are fetched from a read-only storage
+  object that contains them.
+- **Verified.** Strict hub run: about 6 fps. Remaining cost per 30 s window:
+  command processing 30.6 s, fence waits 14.4 s, draw 14.1 s, dispatch
+  10.8 s, write-back 9.5 s; about 80 submits and 35 fence waits per frame.
+
 ## Robot platformer: whole-dword half selects and a recycled 4K storage allocation (2026-10-27)
 
 - **Observed** (Intel A770, strict route through the intro into the first
