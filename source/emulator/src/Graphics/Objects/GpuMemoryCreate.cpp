@@ -2357,6 +2357,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					storage_links_redescribed = true;
 					continue;
 				}
+				// Likewise a storage buffer whose last writable use, possibly still in flight, came before
+				// surfaces drew over its part of the range: its write-back publishes bytes they replaced
+				// (captured: a buffer view of a 1920x1080 target, rendered again since, under a recycled
+				// 1920x1080 storage view).
+				if (o.object.type == GpuMemoryObjectType::StorageBuffer && superseded_in_range(obj, parent_ids))
+				{
+					storage_links_redescribed = true;
+					continue;
+				}
 				if (GpuMemoryAllowsStorageTextureCrossingRecycledImage(o.object.type, obj.relation, info.type))
 				{
 					storage_links_crossed = true;
