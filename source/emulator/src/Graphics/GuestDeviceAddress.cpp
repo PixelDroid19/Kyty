@@ -1333,11 +1333,11 @@ static bool OverlapsRegisteredRange(uint64_t vaddr, uint64_t size)
 	return it != registry.ranges.end() && it->first < vaddr + size;
 }
 
-bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, std::vector<GpuMemoryStoragePublication>* publishable,
-                                        SubmissionId* dependency)
+bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, const std::vector<SubmissionId>& device_awaited,
+                                        std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency)
 {
 	EXIT_IF(dependency == nullptr);
-	return GpuMemoryPendingStorageWriteBack(OverlapsRegisteredRange, consumer, publishable, dependency);
+	return GpuMemoryPendingStorageWriteBack(OverlapsRegisteredRange, consumer, device_awaited, publishable, dependency);
 }
 
 void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer)

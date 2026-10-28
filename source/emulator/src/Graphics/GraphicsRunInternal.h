@@ -283,6 +283,12 @@ public:
 	[[nodiscard]] bool OldestSubmittedTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value);
 	void               SubmitAndWait();
 	void               WaitSubmission(SubmissionId submission);
+	// Submits the submission if it is still being recorded and returns the timeline value its
+	// completion signals; false once it completed.
+	[[nodiscard]] bool SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value);
+	// Orders the recording after another queue's submission on the device; false when the
+	// dependency is this queue's, already awaited, or complete, so it is waited for on the host.
+	[[nodiscard]] bool AwaitOnDevice(SubmissionId submission);
 	[[nodiscard]] bool OwnsSubmissionQueue(SubmissionId submission) const
 	{
 		return submission.queue == GpuQueueId(static_cast<uint32_t>(m_queue));
@@ -380,7 +386,7 @@ public:
 	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom, bool matching_wait_mem64);
 	[[nodiscard]] bool HasPendingDeferredWrite(const uint32_t* dst, uint32_t size_bytes) const;
 	void DeferWriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num);
-	[[nodiscard]] bool DeferWriteBehindPendingStore(uint32_t* dst, const uint32_t* src, uint32_t dw_num);
+	void RetireBeforeStore(uint64_t dst, uint32_t size_bytes);
 
 	void Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data);
 	[[nodiscard]] bool TakeSuspendedRun(SuspendedRun* run);
@@ -418,6 +424,7 @@ private:
 	void                 PublishCompletedSubmissions();
 	void                 WaitUntilPublishedUnlessReentrant(SubmissionId submission);
 	SubmissionId         BufferFlushForGpuWait();
+	void                 WaitProducer(SubmissionId producer);
 	void                 SubmitRecordedWorkIfGpuIdle();
 	void                 SubmitRecordedDispatchesBeforeDraw();
 
@@ -469,6 +476,7 @@ private:
 	// Which completion callbacks the batch recorded (GraphicsBatchCanDeferSubmissionCompletion bits).
 	uint8_t  m_completion_callback_sources = 0u;
 	bool     m_consolidated_plain_wait     = false;
+	SubmissionId m_consolidated_producer;
 	// Draws and dispatches recorded since this processor's last submission.
 	uint32_t        m_operations_since_submit     = 0;
 	// When this processor last submitted a command buffer.
@@ -709,6 +717,7 @@ public:
 	void     Done();
 	void     Wait();
 	void     WaitSubmission(SubmissionId submission);
+	bool     SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value);
 	bool     RunQuiesced(GraphicsRunQuiescedAction action, void* data);
 	int      GetFrameNum();
 	bool     AreSubmitsAllowed();

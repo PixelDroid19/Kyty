@@ -1708,12 +1708,14 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* image);
 void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, VulkanImage* image);
 void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image);
-// The array that a sampled view of depth layers [0, layers) starting at `first` (guest address addr) reads: each layer
-// holds the depth of the slice image at addr + layer * slice_size, copied when that slice changed since its last copy,
-// or, when no slice image is there, the guest bytes of that layer (texture format fmt, pitch in elements), which only
-// a plain_guest_depth view (64 KiB tiled, one level, no MSAA, no metadata) may read.
+// The width x height array that a sampled view of depth layers [0, layers) at guest address addr reads, owned by
+// `first`, the depth image whose plane starts at addr: each layer holds the depth of the slice image at
+// addr + layer * slice_size, copied when that slice changed since its last copy. Without a slice image there, a
+// plain_guest_depth view (64 KiB tiled, one level, no MSAA, no metadata; texture format fmt, pitch in elements)
+// reads the 64 KiB blocks the depth images over the layer wrote, or, when none lies over it, its guest bytes.
 VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVulkanImage* first, uint64_t addr, uint64_t slice_size,
-                                           uint32_t layers, uint32_t fmt, uint32_t pitch, bool plain_guest_depth);
+                                           uint32_t width, uint32_t height, uint32_t layers, uint32_t fmt, uint32_t pitch,
+                                           bool plain_guest_depth);
 
 // --- Core (color / dump) ---
 

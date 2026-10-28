@@ -6728,6 +6728,19 @@ TEST(EmulatorGraphicsState, AllowsRenderTargetMultiSurfaceParents)
 	                                                     GpuMemoryObjectType::RenderTexture));
 	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Equals,
 	                                                     GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsRenderTargetReclaimDepth(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
+	                                                    GpuMemoryObjectType::RenderTexture));
+	EXPECT_FALSE(GpuMemoryAllowsRenderTargetReclaimDepth(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
+	                                                     GpuMemoryObjectType::RenderTexture));
+	EXPECT_FALSE(GpuMemoryAllowsRenderTargetReclaimDepth(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
+	                                                     GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureCrossingRecycledImage(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Crosses,
+	                                                               GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureCrossingRecycledImage(GpuMemoryObjectType::RenderTexture,
+	                                                                GpuMemoryOverlapType::IsContainedWithin,
+	                                                                GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureCrossingRecycledImage(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
+	                                                                GpuMemoryObjectType::StorageTexture));
 }
 
 TEST(EmulatorGraphicsState, ReclaimsSingleSurfaceForDepthStencilReuse)
@@ -6890,12 +6903,16 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	                                                  GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
 	                                                  GpuMemoryObjectType::StorageTexture));
-	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
-	                                                          GpuMemoryObjectType::StorageTexture));
-	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
-	                                                           GpuMemoryObjectType::StorageTexture));
-	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideDepthRange(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Contains,
-	                                                           GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
+	                                                        GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                        GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
+	                                                         GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
+	                                                         GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureOverDepthRange(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Contains,
+	                                                         GpuMemoryObjectType::StorageTexture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                                 GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(

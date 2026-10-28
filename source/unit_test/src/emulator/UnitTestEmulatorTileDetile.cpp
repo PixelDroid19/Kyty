@@ -907,6 +907,34 @@ TEST(EmulatorTileDetile, Depth64KBArraySlicesApplyTheMatchedGfx10ZEquation)
 	EXPECT_FALSE(TileDetileIsSupported(invalid));
 }
 
+// A depth block written as one slice and read as another holds the written samples at XOR-translated positions.
+TEST(EmulatorTileDetile, Depth64KBSliceShiftTranslatesWrittenSamples)
+{
+	for (const uint32_t bpe: {2u, 4u})
+	{
+		const uint32_t block_width = bpe == 2u ? 256u : 128u;
+		for (uint32_t from = 0u; from < 16u; from++)
+		{
+			for (uint32_t to = 0u; to < 16u; to++)
+			{
+				uint32_t dx = 0u;
+				uint32_t dy = 0u;
+				TileGetDepth64KBSliceShift(bpe, from, to, &dx, &dy);
+				ASSERT_LT(dx, block_width);
+				ASSERT_LT(dy, 128u);
+				for (uint32_t y = 0u; y < 128u; y += 3u)
+				{
+					for (uint32_t x = 0u; x < block_width; x += 5u)
+					{
+						ASSERT_EQ(TileGetDepth64KBOffset(x, y, block_width, bpe, to), TileGetDepth64KBOffset(x ^ dx, y ^ dy, block_width, bpe, from))
+						    << "bpe=" << bpe << " from=" << from << " to=" << to << " x=" << x << " y=" << y;
+					}
+				}
+			}
+		}
+	}
+}
+
 TEST(EmulatorTileDetile, RejectsUnsupportedRequests)
 {
 	uint8_t dst[16] {};

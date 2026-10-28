@@ -193,24 +193,29 @@ VkDescriptorSetLayout CreateEmptySetLayout(VkDevice device)
 
 bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipeline_cache, const ShaderBindResources& ps_bind,
                                           const Vector<uint32_t>& binary, bool require_subgroup_size,
-                                          VkDescriptorSetLayout transport_layout, VkPipelineLayout* layout, VkPipeline* pipeline)
+                                          VkDescriptorSetLayout transport_layout, VkPipelineLayout* layout, VkPipeline* pipeline,
+                                          String8* error)
 {
-	EXIT_IF(layout == nullptr || pipeline == nullptr || binary.IsEmpty());
+	EXIT_IF(layout == nullptr || pipeline == nullptr || error == nullptr || binary.IsEmpty());
 	*layout   = nullptr;
 	*pipeline = nullptr;
+	error->Clear();
 	if (g_render_ctx == nullptr || transport_layout == VK_NULL_HANDLE)
 	{
+		*error = "no render context or transport layout";
 		return false;
 	}
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	if (gctx == nullptr || gctx->device != device)
 	{
+		*error = "device mismatch";
 		return false;
 	}
 
 	const VkDescriptorSetLayout empty_layout = CreateEmptySetLayout(device);
 	if (empty_layout == VK_NULL_HANDLE)
 	{
+		*error = "empty set layout creation failed";
 		return false;
 	}
 
@@ -227,6 +232,7 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 	if (ps_slot >= 2u || (has_ps_set && ps_layout == VK_NULL_HANDLE))
 	{
 		vkDestroyDescriptorSetLayout(device, empty_layout, nullptr);
+		*error = String8::FromPrintf("pixel descriptor set unavailable: slot=%u layout=%d", ps_slot, has_ps_set ? 1 : 0);
 		return false;
 	}
 
@@ -252,7 +258,8 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 	layout_info.pSetLayouts            = sets;
 	layout_info.pushConstantRangeCount = push_constant_count;
 	layout_info.pPushConstantRanges    = push_constant_count != 0 ? &push_constant : nullptr;
-	VkResult result = vkCreatePipelineLayout(device, &layout_info, nullptr, layout);
+	VkResult    result = vkCreatePipelineLayout(device, &layout_info, nullptr, layout);
+	const char* step   = "vkCreatePipelineLayout";
 
 	VkShaderModule module = VK_NULL_HANDLE;
 	if (result == VK_SUCCESS)
@@ -262,6 +269,7 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 		module_info.codeSize = binary.Size() * sizeof(uint32_t);
 		module_info.pCode    = binary.GetDataConst();
 		result               = vkCreateShaderModule(device, &module_info, nullptr, &module);
+		step                 = "vkCreateShaderModule";
 	}
 	if (result == VK_SUCCESS)
 	{
@@ -283,6 +291,7 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 		pipeline_info.layout       = *layout;
 		pipeline_info.basePipelineIndex = -1;
 		result                     = vkCreateComputePipelines(device, pipeline_cache, 1, &pipeline_info, nullptr, pipeline);
+		step                       = "vkCreateComputePipelines";
 	}
 	if (module != VK_NULL_HANDLE) { vkDestroyShaderModule(device, module, nullptr); }
 	vkDestroyDescriptorSetLayout(device, empty_layout, nullptr);
@@ -291,6 +300,7 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 		if (*layout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, *layout, nullptr); }
 		*layout   = nullptr;
 		*pipeline = nullptr;
+		*error    = String8::FromPrintf("%s result=%d spirv_words=%u", step, static_cast<int>(result), binary.Size());
 	}
 	return result == VK_SUCCESS;
 }

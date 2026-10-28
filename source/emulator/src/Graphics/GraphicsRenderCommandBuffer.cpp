@@ -856,8 +856,24 @@ struct TransientPoolUsageOccupancy
 	uint32_t largest_duplicate_group = 0;
 };
 
-static void ReportCriticalTransientPoolCapacityReject(uint64_t requested_size, uint32_t usage, uint32_t usage_entries,
-                                                      uint32_t total_entries, uint64_t total_bytes,
+// The 1-based number of the next capacity report, or 0 once the process's eight are spent.
+static uint32_t TakeTransientPoolCapacityReportNumber()
+{
+	static std::atomic<uint32_t> reports_remaining {8u};
+	uint32_t remaining = reports_remaining.load(std::memory_order_relaxed);
+	while (remaining != 0u)
+	{
+		if (reports_remaining.compare_exchange_weak(remaining, remaining - 1u, std::memory_order_relaxed,
+		                                          std::memory_order_relaxed))
+		{
+			return 9u - remaining;
+		}
+	}
+	return 0u;
+}
+
+static void ReportCriticalTransientPoolCapacityReject(uint32_t report_number, uint64_t requested_size, uint32_t usage,
+                                                      uint32_t usage_entries, uint32_t total_entries, uint64_t total_bytes,
                                                       const TransientPoolUsageOccupancy& occupancy)
 {
 	const auto critical_class = GpuMemoryTransientBufferAllocationClass::Critical;
@@ -867,23 +883,6 @@ static void ReportCriticalTransientPoolCapacityReject(uint64_t requested_size, u
 	const bool byte_cap_failed =
 	    !GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, total_bytes, requested_size, critical_class);
 	const uint64_t max_bytes = kGpuMemoryTransientBufferPoolMaxBytes;
-	static std::atomic<uint32_t> reports_remaining {8u};
-	uint32_t report_number = 0u;
-	uint32_t remaining = reports_remaining.load(std::memory_order_relaxed);
-	while (remaining != 0u)
-	{
-		const uint32_t event_number = 9u - remaining;
-		if (reports_remaining.compare_exchange_weak(remaining, remaining - 1u, std::memory_order_relaxed,
-		                                          std::memory_order_relaxed))
-		{
-			report_number = event_number;
-			break;
-		}
-	}
-	if (report_number == 0u)
-	{
-		return;
-	}
 
 	std::fprintf(stderr,
 	             "KYTY_TRANSIENT_POOL_CAPACITY_REJECT event=%" PRIu32 " class=critical(%u) requested=%" PRIu64
@@ -986,6 +985,20 @@ public:
 	                     GpuMemoryTransientBufferAllocationClass allocation_class)
 	{
 		EXIT_IF(ctx == nullptr || data == nullptr || size == 0u || usage == 0u);
+		// Shaders never write a uniform buffer, and a critical entry is not rewritten
+		// before the next Reset, so draws that spill the same user data share one
+		// entry (a hub pass spilled 16,234 constant blocks into one recording,
+		// 10,824 of them identical, and filled the per-usage entry ceiling).
+		const bool     shares_contents = usage == VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT &&
+		                             allocation_class == GpuMemoryTransientBufferAllocationClass::Critical;
+		const uint64_t contents_hash   = shares_contents ? HashContents(data, size) : 0u;
+		if (shares_contents)
+		{
+			if (auto* shared = FindSharedContents(contents_hash, data, size); shared != nullptr)
+			{
+				return &shared->buffer;
+			}
+		}
 		auto* entry = Acquire(ctx, size, usage, allocation_class);
 		if (entry == nullptr)
 		{
@@ -998,6 +1011,10 @@ public:
 		entry->nonzero_end    = std::max(entry->nonzero_end, size);
 		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
 		Commit(entry, size, true);
+		if (shares_contents)
+		{
+			m_shared_contents.emplace(contents_hash, entry);
+		}
 		return &entry->buffer;
 	}
 
@@ -1237,7 +1254,7 @@ public:
 	}
 
 	// A device-local scratch is never mapped: only commands recorded in this buffer read and write it.
-	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage, bool device_local, bool allow_reuse = true)
+	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage, bool device_local)
 	{
 		if (ctx == nullptr || size == 0u || usage == 0u)
 		{
@@ -1251,7 +1268,7 @@ public:
 			{
 				usage_entries++;
 			}
-			if (allow_reuse && candidate->scratch && candidate->usage == usage && candidate->size >= size &&
+			if (candidate->scratch && candidate->usage == usage && candidate->size >= size &&
 			    (best == nullptr || candidate->size < best->size))
 			{
 				best = candidate;
@@ -1295,6 +1312,7 @@ public:
 	void Reset()
 	{
 		m_zero_carriers.clear();
+		m_shared_contents.clear();
 		for (auto* entry: m_entries)
 		{
 			entry->used = false;
@@ -1326,6 +1344,7 @@ public:
 		m_released = {};
 		m_usage_entries.clear();
 		m_zero_carriers.clear();
+		m_shared_contents.clear();
 		m_by_buffer.clear();
 		m_total_bytes = 0;
 	}
@@ -1574,10 +1593,15 @@ private:
 		{
 			return entry;
 		}
+		// The occupancy walk reads every entry, so only the reports actually printed pay for it.
 		if (allocation_class == GpuMemoryTransientBufferAllocationClass::Critical)
 		{
-			ReportCriticalTransientPoolCapacityReject(size, usage, m_usage_entries[usage], static_cast<uint32_t>(m_entries.size()),
-			                                          m_total_bytes, MeasureOccupancy(usage));
+			if (const uint32_t report_number = TakeTransientPoolCapacityReportNumber(); report_number != 0u)
+			{
+				ReportCriticalTransientPoolCapacityReject(report_number, size, usage, m_usage_entries[usage],
+				                                          static_cast<uint32_t>(m_entries.size()), m_total_bytes,
+				                                          MeasureOccupancy(usage));
+			}
 		}
 		return nullptr;
 	}
@@ -1701,6 +1725,38 @@ private:
 		IndexFree(entry);
 		m_total_bytes += size;
 		return entry;
+	}
+
+	static uint64_t HashContents(const void* data, uint64_t size)
+	{
+		const auto* bytes = static_cast<const uint8_t*>(data);
+		uint64_t    hash  = 1469598103934665603ull ^ size;
+		uint64_t    i     = 0;
+		for (; i + 8u <= size; i += 8u)
+		{
+			uint64_t word = 0;
+			std::memcpy(&word, bytes + i, sizeof(word));
+			hash = (hash ^ word) * 1099511628211ull;
+		}
+		for (; i < size; i++)
+		{
+			hash = (hash ^ bytes[i]) * 1099511628211ull;
+		}
+		return hash;
+	}
+
+	Entry* FindSharedContents(uint64_t hash, const void* data, uint64_t size) const
+	{
+		const auto [begin, end] = m_shared_contents.equal_range(hash);
+		for (auto it = begin; it != end; ++it)
+		{
+			Entry* entry = it->second;
+			if (entry->buffer.descriptor_range == size && std::memcmp(entry->mapped, data, static_cast<size_t>(size)) == 0)
+			{
+				return entry;
+			}
+		}
+		return nullptr;
 	}
 
 	// Refusal diagnostics only: groups used entries of one usage by size and committed bytes.
@@ -1887,6 +1943,8 @@ private:
 	std::unordered_map<uint32_t, uint32_t>                                        m_usage_entries;
 	// The zero carrier each usage holds until the next Reset.
 	std::unordered_map<uint32_t, Entry*>              m_zero_carriers;
+	// Uniform entries committed since the last Reset, by the hash of their bytes.
+	std::unordered_multimap<uint64_t, Entry*>         m_shared_contents;
 	std::unordered_map<const VulkanBuffer*, Entry*>   m_by_buffer;
 	uint64_t            m_total_bytes = 0;
 	uint64_t                                          m_lease_generation = 0;
@@ -2008,12 +2066,6 @@ void CommandBuffer::Free()
 		delete m_transient_copy_buffers;
 		m_transient_copy_buffers = nullptr;
 	}
-	if (m_transient_device_buffers != nullptr)
-	{
-		m_transient_device_buffers->Destroy(g_render_ctx->GetGraphicCtx());
-		delete m_transient_device_buffers;
-		m_transient_device_buffers = nullptr;
-	}
 	if (m_transport_descriptor_pool != VK_NULL_HANDLE)
 	{
 		vkDestroyDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, nullptr);
@@ -2134,15 +2186,14 @@ void CommandBuffer::Begin()
 	{
 		m_transient_copy_buffers->Reset();
 	}
-	if (m_transient_device_buffers != nullptr)
-	{
-		m_transient_device_buffers->Reset();
-	}
 	if (m_transport_descriptor_pool != VK_NULL_HANDLE)
 	{
 		vkResetDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, 0);
 	}
 	DestroyRecordingUploads();
+	m_device_awaited.clear();
+	m_device_wait_semaphores.clear();
+	m_device_wait_values.clear();
 
 	auto* buffer = m_pool->buffers[m_index];
 
@@ -2234,16 +2285,6 @@ VulkanBuffer* CommandBuffer::AllocateTransientCopyBuffer(uint64_t size)
 	                                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
 }
 
-VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage, bool allow_reuse)
-{
-	EXIT_IF(IsInvalid());
-	if (m_transient_device_buffers == nullptr)
-	{
-		m_transient_device_buffers = new TransientBufferPool;
-	}
-	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true, allow_reuse);
-}
-
 VulkanBuffer* CommandBuffer::TransportStorage(uint64_t size, uint32_t usage)
 {
 	EXIT_IF(IsInvalid());
@@ -2261,6 +2302,42 @@ VulkanBuffer* CommandBuffer::TransportStorage(uint64_t size, uint32_t usage)
 	auto* storage = m_pool->transport_storage;
 	EXIT_IF(storage->usage != usage);
 	return size <= storage->descriptor_range ? storage : nullptr;
+}
+
+// Shared like the transport storage: each geometry pass orders its fill after
+// the earlier pulls of the queue. Capacity grows by powers of two, so the
+// replaced buffers kept until the pool is destroyed stay below the current one.
+VulkanBuffer* CommandBuffer::GeometryOutput(uint64_t size)
+{
+	EXIT_IF(IsInvalid());
+	EXIT_IF(size == 0u);
+	constexpr uint64_t kMinBytes = 16u * 1024u * 1024u;
+	constexpr uint64_t kMaxBytes = 1024u * 1024u * 1024u;
+	if (size > kMaxBytes)
+	{
+		return nullptr;
+	}
+	Core::LockGuard lock(m_pool->mutex);
+	auto*&          output = m_pool->geometry_output;
+	if (output != nullptr && size <= output->descriptor_range)
+	{
+		return output;
+	}
+	uint64_t capacity = kMinBytes;
+	while (capacity < size)
+	{
+		capacity *= 2u;
+	}
+	if (output != nullptr)
+	{
+		m_pool->retired_geometry_outputs.push_back(output);
+	}
+	output                  = new VulkanBuffer;
+	output->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	output->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	VulkanCreateBuffer(g_render_ctx->GetGraphicCtx(), capacity, output);
+	output->descriptor_range = capacity;
+	return output;
 }
 
 VkDescriptorSet CommandBuffer::AllocateTransportDescriptorSet(VkDescriptorSetLayout layout)
@@ -2422,7 +2499,49 @@ struct SubmitSignals
 	VkSemaphore                   semaphores[2] {};
 	uint64_t                      values[2] {};
 	VkTimelineSemaphoreSubmitInfo timeline {};
+	std::vector<VkPipelineStageFlags> wait_stages;
 };
+
+void CommandBuffer::AwaitSubmissionOnDevice(SubmissionId submission, VkSemaphore timeline, uint64_t value)
+{
+	EXIT_IF(timeline == nullptr || value == 0);
+	for (size_t i = 0; i < m_device_awaited.size(); i++)
+	{
+		if (m_device_awaited[i].queue == submission.queue)
+		{
+			m_device_awaited[i].sequence = std::max(m_device_awaited[i].sequence, submission.sequence);
+			m_device_wait_values[i]      = std::max(m_device_wait_values[i], value);
+			return;
+		}
+	}
+	m_device_awaited.push_back(submission);
+	m_device_wait_semaphores.push_back(timeline);
+	m_device_wait_values.push_back(value);
+}
+
+bool CommandBuffer::AwaitsSubmissionOnDevice(SubmissionId submission) const
+{
+	return std::any_of(m_device_awaited.begin(), m_device_awaited.end(), [&](const SubmissionId& awaited)
+	                   { return awaited.queue == submission.queue && awaited.sequence >= submission.sequence; });
+}
+
+// The submission waits, before any of its commands, for the timeline values of the submissions it awaits.
+static void AttachSubmitWaits(const std::vector<VkSemaphore>& semaphores, const std::vector<uint64_t>& values, SubmitSignals* signals,
+                              VkSubmitInfo* submit_info)
+{
+	if (semaphores.empty())
+	{
+		return;
+	}
+	signals->wait_stages.assign(semaphores.size(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+	signals->timeline.sType                   = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+	signals->timeline.waitSemaphoreValueCount = static_cast<uint32_t>(values.size());
+	signals->timeline.pWaitSemaphoreValues    = values.data();
+	submit_info->pNext                        = &signals->timeline;
+	submit_info->waitSemaphoreCount           = static_cast<uint32_t>(semaphores.size());
+	submit_info->pWaitSemaphores              = semaphores.data();
+	submit_info->pWaitDstStageMask            = signals->wait_stages.data();
+}
 
 // Call with the queue lock held: timeline values rise in submission order.
 static void AttachSubmitSignals(VulkanQueueInfo* queue, VkSemaphore binary, bool timeline, SubmitSignals* signals,
@@ -2500,6 +2619,7 @@ void CommandBuffer::Execute()
 		    EXIT_IF(queue.mutex == nullptr);
 		    Core::LockGuard queue_lock(*queue.mutex);
 		    AttachSubmitSignals(&queue, nullptr, m_has_submission, &signals, &submit_info, &m_timeline_value);
+		    AttachSubmitWaits(m_device_wait_semaphores, m_device_wait_values, &signals, &submit_info);
 		    MarkRecentDrawsSubmitCalled();
 		    return VulkanTraceSubmitAttempt(trail, attempt, [&] { return vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence); },
 		                                    &observed);
@@ -2556,6 +2676,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 		    EXIT_IF(queue.mutex == nullptr);
 		    Core::LockGuard queue_lock(*queue.mutex);
 		    AttachSubmitSignals(&queue, signal_semaphore, m_has_submission, &signals, &submit_info, &m_timeline_value);
+		    AttachSubmitWaits(m_device_wait_semaphores, m_device_wait_values, &signals, &submit_info);
 		    MarkRecentDrawsSubmitCalled();
 		    return VulkanTraceSubmitAttempt(trail, attempt, [&] { return vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence); },
 		                                    &observed);
@@ -2640,6 +2761,7 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 	}
 	return true;
 }
+
 
 void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_buffer)
 {

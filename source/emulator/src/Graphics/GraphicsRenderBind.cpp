@@ -2651,6 +2651,17 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin,
 		                                                  tail_fetched);
 		VkDeviceSize offset   = 0;
+		uint64_t     storage_addr = 0;
+		uint64_t     storage_size = 0;
+		if (vertices == nullptr && GpuMemoryFindWritableStorageContaining(address, size, &storage_addr, &storage_size))
+		{
+			// The stream lies in memory a shader writes: fetch it from that storage
+			// object, as the guest GPU reads the same memory. The guest's own cache
+			// flushes order the writes before the fetch.
+			vertices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, storage_addr,
+			                                                            storage_size, StorageBufferGpuObject(1, storage_size, true)));
+			offset   = address - storage_addr;
+		}
 		if (vertices == nullptr)
 		{
 			// Draws sharing a vertex pool fetch it from a different record each; one object over the
@@ -3775,14 +3786,28 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// Each rendered slice of a depth array is its own image (DescribeRenderDepthInfo).
 				if (gen5 && arrayed_2d && view_layers > 1u && !textures.desc[i].textures2d_without_sampler)
 				{
-					if (!depth_exact || base_array != 0u)
+					// The array belongs to the depth image whose plane starts at the view: its own first slice, or an
+					// image of another extent whose memory the guest reads as these layers.
+					auto* owner = static_cast<DepthStencilVulkanImage*>(tex);
+					if (base_array != 0u || (!depth_exact && owner->depth_vaddr != addr))
 					{
-						EXIT("sampled depth array is not resolved: exact=%u base_array=%u layers=%u addr=0x%012" PRIx64 "\n",
-						     depth_exact ? 1u : 0u, base_array, view_layers, static_cast<uint64_t>(addr));
+						String overlapping;
+						for (const auto* candidate: dtex)
+						{
+							overlapping += String::FromPrintf(" 0x%012" PRIx64 "+0x%" PRIx64 "/%ux%ux%u/%d/layout=%d", candidate->depth_vaddr,
+							                                  candidate->guest_size, candidate->extent.width, candidate->extent.height,
+							                                  candidate->array_layers, static_cast<int>(candidate->format),
+							                                  static_cast<int>(candidate->layout));
+						}
+						EXIT("sampled depth array is not resolved: exact=%u base_array=%u layers=%u addr=0x%012" PRIx64 " size=0x%" PRIx64
+						     " extent=%ux%u fmt=%u tile=%u pitch=%u levels=%u overlapping:%s\n",
+						     depth_exact ? 1u : 0u, base_array, view_layers, static_cast<uint64_t>(addr), size.size, width, height, fmt, tile,
+						     pitch, levels, overlapping.C_Str());
 					}
 					// The guest-memory depth sample contract: metadata (HTILE) or MSAA would change what the layer bytes mean.
 					const bool plain_guest_depth = tile == 24u && levels == 1u && !r.MsaaDepth() && r.MetaAddr() == 0u;
-					tex = GraphicsRenderDepthSliceArray(buffer, static_cast<DepthStencilVulkanImage*>(tex), addr, size.size, view_layers,
+					const auto array_extent = depth_exact ? owner->extent : VkExtent2D {width, height};
+					tex = GraphicsRenderDepthSliceArray(buffer, owner, addr, size.size, array_extent.width, array_extent.height, view_layers,
 					                                    fmt, pitch, plain_guest_depth);
 					materialize = "depth-slice-array";
 				}

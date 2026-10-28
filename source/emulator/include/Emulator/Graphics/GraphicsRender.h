@@ -713,7 +713,7 @@ public:
 	VulkanBuffer* AllocateTransientCopyBuffer(uint64_t size);
 	// Device-local intermediate written and read only by GPU commands of this recording (for example a
 	// geometry pass output), with its own budget. The same ordering and lifetime rules apply.
-	VulkanBuffer* AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage, bool allow_reuse = true);
+	VulkanBuffer* GeometryOutput(uint64_t size);
 	// Storage-buffer set for one fragment-transport draw state. The pool is reset
 	// when the recording starts, so its sets live exactly as long as the commands
 	// that bind them.
@@ -729,6 +729,11 @@ public:
 	// (DepthStencilVulkanImage::storage_plane); the copy returns to the depth plane once the dispatch is recorded.
 	void DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth);
 	void StoreBackDepthPlanes();
+	// A submission of another queue this recording waits for on the device before it executes, through that
+	// queue's timeline value; later submissions of a queue complete after earlier ones.
+	void AwaitSubmissionOnDevice(SubmissionId submission, VkSemaphore timeline, uint64_t value);
+	[[nodiscard]] bool AwaitsSubmissionOnDevice(SubmissionId submission) const;
+	[[nodiscard]] const std::vector<SubmissionId>& DeviceAwaitedSubmissions() const { return m_device_awaited; }
 
 private:
 	friend class PipelineCache;
@@ -756,7 +761,6 @@ private:
 	TransientBufferPool* m_transient_buffers = nullptr;
 	TransientBufferPool* m_transient_scratch_buffers = nullptr;
 	TransientBufferPool* m_transient_copy_buffers    = nullptr;
-	TransientBufferPool* m_transient_device_buffers  = nullptr;
 	TransientSnapshotLeases*   m_snapshot_leases           = nullptr;
 	std::vector<VulkanBuffer*> m_recording_uploads;
 	VkDescriptorPool           m_transport_descriptor_pool = VK_NULL_HANDLE;
@@ -767,6 +771,9 @@ private:
 	bool                         m_resetting = false;
 	std::optional<OpenRenderPass> m_open_render_pass;
 	std::vector<DepthStencilVulkanImage*> m_depth_plane_store_backs;
+	std::vector<SubmissionId>             m_device_awaited;
+	std::vector<VkSemaphore>              m_device_wait_semaphores;
+	std::vector<uint64_t>                 m_device_wait_values;
 
 	bool               m_has_guest_context = false;
 	uint64_t           m_guest_submit = 0;

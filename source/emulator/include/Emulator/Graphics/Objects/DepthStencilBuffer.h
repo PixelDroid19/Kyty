@@ -14,6 +14,7 @@ namespace Kyty::Libs::Graphics {
 
 struct GraphicContext;
 struct DepthStencilVulkanImage;
+struct DepthSliceArray;
 struct StorageTextureVulkanImage;
 
 class DepthStencilBufferObject: public GpuObject
@@ -72,10 +73,10 @@ public:
 [[nodiscard]] VkFormat DepthStencilBufferStoragePlaneFormat(VkFormat depth_format);
 // The colour image a storage view of this depth image's depth plane binds; see DepthStencilVulkanImage::storage_plane.
 [[nodiscard]] StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth);
-// The array image of `layers` layers that a sampled view starting at this depth slice reads; see
-// DepthStencilVulkanImage::slice_array.
-[[nodiscard]] DepthStencilVulkanImage* DepthStencilBufferGetSliceArray(GraphicContext* ctx, DepthStencilVulkanImage* first,
-                                                                       uint32_t layers);
+// The array of `layers` layers of width x height, each layer_size guest bytes, that a sampled view of the memory
+// starting at this image's depth plane reads; see DepthStencilVulkanImage::slice_arrays.
+[[nodiscard]] DepthSliceArray* DepthStencilBufferGetSliceArray(GraphicContext* ctx, DepthStencilVulkanImage* owner, uint32_t width,
+                                                               uint32_t height, uint64_t layer_size, uint32_t layers);
 
 } // namespace Kyty::Libs::Graphics
 

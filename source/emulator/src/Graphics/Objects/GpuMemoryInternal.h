@@ -291,12 +291,14 @@ public:
 	void WriteBackAllCompleted(GraphicContext* ctx);
 	void               WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer);
 	[[nodiscard]] bool PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
+	                                           const std::vector<SubmissionId>&          device_awaited,
 	                                           std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
 	[[nodiscard]] bool WriteBackStorageForGuestSeed(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuQueueId consumer,
 	                                                SubmissionId* dependency);
 	void CollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, SubmissionId reader, std::vector<GpuMemoryStorageSeedSource>* sources);
 	[[nodiscard]] bool PendingStorageHasAliases();
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
+	[[nodiscard]] bool FindWritableStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
 	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
 	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
 	[[nodiscard]] GpuMemoryGdsSource AcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
@@ -463,7 +465,7 @@ private:
 	// `ranges` answers whether a block meets one of the queried guest ranges.
 	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const;
 	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorageIn(uint64_t vaddr, uint64_t size);
-	[[nodiscard]] static bool StorageIsWholeGuestContent(const Object& object);
+	[[nodiscard]] bool StorageIsWholeGuestContent(int heap_id, const Object& object) const;
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);
 	bool TransientReadOnlyOverlapsAllowedLocked(uint64_t vaddr, uint64_t size, const GpuMemoryRangeQueryKey& query,

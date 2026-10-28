@@ -355,6 +355,19 @@ inline bool GpuMemoryAllowsOverwrittenStorageTextureParent(GpuMemoryObjectType e
 	       relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
+// A render target or storage image that only crosses a new storage view (each
+// starts outside the other) cannot share its texel addressing: a view never
+// extends past its resource, so neither is a view of the other and the overlap
+// is recycled memory (captured: a 3840x2160 storage chain declared over
+// 2432x1368 targets and a shifted copy of the same chain). Link it; the new
+// view seeds from guest memory.
+inline bool GpuMemoryAllowsStorageTextureCrossingRecycledImage(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                               GpuMemoryObjectType incoming_type)
+{
+	return incoming_type == GpuMemoryObjectType::StorageTexture && relation == GpuMemoryOverlapType::Crosses &&
+	       (existing_type == GpuMemoryObjectType::RenderTexture || existing_type == GpuMemoryObjectType::StorageTexture);
+}
+
 // Incoming StorageTexture covering a smaller sampled Texture (a texture whose
 // levels a compute pass writes after one level was sampled). A sampled Texture
 // only caches guest bytes, so when it is the only overlapping object the guest
@@ -695,16 +708,18 @@ inline bool GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType existing_ty
 	       incoming_type == GpuMemoryObjectType::Texture;
 }
 
-// Incoming storage image inside the range of an existing depth surface
-// (captured: a 128x128 eight-level six-layer colour image at the base of a
-// 1024x1024 D16 target). Storage views of a depth plane bind the depth image
+// Incoming storage image inside or around the range of an existing depth
+// surface (captured: a 128x128 eight-level six-layer colour image at the base
+// of a 1024x1024 D16 target; a 960x540 six-level RGBA16F image at the base of
+// a 960x540 D32 target). Storage views of a depth plane bind the depth image
 // itself, and one at the same range is checked by its shape, so this is a
 // colour view of a recycled range: the storage view seeds from guest memory,
 // as above, and the depth object stays linked.
-inline bool GpuMemoryAllowsStorageTextureInsideDepthRange(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
-                                                          GpuMemoryObjectType incoming_type)
+inline bool GpuMemoryAllowsStorageTextureOverDepthRange(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                        GpuMemoryObjectType incoming_type)
 {
-	return existing_type == GpuMemoryObjectType::DepthStencilBuffer && relation == GpuMemoryOverlapType::Contains &&
+	return existing_type == GpuMemoryObjectType::DepthStencilBuffer &&
+	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::IsContainedWithin) &&
 	       incoming_type == GpuMemoryObjectType::StorageTexture;
 }
 
@@ -779,6 +794,18 @@ inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing
 		       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
 	}
 	return false;
+}
+
+// A colour target declared over exactly a depth target's allocation re-describes
+// it (captured: a 960x540 colour target over a 960x540 depth target and two
+// storage images of a recycled allocation). The inverse of
+// GpuMemoryAllowsDepthStencilReclaimSurface: depth images publish no guest bytes,
+// so the depth object is reclaimed while the other parents stay linked.
+inline bool GpuMemoryAllowsRenderTargetReclaimDepth(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                    GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::DepthStencilBuffer && relation == GpuMemoryOverlapType::Equals &&
+	       incoming_type == GpuMemoryObjectType::RenderTexture;
 }
 
 // A depth/stencil binding supersedes an earlier generic surface view of the
@@ -1309,6 +1336,9 @@ struct GpuMemoryStorageWriteIdentity
 	const VulkanBuffer* buffer             = nullptr;
 };
 [[nodiscard]] bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
+// The guest range of the only writable StorageBuffer overlapping [vaddr, vaddr + size),
+// when that one object holds the whole range in a single block.
+[[nodiscard]] bool GpuMemoryFindWritableStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
 // A pending StorageBuffer result that is, as a whole object, the guest content of
 // its range: only the consumer's queue has incomplete uses, no other object shares
 // its bytes, no label fence or depth metadata lies in it, and the guest has not
@@ -1323,8 +1353,11 @@ struct GpuMemoryStoragePublication
 // Reports one incomplete submission use of a writable StorageBuffer overlapping
 // any of the ranges, with the same publication exemption. With `publishable`,
 // results that qualify for publication in the consumer's queue order are listed
-// there instead of being reported.
+// there instead of being reported; uses of other queues that the consumer's
+// recording awaits on the device (`device_awaited`) are in that order too. A use
+// of another queue the recording does not await yet is reported first.
 [[nodiscard]] bool GpuMemoryPendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
+                                                    const std::vector<SubmissionId>&          device_awaited,
                                                     std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
 // An object seeded from guest bytes in [vaddr, vaddr + size) on the host misses the
 // writable StorageBuffer results overlapping it until they are written back, even

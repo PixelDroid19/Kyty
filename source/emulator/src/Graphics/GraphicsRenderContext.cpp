@@ -676,6 +676,15 @@ void CommandPool::DeleteAll()
 				VulkanDeleteBuffer(ctx, pool->transport_storage);
 				delete pool->transport_storage;
 			}
+			pool->retired_geometry_outputs.push_back(pool->geometry_output);
+			for (auto* output: pool->retired_geometry_outputs)
+			{
+				if (output != nullptr)
+				{
+					VulkanDeleteBuffer(ctx, output);
+					delete output;
+				}
+			}
 
 			delete[] pool->semaphores;
 			delete[] pool->fences;

@@ -858,11 +858,12 @@ uint32_t StorageTextureMipBackingLevels(const uint64_t* params, bool gen5)
 	return std::min(full, static_cast<uint32_t>(VulkanImage::VIEW_STORAGE_MIP_COUNT));
 }
 
-bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming, bool exact_range)
+bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming, bool compare_layout)
 {
 	return existing[StorageTextureObject::PARAM_FORMAT] != incoming[StorageTextureObject::PARAM_FORMAT] ||
 	       existing[StorageTextureObject::PARAM_TILE] != incoming[StorageTextureObject::PARAM_TILE] ||
-	       (exact_range && existing[StorageTextureObject::PARAM_WIDTH_HEIGHT] != incoming[StorageTextureObject::PARAM_WIDTH_HEIGHT]);
+	       (compare_layout && (existing[StorageTextureObject::PARAM_WIDTH_HEIGHT] != incoming[StorageTextureObject::PARAM_WIDTH_HEIGHT] ||
+	                           existing[StorageTextureObject::PARAM_PITCH] != incoming[StorageTextureObject::PARAM_PITCH]));
 }
 
 bool StorageTextureViewsMipTail(const uint64_t* chain, uint64_t chain_address, const uint64_t* view, uint64_t view_address,
@@ -889,7 +890,7 @@ bool StorageTextureViewsMipTail(const uint64_t* chain, uint64_t chain_address, c
 	return view_address == chain_address + tail.tiled_offset && view_size == tail.tiled_size;
 }
 
-bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool exact_range)
+bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool compare_layout)
 {
 	const auto render_format = static_cast<VkFormat>(
 	    VulkanResolveRenderTextureFormat(static_cast<RenderTextureFormat>(render[RenderTextureObject::PARAM_FORMAT])));
@@ -897,9 +898,13 @@ bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_
 	    ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(storage[StorageTextureObject::PARAM_FORMAT] >> 16u));
 	const bool render_tiled  = render[RenderTextureObject::PARAM_TILED] != 0u;
 	const bool storage_tiled = storage[StorageTextureObject::PARAM_TILE] != 0u;
-	return VulkanColorTexelBytes(render_format) != storage_bytes || render_tiled != storage_tiled ||
-	       (exact_range && (render[RenderTextureObject::PARAM_WIDTH] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u) ||
-	                        render[RenderTextureObject::PARAM_HEIGHT] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu)));
+	// Gen5 colour targets bind only the 64 KiB R_X swizzle when tiled, so a storage view in
+	// any other swizzle (a depth-layout view, say) addresses the bytes differently.
+	const bool swizzle_differs = Config::IsNextGen() && render_tiled && storage[StorageTextureObject::PARAM_TILE] != 27u;
+	return VulkanColorTexelBytes(render_format) != storage_bytes || render_tiled != storage_tiled || swizzle_differs ||
+	       (compare_layout && (render[RenderTextureObject::PARAM_WIDTH] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u) ||
+	                           render[RenderTextureObject::PARAM_HEIGHT] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu) ||
+	                           render[RenderTextureObject::PARAM_PITCH] != storage[StorageTextureObject::PARAM_PITCH]));
 }
 
 bool StorageTextureRedescribesDepthTarget(const uint64_t* storage, bool next_gen)

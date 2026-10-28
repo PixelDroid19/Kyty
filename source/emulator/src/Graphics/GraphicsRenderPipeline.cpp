@@ -1609,9 +1609,9 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 		EXIT("fragment transport pipeline creation failed: %s\n", requirement_facts.c_str());
 	}
 	if (!FragmentTransportCreateShadePipeline(gctx->device, gctx->pipeline_cache, ps_input.bind, shade_binary, true, transport_layout,
-	                                          &passes->shade_layout, &passes->shade))
+	                                          &passes->shade_layout, &passes->shade, &error))
 	{
-		EXIT("fragment transport split compute pipeline creation failed: %s\n", requirement_facts.c_str());
+		EXIT("fragment transport split compute pipeline creation failed: %s %s\n", error.c_str(), requirement_facts.c_str());
 	}
 	return passes;
 }
@@ -1939,6 +1939,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		                                    return ShaderRecompileVS(vs_code, vs_input_info);
 	                                    });
 	DebugStatsRecordShaderTranslationCache(vs_translation.hit, vs_translation.evicted);
+
 
 	if (ps_input_info->stage_enabled)
 	{

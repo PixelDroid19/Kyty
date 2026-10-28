@@ -91,8 +91,9 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->guest_size = *size;
 
 	// Transfers: a proven uniform fill is written by a fill, and copied into the
-	// guest device-address view.
-	vk_obj->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	// guest device-address view. Vertex streams the GPU wrote are fetched from it.
+	vk_obj->usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+	                VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 	vk_obj->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 	                          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	vk_obj->buffer = nullptr;

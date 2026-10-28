@@ -15,6 +15,7 @@
 #include <vulkan/vulkan_core.h> // IWYU pragma: export
 
 #include <atomic>
+#include <memory>
 #include <vector>
 
 // The ratified derivative feature has the same ABI as the NV structure in
@@ -107,6 +108,10 @@ struct VulkanCommandPool
 	TransientSnapshotPool* snapshots = nullptr;
 	// Fragment-transport storage shared by the command buffers of this pool; owned by the command buffer code.
 	VulkanBuffer* transport_storage = nullptr;
+	// Geometry-pass output shared by the command buffers of this pool, and the smaller ones it replaced, which
+	// recordings in flight may still read; owned by the command buffer code.
+	VulkanBuffer*              geometry_output = nullptr;
+	std::vector<VulkanBuffer*> retired_geometry_outputs;
 };
 
 struct VulkanQueueInfo
@@ -371,16 +376,28 @@ struct VideoOutVulkanImage: public VulkanImage
 
 struct StorageTextureVulkanImage;
 
-// One layer of DepthStencilVulkanImage::slice_array.
+// One layer of a DepthSliceArray.
 struct DepthSliceArrayLayer
 {
-	// content_stamp of the slice image last copied into the layer, or the marker of a read from guest memory.
+	// content_stamp of the slice image last copied into the layer, a digest of the images whose 64 KiB blocks
+	// were last assembled into it, or the marker of a read from guest memory.
 	uint64_t stamp = 0;
 	// Guest range registered with the dirty-page tracker by the first read from guest memory (size 0 before it), and
 	// the page generation of the last read.
 	uint64_t guest_addr       = 0;
 	uint64_t guest_size       = 0;
 	uint64_t guest_generation = 0;
+};
+
+struct DepthStencilVulkanImage;
+
+// An array image that a sampled view of the memory starting at a depth image's depth plane reads, and the state
+// of each layer.
+struct DepthSliceArray
+{
+	DepthStencilVulkanImage*          image = nullptr;
+	VulkanMemory                      memory;
+	std::vector<DepthSliceArrayLayer> layers;
 };
 
 struct DepthStencilVulkanImage: public VulkanImage
@@ -397,11 +414,12 @@ struct DepthStencilVulkanImage: public VulkanImage
 	// first use and destroyed with this image.
 	StorageTextureVulkanImage* storage_plane = nullptr;
 	VulkanMemory               storage_plane_memory;
-	// Array image that a sampled view of this slice and the slices after it reads (each rendered guest slice is its
-	// own depth image), and the state of each layer. Created on first use and destroyed with this image.
-	DepthStencilVulkanImage*          slice_array = nullptr;
-	VulkanMemory                      slice_array_memory;
-	std::vector<DepthSliceArrayLayer> slice_array_layers;
+	// DB slice index of the last bind as a render target: the guest bytes of its depth plane XOR it into every
+	// 64 KiB block (Tile.h).
+	uint32_t depth_slice = 0;
+	// Arrays that sampled views of this slice and the memory after it read (each rendered guest slice is its own
+	// depth image), one per view extent and layer count. Created on first use and destroyed with this image.
+	std::vector<std::unique_ptr<DepthSliceArray>> slice_arrays;
 };
 
 struct TextureVulkanImage: public VulkanImage

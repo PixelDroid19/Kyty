@@ -422,7 +422,7 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 	EXIT_IF(buffer == nullptr || dependency == nullptr);
 	const GpuQueueId                         consumer(static_cast<uint32_t>(buffer->GetQueueIndex()));
 	std::vector<GpuMemoryStoragePublication> publishable;
-	if (GuestDeviceAddressPendingWriteBack(consumer, &publishable, dependency))
+	if (GuestDeviceAddressPendingWriteBack(consumer, buffer->DeviceAwaitedSubmissions(), &publishable, dependency))
 	{
 		return true;
 	}
@@ -430,9 +430,6 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 	EXIT_IF(!buffer->GetSubmissionId(&recording));
 	for (const auto& publication: publishable)
 	{
-		if (!GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
-		                                         *publication.identity.buffer, publication.vaddr, publication.size) ||
-		    !GpuMemoryMarkStorageGuestPublished(publication.identity, recording, nullptr))
 		{
 			*dependency = publication.dependency;
 			return true;
@@ -588,23 +585,21 @@ static GpuMemoryDepthD16Source GuestDepthLayerSource(uint64_t addr, uint64_t siz
 // Records the detiled guest bytes of depth layer `layer` (at addr) into the array, which is in TRANSFER_DST_OPTIMAL.
 // The first read registers the range with the dirty-page tracker, as GPU memory objects do, so the layer is read
 // again only after a CPU write; a read the tracker cannot vouch for is repeated at the next bind.
-static void UploadGuestDepthLayer(CommandBuffer* buffer, VkCommandBuffer vk_buffer, DepthStencilVulkanImage* first, uint32_t layer,
+static void UploadGuestDepthLayer(CommandBuffer* buffer, VkCommandBuffer vk_buffer, DepthSliceArray* slice_array, uint32_t layer,
                                   uint64_t addr, uint64_t size, uint32_t fmt, uint32_t pitch)
 {
-	auto*          array   = first->slice_array;
+	auto*          array   = slice_array->image;
 	const uint32_t width   = array->extent.width;
 	const uint32_t height  = array->extent.height;
 	const uint32_t bytes   = State::Gen5DepthSampleBytesPerElement(fmt);
 	const bool     depth16 = array->format == VK_FORMAT_D16_UNORM || array->format == VK_FORMAT_D16_UNORM_S8_UINT;
-	const auto     guest   = first->GetGuestExtent();
-	if (bytes != (depth16 ? 2u : 4u) || State::Gen5DepthSampleLayerBytes(fmt, pitch, height) != size || guest.width != width ||
-	    guest.height != height)
+	if (bytes != (depth16 ? 2u : 4u) || State::Gen5DepthSampleLayerBytes(fmt, pitch, height) != size)
 	{
 		EXIT("depth array layer %u at 0x%012" PRIx64 " cannot be read from guest memory: format=%u/%u pitch=%u size=0x%" PRIx64
-		     " extent=%ux%u guest=%ux%u\n",
-		     layer, addr, fmt, static_cast<uint32_t>(array->format), pitch, size, width, height, guest.width, guest.height);
+		     " extent=%ux%u\n",
+		     layer, addr, fmt, static_cast<uint32_t>(array->format), pitch, size, width, height);
 	}
-	auto& state   = first->slice_array_layers[layer];
+	auto& state   = slice_array->layers[layer];
 	auto& tracker = GpuDirtyPageTracker::Instance();
 	EXIT_IF(state.guest_size != 0u && (state.guest_addr != addr || state.guest_size != size));
 	if (state.guest_size == 0u && tracker.RegisterRange(addr, size))
@@ -624,11 +619,153 @@ static void UploadGuestDepthLayer(CommandBuffer* buffer, VkCommandBuffer vk_buff
 	state.stamp            = observation.tracked && tracker.ReadObservationIsStable(addr, size, observation) ? kSliceArrayGuestLayer : 0u;
 }
 
+// The copies that rebuild a depth layer from the depth images whose planes hold its bytes, and a digest of what
+// those images held when planned.
+struct DepthLayerBlockCopies
+{
+	std::vector<std::pair<DepthStencilVulkanImage*, std::vector<VkImageCopy>>> sources;
+	uint64_t                                                                   digest = 0;
+};
+
+static uint64_t MixDepthLayerDigest(uint64_t digest, uint64_t value)
+{
+	value ^= value >> 33u;
+	value *= 0xff51afd7ed558ccdull;
+	value ^= value >> 33u;
+	return (digest ^ value) * 0x9e3779b97f4a7c15ull + 1u;
+}
+
+// Plans depth layer `layer` (at addr, size bytes, pitch in elements) of a 64 KiB tiled view as the memory the
+// guest reads there: each 64 KiB block of the layer is a block of one image's depth plane, the bytes that image's
+// slice wrote, so the layer's samples are that block's samples translated by the XOR of the two slice patterns.
+// Exits when a block the view reads lies in no image's plane.
+// Plans the copies only when the layer's sources changed since `stamp`; otherwise returns the digest alone.
+static DepthLayerBlockCopies PlanDepthLayerFromImages(const DepthStencilVulkanImage* array, uint32_t layer, uint64_t addr, uint64_t size,
+                                                      uint32_t pitch, uint32_t bytes, const Vector<DepthStencilVulkanImage*>& images,
+                                                      uint64_t stamp)
+{
+	static constexpr uint32_t k_block_bytes  = 65536u;
+	static constexpr uint32_t k_block_height = 128u;
+	const uint32_t            block_width    = k_block_bytes / bytes / k_block_height;
+	const uint32_t            width          = array->extent.width;
+	const uint32_t            height         = array->extent.height;
+	if ((addr % k_block_bytes) != 0u || (size % k_block_bytes) != 0u || pitch == 0u || (pitch % block_width) != 0u)
+	{
+		EXIT("depth array layer %u at 0x%012" PRIx64 " is not whole 64 KiB blocks: size=0x%" PRIx64 " pitch=%u\n", layer, addr, size, pitch);
+	}
+	struct BlockSource
+	{
+		uint32_t                 dst_x;
+		uint32_t                 dst_y;
+		DepthStencilVulkanImage* source;
+		uint32_t                 source_x;
+		uint32_t                 source_y;
+	};
+	std::vector<BlockSource> blocks;
+	DepthLayerBlockCopies    plan;
+	const uint32_t           blocks_x = pitch / block_width;
+	for (uint64_t block = 0; block < size / k_block_bytes; block++)
+	{
+		const uint32_t dst_x = static_cast<uint32_t>(block % blocks_x) * block_width;
+		const uint32_t dst_y = static_cast<uint32_t>(block / blocks_x) * k_block_height;
+		if (dst_x >= width || dst_y >= height)
+		{
+			continue;
+		}
+		const uint64_t block_addr = addr + block * k_block_bytes;
+		DepthStencilVulkanImage* source   = nullptr;
+		uint32_t                 source_x = 0;
+		uint32_t                 source_y = 0;
+		for (auto* image: images)
+		{
+			const auto     guest        = image->GetGuestExtent();
+			const uint32_t image_pitch  = TileAlign64KBPitch(guest.width, bytes);
+			const uint64_t image_blocks = static_cast<uint64_t>(image_pitch / block_width) * ((guest.height + k_block_height - 1u) / k_block_height);
+			if (image->depth_vaddr == 0u || (image->depth_vaddr % k_block_bytes) != 0u || block_addr < image->depth_vaddr ||
+			    block_addr >= image->depth_vaddr + image_blocks * k_block_bytes)
+			{
+				continue;
+			}
+			const uint64_t index = (block_addr - image->depth_vaddr) / k_block_bytes;
+			source               = image;
+			source_x             = static_cast<uint32_t>(index % (image_pitch / block_width)) * block_width;
+			source_y             = static_cast<uint32_t>(index / (image_pitch / block_width)) * k_block_height;
+			break;
+		}
+		if (source == nullptr)
+		{
+			EXIT("depth array layer %u at 0x%012" PRIx64 " lies partly outside depth images: block=0x%012" PRIx64 "\n", layer, addr,
+			     block_addr);
+		}
+		const auto source_extent = source->GetGuestExtent();
+		if (source->format != array->format || source->samples != VK_SAMPLE_COUNT_1_BIT || source->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+		    source->extent.width != source_extent.width || source->extent.height != source_extent.height)
+		{
+			EXIT("depth array layer %u at 0x%012" PRIx64 " cannot be read from a %ux%u depth image: format=%u/%u samples=%u layout=%u\n",
+			     layer, addr, source->extent.width, source->extent.height, static_cast<uint32_t>(source->format),
+			     static_cast<uint32_t>(array->format), static_cast<uint32_t>(source->samples), static_cast<uint32_t>(source->layout));
+		}
+		auto entry = std::find_if(plan.sources.begin(), plan.sources.end(), [source](const auto& e) { return e.first == source; });
+		if (entry == plan.sources.end())
+		{
+			plan.digest = MixDepthLayerDigest(MixDepthLayerDigest(MixDepthLayerDigest(plan.digest, reinterpret_cast<uintptr_t>(source)),
+			                                                      source->content_stamp),
+			                                  source->depth_slice);
+			plan.sources.emplace_back(source, std::vector<VkImageCopy> {});
+		}
+		blocks.push_back({dst_x, dst_y, source, source_x, source_y});
+	}
+	// Zero and the guest-layer marker never name assembled content.
+	if (plan.digest == 0u || plan.digest == kSliceArrayGuestLayer)
+	{
+		plan.digest = 1u;
+	}
+	if (plan.digest == stamp)
+	{
+		return plan;
+	}
+	for (const auto& [dst_x, dst_y, source, source_x, source_y]: blocks)
+	{
+		const auto source_extent = source->GetGuestExtent();
+		auto       entry = std::find_if(plan.sources.begin(), plan.sources.end(), [source = source](const auto& e) { return e.first == source; });
+		auto*      copies = &entry->second;
+		uint32_t dx = 0;
+		uint32_t dy = 0;
+		TileGetDepth64KBSliceShift(bytes, source->depth_slice, layer, &dx, &dy);
+		// XOR by dx keeps runs aligned to its lowest set bit contiguous, so each run is one copy.
+		const uint32_t run_width  = dx == 0u ? block_width : (dx & (~dx + 1u));
+		const uint32_t run_height = dy == 0u ? k_block_height : (dy & (~dy + 1u));
+		for (uint32_t y = 0; y < k_block_height; y += run_height)
+		{
+			for (uint32_t x = 0; x < block_width; x += run_width)
+			{
+				const uint32_t from_x = source_x + (x ^ dx);
+				const uint32_t from_y = source_y + (y ^ dy);
+				if (dst_x + x >= width || dst_y + y >= height || from_x >= source_extent.width || from_y >= source_extent.height)
+				{
+					continue;
+				}
+				VkImageCopy region {};
+				region.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, 0u, 1u};
+				region.srcOffset      = {static_cast<int32_t>(from_x), static_cast<int32_t>(from_y), 0};
+				region.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, layer, 1u};
+				region.dstOffset      = {static_cast<int32_t>(dst_x + x), static_cast<int32_t>(dst_y + y), 0};
+				region.extent         = {std::min({run_width, width - dst_x - x, source_extent.width - from_x}),
+				                         std::min({run_height, height - dst_y - y, source_extent.height - from_y}), 1u};
+				copies->push_back(region);
+			}
+		}
+	}
+	return plan;
+}
+
 VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVulkanImage* first, uint64_t addr, uint64_t slice_size,
-                                           uint32_t layers, uint32_t fmt, uint32_t pitch, bool plain_guest_depth)
+                                           uint32_t width, uint32_t height, uint32_t layers, uint32_t fmt, uint32_t pitch,
+                                           bool plain_guest_depth)
 {
 	EXIT_IF(buffer == nullptr || first == nullptr || slice_size == 0u);
-	auto*           array     = DepthStencilBufferGetSliceArray(g_render_ctx->GetGraphicCtx(), first, layers);
+	auto* slice_array = DepthStencilBufferGetSliceArray(g_render_ctx->GetGraphicCtx(), first, width, height, slice_size, layers);
+	auto* array       = slice_array->image;
 	VkCommandBuffer vk_buffer = nullptr;
 	const auto      record    = [&]()
 	{
@@ -638,29 +775,60 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 			TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 		}
 	};
+	const auto copy_from = [&](DepthStencilVulkanImage* source, const VkImageCopy* regions, uint32_t count)
+	{
+		const auto source_layout = source->layout;
+		TransitionDepthStencilImage(vk_buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		vkCmdCopyImage(vk_buffer, source->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		               count, regions);
+		TransitionDepthStencilImage(vk_buffer, source, source_layout);
+	};
 	for (uint32_t layer = 0; layer < layers; layer++)
 	{
-		const uint64_t           slice_addr = addr + layer * slice_size;
-		DepthStencilVulkanImage* slice      = first;
-		if (layer != 0u)
-		{
-			const auto found = FindDepthStencil(buffer, slice_addr, slice_size, true);
-			slice            = found.IsEmpty() ? nullptr : found.At(0);
-		}
+		const uint64_t slice_addr = addr + layer * slice_size;
+		const auto     found      = FindDepthStencil(buffer, slice_addr, slice_size, true);
+		auto*          slice      = found.IsEmpty() ? nullptr : found.At(0);
+		auto&          state      = slice_array->layers[layer];
 		if (slice != nullptr && slice->layout == VK_IMAGE_LAYOUT_UNDEFINED)
 		{
 			EXIT("depth array layer %u at 0x%012" PRIx64 " has an unrendered depth slice\n", layer, slice_addr);
 		}
-		// A layer no slice renders holds what guest memory holds, as an unrendered depth surface sampled alone does.
 		if (slice == nullptr)
 		{
+			// The layer's memory holds what the depth images over it wrote there; when none lies over it, it holds
+			// what guest memory holds, as an unrendered depth surface sampled alone does.
+			const auto images = FindDepthStencil(buffer, slice_addr, slice_size, false);
+			if (!images.IsEmpty())
+			{
+				if (!plain_guest_depth)
+				{
+					EXIT("depth array layer %u at 0x%012" PRIx64 " lies in another depth image but the view is not plain 64 KiB depth\n",
+					     layer, slice_addr);
+				}
+				const auto plan =
+				    PlanDepthLayerFromImages(array, layer, slice_addr, slice_size, pitch, State::Gen5DepthSampleBytesPerElement(fmt), images,
+				                             state.stamp);
+				if (state.stamp == plan.digest)
+				{
+					continue;
+				}
+				record();
+				for (const auto& [source, regions]: plan.sources)
+				{
+					if (!regions.empty())
+					{
+						copy_from(source, regions.data(), static_cast<uint32_t>(regions.size()));
+					}
+				}
+				state.stamp = plan.digest;
+				continue;
+			}
 			const auto source = plain_guest_depth ? GuestDepthLayerSource(slice_addr, slice_size) : GpuMemoryDepthD16Source::Unsupported;
 			if (source != GpuMemoryDepthD16Source::Guest)
 			{
 				EXIT("depth array layer %u at 0x%012" PRIx64 " has no depth slice and no guest bytes: plain=%u source=%u\n", layer,
 				     slice_addr, plain_guest_depth ? 1u : 0u, static_cast<uint32_t>(source));
 			}
-			const auto&                   state = first->slice_array_layers[layer];
 			const GpuDirtyReadObservation last_read {state.guest_generation, true};
 			if (state.stamp == kSliceArrayGuestLayer &&
 			    GpuDirtyPageTracker::Instance().ReadObservationIsStable(slice_addr, slice_size, last_read))
@@ -668,7 +836,7 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 				continue;
 			}
 			record();
-			UploadGuestDepthLayer(buffer, vk_buffer, first, layer, slice_addr, slice_size, fmt, pitch);
+			UploadGuestDepthLayer(buffer, vk_buffer, slice_array, layer, slice_addr, slice_size, fmt, pitch);
 			continue;
 		}
 		if (slice->format != array->format || slice->extent.width != array->extent.width || slice->extent.height != array->extent.height ||
@@ -678,21 +846,17 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 			     slice_addr, static_cast<uint32_t>(slice->format), static_cast<uint32_t>(array->format), slice->extent.width,
 			     slice->extent.height, array->extent.width, array->extent.height, static_cast<uint32_t>(slice->samples));
 		}
-		if (first->slice_array_layers[layer].stamp == slice->content_stamp)
+		if (state.stamp == slice->content_stamp)
 		{
 			continue;
 		}
 		record();
-		const auto slice_layout = slice->layout;
-		TransitionDepthStencilImage(vk_buffer, slice, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 		VkImageCopy region {};
 		region.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, 0u, 1u};
 		region.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, layer, 1u};
 		region.extent         = {array->extent.width, array->extent.height, 1u};
-		vkCmdCopyImage(vk_buffer, slice->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		               1u, &region);
-		TransitionDepthStencilImage(vk_buffer, slice, slice_layout);
-		first->slice_array_layers[layer].stamp = slice->content_stamp;
+		copy_from(slice, &region, 1u);
+		state.stamp = slice->content_stamp;
 	}
 	if (vk_buffer != nullptr)
 	{
@@ -1203,6 +1367,7 @@ void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, ui
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+
 void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -1505,6 +1670,7 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	if (r->vulkan_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->vulkan_buffer == nullptr condition ignored (continuing)\n"); }
 	// Every bind may write the image (draws, clears); sampled copies of it compare this stamp.
 	r->vulkan_buffer->content_stamp = VulkanImageNextStamp();
+	r->vulkan_buffer->depth_slice   = r->slice_start;
 	const bool stencil_plane        = r->stencil_buffer_size > 0 && DepthFormatHasStencil(r->format);
 	r->vulkan_buffer->depth_vaddr   = r->depth_buffer_size > 0 ? r->depth_buffer_vaddr : 0u;
 	r->vulkan_buffer->stencil_vaddr = stencil_plane ? r->stencil_buffer_vaddr : 0u;
@@ -2101,8 +2267,16 @@ static void PreserveExpandedDccAttachment(CommandBuffer* buffer, const HW::Rende
 	{
 		EXIT("DCC decompression requires an existing render texture\n");
 	}
-	const auto format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
+	const auto format   = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
 	const auto images = FindRenderTexture(buffer, attachment.base_addr, attachment.size, true);
+	if (images.IsEmpty())
+	{
+		// No render texture is this surface (others of a recycled range may
+		// overlap it): the color lives expanded in guest memory or in the
+		// storage view a dispatch wrote, never compressed.
+		return;
+	}
+	const auto overlaps = FindRenderTexture(buffer, attachment.base_addr, attachment.size, false);
 	const RenderTextureVulkanImage* image = nullptr;
 	uint32_t matches = 0;
 	for (const auto* candidate: images)
@@ -2115,8 +2289,16 @@ static void PreserveExpandedDccAttachment(CommandBuffer* buffer, const HW::Rende
 	}
 	if (matches != 1u)
 	{
-		EXIT("DCC decompression has no unique expanded backing: size=%" PRIu64 " aliases=%u matches=%u\n",
-		     attachment.size, images.Size(), matches);
+		String overlapping;
+		for (const auto* candidate: overlaps)
+		{
+			overlapping += String::FromPrintf(" %ux%u/%d", candidate->GetGuestExtent().width, candidate->GetGuestExtent().height,
+			                                  static_cast<int>(candidate->format));
+		}
+		EXIT("DCC decompression has no unique expanded backing: addr=0x%012" PRIx64 " extent=%ux%u format=%d size=%" PRIu64
+		     " aliases=%u matches=%u overlapping:%s\n",
+		     attachment.base_addr, attachment.width, attachment.height, static_cast<int>(format), attachment.size, images.Size(), matches,
+		     overlapping.C_Str());
 	}
 	if (image->image == nullptr || image->layout == VK_IMAGE_LAYOUT_UNDEFINED || image->samples != VK_SAMPLE_COUNT_1_BIT ||
 	    image->array_layers != 1u || image->mip_levels != 1u)

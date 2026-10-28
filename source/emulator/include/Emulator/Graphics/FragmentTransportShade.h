@@ -25,10 +25,11 @@ namespace Kyty::Libs::Graphics {
 
 // Creates the split compute pipeline over the guest pixel resources and the
 // transport storage set at index two. The caller owns and destroys both handles.
+// On failure error names the step that failed.
 [[nodiscard]] bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipeline_cache,
                                                         const ShaderBindResources& ps_bind, const Vector<uint32_t>& binary,
                                                         bool require_subgroup_size, VkDescriptorSetLayout transport_layout,
-                                                        VkPipelineLayout* layout, VkPipeline* pipeline);
+                                                        VkPipelineLayout* layout, VkPipeline* pipeline, String8* error);
 
 } // namespace Kyty::Libs::Graphics
 

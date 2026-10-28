@@ -797,6 +797,28 @@ bool GpuMemory::create_maybe_deleted(const Vector<OverlappedBlock>& others, GpuM
 	return false;
 }
 
+// An equal or crossing range of another extent or pitch cannot address the same
+// texels; a contained range may still be a sub-view of the same image.
+static bool RedescriptionComparesLayout(GpuMemoryOverlapType relation)
+{
+	return relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::Crosses;
+}
+
+// True when the union of the half-open ranges in `writers` covers [begin, end).
+static bool RangeCoveredBy(uint64_t begin, uint64_t end, std::vector<std::pair<uint64_t, uint64_t>> writers)
+{
+	std::sort(writers.begin(), writers.end());
+	for (const auto& writer: writers)
+	{
+		if (begin >= end || writer.first > begin)
+		{
+			break;
+		}
+		begin = std::max(begin, writer.second);
+	}
+	return begin >= end;
+}
+
 static bool TextureMatchesStorageSeed(const uint64_t* texture, const uint64_t* storage)
 {
 	return texture[TextureObject::PARAM_FORMAT] == storage[StorageTextureObject::PARAM_FORMAT] &&
@@ -1466,9 +1488,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				overlap = true;
 			} else if (info.type == GpuMemoryObjectType::StorageTexture &&
 			           ((o.object.type == GpuMemoryObjectType::StorageTexture &&
-			             StorageTextureRedescribesRange(o.params, info.params, obj.relation == OverlapType::Equals)) ||
+			             StorageTextureRedescribesRange(o.params, info.params, RedescriptionComparesLayout(obj.relation))) ||
 			            (o.object.type == GpuMemoryObjectType::RenderTexture &&
-			             StorageTextureRedescribesRenderTarget(o.params, info.params, obj.relation == OverlapType::Equals)) ||
+			             StorageTextureRedescribesRenderTarget(o.params, info.params, RedescriptionComparesLayout(obj.relation))) ||
 			            (o.object.type == GpuMemoryObjectType::DepthStencilBuffer && obj.relation == OverlapType::Equals &&
 			             StorageTextureRedescribesDepthTarget(info.params, Config::IsNextGen()))))
 			{
@@ -1556,7 +1578,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				overlap = true;
 			} else if (GpuMemoryAllowsTextureLinkDepthMetadata(o.object.type, obj.relation, info.type) ||
 			           GpuMemoryAllowsTextureOverDepthRange(o.object.type, obj.relation, info.type) ||
-			           GpuMemoryAllowsStorageTextureInsideDepthRange(o.object.type, obj.relation, info.type))
+			           GpuMemoryAllowsStorageTextureOverDepthRange(o.object.type, obj.relation, info.type))
 			{
 				// Same link as the mixed-parent form: the texture or storage view uploads guest bytes.
 				overlap = true;
@@ -1568,7 +1590,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				texel_bits_parent_id = create_from_objects ? -1 : obj.object_id;
 				retire_after_copy_ids.Add(obj.object_id);
 			} else if (GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type) ||
-			           GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, info.type))
+			           GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, info.type) ||
+			           GpuMemoryAllowsRenderTargetReclaimDepth(o.object.type, obj.relation, info.type))
 			{
 				delete_all = true;
 			} else
@@ -1643,7 +1666,30 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				Vector<StorageTextureRenderAliasCopy> copies;
 				return !StorageTexturePlanRenderAlias(o.params, h.block.vaddr[0], h.block.size[0], info.params, vaddr[0], size[0],
 				                                      &copies) &&
-				       StorageTextureRedescribesRenderTarget(o.params, info.params, obj.relation == OverlapType::Equals);
+				       StorageTextureRedescribesRenderTarget(o.params, info.params, RedescriptionComparesLayout(obj.relation));
+			};
+			// A parent holds no live bytes of the new range once device writes of `writers` newer than its
+			// own last write cover all of its overlap with that range (surfaces rendered over a recycled
+			// allocation since).
+			const auto superseded_in_range = [&](const OverlappedBlock& parent, const std::vector<int>& writers)
+			{
+				const auto& p = heap.objects[parent.object_id];
+				if (p.block.vaddr_num != 1 || vaddr_num != 1)
+				{
+					return false;
+				}
+				const uint64_t last_write = std::max({p.info.cpu_update_time, p.info.gpu_update_time, p.info.write_time});
+				std::vector<std::pair<uint64_t, uint64_t>> newer;
+				for (const int id: writers)
+				{
+					const auto& w = heap.objects[id];
+					if (id != parent.object_id && w.block.vaddr_num == 1 && w.info.device_write_time > last_write)
+					{
+						newer.emplace_back(w.block.vaddr[0], w.block.vaddr[0] + w.block.size[0]);
+					}
+				}
+				return RangeCoveredBy(std::max(p.block.vaddr[0], vaddr[0]),
+				                      std::min(p.block.vaddr[0] + p.block.size[0], vaddr[0] + size[0]), std::move(newer));
 			};
 			// A mipmapped storage array grows over its prefix (copied, then retired). The
 			// recycled allocation may still hold a live render target it links, a
@@ -1774,6 +1820,27 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				    o.content_origin != GpuMemoryContentOrigin::GpuAliasMaterialization &&
 				    !GpuMemoryHasPendingWritableWriteBack(o.in_use, o.read_only, o.write_back_func != nullptr,
 				                                          m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies()));
+			}
+
+			// A recycled allocation under several storage views and render targets: the new view
+			// re-describes the bytes of every one (another format, tile, texel size or, for an equal
+			// or crossing range, extent or pitch). Link them all, as the single-overlap path does;
+			// the new view seeds from guest bytes.
+			bool multi_recycled_storage_texture = info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
+			for (const auto& obj: others)
+			{
+				if (!multi_recycled_storage_texture)
+				{
+					break;
+				}
+				const auto& o              = heap.objects[obj.object_id].info;
+				const bool  compare_layout = RedescriptionComparesLayout(obj.relation);
+				multi_recycled_storage_texture =
+				    (compare_layout || obj.relation == OverlapType::IsContainedWithin) &&
+				    ((o.object.type == GpuMemoryObjectType::StorageTexture &&
+				      StorageTextureRedescribesRange(o.params, info.params, compare_layout)) ||
+				     (o.object.type == GpuMemoryObjectType::RenderTexture &&
+				      StorageTextureRedescribesRenderTarget(o.params, info.params, compare_layout)));
 			}
 
 			bool multi_overwritten_storage_texture =
@@ -1932,6 +1999,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			                          buffer != nullptr && vaddr_num == 1 &&
 			                          info.params[StorageTextureObject::PARAM_SKIP_SEED] == 0u;
 			uint64_t oldest_render_write = UINT64_MAX;
+			std::vector<int>                    render_alias_ids;
+			std::vector<const OverlappedBlock*> unaliased_parents;
 			for (const auto& candidate: others)
 			{
 				if (!multi_render_alias)
@@ -1939,18 +2008,32 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					break;
 				}
 				const auto& source = heap.objects[candidate.object_id];
-				if (source.info.object.type != GpuMemoryObjectType::RenderTexture)
-				{
-					multi_render_alias = GpuMemoryAllowsTextureStorageAlias(source.info.object.type, candidate.relation, info.type);
-					continue;
-				}
 				Vector<StorageTextureRenderAliasCopy> plan;
-				multi_render_alias = source.info.in_use && source.info.object.obj != nullptr && source.block.vaddr_num == 1 &&
-				                     source.info.gpu_update_time > source.info.cpu_update_time &&
-				                     StorageTexturePlanRenderAlias(source.info.params, source.block.vaddr[0], source.block.size[0],
-				                                                   info.params, vaddr[0], size[0], &plan);
-				render_alias_sources.emplace_back(source.info.gpu_update_time, candidate.object_id);
-				oldest_render_write = std::min(oldest_render_write, source.info.gpu_update_time);
+				if (source.info.object.type == GpuMemoryObjectType::RenderTexture && source.info.in_use &&
+				    source.info.object.obj != nullptr && source.block.vaddr_num == 1 &&
+				    source.info.gpu_update_time > source.info.cpu_update_time &&
+				    StorageTexturePlanRenderAlias(source.info.params, source.block.vaddr[0], source.block.size[0], info.params, vaddr[0],
+				                                  size[0], &plan))
+				{
+					render_alias_sources.emplace_back(source.info.gpu_update_time, candidate.object_id);
+					render_alias_ids.push_back(candidate.object_id);
+					oldest_render_write = std::min(oldest_render_write, source.info.gpu_update_time);
+				} else if (source.info.object.type == GpuMemoryObjectType::RenderTexture ||
+				           !GpuMemoryAllowsTextureStorageAlias(source.info.object.type, candidate.relation, info.type))
+				{
+					unaliased_parents.push_back(&candidate);
+				}
+			}
+			// A parent no copy applies to is fine once newer aliased targets overwrote its bytes in the range
+			// (captured: a 3840x2160 view over a recycled range where 2432x1368 targets of other formats and
+			// storage views lived before the two targets rendered there last).
+			// A crossing image holds no texels of the new view (see GpuMemoryAllowsStorageTextureCrossingRecycledImage).
+			for (const auto* candidate: unaliased_parents)
+			{
+				const auto parent_type = heap.objects[candidate->object_id].info.object.type;
+				multi_render_alias     = multi_render_alias &&
+				                     (GpuMemoryAllowsStorageTextureCrossingRecycledImage(parent_type, candidate->relation, info.type) ||
+				                      superseded_in_range(*candidate, render_alias_ids));
 			}
 			for (const auto& candidate: others)
 			{
@@ -2109,8 +2192,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// SB Contains + RT Contains (and permutations).
 			// A layered target that grows past its previous slices (one slice per draw)
 			// copies them from that prefix target, which it retires.
-			int  render_growth_id          = -1;
-			bool multi_render_target_alias = (info.type == GpuMemoryObjectType::RenderTexture && !others.IsEmpty());
+			int         render_growth_id          = -1;
+			Vector<int> render_reclaim_depth_ids;
+			bool        multi_render_target_alias = (info.type == GpuMemoryObjectType::RenderTexture && !others.IsEmpty());
 			if (multi_render_target_alias)
 			{
 				for (const auto& obj: others)
@@ -2125,6 +2209,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					    RenderTextureCanCopyGrowingBacking(o.params, info.params))
 					{
 						render_growth_id = obj.object_id;
+						continue;
+					}
+					if (GpuMemoryAllowsRenderTargetReclaimDepth(o.object.type, obj.relation, info.type))
+					{
+						render_reclaim_depth_ids.Add(obj.object_id);
 						continue;
 					}
 					if (!GpuMemoryAllowsRenderTargetSurfaceAlias(o.object.type, obj.relation, info.type))
@@ -2216,7 +2305,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// CPU-uploaded read-only StorageBuffers and live render targets the
 			// single-parent path links (a view inside one, or a redescription of its
 			// bytes that no render-alias copy applies to), storage views it
-			// redescribes in another format, depth targets it lies inside, and
+			// redescribes in another format, depth targets it lies inside or around, and
 			// read-only VertexBuffers (reclaimed). Guest memory holds the current
 			// bytes, so the image seeds from it.
 			Vector<int> storage_reclaim_vertex_ids;
@@ -2225,6 +2314,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			bool        storage_links_materialized        = false;
 			bool        storage_links_cache               = false;
 			bool        storage_links_redescribed         = false;
+			bool        storage_links_crossed             = false;
+			std::vector<int> parent_ids;
+			for (const auto& obj: others)
+			{
+				parent_ids.push_back(obj.object_id);
+			}
 			for (const auto& obj: others)
 			{
 				if (!multi_storage_texture_over_caches)
@@ -2244,14 +2339,27 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					storage_links_render_target = true;
 					continue;
 				}
-				if (GpuMemoryAllowsStorageTextureInsideDepthRange(o.object.type, obj.relation, info.type))
+				if (GpuMemoryAllowsStorageTextureOverDepthRange(o.object.type, obj.relation, info.type))
 				{
 					continue;
 				}
 				if (o.object.type == GpuMemoryObjectType::StorageTexture &&
-				    StorageTextureRedescribesRange(o.params, info.params, obj.relation == OverlapType::Equals))
+				    StorageTextureRedescribesRange(o.params, info.params, RedescriptionComparesLayout(obj.relation)))
 				{
 					storage_links_redescribed = true;
+					continue;
+				}
+				// Storage images never write back, so a view last bound writable before surfaces drew over
+				// its part of the range no longer holds its bytes (captured: a 2432-wide view of a recycled
+				// range that 2432x1368 render targets rendered since).
+				if (o.object.type == GpuMemoryObjectType::StorageTexture && superseded_in_range(obj, parent_ids))
+				{
+					storage_links_redescribed = true;
+					continue;
+				}
+				if (GpuMemoryAllowsStorageTextureCrossingRecycledImage(o.object.type, obj.relation, info.type))
+				{
+					storage_links_crossed = true;
 					continue;
 				}
 				if (GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type) ||
@@ -2272,7 +2380,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// links them here (captured: several small buffers inside a new
 			// 0x100000 volume). Guest memory already holds the current bytes.
 			if ((storage_links_cache && !storage_links_materialized && !storage_links_render_target) ||
-			    ((storage_links_render_target || storage_links_redescribed) && !storage_links_materialized))
+			    ((storage_links_render_target || storage_links_redescribed || storage_links_crossed) && !storage_links_materialized))
 			{
 				if (!storage_reclaim_vertex_ids.IsEmpty())
 				{
@@ -2363,6 +2471,23 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					}
 					create_from_objects = true;
 					retire_after_copy_ids.Add(render_growth_id);
+					others = keep;
+				}
+				if (multi_render_target_alias && !render_reclaim_depth_ids.IsEmpty())
+				{
+					Vector<OverlappedBlock> keep;
+					for (const auto& obj: others)
+					{
+						if (!std::any_of(render_reclaim_depth_ids.begin(), render_reclaim_depth_ids.end(),
+						                 [&obj](int id) { return id == obj.object_id; }))
+						{
+							keep.Add(obj);
+						}
+					}
+					for (int id: render_reclaim_depth_ids)
+					{
+						selective_reclaim_ids.Add(id);
+					}
 					others = keep;
 				}
 			} else if (multi_texture_reclaim)
@@ -2532,7 +2657,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			} else if (create_maybe_deleted(others, info.type, heap_id))
 			{
 				delete_all = true;
-			} else if (multi_storage_texture_alias)
+			} else if (multi_storage_texture_alias || multi_recycled_storage_texture)
 			{
 				overlap = true;
 			} else if (multi_storage_texture_over_caches)
@@ -2586,20 +2711,6 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				OverlapType         rel  = others.At(0).relation;
 				GpuMemoryObjectType type = heap.objects[others.At(0).object_id].info.object.type;
 
-				// A recycled allocation under several storage views of another format: link them all, as the
-				// single-overlap path does; the new view seeds from guest bytes.
-				bool redescribes_storage = type == GpuMemoryObjectType::StorageTexture &&
-				                           info.type == GpuMemoryObjectType::StorageTexture && rel == OverlapType::IsContainedWithin;
-				for (const auto& parent: others)
-				{
-					redescribes_storage = redescribes_storage &&
-					                      StorageTextureRedescribesRange(heap.objects[parent.object_id].info.params, info.params, false);
-				}
-
-				if (redescribes_storage)
-				{
-					overlap = true;
-				} else
 				{
 					switch (ObjectsRelation(type, rel, info.type))
 					{

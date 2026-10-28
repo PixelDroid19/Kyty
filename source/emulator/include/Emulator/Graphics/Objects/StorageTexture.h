@@ -69,15 +69,17 @@ public:
 // be either.
 [[nodiscard]] bool StorageTextureSharesDepthTexels(const uint64_t* storage, const uint64_t* depth, bool next_gen);
 // A storage view that re-describes memory of another view with a different
-// format or tile mode, or the exact range with a different extent: a recycled
-// allocation whose texels mean nothing in the other layout.
-[[nodiscard]] bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming, bool exact_range);
+// format or tile mode, or (compare_layout) with a different extent or pitch: a
+// recycled allocation whose texels mean nothing in the other layout. Callers
+// compare the layout for an equal or crossing range; a contained range may be
+// a sub-view of the same image.
+[[nodiscard]] bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming, bool compare_layout);
 // A one-level view of exactly the mip tail block of a 64 KiB-swizzled storage chain with the same element format.
 [[nodiscard]] bool StorageTextureViewsMipTail(const uint64_t* chain, uint64_t chain_address, const uint64_t* view, uint64_t view_address,
                                               uint64_t view_size);
 // The same over a render target: a different texel size, a linear view of a
-// tiled target (or the reverse), or the exact range with a different extent.
-[[nodiscard]] bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool exact_range);
+// tiled target (or the reverse), or (compare_layout) a different extent or pitch.
+[[nodiscard]] bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool compare_layout);
 // The same over a Gen5 depth target: a storage view outside the depth layout (mode 24)
 // orders the texels differently, so it never reads what the depth target wrote.
 [[nodiscard]] bool StorageTextureRedescribesDepthTarget(const uint64_t* storage, bool next_gen);

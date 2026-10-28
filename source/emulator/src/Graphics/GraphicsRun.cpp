@@ -343,6 +343,28 @@ void Gpu::WaitLocked()
 	}
 }
 
+bool Gpu::SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value)
+{
+	CommandProcessor* owner = nullptr;
+	{
+		std::lock_guard<std::mutex> topology_lock(m_topology_mutex);
+		for (auto* cp: m_compute_cp)
+		{
+			if (cp != nullptr && cp->OwnsSubmissionQueue(submission))
+			{
+				owner = cp;
+				break;
+			}
+		}
+		if (owner == nullptr && m_gfx_cp->OwnsSubmissionQueue(submission))
+		{
+			owner = m_gfx_cp;
+		}
+	}
+	EXIT_IF(owner == nullptr);
+	return owner->SubmitForDeviceWait(submission, timeline, value);
+}
+
 void Gpu::WaitSubmission(SubmissionId submission)
 {
 	// This is completion of work that already crossed the admission gate, not
@@ -742,6 +764,59 @@ void CommandProcessor::WaitSubmission(SubmissionId submission)
 	(void)GuestDeviceAddressAcknowledgeReader(submission);
 }
 
+bool CommandProcessor::SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value)
+{
+	EXIT_IF(!OwnsSubmissionQueue(submission) || timeline == nullptr || value == nullptr);
+	Core::LockGuard lock(m_mutex);
+
+	uint32_t           slot  = 0;
+	GpuSubmissionState state = GpuSubmissionState::Completed;
+	if (m_submission_slots.FindSlot(submission, &slot) != GpuSubmissionResult::Success)
+	{
+		return false;
+	}
+	require_submission_success(m_submission_slots.GetState(submission, &state), "GetState", m_queue, slot);
+	if (state == GpuSubmissionState::Recording)
+	{
+		EXIT_IF(slot != static_cast<uint32_t>(m_current_buffer));
+		SubmissionId latest_completed;
+		(void)SubmitCurrentLocked(&latest_completed);
+		if (m_submission_slots.FindSlot(submission, &slot) != GpuSubmissionResult::Success)
+		{
+			return false;
+		}
+	}
+	VkDevice device = nullptr;
+	return m_buffer[slot]->GetTimeline(&device, timeline, value);
+}
+
+bool CommandProcessor::AwaitOnDevice(SubmissionId submission)
+{
+	if (OwnsSubmissionQueue(submission))
+	{
+		return false;
+	}
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		if (m_buffer[m_current_buffer]->AwaitsSubmissionOnDevice(submission))
+		{
+			return false;
+		}
+	}
+	// The owner's lock is taken without this processor's, as for a host wait.
+	VkSemaphore timeline = nullptr;
+	uint64_t    value    = 0;
+	if (!g_gpu->SubmitForDeviceWait(submission, &timeline, &value))
+	{
+		return false;
+	}
+	Core::LockGuard lock(m_mutex);
+	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+	m_buffer[m_current_buffer]->AwaitSubmissionOnDevice(submission, timeline, value);
+	return true;
+}
+
 void CommandProcessor::BufferWait()
 {
 	BufferInit();
@@ -1046,6 +1121,7 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	{
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
+		m_consolidated_producer   = dependency.producer;
 		return;
 	}
 	BufferFlushForGpuWait();
@@ -1130,6 +1206,7 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	{
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
+		m_consolidated_producer   = dependency.producer;
 		return;
 	}
 	BufferFlushForGpuWait();
@@ -1234,23 +1311,42 @@ void CommandProcessor::DeferWriteData(uint32_t* dst, const uint32_t* src, uint32
 	require_submission_success(register_result, "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
 }
 
-// A one- or two-dword DMA_DATA store follows the WRITE_DATA ordering below: behind a
-// consolidated wait, or behind a deferred store to the same bytes, it becomes visible
-// at end of pipe instead of at parse time.
-bool CommandProcessor::DeferWriteBehindPendingStore(uint32_t* dst, const uint32_t* src, uint32_t dw_num)
+void CommandProcessor::WaitProducer(SubmissionId producer)
 {
-	Core::LockGuard lock(m_mutex);
+	// Only a producer still in the command buffer being recorded needs a submission; one already
+	// submitted is waited for as it is.
+	SubmissionId current;
+	const bool   recorded = m_current_buffer >= 0 && m_current_buffer < VK_BUFFERS_NUM && m_buffer[m_current_buffer] != nullptr &&
+	                      m_buffer[m_current_buffer]->GetSubmissionId(&current) && producer == current;
+	if (recorded)
+	{
+		BufferFlushForGpuWait();
+	}
+	g_gpu->WaitSubmission(producer);
+}
 
-	if (dw_num != 1u && dw_num != 2u)
+// The CP reaches a DMA_DATA store recorded behind a consolidated wait only after the awaited
+// label lands, and after an earlier store to the same bytes deferred to end of pipe. Retiring
+// those producers first makes the store visible in that order, and still before any later work
+// of this batch reads it.
+void CommandProcessor::RetireBeforeStore(uint64_t dst, uint32_t size_bytes)
+{
+	if (m_consolidated_plain_wait)
 	{
-		return false;
+		WaitProducer(m_consolidated_producer);
+		m_consolidated_plain_wait = false;
 	}
-	if (!m_consolidated_plain_wait && !HasPendingDeferredWrite(dst, dw_num * 4u))
+	if (size_bytes != 4u && size_bytes != 8u)
 	{
-		return false;
+		return;
 	}
-	DeferWriteData(dst, src, dw_num);
-	return true;
+	SubmissionDependency dependency {};
+	const uint64_t       mask   = size_bytes == 8u ? ~0ull : 0xffffffffull;
+	const auto           result = m_submission_slots.FindPendingProducer(dst, size_bytes, 0, mask, &dependency);
+	if (result == GpuSubmissionResult::Success || result == GpuSubmissionResult::ProducerValueMismatch)
+	{
+		WaitProducer(dependency.producer);
+	}
 }
 
 void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom,
@@ -2306,8 +2402,10 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances)
 	m_num_instances = num_instances;
 }
 
+// A dependency on another queue is ordered on the device first; one the draw still reports
+// once its recording awaits it needs the result on the host.
 template <typename Callback>
-static void RetryGuestDeviceAddressDraw(const Callback& callback)
+static void RetryGuestDeviceAddressDraw(CommandProcessor* cp, const Callback& callback)
 {
 	SubmissionId pending;
 	for (uint32_t attempt = 0; attempt < 64u; ++attempt)
@@ -2318,6 +2416,10 @@ static void RetryGuestDeviceAddressDraw(const Callback& callback)
 
 		// A wait can submit and rotate a recording command buffer. The callback
 		// reacquires the processor lock and retries against the new current buffer.
+		if (cp->AwaitOnDevice(pending))
+		{
+			continue;
+		}
 		g_gpu->WaitSubmission(pending);
 	}
 	EXIT("device-address draw preparation did not stabilize: queue=%u sequence=%" PRIu64 "\n", pending.queue.Value(),
@@ -2351,7 +2453,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 			}
 		}
 	}
-	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
+	RetryGuestDeviceAddressDraw(this, [&](SubmissionId* pending)
 	{
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
@@ -2389,7 +2491,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 		index_type_and_size = m_index_type_and_size;
 		instance_count = m_num_instances;
 	}
-	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
+	RetryGuestDeviceAddressDraw(this, [&](SubmissionId* pending)
 	{
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
@@ -2499,7 +2601,7 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		vertex_offset = static_cast<int32_t>(args.base_vertex_location);
 		first_instance = args.start_instance_location;
 	}
-	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
+	RetryGuestDeviceAddressDraw(this, [&](SubmissionId* pending)
 	{
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
@@ -2561,7 +2663,7 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
 		m_num_instances = args.instance_count;
 		submit_id       = m_sumbit_id;
 	}
-	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
+	RetryGuestDeviceAddressDraw(this, [&](SubmissionId* pending)
 	{
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
@@ -2724,7 +2826,7 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifie
 			}
 		}
 	}
-	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
+	RetryGuestDeviceAddressDraw(this, [&](SubmissionId* pending)
 	{
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
@@ -3224,7 +3326,7 @@ void CommandProcessor::WaitDeviceAddressWriteBacks()
 	// publish its guest copy. Waiting must run without the recording mutex —
 	// completion of the pending submission can publish resources that need it.
 	SubmissionId pending;
-	for (uint32_t attempt = 0; GuestDeviceAddressPendingWriteBack(GpuQueueId(static_cast<uint32_t>(m_queue)), nullptr, &pending);)
+	for (uint32_t attempt = 0; GuestDeviceAddressPendingWriteBack(GpuQueueId(static_cast<uint32_t>(m_queue)), {}, nullptr, &pending);)
 	{
 		g_gpu->WaitSubmission(pending);
 		if (++attempt >= 64u)

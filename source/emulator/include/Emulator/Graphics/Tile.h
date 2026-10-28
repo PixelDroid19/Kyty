@@ -82,6 +82,9 @@ uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, ui
                                 uint32_t layer = 0u);
 void     TileConvertDepth64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
 	                                      uint32_t bytes_per_element, uint32_t layer = 0u);
+// The bytes a depth 64 KiB block holds for slice from_slice, read as slice to_slice, are the block's samples
+// translated by XOR: sample (x, y) of the read is sample (x ^ dx, y ^ dy) of the write.
+void     TileGetDepth64KBSliceShift(uint32_t bytes_per_element, uint32_t from_slice, uint32_t to_slice, uint32_t* dx, uint32_t* dy);
 uint64_t TileGetDepth64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems);
 void     TileConvertDepth64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems);
 // Gen5 kStandard4KB (tile mode 5) 32bpp surfaces. The layout is used by

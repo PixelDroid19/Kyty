@@ -256,27 +256,7 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA destination ignored\n");
 		return 6;
 	}
-	if (!source_is_immediate &&
-	    GpuMemoryValidateAllocatedRange(packet.source_address, packet.byte_count) != GpuMemoryRangeValidationStatus::Valid)
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA source ignored\n");
-		return 6;
-	}
-
-	// The CP reads the source when it reaches the packet; a small store it cannot make
-	// visible yet (behind a consolidated wait) is published at end of pipe, in CP order.
-	if (packet.byte_count <= 8u)
-	{
-		uint32_t words[2] = {static_cast<uint32_t>(packet.source_address), static_cast<uint32_t>(packet.source_address)};
-		if (!source_is_immediate)
-		{
-			memcpy(words, reinterpret_cast<const void*>(packet.source_address), packet.byte_count);
-		}
-		if (cp->DeferWriteBehindPendingStore(reinterpret_cast<uint32_t*>(packet.destination_address), words, packet.byte_count / 4u))
-		{
-			return 6;
-		}
-	}
+	cp->RetireBeforeStore(packet.destination_address, packet.byte_count);
 	GpuMemoryNotifyHostWrite(packet.destination_address, packet.byte_count);
 
 	if (source_is_immediate)
@@ -289,6 +269,11 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 		}
 	} else
 	{
+		if (GpuMemoryValidateAllocatedRange(packet.source_address, packet.byte_count) != GpuMemoryRangeValidationStatus::Valid)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA source ignored\n");
+			return 6;
+		}
 		memmove(reinterpret_cast<void*>(packet.destination_address), reinterpret_cast<const void*>(packet.source_address),
 		        packet.byte_count);
 	}
@@ -326,34 +311,23 @@ KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
 		return 7;
 	}
 
-	if (src != 0 && GpuMemoryValidateAllocatedRange(src, byte_count) != GpuMemoryRangeValidationStatus::Valid)
+	cp->RetireBeforeStore(dst, byte_count);
+	if (src == 0)
+	{
+		GpuMemoryNotifyHostWrite(dst, byte_count);
+		memset(reinterpret_cast<void*>(dst), 0, byte_count);
+		GraphicsRenderMemoryFlush(dst, byte_count);
+		GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaDataCustom, dst, byte_count, 0u, 0u, 0u);
+		return 7;
+	}
+
+	if (src == 0 || GpuMemoryValidateAllocatedRange(src, byte_count) != GpuMemoryRangeValidationStatus::Valid)
 	{
 		return 7;
 	}
 
-	// Ordered like the hardware packet: a small store behind a consolidated wait is
-	// published at end of pipe.
-	if (byte_count <= 8u)
-	{
-		uint32_t words[2] = {};
-		if (src != 0)
-		{
-			memcpy(words, reinterpret_cast<const void*>(src), byte_count);
-		}
-		if (cp->DeferWriteBehindPendingStore(reinterpret_cast<uint32_t*>(dst), words, byte_count / 4u))
-		{
-			return 7;
-		}
-	}
-
 	GpuMemoryNotifyHostWrite(dst, byte_count);
-	if (src == 0)
-	{
-		memset(reinterpret_cast<void*>(dst), 0, byte_count);
-	} else
-	{
-		memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), byte_count);
-	}
+	memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), byte_count);
 	GraphicsRenderMemoryFlush(dst, byte_count);
 	GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaDataCustom, dst, byte_count, 0u, 0u, 0u);
 	return 7;

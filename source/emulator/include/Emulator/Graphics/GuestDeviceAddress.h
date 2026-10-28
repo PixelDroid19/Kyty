@@ -79,9 +79,11 @@ void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
 // The caller holds the render recording lock through the later write-back.
 // Wait for a returned dependency only after releasing recording locks, then retry.
 // With `publishable`, results the caller can publish in the consumer's queue order
-// (GuestDeviceAddressRecordPublication) are listed there instead of reported.
-[[nodiscard]] bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, std::vector<GpuMemoryStoragePublication>* publishable,
-                                                      SubmissionId* dependency);
+// (GuestDeviceAddressRecordPublication) are listed there instead of reported;
+// `device_awaited` names the other queues' submissions the consumer's recording
+// waits for on the device (GpuMemoryPendingStorageWriteBack).
+[[nodiscard]] bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, const std::vector<SubmissionId>& device_awaited,
+                                                      std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
 
 // Records into `cmd`, after the GPU work already recorded there, a copy of
 // `source` (whose first byte is guest address `vaddr`, `size` bytes) into the

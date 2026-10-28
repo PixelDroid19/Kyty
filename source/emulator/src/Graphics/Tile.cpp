@@ -15,6 +15,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <iterator>
 
@@ -1234,6 +1235,49 @@ uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, ui
 	const uint64_t            block_index   = static_cast<uint64_t>(yb) * blocks_x + xb;
 	return (block_index * k_block_bytes) +
 	       (Depth64KBWithinBlockOffset(x % block_width, y % k_block_height, bytes_per_element) ^ Sw64kPipeSliceXor(layer));
+}
+
+void TileGetDepth64KBSliceShift(uint32_t bytes_per_element, uint32_t from_slice, uint32_t to_slice, uint32_t* dx, uint32_t* dy)
+{
+	EXIT_IF(dx == nullptr || dy == nullptr);
+	EXIT_IF(bytes_per_element != 2u && bytes_per_element != 4u);
+	// The within-block offset is linear over the bits of x and y, so the sample whose offset is the XOR of the
+	// two slice patterns is the translation every sample of the block undergoes. Slice patterns only set bits
+	// 8..11, so the 16 translations per sample size are found once.
+	struct Shift
+	{
+		uint32_t x = UINT32_MAX;
+		uint32_t y = UINT32_MAX;
+	};
+	static const auto shifts = []()
+	{
+		std::array<std::array<Shift, 16>, 2> table {};
+		for (uint32_t size = 0; size < 2u; size++)
+		{
+			const uint32_t bytes       = size == 0u ? 2u : 4u;
+			const uint32_t block_width = bytes == 2u ? 256u : 128u;
+			for (uint32_t y = 0; y < 128u; y++)
+			{
+				for (uint32_t x = 0; x < block_width; x++)
+				{
+					const uint32_t offset = Depth64KBWithinBlockOffset(x, y, bytes);
+					if ((offset & ~0x0f00u) == 0u && table[size][offset >> 8u].x == UINT32_MAX)
+					{
+						table[size][offset >> 8u] = {x, y};
+					}
+				}
+			}
+		}
+		return table;
+	}();
+	const uint32_t xor_offset = Sw64kPipeSliceXor(from_slice) ^ Sw64kPipeSliceXor(to_slice);
+	const auto&    shift      = shifts[bytes_per_element == 2u ? 0u : 1u][(xor_offset >> 8u) & 0xfu];
+	if (shift.x == UINT32_MAX)
+	{
+		EXIT("depth 64 KiB slice pattern 0x%x has no sample\n", xor_offset);
+	}
+	*dx = shift.x;
+	*dy = shift.y;
 }
 
 void TileConvertDepth64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,

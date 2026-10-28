@@ -1479,10 +1479,9 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
                                          uint32_t first_instance, const FragmentTransportGeometry& geometry)
 {
 	EXIT_IF(pipeline == nullptr || pipeline->transport == nullptr || color_info == nullptr || depth_info == nullptr);
-	if (primitive_plan.chunked || instance_count > 1u)
+	if (primitive_plan.chunked)
 	{
-		EXIT("fragment transport does not split instanced or chunked draws yet: chunked=%u instances=%u\n",
-		     primitive_plan.chunked ? 1u : 0u, instance_count);
+		EXIT("fragment transport does not split chunked draws yet\n");
 	}
 	uint32_t primitive_count = 0;
 	switch (primitive_plan.topology)
@@ -1523,68 +1522,73 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
 			vkCmdBindIndexBuffer(cmd, geometry.indices->buffer, 0, geometry.index_type);
 		}
 	};
-	// A chunk replays primitives [first, first + count) of the draw; strip
+	// A chunk replays primitives [first, first + count) of one instance; strip
 	// chunks start on an even primitive, so their winding matches the strip.
-	const auto draw_geometry = [&](VkCommandBuffer cmd, uint32_t first, uint32_t count)
+	const auto draw_geometry = [&](VkCommandBuffer cmd, uint32_t instance, uint32_t first, uint32_t count)
 	{
 		const uint32_t first_element = strip ? first : first * 3u;
 		const uint32_t elements      = strip ? count + 2u : count * 3u;
 		if (geometry.indices != nullptr)
 		{
-			vkCmdDrawIndexed(cmd, elements, instance_count, first_element, geometry.base_vertex, first_instance);
+			vkCmdDrawIndexed(cmd, elements, 1u, first_element, geometry.base_vertex, instance);
 		} else
 		{
-			vkCmdDraw(cmd, elements, instance_count, geometry.first_vertex + first_element, first_instance);
+			vkCmdDraw(cmd, elements, 1u, geometry.first_vertex + first_element, instance);
 		}
 	};
 
-	for (uint32_t chunk_first = 0; chunk_first < primitive_count; chunk_first += transport.chunk_primitives)
+	// The primitive ID restarts with every instance, so each instance is its own
+	// replay; instances stay in guest order, which keeps blending order.
+	for (uint32_t instance = first_instance; instance < first_instance + std::max(instance_count, 1u); ++instance)
 	{
-		const uint32_t chunk_count = std::min(transport.chunk_primitives, primitive_count - chunk_first);
-		for (uint32_t band_top = static_cast<uint32_t>(scissor[1]); band_top < static_cast<uint32_t>(scissor[3]);
-		     band_top += transport.band_height)
+		for (uint32_t chunk_first = 0; chunk_first < primitive_count; chunk_first += transport.chunk_primitives)
 		{
-			const uint32_t band_bottom = std::min<uint32_t>(static_cast<uint32_t>(scissor[3]), band_top + transport.band_height);
-			const VkRect2D band {{scissor[0], static_cast<int32_t>(band_top)},
-			                     {static_cast<uint32_t>(scissor[2] - scissor[0]), band_bottom - band_top}};
-			FragmentTransportBeginTile(buffer, transport);
+			const uint32_t chunk_count = std::min(transport.chunk_primitives, primitive_count - chunk_first);
+			for (uint32_t band_top = static_cast<uint32_t>(scissor[1]); band_top < static_cast<uint32_t>(scissor[3]);
+			     band_top += transport.band_height)
+			{
+				const uint32_t band_bottom = std::min<uint32_t>(static_cast<uint32_t>(scissor[3]), band_top + transport.band_height);
+				const VkRect2D band {{scissor[0], static_cast<int32_t>(band_top)},
+				                     {static_cast<uint32_t>(scissor[2] - scissor[0]), band_bottom - band_top}};
+				FragmentTransportBeginTile(buffer, transport);
 
-			auto* vk = buffer->RecordState();
-			vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline);
-			SetDynamicParams(vk, capture);
-			vkCmdSetScissor(vk, 0, 1, &band);
-			vkCmdPushConstants(vk, capture->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters),
-			                   &kernel_parameters);
-			vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
-			bind_index_buffer(vk);
-			BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_first, vertex_records, geometry.indices_snapshotted,
-			                  first_instance, instance_count);
-			bind_vertex(capture->pipeline_layout);
-			buffer->BeginRenderPass(framebuffer, color_info, depth_info, &sample_locations);
-			draw_geometry(buffer->RecordInsideRenderPass(), chunk_first, chunk_count);
+				auto* vk = buffer->RecordState();
+				vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline);
+				SetDynamicParams(vk, capture);
+				vkCmdSetScissor(vk, 0, 1, &band);
+				vkCmdPushConstants(vk, capture->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters),
+				                   &kernel_parameters);
+				vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
+				bind_index_buffer(vk);
+				BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_first, vertex_records, geometry.indices_snapshotted,
+				                  first_instance, instance_count);
+				bind_vertex(capture->pipeline_layout);
+				buffer->BeginRenderPass(framebuffer, color_info, depth_info, &sample_locations);
+				draw_geometry(buffer->RecordInsideRenderPass(), instance, chunk_first, chunk_count);
 
-			FragmentTransportDispatchScanPack(buffer, transport);
-			BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->transport->shade_layout, ps_input_info.bind,
-			                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, 0, nullptr, sh_ctx->GetPs().ps_regs.chksum,
-			                stencil_attached_depth, nullptr, &device_address_table, ResolvePixelScaledImageReadAccess(ps_input_info),
-			                color_info);
-			FragmentTransportRecordShade(buffer, transport, *pipeline->transport, ps_input_info.bind, ps_input_info);
+				FragmentTransportDispatchScanPack(buffer, transport);
+				BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->transport->shade_layout, ps_input_info.bind,
+				                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, 0, nullptr, sh_ctx->GetPs().ps_regs.chksum,
+				                stencil_attached_depth, nullptr, &device_address_table, ResolvePixelScaledImageReadAccess(ps_input_info),
+				                color_info);
+				FragmentTransportRecordShade(buffer, transport, *pipeline->transport, ps_input_info.bind, ps_input_info);
 
-			vk = buffer->RecordOutsideRenderPass();
-			vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline);
-			SetDynamicParams(vk, resolve);
-			vkCmdSetScissor(vk, 0, 1, &band);
-			vkCmdPushConstants(vk, resolve->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters),
-			                   &kernel_parameters);
-			vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
-			bind_index_buffer(vk);
-			BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_first, vertex_records, geometry.indices_snapshotted,
-			                  first_instance, instance_count);
-			bind_vertex(resolve->pipeline_layout);
-			buffer->BeginRenderPass(framebuffer, color_info, depth_info, &sample_locations);
-			draw_geometry(buffer->RecordInsideRenderPass(), chunk_first, chunk_count);
-			FragmentTransportEndTile(buffer);
-			DebugStatsRecordDraw();
+				vk = buffer->RecordOutsideRenderPass();
+				vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline);
+				SetDynamicParams(vk, resolve);
+				vkCmdSetScissor(vk, 0, 1, &band);
+				vkCmdPushConstants(vk, resolve->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters),
+				                   &kernel_parameters);
+				vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
+				bind_index_buffer(vk);
+				BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_first, vertex_records, geometry.indices_snapshotted,
+				                  first_instance, instance_count);
+				bind_vertex(resolve->pipeline_layout);
+				buffer->BeginRenderPass(framebuffer, color_info, depth_info, &sample_locations);
+				draw_geometry(buffer->RecordInsideRenderPass(), instance, chunk_first, chunk_count);
+				FragmentTransportEndTile(buffer);
+				DebugStatsRecordDraw();
+			}
 		}
 	}
 
@@ -2806,11 +2810,10 @@ static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const 
                                ShaderVertexInputInfo* pull, uint64_t index_address)
 {
 	const uint64_t bytes  = static_cast<uint64_t>(plan.groups) * plan.info.GroupDwords() * 4u;
-	auto*          output = buffer->AllocateTransientDeviceBuffer(
-        bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	auto*          output = buffer->GeometryOutput(bytes);
 	if (output == nullptr)
 	{
-		EXIT("geometry pass output of %" PRIu64 " bytes exceeds the transient device buffer budget\n", bytes);
+		EXIT("geometry pass output of %" PRIu64 " bytes exceeds the geometry output limit\n", bytes);
 	}
 	VkBufferDeviceAddressInfo address_info {};
 	address_info.sType     = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
