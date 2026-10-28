@@ -113,6 +113,36 @@ void SplitShadeCompressedExportValidates()
 	Check(binary.Size() > 8u, "split shade module has code");
 }
 
+// A transported pixel ds_append runs under the architectural EXEC of the split
+// guest wave; after CMPX narrows it the module still assembles and validates.
+void SplitShadeGdsAppendValidates()
+{
+	ScopedShaderValidation validation;
+
+	Vector<uint32_t> words;
+	words.Add(0xbe8e030eu); // s_mov_b32 s14, s14 materializes the bound GDS pointer SGPR
+	words.Add(0xbefc0380u); // s_mov_b32 m0, 0
+	words.Add(0x7e040300u); // v_mov_b32 v2, v0
+	words.Add(0x7e020281u); // v_mov_b32 v1, 1
+	words.Add(0x7da40300u); // v_cmpx_eq_u32 vcc, v0, v1
+	words.Add(0xd8fa0000u); // ds_append v2, gds
+	words.Add(0x02000000u);
+	words.Add(0xbf810000u); // s_endpgm
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	Check(ShaderTryParseBounded(words.GetDataConst(), words.Size() * 4u, &code), "program parses");
+
+	ShaderPixelInputInfo pixel {};
+	pixel.bind.gds_pointers.pointers_num      = 1;
+	pixel.bind.gds_pointers.start_register[0] = 14;
+	ShaderCalcBindingIndices(&pixel.bind);
+
+	Vector<uint32_t> binary;
+	String8          error;
+	Check(FragmentTransportBuildShadeModule(code, pixel, 0u, 0u, &binary, &error), error.c_str());
+	Check(binary.Size() > 8u, "split shade module has code");
+}
+
 void ResolveModuleValidates()
 {
 	ScopedShaderValidation validation;
@@ -182,6 +212,11 @@ TEST(EmulatorFragmentTransport, SplitShadeModuleValidates)
 TEST(EmulatorFragmentTransport, SplitShadeCompressedExportValidates)
 {
 	ASSERT_EXIT(([] { Initialize(); SplitShadeCompressedExportValidates(); std::_Exit(0); })(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentTransport, SplitShadeGdsAppendValidates)
+{
+	ASSERT_EXIT(([] { Initialize(); SplitShadeGdsAppendValidates(); std::_Exit(0); })(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorFragmentTransport, ResolveModuleValidates)

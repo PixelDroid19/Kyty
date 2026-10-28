@@ -2503,8 +2503,10 @@ static bool EmitGdsAppend(const ShaderCode& code, uint32_t index, Spirv* spirv, 
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
 	if (bind_info == nullptr || bind_info->gds_pointers.pointers_num <= 0) { return false; }
-	return code.GetType() == ShaderType::Pixel ? EmitFragmentGdsAppend(code, inst, index, spirv, dst_source)
-	                                           : EmitOrdinaryNativeGdsAppend(inst, index, spirv, dst_source);
+	// The fragment transport runs the pixel program as a split guest wave with an architectural EXEC.
+	return code.GetType() == ShaderType::Pixel && !spirv->UsesFragmentCompute()
+	           ? EmitFragmentGdsAppend(code, inst, index, spirv, dst_source)
+	           : EmitOrdinaryNativeGdsAppend(inst, index, spirv, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
