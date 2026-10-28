@@ -130,6 +130,9 @@ public:
 	[[nodiscard]] bool UsesNativeComputeWave() const;
 	// Split wave64 (ShaderSpirvSplitWave.cpp): two or four host subgroups per guest wave on the native per-lane path.
 	[[nodiscard]] bool UsesSplitComputeWave() const;
+	// Split compute wave: a mask producer whose result each lane reads only
+	// for itself, so its parts skip the wave-wide gather.
+	[[nodiscard]] bool IsLaneLocalMaskResult(uint32_t index) const;
 	// Guest lanes per host subgroup of a split wave: 32 or 16.
 	[[nodiscard]] uint32_t SplitWavePartLanes() const;
 	// The SubgroupLocalInvocationId builtin. A split wave keeps the guest lane in %gl_SubgroupInvocationID.
@@ -521,6 +524,8 @@ private:
 	mutable int                   m_native_wave_tier = -1;
 	mutable bool                  m_lane_reductions_ready = false;
 	mutable ShaderLaneReductions m_lane_reductions;
+	mutable bool                  m_lane_local_masks_ready = false;
+	mutable std::vector<bool>     m_lane_local_masks;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;

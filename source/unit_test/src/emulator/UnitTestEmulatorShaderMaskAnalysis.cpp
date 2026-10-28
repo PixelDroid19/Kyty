@@ -124,4 +124,95 @@ TEST(EmulatorShaderMaskAnalysis, RejectsIndirectLabelThatCanBypassCompare)
 	EXPECT_FALSE(ShaderReverseBorrowMaskHasProvenance(code, 1u));
 }
 
+namespace {
+
+constexpr uint32_t kCndmaskWord0       = (0xd4u << 24u) | (0x101u << 16u) | 5u;
+constexpr uint32_t kCndmaskSources(uint32_t mask_register)
+{
+	return 256u | ((256u + 1u) << 9u) | (mask_register << 18u);
+}
+constexpr uint32_t kSCmpLgU64S4Zero    = (0x17eu << 23u) | (0x13u << 16u) | (128u << 8u) | 4u;
+constexpr uint32_t kSAndB64S6S4Exec    = (2u << 30u) | (0x0fu << 23u) | (6u << 16u) | (126u << 8u) | 4u;
+constexpr uint32_t kSAndSaveexecS6S4   = (0x17du << 23u) | (6u << 16u) | (0x24u << 8u) | 4u;
+constexpr uint32_t kSCbranchScc1Next   = (0x17fu << 23u) | (5u << 16u);
+constexpr uint32_t kSCbranchExeczNext  = (0x17fu << 23u) | (8u << 16u);
+constexpr uint32_t kVCmpxLtU32         = (0x3eu << 25u) | (0xd1u << 17u) | (1u << 9u) | 256u;
+constexpr uint32_t kVReadfirstlaneS8V0 = (0x3fu << 25u) | (8u << 17u) | (2u << 9u) | 256u;
+
+} // namespace
+
+TEST(EmulatorShaderMaskAnalysis, LaneBitReaderKeepsCompareLocal)
+{
+	const uint32_t shader[] = {kCmpLtU32S4, kCmpSources, kCndmaskWord0, kCndmaskSources(4u), kEndpgm};
+	const auto     local    = ShaderLaneLocalMaskResults(ParseShader(shader));
+
+	ASSERT_EQ(local.size(), 3u);
+	EXPECT_TRUE(local[0]);
+	EXPECT_FALSE(local[1]);
+}
+
+TEST(EmulatorShaderMaskAnalysis, WaveWideScalarReaderNeedsWholeCompare)
+{
+	const uint32_t shader[] = {kCmpLtU32S4, kCmpSources, kSCmpLgU64S4Zero, kCndmaskWord0, kCndmaskSources(4u), kEndpgm};
+	const auto     local    = ShaderLaneLocalMaskResults(ParseShader(shader));
+
+	ASSERT_EQ(local.size(), 4u);
+	EXPECT_FALSE(local[0]);
+}
+
+TEST(EmulatorShaderMaskAnalysis, PointwiseAlgebraKeepsCompareLocalUntilSccIsRead)
+{
+	const uint32_t local_shader[] = {kCmpLtU32S4, kCmpSources, kSAndB64S6S4Exec, kCndmaskWord0, kCndmaskSources(6u), kEndpgm};
+	const uint32_t scc_shader[]   = {kCmpLtU32S4,     kCmpSources,       kSAndB64S6S4Exec, kSCbranchScc1Next,
+	                                 kCndmaskWord0, kCndmaskSources(6u), kEndpgm};
+
+	// s_cmp_eq_u32 s0, s1 redefines SCC before the branch reads it.
+	constexpr uint32_t s_cmp_eq_u32_s0_s1 = (0x17eu << 23u) | (0x06u << 16u) | (1u << 8u) | 0u;
+	const uint32_t     redefined_scc[]    = {kCmpLtU32S4,       kCmpSources,     kSAndB64S6S4Exec,    s_cmp_eq_u32_s0_s1,
+	                                         kSCbranchScc1Next, kCndmaskWord0, kCndmaskSources(6u), kEndpgm};
+
+	EXPECT_TRUE(ShaderLaneLocalMaskResults(ParseShader(local_shader))[0]);
+	EXPECT_FALSE(ShaderLaneLocalMaskResults(ParseShader(scc_shader))[0]);
+	EXPECT_TRUE(ShaderLaneLocalMaskResults(ParseShader(redefined_scc))[0]);
+}
+
+TEST(EmulatorShaderMaskAnalysis, ExecBranchAfterSaveexecNeedsWholeCompare)
+{
+	const uint32_t shader[]    = {kCmpLtU32S4, kCmpSources, kSAndSaveexecS6S4, kSCbranchExeczNext, kEndpgm};
+	const uint32_t no_branch[] = {kCmpLtU32S4, kCmpSources, kSAndSaveexecS6S4, kEndpgm};
+	const auto     local       = ShaderLaneLocalMaskResults(ParseShader(shader));
+
+	ASSERT_EQ(local.size(), 4u);
+	EXPECT_FALSE(local[0]);
+	EXPECT_TRUE(ShaderLaneLocalMaskResults(ParseShader(no_branch))[0]);
+}
+
+TEST(EmulatorShaderMaskAnalysis, ReadfirstlaneNeedsWholeCompareExec)
+{
+	constexpr uint32_t v_mov_b32_v2_v0 = (0x3fu << 25u) | (2u << 17u) | (1u << 9u) | 256u;
+	const uint32_t     shader[]        = {kVCmpxLtU32, kVReadfirstlaneS8V0, kEndpgm};
+	const uint32_t     lane_reader[]   = {kVCmpxLtU32, v_mov_b32_v2_v0, kEndpgm};
+	const auto         local           = ShaderLaneLocalMaskResults(ParseShader(shader));
+
+	ASSERT_EQ(local.size(), 3u);
+	EXPECT_FALSE(local[0]);
+	EXPECT_TRUE(ShaderLaneLocalMaskResults(ParseShader(lane_reader))[0]);
+}
+
+TEST(EmulatorShaderMaskAnalysis, LoopBackEdgeReaderNeedsWholeCompare)
+{
+	// s_cmp_lg_u64 s[4:5], 0 at pc 0; v_cmp at pc 4; s_branch back to pc 0 at pc 12.
+	constexpr uint32_t s_branch_to_start = (0x17fu << 23u) | (2u << 16u) | 0xfffcu;
+	const uint32_t     shader[]          = {kSCmpLgU64S4Zero, kCmpLtU32S4, kCmpSources, s_branch_to_start, kEndpgm};
+	const auto         local             = ShaderLaneLocalMaskResults(ParseShader(shader));
+
+	ASSERT_EQ(local.size(), 4u);
+	EXPECT_FALSE(local[1]);
+
+	// The same loop with a lane-bit reader at pc 0 (8 bytes); the branch at pc 16.
+	constexpr uint32_t s_branch_over_cndmask = (0x17fu << 23u) | (2u << 16u) | 0xfffbu;
+	const uint32_t     lane_loop[] = {kCndmaskWord0, kCndmaskSources(4u), kCmpLtU32S4, kCmpSources, s_branch_over_cndmask, kEndpgm};
+	EXPECT_TRUE(ShaderLaneLocalMaskResults(ParseShader(lane_loop))[1]);
+}
+
 UT_END();

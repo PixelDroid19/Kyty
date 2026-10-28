@@ -254,7 +254,10 @@ String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index
 OpStore %<lo> %mask_out_lo_<tag>
 <store_hi>
 )")
-			        .ReplaceStr("<ballot>", NativeMaskBallot("mask_out_active_" + tag, "mask_out_ballot_" + tag))
+			        .ReplaceStr("<ballot>", IsLaneLocalMaskResult(index) ? "%mask_out_ballot_" + tag +
+			                                                                 " = OpFunctionCall %v4uint %split_part_ballot %mask_out_active_" +
+			                                                                 tag + "\n"
+			                                                             : NativeMaskBallot("mask_out_active_" + tag, "mask_out_ballot_" + tag))
 			        .ReplaceStr("<store_hi>", !hi.value.IsEmpty() && !NativeWave32() ? "OpStore %<hi> %mask_out_hi_<tag>" : "")
 			        .ReplaceStr("<lo>", lo.value)
 			        .ReplaceStr("<hi>", hi.value)

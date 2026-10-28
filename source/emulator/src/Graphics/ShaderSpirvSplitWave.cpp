@@ -1,3 +1,4 @@
+#include "ShaderMaskAnalysis.h"
 #include "ShaderSpirvInternal.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -22,6 +23,20 @@ bool Spirv::UsesSplitComputeWave() const
 {
 	return (m_code.GetType() == ShaderType::Compute || UsesFragmentCompute()) && m_cs_input_info != nullptr &&
 	       m_cs_input_info->native_wave_sensitive && m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32;
+}
+
+bool Spirv::IsLaneLocalMaskResult(uint32_t index) const
+{
+	if (!UsesSplitComputeWave() || m_code.GetType() != ShaderType::Compute)
+	{
+		return false;
+	}
+	if (!m_lane_local_masks_ready)
+	{
+		m_lane_local_masks_ready = true;
+		m_lane_local_masks       = ShaderLaneLocalMaskResults(m_code);
+	}
+	return index < m_lane_local_masks.size() && m_lane_local_masks[index];
 }
 
 String8 Spirv::HostLaneVariable() const
@@ -52,6 +67,7 @@ String8 Spirv::SplitWaveTypes() const
 %%split_c4 = OpConstant %%uint 4
 %%split_c6 = OpConstant %%uint 6
 %%split_c16 = OpConstant %%uint 16
+%%split_c31 = OpConstant %%uint 31
 %%split_c48 = OpConstant %%uint 48
 %%split_c63 = OpConstant %%uint 63
 %%split_parts = OpConstant %%uint %u
@@ -307,6 +323,26 @@ OpFunctionEnd
 )";
 	text += SplitWavePublishFunction(parts);
 	text += SplitWaveBallotFunction(parts, lanes);
+	// This part's bits of the wave mask, the other parts' bits zero: enough
+	// for a mask whose every reader takes only its own lane's bit.
+	text += R"(
+%split_part_ballot = OpFunction %v4uint None %function_split_ballot
+%split_part_ballot_predicate = OpFunctionParameter %bool
+%split_part_ballot_entry = OpLabel
+%split_part_ballot_host = OpGroupNonUniformBallot %v4uint %split_scope_subgroup %split_part_ballot_predicate
+%split_part_ballot_own = OpCompositeExtract %uint %split_part_ballot_host 0
+%split_part_ballot_subgroup = OpLoad %uint %gl_SubgroupID
+%split_part_ballot_part = OpBitwiseAnd %uint %split_part_ballot_subgroup %split_parts_mask
+%split_part_ballot_first = OpShiftLeftLogical %uint %split_part_ballot_part %split_lanes_shift
+%split_part_ballot_shift = OpBitwiseAnd %uint %split_part_ballot_first %split_c31
+%split_part_ballot_upper = OpINotEqual %bool %split_part_ballot_first %split_part_ballot_shift
+%split_part_ballot_bits = OpShiftLeftLogical %uint %split_part_ballot_own %split_part_ballot_shift
+%split_part_ballot_lo = OpSelect %uint %split_part_ballot_upper %split_c0 %split_part_ballot_bits
+%split_part_ballot_hi = OpSelect %uint %split_part_ballot_upper %split_part_ballot_bits %split_c0
+%split_part_ballot_result = OpCompositeConstruct %v4uint %split_part_ballot_lo %split_part_ballot_hi %split_c0 %split_c0
+OpReturnValue %split_part_ballot_result
+OpFunctionEnd
+)";
 	text += R"(
 %split_read = OpFunction %uint None %function_u_u
 %split_read_value = OpFunctionParameter %uint
