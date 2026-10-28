@@ -352,6 +352,28 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	if (framebuffer_extent.width == 0 || framebuffer_extent.height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer_extent.width == 0 || framebuffer_extent.height == 0 condition ignored (continuing)\n"); }
 	framebuffer->extent.width  = framebuffer_extent.width;
 	framebuffer->extent.height = framebuffer_extent.height;
+	auto& compatibility                = framebuffer->compatibility;
+	compatibility.color_count          = color_count;
+	compatibility.width                = framebuffer_extent.width;
+	compatibility.height               = framebuffer_extent.height;
+	compatibility.begins_without_clear = framebuffer->depth_load_op != VK_ATTACHMENT_LOAD_OP_CLEAR;
+	for (uint32_t slot = 0; slot < color_count; slot++)
+	{
+		const auto& ref = color_attachment_refs[slot];
+		if (ref.attachment == VK_ATTACHMENT_UNUSED)
+		{
+			continue;
+		}
+		compatibility.color_format[slot]  = attachments[ref.attachment].format;
+		compatibility.color_samples[slot] = attachments[ref.attachment].samples;
+		compatibility.begins_without_clear =
+		    compatibility.begins_without_clear && framebuffer->color_load_op[slot] != VK_ATTACHMENT_LOAD_OP_CLEAR;
+	}
+	if (with_depth)
+	{
+		compatibility.depth_format  = attachments[attachment_count].format;
+		compatibility.depth_samples = attachments[attachment_count].samples;
+	}
 	framebuffer_info.width     = framebuffer->extent.width;
 	framebuffer_info.height    = framebuffer->extent.height;
 	framebuffer_info.layers = framebuffer_layers;
@@ -439,7 +461,6 @@ void FramebufferCache::FreeFramebufferByColor(VulkanImage* image)
 			continue;
 		}
 
-		g_render_ctx->GetPipelineCache()->DeletePipelines(f.framebuffer);
 		g_render_ctx->ReleaseDepthStencilCopyRenderPass(f.framebuffer->render_pass_id);
 
 		auto* gctx = g_render_ctx->GetGraphicCtx();
@@ -463,7 +484,6 @@ void FramebufferCache::FreeFramebufferByDepth(DepthStencilVulkanImage* image)
 	{
 		if (f.framebuffer != nullptr && f.depth_id == image->memory.unique_id)
 		{
-			g_render_ctx->GetPipelineCache()->DeletePipelines(f.framebuffer);
 			g_render_ctx->ReleaseDepthStencilCopyRenderPass(f.framebuffer->render_pass_id);
 
 			auto* gctx = g_render_ctx->GetGraphicCtx();

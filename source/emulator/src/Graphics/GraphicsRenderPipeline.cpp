@@ -1313,10 +1313,9 @@ PipelineCache::Pipeline* PipelineCache::Find(const Pipeline& p)
 {
 	for (auto& pn: m_pipelines)
 	{
-		if (pn.pipeline != nullptr && !pn.lifetime.RetirementRequested() && p.render_pass_id == pn.render_pass_id &&
-		    p.vs_shader_id == pn.vs_shader_id &&
-		    p.ps_shader_id == pn.ps_shader_id && p.cs_shader_id == pn.cs_shader_id && *p.static_params == *pn.static_params &&
-		    *p.dynamic_params == *pn.dynamic_params)
+		if (pn.pipeline != nullptr && !pn.lifetime.RetirementRequested() && p.vs_shader_id == pn.vs_shader_id &&
+		    p.ps_shader_id == pn.ps_shader_id && p.cs_shader_id == pn.cs_shader_id && p.render_pass == pn.render_pass &&
+		    *p.static_params == *pn.static_params && *p.dynamic_params == *pn.dynamic_params)
 		{
 			return &pn;
 		}
@@ -1480,22 +1479,6 @@ static bool TransportColorTargetsWritable(const RenderColorInfo& color)
 	return true;
 }
 
-static bool TransportLoadOpsPreserve(const VulkanFramebuffer& framebuffer)
-{
-	if (framebuffer.depth_load_op == VK_ATTACHMENT_LOAD_OP_CLEAR)
-	{
-		return false;
-	}
-	for (uint32_t target = 0; target < std::min(framebuffer.color_count, VulkanFramebuffer::TARGETS_MAX); ++target)
-	{
-		if (framebuffer.color_load_op[target] == VK_ATTACHMENT_LOAD_OP_CLEAR)
-		{
-			return false;
-		}
-	}
-	return true;
-}
-
 // One transported draw state: the host capture and resolve graphics pipelines
 // plus the split compute pass that shades captured lanes. The resolve pipeline
 // carries the guest draw's fixed-function state so depth, stencil, blending and
@@ -1517,7 +1500,7 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	{
 		EXIT("fragment transport needs single-sample rasterization: %s\n", requirement_facts.c_str());
 	}
-	if (!TransportLoadOpsPreserve(*framebuffer))
+	if (!framebuffer->compatibility.begins_without_clear)
 	{
 		EXIT("fragment transport cannot begin a clearing pass yet: %s\n", requirement_facts.c_str());
 	}
@@ -1689,7 +1672,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	EXIT_IF(gctx == nullptr);
 
 	Pipeline p {};
-	p.render_pass_id = framebuffer->render_pass_id;
+	p.render_pass    = framebuffer->compatibility;
 	p.ps_shader_id   = ps_id;
 	p.vs_shader_id   = vs_id;
 	p.static_params  = new PipelineStaticParameters {};
@@ -2225,23 +2208,6 @@ void PipelineCache::DeletePipeline(VulkanPipeline* pipeline)
 	if (m_pipelines.IndexValid(index))
 	{
 		DeletePipelineInternal(index);
-	}
-}
-
-void PipelineCache::DeletePipelines(VulkanFramebuffer* framebuffer)
-{
-	EXIT_IF(framebuffer == nullptr);
-
-	Core::LockGuard lock(m_mutex);
-
-	int index = 0;
-	for (auto& p: m_pipelines)
-	{
-		if (p.pipeline != nullptr && p.render_pass_id == framebuffer->render_pass_id)
-		{
-			DeletePipelineInternal(index);
-		}
-		index++;
 	}
 }
 

@@ -180,6 +180,32 @@ struct PipelineDynamicParameters
 
 struct FragmentTransportPasses;
 
+// What a graphics pipeline takes from the framebuffer it is created for. Render
+// passes whose attachments match in format and sample count are compatible, so
+// one pipeline serves every framebuffer with the same description, whichever
+// framebuffer created it.
+struct RenderPassCompatibility
+{
+	static constexpr uint32_t TARGETS_MAX = 8;
+	uint32_t                  color_count = 0;
+	VkFormat                  color_format[TARGETS_MAX]  = {}; // VK_FORMAT_UNDEFINED: unused slot
+	VkSampleCountFlagBits     color_samples[TARGETS_MAX] = {};
+	VkFormat                  depth_format               = VK_FORMAT_UNDEFINED; // VK_FORMAT_UNDEFINED: no depth
+	VkSampleCountFlagBits     depth_samples              = {};
+	uint32_t                  width                      = 0;
+	uint32_t                  height                     = 0;
+	// No attachment loads with a clear, so fragment transport can begin the pass again.
+	bool begins_without_clear = false;
+
+	bool operator==(const RenderPassCompatibility& other) const
+	{
+		return color_count == other.color_count && depth_format == other.depth_format && depth_samples == other.depth_samples &&
+		       width == other.width && height == other.height && begins_without_clear == other.begins_without_clear &&
+		       std::equal(color_format, color_format + TARGETS_MAX, other.color_format) &&
+		       std::equal(color_samples, color_samples + TARGETS_MAX, other.color_samples);
+	}
+};
+
 struct VulkanPipeline
 {
 	VkPipelineLayout                pipeline_layout = nullptr;
@@ -275,7 +301,6 @@ public:
 	                                       const ShaderGeometryComputeInfo& geometry, const HW::VertexShaderInfo* vs_regs,
 	                                       const HW::ShaderRegisters* sh_regs);
 	void            DeletePipeline(VulkanPipeline* pipeline);
-	void            DeletePipelines(VulkanFramebuffer* framebuffer);
 	void            DeleteAllPipelines();
 	void            ReleasePipelineLease(VulkanPipeline* pipeline);
 	[[nodiscard]] static constexpr uint32_t MaxPipelineCount() { return MAX_PIPELINES; }
@@ -287,7 +312,7 @@ private:
 
 	struct Pipeline
 	{
-		uint64_t                   render_pass_id = 0;
+		RenderPassCompatibility    render_pass;
 		ShaderId                   vs_shader_id;
 		ShaderId                   ps_shader_id;
 		ShaderId                   cs_shader_id;
@@ -530,6 +555,7 @@ struct VulkanFramebuffer
 	static constexpr uint32_t TARGETS_MAX                       = 8;
 	VkRenderPass              render_pass                       = nullptr;
 	uint64_t                  render_pass_id                    = 0;
+	RenderPassCompatibility   compatibility;
 	VkFramebuffer             framebuffer                       = nullptr;
 	uint32_t                  color_count                       = 0;
 	uint32_t                  attachment_count                  = 0;
