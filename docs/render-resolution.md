@@ -48,8 +48,12 @@ anisotropy. `Quality`, `Balanced` and `Performance` select `Fixed` with
 `Fsr` and `Fsr` presentation and `X16`, `X8` and guest anisotropy. A fixed
 resolution raises frame rate only when a title is bound by GPU pixel work.
 
-`ScreenWidth` and `ScreenHeight` configure only the host window and swapchain.
-They do not select the guest render resolution.
+`ScreenWidth` and `ScreenHeight` configure the host window and swapchain. They
+do not select the guest render resolution, but they are the display size the
+guest sees: `VideoOutGetResolutionStatus` reports them as the full and pane
+extent, and `VideoOutGetOutputStatus` reports a 4K output only when they reach
+3840x2160 (`VideoOut.cpp`). A title that sizes its buffers from those queries
+therefore follows these keys.
 
 Invalid enum values or zero render extents stop startup during configuration
 loading with a direct diagnostic. The fixed extent is a maximum bound: Kyty
