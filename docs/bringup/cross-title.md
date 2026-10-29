@@ -2787,6 +2787,8 @@ checked against the code; none is hit by a title in the current strict runs.
 - Changes:
   - The recycle limit is now four trim batches (`RECYCLED_SETS_MAX`, 32,768). Pools never give memory
     back to the system, so holding a set only reserves pool space.
+    (2026-10-28: the live-set cap is 16,384 and a trim retires 2,048 sets, so the limit is 8,192; see
+    `PPSA21567 - ASTRO BOT` in `docs/titles/robot-platformer.md`.)
   - A full recycle list frees its oldest set, not the incoming one. With the incoming set freed, sets
     of layouts no longer in use stayed in the list until it was full of them, and driver frees per
     200,000 requests rose over the session from 3,400 to 29,000. Released sets are kept in release

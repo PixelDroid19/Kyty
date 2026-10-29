@@ -6,6 +6,70 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: host memory, descriptor churn and a recycled view at hub load (2026-10-28)
+
+- **Observed** (Intel A770, strict 340 s route to the crash-site dunes,
+  60 fps limit): the process peaked at 2759 MB of anonymous memory plus
+  swap. A sampling heap profiler (scratch `LD_PRELOAD` tool, not in the
+  repository) put 2080 MB live at 210 s. The largest items were the
+  descriptor cache table (about 470 MB), the driver descriptor pools (about
+  450-490 MB, growing with live and recycled sets), the write-back page
+  snapshots (about 256 MB), the dirty-page tracker (112 MB) and the driver
+  context (about 125 MB).
+- **Localized: descriptor churn.** The dunes make about 1000 set lookups
+  per frame and hit about 31 %. The cache sat at its 65536 live-set cap
+  with 37 driver pools. Temporary counters classified the misses of one
+  30 s window: 136305 of 138943 differ from a cached set only in the
+  storage-buffer ids of buffers that already exist (rotating ring slots),
+  424 bring a new buffer object, 351 differ only in ranges, 4 only in
+  images. Holding more sets therefore buys almost no hits.
+- **Fix 1** (`f14a6d996`): cache entries keep only their bound storage
+  buffers, images and samplers instead of arrays sized for the largest
+  layout. The live heap at 210 s fell from 2080 to 1635 MB, the table from
+  about 470 to 35 MB, with the same hit rate.
+- **Fix 2** (`68dc3bbfa`): the live-set cap is 16384, trimmed 2048 at a
+  time (the recycle limit stays four trims). Hit rate about 31 % as
+  before, 10 driver pools instead of 37. Against the tree before both
+  fixes, the run peak fell from 2759 to 1743 MB and the anonymous plus
+  swap footprint at 150 s from 2422 to 1666 MB. Dune windows ran at 7.57
+  against 7.47 fps, the command processor at 231.5 against 241.8 us per
+  draw, and the descriptor finalize stage at 9.2 against 8.6 us per draw
+  (within run noise).
+- **Fix 3** (`c8abdb479`): the attributes a pixel program reads through
+  `V_INTERP_*` are summarized once per parsed program instead of on every
+  draw. Its share of the per-draw shader analysis was not measured
+  separately.
+- **Fix 4** (`67ae9e1d9`, translator 183): pointwise `S_*_B64` algebra over
+  in-block lane-local masks gathers only its root in a split wave.
+  `0x3666fa39` went from 26.2 to 22.7 ms mean per call; the sample is small
+  and noisy.
+- **Fix 5: strict stop at hub load** (`5112aeec9`). One run stopped at about
+  200 s, while loading the crash-site hub level, on `!create_all_the_same`:
+  a 3840x2160 single-level storage view (tile 27, 8-byte texels) over 22
+  objects of a recycled range. The render-alias rule seeds such a view from
+  the 64 KiB blocks of the 2432x1368 targets with the same texel size, in
+  write order, but required every other parent to be crossing or
+  overwritten since by those targets. 4-byte 480x270, 240x135 and 120x67
+  downsample targets and four-byte storage views had drawn there after
+  them. The single-parent path and the storage-over-caches rule already link
+  such parents as re-descriptions (another texel size, tiling or format), so
+  the render-alias rule now links them too. The same load stopped in four
+  earlier runs that day on other parent sets (a superseded storage buffer, a
+  shifted copy of the same view); those were resolved by `467401517` and the
+  crossing rule before this run. The fixed case is intermittent and did not
+  recur in the runs below, so it is verified only against the recorded
+  parent list.
+- **Open: remaining host memory.** The write-back page snapshots (about
+  256 MB) and the dirty-page tracker (112 MB) are the next items. A lazy or
+  partial snapshot must keep the protection of CPU writes to GPU-flagged
+  pages.
+- **Verified.** Focused `kyty_unit_test` suites (1495 passed), the three
+  repository CTest gates (4 tests passed), strict 340 s dune runs on Intel
+  A770 (time limit reached), and the strict games matrix: 26 of 32 titles
+  reach the interactive state, as before these fixes. The per-draw cost of
+  the titles with the most draws per frame was not re-measured under the
+  lower live-set cap.
+
 ## Robot platformer: dune waits on aliased storage, DMA stores, pipeline churn and indirect arguments (2026-10-28)
 
 - **Observed** (Intel A770, strict 340 s route to the crash-site dunes,
