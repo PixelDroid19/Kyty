@@ -5168,15 +5168,17 @@ matched on all of them. Failures shared with main, not caused by this branch:
     the stale shared files were removed and the per-title file was created at
     boot (46 MB after two runs). Focused test
     `EmulatorAtomicFile.RemovesOnlyTemporariesOfExitedWriters`.
-- **Open: GPU pins populate unwritten guest pages.** Physical imports pin
-  whole 2 MiB blocks through udmabuf, and pinning populates every page of the
-  block. A temporary probe counted 2.9 GB of 7.4 GB pinned pages that the
-  guest had not written before the pin, about 40% of the shared guest memory.
-  A 64 KiB block cut that to 0.19 GB (peak RSS plus swap 9.3 GB to 7.1 GB at
-  the same point), but made 5.5 times more window imports, and its 340 s run
-  never reached the dunes (CP 639 us/draw against 225-272 with 2 MiB blocks)
-  on a host that was swapping. One run each, so the cause of the slowdown is
-  not separated; the 2 MiB block was chosen for the AMD per-submit cost
-  recorded above. Direction: measure the import count and per-submit cost per
-  block size on both hosts, or keep large windows while pinning only written
-  pages.
+- **Excluded: smaller physical import blocks.** Physical imports pin whole
+  2 MiB blocks through udmabuf, and pinning populates every page of the block.
+  A temporary probe counted 2.9 GB of 7.4 GB pinned pages that the guest had
+  not written before the pin. A 64 KiB block cut that to 0.19 GB at 206 s,
+  but made 5.5 times more window imports, and two 340 s runs never reached
+  the dunes (CP about 600 us/draw from the first measured window, against
+  225-272 us/draw with 2 MiB blocks). The second run kept the emulator out of
+  swap, and its shared guest memory still peaked at 7.8 GB, the same as with
+  2 MiB blocks: the guest writes those pages later anyway. Smaller blocks cost
+  CP time and do not lower the peak.
+- **Runs out of swap.** A bounded run inside a user scope with
+  `MemorySwapMax=0` (no root needed) kept the emulator's memory out of swap;
+  the system disk received 1.2 GB of writes in 340 s against 3.1 GB without
+  it, the rest being other processes swapped out by the host.
