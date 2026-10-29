@@ -131,6 +131,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
   - [Per-draw plan design](bringup/cp-draw-plan.md): stage 3a lookup-miss memo, texture binding 19-23 -> 14 us/draw (2026-10-28)
   - Small `DMA_DATA` stores behind a consolidated wait retire it first (2026-10-27, fixed)
+  - Open: PPSA01341 - Demon's Souls livelocks at boot, parked (2026-10-29)
   - Open: index objects over pending storage (2026-10-27, found by inspection)
   - Open: `KYTY_DUMP_VIDEOOUT` stops on a display image without a guest address (2026-10-27)
   - GDS backing shared across queue families (2026-10-26)

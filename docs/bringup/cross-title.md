@@ -84,6 +84,30 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   (`docs/titles/survival.md`, 2026-10-27), had 26 of 32 cases interactive
   against 23 of 32. The sweep has not been repeated with this fix.
 
+## Open: PPSA01341 - Demon's Souls livelocks at boot (2026-10-29, parked)
+
+- **Observed.**
+  - Intel A770, kernel `7.2.11-zen1`, `8f3b5d6b6`. Strict runs des1 and des2 (300 s and 260 s)
+    stop at frame 3 with 2 presents, and the command processor gets no draw or dispatch after
+    about 60 s.
+  - The games matrix shows it as `controlled_timeout` at 2 presents: its 120 s deadline ends the
+    case with SIGTERM.
+  - On 2026-10-26 at `b248d1a57` the same title reached a gray loading screen at 0.2-0.9 fps.
+- **Localized.**
+  - `kyty_agent threads` at 175 s: the main guest thread waits on event flag 3, and 11 job-worker
+    threads (entry `0x900841a80`) are in no tracked wait.
+  - Those 11 threads and one more host thread run at about 100% CPU each on a 12-CPU host.
+  - A static read of `EventFlag.cpp` shows that polls return `EBUSY` without blocking, so a guest
+    poll loop on an unset flag or label spins this way.
+  - The word the workers poll and its producer are not identified. Two attempts to sample their
+    stacks as perf's parent lost the data when the harness killed perf (`EXIT=137`).
+- **Parked** at the maintainer's request (2026-10-29) in favour of `PPSA21567 - Astro Bot`
+  performance.
+- **Next step.**
+  - Attaching perf with `-p` is refused at `perf_event_paranoid` 2, so perf has to start the
+    process and be stopped with SIGINT before the run is killed.
+  - Then compare one run of the 2026-10-26 binary to confirm the regression range.
+
 ## Open: index objects over pending storage (2026-10-27, found by inspection)
 
 - **State.** The index bind has the shape the vertex bind had before the
