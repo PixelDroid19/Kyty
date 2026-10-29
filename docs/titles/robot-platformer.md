@@ -6,11 +6,12 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
-## Robot platformer: dynamic resolution is dormant, and the GPU clock rate (2026-10-29)
+## Robot platformer: the clock-driven resolution controller is stereo-only, and the GPU clock rate (2026-10-29)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
-strict 60 fps-limited runs on the dune route (gw84-gw86). Evidence came from
-an uncommitted `DIAG-DRS` probe and a static read of the title's eboot.
+strict 60 fps-limited runs on the dune route (gw84-gw88). Evidence came from
+an uncommitted `DIAG-DRS` probe, a static read of the title's eboot and two
+gdb runs.
 
 - **Question.** Is the title rendering at a high internal resolution because
   its dynamic resolution sees end-of-pipe clock writes that Kyty stamps at
@@ -27,19 +28,23 @@ an uncommitted `DIAG-DRS` probe and a static read of the title's eboot.
   - the controller's static guard is set;
   - bit 2 (`& 4`) of the current display mode is set;
   - bit 0 of the statistics field `+0x5c` is clear.
-
-  The display mode is the field logged as `ChangeDisplayMode from %d to %d`.
-  It is read from a title settings node and falls back to 2 when the node
-  holds 0.
-- **Open: why the mode under Kyty lacks bit 2.**
-  - The live mode value has not been read. Only the fallback path to 2 is
-    known from the code.
-  - A secondary implementation reports that the same 01.018 build switches
-    between 1080p and 1368p/4K in emulation, so the controller runs there.
-  - The mode may therefore depend on an input Kyty provides (a system,
-    video-out or settings query), not only on the title.
-  - Until the gate is understood, device timestamps for the clock writes
-    cannot move the resolution.
+- **The display mode is the title's `MainDisplay` setting.**
+  - Its options are built at eboot `0x2b2887`: `Auto` = 0, `Mono` = 2,
+    `HmdStereo` = 0xc, `SocialScreen` = 0x22, `SideBySide` = 4.
+  - A value of 0 (`Auto`) falls back to 2 (`Mono`). This is the mode logged
+    as `ChangeDisplayMode from %d to %d`.
+  - Only `HmdStereo` and `SideBySide` have bit 2, so this controller updates
+    only for head-mounted stereo or side-by-side output.
+- **Live check** (gw87-gw88, gdb as parent, a hardware breakpoint on the
+  gate and a watchpoint on the setting value):
+  - the setting is written once, with 0, when it is created;
+  - the gate then reads mode 2 on every frame sampled (39 of 39).
+- **Excluded: this controller as an fps lever on a flat display.**
+  - In `Mono` the title never runs it, so device timestamps for the clock
+    writes cannot change the resolution.
+  - A secondary implementation reports resolution changes on the same build.
+    They cannot come from this update in `Mono`, so that report needs another
+    mechanism or another display mode.
 - **Found, not fixed: the GPU clock rate.**
   - The ring reader converts a timer pair with `(end - begin) * 1e6 / 1e8`
     (multiply by `0xabcc77118461cefd`, shift by 90), so it assumes a
@@ -306,8 +311,8 @@ an uncommitted `DIAG-DRS` probe and a static read of the title's eboot.
   Narrowed by the dune waits record above: the aliases at the dune waits never read
   the guest bytes, so those waits now consolidate.
 - **Narrowed** (2026-10-29, see the dynamic resolution record): the title's
-  dynamic resolution reads these timestamps, but under Kyty its update does
-  not run (display-mode gate, open).
+  resolution controller reads these timestamps, but it only runs for stereo
+  or side-by-side display modes.
 - **Verified.** Focused `kyty_unit_test` suites (1147 passed), the three
   repository CTest gates (4 tests passed), strict 340 s runs on Intel A770
   (cold and warm) with no submit fault.
