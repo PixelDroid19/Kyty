@@ -167,12 +167,13 @@ VulkanBuffer* GraphicsRenderRecordDispatchIndirectArgs(CommandBuffer* buffer, co
 	vkCmdPushConstants(vk_buffer, g_converter.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 	vkCmdDispatch(vk_buffer, 1, 1, 1);
 
+	// The limit flag is read on the host once the recording's fence completes.
 	VkMemoryBarrier after {};
 	after.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-	after.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1, &after, 0, nullptr, 0,
-	                     nullptr);
+	after.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+	                     0, 1, &after, 0, nullptr, 0, nullptr);
 	return args;
 }
 
