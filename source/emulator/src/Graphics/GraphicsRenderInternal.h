@@ -470,9 +470,12 @@ private:
 	static void     CollectResourceIds(const Set& s, std::vector<uint64_t>* ids);
 
 	// Live sets are bounded: past the limit, the least recently used tracked
-	// sets leave the cache and are freed once their submissions complete.
-	static constexpr uint32_t LIVE_SETS_MAX = 65536;
-	static constexpr uint32_t TRIM_SETS     = 8192;
+	// sets leave the cache and are freed once their submissions complete. Nearly
+	// every miss rebinds rotating storage buffers in a combination that seldom
+	// recurs, so a set unused for this many newer sets is rarely hit again, while
+	// each live set holds driver pool memory that pools never return.
+	static constexpr uint32_t LIVE_SETS_MAX = 16384;
+	static constexpr uint32_t TRIM_SETS     = 2048;
 	// Released sets wait for reuse by the next set of their layout, up to this
 	// many in all; past it the oldest returns to its pool. Pools never give memory
 	// back to the system, so a held set only reserves pool space, while a driver
