@@ -287,6 +287,14 @@ gdb runs.
   Focused `kyty_unit_test` suites (1492 passed); the strict games matrix on
   Intel A770 reached 26 of 32 cases interactive (25 of 32 before), with no
   case losing presents.
+- **Excluded: 32-lane parts** (2026-10-29, translator 183). Two parts per
+  guest wave instead of eight cut the rendezvous count by four, but the
+  extra spills cost far more: `0x3666fa39` took 101 ms per call (297 calls
+  in the last 12 windows of a strict 400 s dune run, compute pipelines
+  compiled in an earlier run) against about 22 ms with 8-lane parts, and the
+  frame GPU total rose to about 150 ms. ANV spilled 2.6k-4k registers per
+  pipeline at SIMD32. 16-lane parts were not re-measured; their offline
+  spills (1574:9325) are already above the 8-lane ones (470:2397).
 - **Excluded: GDA address translation cache** (translator 174): some
   compute pipelines took 13-16 s each to compile on ANV and the worldmap
   stopped on a strict storage refusal at 72 s.
