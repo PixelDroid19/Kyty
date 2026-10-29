@@ -87,8 +87,24 @@ gdb runs.
     no queue-7 record, only queue-8 work (dispatches of `0x4c97f40f`, 192x1x1, and `0x1404b233`,
     plus draws), so the hung job is unattributed.
   - Two other runs on the same kernel and binary (gw76, gw78) reached the dunes without a fault.
-  - Next step if it recurs: correlate the faulting host sequence with a recent-draw trail that
-    covers queue 7.
+  - It recurred twice on 2026-10-29, at the same place in the route: gw100 (`12325b8be`, the
+    baseline of an A/B pair) at frame 3364 and gw103 (`f0db2e1b5` plus the clock change above) at
+    frame 3303. Five other runs of that day passed the same point (gw97-gw99, gw101, gw102). The
+    kernel again reset the render engine for a timed-out `fc_script` job.
+  - In both runs the first queue-8 command buffer that never completed holds the same work:
+    two fills by `0x4c97f40f` (4608 and 8640 groups; a 64-lane kernel that stores one 16-byte
+    value per lane), one draw with PS `0x210001602712f299`, then point-list draws of VS
+    `0x360038d0f4cfb9a5` with PS `0x210045a05d93a5ea` (37 in gw100; 11 in gw103, next to 11 draws
+    of VS `0x360043b08e51dd94`).
+  - Lead, not verified: PS `0x210045a05d93a5ea` walks a per-cell light list. It reads
+    `head[cell]` through the V# at table offset 256, then follows `{light, next}` nodes through
+    the V# at offset 272 until `next == -1`. The loop has no other bound, so a node buffer that
+    reads back 0 (a zero carrier or an out-of-range binding) or a list with a cycle never ends.
+    The same program completed two draws in the command buffer before the hung one, so the
+    program alone does not hang. The two fills before it fit a list-head clear.
+  - Next step: record the bound V# words (base, `num_records`, binding kind) of the nodes and
+    heads buffers for that draw in a bad run, and check whether the list buffers can be bound as
+    a zero carrier or a shorter range than the guest V#.
 - **Dune wait sites** (gw78, same binary, whole run, fence waits of 0.2 ms or longer, by call site):
 
   | Call site | Wait time | Waits |
