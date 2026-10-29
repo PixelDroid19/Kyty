@@ -1,7 +1,8 @@
 # Command processor and GPU sync chain (design, 2026-10-29)
 
-Status: link 1 (`DISPATCH_INDIRECT`) is implemented (2026-10-29, see "Link 1 result"); the other
-links are design and measurements only.
+Status: link 1 (`DISPATCH_INDIRECT`) is implemented (2026-10-29, see "Link 1 result"). Link 2
+(`DRAW_INDEX_INDIRECT`) is deprioritized (see its entry); the other links are design and
+measurements only.
 
 ## Why
 
@@ -79,6 +80,14 @@ Each link moves the wait to the next one:
      blocking argument read cost about 5.1 ms of CP time; the draws themselves about 0.54 ms.
    - It also needs a GPU twin of the CPU geometry and NGG plan that today consumes `index_count`
      on the CPU.
+   - **Deprioritized (2026-10-29).** In the same dune runs the GPU is busy about 81.5 ms per frame
+     and the CP spends about 110 ms per frame outside fence waits. Each of them alone holds the
+     frame rate at roughly 9-12 fps. Link 1 showed that removing one link moves its waits to the next one
+     (`DISPATCH_INDIRECT` 28 s to 0.27 s, `DRAW_INDEX_INDIRECT` 12.5 s to 34.4 s, frame rate
+     unchanged). A device-side `DRAW_INDEX_INDIRECT` would move them to the `WAIT_REG_MEM` link the
+     same way, and it costs the GPU twin of the geometry and NGG plan above. It is parked until GPU
+     frame time and CP work per draw are lower, where removing the waits can change the frame
+     rate.
 3. **`WAIT_REG_MEM`.** The 10.6 s are waits on labels whose release also writes back aliased
    storage.
    - Two attempts are recorded as excluded: consolidating those waits, and eliding the submit and
