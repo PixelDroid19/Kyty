@@ -696,6 +696,7 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 	EXIT_IF(vaddr == nullptr || size == nullptr);
 
 	auto& heap = m_heaps[heap_id];
+	m_object_graph_generation.fetch_add(1, std::memory_order_release);
 
 	Block nb {};
 	nb.vaddr_num = vaddr_num;
@@ -719,6 +720,7 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 void GpuMemory::DeleteBlock(Block* b, int heap_id, int obj_id)
 {
 	auto& heap = m_heaps[heap_id];
+	m_object_graph_generation.fetch_add(1, std::memory_order_release);
 
 	for (int vi = 0; vi < b->vaddr_num; vi++)
 	{

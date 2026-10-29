@@ -806,6 +806,13 @@ Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64
 	return g_gpu_memory->FindObjects(vaddr, size, vaddr_num, type, exact, only_first);
 }
 
+uint64_t GpuMemoryObjectGraphGeneration()
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+
+	return g_gpu_memory->ObjectGraphGeneration();
+}
+
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,
                                                           bool exact, bool only_first)
 {

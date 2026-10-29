@@ -1451,6 +1451,9 @@ bool GpuMemoryWatcherEnabled();
 Vector<GpuMemoryObject> GpuMemoryFindObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, bool exact, bool only_first);
 Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type,
                                              bool exact, bool only_first);
+// Advances whenever an object enters or leaves GPU memory; a lookup that found
+// nothing stays a miss while it is unchanged.
+[[nodiscard]] uint64_t GpuMemoryObjectGraphGeneration();
 // Atomically finds matching objects and records the exact submission high-water
 // before exposing their raw Vulkan handles to the caller.
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,

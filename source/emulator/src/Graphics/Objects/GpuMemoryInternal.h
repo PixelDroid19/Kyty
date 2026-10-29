@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <climits>
 #include <set>
 #include <tuple>
@@ -270,6 +271,8 @@ public:
 	void  ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type);
 	void  ResetPlaneHash(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type);
 	void  FrameDone(GraphicContext* ctx);
+
+	[[nodiscard]] uint64_t ObjectGraphGeneration() const { return m_object_graph_generation.load(std::memory_order_acquire); }
 
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first, const SubmissionId* submission = nullptr);
@@ -537,6 +540,10 @@ private:
 	// of every heap on each completion.
 	std::set<std::pair<int, int>> m_pending_write_back;
 	void                          SyncWriteBackIndexes(int heap_id, int object_id);
+
+	// Advances whenever an object block enters or leaves a heap. Lookup results
+	// over the object graph stay valid while it is unchanged.
+	std::atomic<uint64_t> m_object_graph_generation {1};
 
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;

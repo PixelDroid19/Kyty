@@ -48,11 +48,13 @@
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cinttypes>
 #include <chrono>
 #include <cstring>
 #include <initializer_list>
+#include <memory>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -3390,6 +3392,61 @@ static bool CopyNewerStoragePrefixLayers(CommandBuffer* buffer, VulkanImage* tex
 	return true;
 }
 
+// Sampled descriptors whose GPU-owned lookups (stencil plane, depth, render
+// and storage targets) found nothing to bind. That outcome changes only when an
+// object enters or leaves GPU memory, so while the object-graph generation is
+// unchanged the next bind of the same descriptor goes straight to the guest
+// texture. Each command-processor thread keeps its own table.
+class SampledLookupMissMemo
+{
+public:
+	struct Key
+	{
+		uint32_t words[8]     = {};
+		uint32_t size         = 0;
+		uint32_t view_swizzle = 0;
+		uint32_t flags        = 0;
+
+		bool operator==(const Key& other) const
+		{
+			return std::memcmp(words, other.words, sizeof(words)) == 0 && size == other.size && view_swizzle == other.view_swizzle &&
+			       flags == other.flags;
+		}
+	};
+
+	[[nodiscard]] bool Contains(const Key& key, uint64_t generation) const
+	{
+		const auto& entry = m_entries[Slot(key)];
+		return entry.generation == generation && entry.key == key;
+	}
+
+	void Store(const Key& key, uint64_t generation) { m_entries[Slot(key)] = {key, generation}; }
+
+private:
+	static constexpr size_t Capacity = 4096;
+
+	struct Entry
+	{
+		Key      key;
+		uint64_t generation = 0;
+	};
+
+	[[nodiscard]] static size_t Slot(const Key& key)
+	{
+		uint64_t hash = 1469598103934665603ull;
+		for (uint32_t word: key.words)
+		{
+			hash = (hash ^ word) * 1099511628211ull;
+		}
+		hash = (hash ^ key.size) * 1099511628211ull;
+		hash = (hash ^ key.view_swizzle) * 1099511628211ull;
+		hash = (hash ^ key.flags) * 1099511628211ull;
+		return static_cast<size_t>(hash ^ (hash >> 32u)) & (Capacity - 1u);
+	}
+
+	std::array<Entry, Capacity> m_entries {};
+};
+
 static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
                             const ShaderSamplerResources& samplers, VulkanImage** images_sampled, VulkanImage** images_storage,
                             int* images_sampled_view, VulkanImage** images_sampled_depth, int* images_sampled_depth_view,
@@ -3446,6 +3503,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 	int          sampled_3d_uint_padding_view        = VulkanImage::VIEW_3D;
 
 	bool gen5 = Config::IsNextGen();
+	thread_local const auto lookup_memo = std::make_unique<SampledLookupMissMemo>();
 	const int sampled_total = textures.textures2d_sampled_num + textures.textures2d_array_sampled_num + textures.textures3d_sampled_num;
 	const int sampled_uint_total = textures.textures2d_sampled_uint_num + textures.textures2d_array_sampled_uint_num +
 	                               textures.textures3d_sampled_uint_num;
@@ -3755,9 +3813,21 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		// A live storage image read through another format of its texel size.
 		VkFormat     reinterpret_format = VK_FORMAT_UNDEFINED;
 
+		SampledLookupMissMemo::Key lookup_key;
+		std::memcpy(lookup_key.words, r.fields, sizeof(lookup_key.words));
+		lookup_key.size         = size.size;
+		lookup_key.view_swizzle = view_swizzle;
+		lookup_key.flags        = (use_srgb ? 1u : 0u) | (textures.desc[i].textures2d_without_sampler ? 2u : 0u) |
+		                          (compute_stage ? 4u : 0u) | (scaled_sampling_refused ? 8u : 0u) |
+		                          (static_cast<uint32_t>(sampled_shape) << 4u) |
+		                          (static_cast<uint32_t>(textures.desc[i].sample_operation) << 12u) |
+		                          (static_cast<uint32_t>(textures.desc[i].usage) << 20u);
+		const uint64_t lookup_generation = GpuMemoryObjectGraphGeneration();
+		const bool     lookups_missed    = lookup_memo->Contains(lookup_key, lookup_generation);
+
 		// An 8-bit unsigned read of a live depth target's stencil plane reads the
 		// stencil the device wrote; guest memory holds only the plane's last upload.
-		if (gen5 && check_depth_texture && fmt == 5u && !arrayed_2d && !three_dimensional)
+		if (!lookups_missed && gen5 && check_depth_texture && fmt == 5u && !arrayed_2d && !three_dimensional)
 		{
 			tex = FindStencilPlane(buffer, addr, size.size, width, height);
 			if (tex != nullptr)
@@ -3767,7 +3837,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				materialize     = "stencil-plane";
 			}
 		}
-		if (check_depth_texture && !stencil_texture)
+		if (!lookups_missed && check_depth_texture && !stencil_texture)
 		{
 			auto dtex     = FindDepthStencil(buffer, addr, size.size, true);
 			const bool depth_exact = !dtex.IsEmpty();
@@ -3868,13 +3938,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		// surface); only guest memory would miss that content.
 		if (!depth_texture)
 		{
-			auto rtex      = FindRenderTexture(buffer, addr, size.size, true);
+			auto rtex      = lookups_missed ? decltype(FindRenderTexture(buffer, addr, size.size, true)) {}
+			                                : FindRenderTexture(buffer, addr, size.size, true);
 			render_texture = !rtex.IsEmpty();
 			const bool rt_exact = render_texture;
 			// Exact miss: sample range can sit inside a live RT (Contains) or cover a
 			// smaller RT (IsContainedWithin). Falling through to guest-memory tile-27
 			// upload then reads empty GPU-owned backing and paints opaque-black props.
-			if (!render_texture && gen5)
+			if (!lookups_missed && !render_texture && gen5)
 			{
 				rtex           = FindRenderTexture(buffer, addr, size.size, false);
 				render_texture = !rtex.IsEmpty();
@@ -3883,7 +3954,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			// width*height*4 while the sample descriptor sizes the Display Thin pad
 			// (pitch×align128(height)×4). Exact miss then created an empty RT; allow
 			// non-exact alias before guest detile upload.
-			if (!render_texture && !gen5 && tile == 10)
+			if (!lookups_missed && !render_texture && !gen5 && tile == 10)
 			{
 				rtex           = FindRenderTexture(buffer, addr, size.size, false);
 				render_texture = !rtex.IsEmpty();
@@ -3989,7 +4060,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			// guest memory (opaque-black wall/prop quads). Same format+extent
 			// ranking as the RT path so float UAV parents do not paint cyan sprites.
 			bool storage_texture = false;
-				if (!render_texture && gen5)
+				if (!lookups_missed && !render_texture && gen5)
 				{
 					Vector<StorageTextureVulkanImage*> stex;
 					auto* latest_stex = FindLatestStorageTexture(buffer, addr, size.size);
@@ -4107,6 +4178,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					/* [gen5-nonfatal] EXIT("Gen5 sampled texture has no exact render-target backing and no guest-memory upload: " */
 					KYTY_LOG_DEBUG("WARNING: Gen5 sampled texture has no exact render-target backing and no guest-memory upload:  (continuing)\n");
 				}
+			}
+			if (!lookups_missed && !render_texture && tex == nullptr)
+			{
+				lookup_memo->Store(lookup_key, lookup_generation);
 			}
 			if (!render_texture && !depth_texture && tex == nullptr && !textures.desc[i].textures2d_without_sampler)
 			{
