@@ -25,18 +25,30 @@ bool Spirv::UsesSplitComputeWave() const
 	       m_cs_input_info->native_wave_sensitive && m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32;
 }
 
-bool Spirv::IsLaneLocalMaskResult(uint32_t index) const
+const ShaderLaneMaskPlan* Spirv::LaneMaskPlan() const
 {
 	if (!UsesSplitComputeWave() || m_code.GetType() != ShaderType::Compute)
 	{
-		return false;
+		return nullptr;
 	}
-	if (!m_lane_local_masks_ready)
+	if (!m_lane_mask_plan_ready)
 	{
-		m_lane_local_masks_ready = true;
-		m_lane_local_masks       = ShaderLaneLocalMaskResults(m_code);
+		m_lane_mask_plan_ready = true;
+		m_lane_mask_plan       = ShaderLaneMaskPlanOf(m_code);
 	}
-	return index < m_lane_local_masks.size() && m_lane_local_masks[index];
+	return &m_lane_mask_plan;
+}
+
+bool Spirv::IsLaneLocalMaskResult(uint32_t index) const
+{
+	const auto* plan = LaneMaskPlan();
+	return plan != nullptr && index < plan->local.size() && plan->local[index];
+}
+
+bool Spirv::IsLaneMaskGather(uint32_t index) const
+{
+	const auto* plan = LaneMaskPlan();
+	return plan != nullptr && index < plan->gather.size() && plan->gather[index];
 }
 
 String8 Spirv::HostLaneVariable() const

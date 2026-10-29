@@ -43,6 +43,7 @@
 #include "Emulator/Graphics/ShaderSpirv.h"
 
 #include "ShaderControlFlowGraph.h"
+#include "ShaderMaskAnalysis.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -133,6 +134,10 @@ public:
 	// Split compute wave: a mask producer whose result each lane reads only
 	// for itself, so its parts skip the wave-wide gather.
 	[[nodiscard]] bool IsLaneLocalMaskResult(uint32_t index) const;
+	[[nodiscard]] const ShaderLaneMaskPlan* LaneMaskPlan() const;
+	// Split compute wave: pointwise mask algebra that gathers its own result
+	// from the lane-local masks it combines.
+	[[nodiscard]] bool IsLaneMaskGather(uint32_t index) const;
 	// Guest lanes per host subgroup of a split wave: 32 or 16.
 	[[nodiscard]] uint32_t SplitWavePartLanes() const;
 	// The SubgroupLocalInvocationId builtin. A split wave keeps the guest lane in %gl_SubgroupInvocationID.
@@ -524,8 +529,8 @@ private:
 	mutable int                   m_native_wave_tier = -1;
 	mutable bool                  m_lane_reductions_ready = false;
 	mutable ShaderLaneReductions m_lane_reductions;
-	mutable bool                  m_lane_local_masks_ready = false;
-	mutable std::vector<bool>     m_lane_local_masks;
+	mutable bool                  m_lane_mask_plan_ready = false;
+	mutable ShaderLaneMaskPlan    m_lane_mask_plan;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;

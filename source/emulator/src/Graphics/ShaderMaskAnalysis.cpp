@@ -218,7 +218,11 @@ struct MaskDemandStep
 	MaskWords defs;
 	MaskWords uses;
 	MaskWords uses_if_demanded;
+	// Sources a gathering instruction takes from an in-block producer or
+	// gather candidate: the gather, not they, completes the result.
+	MaskWords tree_uses;
 	bool      producer = false;
+	bool      gather_candidate = false;
 };
 
 bool UsesWholeExec(ShaderInstructionType type)
@@ -350,23 +354,109 @@ bool BuildMaskSuccessors(const ShaderCode& code, std::vector<std::vector<uint32_
 }
 
 
+bool IsGatherType(const ShaderInstruction& inst)
+{
+	switch (inst.type)
+	{
+		case ShaderInstructionType::SAndB64:
+		case ShaderInstructionType::SAndn2B64:
+		case ShaderInstructionType::SNandB64:
+		case ShaderInstructionType::SNorB64:
+		case ShaderInstructionType::SOrB64:
+		case ShaderInstructionType::SOrn2B64:
+		case ShaderInstructionType::SXnorB64:
+		case ShaderInstructionType::SXorB64: break;
+		default: return false;
+	}
+	return inst.format == ShaderInstructionFormat::Sdst2Ssrc02Ssrc12 && inst.dst.size == 2 &&
+	       (inst.dst.type == ShaderOperandType::Sgpr || inst.dst.type == ShaderOperandType::VccLo);
+}
+
+// The instruction whose whole-pair write of `pair` reaches `index` in its
+// straight-line block, or -1.
+int64_t InBlockPairDefinition(const ShaderCode& code, const std::vector<bool>& label_targets, const std::vector<MaskDemandStep>& steps,
+                              uint32_t index, const ShaderOperand& pair)
+{
+	MaskWords words;
+	AddMaskWords(pair, &words);
+	if (words.count() != 2 || words.test(LaneFlow::kSccWord))
+	{
+		return -1;
+	}
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t at = index; at > 0 && !label_targets[at];)
+	{
+		const uint32_t candidate = --at;
+		if (ShaderInstructionBreaksStraightLineProof(instructions.At(candidate).type))
+		{
+			return -1;
+		}
+		const auto written = steps[candidate].defs & words;
+		if (written.any())
+		{
+			return written == words ? static_cast<int64_t>(candidate) : -1;
+		}
+	}
+	return -1;
+}
+
+// Marks the gather candidates: pointwise S_*_B64 mask algebra with at least
+// one source from an in-block compare or candidate. Such a tree costs one
+// gather at its demanded root instead of one per compare leaf, executed as
+// often since the whole tree is one block.
+void MarkGatherCandidates(const ShaderCode& code, std::vector<MaskDemandStep>* steps, std::vector<std::vector<int64_t>>* tree_definitions)
+{
+	const auto&    instructions = code.GetInstructions();
+	const uint32_t count        = instructions.Size();
+	std::vector<bool> label_targets(count, false);
+	for (uint32_t i = 0; i < count; i++)
+	{
+		label_targets[i] = ShaderCodeHasLabelTarget(code, instructions.At(i).pc);
+	}
+	tree_definitions->assign(count, {});
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const auto& inst = instructions.At(i);
+		if (!IsGatherType(inst))
+		{
+			continue;
+		}
+		auto& step = (*steps)[i];
+		for (int s = 0; s < 2; s++)
+		{
+			const auto definition = InBlockPairDefinition(code, label_targets, *steps, i, inst.src[s]);
+			if (definition < 0 || !((*steps)[definition].producer || (*steps)[definition].gather_candidate))
+			{
+				continue;
+			}
+			AddMaskWords(inst.src[s], &step.tree_uses);
+			(*tree_definitions)[i].push_back(definition);
+		}
+		step.gather_candidate = step.tree_uses.any();
+	}
+}
+
 } // namespace
 
-std::vector<bool> ShaderLaneLocalMaskResults(const ShaderCode& code)
+ShaderLaneMaskPlan ShaderLaneMaskPlanOf(const ShaderCode& code)
 {
 	const auto&                        instructions = code.GetInstructions();
 	const uint32_t                     count        = instructions.Size();
-	std::vector<bool>                  local(count, false);
+	ShaderLaneMaskPlan                 plan;
+	plan.local.assign(count, false);
+	plan.gather.assign(count, false);
 	std::vector<std::vector<uint32_t>> successors;
 	if (!BuildMaskSuccessors(code, &successors))
 	{
-		return local;
+		return plan;
 	}
 	std::vector<MaskDemandStep> steps(count);
 	for (uint32_t i = 0; i < count; i++)
 	{
 		steps[i] = MaskDemandOf(instructions.At(i));
 	}
+	std::vector<std::vector<int64_t>> tree_definitions;
+	MarkGatherCandidates(code, &steps, &tree_definitions);
 	// Backward: the words some later reader needs with every lane's bit.
 	std::vector<MaskWords> demanded_in(count);
 	std::vector<MaskWords> demanded_out(count);
@@ -384,7 +474,7 @@ std::vector<bool> ShaderLaneLocalMaskResults(const ShaderCode& code)
 			auto        in   = (out & ~step.defs) | step.uses;
 			if ((out & step.defs).any())
 			{
-				in |= step.uses_if_demanded;
+				in |= step.uses_if_demanded & ~step.tree_uses;
 			}
 			if (in != demanded_in[i] || out != demanded_out[i])
 			{
@@ -396,9 +486,15 @@ std::vector<bool> ShaderLaneLocalMaskResults(const ShaderCode& code)
 	}
 	for (uint32_t i = 0; i < count; i++)
 	{
-		local[i] = steps[i].producer && (demanded_out[i] & steps[i].defs).none();
+		const auto& step = steps[i];
+		const bool  demanded = (demanded_out[i] & step.defs).any();
+		plan.local[i]        = step.producer && !demanded;
+		// A tree whose every leaf is complete anyway needs no gather.
+		const bool partial = std::any_of(tree_definitions[i].begin(), tree_definitions[i].end(),
+		                                 [&](int64_t d) { return plan.local[d] || (steps[d].gather_candidate && !plan.gather[d]); });
+		plan.gather[i] = step.gather_candidate && demanded && partial;
 	}
-	return local;
+	return plan;
 }
 
 } // namespace Kyty::Libs::Graphics

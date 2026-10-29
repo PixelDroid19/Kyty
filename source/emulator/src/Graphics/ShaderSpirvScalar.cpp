@@ -55,15 +55,32 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B64_Sdst2Ssrc02Ssrc12)
 		return false;
 	}
 
+	String8 params = String8(param[0]) + "\n" + param[1] + "\n" + (param[2] == nullptr ? "" : param[2]) + "\n" +
+	                 (param[3] == nullptr ? "" : param[3]) + "\n";
+	if (spirv->IsLaneMaskGather(index))
+	{
+		// Every lane holds its own part's bits of the combined mask; one
+		// gather of each lane's own bit completes the wave mask.
+		params = params.ReplaceStr("%tb_<index> =", "%tb_part_<index> =").ReplaceStr("%td_<index> =", "%td_part_<index> =") + R"(
+    %tg_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
+    %tg_upper_<index> = OpUGreaterThanEqual %bool %tg_lane_<index> %uint_32
+    %tg_word_<index> = OpSelect %uint %tg_upper_<index> %td_part_<index> %tb_part_<index>
+    %tg_shift_<index> = OpBitwiseAnd %uint %tg_lane_<index> %uint_31
+    %tg_bits_<index> = OpShiftRightLogical %uint %tg_word_<index> %tg_shift_<index>
+    %tg_bit_<index> = OpBitwiseAnd %uint %tg_bits_<index> %uint_1
+    %tg_own_<index> = OpINotEqual %bool %tg_bit_<index> %uint_0
+    %tg_ballot_<index> = OpFunctionCall %v4uint %split_ballot %tg_own_<index>
+    %tb_<index> = OpCompositeExtract %uint %tg_ballot_<index> 0
+    %td_<index> = OpCompositeExtract %uint %tg_ballot_<index> 1
+)";
+	}
+
 	static const char* text = R"(
     <load0>
     <load1>
     <load2>
     <load3>
-    <param0>
-    <param1>
-    <param2>
-    <param3>
+    <params>
     <store0>
     <store1>
     <execz>
@@ -75,10 +92,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B64_Sdst2Ssrc02Ssrc12)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<load2>", load2)
 	                   .ReplaceStr("<load3>", load3)
-	                   .ReplaceStr("<param0>", param[0])
-	                   .ReplaceStr("<param1>", param[1])
-	                   .ReplaceStr("<param2>", (param[2] == nullptr ? "" : param[2]))
-	                   .ReplaceStr("<param3>", (param[3] == nullptr ? "" : param[3]))
+	                   .ReplaceStr("<params>", params)
 	                   .ReplaceStr("<execz>", (operand_is_exec(inst.dst) ? EXECZ : ""))
 	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 2))
 	                   .ReplaceStr("<store0>", discard_result ? "" : String8("OpStore %<dst0> %tb_<index>").ReplaceStr("<dst0>", dst_value0.value))
