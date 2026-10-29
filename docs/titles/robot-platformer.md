@@ -107,6 +107,19 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   and the acquire fence. The parts then ran unsynchronised and the device
   was lost on the worldmap at 43-46 s (translators 178 and 180). Acquire
   loads keep every loop (200 of 200 at translator 181).
+- **Fix 3** (translator 182): ANV compiles each acquire load in the spin as
+  a shared-memory load followed by a fence that waits for it, so one spin
+  iteration of P parts paid about 2P serialized round trips. Only the last
+  load of each iteration now acquires; the others are relaxed and issue
+  together, and one acquire fence follows the loop. The acquire load keeps
+  the loop, unlike the excluded fully relaxed spin: the final NIR of the
+  same 8-lane pipeline keeps all 200 rendezvous loops, with shared-memory
+  fences down from 1843 to 643 and instructions from 66105 to 50259.
+  `0x3666fa39` went from 28.9 to 22.4 ms per call (GPU timestamps, strict
+  340 s dune runs before and after, last six 5 s windows each).
+  Focused `kyty_unit_test` suites (1492 passed); the strict games matrix on
+  Intel A770 reached 26 of 32 cases interactive (25 of 32 before), with no
+  case losing presents.
 - **Excluded: GDA address translation cache** (translator 174): some
   compute pipelines took 13-16 s each to compile on ANV and the worldmap
   stopped on a strict storage refusal at 72 s.

@@ -220,9 +220,11 @@ OpBranch %split_publish_published
 %split_publish_published = OpLabel
 )";
 	// One spin reads every part's sequence, so the parts' latencies overlap
-	// instead of adding up; every seen value is n or n + 1. The loads acquire:
-	// a relaxed spin whose result a caller ignores has no effect and the
-	// compiler drops it.
+	// instead of adding up; every seen value is n or n + 1. Only the last load
+	// acquires: an acquire load per part serializes the loads behind one fence
+	// each, while a spin of relaxed loads alone has no effect a caller may
+	// observe and the compiler drops it. The fence after the loop orders the
+	// reads of what the relaxed loads saw published.
 	text += R"(OpBranch %split_publish_header
 %split_publish_header = OpLabel
 %split_publish_spins = OpPhi %uint %split_c0 %split_publish_published %split_publish_next %split_publish_continue
@@ -233,13 +235,14 @@ OpBranch %split_publish_body
 	String8 sequence = "%split_publish_n";
 	for (uint32_t part = 0; part < parts; ++part)
 	{
+		const char* semantics = part + 1u == parts ? "%split_acquire" : "%split_c0";
 		text += String8::FromPrintf("%%split_publish_sequence_index%u = OpIAdd %%uint %%split_publish_base %%split_c%u\n"
 		                            "%%split_publish_sequence%u_ptr = OpAccessChain %%_ptr_Workgroup_split_uint %%split_exchange "
 		                            "%%split_publish_sequence_index%u\n"
 		                            "%%split_publish_seen%u = OpAtomicLoad %%uint %%split_publish_sequence%u_ptr %%split_scope_workgroup "
-		                            "%%split_acquire\n"
+		                            "%s\n"
 		                            "%%split_publish_upto%u = OpExtInst %%uint %%GLSL_std_450 UMin %s %%split_publish_seen%u\n",
-		                            part, part, part, part, part, part, part, sequence.c_str(), part);
+		                            part, part, part, part, part, part, semantics, part, sequence.c_str(), part);
 		sequence = String8::FromPrintf("%%split_publish_upto%u", part);
 	}
 	text += String8::FromPrintf(R"(%%split_publish_ready = OpIEqual %%bool %s %%split_publish_n
@@ -250,6 +253,7 @@ OpBranchConditional %%split_publish_done %%split_publish_merge %%split_publish_c
 %%split_publish_continue = OpLabel
 OpBranch %%split_publish_header
 %%split_publish_merge = OpLabel
+OpMemoryBarrier %%split_scope_workgroup %%split_acquire
 OpReturnValue %s
 OpFunctionEnd
 )",
