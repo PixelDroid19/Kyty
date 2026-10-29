@@ -94,6 +94,14 @@ buffers without allocating a set or hashing anything.
   layout plan decides this per shader, not per draw.
 - Expected gain: most of `GetDescriptor` (7.1%) plus the misses' `vkUpdateDescriptorSets`. The gain
   is small, but stage 3 needs stable image sets.
+- **Premise checked (2026-10-29, gw111 and gw112, crash-site dunes).** A temporary counter split
+  every set lookup key into its buffer part and its image/sampler part and remembered both:
+  - about 79-81% of lookups miss (5000-8000 hits against 18000-30000 misses per 5 s window);
+  - in 95-96% of the misses the buffer part is new and the image part was already seen;
+  - a new image part causes about 0.7% of the misses.
+
+  The misses therefore come from buffers, as stage 1 assumes; bindless images (stage 4) would not
+  remove them. At about 8% of CP time, stage 1 is worth about 5-7 ms per frame there.
 
 ### Stage 2: resource recipe per shader (replaces per-draw `ShaderParseUsage2`)
 
@@ -185,10 +193,15 @@ the inputs a recipe would re-copy:
   with `CopyFromGuest`, while the parse without a reader uses `CopyFromGuestOrLent`. A fold
   capture of a table in lent host memory therefore records a failed read where production
   succeeds. Direction: read through the same function as production.
-- Storage publication to guest addresses is capped at 2.9% of CP time, inside the driver under
-  `GuestDeviceAddressRecordPublication`: two global barriers and one copy per publication.
-  - A 1-in-20000 counter never printed in a 320 s run (gw76). There are fewer than 20000 non-empty
-    publication calls per run, so batching their barriers is not pursued.
+- Storage publication to guest addresses (`GuestDeviceAddressRecordPublication`, two global
+  barriers and one copy per publication) costs about 2 ms of CP time per frame in the dunes.
+  - Measured with a temporary counter in two strict 340 s runs (gw111, gw112, 2026-10-29): per
+    5 s dune window, 270-400 calls of about 2 pieces each, about 4.5 MB copied per call, and
+    50-80 ms of CP time (about 200 us per call, roughly 8-10 calls per frame).
+  - That is too small to change the frame rate (about 131 ms per frame there), so batching the
+    barriers is not pursued.
+  - This corrects an earlier estimate of 2.9% of CP time, which was based only on a 1-in-20000
+    sampling counter that never printed.
 
 ### Stage 3: T#/S# resolution memo per slot
 

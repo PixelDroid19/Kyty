@@ -92,6 +92,28 @@ Each link moves the wait to the next one:
      same way, and it costs the GPU twin of the geometry and NGG plan above. It is parked until GPU
      frame time and CP work per draw are lower, where removing the waits can change the frame
      rate.
+   - **The wait under the long compute kernel (measured 2026-10-29, gw111-gw113).** A temporary
+     probe wrote a host-visible word after `0x3666fa39`, a BVH traversal kernel. It runs as one
+     16x16 workgroup per frame on the graphics queue and takes 22-29 ms per call as split wave64 on
+     this GPU. The probe classified each host fence wait by whether that kernel was still running.
+     - In the dune windows, one graphics-queue wait per frame starts while the kernel runs. It
+       costs 21-23 ms of the roughly 131 ms frame. The other graphics-queue waits add about
+       8-10 ms per frame.
+     - Fence stacks tagged the same way (gw112, 340 s): the running-kernel wait is the
+       `DRAW_INDEX_INDIRECT` argument read in 942 of 944 cases, 21.3 s in total.
+     - The kernel itself writes only two storage images. A second probe recorded every writable
+       storage binding and every compute dispatch in host order (gw113). The 20-byte record is
+       written by a later compute dispatch (`0xd3ef7a03`) on the same queue, in the submission just
+       before the read. The kernel sits three submissions earlier, before the writer in every one
+       of the 1247 classified reads. `SubmitRecordedDispatchesBeforeDraw` splits each draw from the
+       dispatches before it, which is why these are separate submissions.
+     - The backing is host-visible, so after its writer completes the host could read the record
+       without a device copy. A queue-order dependency remains, though.
+     - **Excluded by this classification: waiting only for the writer's submission** instead of
+       writing back with the recording. Every completion point after the writer also includes the
+       kernel, so that change would not shorten this wait. It was not built or run.
+     - The levers are therefore the kernel's own GPU time and this link (a device-side read). The
+       kernel's time also counts toward the GPU frame, where it is about 30% of the graphics queue.
 3. **`WAIT_REG_MEM`.** The 10.6 s are waits on labels whose release also writes back aliased
    storage.
    - Two attempts are recorded as excluded: consolidating those waits, and eliding the submit and
