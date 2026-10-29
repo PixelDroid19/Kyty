@@ -3364,7 +3364,7 @@ void Spirv::FindConstants()
 	}
 	for (const auto& reduction: LaneReductions().reductions)
 	{
-		if (reduction.op == ShaderLaneReductionOp::MaxF32) { AddConstantUint(0xff800000u); } // -inf, the identity
+		AddConstantUint(ShaderLaneReductionIdentity(reduction.op)); // the subgroup reduction's value for a lane a read does not select
 		// Each read selects the seeds of its guest lanes by a two-word lane set.
 		for (const auto& read: reduction.reads)
 		{

@@ -178,6 +178,16 @@ TEST(EmulatorFragmentNeutralRegion, ProvesPartialWaveReadsOnlyThroughRegions)
 	EXPECT_FALSE(Proven(Insert(Region(), 5, Readlane(300))));
 }
 
+TEST(EmulatorFragmentNeutralRegion, WaveTierRegionNeedsAZeroSeedNotAnyIdentity)
+{
+	// Ghost lanes in the wave tier read zero, so a region seeded with another identity (all ones here) is no
+	// neutral region for it; the same region with a zero seed is.
+	EXPECT_TRUE(Proven(Insert(Region(), 5, Readlane(10))));
+	auto program                 = Region();
+	program[2].src[0].constant.u = 0xffffffffu;
+	EXPECT_FALSE(Proven(Insert(program, 5, Readlane(10))));
+}
+
 TEST(EmulatorFragmentNeutralRegion, RejectsReadsReachableWithoutTheRegion)
 {
 	EXPECT_FALSE(Proven(Insert(Region(), 5, Readlane(10)), {ShaderLabel(20, 100)}));

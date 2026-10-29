@@ -170,7 +170,7 @@ public:
 	[[nodiscard]] bool UsesFragmentWaveTier() const;
 	// A pixel program admitted as FragmentPartialWave: each host subgroup is a partially populated guest wave.
 	[[nodiscard]] bool UsesFragmentPartialWave() const;
-	// The whole-wave OR reductions of a pixel program admitted as FragmentPartialWave; empty otherwise.
+	// The whole-wave idempotent reductions of a pixel program admitted as FragmentPartialWave; empty otherwise.
 	// Their network steps are not emitted and each read lowers to one subgroup reduction of the seed.
 	[[nodiscard]] const ShaderLaneReductions& LaneReductions() const;
 	// ds_*_addtid_b32: a per-lane LDS slot at M0[15:0] + offset + TID*4.

@@ -109,8 +109,13 @@ const LaneSets* Known(const Network& network, const ShaderOperand& operand)
 	return found == network.end() ? nullptr : &found->second;
 }
 
-// D = S0 op S1 with S0 optionally row-shifted. A lane whose shift leaves the row keeps D, which is the unshifted
-// source, or takes zero (BOUND_CTRL), the identity of OR but not of a maximum.
+// D = S0 op S1 with S0 optionally row-shifted. A lane whose shift leaves the row keeps D when BOUND_CTRL is off (RDNA2
+// Shader ISA, section 13.3.9 (DPP16), Table 90, field BC); D is the unshifted source, which the check below requires to
+// be the other operand. With BOUND_CTRL on, the lane reads the bound_ctrl value, which Table 91 does not state. The
+// emulator models that value as zero (the RowOpKeepOldSafe comment in ShaderFragmentNeutralRegion.cpp). Zero is the
+// identity of OR, the only op admitted with BOUND_CTRL. Zero is also the identity of unsigned max, which is refused
+// conservatively. The sets are unions of seeds, so the op itself does not change them: an idempotent op folds each
+// seed of a union exactly once.
 bool FoldStep(const ShaderInstruction& inst, ShaderLaneReductionOp op, uint32_t lanes, Network* network)
 {
 	if (inst.src_num != 2 || inst.format != ShaderInstructionFormat::SVdstSVsrc0SVsrc1 || inst.vop3_op_sel != 0u) { return false; }
@@ -155,10 +160,43 @@ bool PermuteStep(const ShaderInstruction& inst, uint32_t lanes, Network* network
 	return true;
 }
 
+// The op of a VALU step that folds two seeds, or nothing for a step that is not one.
+std::optional<ShaderLaneReductionOp> FoldOf(Type type)
+{
+	switch (type)
+	{
+		case Type::VOrB32: return ShaderLaneReductionOp::Or;
+		case Type::VAndB32: return ShaderLaneReductionOp::And;
+		case Type::VMinU32: return ShaderLaneReductionOp::UMin;
+		case Type::VMaxU32: return ShaderLaneReductionOp::UMax;
+		case Type::VMinI32: return ShaderLaneReductionOp::SMin;
+		case Type::VMaxI32: return ShaderLaneReductionOp::SMax;
+		case Type::VMaxF32: return ShaderLaneReductionOp::MaxF32;
+		default: return std::nullopt;
+	}
+}
+
+// The op every fold of the network names, which must be one. A network without a fold takes `fallback`, the op its
+// caller set.
+std::optional<ShaderLaneReductionOp> NetworkOp(const ShaderCode& code, uint32_t seed_index, uint32_t restore, ShaderLaneReductionOp fallback)
+{
+	const auto&                          instructions = code.GetInstructions();
+	std::optional<ShaderLaneReductionOp> op;
+	for (uint32_t index = seed_index + 1u; index < restore; ++index)
+	{
+		const auto fold = FoldOf(instructions.At(index).type);
+		if (!fold.has_value()) { continue; }
+		if (op.has_value() && *op != *fold) { return std::nullopt; }
+		op = fold;
+	}
+	return op.value_or(fallback);
+}
+
 bool Step(const ShaderInstruction& inst, ShaderLaneReductionOp op, uint32_t lanes, Network* network)
 {
 	if (!PlainVector(inst)) { return false; }
-	if (inst.type == (op == ShaderLaneReductionOp::Or ? Type::VOrB32 : Type::VMaxF32)) { return FoldStep(inst, op, lanes, network); }
+	const auto fold = FoldOf(inst.type);
+	if (fold.has_value()) { return FoldStep(inst, op, lanes, network); }
 	if (inst.type == Type::VPermlane16B32 || inst.type == Type::VPermlanex16B32) { return PermuteStep(inst, lanes, network); }
 	return false;
 }
@@ -484,7 +522,7 @@ bool ProveReduction(const ShaderCode& code, const ShaderFragmentMaskFlow& masks,
                     ShaderLaneReduction* reduction)
 {
 	const auto& instructions = code.GetInstructions();
-	// The region proof made the seed V_CNDMASK_B32 0, x, cond with cond inside the region's EXEC; the
+	// The region proof made the seed V_CNDMASK_B32 identity, x, cond with cond inside the region's EXEC; the
 	// mask flow adds that cond holds only covered lanes.
 	if (!masks.live_condition[seed_index]) { return false; }
 	if (!ShaderProveLaneReductionNetwork(code, masks.guest_wave_size, seed_index, restore, reduction)) { return false; }
@@ -496,11 +534,36 @@ bool ProveReduction(const ShaderCode& code, const ShaderFragmentMaskFlow& masks,
 
 } // namespace
 
+uint32_t ShaderLaneReductionIdentity(ShaderLaneReductionOp op)
+{
+	switch (op)
+	{
+		case ShaderLaneReductionOp::Or:
+		case ShaderLaneReductionOp::UMax: return 0u;
+		case ShaderLaneReductionOp::And:
+		case ShaderLaneReductionOp::UMin: return 0xffffffffu;
+		case ShaderLaneReductionOp::SMin: return 0x7fffffffu;
+		case ShaderLaneReductionOp::SMax: return 0x80000000u;
+		case ShaderLaneReductionOp::MaxF32: return 0xff800000u; // -inf
+		default: EXIT("unknown lane reduction op\n"); return 0u;
+	}
+}
+
 bool ShaderProveLaneReductionNetwork(const ShaderCode& code, uint32_t guest_wave_size, uint32_t seed_index, uint32_t restore,
                                      ShaderLaneReduction* reduction)
 {
 	const auto& instructions = code.GetInstructions();
 	if (guest_wave_size > kLanes || seed_index >= restore || restore >= instructions.Size()) { return false; }
+	// A subgroup reduction gives an absent lane the identity of the op, while the guest folds the seed of a lane
+	// the condition excludes: the two agree only when that seed is the identity.
+	const auto op = NetworkOp(code, seed_index, restore, reduction->op);
+	uint32_t   identity_seed = 0;
+	if (!op.has_value() || !Constant(instructions.At(seed_index).src[0], &identity_seed) ||
+	    identity_seed != ShaderLaneReductionIdentity(*op))
+	{
+		return false;
+	}
+	reduction->op = *op;
 	const int seed = instructions.At(seed_index).dst.register_id;
 	Network   network;
 	auto&     own = network[seed];

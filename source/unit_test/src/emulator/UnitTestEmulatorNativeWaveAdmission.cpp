@@ -18,8 +18,10 @@
 #include "spirv/unified1/spirv.hpp"
 
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -132,13 +134,15 @@ ShaderInstruction Compare()
 	return inst;
 }
 
-ShaderInstruction Select(ShaderOperand mask)
+// The seed `cond ? v9 : identity`: zero, or the identity of a lane reduction's op.
+ShaderInstruction Select(ShaderOperand mask, uint32_t identity = 0)
 {
 	ShaderInstruction inst {};
 	inst.type = ShaderInstructionType::VCndmaskB32;
 	inst.format = ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2;
 	inst.dst = Operand(ShaderOperandType::Vgpr, 10);
 	inst.src[0] = Operand(ShaderOperandType::LiteralConstant, 0, 0);
+	inst.src[0].constant.u = identity;
 	inst.src[1] = Operand(ShaderOperandType::Vgpr, 9);
 	inst.src[2] = mask;
 	inst.src_num = 3;
@@ -184,14 +188,16 @@ ShaderInstruction Vector(ShaderInstructionType type, int dst, ShaderOperand a, S
 	return inst;
 }
 
-// v10 |= v10 shifted right by `shift` lanes inside each row.
-ShaderInstruction RowShiftOr(uint32_t shift, uint8_t row_mask = 15)
+// v10 = fold(v10, v10 shifted right by `shift` lanes inside each row); the fold is OR unless named.
+ShaderInstruction RowShiftOr(uint32_t shift, uint8_t row_mask = 15, ShaderInstructionType fold = ShaderInstructionType::VOrB32,
+                             bool bound_ctrl = false)
 {
-	auto inst = Vector(ShaderInstructionType::VOrB32, 10, Operand(ShaderOperandType::Vgpr, 10), Operand(ShaderOperandType::Vgpr, 10));
+	auto inst = Vector(fold, 10, Operand(ShaderOperandType::Vgpr, 10), Operand(ShaderOperandType::Vgpr, 10));
 	inst.src[0].dpp = true;
 	inst.src[0].dpp_ctrl = static_cast<uint16_t>(0x110u + shift);
 	inst.src[0].dpp_row_mask = row_mask;
 	inst.src[0].dpp_bank_mask = 15;
+	inst.src[0].dpp_bound_ctrl = bound_ctrl;
 	return inst;
 }
 
@@ -210,10 +216,13 @@ ShaderInstruction Endpgm()
 	return inst;
 }
 
-// The whole-wave OR of a seed `cond ? v9 : 0` (cond = the entry EXEC): row-shift ORs fold each row onto its
-// last lane, PERMLANEX16 brings the other row of each half, and lanes 31 and 63 are read after the restore.
-// `between` sits between the restore and the reads, `tail` follows the reads.
-ShaderCode Reduction(std::initializer_list<ShaderInstruction> tail, uint8_t row_mask = 15, std::initializer_list<ShaderInstruction> between = {})
+// The whole-wave reduction of a seed `cond ? v9 : identity` (cond = the entry EXEC), folded by `fold`: row-shift folds
+// fold each row onto its last lane, PERMLANEX16 brings the other row of each half, and lanes 31 and 63 are read after
+// the restore. `steps` follow the folds and precede the restore, `between` sits between the restore and the reads,
+// `tail` follows the reads.
+ShaderCode Reduction(std::initializer_list<ShaderInstruction> tail, uint8_t row_mask = 15, std::initializer_list<ShaderInstruction> between = {},
+                     ShaderInstructionType fold = ShaderInstructionType::VOrB32, uint32_t identity = 0u, bool bound_ctrl = false,
+                     std::initializer_list<ShaderInstruction> steps = {})
 {
 	const auto exec  = Operand(ShaderOperandType::ExecLo, 0, 2);
 	const auto mask  = Operand(ShaderOperandType::Sgpr, 36, 2);
@@ -227,15 +236,15 @@ ShaderCode Reduction(std::initializer_list<ShaderInstruction> tail, uint8_t row_
 	permute.src_num = 3;
 	std::vector<ShaderInstruction> body {Unary(ShaderInstructionType::SMovB64, mask, exec, true),
 	                                     Unary(ShaderInstructionType::SOrn2SaveexecB64, saved, mask, true),
-	                                     Select(mask),
-	                                     RowShiftOr(1, row_mask),
-	                                     RowShiftOr(2),
-	                                     RowShiftOr(4),
-	                                     RowShiftOr(8),
+	                                     Select(mask, identity),
+	                                     RowShiftOr(1, row_mask, fold, bound_ctrl),
+	                                     RowShiftOr(2, 15, fold, bound_ctrl),
+	                                     RowShiftOr(4, 15, fold, bound_ctrl),
+	                                     RowShiftOr(8, 15, fold, bound_ctrl),
 	                                     permute,
-	                                     Vector(ShaderInstructionType::VOrB32, 10, Operand(ShaderOperandType::Vgpr, 10),
-	                                            Operand(ShaderOperandType::Vgpr, 9)),
-	                                     Unary(ShaderInstructionType::SMovB64, exec, saved, true)};
+	                                     Vector(fold, 10, Operand(ShaderOperandType::Vgpr, 10), Operand(ShaderOperandType::Vgpr, 9))};
+	body.insert(body.end(), steps.begin(), steps.end());
+	body.push_back(Unary(ShaderInstructionType::SMovB64, exec, saved, true));
 	body.insert(body.end(), between.begin(), between.end());
 	body.push_back(Readlane(0, 31));
 	body.push_back(Readlane(1, 63));
@@ -1210,21 +1219,20 @@ TEST(EmulatorNativeWaveAdmission, Wave32OrReductionMayHoldScalarLoadsAmongItsSte
 	refused(with_loads(other, load(Operand(ShaderOperandType::ExecLo))));
 }
 
-// The guest form of the entry: the launch mask saved before WQM, the condition taken as EXEC & launch, an
-// ORN2_SAVEEXEC of EXEC itself, and M0 saved for the region's interpolation-free span.
-TEST(EmulatorNativeWaveAdmission, PartialWaveEntryMaySaveExecItselfAndCopyM0)
+// The guest form of a partial-wave entry: the launch mask saved before WQM, the condition taken as EXEC & launch, an
+// ORN2_SAVEEXEC of EXEC itself, and M0 saved for the region's interpolation-free span. `plain` supplies the network
+// from its seed on.
+static ShaderCode PartialWaveEntry(const ShaderCode& plain)
 {
 	const auto exec   = Operand(ShaderOperandType::ExecLo, 0, 2);
 	const auto launch = Operand(ShaderOperandType::Sgpr, 30, 2);
-	const auto mask   = Operand(ShaderOperandType::Sgpr, 36, 2);
 	ShaderInstruction condition {};
 	condition.type    = ShaderInstructionType::SAndB64;
 	condition.format  = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
-	condition.dst     = mask;
+	condition.dst     = Operand(ShaderOperandType::Sgpr, 36, 2);
 	condition.src[0]  = exec;
 	condition.src[1]  = launch;
 	condition.src_num = 2;
-	const auto plain = Reduction({Clear(9), Clear(10)});
 	ShaderCode code;
 	code.SetType(ShaderType::Pixel);
 	const auto add = [&code](ShaderInstruction inst)
@@ -1238,6 +1246,12 @@ TEST(EmulatorNativeWaveAdmission, PartialWaveEntryMaySaveExecItselfAndCopyM0)
 	add(Unary(ShaderInstructionType::SOrn2SaveexecB64, Operand(ShaderOperandType::VccLo, 0, 2), exec, true));
 	add(Unary(ShaderInstructionType::SMovB32, Operand(ShaderOperandType::M0), Operand(ShaderOperandType::Sgpr, 32)));
 	for (uint32_t index = 2; index < plain.GetInstructions().Size(); ++index) { add(plain.GetInstructions().At(index)); }
+	return code;
+}
+
+TEST(EmulatorNativeWaveAdmission, PartialWaveEntryMaySaveExecItselfAndCopyM0)
+{
+	const auto code = PartialWaveEntry(Reduction({Clear(9), Clear(10)}));
 	EXPECT_EQ(ShaderAnalyzeNativeWave(code, 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
 	const auto reductions = ShaderFindFragmentLaneReductions(code, ShaderAnalyzeFragmentMaskFlow(code, 64u));
 	ASSERT_EQ(reductions.reductions.size(), 1u);
@@ -1342,6 +1356,183 @@ TEST(EmulatorNativeWaveAdmission, PartialWaveReductionEmitsOneSubgroupOrPerRead)
 		}
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNativeWaveAdmission, IdempotentIntegerFoldsRunAsPartialWavesWithTheirIdentity)
+{
+	const struct
+	{
+		ShaderInstructionType fold;
+		uint32_t              identity;
+		ShaderLaneReductionOp op;
+	} cases[] {
+	    {ShaderInstructionType::VAndB32, 0xffffffffu, ShaderLaneReductionOp::And},
+	    {ShaderInstructionType::VMinU32, 0xffffffffu, ShaderLaneReductionOp::UMin},
+	    {ShaderInstructionType::VMaxU32, 0u, ShaderLaneReductionOp::UMax},
+	    {ShaderInstructionType::VMinI32, 0x7fffffffu, ShaderLaneReductionOp::SMin},
+	    {ShaderInstructionType::VMaxI32, 0x80000000u, ShaderLaneReductionOp::SMax},
+	};
+	for (const auto& [fold, identity, op]: cases)
+	{
+		const auto code = Reduction({Clear(9), Clear(10)}, 15, {}, fold, identity);
+		EXPECT_EQ(ShaderAnalyzeNativeWave(code, 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+		const auto reductions = ShaderFindFragmentLaneReductions(code, ShaderAnalyzeFragmentMaskFlow(code, 64u));
+		ASSERT_EQ(reductions.reductions.size(), 1u);
+		EXPECT_EQ(reductions.reductions[0].op, op);
+		EXPECT_EQ(reductions.reductions[0].seed, 10);
+		uint64_t lanes = 0;
+		ASSERT_NE(reductions.ReadAt(10, &lanes), nullptr);
+		EXPECT_EQ(lanes, 0x00000000ffffffffull);
+		ASSERT_NE(reductions.ReadAt(11, &lanes), nullptr);
+		EXPECT_EQ(lanes, 0xffffffff00000000ull);
+	}
+}
+
+// Whether the prover admits the whole-wave reduction of `code`: the seed is at index 2 and the restore at `restore`.
+static bool ProvesReduction(const ShaderCode& code, uint32_t restore = 9)
+{
+	ShaderLaneReduction reduction;
+	return ShaderProveLaneReductionNetwork(code, 64, 2, restore, &reduction);
+}
+
+TEST(EmulatorNativeWaveAdmission, IdempotentFoldRefusesSeedsOtherThanItsIdentity)
+{
+	// Each refusal has a control that differs only in the rule it names: the seed, or BOUND_CTRL on the fold's row shifts.
+	EXPECT_TRUE(ProvesReduction(Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMinU32, 0xffffffffu)));
+	EXPECT_FALSE(ProvesReduction(Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMinU32, 0u)));
+	EXPECT_TRUE(ProvesReduction(Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VOrB32, 0u)));
+	EXPECT_FALSE(ProvesReduction(Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VOrB32, 0xffffffffu)));
+	EXPECT_TRUE(ProvesReduction(Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMinU32, 0xffffffffu, false)));
+	EXPECT_FALSE(ProvesReduction(Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMinU32, 0xffffffffu, true)));
+	EXPECT_TRUE(ProvesReduction(Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMaxU32, 0u, false)));
+	EXPECT_FALSE(ProvesReduction(Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMaxU32, 0u, true)));
+	// BOUND_CTRL is admitted for OR alone, so the refusals above come from that rule and not from the row shifts.
+	EXPECT_TRUE(ProvesReduction(Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VOrB32, 0u, true)));
+}
+
+TEST(EmulatorNativeWaveAdmission, AddAndXorFoldsAreNotIdempotentReductions)
+{
+	// An Add or Xor step is not a fold of the network and is refused; the OR control of the same network is proven.
+	const auto prove = [](ShaderInstructionType fold) { return ProvesReduction(Reduction({Clear(9), Clear(10)}, 15, {}, fold, 0u)); };
+	EXPECT_TRUE(prove(ShaderInstructionType::VOrB32));
+	EXPECT_FALSE(prove(ShaderInstructionType::VAddI32));
+	EXPECT_FALSE(prove(ShaderInstructionType::VXorB32));
+}
+
+// Counts the lines of `source` that contain `text` and end with `suffix`. Each read lowers to one such line.
+static size_t CountLines(const String8& source, std::string_view text, std::string_view suffix)
+{
+	size_t count = 0;
+	std::string_view rest = source.c_str();
+	while (!rest.empty())
+	{
+		const size_t           end  = rest.find('\n');
+		const std::string_view line = rest.substr(0, end);
+		if (line.find(text) != std::string_view::npos && line.size() >= suffix.size() &&
+		    line.substr(line.size() - suffix.size()) == suffix)
+		{
+			count++;
+		}
+		if (end == std::string_view::npos) { break; }
+		rest.remove_prefix(end + 1);
+	}
+	return count;
+}
+
+// Compiles the partial-wave source of `code` and exits the child process with a distinct code unless every read lowers to
+// one subgroup reduction `reduce`, selects `identity` for the lanes it does not hold, no OR reduction is emitted, and the
+// toolchain accepts the module.
+static void ExitUnlessPartialWaveReductionValidates(const ShaderCode& code, uint32_t wave, std::string_view reduce, std::string_view identity,
+                                                    size_t reads)
+{
+	ShaderPixelInputInfo input {};
+	input.native_wave = ShaderAnalyzeNativeWave(code, wave);
+	if (input.native_wave.proof != ShaderNativeWaveProof::FragmentPartialWave) { std::_Exit(1); }
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	if (CountLines(source, reduce, "") != reads) { std::_Exit(2); }
+	if (CountLines(source, "OpSelect %uint %lr_member_", identity) != reads) { std::_Exit(3); }
+	if (CountLines(source, "OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %lr_", "") != 0) { std::_Exit(5); }
+	Kyty::Vector<uint32_t> binary;
+	String8                error;
+	if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+	{
+		std::fprintf(stderr, "%s\n", error.c_str());
+		std::_Exit(6);
+	}
+}
+
+TEST(EmulatorNativeWaveAdmission, IdempotentIntegerFoldsEmitTheirSubgroupReduction)
+{
+	ASSERT_EXIT(([] {
+		NggFixture::Initialize();
+		ScopedShaderValidation validation;
+		if (!Config::ShaderValidationEnabled()) { std::_Exit(4); }
+		// The unsigned folds reduce their seeds as uint, the signed ones the int bitcast of them. The identity is the
+		// constant id of the op's identity: `uint_<n>` below 256, `uint_0x<hex>` otherwise (ShaderSpirvOperands.cpp).
+		struct Emission
+		{
+			ShaderInstructionType fold;
+			uint32_t              identity;
+			std::string_view      reduce;
+			std::string_view      identity_text;
+		};
+		const Emission cases[] {
+		    {ShaderInstructionType::VAndB32, 0xffffffffu, "OpGroupNonUniformBitwiseAnd %uint %uint_3 Reduce %lr_part_", "%uint_0xffffffff"},
+		    {ShaderInstructionType::VMinU32, 0xffffffffu, "OpGroupNonUniformUMin %uint %uint_3 Reduce %lr_part_", "%uint_0xffffffff"},
+		    {ShaderInstructionType::VMaxU32, 0u, "OpGroupNonUniformUMax %uint %uint_3 Reduce %lr_part_", "%uint_0"},
+		    {ShaderInstructionType::VMinI32, 0x7fffffffu, "OpGroupNonUniformSMin %int %uint_3 Reduce %lr_signed_", "%uint_0x7fffffff"},
+		    {ShaderInstructionType::VMaxI32, 0x80000000u, "OpGroupNonUniformSMax %int %uint_3 Reduce %lr_signed_", "%uint_0x80000000"},
+		};
+		for (const auto& c: cases)
+		{
+			ExitUnlessPartialWaveReductionValidates(Reduction({Clear(9), Clear(10)}, 15, {}, c.fold, c.identity), 64u, c.reduce,
+			                                        c.identity_text, 2u);
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNativeWaveAdmission, IdempotentFoldsOfMixedOpsAreRefused)
+{
+	const auto fold_and = Vector(ShaderInstructionType::VAndB32, 10, Operand(ShaderOperandType::Vgpr, 10), Operand(ShaderOperandType::Vgpr, 10));
+	const auto whole    = Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMinU32, 0xffffffffu);
+	const auto mixed    = Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMinU32, 0xffffffffu, false, {fold_and});
+	// The AND step moves the restore from index 9 to 10, so the control keeps that shape: a self-fold with the same
+	// UMin op, which FoldStep admits. Only the op of the extra step differs between the control and `mixed`.
+	const auto same_op = Vector(ShaderInstructionType::VMinU32, 10, Operand(ShaderOperandType::Vgpr, 10), Operand(ShaderOperandType::Vgpr, 10));
+	const auto control = Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMinU32, 0xffffffffu, false, {same_op});
+	EXPECT_TRUE(ProvesReduction(whole));
+	EXPECT_TRUE(ProvesReduction(control, 10));
+	EXPECT_FALSE(ProvesReduction(mixed, 10));
+}
+
+TEST(EmulatorNativeWaveAdmission, MaxF32NetworkIsProvableButNotAFragmentReduction)
+{
+	// The NGG front body proves MaxF32 by naming the op and checking the -inf seed. The fragment region admits no
+	// MaxF32 fold: the same -inf seed with an integer fold is a neutral region, so the fold alone refuses the network.
+	const auto maxf32 = Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMaxF32, 0xff800000u);
+	ShaderLaneReduction reduction;
+	reduction.op = ShaderLaneReductionOp::MaxF32;
+	EXPECT_TRUE(ShaderProveLaneReductionNetwork(maxf32, 64, 2, 9, &reduction));
+	EXPECT_EQ(reduction.op, ShaderLaneReductionOp::MaxF32);
+	// Entry index 1 is the SOrn2 that opens the region.
+	uint32_t seed = 0;
+	uint32_t end  = 0;
+	const auto integer = Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMinU32, 0xff800000u);
+	EXPECT_TRUE(ShaderFragmentNeutralRegionBounds(integer, 64, 1, &seed, &end));
+	EXPECT_FALSE(ShaderFragmentNeutralRegionBounds(maxf32, 64, 1, &seed, &end));
+	EXPECT_TRUE(ShaderFindFragmentLaneReductions(maxf32, ShaderAnalyzeFragmentMaskFlow(maxf32, 64u)).reductions.empty());
+}
+
+TEST(EmulatorNativeWaveAdmission, IdempotentFoldSeedFromASubsetConditionKeepsItsIdentity)
+{
+	// The condition EXEC & launch is a subset of the entry EXEC, so the identity seed of an unsigned minimum holds.
+	const auto code = PartialWaveEntry(Reduction({Clear(9), Clear(10)}, 15, {}, ShaderInstructionType::VMinU32, 0xffffffffu));
+	EXPECT_EQ(ShaderAnalyzeNativeWave(code, 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	const auto reductions = ShaderFindFragmentLaneReductions(code, ShaderAnalyzeFragmentMaskFlow(code, 64u));
+	ASSERT_EQ(reductions.reductions.size(), 1u);
+	EXPECT_EQ(reductions.reductions[0].op, ShaderLaneReductionOp::UMin);
+	EXPECT_EQ(reductions.reductions[0].seed_index, 5u);
 }
 
 // A pixel append allocation: each valid pixel takes counter + MBCNT(launch EXEC) as its slot.

@@ -1022,8 +1022,8 @@ static uint32_t ShaderFragmentFirstQuadLoss(const ShaderCode& code)
 // Whether a lane-local Wave64 or Wave32 pixel program runs as a partially populated guest wave. Which pixels share a
 // wave is the rasterizer's choice, so a host subgroup of any width holding whole quads is such a wave, as long
 // as nothing observes a lane by its position:
-//  - an OR reduction proven by ShaderFindFragmentLaneReductions folds only lanes that hold their seed, so a
-//    lane outside the subgroup is an absent guest lane that seeds zero;
+//  - an idempotent reduction (OR, AND, integer min or max) proven by ShaderFindFragmentLaneReductions folds only the
+//    lanes its read selects, so a lane outside the subgroup is an absent guest lane that seeds the op's identity;
 //  - quad DPP and a READFIRSTLANE over an EXEC inside the launched quads see only lanes that exist, while no
 //    quad has lost a member yet;
 //  - scalar spills keep their own storage;

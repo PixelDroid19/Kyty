@@ -3626,6 +3626,22 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadfirstlaneB32_SVdstSVsrc0)
 	return true;
 }
 
+// The SPIR-V subgroup reduction of each op, by its name after OpGroupNonUniform.
+static const char* SubgroupReduction(ShaderLaneReductionOp op)
+{
+	switch (op)
+	{
+		case ShaderLaneReductionOp::Or: return "BitwiseOr";
+		case ShaderLaneReductionOp::And: return "BitwiseAnd";
+		case ShaderLaneReductionOp::UMin: return "UMin";
+		case ShaderLaneReductionOp::UMax: return "UMax";
+		case ShaderLaneReductionOp::SMin: return "SMin";
+		case ShaderLaneReductionOp::SMax: return "SMax";
+		case ShaderLaneReductionOp::MaxF32: return "FMax";
+		default: EXIT("unknown lane reduction subgroup op\n"); return "";
+	}
+}
+
 // A V_READLANE_B32 of a proven whole-wave reduction: the seed folded over the invocations whose guest lane is
 // in `lanes`. The seed register still holds the seed, since the network steps were not emitted. Lanes the
 // subgroup does not hold contribute the identity, as absent guest lanes do; in a pixel program the quad transfer
@@ -3650,11 +3666,19 @@ static bool RecompileLaneReductionRead(uint32_t index, const ShaderLaneReduction
         %lr_bit_<index> = OpBitwiseAnd %uint %lr_shifted_<index> %uint_1
         %lr_member_<index> = OpINotEqual %bool %lr_bit_<index> %uint_0
 )";
-	// V_MAX_F32 returns the other operand of a quiet NaN; the subgroup maximum of a NaN is undefined.
-	static const char* or_text = R"(
-        %lr_part_<index> = OpSelect %uint %lr_member_<index> %lr_seed_<index> %uint_0
-        %lr_raw_<index> = OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %lr_part_<index>
+	// An integer fold reduces the seeds of its members, and the other lanes contribute the identity of the op. The
+	// signed folds reduce the same bits as int.
+	static const char* unsigned_text = R"(
+        %lr_part_<index> = OpSelect %uint %lr_member_<index> %lr_seed_<index> %<identity>
+        %lr_raw_<index> = OpGroupNonUniform<reduce> %uint %uint_3 Reduce %lr_part_<index>
 )";
+	static const char* signed_text = R"(
+        %lr_part_<index> = OpSelect %uint %lr_member_<index> %lr_seed_<index> %<identity>
+        %lr_signed_<index> = OpBitcast %int %lr_part_<index>
+        %lr_reduced_<index> = OpGroupNonUniform<reduce> %int %uint_3 Reduce %lr_signed_<index>
+        %lr_raw_<index> = OpBitcast %uint %lr_reduced_<index>
+)";
+	// V_MAX_F32 returns the other operand of a quiet NaN; the subgroup maximum of a NaN is undefined.
 	static const char* max_text = R"(
         %lr_value_<index> = OpBitcast %float %lr_seed_<index>
         %lr_identity_<index> = OpBitcast %float %<negative_infinity>
@@ -3665,9 +3689,12 @@ static bool RecompileLaneReductionRead(uint32_t index, const ShaderLaneReduction
         %lr_max_<index> = OpGroupNonUniformFMax %float %uint_3 Reduce %lr_part_<index>
         %lr_raw_<index> = OpBitcast %uint %lr_max_<index>
 )";
-	const bool maximum = reduction.op == ShaderLaneReductionOp::MaxF32;
-	*dst_source += (String8(text) + (maximum ? max_text : or_text))
+	const bool signed_fold = reduction.op == ShaderLaneReductionOp::SMin || reduction.op == ShaderLaneReductionOp::SMax;
+	const char* fold       = reduction.op == ShaderLaneReductionOp::MaxF32 ? max_text : (signed_fold ? signed_text : unsigned_text);
+	*dst_source += (String8(text) + fold)
 	                   .ReplaceStr("<load_seed>", load_seed)
+	                   .ReplaceStr("<reduce>", String8(SubgroupReduction(reduction.op)))
+	                   .ReplaceStr("<identity>", spirv->GetConstantUint(ShaderLaneReductionIdentity(reduction.op)))
 	                   .ReplaceStr("<low>", spirv->GetConstantUint(static_cast<uint32_t>(lanes)))
 	                   .ReplaceStr("<high>", spirv->GetConstantUint(static_cast<uint32_t>(lanes >> 32u)))
 	                   .ReplaceStr("<negative_infinity>", spirv->GetConstantUint(0xff800000u))
