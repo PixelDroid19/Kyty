@@ -6,7 +6,7 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
-## Robot platformer: dynamic resolution stays off, and the GPU clock rate (2026-10-29)
+## Robot platformer: dynamic resolution is dormant, and the GPU clock rate (2026-10-29)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
 strict 60 fps-limited runs on the dune route (gw84-gw86). Evidence came from
@@ -21,24 +21,25 @@ an uncommitted `DIAG-DRS` probe and a static read of the title's eboot.
   - Its target fps, GPU-ms and level fields stay 0 for the whole run.
   - Its update never runs, so its input timestamps cannot change the
     resolution.
-- **Cause, from the eboot.** The frame-statistics function (eboot `0x2a57e0`)
+- **Gate, from the eboot.** The frame-statistics function (eboot `0x2a57e0`)
   calls the controller update (`0x73e5060`) at `0x2a7ca7` only under three
   conditions:
   - the controller's static guard is set;
   - bit 2 (`& 4`) of the current display mode is set;
-  - the frame parity check passes.
-  
-  The display mode comes from a title settings node (`ChangeDisplayMode
-  from %d to %d`) and defaults to 2 when the node holds 0. Mode 2 has no
-  bit 2, so dynamic resolution is off by the title's own choice. It is not
-  off because of a clock defect.
-- **Excluded for now: GPU-time clock writes as an fps lever.**
-  - Recording a device timestamp for each clock write cannot move the
-    resolution while the update does not run.
-  - What selects a mode with bit 2 is not traced. The settings node is
-    filled elsewhere.
-  - Reopen this only with evidence that a supported configuration selects
-    such a mode.
+  - bit 0 of the statistics field `+0x5c` is clear.
+
+  The display mode is the field logged as `ChangeDisplayMode from %d to %d`.
+  It is read from a title settings node and falls back to 2 when the node
+  holds 0.
+- **Open: why the mode under Kyty lacks bit 2.**
+  - The live mode value has not been read. Only the fallback path to 2 is
+    known from the code.
+  - A secondary implementation reports that the same 01.018 build switches
+    between 1080p and 1368p/4K in emulation, so the controller runs there.
+  - The mode may therefore depend on an input Kyty provides (a system,
+    video-out or settings query), not only on the title.
+  - Until the gate is understood, device timestamps for the clock writes
+    cannot move the resolution.
 - **Found, not fixed: the GPU clock rate.**
   - The ring reader converts a timer pair with `(end - begin) * 1e6 / 1e8`
     (multiply by `0xabcc77118461cefd`, shift by 90), so it assumes a
@@ -305,8 +306,8 @@ an uncommitted `DIAG-DRS` probe and a static read of the title's eboot.
   Narrowed by the dune waits record above: the aliases at the dune waits never read
   the guest bytes, so those waits now consolidate.
 - **Narrowed** (2026-10-29, see the dynamic resolution record): the title's
-  dynamic resolution reads these timestamps, but it does not run in the
-  display mode the title selects under Kyty.
+  dynamic resolution reads these timestamps, but under Kyty its update does
+  not run (display-mode gate, open).
 - **Verified.** Focused `kyty_unit_test` suites (1147 passed), the three
   repository CTest gates (4 tests passed), strict 340 s runs on Intel A770
   (cold and warm) with no submit fault.
