@@ -410,6 +410,17 @@ private:
 		int      set  = -1;
 		uint32_t slot = 0;
 	};
+	struct ImageSlot
+	{
+		uint64_t unique_id = 0;
+		uint8_t  view      = 0;
+
+		[[nodiscard]] bool operator==(const ImageSlot& other) const { return unique_id == other.unique_id && view == other.view; }
+	};
+	// Holds only the bound resources: a live set costs its bindings, not the
+	// largest layout. The image counts split `images` into banks in this order:
+	// sampled, depth, array, 3D, unsigned sampled, unsigned array, unsigned 3D,
+	// storage.
 	struct Set
 	{
 		VulkanDescriptorSet* set                                           = nullptr;
@@ -417,34 +428,17 @@ private:
 		uint32_t             hash                                          = 0;
 		Stage                stage                                         = Stage::Unknown;
 		ShaderDescriptorLayoutPlan::Key layout_key = {};
-		int                  storage_buffers_num                           = 0;
-		VulkanBufferDescriptorKey storage_buffers[BUFFERS_MAX]             = {};
-		int                  textures2d_sampled_num                        = 0;
-		uint64_t             textures2d_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures2d_sampled_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures2d_sampled_depth_num                        = 0;
-		uint64_t             textures2d_sampled_depth_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures2d_sampled_depth_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures2d_array_sampled_num                        = 0;
-		uint64_t             textures2d_array_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures2d_array_sampled_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures3d_sampled_num                        = 0;
-		uint64_t             textures3d_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures3d_sampled_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures2d_sampled_uint_num                        = 0;
-		uint64_t             textures2d_sampled_uint_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures2d_sampled_uint_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures2d_array_sampled_uint_num                        = 0;
-		uint64_t             textures2d_array_sampled_uint_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures2d_array_sampled_uint_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures3d_sampled_uint_num                        = 0;
-		uint64_t             textures3d_sampled_uint_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures3d_sampled_uint_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures2d_storage_num                        = 0;
-		uint64_t             textures2d_storage_id[TEXTURES_STORAGE_MAX]   = {};
-		uint8_t              textures2d_storage_view[TEXTURES_STORAGE_MAX] = {};
-		int                  samplers_num                                  = 0;
-		uint64_t             samplers_id[SAMPLERS_MAX]                     = {};
+		std::vector<VulkanBufferDescriptorKey> storage_buffers;
+		int                    textures2d_sampled_num                         = 0;
+		int                    textures2d_sampled_depth_num                   = 0;
+		int                    textures2d_array_sampled_num                   = 0;
+		int                    textures3d_sampled_num                         = 0;
+		int                    textures2d_sampled_uint_num                    = 0;
+		int                    textures2d_array_sampled_uint_num              = 0;
+		int                    textures3d_sampled_uint_num                    = 0;
+		int                    textures2d_storage_num                         = 0;
+		std::vector<ImageSlot> images;
+		std::vector<uint64_t>  samplers_id;
 		int                  gds_buffers_num                               = 0;
 		uint64_t             gds_buffers_id[GDS_BUFFER_MAX]                = {};
 		bool                 vsharp_uniform_buffer                         = false;
@@ -472,6 +466,7 @@ private:
 	const VulkanBuffer*   WriteMaskSink(GraphicContext* gctx);
 
 	static uint32_t CalcHash(const Set& s);
+	static bool     SameBindings(const Set& a, const Set& b);
 	static void     CollectResourceIds(const Set& s, std::vector<uint64_t>* ids);
 
 	// Live sets are bounded: past the limit, the least recently used tracked
@@ -511,6 +506,8 @@ private:
 	std::unordered_map<uint64_t, std::vector<SetReference>> m_sets_by_resource;
 	// IndexSet scratch, kept to avoid an allocation per created set.
 	std::vector<uint64_t>                                   m_resource_ids;
+	// GetDescriptor's lookup key, kept so a cache hit allocates nothing.
+	Set                                                     m_probe;
 
 	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
 	// Released sets, oldest first, and per layout the positions of its sets in
