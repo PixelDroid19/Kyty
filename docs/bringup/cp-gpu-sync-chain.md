@@ -1,6 +1,7 @@
 # Command processor and GPU sync chain (design, 2026-10-29)
 
-Status: design and measurements only. Nothing here is implemented.
+Status: link 1 (`DISPATCH_INDIRECT`) is implemented (2026-10-29, see "Link 1 result"); the other
+links are design and measurements only.
 
 ## Why
 
@@ -41,6 +42,24 @@ Each link moves the wait to the next one:
    A small conversion dispatch turns the guest record into the host dispatch arguments with
    exactly the CPU rules, followed by `vkCmdDispatchIndirect`. The CPU path stays for every case
    the conversion cannot express.
+
+   **Link 1 result (2026-10-29).** Implemented in `GraphicsRenderComputeIndirect.cpp` and
+   `GraphicsRenderDispatchDirect`:
+   - It applies when `GpuMemoryAcquireGdsSource` reports the 12-byte record as held by a storage
+     buffer of the recording (`DeviceBuffer`), the dispatch mode is 0x01 or 0x41, and no thread
+     limits, depth metadata fill or uniform fill proof applies. The storage seed skip mask is 0
+     for these dispatches. Every other case reads the record on the host as before.
+   - The kernel copies the counts; counts above the host limits dispatch nothing and set a
+     sticky flag that ends the run at the recording's completion.
+   - Before shipping, a verify-only twin (gw95) copied the 12 bytes at the dispatch's stream
+     point and compared them with the host read: 6400 of 6400 matched.
+   - Strict 340 s dune run gw96 (same route as gw93): `DISPATCH_INDIRECT` fence waits fell from
+     about 28 s to 0.27 s (239 host fallbacks). As predicted, the wait moved to the next link:
+     `DRAW_INDEX_INDIRECT` rose from 12.5 s (gw79) to 34.4 s (10938 waits).
+   - Frame rate is unchanged (6.4 vs 6.9 fps over the gw93/gw96 windows); gw96 reached frame
+     4442 against 4330 in the same time. Captures match gw93 and there was no device loss.
+   - Games matrix (strict, 60 fps cap): 26 interactive, 4 launch_failed, 1 presenting,
+     1 host_crash; no case regressed against the zen-kernel matrix of the same day.
 2. **`DRAW_INDEX_INDIRECT`.** In the dunes these are point lists (`prim=1`) with
    `INDEX_BUFFER_SIZE` 1-2 (gw79: 3715 records, of which 3339 were empty and 376 drew work).
    - The rule "the index buffer cannot hold one primitive, so the draw is empty" does not hold
@@ -87,6 +106,10 @@ only, not code):
   per-dispatch runtime blocks (`thread_limits`, `geometry_block`)? Either would dispatch a
   different grid than the CPU path, which fits a device loss. The patch files were in a temporary
   directory and are gone.
+  - A missing barrier is not the explanation. The guest's `CS_PARTIAL_FLUSH`, `ACQUIRE_MEM` and
+    `EVENT_WRITE` flushes record `GraphicsRenderMemoryBarrier`, which is ALL_COMMANDS to
+    ALL_COMMANDS with MEMORY_WRITE to MEMORY_READ|WRITE. That already orders an earlier dispatch's
+    writes before an indirect command read.
 - **Argument residency (measured 2026-10-29).** In strict 340 s dune runs (gw93, gw94) every
   blocking argument read was classified by the source the CPU read path chose:
   - `DISPATCH_INDIRECT`: 5345 of 6138 blocking reads (87%) were held by one writable storage
