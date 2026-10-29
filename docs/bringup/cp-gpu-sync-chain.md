@@ -66,6 +66,12 @@ Each link moves the wait to the next one:
      for points: one index is one point. Those records must really be read.
    - A device-side form needs the index range bounded by `INDEX_BASE` and `INDEX_BUFFER_SIZE`, not
      by the record's start index.
+   - Defect found 2026-10-29, not fixed: `CommandProcessor::DrawIndexIndirect`
+     (`GraphicsRun.cpp`) caps `index_count` at `INDEX_BUFFER_SIZE` but offsets the index address
+     by `start_index_location` without a bound. A record with a nonzero start index therefore
+     reads indices past `INDEX_BASE + INDEX_BUFFER_SIZE`. Direction: bound the read by
+     `INDEX_BUFFER_SIZE - start` and define the indices past the end from a published contract
+     before the device-side form uses them.
    - It also needs a GPU twin of the CPU geometry and NGG plan that today consumes `index_count`
      on the CPU.
 3. **`WAIT_REG_MEM`.** The 10.6 s are waits on labels whose release also writes back aliased
