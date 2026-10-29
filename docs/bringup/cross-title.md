@@ -5206,3 +5206,76 @@ matched on all of them. Failures shared with main, not caused by this branch:
   `MemorySwapMax=0` (no root needed) kept the emulator's memory out of swap;
   the system disk received 1.2 GB of writes in 340 s against 3.1 GB without
   it, the rest being other processes swapped out by the host.
+
+## Reimplemented feature leads: landed, refused and excluded (2026-10-29)
+
+- **Context.** A review of another project's change list gave a set of leads.
+  Each one was checked against the local RDNA2 ISA, our code and the published
+  contracts before it was reimplemented. The leads that landed are on
+  `agent/astro-split-wave64`:
+  - device-side `DISPATCH_INDIRECT` (0a7dc5b29, b24ae77ab);
+  - LDS compare-and-store `DS_CMPST_B32` and `DS_CMPST_RTN_B32` (6f4d6c367);
+  - `fsync`/`fdatasync` that flush, plus vectored write and path truncate
+    (fa392a6a0). `fsync` on fd 0-2 or a socket now returns EINVAL, and on an
+    unknown fd EBADF. A save-writing title has not been run against this yet;
+  - GLOBAL byte loads into the high half of a VGPR (ab512e40d);
+  - AND and integer min/max whole-wave reductions (12325b8be);
+  - compute `S_BARRIER` that also orders storage writes (c5a580803). Strict
+    340 s dune A/B on the Intel A770, 60 fps cap, same save state (gw99 with it,
+    gw100 without): frame rate matched window by window (for example 13.65 vs
+    11.06, 16.22 vs 17.69 fps), and GPU time per presented frame was 42.3 vs
+    41.7 ms over the 60-210 s windows. No measurable cost. The run without
+    the change lost the device (`vkWaitForFences` -4) at frame 3364. That fits
+    the intermittent device losses already seen in earlier dune runs; one loss
+    does not show that the barrier causes or prevents them.
+- **Refused explicitly (not implemented).**
+  - `GLOBAL_LOAD_SHORT_D16_HI`. At an odd address its result depends on
+    `SH_MEM_CONFIG.alignment_mode` (ISA section 8.1.7), and the ISA gives no
+    result for that case. We don't model that register.
+  - `V_INTERP_P1LL_F16` and `V_INTERP_P2_F16` (VOP3 0x342, 0x35a). Nothing we
+    have documents the packed f16 parameter layout, how the PARAM export is
+    compressed or where the accumulator comes from. Only the decode is known:
+    the attribute word is SRC0 bit 8 and `op_sel[3]` selects the destination
+    half.
+  - `SPI_SHADER_PGM_RSRC1_LS`/`RSRC2_LS` (0x14A, 0x14B) and the
+    `VGT_SHADER_STAGES_EN` LS field. No local GFX10 source documents their
+    fields.
+  - Loading an application PRX from `sceSysmodule`. No local source backs a
+    table mapping module IDs to files.
+- **Excluded.**
+  - GPU timestamps from host queries. The end-of-pipe clock write already reads
+    the clock when the fence completes. A "100 MHz clock defect" was cited
+    earlier, but it is not recorded anywhere in `docs/`; `S_MEMREALTIME` is
+    documented only as "constant frequency".
+  - Host occlusion queries. The guest counter contract is only partly
+    evidenced, and the lead itself was withdrawn without a stated reason.
+  - P010 video output. `Videodec2` accepts only AVC and HEVC
+    (`LibVideodec2.cpp`), and no 10-bit output contract is known.
+  - DCC clears over several mips. Multi-mip images are deliberately excluded
+    from DCC clears, and no layout evidence exists.
+  - HTILE clears only for real metadata. The rule could not be tied to
+    evidence, so the size-keyed variant was dropped.
+  - Returning freed memory to the host. This is already implemented:
+    `fallocate` `PUNCH_HOLE` through `sys_virtual_discard_shared_backing_range`,
+    and flexible memory is released by `munmap`. Gap: discard is a no-op on
+    Windows.
+- **Defects found, not fixed.**
+  - GLOBAL dword loads don't clear address bits [1:0]
+    (`EmitGlobalLoadAddress` in `ShaderSpirvBuffer.cpp`, and
+    `Spirv::EmitGuestLoad` in `ShaderSpirvGuestAddress.cpp`). Under the DWORD
+    alignment modes the hardware ignores those bits. A misaligned
+    `global_load_dword` therefore reads different bytes on the host. Direction:
+    get the alignment mode a title runs with (a trace of `SH_MEM_CONFIG`), then
+    mask or refuse to match it.
+  - GLOBAL dword loads and the MUBUF loads are not gated by EXEC
+    (`ShaderSpirvBuffer.cpp`, the `TODO() check EXEC` notes in the buffer-load
+    lowerings). An inactive lane still reads memory and overwrites its
+    destination VGPR. The new byte loads are gated. Direction: gate the access
+    and the store with the predicate the store lowerings already use.
+  - `GraphicsGetTheTessellationFactorRingBufferBaseAddress`
+    (`source/emulator/src/Graphics/Graphics.cpp`) frees the 128 KiB ring it
+    re-maps before returning its address, and only logs a failed
+    `AllocFixed`. A guest that writes the ring writes unmapped memory.
+    Tessellation itself is not translated (`docs/bringup/tessellation-design.md`).
+    Direction: keep the mapping for the process lifetime and fail explicitly
+    when it cannot be made.
