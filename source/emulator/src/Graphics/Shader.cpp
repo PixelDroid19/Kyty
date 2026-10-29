@@ -1341,6 +1341,10 @@ struct ShaderVertexProgram
 	ShaderNativeWaveVerdict native_wave;
 	// Width-neutrality of the fused NGG front, proved once for this immutable code.
 	ShaderNggFrontVerdict  ngg_front;
+	// Scans of front_code that every draw used to repeat.
+	bool                   front_has_getpc              = false;
+	bool                   front_has_global_memory_load = false;
+	std::bitset<108>       front_sbuffer_base_sgprs;
 	// Vertex-stream access scan of `code` for the last fetch-register pair it was asked for.
 	mutable std::mutex                                          stream_access_mutex;
 	mutable std::shared_ptr<const ShaderVertexStreamAccessScan> stream_access;
@@ -1490,16 +1494,10 @@ static bool NggCapturedBufferQuad(const HW::UserSgprInfo& user_sgpr, int user_sg
 // (s8+). Hardware user-data slot 0 is that register minus 8. Rebase only when
 // the ISA actually SBUFFERs that scalar and the captured user-data quad looks
 // like a buffer — same contract as the measured NGG constant-sharp rebase.
-static void RebaseNggConstantSharps(ShaderUserData* user_data, const ShaderCode* code, const HW::UserSgprInfo& user_sgpr,
-                                    int user_sgpr_num)
+static std::bitset<108> ShaderScalarBufferBaseSgprs(const ShaderCode& code)
 {
-	if (user_data == nullptr || code == nullptr || user_data->sharp_resource_offset[3] == nullptr)
-	{
-		return;
-	}
-	constexpr int kNggScalarBase = 8;
-	bool          used[108]      = {};
-	for (const auto& inst: code->GetInstructions())
+	std::bitset<108> used;
+	for (const auto& inst: code.GetInstructions())
 	{
 		if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr)
 		{
@@ -1508,9 +1506,20 @@ static void RebaseNggConstantSharps(ShaderUserData* user_data, const ShaderCode*
 		const int reg = inst.src[0].register_id;
 		if (reg >= 0 && reg < 108)
 		{
-			used[reg] = true;
+			used.set(static_cast<size_t>(reg));
 		}
 	}
+	return used;
+}
+
+static void RebaseNggConstantSharps(ShaderUserData* user_data, const std::bitset<108>& used, const HW::UserSgprInfo& user_sgpr,
+                                    int user_sgpr_num)
+{
+	if (user_data == nullptr || user_data->sharp_resource_offset[3] == nullptr)
+	{
+		return;
+	}
+	constexpr int kNggScalarBase = 8;
 	for (uint16_t slot = 0; slot < user_data->sharp_resource_count[3]; ++slot)
 	{
 		auto& sharp = user_data->sharp_resource_offset[3][slot];
@@ -1524,7 +1533,7 @@ static void RebaseNggConstantSharps(ShaderUserData* user_data, const ShaderCode*
 		// Metadata that already names a captured user-data slot (offset <
 		// captured) is left alone. Only scalar registers past that window
 		// are NGG-encoded (s8 + slot) and need the minus-eight rebase.
-		if (scalar < captured || scalar < kNggScalarBase || scalar >= 108 || !used[scalar])
+		if (scalar < captured || scalar < kNggScalarBase || scalar >= 108 || !used.test(static_cast<size_t>(scalar)))
 		{
 			continue;
 		}
@@ -2076,6 +2085,9 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 		     shader_addr, data.code_size_bytes);
 	}
 	program->front_scalar_flow = ShaderScalarFlowOf(program->front_code);
+	program->front_has_getpc              = program->front_code.HasAnyOf({ShaderInstructionType::SGetpcB64});
+	program->front_has_global_memory_load = ShaderHasGlobalMemoryLoad(program->front_code);
+	program->front_sbuffer_base_sgprs     = ShaderScalarBufferBaseSgprs(program->front_code);
 	program->code = program->front_code;
 	std::vector<uint32_t> back_words;
 	if (ShaderHasTerminalSetpc(program->front_code))
@@ -4099,7 +4111,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			std::memcpy(sharp_copy, data.user_data->sharp_resource_offset[3],
 			            static_cast<size_t>(data.user_data->sharp_resource_count[3]) * sizeof(ShaderSharp));
 			rebased_user.sharp_resource_offset[3] = sharp_copy;
-			RebaseNggConstantSharps(&rebased_user, vs_isa, user_sgpr, static_cast<int>(user_sgpr_num));
+			RebaseNggConstantSharps(&rebased_user, info->program->front_sbuffer_base_sgprs, user_sgpr, static_cast<int>(user_sgpr_num));
 			usage_user = &rebased_user;
 		}
 		// Keep general ISA analysis disabled: the scalar-buffer fallback on a
@@ -4120,10 +4132,10 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			                                      &info->program->resource_memo);
 			// Constant tables embedded after the code are addressed from GETPC;
 			// the base stays runtime data so a cached pipeline can relocate.
-			info->bind.program_base_used   = vs_isa->HasAnyOf({ShaderInstructionType::SGetpcB64});
+			info->bind.program_base_used   = info->program->front_has_getpc;
 			info->bind.program_base        = info->bind.program_base_used ? shader_addr : 0u;
 			info->bind.device_address_used =
-			    ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) || ShaderHasGlobalMemoryLoad(*vs_isa) ||
+			    info->program->front_has_global_memory_load || ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) ||
 			    ShaderHasComputedPointerScalarLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase, static_cast<int>(user_sgpr_num));
 		}
 	} else

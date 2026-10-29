@@ -63,6 +63,8 @@ public:
 	// Why the proof refused this program at this width (empty when it proved it or has not
 	// run). For the strict-mode diagnostic; valid after LaneLocal() for the same width.
 	[[nodiscard]] const Kyty::Core::String8& Refusal(uint32_t guest_wave_size) const;
+	// ShaderUsesNativeWaveState of the same program, scanned once instead of per draw.
+	[[nodiscard]] bool UsesNativeWaveState(const ShaderCode& code) const;
 
 private:
 	struct Slot
@@ -71,8 +73,10 @@ private:
 		bool                lane_local = false;
 		Kyty::Core::String8 refusal;
 	};
-	mutable Slot m_wave32;
-	mutable Slot m_wave64;
+	mutable Slot           m_wave32;
+	mutable Slot           m_wave64;
+	mutable std::once_flag m_native_state_once;
+	mutable bool           m_uses_native_wave_state = false;
 };
 
 // Replaces an ExactSubgroup verdict by LaneLocal when the GE stage state decodes as a

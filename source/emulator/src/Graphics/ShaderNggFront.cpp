@@ -140,6 +140,12 @@ bool ShaderNggFrontVerdict::LaneLocal(const ShaderCode& code, uint32_t guest_wav
 	return slot.lane_local;
 }
 
+bool ShaderNggFrontVerdict::UsesNativeWaveState(const ShaderCode& code) const
+{
+	std::call_once(m_native_state_once, [&] { m_uses_native_wave_state = ShaderUsesNativeWaveState(code); });
+	return m_uses_native_wave_state;
+}
+
 const Kyty::Core::String8& ShaderNggFrontVerdict::Refusal(uint32_t guest_wave_size) const
 {
 	static const Kyty::Core::String8 none;
@@ -156,7 +162,7 @@ static bool StagesAreNggPassthrough(const GraphicsGeRawRegister* stages)
 bool ShaderApplyNggFrontProof(ShaderNativeWaveInfo* wave, const ShaderCode& code, const GraphicsGeRawRegister* stages,
                               const ShaderNggFrontVerdict& verdict)
 {
-	const bool needs_exact = ShaderUsesNativeWaveState(code);
+	const bool needs_exact = verdict.UsesNativeWaveState(code);
 	const bool classified  = wave != nullptr && wave->refusal_reason == nullptr && wave->proof == ShaderNativeWaveProof::ExactSubgroup;
 	if (!needs_exact || !classified || !StagesAreNggPassthrough(stages)) { return needs_exact; }
 	if (!verdict.LaneLocal(code, wave->guest_wave_size)) { return true; }
