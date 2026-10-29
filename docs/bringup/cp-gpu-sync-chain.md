@@ -82,7 +82,11 @@ Each link moves the wait to the next one:
      on the CPU.
    - **Deprioritized (2026-10-29).** In the same dune runs the GPU is busy about 81.5 ms per frame
      and the CP spends about 110 ms per frame outside fence waits. Each of them alone holds the
-     frame rate at roughly 9-12 fps. Link 1 showed that removing one link moves its waits to the next one
+     frame rate at roughly 9-12 fps. Per queue (gw109, clean GPU, dune windows at 8.4 fps, span of
+     each recording from its first to its last landed timestamp), the graphics queue is busy about
+     72 ms per frame and the compute queues about 7 ms. On this GPU the two engines share the
+     execution units, so the sum bounds the busy time from above.
+     Link 1 showed that removing one link moves its waits to the next one
      (`DISPATCH_INDIRECT` 28 s to 0.27 s, `DRAW_INDEX_INDIRECT` 12.5 s to 34.4 s, frame rate
      unchanged). A device-side `DRAW_INDEX_INDIRECT` would move them to the `WAIT_REG_MEM` link the
      same way, and it costs the GPU twin of the geometry and NGG plan above. It is parked until GPU

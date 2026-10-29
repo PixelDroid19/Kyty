@@ -91,20 +91,52 @@ gdb runs.
     baseline of an A/B pair) at frame 3364 and gw103 (`f0db2e1b5` plus the clock change above) at
     frame 3303. Five other runs of that day passed the same point (gw97-gw99, gw101, gw102). The
     kernel again reset the render engine for a timed-out `fc_script` job.
-  - In both runs the first queue-8 command buffer that never completed holds the same work:
-    two fills by `0x4c97f40f` (4608 and 8640 groups; a 64-lane kernel that stores one 16-byte
-    value per lane), one draw with PS `0x210001602712f299`, then point-list draws of VS
-    `0x360038d0f4cfb9a5` with PS `0x210045a05d93a5ea` (37 in gw100; 11 in gw103, next to 11 draws
-    of VS `0x360043b08e51dd94`).
+  - In both runs the first queue-8 command buffer that never completed holds the same work. In
+    record order:
+    - point-list draws of VS `0x360038d0f4cfb9a5` with PS `0x210045a05d93a5ea` (37 in gw100;
+      11 in gw103, after 11 draws of VS `0x360043b08e51dd94` with PS `0x2100371083c06780` and
+      `0x210046a060eca166`);
+    - one draw with PS `0x210001602712f299`;
+    - two fills by `0x4c97f40f` (4608 and 8640 groups; a 64-lane kernel that stores one 16-byte
+      value per lane).
+  - The recent-draw trail holds 64 records, so the work before these records is not known for
+    gw100.
   - Lead, not verified: PS `0x210045a05d93a5ea` walks a per-cell light list. It reads
     `head[cell]` through the V# at table offset 256, then follows `{light, next}` nodes through
     the V# at offset 272 until `next == -1`. The loop has no other bound, so a node buffer that
     reads back 0 (a zero carrier or an out-of-range binding) or a list with a cycle never ends.
-    The same program completed two draws in the command buffer before the hung one, so the
-    program alone does not hang. The two fills before it fit a list-head clear.
+  - The program does not hang by itself: gw96 drew it about 1060 times over three 5 s windows
+    without a fault.
+  - The fills come after the walks, so they are not a list-head clear for these draws. The walks
+    read heads and nodes written before this command buffer. A hang therefore needs valid heads
+    whose nodes read back zero or stale, which is a publication-order question between earlier
+    writers, possibly on another queue.
+  - The PS is rare on this route: of the saved runs, only gw96, gw100 and gw103 drew it, about
+    175-225 s into the route. Probe runs gw105-gw107 (a temporary probe at all three PS bind
+    sites) logged nothing, and so did the clean gw109 (frame 4282). A Blender render of another session shared the GPU during all three,
+    so they ran slower (frames 3101, 3235 and 3555, against 4322 for gw104), and the time-based
+    input route then plays differently.
   - Next step: record the bound V# words (base, `num_records`, binding kind) of the nodes and
-    heads buffers for that draw in a bad run, and check whether the list buffers can be bound as
-    a zero carrier or a shorter range than the guest V#.
+    heads buffers for that draw in a bad run, and check the translator's `s_buffer_load` range
+    rule against the ISA reference.
+- **Open defect: in-flight write-back refusal** (gw108, strict 340 s, `453fd755a` plus
+  diagnostics, frame about 2044, before the dunes).
+  - The run stopped with `GpuMemory cannot version an in-flight write-back backing:
+    type=StorageBuffer vaddr=0x553ba3a50 size=0x1fa40 queue=7 sequence=6253`
+    (`GpuMemoryCreate.cpp`, `GpuMemoryChooseMutationAction` returns `RejectWriteBackConflict`).
+  - Trigger: the guest bytes of a write-back-capable storage buffer changed while a
+    compute-queue (queue 7) submission that uses the backing had not completed. Versioning the
+    backing would drop that submission's writes, so the strict path stops.
+  - It is the first time this stop appears in the saved runs of this route; gw104-gw107, gw109
+    and the earlier runs passed the same point. It is timing-dependent.
+  - Lead, not verified: the device-side `DISPATCH_INDIRECT` read (`0a7dc5b29`) applies on every
+    queue, compute queues included. It removed the host argument reads that used to submit and
+    wait for each queue's work, so a compute queue now keeps uses of its storage pending for
+    longer. The run kept no record of what queue 7 sequence 6253 dispatched, so the link to that
+    change is not shown.
+  - Suggested direction: decide from evidence which order the guest relies on (its own label
+    wait before the CPU store, or none), then either wait for the pending use and write it back
+    before the in-place update, or prove the GPU write and the CPU store cover disjoint bytes.
 - **Dune wait sites** (gw78, same binary, whole run, fence waits of 0.2 ms or longer, by call site):
 
   | Call site | Wait time | Waits |
@@ -139,6 +171,16 @@ gdb runs.
     cost follows from the guest algorithm.
   - The listing shows no translator change to test, and the offline loop-retention check used for
     the earlier spin work is not available. No change is attempted.
+- **Not measurable: scanning the NGG front once per program** (`5790919c2`). The GS-front
+  vertex path now computes its scan of the immutable front program (GETPC, global loads,
+  scalar-buffer base registers, native wave state) once per cached program instead of per draw.
+  - One strict 340 s dune run with the change (gw104) against gw101: per draw, state setup fell
+    from 32.5 to 30.1 us, resource binding from 43.2 to 40.6 us and storage descriptors from 12.3
+    to 11.1 us. The totals rose: command processor from 236.8 to 250.4 us, draw processor from
+    190.5 to 197.9 us.
+  - gw101 ran another binary with a diagnostic probe, and the two runs drew 585 and 601 draws per
+    frame. The comparison is not like-for-like, and the gain is within run-to-run variance.
+  - gw104 reached frame 4322 in 340 s, interactive throughout, without a device loss.
 
 ## Robot platformer: host memory, descriptor churn and a recycled view at hub load (2026-10-28)
 
