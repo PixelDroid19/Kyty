@@ -1,6 +1,7 @@
 # Per-draw plan: dynamic buffer bases and bindless textures (design, 2026-10-28)
 
-Status: design. Stage 3a (the sampled lookup-miss memo) is implemented and measured; the rest is not.
+Status: design. Stage 3a (the sampled lookup-miss memo) is implemented and measured, and stage 3b
+is excluded. The other stages are not started.
 
 ## Why
 
@@ -17,6 +18,22 @@ about 27 us. A cpu-clock profile of the CP thread (24,250 samples, dunes,
 | `PrepareStorageBuffers` | 10.9% | `CaptureTransientSnapshotBuffer` 8.9 (a data copy) |
 | `DescriptorCache::GetDescriptor` | 7.1% | Trim 1.9, index 1.5, allocate and update on a miss |
 | Unattributed (`[unknown]` self) | 27% | Driver and unresolved frames, still to be split |
+
+That profile ran with the opt-in `KYTY_SAMPLE_BIND_CATALOG`. The catalog formats one line per
+sampled slot, which adds 3.6% of `snprintf` under `PrepareTextures`. Later runs leave it unset.
+
+A clean profile on `776f7d889` (gw73, 23,664 CP samples, dunes, 225 us/draw, 8.1 fps) shares out
+as follows (inclusive):
+
+| Function | Share | Main callees |
+| --- | --- | --- |
+| `ShaderGetInputInfoPS` + `VS` | 14.7% + 3.1% | `ShaderParseUsage2` 10.8%. No callee is above 3%: dynamic scalar resources 3.0, EUD end 1.2, sampler association 1.2, span lookup 0.8, image and sampler descriptor search 0.7 each |
+| `PrepareTextures` | 12.7% | `GpuMemoryCreateObject` 9.3% (its `Update` 3.1%) |
+| `PrepareStorageBuffers` | 12.1% | `CaptureTransientSnapshotBuffer` 9.8% |
+| `DescriptorCache::GetDescriptor` | 7.9% | |
+| `ResolveIndexedVertexRecords` | 4.9% | |
+| `PrepareGuestDeviceAddressForRead` | 4.5% | |
+| Unattributed (`[unknown]` self) | 24.2% | Driver and libc frames without frame pointers |
 
 The evidence from Experiment 0 (2026-10-27, 4 titles) sets the shape of a plan:
 
@@ -132,8 +149,16 @@ Result on `PPSA21567 - Astro Bot` dunes (Intel A770, 340 s, gameplay route, 60 f
 - The CP total did not move: `fence_wait` (57 us/draw) and run-to-run noise hide the saving.
 - The dune capture matches gw64.
 
-**Stage 3b, not started: memo of the resolved image.** For render-target and depth slots, key by
-the same words plus the object-graph generation, and replay `RecordUse` for the cached object.
+**Stage 3b, excluded (2026-10-29): memo of the resolved render-target or depth image.**
+
+- The idea was to key render-target and depth slots by the same words plus the object-graph
+  generation, and replay `RecordUse` for the cached object.
+- In the gw64 profile, `FindRenderTexture` was 4.9% of CP time:
+  - 2.7% was the inexact walk, which stage 3a already skips on misses;
+  - 1.7% was the exact hash lookup, paid mostly by slots that stage 3a now skips as well.
+- Render-target hits are about 2.6% of sampled slots. `FindDepthStencil` is 0.6%, mostly under
+  `GraphicsRenderDepthSliceArray`.
+- The ceiling is below 1% of CP time, which does not justify a `RecordUse` replay interface.
 
 ### Stage 4 (only if stage 3 leaves set churn): bindless images
 
