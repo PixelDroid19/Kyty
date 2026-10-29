@@ -105,6 +105,7 @@ UT_LINK(EmulatorControllerSources);
 UT_LINK(EmulatorInputProfile);
 UT_LINK(EmulatorHostInput);
 UT_LINK(EmulatorFileSystemPath);
+UT_LINK(EmulatorAtomicFile);
 UT_LINK(EmulatorFileDescriptors);
 UT_LINK(EmulatorPlayGo);
 // Also registers EmulatorFragmentNativeWaveTier from this translation unit.

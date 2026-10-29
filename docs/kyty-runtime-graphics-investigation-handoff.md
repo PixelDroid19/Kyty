@@ -88,9 +88,14 @@ The cache store now:
 
 - uses `KYTY_VULKAN_PIPELINE_CACHE` when an explicit test location is needed,
   otherwise a per-user cache directory;
-- includes the Vulkan vendor ID, device ID, and pipeline-cache UUID in the
-  default filename;
-- accepts at most 64 MiB and validates the standard version-one header before
+- keeps one default file per title: the filename holds the title ID, the
+  Vulkan vendor ID, device ID and pipeline-cache UUID, and the shader
+  translator versions; with no title loaded nothing is persisted;
+- at load, removes this device's files that the current one replaces (the
+  title's files from other drivers or translator versions, and the file all
+  titles shared before 2026-10-28), plus temporary files left by a writer
+  that exited before its replace;
+- accepts at most 128 MiB and validates the standard version-one header before
   passing bytes to Vulkan;
 - retries with an empty cache if a driver rejects otherwise compatible data;
 - writes a sibling temporary file and replaces the destination;
@@ -98,7 +103,7 @@ The cache store now:
   once every 30 seconds;
 - charges attempted bytes before opening the temporary file, including failed
   write, flush, and replace operations;
-- enforces a 64 MiB attempted-write budget per process, so I/O failures and a
+- enforces a 128 MiB attempted-write budget per process, so I/O failures and a
   long session cannot repeatedly replace the bounded blob into gigabytes of
   cumulative writes.
 

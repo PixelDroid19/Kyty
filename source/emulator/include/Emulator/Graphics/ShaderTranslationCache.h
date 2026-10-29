@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -17,6 +18,13 @@ namespace Kyty::Libs::Graphics {
 
 inline constexpr uint32_t kShaderTranslatorVersion         = 183;
 inline constexpr uint32_t kShaderGeometryTranslatorVersion = 94;
+
+// Names the on-disk stores that hold translator output, so each translator
+// version keeps its own.
+[[nodiscard]] inline std::string ShaderTranslatorStoreSuffix()
+{
+	return "-t" + std::to_string(kShaderTranslatorVersion) + "-g" + std::to_string(kShaderGeometryTranslatorVersion);
+}
 
 class SpirvBinaryCacheStore;
 

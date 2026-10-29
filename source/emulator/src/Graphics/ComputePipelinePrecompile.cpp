@@ -102,19 +102,13 @@ Service& PrecompileService()
 	return *service;
 }
 
-// Recipes hold translator output, so each translator version keeps its own store.
-std::string TranslatorSuffix()
-{
-	return "-t" + std::to_string(kShaderTranslatorVersion) + "-g" + std::to_string(kShaderGeometryTranslatorVersion);
-}
-
 // Removes the stores this title recorded under other translator versions: their
 // modules are never dispatched again, and the largest ones would occupy the
 // workers for the whole session.
 void RemoveStaleStores(const std::filesystem::path& directory)
 {
 	const auto name   = directory.filename().string();
-	const auto suffix = TranslatorSuffix();
+	const auto suffix = ShaderTranslatorStoreSuffix();
 	if (name.size() <= suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
 	{
 		return;
@@ -133,6 +127,7 @@ void RemoveStaleStores(const std::filesystem::path& directory)
 
 std::vector<QueuedRecipe> ScanDirectory(const std::filesystem::path& directory, size_t* count, uintmax_t* bytes)
 {
+	AtomicFileRemoveOrphans(directory);
 	std::vector<QueuedRecipe> queue;
 	std::error_code           error;
 	for (const auto& entry: std::filesystem::directory_iterator(directory, error))
@@ -305,7 +300,7 @@ std::filesystem::path ComputePipelinePrecompileDirectory()
 	std::string name = std::string(title_id.C_Str()) + "-" + app_version.C_Str();
 	std::replace_if(name.begin(), name.end(), [](char c) { return !(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '.'); },
 	                '_');
-	return SpirvBinaryCacheDefaultRoot() / "compute-pipelines" / (name + TranslatorSuffix());
+	return SpirvBinaryCacheDefaultRoot() / "compute-pipelines" / (name + ShaderTranslatorStoreSuffix());
 }
 
 void ComputePipelinePrecompileStart(const std::filesystem::path& directory, uint32_t vendor_id, uint32_t device_id,

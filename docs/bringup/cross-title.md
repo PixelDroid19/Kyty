@@ -5148,3 +5148,35 @@ matched on all of them. Failures shared with main, not caused by this branch:
   owner (GPU write watch, demand range, guest mapping) as the handler sees
   it. The streaks suggest a race between a watch being installed or
   released and the guest write, rather than a wrong mapping.
+
+## Host disk writes while a title runs (2026-10-28)
+
+- **Observed.** Intel A770 host, 31 GiB RAM, 10 GiB zram plus a 24 GiB swap
+  file on the system disk, `vm.swappiness=180`. During a 206 s strict run of
+  `PPSA21567 - Astro Bot` the system disk received 1.7 GB of writes and the
+  kernel swapped out 2.0 GB; the emulator process itself wrote about 105 MB
+  (`/proc/<pid>/io`). Swap is the writer, driven by host memory pressure.
+- **Cache files.** The Vulkan pipeline cache was one file per device shared by
+  every title. It had reached 133 MB, just under its 128 MiB cap, so it was
+  read whole at each boot and every save failed. Killed writers had also left
+  43 temporary files (`<file>.<pid>.<seq>.tmp`, 366 MB in the cache root) that
+  nothing removed.
+  - Fixed: one pipeline cache file per title, device, driver and translator
+    version; replaced files of the same device are removed at load; temporary
+    files whose writer exited are removed from the pipeline cache root, the
+    SPIR-V cache and the compute recipe stores. Verified live: the orphans and
+    the stale shared files were removed and the per-title file was created at
+    boot (46 MB after two runs). Focused test
+    `EmulatorAtomicFile.RemovesOnlyTemporariesOfExitedWriters`.
+- **Open: GPU pins populate unwritten guest pages.** Physical imports pin
+  whole 2 MiB blocks through udmabuf, and pinning populates every page of the
+  block. A temporary probe counted 2.9 GB of 7.4 GB pinned pages that the
+  guest had not written before the pin, about 40% of the shared guest memory.
+  A 64 KiB block cut that to 0.19 GB (peak RSS plus swap 9.3 GB to 7.1 GB at
+  the same point), but made 5.5 times more window imports, and its 340 s run
+  never reached the dunes (CP 639 us/draw against 225-272 with 2 MiB blocks)
+  on a host that was swapping. One run each, so the cause of the slowdown is
+  not separated; the 2 MiB block was chosen for the AMD per-submit cost
+  recorded above. Direction: measure the import count and per-submit cost per
+  block size on both hosts, or keep large windows while pinning only written
+  pages.
