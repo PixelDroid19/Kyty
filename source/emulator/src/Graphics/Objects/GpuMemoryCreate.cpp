@@ -2027,13 +2027,20 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// A parent no copy applies to is fine once newer aliased targets overwrote its bytes in the range
 			// (captured: a 3840x2160 view over a recycled range where 2432x1368 targets of other formats and
 			// storage views lived before the two targets rendered there last).
-			// A crossing image holds no texels of the new view (see GpuMemoryAllowsStorageTextureCrossingRecycledImage).
+			// A crossing image holds no texels of the new view (see GpuMemoryAllowsStorageTextureCrossingRecycledImage),
+			// nor does a target or storage view the new view re-describes (another texel size, tiling or format), which the
+			// storage-over-caches rule below links the same way (captured: a 3840x2160 view over a recycled range whose
+			// 4-byte downsample targets and storage views rendered there after the aliased 2432x1368 targets).
 			for (const auto* candidate: unaliased_parents)
 			{
-				const auto parent_type = heap.objects[candidate->object_id].info.object.type;
-				multi_render_alias     = multi_render_alias &&
+				const auto& parent      = heap.objects[candidate->object_id];
+				const auto  parent_type = parent.info.object.type;
+				multi_render_alias      = multi_render_alias &&
 				                     (GpuMemoryAllowsStorageTextureCrossingRecycledImage(parent_type, candidate->relation, info.type) ||
-				                      superseded_in_range(*candidate, render_alias_ids));
+				                      superseded_in_range(*candidate, render_alias_ids) || links_render_target(parent, *candidate) ||
+				                      (parent_type == GpuMemoryObjectType::StorageTexture &&
+				                       StorageTextureRedescribesRange(parent.info.params, info.params,
+				                                                      RedescriptionComparesLayout(candidate->relation))));
 			}
 			for (const auto& candidate: others)
 			{
