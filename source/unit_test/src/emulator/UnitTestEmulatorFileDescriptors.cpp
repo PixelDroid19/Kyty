@@ -20,6 +20,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -840,6 +841,105 @@ TEST_F(EmulatorFileDescriptors, Dup2RejectsUnrepresentableTargetWithoutChangingS
 	char byte = 0;
 	EXPECT_EQ(KernelRead(descriptor, &byte, 1), 1);
 	EXPECT_EQ(byte, 'a');
+}
+
+// Vectored calls read the iovec table and its buffers from guest memory, so the test allocates them from the VM.
+struct GuestPage
+{
+	GuestPage() { address = Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite); }
+	~GuestPage()
+	{
+		if (address != 0) { (void)Core::VirtualMemory::Free(address); }
+	}
+	GuestPage(const GuestPage&)            = delete;
+	GuestPage& operator=(const GuestPage&) = delete;
+
+	uint64_t address = 0;
+};
+
+TEST_F(EmulatorFileDescriptors, FsyncPublishesStreamBufferedWriteAndRejectsBadDescriptors)
+{
+	FILE* stream = Stream("a", "wb");
+	ASSERT_NE(stream, nullptr);
+	const int descriptor = c_fileno(stream);
+	ASSERT_GE(descriptor, 3);
+	// Full buffering keeps the three bytes in the stdio buffer until fsync flushes them.
+	ASSERT_EQ(c_setvbuf(stream, nullptr, 0, BUFSIZ), 0);
+	ASSERT_EQ(c_fwrite("abc", 1, 3, stream), 3u);
+	EXPECT_EQ(Contents("a"), "");
+	ASSERT_EQ(KernelFsync(descriptor), OK);
+	EXPECT_EQ(Contents("a"), "abc");
+
+	EXPECT_EQ(KernelFsync(-1), KERNEL_ERROR_EBADF);
+	EXPECT_EQ(KernelFsync(1), KERNEL_ERROR_EINVAL);
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+	// POSIX fsync accepts a directory descriptor, so the host directory is synced and OK is returned.
+	std::filesystem::create_directories(root / "dir");
+	const int directory = Open("dir", 0x00020000);
+	ASSERT_GE(directory, 3);
+	EXPECT_EQ(KernelFsync(directory), OK);
+#endif
+	const int closed = Open("a", 0);
+	ASSERT_GE(closed, 3);
+	ASSERT_EQ(KernelClose(closed), OK);
+	descriptors.pop_back();
+	EXPECT_EQ(KernelFsync(closed), KERNEL_ERROR_EBADF);
+}
+
+TEST_F(EmulatorFileDescriptors, WritevGathersAtPositionHonoursAppendAndRejectsBadTables)
+{
+	GuestPage page;
+	ASSERT_NE(page.address, 0u);
+	auto* table = reinterpret_cast<KernelIovec*>(page.address);
+	auto* bytes = reinterpret_cast<char*>(page.address + 256);
+	std::memcpy(bytes, "12", 2);
+	std::memcpy(bytes + 16, "3", 1);
+	std::memcpy(bytes + 32, "Z", 1);
+	Seed("a", "abc");
+	const int descriptor = Open("a", 2);
+	ASSERT_GE(descriptor, 3);
+
+	table[0] = KernelIovec {bytes, 2};
+	table[1] = KernelIovec {bytes + 16, 1};
+	ASSERT_EQ(KernelWritev(descriptor, table, 2), 3);
+	EXPECT_EQ(KernelLseek(descriptor, 0, SEEK_CUR), 3);
+	EXPECT_EQ(Contents("a"), "123");
+
+	ASSERT_EQ(KernelFcntl(descriptor, 4, 8), OK);
+	ASSERT_EQ(KernelLseek(descriptor, 0, SEEK_SET), 0);
+	table[0] = KernelIovec {bytes + 32, 1};
+	ASSERT_EQ(KernelWritev(descriptor, table, 1), 1);
+	EXPECT_EQ(Contents("a"), "123Z");
+
+	EXPECT_EQ(KernelWritev(descriptor, table, 0), KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelWritev(descriptor, table, 1025), KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelWritev(descriptor, nullptr, 1), KERNEL_ERROR_EFAULT);
+	table[0] = KernelIovec {bytes, static_cast<uint64_t>(std::numeric_limits<int64_t>::max())};
+	table[1] = KernelIovec {bytes, 1};
+	EXPECT_EQ(KernelWritev(descriptor, table, 2), KERNEL_ERROR_EINVAL);
+	table[0] = KernelIovec {nullptr, 3};
+	table[1] = KernelIovec {bytes, 1};
+	EXPECT_EQ(KernelWritev(descriptor, table, 2), KERNEL_ERROR_EFAULT);
+	EXPECT_EQ(Contents("a"), "123Z");
+
+	// A zero-length entry may name no buffer; the following entry is still appended.
+	table[0] = KernelIovec {nullptr, 0};
+	table[1] = KernelIovec {bytes + 32, 1};
+	ASSERT_EQ(KernelWritev(descriptor, table, 2), 1);
+	EXPECT_EQ(Contents("a"), "123ZZ");
+}
+
+TEST_F(EmulatorFileDescriptors, TruncateByPathShortensFileAndRejectsBadTargets)
+{
+	Seed("a", "abcdef");
+	ASSERT_EQ(KernelTruncate("/descriptor-test/a", 2), OK);
+	EXPECT_EQ(Contents("a"), "ab");
+	EXPECT_EQ(KernelTruncate("/descriptor-test/a", -1), KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelTruncate(nullptr, 0), KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelTruncate("/descriptor-test/missing", 0), KERNEL_ERROR_ENOENT);
+	std::filesystem::create_directories(root / "dir");
+	EXPECT_EQ(KernelTruncate("/descriptor-test/dir", 0), KERNEL_ERROR_EISDIR);
+	EXPECT_EQ(Contents("a"), "ab");
 }
 
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS

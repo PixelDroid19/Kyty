@@ -120,6 +120,15 @@ private:
 [[nodiscard]] String PreferHostOdCompanionAsset(const String& guest_path, const String& requested_host_path,
                                                 const String& last_od_host_path = {});
 
+// One entry of a guest struct iovec: a buffer pointer followed by its length.
+// Pointer and length sizes match the x86-64 guest layout, 16 bytes per entry.
+struct KernelIovec
+{
+	const void* base;
+	uint64_t    size;
+};
+static_assert(sizeof(KernelIovec) == 16);
+
 int KYTY_SYSV_ABI     KernelOpen(const char* path, int flags, uint16_t mode);
 int KYTY_SYSV_ABI     KernelClose(int d);
 [[nodiscard]] bool   KernelIsStandardDescriptorOpen(int d);
@@ -127,11 +136,17 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes);
 int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offset);
 int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes);
 int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset);
+// sceKernelWritev: iov points to count guest KernelIovec entries, validated before any byte is written.
+int64_t KYTY_SYSV_ABI KernelWritev(int d, const KernelIovec* iov, int count);
 int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence);
 int KYTY_SYSV_ABI     KernelStat(const char* path, FileStat* sb);
 int KYTY_SYSV_ABI     KernelFstat(int d, FileStat* sb);
 int KYTY_SYSV_ABI     KernelFcntl(int d, int command, int64_t argument);
 int KYTY_SYSV_ABI     KernelFtruncate(int d, int64_t length);
+// sceKernelFsync / POSIX fsync: flushes attached stdio streams, then syncs the host file or directory.
+int KYTY_SYSV_ABI     KernelFsync(int d);
+// sceKernelTruncate: path-based truncate. Like POSIX truncate, open stdio streams are not flushed first.
+int KYTY_SYSV_ABI     KernelTruncate(const char* path, int64_t length);
 int KYTY_SYSV_ABI     KernelRename(const char* from, const char* to);
 int KYTY_SYSV_ABI     KernelUnlink(const char* path);
 int KYTY_SYSV_ABI     KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep);

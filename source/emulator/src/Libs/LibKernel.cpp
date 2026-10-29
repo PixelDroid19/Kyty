@@ -1102,26 +1102,27 @@ static int KYTY_SYSV_ABI KernelGetOperationMode(int* mode, int* submode)
 	return OK;
 }
 
-// sceKernelFsync — NID fTx66l5iWIA. Host has no guest-fd flush; accept valid fd.
-static int KYTY_SYSV_ABI KernelFsync(int fd)
+// sceKernelFsync (NID fTx66l5iWIA) and sceKernelFdatasync (NID 30Rh4ixbKy4). Sockets
+// are not files, so POSIX reports EINVAL for them; the file path lives in FileSystem.
+static int KYTY_SYSV_ABI FsyncFileOrSocket(int fd)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t fd = %d\n", fd);
-	if (fd < 0)
+	if (Network::Net::NetIsSocket(fd))
 	{
-		return KERNEL_ERROR_EBADF;
+		return KERNEL_ERROR_EINVAL;
 	}
-	return OK;
+	return Kernel::FileSystem::KernelFsync(fd);
 }
 
 static int KYTY_SYSV_ABI PosixFsync(int fd)
 {
-	return POSIX_CALL(KernelFsync(fd));
+	return POSIX_CALL(FsyncFileOrSocket(fd));
 }
 
 static int KYTY_SYSV_ABI PosixFdatasync(int fd)
 {
-	return POSIX_CALL(KernelFsync(fd));
+	return POSIX_CALL(FsyncFileOrSocket(fd));
 }
 
 static int64_t KYTY_SYSV_ABI PosixFstat(int fd, Kernel::FileSystem::FileStat* stat)
@@ -1672,6 +1673,8 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("eV9wAD2riIA", FileSystem::KernelStat);
 	LIB_FUNC("kBwCPsYX-m4", FileSystem::KernelFstat);
 	LIB_FUNC("VW3TVZiM4-E", FileSystem::KernelFtruncate);
+	LIB_FUNC("kAt6VDbHmro", FileSystem::KernelWritev);
+	LIB_FUNC("WlyEA-sLDf0", FileSystem::KernelTruncate);
 	LIB_FUNC("AUXVxWeJU-A", FileSystem::KernelUnlink);
 	LIB_FUNC("52NcYU9+lEo", FileSystem::KernelRename);
 	LIB_FUNC("taRWhTJFTgE", FileSystem::KernelGetdirentries);
@@ -1699,7 +1702,8 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	// Gen5 kernel mode / fd flush.
 	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
 	LIB_FUNC("NH6xARDOVv8", LibKernel::KernelGetOperationMode);
-	LIB_FUNC("fTx66l5iWIA", LibKernel::KernelFsync);
+	LIB_FUNC("fTx66l5iWIA", LibKernel::FsyncFileOrSocket);
+	LIB_FUNC("30Rh4ixbKy4", LibKernel::FsyncFileOrSocket);
 }
 
 LIB_DEFINE(InitLibKernel_1_Mem)

@@ -2,6 +2,7 @@
 #include "Emulator/Kernel/FileSystemPath.h"
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/AmprPort.h"
+#include "FileSystemInternal.h"
 #include "HostFile.h"
 
 #include "Kyty/Core/Common.h"
@@ -323,6 +324,7 @@ public:
 	FILE* StandardStream(int descriptor);
 	std::shared_ptr<StreamState> GetStreamState(FILE* stream);
 	int FlushStreams();
+	bool FlushDescriptionStreams(const FileHandle& file);
 
 private:
 	int EnsureDescriptorCapacity(uint32_t index);
@@ -365,7 +367,7 @@ static void sec_to_timespec(KernelTimespec* ts, double sec)
 	ts->tv_nsec = static_cast<int64_t>((sec - static_cast<double>(ts->tv_sec)) * 1000000000.0);
 }
 
-static int KernelErrorFromHost(int error)
+int KernelErrorFromHost(int error)
 {
 	// POSIX/BSD error numbers at the guest boundary, never host errno values.
 	constexpr int base = -2147352576;
@@ -724,6 +726,28 @@ int FileDescriptors::FlushStreams()
 	}
 	errno = saved;
 	return result;
+}
+
+// Flushes the stdio streams attached to one description. The registry and
+// description locks are held only to collect the stream states (lock order:
+// registry, then description, as in Dup2 and fclose). Each flush then runs under
+// its own buffer lease, so a slow writeback does not stall other descriptor calls.
+// A stream closed meanwhile was already flushed by its fclose, so it is skipped.
+bool FileDescriptors::FlushDescriptionStreams(const FileHandle& file)
+{
+	std::vector<std::shared_ptr<StreamState>> states;
+	{
+		Core::LockGuard lock(m_mutex);
+		Core::LockGuard file_lock(file->mutex);
+		for (FILE* stream: file->streams) { states.push_back(m_streams.at(stream).state); }
+	}
+	for (const auto& state: states)
+	{
+		const StreamUse use(state);
+		if (!use.IsValid()) { continue; }
+		if (std::fflush(state->stream) != 0) { return false; }
+	}
+	return true;
 }
 
 FILE* FileDescriptors::OpenStream(int d, const char* mode, uint32_t flags)
@@ -1926,6 +1950,34 @@ int KYTY_SYSV_ABI KernelFtruncate(int d, int64_t length)
 	}
 
 	return file->f.Truncate(length) ? OK : KernelErrorFromHost(errno);
+}
+
+int SyncOpenDescriptor(int d)
+{
+	EXIT_IF(g_files == nullptr);
+
+	auto file = g_files->GetFile(d);
+	if (file == nullptr || !file->opened)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+
+	if (file->directory)
+	{
+		return Host::File::SyncDirectory(file->real_name.C_Str()) ? OK : KernelErrorFromHost(errno);
+	}
+
+	if (!g_files->FlushDescriptionStreams(file))
+	{
+		return KernelErrorFromHost(errno);
+	}
+
+	Core::LockGuard lock(file->mutex);
+	if (file->f.IsInvalid())
+	{
+		return KERNEL_ERROR_EIO;
+	}
+	return file->f.Sync() ? OK : KernelErrorFromHost(errno);
 }
 
 int KYTY_SYSV_ABI KernelFcntl(int d, int command, int64_t argument)
