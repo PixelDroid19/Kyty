@@ -6,6 +6,40 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: GPU job timeout before the dunes, and dune wait sites (2026-10-29)
+
+- **Open defect: GPU job timeout.**
+  - Host: Intel A770, kernel `7.2.11-zen1`, Mesa 26.2.5, xe `job_timeout_ms` 5000.
+  - One strict 340 s run on `8f3b5d6b6` (gw77) lost the device at frame 3167 (guest submit
+    23165). The kernel reset the render engine for a timed-out `fc_script` job.
+  - The faulting context was queue 7, slot 3, host sequence 13244. The recent-draw report holds
+    no queue-7 record, only queue-8 work (dispatches of `0x4c97f40f`, 192x1x1, and `0x1404b233`,
+    plus draws), so the hung job is unattributed.
+  - Two other runs on the same kernel and binary (gw76, gw78) reached the dunes without a fault.
+  - Next step if it recurs: correlate the faulting host sequence with a recent-draw trail that
+    covers queue 7.
+- **Dune wait sites** (gw78, same binary, whole run, fence waits of 0.2 ms or longer, by call site):
+
+  | Call site | Wait time | Waits |
+  | --- | --- | --- |
+  | `DISPATCH_INDIRECT` argument reads | 31.4 s | 7596 |
+  | 32-bit `WAIT_REG_MEM` | 21.3 s | 11432 |
+  | `DRAW_INDEX_INDIRECT` argument reads | 12.8 s | 8728 |
+  | Indexed draws over pending device-address storage | 6.6 s | 4338 |
+  | `DMA_DATA` image fills | 3.2 s | 7829 |
+
+  - Argument reads that hit the current recording submit it and wait for all of it, so each wait
+    lasts as long as the queued GPU work.
+  - The frame is serialized: in the dune windows the processor waits on the GPU, and the GPU then
+    idles while the processor records.
+- **Parked: `0x3666fa39` latency** (about 22 ms per call, the largest single GPU item).
+  - The guest builds a deduplicated list across lanes: `s_ff1` over a compare mask, `v_readlane`
+    of the found lane, and `v_writelane` into one VGPR capped at 60 entries. It does this 30 times.
+  - Every step needs the whole 64-lane wave, so each is a rendezvous of all eight split parts. The
+    cost follows from the guest algorithm.
+  - The listing shows no translator change to test, and the offline loop-retention check used for
+    the earlier spin work is not available. No change is attempted.
+
 ## Robot platformer: host memory, descriptor churn and a recycled view at hub load (2026-10-28)
 
 - **Observed** (Intel A770, strict 340 s route to the crash-site dunes,

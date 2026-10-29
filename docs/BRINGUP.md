@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: GPU job timeout before the dunes, and dune wait sites (2026-10-29, open)
   - Robot platformer: Gen5 AGC HLE run reaches the tutorial level load (2026-10-26)
   - Robot platformer: fragment wave transport executes (2026-10-24)
   - Robot platformer: gameplay level stops at the fragment transport gate (2026-10-24)
