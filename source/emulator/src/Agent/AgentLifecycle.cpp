@@ -307,9 +307,14 @@ void EmitStorageFrontier(const StorageFrontierContext& context)
 
 void EmitStorageFrontierFatal(const StorageFrontierContext& context)
 {
+	EmitStorageFrontier(context);
+	// Callers continue past the frontier on every draw; format only when the line is printed.
+	if (!::Kyty::Log::ShouldLog(::Kyty::Log::Level::Debug))
+	{
+		return;
+	}
 	char msg[kAgentEventMessageMax] {};
 	FormatStorageFrontier(context, msg, sizeof(msg));
-	EmitStorageFrontier(context);
 	KYTY_LOG_DEBUG( "KYTY_AGENT_FRONTIER code=%s %s\n", kCodeGraphicsStorageFrontier, msg);
 }
 
@@ -343,9 +348,13 @@ void EmitStorageRange(const StorageRangeContext& context)
 
 void EmitStorageRangeFatal(const StorageRangeContext& context)
 {
+	EmitStorageRange(context);
+	if (!::Kyty::Log::ShouldLog(::Kyty::Log::Level::Debug))
+	{
+		return;
+	}
 	char msg[kAgentEventMessageMax] {};
 	FormatStorageRange(context, msg, sizeof(msg));
-	EmitStorageRange(context);
 	KYTY_LOG_DEBUG( "KYTY_AGENT_FRONTIER code=%s %s\n", kCodeGraphicsStorageRange, msg);
 }
 
