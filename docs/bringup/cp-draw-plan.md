@@ -135,6 +135,55 @@ the inputs a recipe would re-copy:
   - In gw73 the CP thread blocks on fences for about 27% of its time (8.1 s per 30 s window). The
     GPU is busy about 85 ms per frame.
   - Those waits come first. Stage 2 stays the largest measured CPU-side lever.
+
+**Stage 2, first slice: built, verified, measured, and excluded (2026-10-29).**
+
+- **Design.**
+  - Each pixel program kept up to 4 recorded parses.
+  - The guard kept every input exact (all user SGPRs plus the EUD snapshot), except:
+    - `Base48` and `NumRecords` of the storage V#s bound from user SGPRs or the EUD;
+    - the EUD pointer.
+  - Per masked V#, the guard also checked these predicates: base zero, records zero, all-zero
+    words, and whole-descriptor equality with every other bound buffer.
+  - A hit copied the recorded bind and rewrote the masked words at byte offsets.
+  - The offsets came from a second parse at record time with every masked field changed by a
+    position-dependent amount. A recording was rejected when any patched word matched more than
+    one source, or when the canonical text of the patched result differed from the second
+    parse's.
+  - The post-parse steps (program base, device-address use, binding indices) were part of the
+    template.
+- **Verified.**
+  - Two unit tests compared reused parses with full parses: new bases and sizes, a buffer turning
+    null, and two buffers with equal sizes. A hand mutation that skips the patches fails the first
+    test.
+  - An adversarial review found three defects in the first version, all fixed before measuring:
+    - equal field values in two buffers could be patched from the wrong source;
+    - the low word of the EUD pointer was never patched;
+    - the record-time reader used another guest-read function than the parse.
+  - The dune comparator (full parse on every hit, canonical compare) caught the EUD pointer
+    defect on the first build (gw81: 38,029 mismatches in 80,000 hits).
+  - After the fixes it reported 0 mismatches in 80,000 hits (gw82), and its hand-made self-test
+    reported its mismatch.
+- **Measured** (dunes, Intel A770, kernel `7.2.11-zen1`, three 30 s windows each):
+
+  | Run | Recipe hits | `draw_state_setup` | CP total | fps |
+  | --- | --- | --- | --- | --- |
+  | gw80, without recipes | none | 26.7 us/draw | 203.8 us/draw | 8.65 |
+  | gw83, with recipes | 14.5% of parses | 48.0 us/draw | 282.5 us/draw | 6.30 |
+
+  - The other stages of gw83 are also about 25% higher, so part of that run is host load.
+  - The state-setup cost still rose by 21 us/draw. The cost comes from recording: every structure
+    seen a second time pays two extra parses and two canonical texts of the 7.2 KB bind.
+  - With most parses missing, recordings are frequent.
+- **Excluded.** The ceiling at 14.5% hits is under 2% of CP time even with free recording, so this
+  slice is not worth its complexity.
+  - The patch is kept outside the repository.
+  - A larger slice would also have to mask dynamically loaded V#s and direct SGPRs. That needs
+    guards on their control reads (zero-image checks, sharp word 3), which this slice does not have.
+- **Found, not fixed.** `ShaderResourceFoldRecorder::Read` (`ShaderResourceFoldCapture.cpp`) reads
+  with `CopyFromGuest`, while the parse without a reader uses `CopyFromGuestOrLent`. A fold
+  capture of a table in lent host memory therefore records a failed read where production
+  succeeds. Direction: read through the same function as production.
 - Storage publication to guest addresses is capped at 2.9% of CP time, inside the driver under
   `GuestDeviceAddressRecordPublication`: two global barriers and one copy per publication.
   - A 1-in-20000 counter never printed in a 320 s run (gw76). There are fewer than 20000 non-empty

@@ -129,7 +129,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
-  - [Per-draw plan design](bringup/cp-draw-plan.md): stage 3a lookup-miss memo, texture binding 19-23 -> 14 us/draw (2026-10-28)
+  - [Per-draw plan design](bringup/cp-draw-plan.md): stage 3a lookup-miss memo, texture binding 19-23 -> 14 us/draw (2026-10-28); stage 2 first slice excluded, 14.5% hits (2026-10-29)
   - [CP and GPU sync chain](bringup/cp-gpu-sync-chain.md): dune fence-wait links and device-side design (2026-10-29, design)
   - Small `DMA_DATA` stores behind a consolidated wait retire it first (2026-10-27, fixed)
   - Open: PPSA01341 - Demon's Souls livelocks at boot, parked (2026-10-29)
