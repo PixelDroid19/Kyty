@@ -66,12 +66,17 @@ Each link moves the wait to the next one:
      for points: one index is one point. Those records must really be read.
    - A device-side form needs the index range bounded by `INDEX_BASE` and `INDEX_BUFFER_SIZE`, not
      by the record's start index.
-   - Defect found 2026-10-29, not fixed: `CommandProcessor::DrawIndexIndirect`
-     (`GraphicsRun.cpp`) caps `index_count` at `INDEX_BUFFER_SIZE` but offsets the index address
-     by `start_index_location` without a bound. A record with a nonzero start index therefore
-     reads indices past `INDEX_BASE + INDEX_BUFFER_SIZE`. Direction: bound the read by
-     `INDEX_BUFFER_SIZE - start` and define the indices past the end from a published contract
-     before the device-side form uses them.
+   - Defect found 2026-10-29, fixed the same day: `CommandProcessor::DrawIndexIndirect`
+     (`GraphicsRun.cpp`) capped `index_count` at `INDEX_BUFFER_SIZE` but offset the index address
+     by `start_index_location` without a bound, so a record with a nonzero start index read
+     indices past `INDEX_BASE + INDEX_BUFFER_SIZE`. The draw now keeps only the indices inside
+     `INDEX_BUFFER_SIZE - start` and logs a bounded warning when it drops some. What the guest
+     reads past the end is still not defined by a published contract; the device-side form must
+     settle it before it uses those indices.
+   - Classification of the dune records (gw101, strict 340 s, 4096 records): 3472 empty (85%),
+     369 single-index point records with more than one instance, 255 triangle-list records. No
+     record had a nonzero start index or base vertex, so the bound never fired there. Each
+     blocking argument read cost about 5.1 ms of CP time; the draws themselves about 0.54 ms.
    - It also needs a GPU twin of the CPU geometry and NGG plan that today consumes `index_count`
      on the CPU.
 3. **`WAIT_REG_MEM`.** The 10.6 s are waits on labels whose release also writes back aliased

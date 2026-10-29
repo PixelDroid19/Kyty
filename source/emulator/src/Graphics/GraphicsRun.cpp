@@ -2586,9 +2586,24 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 			default: if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); } break;
 		}
 
-		index_count =
-		    (m_index_buffer_size != 0 && args.index_count_per_instance > m_index_buffer_size) ? m_index_buffer_size
-		                                                                                     : args.index_count_per_instance;
+		// INDEX_BUFFER_SIZE counts the indices from INDEX_BASE, so the record's start index consumes part of it.
+		// What the guest reads past that window is not known; the draw keeps only the indices inside it.
+		uint32_t window = args.index_count_per_instance;
+		if (m_index_buffer_size != 0)
+		{
+			window = args.start_index_location >= m_index_buffer_size ? 0u : m_index_buffer_size - args.start_index_location;
+		}
+		index_count = std::min(args.index_count_per_instance, window);
+		if (index_count < args.index_count_per_instance)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+			               "WARNING: DRAW_INDEX_INDIRECT reads past INDEX_BUFFER_SIZE: start=%u count=%u size=%u, drawing %u\n",
+			               args.start_index_location, args.index_count_per_instance, m_index_buffer_size, index_count);
+		}
+		if (index_count == 0)
+		{
+			return;
+		}
 		index_addr = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(args.start_index_location) * index_bytes);
 
 		if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
