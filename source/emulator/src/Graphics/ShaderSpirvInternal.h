@@ -608,6 +608,9 @@ void    SpirvAddGen5BufferFormatConstants(Spirv* spirv);
 String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, bool bound_buffers);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
+extern const uint32_t SPIRV_WORKGROUP_STORE_BARRIER_MEMORY;
+// True when a compute barrier must also order storage: the shader writes a storage buffer or image.
+bool                  ShaderCodeWritesStorage(const ShaderCode& code);
 const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFormat::Format format);
 // Every constant the ds_swizzle_b32 lane formula for this offset names.
 std::array<uint32_t, 8> ShaderDsSwizzleConstants(uint16_t offset);

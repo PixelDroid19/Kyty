@@ -3383,6 +3383,11 @@ void Spirv::FindConstants()
 	{
 		AddConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
 	}
+	// The compute barrier emitter picks this value with the same predicate, so both must agree.
+	if (m_code.HasAnyOf({ShaderInstructionType::SBarrier}) && ShaderCodeWritesStorage(m_code))
+	{
+		AddConstantUint(SPIRV_WORKGROUP_STORE_BARRIER_MEMORY);
+	}
 	if (UsesVertexLayerExport())
 	{
 		AddConstantUint(0x7ffu);

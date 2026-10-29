@@ -260,6 +260,33 @@ bool ShaderInstructionWritesImageResource(ShaderInstructionType type)
 	       ShaderIsImageAtomic(type);
 }
 
+// FLAT and GLOBAL stores are not decoded (ShaderParseFLAT.cpp accepts only the loads), so a store
+// family added there must be added here as well.
+bool ShaderInstructionWritesStorage(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::BufferStoreDword:
+		case ShaderInstructionType::BufferStoreDwordx2:
+		case ShaderInstructionType::BufferStoreDwordx3:
+		case ShaderInstructionType::BufferStoreDwordx4:
+		case ShaderInstructionType::BufferStoreFormatX:
+		case ShaderInstructionType::BufferStoreFormatXy:
+		case ShaderInstructionType::BufferStoreFormatXyzw:
+		case ShaderInstructionType::BufferAtomicAdd:
+		case ShaderInstructionType::BufferAtomicAnd:
+		case ShaderInstructionType::BufferAtomicOr:
+		case ShaderInstructionType::BufferAtomicSmax:
+		case ShaderInstructionType::BufferAtomicSmin:
+		case ShaderInstructionType::BufferAtomicSub:
+		case ShaderInstructionType::BufferAtomicSwap:
+		case ShaderInstructionType::BufferAtomicUmax:
+		case ShaderInstructionType::BufferAtomicUmin:
+		case ShaderInstructionType::BufferAtomicXor: return true;
+		default: return ShaderInstructionWritesImageResource(type);
+	}
+}
+
 bool ShaderInstructionUsesImageSampler(ShaderInstructionType type)
 {
 	return type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageGather4C ||

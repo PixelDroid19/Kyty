@@ -23,6 +23,8 @@ namespace Kyty::Libs::Graphics {
 [[nodiscard]] bool ShaderInstructionHasStaticBranchTarget(ShaderInstructionType type);
 [[nodiscard]] bool ShaderInstructionReadsImageResource(ShaderInstructionType type);
 [[nodiscard]] bool ShaderInstructionWritesImageResource(ShaderInstructionType type);
+// Storage buffer or image write: buffer stores and buffer atomics plus the image writes above.
+[[nodiscard]] bool ShaderInstructionWritesStorage(ShaderInstructionType type);
 [[nodiscard]] bool ShaderInstructionUsesImageSampler(ShaderInstructionType type);
 [[nodiscard]] State::ImageSampleOperation ShaderInstructionSamplerOperation(ShaderInstructionType type);
 class ShaderCodeResourceMemo;

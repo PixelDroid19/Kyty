@@ -16,7 +16,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-inline constexpr uint32_t kShaderTranslatorVersion         = 183;
+inline constexpr uint32_t kShaderTranslatorVersion         = 184;
 inline constexpr uint32_t kShaderGeometryTranslatorVersion = 94;
 
 // Names the on-disk stores that hold translator output, so each translator

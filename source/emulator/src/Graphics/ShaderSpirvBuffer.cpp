@@ -55,8 +55,12 @@ static constexpr uint32_t SPIRV_SCOPE_WORKGROUP          = 2;
 static constexpr uint32_t SPIRV_ACQUIRE_RELEASE          = 0x8;
 static constexpr uint32_t SPIRV_UNIFORM_MEMORY           = 0x40;
 static constexpr uint32_t SPIRV_WORKGROUP_MEMORY         = 0x100;
+static constexpr uint32_t SPIRV_IMAGE_MEMORY             = 0x800;
 const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL    = SPIRV_ACQUIRE_RELEASE | SPIRV_UNIFORM_MEMORY;
 const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL = SPIRV_ACQUIRE_RELEASE | SPIRV_WORKGROUP_MEMORY;
+// Workgroup barrier that also orders the storage buffer and image writes the workgroup shares.
+const uint32_t SPIRV_WORKGROUP_STORE_BARRIER_MEMORY =
+    SPIRV_ACQUIRE_RELEASE | SPIRV_UNIFORM_MEMORY | SPIRV_WORKGROUP_MEMORY | SPIRV_IMAGE_MEMORY;
 
 struct BufferAddressSetup
 {
@@ -3354,6 +3358,21 @@ KYTY_RECOMPILER_FUNC(Recompile_DsReadAddtidB32_VdstOffset)
 	return EmitDsAddtidLoad(dst, active, index_str, bound, String8(), spirv, inst, dst_source);
 }
 
+// S_BARRIER only makes waves wait for each other (RDNA2 ISA 4.3), and stores from one wave are
+// not kept in order (ISA 4.4). A workgroup that writes storage therefore needs the barrier to
+// order UniformMemory and ImageMemory as well as workgroup (LDS) memory.
+bool ShaderCodeWritesStorage(const ShaderCode& code)
+{
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (ShaderInstructionWritesStorage(inst.type))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty)
 {
 	if (spirv->GetCsInputInfo() == nullptr)
@@ -3368,7 +3387,9 @@ KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty)
 
 	const auto execution_scope = spirv->GetConstantUint(SPIRV_SCOPE_WORKGROUP);
 	const auto memory_scope    = spirv->GetConstantUint(SPIRV_SCOPE_WORKGROUP);
-	const auto semantics       = spirv->GetConstantUint(SPIRV_WORKGROUP_MEMORY_ACQ_REL);
+	const auto barrier_memory  = ShaderCodeWritesStorage(spirv->GetCode()) ? SPIRV_WORKGROUP_STORE_BARRIER_MEMORY
+	                                                                       : SPIRV_WORKGROUP_MEMORY_ACQ_REL;
+	const auto semantics       = spirv->GetConstantUint(barrier_memory);
 
 	*dst_source += String8::FromPrintf("               OpControlBarrier %%%s %%%s %%%s\n", execution_scope.c_str(),
 	                                  memory_scope.c_str(), semantics.c_str());
