@@ -12,6 +12,9 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferAtomic_XXX_Vdata1VaddrSvSoffsIdxen);
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadUbyte_Vdata1VaddrSvSoffsIdxen);
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword);
 KYTY_RECOMPILER_FUNC(Recompile_GlobalLoad);
+KYTY_RECOMPILER_FUNC(Recompile_GlobalLoadD16Hi);
+// Emits the 64-bit guest address of a GLOBAL access as %<tag>_lo and %<tag>_hi (defined in ShaderSpirvBuffer.cpp).
+bool EmitGlobalLoadAddress(Spirv* spirv, const ShaderInstruction& inst, const String8& tag, String8* source);
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx2_Vdata2VaddrSvSoffsIdxen);
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx4_Vdata4VaddrSvSoffsIdxen);
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx3_Vdata3VaddrSvSoffsIdxen);

@@ -4621,7 +4621,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 bool ShaderHasGlobalMemoryLoad(const ShaderCode& code)
 {
 	return code.HasAnyOf({ShaderInstructionType::GlobalLoadDword, ShaderInstructionType::GlobalLoadDwordx2,
-	                      ShaderInstructionType::GlobalLoadDwordx3, ShaderInstructionType::GlobalLoadDwordx4});
+	                      ShaderInstructionType::GlobalLoadDwordx3, ShaderInstructionType::GlobalLoadDwordx4,
+	                      ShaderInstructionType::GlobalLoadUbyteD16Hi, ShaderInstructionType::GlobalLoadSbyteD16Hi});
 }
 
 static bool ShaderUsesGuestDeviceAddress(const ShaderCode& code, const ShaderBindResources& bind)

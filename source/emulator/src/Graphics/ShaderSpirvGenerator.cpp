@@ -3185,6 +3185,12 @@ void Spirv::FindConstants()
 		}
 	}
 	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU16U32})) { AddConstantUint(0xffffu); }
+	// GLOBAL D16_HI byte loads: the byte shift and the merge offset.
+	if (m_code.HasAnyOf({ShaderInstructionType::GlobalLoadUbyteD16Hi, ShaderInstructionType::GlobalLoadSbyteD16Hi}))
+	{
+		AddConstantUint(8u);
+		AddConstantUint(16u);
+	}
 	if (m_code.HasAnyOf({ShaderInstructionType::VFfbhU32, ShaderInstructionType::VFfbhI32})) { AddConstantUint(31u); }
 	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkI16I32}))
 	{

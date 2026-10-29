@@ -734,25 +734,23 @@ OpBranch %<t>_merge
 	return true;
 }
 
-// GLOBAL load: each lane reads at its own 64-bit address, a VGPR pair or a
+// GLOBAL address: each lane reads at its own 64-bit address, a VGPR pair or a
 // 64-bit SGPR base plus a 32-bit VGPR offset, plus the signed immediate, through
-// guest device addressing.
-static bool emit_global_load(Spirv* spirv, const ShaderInstruction& inst, uint32_t instruction_index, String8* dst_source)
+// guest device addressing. The address is left in %<tag>_lo and %<tag>_hi for
+// the guest load that the caller emits (dword or D16_HI).
+bool EmitGlobalLoadAddress(Spirv* spirv, const ShaderInstruction& inst, const String8& tag, String8* source)
 {
-	const int dwords = inst.dst.size;
-	if (!spirv->UsesGuestDeviceAddress() || dwords < 1 || dwords > 4 || inst.src_num < 1 || inst.src_num > 2)
+	if (!spirv->UsesGuestDeviceAddress() || inst.src_num < 1 || inst.src_num > 2)
 	{
 		return false;
 	}
-	const auto tag         = String8::FromPrintf("glb_%u", instruction_index);
 	const bool scalar_base = inst.src_num == 2;
-	String8    source;
 	String8    part;
 	if (!operand_load_uint(spirv, inst.src[0], tag + "_v0", tag, &part, scalar_base ? -1 : 0))
 	{
 		return false;
 	}
-	source += part + "\n";
+	*source += part + "\n";
 	const ShaderOperand& high_source = scalar_base ? inst.src[1] : inst.src[0];
 	if (scalar_base)
 	{
@@ -761,14 +759,14 @@ static bool emit_global_load(Spirv* spirv, const ShaderInstruction& inst, uint32
 		{
 			return false;
 		}
-		source += part + "\n";
+		*source += part + "\n";
 	}
 	part = String8();
 	if (!operand_load_uint(spirv, high_source, tag + "_b1", tag, &part, 1))
 	{
 		return false;
 	}
-	source += part + "\n";
+	*source += part + "\n";
 
 	const auto imm    = static_cast<int32_t>(inst.flat_offset);
 	const auto imm_lo = static_cast<uint32_t>(imm);
@@ -783,17 +781,31 @@ static bool emit_global_load(Spirv* spirv, const ShaderInstruction& inst, uint32
 	                                    : R"(%<t>_a_lo = OpCopyObject %uint %<t>_v0
 %<t>_a_hi = OpCopyObject %uint %<t>_b1
 )";
-	source += String8(base_text).ReplaceStr("<t>", tag);
-	source += String8(R"(%<t>_lo = OpIAdd %uint %<t>_a_lo %<imm_lo>
+	*source += String8(base_text).ReplaceStr("<t>", tag);
+	*source += String8(R"(%<t>_lo = OpIAdd %uint %<t>_a_lo %<imm_lo>
 %<t>_i_c = OpULessThan %bool %<t>_lo %<t>_a_lo
 %<t>_i_ci = OpSelect %uint %<t>_i_c %uint_1 %uint_0
 %<t>_hi_s = OpIAdd %uint %<t>_a_hi %<imm_hi>
 %<t>_hi = OpIAdd %uint %<t>_hi_s %<t>_i_ci
 )")
-	              .ReplaceStr("<imm_lo>", spirv->GetConstantUint(imm_lo))
-	              .ReplaceStr("<imm_hi>", spirv->GetConstantUint(imm_hi))
-	              .ReplaceStr("<t>", tag);
-	if (!spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", dwords, tag + "_g", &source))
+	               .ReplaceStr("<imm_lo>", spirv->GetConstantUint(imm_lo))
+	               .ReplaceStr("<imm_hi>", spirv->GetConstantUint(imm_hi))
+	               .ReplaceStr("<t>", tag);
+	return true;
+}
+
+// GLOBAL dword load: each loaded dword is bit-cast into the destination VGPR.
+static bool emit_global_load(Spirv* spirv, const ShaderInstruction& inst, uint32_t instruction_index, String8* dst_source)
+{
+	const int dwords = inst.dst.size;
+	if (dwords < 1 || dwords > 4)
+	{
+		return false;
+	}
+	const auto tag = String8::FromPrintf("glb_%u", instruction_index);
+	String8    source;
+	if (!EmitGlobalLoadAddress(spirv, inst, tag, &source) ||
+	    !spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", dwords, tag + "_g", &source))
 	{
 		return false;
 	}

@@ -143,6 +143,8 @@ enum class ShaderInstructionType : uint32_t
 	GlobalLoadDwordx2,
 	GlobalLoadDwordx3,
 	GlobalLoadDwordx4,
+	GlobalLoadUbyteD16Hi,
+	GlobalLoadSbyteD16Hi,
 	ImageGetResinfo,
 	ImageGather4,
 	ImageLoad,
