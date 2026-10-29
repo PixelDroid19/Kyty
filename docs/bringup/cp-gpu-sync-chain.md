@@ -87,7 +87,17 @@ only, not code):
   per-dispatch runtime blocks (`thread_limits`, `geometry_block`)? Either would dispatch a
   different grid than the CPU path, which fits a device loss. The patch files were in a temporary
   directory and are gone.
-- **Argument residency.** Which argument and label pages in the dunes are GPU-visible (dma-buf
-  imports)? Device-side reads are only valid there.
+- **Argument residency (measured 2026-10-29).** In strict 340 s dune runs (gw93, gw94) every
+  blocking argument read was classified by the source the CPU read path chose:
+  - `DISPATCH_INDIRECT`: 5345 of 6138 blocking reads (87%) were held by one writable storage
+    buffer of the current recording, so a device-side read can take them from that buffer. The
+    other 793 waited for another queue's submission.
+  - `DRAW_INDEX_INDIRECT`: all 4471 blocking reads were held by such a storage buffer.
+  - Of 2560 device-held `DISPATCH_INDIRECT` records, none had a zero group count, and none took a
+    count-dependent branch of the dispatch (storage seed skip, depth meta fill, uniform fill,
+    thread limits, a mode other than 0x01/0x41).
+  - The dispatch plan reads the group counts only for its zero and host-limit checks; the shader
+    does not receive them.
+  - `WAIT_REG_MEM` labels were not classified.
 - **Measuring each link.** Each link has to be removed with an exact twin and measured with
   `KYTY_DIAG_FENCE_STACK` on the dunes, on Intel first and then on AMD.
