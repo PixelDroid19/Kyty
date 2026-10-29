@@ -109,6 +109,37 @@ buffers without allocating a set or hashing anything.
   another branch, the draw runs the full parse and the recipe is extended.
 - Expected gain: most of the 13.1% + 2.1% input-info time.
 
+**Measured ceiling (2026-10-29, gw74/gw75, temporary counters, dunes late window, about 900k pixel-shader
+parses).** Each parse was compared with the earlier parses of the same program after masking
+the inputs a recipe would re-copy:
+
+| Masked inputs | Same structure as the previous parse | Same as one of the last 4 |
+| --- | --- | --- |
+| None (exact inputs) | 4-7% | |
+| Base and `num_records` of metadata and direct V#s | 30% | |
+| Plus the same fields of dynamically loaded V#s, matched in the EUD | 62% | |
+| Plus direct SGPR values | 65-67% | 77% |
+
+- Each miss changes on average about 22 EUD words and 6 user SGPRs outside those fields (constants
+  and image descriptors).
+- No pointer-table read occurs in this scene.
+- With a 4-entry recipe per program, the ceiling is about 77% of the parse cost, roughly 9% of CP
+  time (about 20 us/draw), before the cost of copying the template.
+- About 28 value reads in the call tree feed control decisions and would all need guards:
+  - T# type nibble, tile mode and format;
+  - null V#s (`Base48 == 0 && NumRecords == 0`, all-zero words);
+  - `NumRecords == 0` for the always-out-of-bounds zero buffers;
+  - full-descriptor equality used for deduplication;
+  - all-zero or non-image T#s read from direct SGPRs.
+- Deferred, not excluded.
+  - In gw73 the CP thread blocks on fences for about 27% of its time (8.1 s per 30 s window). The
+    GPU is busy about 85 ms per frame.
+  - Those waits come first. Stage 2 stays the largest measured CPU-side lever.
+- Storage publication to guest addresses is capped at 2.9% of CP time, inside the driver under
+  `GuestDeviceAddressRecordPublication`: two global barriers and one copy per publication.
+  - A 1-in-20000 counter never printed in a 320 s run (gw76). There are fewer than 20000 non-empty
+    publication calls per run, so batching their barriers is not pursued.
+
 ### Stage 3: T#/S# resolution memo per slot
 
 Measurement (temporary counters, gw70/gw71, dunes, 3.4M sampled slots late in the run), keyed by
