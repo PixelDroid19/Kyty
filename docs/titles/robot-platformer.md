@@ -45,18 +45,33 @@ gdb runs.
   - A secondary implementation reports resolution changes on the same build.
     They cannot come from this update in `Mono`, so that report needs another
     mechanism or another display mode.
-- **Found, not fixed: the GPU clock rate.**
+- **Found, then fixed the same day: the GPU clock rate.**
   - The ring reader converts a timer pair with `(end - begin) * 1e6 / 1e8`
     (multiply by `0xabcc77118461cefd`, shift by 90), so it assumes a
     100 MHz GPU clock.
   - `GraphicsRenderWriteAtEndOfPipeClockCounter`
-    (`source/emulator/src/Graphics/GraphicsRenderEop.cpp`) writes
+    (`source/emulator/src/Graphics/GraphicsRenderEop.cpp`) wrote
     `Kernel::TimePort::GetCounter()`, which runs at 1 GHz on Linux. Every
-    GPU interval the title computes is therefore 10 times too long.
-  - One secondary implementation also uses a 100 MHz domain for these
-    writes. The direction is to give the Gen5 end-of-pipe clock its own
-    100 MHz domain, after checking the other titles that read it and the
-    Gen4 `GetGpuCoreClockFrequency` contract.
+    GPU interval the title computed was therefore 10 times too long.
+  - Evidence for 100 MHz, from three independent sources:
+    - the title's own conversion above;
+    - the RDNA2 GPU timestamp clock: RADV reports `timestampPeriod = 10` ns
+      for the RDNA2 iGPU of the test host (`vulkaninfo`);
+    - one secondary implementation uses a 100 MHz domain for these writes.
+  - Fix: on Gen5, the end-of-pipe clock write (`RELEASE_MEM` data_sel 3, the
+    only GPU-clock source the command processor writes) converts the host
+    counter to 100 MHz. Gen4 keeps the host counter, because Gen4 titles
+    read its rate from `GetGpuCoreClockFrequency`, which returns the host
+    counter's rate.
+  - Gen5 exports no GPU clock frequency query, so no other guest-visible
+    value has to change with it. `S_MEMTIME` and `S_MEMREALTIME` are still
+    refused by the translator (`ShaderParseSMRD.cpp`).
+  - Measured on the dunes (strict 340 s, gw103 against gw101 without the
+    change): the first six 30 s windows ran at 39.2, 14.9, 17.8, 5.1, 11.7
+    and 31.0 fps against 38.7, 14.2, 18.6, 5.9, 10.5 and 34.6. The frame rate
+    is unchanged, as expected for a dormant controller. gw103 then lost the
+    device at frame 3303; that is the GPU job timeout below, which the
+    baseline gw100 also hit without this change.
 - **Measured.** The gw85 dunes ran at 8.25 fps, with CP 226.2 us per draw
   including 66.7 us of fence wait, and 556 draws per frame. Without the waits
   the CP costs about 89 ms per frame, so a cheaper GPU alone cannot pass about

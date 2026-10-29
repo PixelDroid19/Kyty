@@ -5244,9 +5244,11 @@ matched on all of them. Failures shared with main, not caused by this branch:
     table mapping module IDs to files.
 - **Excluded.**
   - GPU timestamps from host queries. The end-of-pipe clock write already reads
-    the clock when the fence completes. A "100 MHz clock defect" was cited
-    earlier, but it is not recorded anywhere in `docs/`; `S_MEMREALTIME` is
-    documented only as "constant frequency".
+    the clock when the fence completes. The clock rate is a separate defect,
+    recorded in `docs/titles/robot-platformer.md` (the Gen5 title converts
+    intervals at 100 MHz while Kyty wrote a 1 GHz counter). An earlier version
+    of this entry said that defect was not recorded; that was wrong.
+    `S_MEMREALTIME` is documented only as "constant frequency".
   - Host occlusion queries. The guest counter contract is only partly
     evidenced, and the lead itself was withdrawn without a stated reason.
   - P010 video output. `Videodec2` accepts only AVC and HEVC

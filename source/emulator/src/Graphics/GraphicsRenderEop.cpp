@@ -1,3 +1,4 @@
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
@@ -251,6 +252,21 @@ void GraphicsRenderWriteAtEndOfPipe64(uint64_t /*submit_id*/, CommandBuffer* buf
 	RecordTransientLabel64(buffer, dst_gpu_addr, value, nullptr, nullptr, nullptr);
 }
 
+// Gen5 titles convert GPU clock intervals at a fixed 100 MHz, the RDNA2 reference clock; Gen4 titles read
+// the rate from GetGpuCoreClockFrequency, which reports the host counter's own rate.
+static uint64_t EndOfPipeClockCounter()
+{
+	const uint64_t counter = Kernel::TimePort::GetCounter();
+	if (!Config::IsNextGen())
+	{
+		return counter;
+	}
+	constexpr uint64_t kGen5GpuClockHz = 100000000u;
+	const uint64_t     frequency       = Kernel::TimePort::GetFrequency();
+	EXIT_IF(frequency == 0);
+	return counter / frequency * kGen5GpuClockHz + counter % frequency * kGen5GpuClockHz / frequency;
+}
+
 void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr)
 {
 	EXIT_IF(g_render_ctx == nullptr);
@@ -269,7 +285,7 @@ void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandB
 	    {
 		    auto* dst_gpu_addr = reinterpret_cast<uint64_t*>(args[0]);
 		    EXIT_IF(dst_gpu_addr == nullptr);
-		    *dst_gpu_addr = Kernel::TimePort::GetCounter();
+		    *dst_gpu_addr = EndOfPipeClockCounter();
 		    KYTY_LOG_DEBUG(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n" FG_DEFAULT,
 		           reinterpret_cast<uint64_t>(dst_gpu_addr), *dst_gpu_addr);
 		    return false;
