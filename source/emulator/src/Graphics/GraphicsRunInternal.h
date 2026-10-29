@@ -334,6 +334,10 @@ public:
 	void RenderTextureBarrier(uint64_t vaddr, uint64_t size);
 	void DepthStencilBarrier(uint64_t vaddr, uint64_t size);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
+	// Records one dispatch; a nonzero indirect_args_address takes the group counts from that
+	// record on the device. False when those arguments have to be read on the host instead.
+	[[nodiscard]] bool RecordDispatch(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
+	                                  uint64_t indirect_args_address);
 	void DispatchIndirect(uint32_t data_offset, uint32_t mode);
 	void DispatchIndirectAbsolute(uint64_t address, uint32_t mode);
 	void WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index);

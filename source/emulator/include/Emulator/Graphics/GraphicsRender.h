@@ -831,13 +831,17 @@ enum class ComputeDispatchResult
 	ProcessorWriteBackRequired,
 	SubmissionCompletionRequired,
 	ReaderCompletionRequired,
+	// The indirect arguments cannot be read on the device: read them on the host and dispatch directly.
+	IndirectArgumentsOnHost,
 };
 // Preparation and recording share one resource analysis. A required write-back
 // or submission wait leaves the command buffer untouched; retry with fresh inputs.
+// A nonzero indirect_args_address takes the group counts from that guest record on
+// the device and ignores the thread_group arguments.
 [[nodiscard]] ComputeDispatchResult GraphicsRenderDispatchDirect(
     uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
-    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, bool processor_writeback_complete,
-    SubmissionId* pending_submission);
+    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, uint64_t indirect_args_address,
+    bool processor_writeback_complete, SubmissionId* pending_submission);
 void GraphicsRenderMemoryBarrier(CommandBuffer* buffer);
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);

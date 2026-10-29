@@ -2685,6 +2685,12 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
 {
+	(void)RecordDispatch(thread_group_x, thread_group_y, thread_group_z, mode, 0);
+}
+
+bool CommandProcessor::RecordDispatch(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
+                                      uint64_t indirect_args_address)
+{
 	const ScopedDebugStatsTimer dispatch_timer(DebugStatsRecordDispatchProcessor);
 	bool processor_writeback_complete = false;
 	SubmissionId pending;
@@ -2695,13 +2701,19 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 			Core::LockGuard lock(m_mutex);
 			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 			result = GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, thread_group_x,
-			                                      thread_group_y, thread_group_z, mode, processor_writeback_complete, &pending);
+			                                      thread_group_y, thread_group_z, mode, indirect_args_address,
+			                                      processor_writeback_complete, &pending);
 			m_dispatch_recorded = m_dispatch_recorded || result == ComputeDispatchResult::Completed;
 		}
 		if (result == ComputeDispatchResult::Completed)
 		{
 			SubmitRecordedWorkIfGpuIdle();
-			return;
+			return true;
+		}
+		if (result == ComputeDispatchResult::IndirectArgumentsOnHost)
+		{
+			EXIT_IF(indirect_args_address == 0);
+			return false;
 		}
 		if (result == ComputeDispatchResult::ProcessorWriteBackRequired)
 		{
@@ -2751,9 +2763,18 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 		uint32_t thread_group_z;
 	};
 
-	// The arguments are often written by an earlier dispatch of this recording.
+	if (address == 0)
+	{
+		EXIT("unreadable dispatch-indirect arguments: address=0x%016" PRIx64 "\n", address);
+	}
+	// The arguments are often written by an earlier dispatch of this recording; when its storage
+	// buffer holds them, the device reads them in queue order and the host does not wait.
+	if (RecordDispatch(1, 1, 1, mode, address))
+	{
+		return;
+	}
 	DispatchIndirectArgs args {};
-	if (address == 0 || !ReadCurrentGuestBytes(address, &args, sizeof(args)))
+	if (!ReadCurrentGuestBytes(address, &args, sizeof(args)))
 	{
 		EXIT("unreadable dispatch-indirect arguments: address=0x%016" PRIx64 "\n", address);
 	}

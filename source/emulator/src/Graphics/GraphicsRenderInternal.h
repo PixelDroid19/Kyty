@@ -1749,6 +1749,12 @@ void FormatTextureList(const ShaderTextureResources& textures, char* buffer, siz
 // Bytes before read_begin are never read through the returned buffer and are not captured.
 VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
                                                VkBufferUsageFlags usage, uint64_t read_begin = 0, bool zero_tail = true);
+// Records a conversion of the 12-byte DISPATCH_INDIRECT record at `offset` of `source` into host
+// dispatch arguments, in queue order; counts above `max_group_count` dispatch nothing and fail the
+// recording at completion. Returns the argument buffer, or nullptr when the conversion is unavailable.
+VulkanBuffer* GraphicsRenderRecordDispatchIndirectArgs(CommandBuffer* buffer, const VulkanBuffer* source, uint64_t offset,
+                                                       const uint32_t* max_group_count);
+void          GraphicsRenderCheckDispatchIndirectLimits();
 
 bool                            RenderColorSlotConfigured(const RenderColorInfo& color, uint32_t slot);
 bool                            RenderColorSlotActive(const RenderColorInfo& color, uint32_t slot);

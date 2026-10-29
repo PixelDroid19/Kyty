@@ -3558,8 +3558,8 @@ static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint
 
 ComputeDispatchResult GraphicsRenderDispatchDirect(
     uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
-    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, bool processor_writeback_complete,
-    SubmissionId* pending_submission)
+    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, uint64_t indirect_args_address,
+    bool processor_writeback_complete, SubmissionId* pending_submission)
 {
 	EXIT_IF(pending_submission == nullptr);
 	*pending_submission = {};
@@ -3569,11 +3569,26 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	EXIT_IF(buffer->IsInvalid());
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
+	const bool indirect = indirect_args_address != 0u;
+	if (indirect)
+	{
+		// The plan reads the group counts only for its zero and host-limit checks;
+		// the device conversion applies both to the recorded counts.
+		thread_group_x = 1u;
+		thread_group_y = 1u;
+		thread_group_z = 1u;
+	}
 	ShaderComputeInputInfo input_info;
 	ShaderComputeWaveDispatchPlan plan {};
 	if (!BuildComputeDispatchInput(ctx, sh_ctx, thread_group_x, thread_group_y, thread_group_z, mode, &input_info, &plan))
 	{
 		return ComputeDispatchResult::Completed;
+	}
+	// Seeding, metadata and uniform fills derive work from the group counts on the host.
+	if (indirect && ((plan.dispatch_mode != 0x01u && plan.dispatch_mode != 0x41u) || input_info.thread_limits_used ||
+	                 input_info.meta_fill.valid || input_info.uniform_buffer_fill.valid))
+	{
+		return ComputeDispatchResult::IndirectArgumentsOnHost;
 	}
 	// Storage results reach the reader through the device-address preparation
 	// below, in queue order; only other objects need the draining write-back.
@@ -3599,6 +3614,16 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 			// The proven scalar gate clears EXEC on every path to each image
 			// store. No descriptor or image needs materialization for this dispatch.
 			return ComputeDispatchResult::Completed;
+		}
+	}
+
+	GpuMemoryGdsSource indirect_source {};
+	if (indirect)
+	{
+		indirect_source = GpuMemoryAcquireGdsSource(g_render_ctx->GetGraphicCtx(), buffer, indirect_args_address, 3u * sizeof(uint32_t));
+		if (indirect_source.status != GpuMemoryGdsSourceStatus::DeviceBuffer)
+		{
+			return ComputeDispatchResult::IndirectArgumentsOnHost;
 		}
 	}
 
@@ -3719,6 +3744,18 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		}
 	}
 
+	VulkanBuffer* indirect_args = nullptr;
+	if (indirect)
+	{
+		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(g_render_ctx->GetGraphicCtx()->compute_wave_vulkan_state);
+		indirect_args = GraphicsRenderRecordDispatchIndirectArgs(buffer, indirect_source.buffer, indirect_source.offset,
+		                                                         capabilities.max_group_count);
+		if (indirect_args == nullptr)
+		{
+			return ComputeDispatchResult::IndirectArgumentsOnHost;
+		}
+	}
+
 	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(buffer, &input_info, &sh_ctx->GetCs(), &ctx->GetShaderRegisters());
@@ -3726,11 +3763,14 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 
 	const uint64_t storage_seed_skip_mask =
-	    ShaderComputeStorageSeedSkipMask(input_info, Config::IsNextGen(), thread_group_x, thread_group_y, thread_group_z);
+	    indirect ? 0u : ShaderComputeStorageSeedSkipMask(input_info, Config::IsNextGen(), thread_group_x, thread_group_y, thread_group_z);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
 	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask, nullptr,
 	                cs_regs.cs_regs.chksum, nullptr, input_info.storage_image_tile_coverage, &device_address_table);
-	(void)TryPublishComputeDepthMetaFill(submit_id, input_info, thread_group_x, thread_group_y, thread_group_z);
+	if (!indirect)
+	{
+		(void)TryPublishComputeDepthMetaFill(submit_id, input_info, thread_group_x, thread_group_y, thread_group_z);
+	}
 
 	// Materialization may dispatch a host compute kernel. Restore the guest
 	// pipeline after all preparation has completed.
@@ -3742,11 +3782,17 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	constexpr uint32_t kDispatchComputeShaderEnable = 0x01u;
 	constexpr uint32_t kDispatchPartialThreadGroups = 0x02u;
 	ComputeUniformBufferFill fill;
-	const bool proven_fill = (mode & kDispatchComputeShaderEnable) != 0u && (mode & kDispatchPartialThreadGroups) == 0u &&
+	const bool proven_fill = !indirect && (mode & kDispatchComputeShaderEnable) != 0u && (mode & kDispatchPartialThreadGroups) == 0u &&
 	                         ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill);
 	if (!(proven_fill && RecordComputeUniformFillTransfer(buffer, fill)))
 	{
-		vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
+		if (indirect)
+		{
+			vkCmdDispatchIndirect(vk_buffer, indirect_args->buffer, 0);
+		} else
+		{
+			vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
+		}
 	}
 	buffer->StoreBackDepthPlanes();
 	if (proven_fill)
@@ -3765,9 +3811,10 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		dispatch.kind          = VulkanRecentDrawKind::Dispatch;
 		dispatch.guest_submit  = submit_id;
 		dispatch.cs_checksum   = cs_regs.cs_regs.chksum;
-		dispatch.groups[0]     = thread_group_x;
-		dispatch.groups[1]     = thread_group_y;
-		dispatch.groups[2]     = thread_group_z;
+		// Device-side counts are unknown to the host.
+		dispatch.groups[0]     = indirect ? 0u : thread_group_x;
+		dispatch.groups[1]     = indirect ? 0u : thread_group_y;
+		dispatch.groups[2]     = indirect ? 0u : thread_group_z;
 		dispatch.host_commands = 1;
 		VulkanRecentDrawRecord(buffer, dispatch);
 	}
