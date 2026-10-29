@@ -287,14 +287,20 @@ gdb runs.
   Focused `kyty_unit_test` suites (1492 passed); the strict games matrix on
   Intel A770 reached 26 of 32 cases interactive (25 of 32 before), with no
   case losing presents.
-- **Excluded: 32-lane parts** (2026-10-29, translator 183). Two parts per
-  guest wave instead of eight cut the rendezvous count by four, but the
-  extra spills cost far more: `0x3666fa39` took 101 ms per call (297 calls
-  in the last 12 windows of a strict 400 s dune run, compute pipelines
-  compiled in an earlier run) against about 22 ms with 8-lane parts, and the
-  frame GPU total rose to about 150 ms. ANV spilled 2.6k-4k registers per
-  pipeline at SIMD32. 16-lane parts were not re-measured; their offline
-  spills (1574:9325) are already above the 8-lane ones (470:2397).
+- **Open: 32-lane parts render wrong** (2026-10-29, translator 183, Intel
+  A770). Forcing two 32-lane parts per guest wave instead of eight 8-lane
+  parts for programs over 64 VGPRs (a temporary override, compute pipelines
+  compiled in an earlier run) drew the dunes saturated yellow with the cliffs
+  missing in every dune capture of a strict 400 s run (frames 2867-3407);
+  8-lane runs on the same route are clean. `0x3666fa39` took 101 ms per call
+  there against about 22 ms with 8-lane parts, but with wrong output that
+  time says nothing about the rendezvous trade-off, so 32-lane parts are not
+  excluded on cost. 32-lane parts are the default split on hosts whose only
+  subgroup size is 32, so the defect matters beyond this experiment.
+  Unknown: whether the wrong image comes from the split path at 32 lanes
+  (exchange layout, lane masks above bit 31 of a part) or from ANV at
+  SIMD32. Direction: run the existing split-wave fixtures at 32 lanes on a
+  GPU, then a host with a fixed 32-lane subgroup.
 - **Excluded: GDA address translation cache** (translator 174): some
   compute pipelines took 13-16 s each to compile on ANV and the worldmap
   stopped on a strict storage refusal at 72 s.
