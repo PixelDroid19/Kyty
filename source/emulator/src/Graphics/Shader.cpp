@@ -4555,6 +4555,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 			    auto pixel_analysis = std::make_shared<ShaderImmutablePixelAnalysis>();
 			    pixel_analysis->has_only_null_exports        = ShaderHasOnlyNullPixelExports(*code);
 			    pixel_analysis->color_exports                = ShaderSummarizePixelColorExports(*code);
+			    pixel_analysis->interpolation                = ShaderSummarizePixelInterpolation(*code);
 			    pixel_analysis->uses_native_wave_state      = ShaderUsesNativeWaveState(*code);
 			    pixel_analysis->has_getpc                   = code->HasAnyOf({ShaderInstructionType::SGetpcB64});
 			    pixel_analysis->has_global_memory_load      = ShaderHasGlobalMemoryLoad(*code);
@@ -4580,7 +4581,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 			ps_info->stage_enabled = false;
 			return;
 		}
-		ShaderResolveCustomInterpolation(*analysis.code, *vs_info, ps_info);
+		ShaderResolveCustomInterpolation(analysis.pixel_analysis->interpolation, *vs_info, ps_info);
 		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr, analysis.code.get(), 0,
 		                  false, nullptr, analysis.scalar_flow.get(), nullptr, analysis.resource_memo.get());
 		// GETPC uses runtime metadata so relocated pixel programs keep their

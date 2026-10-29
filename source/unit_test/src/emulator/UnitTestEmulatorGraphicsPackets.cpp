@@ -4403,7 +4403,7 @@ TEST(EmulatorGraphicsPackets, SeparatesSmoothAndFlatViewsOfOnePixelParameter)
 		input.system_input_enable = input.system_input_address = 1u << 1u;
 		input.interpolator_settings[0] = location;
 		input.interpolator_settings[1] = location | 0x400u;
-		ShaderResolveCustomInterpolation(code, producer, &input);
+		ShaderResolveCustomInterpolation(ShaderSummarizePixelInterpolation(code), producer, &input);
 		ASSERT_TRUE(input.custom_interpolation.Enabled());
 		EXPECT_EQ(input.custom_interpolation.per_vertex_inputs, 0u);
 		EXPECT_EQ(input.custom_interpolation.inputs, 3u);

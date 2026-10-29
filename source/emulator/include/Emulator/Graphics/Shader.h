@@ -2576,12 +2576,22 @@ struct ShaderPixelColorExports
 	uint8_t partial_targets = 0;  // bit per target with any color export whose EN is not 0xF
 };
 
+// Attribute inputs read by V_INTERP_* in a parsed pixel program.
+struct ShaderPixelInterpolationUse
+{
+	uint32_t inputs             = 0; // bit per attribute read by any V_INTERP_*
+	uint32_t barycentric_inputs = 0; // bit per attribute read by V_INTERP_P1/P2
+};
+
+[[nodiscard]] ShaderPixelInterpolationUse ShaderSummarizePixelInterpolation(const ShaderCode& code);
+
 // Values derived only from a parsed pixel program. Descriptor and user-data
 // predicates remain per draw because their inputs can change between draws.
 struct ShaderImmutablePixelAnalysis
 {
 	bool has_only_null_exports = false;
 	ShaderPixelColorExports color_exports;
+	ShaderPixelInterpolationUse interpolation;
 	bool uses_native_wave_state = false;
 	bool has_getpc = false;
 	bool has_global_memory_load = false;
@@ -2672,7 +2682,7 @@ struct ShaderPixelInterpolator
 [[nodiscard]] float ShaderPixelInterpolatorDefaultComponent(const ShaderPixelInterpolator& interpolator, uint32_t component);
 [[nodiscard]] bool ShaderPixelInputActive(const ShaderPixelInputInfo& info, uint32_t index);
 [[nodiscard]] uint32_t ShaderPixelSystemInputRegister(const ShaderPixelInputInfo& info, uint32_t field);
-void ShaderResolveCustomInterpolation(const ShaderCode& code, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info);
+void ShaderResolveCustomInterpolation(const ShaderPixelInterpolationUse& use, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info);
 [[nodiscard]] Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& info);
 
 struct ShaderSharp
