@@ -3435,6 +3435,8 @@ void Spirv::FindConstants()
 			case ShaderInstructionType::DsOrB32:
 			case ShaderInstructionType::DsXorB32:
 			case ShaderInstructionType::DsWrxchgRtnB32:
+			case ShaderInstructionType::DsCmpstB32:
+			case ShaderInstructionType::DsCmpstRtnB32:
 				// Atomics also require AcquireRelease|WorkgroupMemory (0x108)
 				// in native modules that contain no SBarrier.
 				AddConstantUint(SPIRV_WORKGROUP_MEMORY_ACQ_REL);

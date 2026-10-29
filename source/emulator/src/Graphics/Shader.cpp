@@ -2854,7 +2854,7 @@ bool ShaderPreventsNoopPixelElision(const ShaderCode& code)
 	                      ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX,
 	                      ShaderInstructionType::BufferStoreFormatXy, ShaderInstructionType::BufferStoreFormatXyzw,
 	                      ShaderInstructionType::DsAppend, ShaderInstructionType::DsConsume, ShaderInstructionType::DsAddU32,
-	                      ShaderInstructionType::DsAddRtnU32,
+	                      ShaderInstructionType::DsAddRtnU32, ShaderInstructionType::DsCmpstB32, ShaderInstructionType::DsCmpstRtnB32,
 	                      ShaderInstructionType::DsAndB32, ShaderInstructionType::DsDecU32, ShaderInstructionType::DsIncU32,
 	                      ShaderInstructionType::DsMaxI32, ShaderInstructionType::DsMaxU32, ShaderInstructionType::DsMinI32,
 	                      ShaderInstructionType::DsMinU32, ShaderInstructionType::DsOrB32, ShaderInstructionType::DsRsubU32,

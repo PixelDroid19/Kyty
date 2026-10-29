@@ -194,7 +194,17 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			break;
 		case 0x0E: DecodeDsWrite2(&inst, ShaderInstructionType::DsWrite2B32, addr, data0, data1, offset0, offset1); break;
 		case 0x0F: DecodeDsWrite2(&inst, ShaderInstructionType::DsWrite2St64B32, addr, data0, data1, offset0, offset1); break;
-		case 0x10: KYTY_NI("ds_cmpst_b32"); break;
+		case 0x10:
+			// DATA is the comparand and DATA2 the replacement (ISA 12.13); no return data.
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			inst.type      = ShaderInstructionType::DsCmpstB32;
+			inst.format    = ShaderInstructionFormat::VaddrVdata2Offset;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src[2]    = operand_parse(data1 + 256);
+			inst.src_num   = 3;
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
+			break;
 		case 0x11: KYTY_NI("ds_cmpst_f32"); break;
 		case 0x12: KYTY_NI("ds_min_f32"); break;
 		case 0x13: KYTY_NI("ds_max_f32"); break;
@@ -239,7 +249,18 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			break;
 		case 0x2E: KYTY_NI("ds_wrxchg2_rtn_b32"); break;
 		case 0x2F: KYTY_NI("ds_wrxchg2st64_rtn_b32"); break;
-		case 0x30: KYTY_NI("ds_cmpst_rtn_b32"); break;
+		case 0x30:
+			// Same operand order as DS_CMPST_B32; the prior value returns to VDST.
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			inst.type      = ShaderInstructionType::DsCmpstRtnB32;
+			inst.format    = ShaderInstructionFormat::VdstVaddrVdata2Offset;
+			inst.dst       = operand_parse(vdst + 256);
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src[2]    = operand_parse(data1 + 256);
+			inst.src_num   = 3;
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
+			break;
 		case 0x31: KYTY_NI("ds_cmpst_rtn_f32"); break;
 		case 0x32: KYTY_NI("ds_min_rtn_f32"); break;
 		case 0x33: KYTY_NI("ds_max_rtn_f32"); break;

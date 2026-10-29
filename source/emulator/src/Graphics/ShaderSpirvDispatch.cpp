@@ -99,6 +99,8 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 	{Recompile_DsAddU32_VaddrVdataOffset,                  ShaderInstructionType::DsAddU32,            ShaderInstructionFormat::VaddrVdataOffset,               {""}},
     {Recompile_DsAtomicRtn_VdstVaddrVdataOffset,            ShaderInstructionType::DsAddRtnU32,         ShaderInstructionFormat::VdstVaddrVdataOffset,           {"OpAtomicIAdd"}},
     {Recompile_DsAtomicRtn_VdstVaddrVdataOffset,            ShaderInstructionType::DsWrxchgRtnB32,      ShaderInstructionFormat::VdstVaddrVdataOffset,           {"OpAtomicExchange"}},
+    {Recompile_DsCmpstRtn_VdstVaddrVdata2Offset,            ShaderInstructionType::DsCmpstRtnB32,       ShaderInstructionFormat::VdstVaddrVdata2Offset,          {""}},
+    {Recompile_DsCmpst_VaddrVdata2Offset,                   ShaderInstructionType::DsCmpstB32,          ShaderInstructionFormat::VaddrVdata2Offset,              {""}},
     {Recompile_DsAtomic_XXX_VaddrVdataOffset,              ShaderInstructionType::DsSubU32,            ShaderInstructionFormat::VaddrVdataOffset,               {"OpAtomicISub"}},
     {Recompile_DsAtomic_XXX_VaddrVdataOffset,              ShaderInstructionType::DsMinU32,            ShaderInstructionFormat::VaddrVdataOffset,               {"OpAtomicUMin"}},
     {Recompile_DsAtomic_XXX_VaddrVdataOffset,              ShaderInstructionType::DsMaxU32,            ShaderInstructionFormat::VaddrVdataOffset,               {"OpAtomicUMax"}},

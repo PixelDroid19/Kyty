@@ -144,4 +144,23 @@ TEST(EmulatorComputeWaveLds, RejectsWrongRegisterSpans)
 	    }, ::testing::ExitedWithCode(0), "");
 }
 
+// ds_cmpst has no banked-LDS emitter. The classifier admits it on the generic LDS
+// route, which ds_wrxchg_rtn_b32 already takes, so its kind must stay that route.
+static void RunCmpstClassification(uint32_t control, uint32_t registers)
+{
+	InitializeConfig();
+	const uint32_t words[] = {control, registers, 0xbf810000u};
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	if (!ShaderTryParseBounded(words, sizeof(words), &code)) { std::_Exit(2); }
+	const auto kind = ShaderClassifyComputeWaveInstruction(code.GetInstructions().At(0));
+	std::_Exit(kind == ShaderComputeWaveInstructionKind::BankedGenericLds ? 0 : 3);
+}
+
+TEST(EmulatorComputeWaveLds, CmpstTakesTheGenericLdsRoute)
+{
+	ASSERT_EXIT(RunCmpstClassification(0xd8c00000u, 0x04130504u), ::testing::ExitedWithCode(0), ""); // ds_cmpst_rtn_b32
+	ASSERT_EXIT(RunCmpstClassification(0xd8400000u, 0x00130504u), ::testing::ExitedWithCode(0), ""); // ds_cmpst_b32
+}
+
 UT_END();

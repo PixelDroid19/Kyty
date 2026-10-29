@@ -227,6 +227,14 @@ void ExecuteBody(const std::string& full, const std::string& begin_marker, const
 			++state->accesses;
 			continue;
 		}
+		if (op == "OpAtomicCompareExchange")
+		{
+			// Operands: pointer, scope, equal, unequal, Value, Comparator. Value is stored only when the prior word equals Comparator.
+			const uint32_t old = load(t[4]);
+			store(t[4], old == values.at(t[9]) ? values.at(t[8]) : old);
+			values[t[0]] = old;
+			continue;
+		}
 		if (op.rfind("OpAtomic", 0) == 0)
 		{
 			const uint32_t old = load(t[4]);
@@ -658,6 +666,83 @@ void RunFullAtomicOffsets()
 	}
 }
 
+// Captured ds_cmpst_rtn_b32 words 0xd8c00000 0x04130504 (VDST=ADDR=v4, DATA=v5, DATA2=v19) and a
+// hand-built ds_cmpst_b32 (opcode 0x10, same register layout). Both must keep the ISA operand order.
+void RunCmpstDecode()
+{
+	Initialize();
+	const auto rtn = ParsePair(0xd8c00000u, 0x04130504u, true).GetInstructions().At(0);
+	Check(rtn.type == ShaderInstructionType::DsCmpstRtnB32 && rtn.format == ShaderInstructionFormat::VdstVaddrVdata2Offset);
+	Check(rtn.dst.register_id == 4 && rtn.src[0].register_id == 4 && rtn.src[1].register_id == 5 && rtn.src[2].register_id == 19);
+	Check(rtn.src_num == 3 && rtn.ds_offset == 0 && ShaderLdsMemoryInstructionSupported(rtn));
+	const auto no_rtn = ParsePair(0xd8400000u, 0x00130504u, true).GetInstructions().At(0);
+	Check(no_rtn.type == ShaderInstructionType::DsCmpstB32 && no_rtn.format == ShaderInstructionFormat::VaddrVdata2Offset);
+	Check(no_rtn.src[0].register_id == 4 && no_rtn.src[1].register_id == 5 && no_rtn.src[2].register_id == 19 && no_rtn.src_num == 3);
+	Check(ShaderLdsMemoryInstructionSupported(no_rtn));
+	// The single byte offset is carried whole in both forms.
+	for (const uint32_t prefix: {0xd8c00000u, 0xd8400000u})
+	{
+		for (const uint32_t offset: {0x100u, 0xfffcu})
+		{
+			Check(ParsePair(prefix | offset, 0x04130504u, true).GetInstructions().At(0).ds_offset == offset);
+		}
+	}
+}
+
+struct CmpstVariant
+{
+	bool     returns;
+	uint32_t vdst;
+	uint32_t offset;
+	uint32_t lds_dwords;
+};
+
+// One lane state: the replacement is stored only for an active, in-bounds lane whose memory equals the comparand.
+void RunCmpstRow(const String8& source, const CmpstVariant& variant, bool active, uint32_t address, uint32_t memory)
+{
+	const std::string bank;
+	const uint32_t    word  = (12u + variant.offset) / 4u;
+	auto              state = MakeState(address, active, bank);
+	state.lds.assign(variant.lds_dwords, 0x80000010u);
+	state.lds[word]   = memory;
+	const auto before = state;
+	Execute(source, bank, &state);
+	const bool valid    = active && address == 12u;
+	auto       expected = before.lds;
+	if (valid && memory == 0xa0000001u)
+	{
+		expected[word] = 0xa0000002u;
+	}
+	Check(state.lds == expected && state.accesses == (valid ? 1u : 0u));
+	if (!active || !variant.returns)
+	{
+		Check(state.registers == before.registers);
+		return;
+	}
+	Check(state.registers.at("%v" + std::to_string(variant.vdst) + bank) == (valid ? memory : 0u));
+}
+
+// Rows: return/no-return form, VDST register (4, or 0 aliasing ADDR), and a DS byte offset with its banked LDS size.
+// ADDR=v0, DATA (comparand)=v1=0xa0000001, DATA2 (replacement)=v2=0xa0000002; memory is either the comparand or not.
+void RunCmpst()
+{
+	Initialize();
+	const CmpstVariant variants[] = {{true, 4, 0, 4}, {true, 0, 0, 4}, {false, 0, 0, 4}, {true, 4, 0x100, 68}, {false, 0, 0x100, 68}};
+	for (const auto& variant: variants)
+	{
+		const uint32_t registers = 0x00020100u | (variant.vdst << 24u);
+		const auto     source    = Generate(variant.returns ? 0x30u : 0x10u, registers, static_cast<uint16_t>(variant.offset), variant.lds_dwords);
+		for (const bool active: {false, true})
+		{
+			for (const uint32_t address: {12u, 16u, 0xffffff00u})
+			{
+				RunCmpstRow(source, variant, active, address, 0xa0000001u);
+				RunCmpstRow(source, variant, active, address, 0x80000010u);
+			}
+		}
+	}
+}
+
 void RunAddtid(bool shared)
 {
 	Initialize();
@@ -913,6 +998,22 @@ TEST(EmulatorShaderLdsBounds, Read2ChecksIndependentAddressesAndRejectsAdditionO
 TEST(EmulatorShaderLdsBounds, AtomicsDiscardOutOfBoundsAndReturnZeroOnlyToActiveLanes)
 {
 	ASSERT_EXIT({ RunAtomics(); std::_Exit(0); }, ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderLdsBounds, CmpstDecodesComparandAndReplacementInIsaOrder)
+{
+	ASSERT_EXIT({ RunCmpstDecode(); std::_Exit(0); }, ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderLdsBounds, CmpstStoresReplacementOnlyWhenMemoryEqualsComparandAndReturnsPrior)
+{
+	ASSERT_EXIT({ RunCmpst(); std::_Exit(0); }, ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderLdsBounds, CmpstRefusesGdsEncodingsInBothForms)
+{
+	EXPECT_EXIT(RunRefusedDsDecode(0xd8c20000u), ::testing::ExitedWithCode(kRejectedExit), "");
+	EXPECT_EXIT(RunRefusedDsDecode(0xd8420000u), ::testing::ExitedWithCode(kRejectedExit), "");
 }
 
 TEST(EmulatorShaderLdsBounds, NativeMubufRejectUnmodeledAndReservedFlags)

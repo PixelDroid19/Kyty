@@ -113,6 +113,11 @@ enum class ShaderInstructionType : uint32_t
 	DsWriteAddtidB32,
 	DsReadAddtidB32,
 	DsWrxchgRtnB32,
+	// ds_cmpst_b32 / ds_cmpst_rtn_b32: MEM = (MEM == DATA) ? DATA2 : MEM. The
+	// comparand is DATA (src[1]) and the replacement is DATA2 (src[2]), the
+	// reverse of BUFFER_ATOMIC_CMPSWAP (ISA 12.13).
+	DsCmpstB32,
+	DsCmpstRtnB32,
 	SBitcmp0B32,
 	SBitcmp1B32,
 	SBitcmp0B64,
@@ -922,6 +927,11 @@ enum Format : uint64_t
 	Vdst2VaddrOffset01            = FormatDefine({DA2, S0}),
 	// ds_write2_b32: S0 = ADDR, S1 = DATA0, S2 = DATA1; offsets live in ds_offset.
 	VaddrVdata2Offset01           = FormatDefine({S0, S1, S2}),
+	// ds_cmpst: one address, DATA (S1) and DATA2 (S2), and a single byte offset in
+	// ds_offset. The DsOff token keeps these values distinct from the VOP3 and
+	// write2 formats, which are matched by value in several places.
+	VaddrVdata2Offset             = FormatDefine({S0, S1, S2, DsOff}),
+	VdstVaddrVdata2Offset         = FormatDefine({D, S0, S1, S2, DsOff}),
 	VdstSdst2Vsrc0Vsrc1           = FormatDefine({D, D2A2, S0, S1}),
 	VdstSdst2Vsrc0Vsrc1Ssrc2A2    = FormatDefine({D, D2A2, S0, S1, S2A2}),
 	Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair = FormatDefine({DA2, D2A2, S0, S1, S2A2}),

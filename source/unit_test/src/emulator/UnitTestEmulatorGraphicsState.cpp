@@ -4806,7 +4806,8 @@ TEST(EmulatorGraphicsState, RejectsUnsafeNoopPixelElision)
 	for (const auto type: {ShaderInstructionType::Unknown, ShaderInstructionType::SSetpcB64, ShaderInstructionType::SSwappcB64,
 	                       ShaderInstructionType::BufferStoreDword, ShaderInstructionType::BufferAtomicXor,
 	                       ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
-	                       ShaderInstructionType::DsWriteB32, ShaderInstructionType::DsAppend, ShaderInstructionType::DsAddRtnU32})
+	                       ShaderInstructionType::DsWriteB32, ShaderInstructionType::DsAppend, ShaderInstructionType::DsAddRtnU32,
+	                       ShaderInstructionType::DsCmpstB32, ShaderInstructionType::DsCmpstRtnB32})
 	{
 		ShaderInstruction instruction {};
 		instruction.type = type;

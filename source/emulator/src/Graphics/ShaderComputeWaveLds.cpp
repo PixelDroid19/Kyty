@@ -221,6 +221,18 @@ bool ShaderLdsMemoryInstructionSupported(const ShaderInstruction& instruction)
 			result = true;
 			format = ShaderInstructionFormat::VdstVaddrVdataOffset;
 			break;
+		// ds_cmpst: DATA (src[1]) is the comparand, DATA2 (src[2]) the replacement; one dword each.
+		case ShaderInstructionType::DsCmpstRtnB32:
+			opcode  = 0x30u;
+			result  = true;
+			sources = 3;
+			format  = ShaderInstructionFormat::VdstVaddrVdata2Offset;
+			break;
+		case ShaderInstructionType::DsCmpstB32:
+			opcode  = 0x10u;
+			sources = 3;
+			format  = ShaderInstructionFormat::VaddrVdata2Offset;
+			break;
 		case ShaderInstructionType::DsAddU32: opcode = 0x00u; break;
 		case ShaderInstructionType::DsSubU32: opcode = 0x01u; break;
 		case ShaderInstructionType::DsMinI32: opcode = 0x05u; break;

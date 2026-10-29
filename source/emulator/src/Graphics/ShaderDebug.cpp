@@ -352,6 +352,8 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::VdstOffset: return "VdstOffset"; break;
 		case ShaderInstructionFormat::Vdst2VaddrOffset01: return "Vdst2VaddrOffset01"; break;
 		case ShaderInstructionFormat::VaddrVdata2Offset01: return "VaddrVdata2Offset01"; break;
+		case ShaderInstructionFormat::VaddrVdata2Offset: return "VaddrVdata2Offset"; break;
+		case ShaderInstructionFormat::VdstVaddrVdata2Offset: return "VdstVaddrVdata2Offset"; break;
 		case ShaderInstructionFormat::Label: return "Label"; break;
 		default: return "????"; break;
 	}
