@@ -32,6 +32,19 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     lasts as long as the queued GPU work.
   - The frame is serialized: in the dune windows the processor waits on the GPU, and the GPU then
     idles while the processor records.
+- **Excluded: eliding `DRAW_INDEX_INDIRECT` record reads by register rule.** One reference skips
+  the CPU read when `INDEX_BUFFER_SIZE` cannot hold one input primitive. In the dunes these
+  draws are point lists (`prim=1`) with `INDEX_BUFFER_SIZE` 1-2, so one index already draws a
+  point (gw79, `DIAG-IDXIND`):
+
+  | Records | Count | Argument-read wait |
+  | --- | --- | --- |
+  | Empty | 3339 | 12.85 s |
+  | Carried work | 376 | about 0 s |
+  | Triangle lists with a large index buffer | 285 | about 0.1 s |
+
+  The rule would drop real points, so it does not apply. The sync-chain design is in
+  `docs/bringup/cp-gpu-sync-chain.md`.
 - **Parked: `0x3666fa39` latency** (about 22 ms per call, the largest single GPU item).
   - The guest builds a deduplicated list across lanes: `s_ff1` over a compare mask, `v_readlane`
     of the found lane, and `v_writelane` into one VGPR capped at 60 entries. It does this 30 times.
