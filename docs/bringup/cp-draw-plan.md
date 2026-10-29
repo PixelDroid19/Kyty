@@ -171,10 +171,11 @@ the inputs a recipe would re-copy:
   | gw80, without recipes | none | 26.7 us/draw | 203.8 us/draw | 8.65 |
   | gw83, with recipes | 14.5% of parses | 48.0 us/draw | 282.5 us/draw | 6.30 |
 
-  - The other stages of gw83 are also about 25% higher, so part of that run is host load.
-  - The state-setup cost still rose by 21 us/draw. The cost comes from recording: every structure
-    seen a second time pays two extra parses and two canonical texts of the 7.2 KB bind.
-  - With most parses missing, recordings are frequent.
+  - gw83 ran on a loaded host: every other stage is also about 25% higher, and the load average
+    was about 7.6. Its numbers are not a clean B.
+  - The likely cost is recording, though it was not measured separately. Every structure seen a
+    second time pays two extra parses and two canonical texts of the 7.2 KB bind, and with most
+    parses missing, recordings are frequent.
 - **Excluded.** The ceiling at 14.5% hits is under 2% of CP time even with free recording, so this
   slice is not worth its complexity.
   - The patch is kept outside the repository.
