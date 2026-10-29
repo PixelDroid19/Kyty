@@ -299,8 +299,10 @@ gdb runs.
   subgroup size is 32, so the defect matters beyond this experiment.
   Unknown: whether the wrong image comes from the split path at 32 lanes
   (exchange layout, lane masks above bit 31 of a part) or from ANV at
-  SIMD32. Direction: run the existing split-wave fixtures at 32 lanes on a
-  GPU, then a host with a fixed 32-lane subgroup.
+  SIMD32. No test executes a split program on a GPU (see the test gap
+  below). Direction: force 32 lanes for one program hash at a time to find
+  the program with the wrong output, compare its 8-lane and 32-lane results
+  offline, then check a host with a fixed 32-lane subgroup.
 - **Excluded: GDA address translation cache** (translator 174): some
   compute pipelines took 13-16 s each to compile on ANV and the worldmap
   stopped on a strict storage refusal at 72 s.
