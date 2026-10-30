@@ -76,6 +76,26 @@ strict 60 fps-limited runs on the dune route (gw111-gw119).
   remaining candidates are the spills (538:2225 at SIMD8), the rendezvous of
   the wave-wide mask and stack steps, and the latency of one workgroup per
   frame.
+- **Narrowed: the spills follow from the guest's register file** (offline,
+  2026-10-29, the gw118 recipe compiled by ANV with its shader cache disabled).
+  - The guest program uses v0-v73 and s0-s54. At SIMD8, ANV gives every
+    32-bit value a whole register, uniform or not, and a thread has 128.
+    The guest's own registers already fill them before any temporary.
+  - A liveness pass over the final NIR puts the peak at about 265 registers
+    (constants excluded, since they fold into instructions), against ANV's
+    362. At that point 166 are per-lane values and 99 are uniform ones. Most
+    are guest values that live across the traversal loop.
+  - Rewriting the module with `spirv-opt -O` left it unchanged: 539:2216
+    spills:fills and 369 max live.
+  - Fills are spread over the whole program rather than gathered in one
+    region. The outer loop holds 1072 fills and 305 spills. 86 of the 176
+    rendezvous spin loops fill and spill one register on every iteration.
+    With one workgroup on one Xe core, each fill stalls a thread that has
+    little other work to switch to.
+  - Since the peak is mostly guest values, reshaping the module cannot cut
+    it by the 30% that would remove most spills; only `spirv-opt` was tried.
+    Keeping cold guest registers in shared memory, which has lower latency
+    than scratch, is untested.
 - **Fix.** Translator version 185 retires the stale modules. The next boot
   translates and compiles every program again.
 - **Rule.** A build with an uncommitted or experimental translator runs only
