@@ -29,11 +29,33 @@ strict 60 fps-limited runs gw181 (before) and gw182, gw184 (after).
   | `9dacb90f` | 10.0 ns | 3.4 ns | 3.4 ns |
   | `d4bef057` (few triangles per draw) | 16.1 ns | 13.4 ns | 14.0 ns |
 
-- **Limits.** gw182, gw184 and gw185 hit the guest assert at hub start (below)
-  within seconds of the first crowd frames, so the "after" figures come from one
-  full window each, and no whole-frame rate in the hub was measured. gw183 ran
-  out of its 330 s bound during the hub load, with a foreign build on the host.
-  No other title that uses this path was re-run.
+- **Whole-frame rate, crowd scene** (about 1175 draws per frame, same binary, an
+  environment toggle selects the arm, no per-draw timestamps). gw186 and gw188
+  ran with the guest's `CB` size table scaled by 2, a probe to pass the hub-start
+  assert, so they are not strict runs. gw181 is the strict run from before the
+  change, with timestamps:
+
+  | Run | Arm | fps | Fence wait, ms/frame | CP run, ms/frame | Run-queue wait / run |
+  | --- | --- | --- | --- | --- | --- |
+  | gw186 | without the builtin | 6.34 | 63 | 161 | 41 % |
+  | gw188 | builtin forwarded | 3.22, 3.40 | 202, 205 | 318, 320 | 91 % |
+  | gw181 | before the change | 2.86-2.96 | 201-206 | 329-338 | 35 % |
+
+  The host was busier in gw188 than in gw186, which inflates its CP time. gw181,
+  on a quiet host, gives the same rate and fence time, so the host load does not
+  explain the gain: the frame rate doubles in this scene and the fence wait falls
+  to about a third. The frame is now about 151 ms, 63 ms of it in the fence, so
+  CP cost is a principal limit there.
+- **Later windows of gw186.** 4.88-5.6 fps at about 600 draws per frame, CP run
+  185-236 ms/frame, and 4.06 fps under foreign load. These windows pass frame
+  4246, a black and green wipe; no capture identifies them as the hub. The run
+  ended at its 420 s bound.
+- **Limits.** Strict runs gw182, gw184 and gw185 hit the guest assert at hub start
+  (below), so the 2x figure has no strict confirmation. All three ran on a
+  contended host, and the assert follows contention across all runs (next record),
+  so these runs neither show nor exclude a regression at hub start; that needs an
+  uncontended strict run. gw183 ran out of its 330 s bound during the hub load,
+  with a foreign build on the host. No other title that uses this path was re-run.
 
 ## Robot platformer: heavy character draws are real content, and same-queue guest-address waits (2026-10-30)
 
@@ -45,6 +67,11 @@ strict 60 fps-limited runs gw180 and gw181, `504361d49` plus temporary probes
   gw153-155, gw175, gw176, gw178, gw179, and with the geometry change above
   gw182, gw184, gw185. GPU job timeout: gw144, gw148, gw150, gw152, gw168.
   Passed: gw147, gw169, gw180, gw181.
+- **Hub start outcome against host contention** (run-queue wait over run time of
+  the emulator's threads, last sample of each run). Passed: gw169 36 %, gw180
+  31 %, gw181 35 %, gw147 54.5 %. Guest assert: gw154 38 %, gw155 81 %, gw178
+  100 %, gw182 69 %, gw184 69 %, gw185 98 %. The assert is more likely under load
+  but also happened at 38 %. `CPU_WEIGHT=1000` did not lower the wait (gw185).
 - **Excluded: a replay defect behind the repeated large draws.** The pixel
   program `cbb6bb28` draws the same vertex program, 32-bit index buffer
   (608,112 indices, 202,704 triangles) and vertex buffer (107,967 records,
