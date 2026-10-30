@@ -969,8 +969,11 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - GPU time per kernel rose 1.5-4.8x against the same scenes of gw121. This
     does not measure placement: at 1 fps the GPU runs mostly idle, and its
     clock is not controlled.
-  - Placement can only follow a change that moves every CPU reader of these
-    objects to guest memory or a host-side copy. The GPU gain is not measured.
+  - For storage data, write masks and the snapshot pool, placement can only
+    follow a change that moves every CPU reader to guest memory or a host-side
+    copy. Vertex buffers have no CPU reader, but they were only tested together
+    with the snapshot pool, so their placement alone is not excluded. The GPU
+    gain is not measured.
 
 ## Crash evidence read only for a reported fault (2026-10-23)
 

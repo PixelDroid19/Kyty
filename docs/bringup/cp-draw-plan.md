@@ -67,9 +67,13 @@ structural stages below change the total.
 **Indexed vertex range from the index snapshot (2026-10-29).** The draw already copies its index
 bytes into a transient snapshot, so `ResolveIndexedVertexRecords` now takes the min/max index from
 that snapshot instead of scanning guest memory again, and the snapshot entry keeps the result until
-its bytes are rewritten. Its CP share fell from 4.9% (gw110) to 0.15% (gw120). The dune run gw121
-(strict, 480 s) reached the dunes with the same image as gw118 at 203 us/draw and 8.9 fps; gw118
-measured 279 us/draw on a loaded host, so only the profile share is attributed to this change.
+its bytes are rewritten. Its CP share fell from 4.9% (gw110, dunes) to 0.15% (gw120, the intro
+cutscene at 971 draws per frame; no dune profile of the new code exists yet). The strict 480 s run
+gw121 reached the dunes, and its captures match gw118 at a similar frame. It measured 203 us/draw
+and 8.9 fps against 279 us/draw and 6.3 fps for gw118. Every stage was about 25% lower. gw121
+started from the shader store gw118 had filled, so part of that is pipeline compiles
+(`draw_pipeline_setup` 16.3 to 6.8 us/draw). The rest is not attributed, and only the profile share
+is credited to this change.
 
 The evidence from Experiment 0 (2026-10-27, 4 titles) sets the shape of a plan:
 
