@@ -10,7 +10,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5, 60
 fps-limited run gw190 under a debugger probe (not committed), which ended in the
-assert after 328 s. Addresses are guest image offsets.
+assert after 328 s, and strict run gw191. Addresses are guest image offsets.
 
 - **Thread order.** The game thread loop (`0x2a37f0`) waits for the render thread's
   state at `0x2a4ac7`, publishes the skeleton palettes (`0x736e960` at `0x2a4ec9`),
@@ -41,15 +41,24 @@ assert after 328 s. Addresses are guest image offsets.
   labels shown to the guest at record time. Every `WriteAtEndOfPipe32/64` and
   `FlipWithInterrupt` branch here records the store for the GPU to perform; none
   stores at record time.
-- **Whole windows do not separate the runs.** The largest command processor run in the
-  crowd arrival window was 531 ms and 562 ms in the passing runs gw180 and gw181, and
-  396-640 ms in the last complete windows of gw184, gw185, gw189 and gw190. The window
-  holding the assert is lost in every asserting run, so the 1651 ms period is not
-  attributed. gw182 is excluded here: its store was cold (one pipeline 1863 ms).
-- **After the arrival the assert does not recur at the measured rates.** gw180 and
-  gw181 held the crowd for over 90 s at about 3 fps.
+- **Excluded: a long stall before the assert is required.** gw190 had periods of 1651,
+  338 and 187 ms just before it, but gw191 (strict, no debugger, one-second counter
+  windows and a 250 ms per-thread CPU sampler) held the crowd at 1169 draws per frame
+  and 7 fps through the last 10 s before the same assert, with a largest command
+  processor run of 59-120 ms. The largest run in the crowd arrival window of the
+  passing runs gw180 and gw181 was 531 and 562 ms, so a stall does not separate them
+  either.
+- **Host CPU in those 10 s.** All threads together used about 0.8 of one core: the
+  command processor thread 0.54, every other thread at most 0.04. Guest threads are not
+  starved of total CPU in the steady crowd; run-queue delay of a single wake was not
+  measured.
+- **Open.** gw180 and gw181 held the crowd for over 90 s at about 3 fps, and gw191
+  asserted after about 20 s at 7 fps. What decides that one crowd frame loses the race
+  in nearly every list is not known.
 - **Limits.** gw190 ran under a debugger, which may lengthen periods. Whether the
-  guest paces on vertical blank between the signal and the next update was not read.
+  guest paces on vertical blank between the signal and the next update was not read,
+  and no frame with skinned items ran faster than 33 ms, so the race at the intended
+  frame rate is unmeasured.
 
 ## Robot platformer: PrimitiveId in the interpolation geometry stage limited geometry distribution (2026-10-30)
 
