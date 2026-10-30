@@ -881,21 +881,34 @@ static KYTY_SYSV_ABI int c_sprintf_s(VA_ARGS)
 	}
 	return Format(s, n, fmt, &ctx.va_list);
 }
+// Format returns the full length but writes only what fits, so a longer result is
+// formatted again into a heap buffer. Format copies the VaList, so both passes read
+// the same arguments.
+static int c_format_to_stream(FILE* f, const char* fmt, VaList* ap)
+{
+	char      buffer[C_UNBOUNDED_FORMAT];
+	const int written = Format(buffer, sizeof(buffer), fmt, ap);
+	if (f == nullptr || written < 0)
+	{
+		return written;
+	}
+	const auto length = static_cast<size_t>(written);
+	if (length < sizeof(buffer))
+	{
+		c_fwrite(buffer, 1, length, f);
+		return written;
+	}
+	std::vector<char> heap(length + 1);
+	Format(heap.data(), heap.size(), fmt, ap);
+	c_fwrite(heap.data(), 1, length, f);
+	return written;
+}
 static KYTY_SYSV_ABI int c_fprintf(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
 	FILE*       f   = VaArg_ptr<FILE>(&ctx.va_list);
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
-
-	char      buffer[C_UNBOUNDED_FORMAT];
-	const int written = Format(buffer, sizeof(buffer), fmt, &ctx.va_list);
-
-	if (f == nullptr || written < 0)
-	{
-		return written;
-	}
-	c_fwrite(buffer, 1, static_cast<size_t>(written), f);
-	return written;
+	return c_format_to_stream(f, fmt, &ctx.va_list);
 }
 static KYTY_SYSV_ABI int c_vfprintf(VA_ARGS)
 {
@@ -906,14 +919,7 @@ static KYTY_SYSV_ABI int c_vfprintf(VA_ARGS)
 	{
 		return -1;
 	}
-	char      buffer[C_UNBOUNDED_FORMAT];
-	const int written = Format(buffer, sizeof(buffer), fmt, &ctx.va_list);
-	if (written < 0)
-	{
-		return written;
-	}
-	c_fwrite(buffer, 1, static_cast<size_t>(written), f);
-	return written;
+	return c_format_to_stream(f, fmt, &ctx.va_list);
 }
 // scanf parses a guest input string into guest output pointers. Kyty has no input
 // converter yet; forward to the host, which reads the guest string and writes back
