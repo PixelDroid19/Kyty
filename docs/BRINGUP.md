@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: stale modules in the shared shader store, and the BVH kernel cost (2026-10-29)
   - Robot platformer: GPU job timeout before the dunes, and dune wait sites (2026-10-29, open)
   - Robot platformer: Gen5 AGC HLE run reaches the tutorial level load (2026-10-26)
   - Robot platformer: fragment wave transport executes (2026-10-24)
@@ -501,6 +502,11 @@ hypothesis*. Then remove the code from that experiment before coding the next.
   or an explicitly recorded non-claim.
 - **Performance.** Never compare FPS under Console logging to Silent; record
   logging mode, resolution, and shader-cache state.
+- **Translator experiments.** Run a build with an uncommitted or experimental
+  shader translator, and each arm of a translator A/B, only with its own
+  private `KYTY_SPIRV_CACHE`. A stored module's identity covers the
+  translator version, not the generator text, so modules written by such a
+  build load into later runs of the committed translator.
 - **Scratch evidence.** Save logs under untracked `_scratch_playable/` or a
   session scratch dir. Never commit guest paths, screenshots, or raw
   multi-megabyte logs.

@@ -6,6 +6,73 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: stale modules in the shared shader store, and the BVH kernel cost (2026-10-29)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
+strict 60 fps-limited runs on the dune route (gw114-gw116).
+
+- **Observed.** The shared module store held `0x3666fa39`, the BVH traversal
+  kernel, under translator version 184 written on 2026-10-28 at 19:49. The
+  commits that define version 183 (`67ae9e1d9`, 21:25 that day) and 184
+  (`c5a580803`, 2026-10-29 14:55) did not exist yet: a pre-release build
+  with the version already raised wrote it.
+- **Why it kept loading.** A module's identity is the shader id, stage,
+  options and `kShaderTranslatorVersion`, not the generator text
+  (`ModuleIdentity`, `SpirvBinaryCacheStore.cpp`). Every later run of the
+  committed version-184 translator loaded those modules.
+- **How it was found.** Runs with an empty private store (`KYTY_SPIRV_CACHE`,
+  gw114, gw115) produced a different `0x3666fa39` module. The committed
+  translator publishes each split-wave exchange once; the stored module
+  routed every exchange through a wrapper that publishes twice (0, then the
+  value), so it waits on twice as many rendezvous.
+- **Scope.** Of the 333 modules the committed translator produced in gw115:
+  - 233 are byte-identical to the shared store's entries of the same name
+    (the translator is deterministic);
+  - 84 differ: 76 written on 2026-10-28 around 19:00 and 8 on 2026-10-29
+    around 14:00, by the `c5a580803` A/B arms;
+  - 16 are missing from the shared store.
+- **Measurements affected.** Every shared-store run at version 184 loaded
+  modules without `67ae9e1d9` and `c5a580803` for those programs: the
+  `c5a580803` A/B (gw99, gw100; `docs/bringup/cross-title.md`) and
+  gw101-gw113. The Fix 4 figure of the dune compute cost record below
+  (26.2 to 22.7 ms) loaded version-183 modules that a pre-release build of
+  that commit wrote, so it is unverified too.
+- **Cost of the committed module.** gw116 (strict 480 s, a private store
+  copied from gw115, so every module comes from the committed translator):
+  `0x3666fa39` took 25.99 ms per call over 1345 calls, 26.3% of the GPU time.
+  The stored double-publish module took 26.6 ms (gw112) and 24.4 ms (gw111).
+- **Excluded: fewer rendezvous as this kernel's lever.** Halving the
+  rendezvous did not change the kernel time. Offline ANV statistics of the
+  two recorded pipelines at SIMD8 (stored module, then committed module):
+
+  | Statistic | Stored | Committed |
+  | --- | --- | --- |
+  | Instructions | 47838 | 39335 |
+  | Sends | 2399 | 1486 |
+  | Loops | 336 | 183 |
+  | Spills:fills | 541:2354 | 538:2225 |
+  | Max live registers | 360 | 362 |
+
+  Merging the per-lane `v_readlane` exchanges into fewer rendezvous is
+  therefore not expected to pay for this kernel. What does cost its time is
+  not attributed yet. Candidates: each BVH node load translates its guest
+  address through the in-shader lookup (a chain of dependent loads), the
+  remaining spills, and the latency of one workgroup per frame.
+- **Fix.** Translator version 185 retires the stale modules. The next boot
+  translates and compiles every program again.
+- **Rule.** A build with an uncommitted or experimental translator runs only
+  with a private `KYTY_SPIRV_CACHE` (`docs/BRINGUP.md`, debug and execution
+  tactics).
+- **Open: transient-pool stop on a cold boot** (gw114, private empty store,
+  400 s). The run stopped while loading the worldmap on
+  `!create_all_the_same` (`GpuMemoryCreate.cpp`): a new 1920x1080
+  RenderTexture at `0x53ad00000` (size `0xff0000`) crossed or was contained by
+  14 objects of a transient pool, among them StorageTextures, a 2432x1368 and
+  a 1216x684 render target with depth, and 1920x1080 render targets. This is
+  the open transient-pool aliasing class (`docs/bringup/cross-title.md`); the
+  slower cold boot reached it. gw115 and gw116, on warm private stores,
+  passed the same point.
+
 ## Robot platformer: the clock-driven resolution controller is stereo-only, and the GPU clock rate (2026-10-29)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
@@ -164,11 +231,13 @@ gdb runs.
 
   The rule would drop real points, so it does not apply. The sync-chain design is in
   `docs/bringup/cp-gpu-sync-chain.md`.
-- **Parked: `0x3666fa39` latency** (about 22 ms per call, the largest single GPU item).
+- **Parked: `0x3666fa39` latency** (about 22-26 ms per call, the largest single GPU item; 26 ms
+  for the committed translator's module, see the stale-module record above).
   - The guest builds a deduplicated list across lanes: `s_ff1` over a compare mask, `v_readlane`
     of the found lane, and `v_writelane` into one VGPR capped at 60 entries. It does this 30 times.
-  - Every step needs the whole 64-lane wave, so each is a rendezvous of all eight split parts. The
-    cost follows from the guest algorithm.
+  - Every step needs the whole 64-lane wave, so each is a rendezvous of all eight split parts.
+    Narrowed later the same day: a module with half the rendezvous took the same time, so the
+    rendezvous count does not set this cost (stale-module record above).
   - The listing shows no translator change to test, and the offline loop-retention check used for
     the earlier spin work is not available. No change is attempted.
 - **Not measurable: scanning the NGG front once per program** (`5790919c2`). The GS-front
@@ -218,7 +287,8 @@ gdb runs.
 - **Fix 4** (`67ae9e1d9`, translator 183): pointwise `S_*_B64` algebra over
   in-block lane-local masks gathers only its root in a split wave.
   `0x3666fa39` went from 26.2 to 22.7 ms mean per call; the sample is small
-  and noisy.
+  and noisy, and the runs loaded modules a pre-release build wrote (see the
+  stale-module record), so the figure is unverified.
 - **Fix 5: strict stop at hub load** (`5112aeec9`). One run stopped at about
   200 s, while loading the crash-site hub level, on `!create_all_the_same`:
   a 3840x2160 single-level storage view (tile 27, 8-byte texels) over 22

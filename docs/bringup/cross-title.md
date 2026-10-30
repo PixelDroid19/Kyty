@@ -5227,7 +5227,11 @@ matched on all of them. Failures shared with main, not caused by this branch:
     41.7 ms over the 60-210 s windows. No measurable cost. The run without
     the change lost the device (`vkWaitForFences` -4) at frame 3364. That fits
     the intermittent device losses already seen in earlier dune runs; one loss
-    does not show that the barrier causes or prevents them.
+    does not show that the barrier causes or prevents them. Not a measurement
+    of the change (found later the same day): both arms ran translator version
+    184 against the shared module store, so each loaded modules the other arm
+    or a pre-release build had written (stale-module record in
+    `docs/titles/robot-platformer.md`).
 - **Refused explicitly (not implemented).**
   - `GLOBAL_LOAD_SHORT_D16_HI`. At an odd address its result depends on
     `SH_MEM_CONFIG.alignment_mode` (ISA section 8.1.7), and the ISA gives no
