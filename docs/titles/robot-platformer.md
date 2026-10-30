@@ -9,7 +9,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 ## Robot platformer: stale modules in the shared shader store, and the BVH kernel cost (2026-10-29)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
-strict 60 fps-limited runs on the dune route (gw114-gw116).
+strict 60 fps-limited runs on the dune route (gw111-gw119).
 
 - **Observed.** The shared module store held `0x3666fa39`, the BVH traversal
   kernel, under translator version 184 written on 2026-10-28 at 19:49. The
@@ -37,13 +37,20 @@ strict 60 fps-limited runs on the dune route (gw114-gw116).
   gw101-gw113. The Fix 4 figure of the dune compute cost record below
   (26.2 to 22.7 ms) loaded version-183 modules that a pre-release build of
   that commit wrote, so it is unverified too.
-- **Cost of the committed module.** gw116 (strict 480 s, a private store
-  copied from gw115, so every module comes from the committed translator):
-  `0x3666fa39` took 25.99 ms per call over 1345 calls, 26.3% of the GPU time.
-  The stored double-publish module took 26.6 ms (gw112) and 24.4 ms (gw111).
-- **Excluded: fewer rendezvous as this kernel's lever.** Halving the
-  rendezvous did not change the kernel time. Offline ANV statistics of the
-  two recorded pipelines at SIMD8 (stored module, then committed module):
+- **Cost of the committed module.** The kernel's time depends on the scene,
+  so only 5 s windows of the same scene compare:
+  - dune windows of gw118 (strict 480 s, a private store warmed by the cold
+    run gw117, every module from the committed translator): 22.3-23.3 ms per
+    call;
+  - dune windows of gw111 and gw112 (the stored double-publish module):
+    24.6-26.4 and 25.3-29.3 ms per call;
+  - whole runs mix scenes: gw116 (late boot, hub and intro) averaged
+    25.99 ms over 1345 calls, gw117 (cold boot) 20.28 ms with windows from
+    24.7 to 33.9 ms.
+- **Narrowed: fewer rendezvous is a small lever for this kernel.** Halving the
+  rendezvous gained at most about 10% in dune windows, measured on different
+  days, so most of the cost is elsewhere. Offline ANV statistics of the two
+  recorded pipelines at SIMD8 (stored module, then committed module):
 
   | Statistic | Stored | Committed |
   | --- | --- | --- |
@@ -53,18 +60,29 @@ strict 60 fps-limited runs on the dune route (gw114-gw116).
   | Spills:fills | 541:2354 | 538:2225 |
   | Max live registers | 360 | 362 |
 
-  Merging the per-lane `v_readlane` exchanges into fewer rendezvous is
-  therefore not expected to pay for this kernel. What does cost its time is
-  not attributed yet. Candidates: each BVH node load translates its guest
-  address through the in-shader lookup (a chain of dependent loads), the
-  remaining spills, and the latency of one workgroup per frame.
+  Merging the same-lane `v_readlane` exchanges of one stack push into fewer
+  rendezvous would gain less than that halving did.
+- **Excluded: the guest address lookup as this kernel's lever** (gw118 against
+  gw119). The traversal is wave-coherent: the node pointer is an SGPR, each
+  iteration loads one node through `image_bvh_intersect_ray` and the BLAS
+  words through `s_buffer_load`, and each such load translates its guest
+  address through the in-shader lookup (directory, binary search, entry: a
+  chain of dependent loads). A temporary probe gave only this kernel a
+  one-entry cache of the last translated table entry, checked with the same
+  bounds as the lookup. Physical imports are entries of up to 64 MB, so the
+  traversal's loads should hit it; the hit rate was not counted. The module
+  with the cache (recipe changed, 140 more words) took 21.6-23.2 ms per call
+  in the same dune windows against 22.3-23.3 ms without it, under 2%. The
+  remaining candidates are the spills (538:2225 at SIMD8), the rendezvous of
+  the wave-wide mask and stack steps, and the latency of one workgroup per
+  frame.
 - **Fix.** Translator version 185 retires the stale modules. The next boot
   translates and compiles every program again.
 - **Rule.** A build with an uncommitted or experimental translator runs only
   with a private `KYTY_SPIRV_CACHE` (`docs/BRINGUP.md`, debug and execution
   tactics).
 - **Open: transient-pool stop on a cold boot** (gw114, private empty store,
-  400 s). The run stopped while loading the worldmap on
+  400 s; the cold boot gw117 on version 185 passed the same point). The run stopped while loading the worldmap on
   `!create_all_the_same` (`GpuMemoryCreate.cpp`): a new 1920x1080
   RenderTexture at `0x53ad00000` (size `0xff0000`) crossed or was contained by
   14 objects of a transient pool, among them StorageTextures, a 2432x1368 and
@@ -231,13 +249,13 @@ gdb runs.
 
   The rule would drop real points, so it does not apply. The sync-chain design is in
   `docs/bringup/cp-gpu-sync-chain.md`.
-- **Parked: `0x3666fa39` latency** (about 22-26 ms per call, the largest single GPU item; 26 ms
-  for the committed translator's module, see the stale-module record above).
+- **Parked: `0x3666fa39` latency** (about 22-27 ms per call, the largest single GPU item; 22.3-23.3 ms
+  in dune windows for the committed translator's module, see the stale-module record above).
   - The guest builds a deduplicated list across lanes: `s_ff1` over a compare mask, `v_readlane`
     of the found lane, and `v_writelane` into one VGPR capped at 60 entries. It does this 30 times.
   - Every step needs the whole 64-lane wave, so each is a rendezvous of all eight split parts.
-    Narrowed later the same day: a module with half the rendezvous took the same time, so the
-    rendezvous count does not set this cost (stale-module record above).
+    Narrowed later the same day: a module with half the rendezvous gained at most about 10%, so
+    the rendezvous count does not set most of this cost (stale-module record above).
   - The listing shows no translator change to test, and the offline loop-retention check used for
     the earlier spin work is not available. No change is attempted.
 - **Not measurable: scanning the NGG front once per program** (`5790919c2`). The GS-front

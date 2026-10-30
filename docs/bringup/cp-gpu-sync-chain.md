@@ -96,7 +96,8 @@ Each link moves the wait to the next one:
      probe wrote a host-visible word after `0x3666fa39`, a BVH traversal kernel. It runs as one
      16x16 workgroup per frame on the graphics queue and takes 22-29 ms per call as split wave64 on
      this GPU. These runs loaded a stale module for that kernel; the committed translator's module
-     takes about 26 ms (gw116, `docs/titles/robot-platformer.md`, stale-module record). The probe
+     takes 22.3-23.3 ms in dune windows (gw118, `docs/titles/robot-platformer.md`, stale-module
+     record). The probe
      classified each host fence wait by whether that kernel was still running.
      - In the dune windows, one graphics-queue wait per frame starts while the kernel runs. It
        costs 21-23 ms of the roughly 131 ms frame. The other graphics-queue waits add about
