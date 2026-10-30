@@ -1,3 +1,17 @@
+## Guest `fprintf` read past its buffer and `strto*` dropped range errors (2026-10-30, fixed)
+
+- **Found by review** of `source/emulator/src/Libs/LibC.cpp`; no title is known to reach either
+  path.
+- `fprintf` and `vfprintf` formatted into a 64 KiB stack buffer, then wrote the full formatted
+  length, so output longer than 64 KiB read past the buffer. Longer output is now formatted again
+  into a heap buffer of the reported length; the formatter copies its argument list, so both
+  passes read the same arguments.
+- `strtod`, `strtof`, `strtol`, `strtoul`, `strtoll` and `strtoull` returned the host result but
+  left the guest `errno` untouched when the host reported `ERANGE`. They now store `ERANGE` in the
+  guest errno slot; other host errno values are not mapped.
+- Verified by review and build only: no test or title reaches either path. The gw164 run of the
+  mspace record below used the same build and kept its frontier.
+
 ## Guest mspaces fragmented and reported freed memory as in use (2026-10-30, fixed)
 
 - **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, strict default-route runs):

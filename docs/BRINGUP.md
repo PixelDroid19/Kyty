@@ -140,6 +140,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - [Tessellation design](bringup/tessellation-design.md): hull/domain mapping to Vulkan, staged plan, PATCH draws refused first (2026-10-29, design)
   - [GPU-indexed descriptor tables](bringup/bindless-tables-design.md): table-selected T#/S# and ray-tracing dispatch needs (2026-10-29, design)
   - [Temporal upscalers decision](bringup/temporal-upscalers-decision.md): no DLSS/XeSS now; temporal inputs first, FSR 2 before proprietary SDKs (2026-10-29, decided)
+  - Guest `fprintf` read past its buffer and `strto*` dropped range errors (2026-10-30, fixed)
   - Guest mspaces fragmented and reported freed memory as in use (2026-10-30, fixed)
   - Small `DMA_DATA` stores behind a consolidated wait retire it first (2026-10-27, fixed)
   - Open: PPSA01341 - Demon's Souls livelocks at boot, parked (2026-10-29)
