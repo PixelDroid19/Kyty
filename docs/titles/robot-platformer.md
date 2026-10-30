@@ -24,8 +24,10 @@ strict 60 fps-limited runs, `4305c2080` plus a temporary translator change
     4359 -> 2879 instructions, 109 -> 83 sends, estimated cycles
     39913 -> 30872, live registers 100 -> 81.
   - Runtime, GPU time per call: on the title `8ca0b9ff` took 50-58 us with
-    translator 185 (gw147) and 44-54 us with the change (gw177); in the ship
-    scene both stay at about 70-77 us. The intro character programs
+    translator 185 (gw147) and 44-54 us with the change (gw177). In the ship
+    scene translator 185 took 72-77 us; the change was not measured there
+    cleanly (gw177 stopped before it, gw178 ran with per-draw markers and
+    took 81-87 us). The intro character programs
     `cbb6bb28` and `9dacb90f` took 6.0 ms and 1.3 ms per call in the one full
     intro dump of gw178, against 5.6-6.0 ms and 1.2 ms in gw147.
   - Upper bound (gw179): every guard of `8ca0b9ff`, `cbb6bb28` and `9dacb90f`
@@ -33,7 +35,7 @@ strict 60 fps-limited runs, `4305c2080` plus a temporary translator change
     for masked lanes and serves only for timing. Offline this also compiles
     `8ca0b9ff` at SIMD16 (1942 instructions, 25012 cycles for 16 fragments
     against 39913 for 8). At runtime `8ca0b9ff` took 40-48 us per call on the
-    title and 69-89 us in the ship scene. The run stopped at the start of the
+    title and 69-73 us in the ship scene once it settled. The run stopped at the start of the
     intro on the guest assert recorded below, so the character programs were
     not measured.
   - So the heavy pixel program is not limited by ALU work or SIMD width,
