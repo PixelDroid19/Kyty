@@ -6,6 +6,51 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: hub-start guest assert, frame timeline (2026-10-30)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5, 60
+fps-limited run gw190 under a debugger probe (not committed), which ended in the
+assert after 328 s. Addresses are guest image offsets.
+
+- **Thread order.** The game thread loop (`0x2a37f0`) waits for the render thread's
+  state at `0x2a4ac7`, publishes the skeleton palettes (`0x736e960` at `0x2a4ec9`),
+  sets the state and signals at `0x2a50bc`, and starts the next frame's update at
+  once. That update clears the published palette (`0x73fd090`, called from a job
+  reached through `0x105c400` and `0x10ae200`). The render thread (`0x2a9fd0`) builds
+  its lists through `0x7097de0`, on itself and on job workers. The job system uses
+  atomics; no guest primitive orders the clear against the list build, so the two
+  overlap by design.
+- **Timeline, milliseconds after the signal.** The render thread wakes after about
+  0.2. Across 1542 frames with skinned items:
+
+  | Frames | Count | First list | Last list | Clear | Items without a palette |
+  | --- | --- | --- | --- | --- | --- |
+  | All items have a palette | 964 | 1.7 | 4.2 | 6.8 | 0 of 130084 |
+  | Some items miss it | 578 | 3.6 | 6.2 | 2.6 | 33492 of 84351 |
+
+  An item that misses the palette takes the path that writes its skinning data into
+  the command buffer. Misses by frame period: 33-50 ms 13 %, 50-80 ms 9 %, 80-120 ms
+  14 %, 120-200 ms 22 %, 200-400 ms 25 %; the first list moves from 1.1 to 4.9 ms over
+  the same range while the clear stays at 4-6.5 ms.
+- **The fatal frame.** Partial misses are survived in all 578 frames. The crowd
+  arrives at frame 4107 (lists 10 to 25, items about 40 to 520). The first three
+  crowd frames have every palette, with periods of 1651, 338 and 187 ms. Frame 4110
+  has 7 items with a palette and 513 without, first list at 3.9 ms, and the assert
+  follows. So one whole crowd frame on the larger path is enough.
+- **Not the cause: guest-visible end-of-pipe labels.** A secondary account blames
+  labels shown to the guest at record time. Every `WriteAtEndOfPipe32/64` and
+  `FlipWithInterrupt` branch here records the store for the GPU to perform; none
+  stores at record time.
+- **Whole windows do not separate the runs.** The largest command processor run in the
+  crowd arrival window was 531 ms and 562 ms in the passing runs gw180 and gw181, and
+  396-640 ms in the last complete windows of gw184, gw185, gw189 and gw190. The window
+  holding the assert is lost in every asserting run, so the 1651 ms period is not
+  attributed. gw182 is excluded here: its store was cold (one pipeline 1863 ms).
+- **After the arrival the assert does not recur at the measured rates.** gw180 and
+  gw181 held the crowd for over 90 s at about 3 fps.
+- **Limits.** gw190 ran under a debugger, which may lengthen periods. Whether the
+  guest paces on vertical blank between the signal and the next update was not read.
+
 ## Robot platformer: PrimitiveId in the interpolation geometry stage limited geometry distribution (2026-10-30)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
@@ -59,8 +104,15 @@ strict 60 fps-limited runs gw181 (before) and gw182, gw184 (after).
   of 4 is expected about 45 % of the time with no effect at all. These runs neither
   show nor exclude a regression at hub start, and more runs would not settle it on
   this host; fixing the assert will. gw183 ran out of its 330 s bound during the
-  hub load, with a foreign build on the host. No other title that uses this path
-  was re-run.
+  hub load, with a foreign build on the host.
+- **Other titles.** The strict games matrix on this binary ended with 25 interactive,
+  1 controlled timeout, 2 host crashes and 4 launch failures, against 26 presenting,
+  1, 1 and 4 before it. `case_429dd9d08d87` moved between presenting and controlled
+  timeout, as it already did between earlier matrices. `case_e16011e8b594`
+  (`PPSA02929`) crashed with exit 139 while stopping, after its stability point and
+  605 presents; four reruns of that case ended interactive with exit 0, so this
+  rare shutdown crash did not reproduce. No regression is shown. The matrix checks
+  neither pictures nor gameplay, and `playable-regression` was not run.
 
 ## Robot platformer: heavy character draws are real content, and same-queue guest-address waits (2026-10-30)
 
