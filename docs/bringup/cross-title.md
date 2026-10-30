@@ -821,6 +821,13 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   and no validation error. That run did not confirm that a compute-family
   queue recorded work before it ended.
 - **Not verified:** the robot platformer; async compute on the AMD host.
+- **Later (2026-10-30): compression cost of concurrent sharing.** On Intel
+  before Xe2, ANV disables CCS compression, HiZ and fast clears for
+  concurrent images when the device has more than one queue, so this layout
+  runs every image uncompressed on the A770. A same-binary A/B on the robot
+  platformer's dune route found no fps or per-draw GPU difference
+  (`docs/titles/robot-platformer.md`, 2026-10-30 record); other titles are
+  not measured.
 
 ## Early submissions at least half a millisecond apart (2026-10-24)
 

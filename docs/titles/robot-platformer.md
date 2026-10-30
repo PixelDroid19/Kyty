@@ -6,6 +6,89 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: dune GPU cost by stage, translated program size, and concurrent sharing excluded (2026-10-30)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
+strict 60 fps-limited runs on the dune route (gw130-gw139), translator
+version 185, `34c370da8` plus temporary probes (removed). Dune windows run at
+about 10 fps.
+
+- **GPU time per frame** (gw137, Vulkan timestamps over 12 dune windows of
+  5 s): about 76 ms of GPU work per frame.
+  - Compute on the async queue: about 26 ms, of which the BVH kernel
+    `0x3666fa39` takes about 22.5 ms (record below).
+  - Indexed draws: about 22 ms. The three heaviest pixel keys take about
+    7 ms (`0x210025508ca0b9ff`, 116 us per draw), 6.6 ms
+    (`0x210022506bcfb82d`, 316 us per draw) and 4.2 ms
+    (`0x210011e0d4bef057`, 59 us per draw).
+  - Geometry-stage draws about 5.6 ms, the rest under 4 ms each.
+- **Stage split of the heavy draws** (pipeline statistics queries, gw130):
+  - `8ca0b9ff` is fragment-bound: 1.26G fragment invocations (about one
+    screen per frame) against 314M vertex invocations, 3.7 ns per fragment.
+    The program declares early fragment tests, so its kill does not defeat
+    early depth. At the A770's ALU rate the same instruction count would
+    take about 0.56 ns per fragment; the program waits on memory and
+    latency, not arithmetic.
+  - `6bcfb82d` is vertex-bound: 206M vertex and 5M fragment invocations,
+    18 ns per vertex. Its vertex program `0x0a0014400c2ae56d` (a 483600-index
+    draw) compiles to 6430 instructions with 178 spills, 263 fills and 4 KB
+    of scratch at SIMD8; the other dune vertex programs are 1329-1678
+    instructions without spills.
+  - `d4bef057` is mixed (206M vertex, 69M fragment invocations).
+  - Depth-only passes cost about 2.2 ns per vertex.
+  - The interpolation geometry stage compiles to 151-216 instructions and is
+    needed: the pixel programs read per-vertex attributes through it. It is
+    not the multiplier.
+- **Driver statistics** (`VK_KHR_pipeline_executable_properties`, gw134,
+  gw135). Every dune colour pixel program compiles only at SIMD8, with
+  2.5k-5.7k instructions, 132 live registers and 100-121 sends. In the final
+  NIR of one of them, 54 loads are uniform-block loads from storage buffers:
+  guest `S_BUFFER_LOAD` constants whose V# is bound as a storage buffer. The
+  push range covers only 32 bytes of push constants and 96 bytes of one
+  uniform buffer.
+- **Translated program size.**
+  - Pixel program of `8ca0b9ff`: about 1564 guest instructions (about 1000
+    VALU, 43 samples) become 99k SPIR-V words. About 1.9k are per-instruction
+    EXEC selects, and each of 31 vector compares builds a full-mask ballot
+    (11 quad broadcasts and 2 subgroup ORs). The lane-local mask plan that
+    avoids the ballot is used only by split compute waves.
+  - Vertex program `0x0a0014400c2ae56d`: 929 guest instructions (about 440 FP
+    VALU, 39 buffer loads) become 65k words. Each four-dword buffer load is
+    emitted as four one-dword loads with their own index arithmetic (125
+    one-dword loads), and the program calls the guest address translation 27
+    times.
+- **Bound: the transient pool in device-local host-visible memory** (gw133).
+  Placing the whole transient pool there with a host shadow moved indexed
+  draws from 53.3 to 45.6 us per call with flat fps, about 3 ms of 76. The
+  shadow misses device writes from storage-to-vertex copies, so this is a
+  bound, not a change; a same-binary arm is still needed before quoting it.
+- **Excluded: concurrent sharing disabling Intel compression as the dune
+  bottleneck** (gw137 against gw138).
+  - Mechanism: on Intel before Xe2 with more than one device queue, ANV
+    disables auxiliary surfaces (CCS compression, HiZ, fast clears) for
+    every image created with `VK_SHARING_MODE_CONCURRENT`. Since compute
+    moved to a compute-only family, every Kyty image is concurrent on the
+    A770 (`docs/bringup/cross-title.md`, compute-only family record).
+  - Experiment: the same binary with a temporary switch that keeps every
+    queue in the graphics family. gw139 (`INTEL_DEBUG=perf`) confirmed the
+    driver's "concurrent sharing mode" warning disappears in that arm.
+  - Result: dune windows 9.9, 10.1, 9.9 fps (two families) against 9.9,
+    9.9, 10.1 fps (one family). Per-draw GPU time is unchanged: `8ca0b9ff`
+    116.2 against 116.3 us, `6bcfb82d` 316 against 320 us, async compute
+    about 4.4 ms per call in both. The exclusion covers this scene on this
+    GPU, not other titles.
+  - One of the two single-family runs (gw136) exited with code 0 about 80 s
+    in, while the worldmap loaded, with no error in its log; the other
+    (gw138) reached the dunes. Not investigated, since the arm does not ship.
+- **Descriptor pool pressure.** Mesa reported `VK_ERROR_FRAGMENTED_POOL` 351
+  times and `VK_ERROR_OUT_OF_POOL_MEMORY` 22 times in gw135; Kyty recovers by
+  allocating new pools. Not measured as a GPU cost.
+- **Open levers, by measured share:** the BVH kernel; the pixel programs'
+  constant loads (binding scalar-only, read-only V#s as uniform buffers so
+  the driver can push them); vector buffer loads in vertex programs; EXEC
+  and mask code where the mask flow analysis proves the wave full or the
+  value lane-local.
+
 ## Robot platformer: stale modules in the shared shader store, and the BVH kernel cost (2026-10-29)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
