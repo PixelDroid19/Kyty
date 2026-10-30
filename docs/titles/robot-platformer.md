@@ -96,6 +96,10 @@ strict 60 fps-limited runs on the dune route (gw111-gw119).
     it by the 30% that would remove most spills; only `spirv-opt` was tried.
     Keeping cold guest registers in shared memory, which has lower latency
     than scratch, is untested.
+  - The guest's scalar state stays uniform after translation. In the final
+    NIR, 175 of 183 loops and 400 of 712 registers are convergent. So
+    scalar values made per-lane by the translation are not the source of
+    the per-lane peak, and no uniformity lever is open there.
 - **Fix.** Translator version 185 retires the stale modules. The next boot
   translates and compiles every program again.
 - **Rule.** A build with an uncommitted or experimental translator runs only
@@ -289,6 +293,8 @@ gdb runs.
     the rendezvous count does not set most of this cost (stale-module record above).
   - The listing shows no translator change to test, and the offline loop-retention check used for
     the earlier spin work is not available. No change is attempted.
+  - Running it on the compute family is excluded too (gw128): the very next compute dispatch reads
+    its output, so there is no work to overlap it with (`docs/bringup/cp-gpu-sync-chain.md`).
 - **Not measurable: scanning the NGG front once per program** (`5790919c2`). The GS-front
   vertex path now computes its scan of the immutable front program (GETPC, global loads,
   scalar-buffer base registers, native wave state) once per cached program instead of per draw.

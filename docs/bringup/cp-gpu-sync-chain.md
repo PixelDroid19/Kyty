@@ -117,6 +117,16 @@ Each link moves the wait to the next one:
        kernel, so that change would not shorten this wait. It was not built or run.
      - The levers are therefore the kernel's own GPU time and this link (a device-side read). The
        kernel's time also counts toward the GPU frame, where it is about 30% of the graphics queue.
+     - **Excluded: moving the kernel to the compute family** with a wait at its first reader
+       (gw128, 360 s, measured 2026-10-29). A temporary probe matched the kernel's output storage
+       images and its five buffers against every later draw and dispatch. In all 1733 calls the
+       very next compute dispatch (`0x8f3da857`) binds an output image as storage and four of the
+       five buffers, with no draw in between. With the consumer adjacent, a second queue has no
+       independent work to overlap the kernel with, so neither its GPU time nor this wait would
+       shrink. Moving the whole compute chain does not help either: the graphics-side
+       `DRAW_INDEX_INDIRECT` read of `0xd3ef7a03`'s record starts while the kernel is still
+       running (gw112 above), so there is almost no independent graphics work before the chain's
+       consumer. It was not built.
 3. **`WAIT_REG_MEM`.** The 10.6 s are waits on labels whose release also writes back aliased
    storage.
    - Two attempts are recorded as excluded: consolidating those waits, and eliding the submit and

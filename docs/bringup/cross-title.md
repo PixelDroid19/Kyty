@@ -110,6 +110,11 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     9-13 in both, and 195 against 186 us/draw. Captures match.
   - The command-processor thread was not starved before the fix (its run-queue time was below 1%).
     The fix frees host CPU, not frame time, on this 12-CPU host.
+  - Strict `games-matrix` sweep at the 60 fps present limit: every case has the same outcome as
+    the previous sweep (`f0db2e1b5`, 26 of 32 interactive), and no interactive case lost
+    presents beyond run-to-run spread.
+  - A waiter takes on count alone, and `Signal` still wakes every waiter, so no waiter can be
+    left asleep with count available.
 
 ## Open: PPSA01341 - Demon's Souls livelocks at boot (2026-10-29, parked)
 
@@ -118,7 +123,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     stop at frame 3 with 2 presents, and the command processor gets no draw or dispatch after
     about 60 s.
   - The games matrix shows it as `controlled_timeout` at 2 presents: its 120 s deadline ends the
-    case with SIGTERM.
+    case with SIGTERM. The label flips between sweeps at the same 2 presents: `presenting` on
+    `51dc2553e`, `controlled_timeout` on `f0db2e1b5`.
   - On 2026-10-26 at `b248d1a57` the same title reached a gray loading screen at 0.2-0.9 fps.
 - **Localized.**
   - `kyty_agent threads` at 175 s: the main guest thread waits on event flag 3, and 11 job-worker

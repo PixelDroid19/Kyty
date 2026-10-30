@@ -333,3 +333,26 @@ us/draw. That is not 27 us. 60 fps also needs:
 - the transient-copy lever;
 - a cut in the libc and driver time that the gw110 profile spreads over the whole path;
 - fewer host draws per guest draw (`PrepareGuestDeviceAddressForRead` 3.9%).
+
+### Where the command-processor thread's wall time goes (2026-10-29, gw126 and gw127)
+
+Per-thread `/proc` counters (`stat` and `schedstat`) were read every 30 s in strict warm dune runs
+on the A770 host (12 CPUs). In dune windows the command-processor thread was:
+
+| Bucket | Share of the thread's wall time |
+| --- | --- |
+| User time | 43-48% |
+| Kernel time | 12-15% |
+| Waiting to run | under 1% (up to 6% at the end of gw127) |
+| Asleep (fence and other waits) | about 37-44% |
+
+- cpstage put the fence waits at 54-62 us/draw, about 33% of the frame. The other ~5-10% of sleep is
+  not attributed.
+- About 6000 minor faults per 30 s and almost no major faults reach this thread, so faults do not
+  explain the kernel time.
+- The user-time profile shows only a few syscall wrappers: `fstat` under
+  `GuestDeviceAddressPrepareForRead`, syncobj waits, and `mprotect` from the dirty-page tracker.
+  Kernel samples need `perf_event_paranoid` 1 or lower, so the kernel time is **open and
+  unattributed**. Its upper bound is about 13-15 ms per frame.
+- Every stage above works on user time. Even removed entirely, the user share leaves the frame bound
+  by the GPU (about 77 ms per frame in the dunes) and by these kernel and wait buckets.
