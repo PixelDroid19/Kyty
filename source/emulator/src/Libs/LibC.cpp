@@ -1010,13 +1010,25 @@ static KYTY_SYSV_ABI int c_vswprintf(uint16_t* out, size_t out_count, const uint
 }
 
 // --- stdlib ------------------------------------------------------------------
+// The host reports a range error through its own errno; the guest reads its errno slot.
+template <typename Convert>
+static auto c_strto_publish_erange(Convert convert)
+{
+	errno             = 0;
+	const auto result = convert();
+	if (errno == ERANGE)
+	{
+		*Posix::GetErrorAddr() = Posix::POSIX_ERANGE;
+	}
+	return result;
+}
 static KYTY_SYSV_ABI double c_strtod(const char* s, char** e)
 {
-	return ::strtod(s, e);
+	return c_strto_publish_erange([&] { return ::strtod(s, e); });
 }
 static KYTY_SYSV_ABI float c_strtof(const char* s, char** e)
 {
-	return ::strtof(s, e);
+	return c_strto_publish_erange([&] { return ::strtof(s, e); });
 }
 
 // Orbis uses an x86-64 LP64 ABI. Keep this independent of the host's `long`
@@ -1055,7 +1067,7 @@ static KYTY_SYSV_ABI int64_t c_strtol(const char* s, char** e, int b)
 	{
 		return 0;
 	}
-	return static_cast<int64_t>(std::strtoll(s, e, b));
+	return c_strto_publish_erange([&] { return static_cast<int64_t>(std::strtoll(s, e, b)); });
 }
 static KYTY_SYSV_ABI uint64_t c_strtoul(const char* s, char** e, int b)
 {
@@ -1063,7 +1075,7 @@ static KYTY_SYSV_ABI uint64_t c_strtoul(const char* s, char** e, int b)
 	{
 		return 0;
 	}
-	return static_cast<uint64_t>(std::strtoull(s, e, b));
+	return c_strto_publish_erange([&] { return static_cast<uint64_t>(std::strtoull(s, e, b)); });
 }
 static KYTY_SYSV_ABI int64_t c_strtoll(const char* s, char** e, int b)
 {
@@ -1071,7 +1083,7 @@ static KYTY_SYSV_ABI int64_t c_strtoll(const char* s, char** e, int b)
 	{
 		return 0;
 	}
-	return static_cast<int64_t>(std::strtoll(s, e, b));
+	return c_strto_publish_erange([&] { return static_cast<int64_t>(std::strtoll(s, e, b)); });
 }
 
 // Gen5 libc_v1 strtoull — NID 5OqszGpy7Mg.
@@ -1081,7 +1093,7 @@ static KYTY_SYSV_ABI uint64_t c_strtoull(const char* s, char** e, int b)
 	{
 		return 0;
 	}
-	return static_cast<uint64_t>(std::strtoull(s, e, b));
+	return c_strto_publish_erange([&] { return static_cast<uint64_t>(std::strtoull(s, e, b)); });
 }
 static KYTY_SYSV_ABI double c_atof(const char* s)
 {
