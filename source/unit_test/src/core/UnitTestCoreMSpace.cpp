@@ -819,4 +819,75 @@ TEST(CoreMSpace, StatsTrackInUseBytes)
 	delete[] buf;
 }
 
+// memalign(4096) leaves the user pointer far inside its raw chunk; a plain (32-byte) realloc must keep
+// the caller's bytes at the returned pointer. The arena starts on a 4096 boundary so the placement is fixed.
+TEST(CoreMSpace, ReallocOfOverAlignedBlockKeepsData)
+{
+	constexpr size_t kCapacity  = 0x10000;
+	constexpr size_t kBlockSize = 1000;
+	auto*            storage    = new uint8_t[kCapacity + 4096];
+	auto*            buf        = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(storage) + 4095u) & ~static_cast<uintptr_t>(4095u));
+	auto*            m          = MSpaceCreate("realloc-align", buf, kCapacity, true, nullptr);
+	EXPECT_NE(m, nullptr);
+	if (m == nullptr)
+	{
+		delete[] storage;
+		return;
+	}
+
+	const size_t new_sizes[] = {kBlockSize + 8, kBlockSize - 500};
+	for (size_t new_size: new_sizes)
+	{
+		auto* block = static_cast<uint8_t*>(Core::MSpaceMemalign(m, 4096, kBlockSize));
+		EXPECT_NE(block, nullptr);
+		if (block == nullptr)
+		{
+			break;
+		}
+
+		StressAllocation original {};
+		original.buf  = block;
+		original.id   = 1;
+		original.size = kBlockSize;
+		StressFill(original);
+
+		const size_t kept  = (new_size < kBlockSize ? new_size : kBlockSize);
+		auto*        moved = static_cast<uint8_t*>(MSpaceRealloc(m, block, new_size));
+		EXPECT_NE(moved, nullptr);
+		if (moved != nullptr)
+		{
+			StressAllocation resized {};
+			resized.buf  = moved;
+			resized.id   = 1;
+			resized.size = new_size;
+			EXPECT_TRUE(StressMatches(resized, kept));
+			EXPECT_TRUE(MSpaceFree(m, moved));
+		}
+	}
+
+	EXPECT_TRUE(Core::MSpaceIsHeapEmpty(m));
+	EXPECT_TRUE(MSpaceDestroy(m));
+	delete[] storage;
+}
+
+// 0xFFFFFFC5 plus the 48-byte aligned-path padding is 0xFFFFFFF5 internally, and its block count wraps in 32 bits.
+TEST(CoreMSpace, OversizedRequestIsRefusedWithoutTouchingArena)
+{
+	constexpr size_t kCapacity = 0x10000;
+	auto*            buf       = new uint8_t[kCapacity];
+	auto*            m         = MSpaceCreate("oversize", buf, kCapacity, true, nullptr);
+	EXPECT_NE(m, nullptr);
+	if (m == nullptr)
+	{
+		delete[] buf;
+		return;
+	}
+
+	EXPECT_EQ(MSpaceMalloc(m, 0xFFFFFFC5u), nullptr);
+	EXPECT_TRUE(Core::MSpaceIsHeapEmpty(m));
+
+	EXPECT_TRUE(MSpaceDestroy(m));
+	delete[] buf;
+}
+
 UT_END();

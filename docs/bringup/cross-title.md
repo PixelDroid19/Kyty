@@ -30,19 +30,29 @@
   - `kyty_agent games-matrix --mode strict` (32 cases, 60 fps limit): 26 interactive, 4
     launch_failed, 1 host_crash and 1 stalled at its first frames, the same frontier per case as
     the three matrices of 2026-10-29.
-- **Found, not fixed** (`source/lib/Core/src/MSpace.cpp`, `source/emulator/src/Libs/LibCInternal.cpp`):
-  - `MSpaceInternalRealloc_align` keeps the raw chunk when the new size fits within 128 bytes of
-    the old one, then recomputes the aligned pointer for the new boundary without moving the data.
-    A block from `memalign(4096, n)` resized through the 32-byte path returns a pointer that no
-    longer points at its data. Direction: move the data from the old user offset whenever the
-    aligned pointer changes, bounded by the old usable size.
-  - `MSpaceInternalMallocUnsafe` rounds with `(size + 11) / 8` in 32 bits, which wraps for
-    requests within 11 bytes of 4 GiB, and its out-of-memory loop compares against
-    `ctx.capacity * 16`, which wraps for arenas of 2 GiB or more. Direction: compute both in
-    64 bits and refuse requests larger than the arena.
-  - `LibcMspaceFree` drops the result of `Core::MSpaceFree`, so a refused free (unknown mspace,
-    bad header, pinned block or a block backing a nested arena) leaks without a trace. Not seen in
-    this title. Direction: report the refusal.
+- **Fixed later the same day** (`source/lib/Core/src/MSpace.cpp`,
+  `source/emulator/src/Libs/LibCInternal.cpp`), defects found by reading the allocator, none seen
+  in this title:
+  - `MSpaceInternalRealloc_align` kept the raw chunk when the new size fit within 128 bytes of
+    the old one, then recomputed the aligned pointer for the new boundary without moving the data,
+    so a block from `memalign(4096, n)` resized through the 32-byte path came back pointing away
+    from its data. The block now stays in place only when its pointer is still aligned for the new
+    boundary and its chunk holds the new size within the same 128-byte slack; otherwise the data
+    moves to a new aligned block, bounded by the old usable size.
+  - `MSpaceInternalMallocUnsafe` rounded with `(size + 11) / 8` in 32 bits, which wrapped to a
+    zero-block request within 11 bytes of 4 GiB, and its out-of-memory loop bound
+    `ctx.capacity * 16` wrapped for arenas of 2 GiB or more. Both are computed in 64 bits, and a
+    request larger than the arena is refused before the free lists are searched.
+  - `LibcMspaceFree` dropped the result of `Core::MSpaceFree`; a refused free (unknown mspace, bad
+    header, pinned block or a block backing a nested arena) is now logged, rate limited.
+  - Verified: the new `CoreMSpace` tests `ReallocOfOverAlignedBlockKeepsData` and
+    `OversizedRequestIsRefusedWithoutTouchingArena` fail before the fix (the realloc test reads
+    other bytes after both resizes; the oversized request crashes the test binary) and pass after
+    it, with the 11 `CoreMSpace` tests. `ctest --no-tests=error` over the build: 105 of 108 pass,
+    1 skipped, and the 2 failures are the open EVENT_WRITE 0x38 record below. gw164 (strict
+    default route, 330 s, 60 fps limit, `PPSA21567 - Astro Bot` 01.018, Intel Arc A770) took the
+    same boot, title, world map and intro path, logged no refused free, and stopped at about
+    228 s at the hub-start command buffer assert of `docs/titles/robot-platformer.md`.
 
 ## GDS is shared across queue families (2026-10-24)
 

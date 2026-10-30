@@ -241,7 +241,7 @@ static void MSpaceInternalLeave(MSpaceContext& ctx)
 	}
 }
 
-static void MSpaceInternalOutOfMemory(MSpaceContext& ctx, uint32_t free_bytes, uint32_t bytes)
+static void MSpaceInternalOutOfMemory(MSpaceContext& ctx, uint64_t free_bytes, uint32_t bytes)
 {
 	if (!ctx.in_callback)
 	{
@@ -368,15 +368,23 @@ static void* MSpaceInternalTakeFreeChunk(MSpaceContext& ctx, uint32_t num_blocks
 
 static void* MSpaceInternalMallocUnsafe(MSpaceContext& ctx, uint32_t size, uint32_t report_size)
 {
-	uint32_t num_blocks = 0;
+	// Counted in 64 bits: size + 11 wraps in 32 bits for sizes near 4 GiB.
+	uint64_t wanted_blocks = 0;
 
 	if (size <= 12)
 	{
-		num_blocks = 2;
+		wanted_blocks = 2;
 	} else
 	{
-		num_blocks = (size + 11) / 8;
+		wanted_blocks = (static_cast<uint64_t>(size) + 11u) / 8u;
 	}
+
+	// A chunk larger than the arena can never be served, so it is refused before the free lists are searched.
+	if (wanted_blocks > ctx.capacity)
+	{
+		return nullptr;
+	}
+	const auto num_blocks = static_cast<uint32_t>(wanted_blocks);
 
 	void* p = MSpaceInternalTakeFreeChunk(ctx, num_blocks);
 	if (p != nullptr)
@@ -384,7 +392,8 @@ static void* MSpaceInternalMallocUnsafe(MSpaceContext& ctx, uint32_t size, uint3
 		return p;
 	}
 
-	for (uint32_t to_free = num_blocks * 16; to_free < (ctx.capacity * 16); to_free *= 2)
+	const uint64_t capacity_bytes = static_cast<uint64_t>(ctx.capacity) * 16u;
+	for (uint64_t to_free = static_cast<uint64_t>(num_blocks) * 16u; to_free < capacity_bytes; to_free *= 2u)
 	{
 		MSpaceInternalOutOfMemory(ctx, to_free, report_size);
 		p = MSpaceInternalTakeFreeChunk(ctx, num_blocks);
@@ -624,66 +633,36 @@ static void MSpaceInternalFree_align(MSpaceContext& ctx, void* buf)
 	MSpaceInternalFree(ctx, reinterpret_cast<void*>(real_addr));
 }
 
-static void* MSpaceInternalRealloc(MSpaceContext& ctx, void* prior, uint32_t size, uint32_t report_size)
-{
-	if (prior == nullptr)
-	{
-		return MSpaceInternalMalloc(ctx, size, report_size);
-	}
-	if (size <= 0)
-	{
-		MSpaceInternalFree(ctx, prior);
-		return nullptr;
-	}
-	auto old = MSpaceInternalSize(prior);
-	if (size <= old && size >= old - 128)
-	{
-		return prior;
-	}
-	MSpaceInternalEnter(ctx);
-	auto* p = MSpaceInternalMallocUnsafe(ctx, size, report_size);
-	if (p != nullptr)
-	{
-		if (old < size)
-		{
-			memcpy(p, prior, old);
-		} else
-		{
-			memcpy(p, prior, size);
-		}
-		MSpaceInternalFreeUnsafe(ctx, prior);
-	}
-	MSpaceInternalLeave(ctx);
-	return p;
-}
-
 static void* MSpaceInternalRealloc_align(MSpaceContext& ctx, void* buf, uint32_t size, uint64_t boundary)
 {
-	uint32_t allocation_size = 0;
-	if (!MSpaceInternalGetAlignedAllocationSize(size, boundary, &allocation_size))
+	if (buf == nullptr)
+	{
+		return MSpaceInternalMalloc_align(ctx, size, boundary);
+	}
+
+	// The usable size is measured from the caller's pointer, which sits inside its raw chunk.
+	auto*          buf64      = static_cast<uint64_t*>(buf);
+	const uint64_t real_addr  = buf64[-1];
+	const uint64_t user_addr  = reinterpret_cast<uint64_t>(buf);
+	const uint64_t old_usable = MSpaceInternalSize(reinterpret_cast<void*>(real_addr)) - (user_addr - real_addr);
+
+	// The block stays in its chunk only if the same pointer is still aligned for the new boundary and the chunk
+	// holds the new size. The 128-byte slack matches the plain realloc: a larger shrink moves and releases the tail.
+	const uint64_t aligned_addr = align(real_addr + MSPACE_ALIGNED_PREFIX_SIZE, boundary);
+	if (aligned_addr == user_addr && size <= old_usable && old_usable - size <= 128u)
+	{
+		return buf;
+	}
+
+	void* p = MSpaceInternalMalloc_align(ctx, size, boundary);
+	if (p == nullptr)
 	{
 		return nullptr;
 	}
-
-	auto*    buf64     = static_cast<uint64_t*>(buf);
-	uint64_t real_addr = (buf64 != nullptr ? buf64[-1] : 0);
-	auto     addr = reinterpret_cast<uint64_t>(MSpaceInternalRealloc(ctx, reinterpret_cast<uint64_t*>(real_addr), allocation_size, size));
-	if (addr != 0)
-	{
-		const uint64_t aligned_addr = align(addr + MSPACE_ALIGNED_PREFIX_SIZE, boundary);
-		if (addr != real_addr)
-		{
-			auto* dst = reinterpret_cast<void*>(aligned_addr);
-			auto* src = reinterpret_cast<void*>(addr + reinterpret_cast<uint64_t>(buf) - real_addr);
-			if (dst != src)
-			{
-				memmove(dst, src, size);
-			}
-		}
-		MSpaceInternalSetAlignedPrefix(addr, aligned_addr);
-		return reinterpret_cast<void*>(aligned_addr);
-	}
-	return nullptr;
+	const uint64_t copy_size = (old_usable < size ? old_usable : size);
+	memcpy(p, buf, copy_size);
+	MSpaceInternalFree_align(ctx, buf);
+	return p;
 }
 
 static bool MSpaceInternalInit(MSpaceContext& ctx, const char* name, void* base, size_t capacity, bool thread_safe,

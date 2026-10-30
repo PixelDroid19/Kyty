@@ -252,7 +252,11 @@ void KYTY_SYSV_ABI LibcMspaceFree(void* msp, void* ptr)
 		return;
 	}
 
-	Core::MSpaceFree(msp, ptr);
+	if (!Core::MSpaceFree(msp, ptr))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Error, 16, "libc: mspace free refused (msp=0x%016" PRIx64 " ptr=0x%016" PRIx64 ")\n",
+		               reinterpret_cast<uint64_t>(msp), reinterpret_cast<uint64_t>(ptr));
+	}
 }
 
 LIB_DEFINE(InitLibcInternal_1)
