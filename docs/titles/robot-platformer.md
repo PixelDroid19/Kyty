@@ -40,6 +40,7 @@ strict 60 fps-limited runs gw181 (before) and gw182, gw184 (after).
   | gw186 | without the builtin | 6.34 | 63 | 161 | 41 % |
   | gw188 | builtin forwarded | 3.22, 3.40 | 202, 205 | 318, 320 | 91 % |
   | gw181 | before the change | 2.86-2.96 | 201-206 | 329-338 | 35 % |
+  | gw189 | without the builtin, strict | 5.47 (one window) | 50 | 182 | 45 % |
 
   The host was busier in gw188 than in gw186, which inflates its CP time. gw181,
   on a quiet host, gives the same rate and fence time, so the host load does not
@@ -50,12 +51,16 @@ strict 60 fps-limited runs gw181 (before) and gw182, gw184 (after).
   185-236 ms/frame, and 4.06 fps under foreign load. These windows pass frame
   4246, a black and green wipe; no capture identifies them as the hub. The run
   ended at its 420 s bound.
-- **Limits.** Strict runs gw182, gw184 and gw185 hit the guest assert at hub start
-  (below), so the 2x figure has no strict confirmation. All three ran on a
-  contended host, and the assert follows contention across all runs (next record),
-  so these runs neither show nor exclude a regression at hub start; that needs an
-  uncontended strict run. gw183 ran out of its 330 s bound during the hub load,
-  with a foreign build on the host. No other title that uses this path was re-run.
+- **Native readers of the builtin.** None: only the transport capture and resolve
+  programs read `PrimitiveId`, so no native pixel program lost an input.
+- **Limits.** The strict confirmation is one window (gw189, about 1.85x against
+  gw181): strict runs gw182, gw184, gw185 and gw189 all hit the guest assert at
+  hub start (below). Before the change about 3 of 17 strict runs passed it, so 0
+  of 4 is expected about 45 % of the time with no effect at all. These runs neither
+  show nor exclude a regression at hub start, and more runs would not settle it on
+  this host; fixing the assert will. gw183 ran out of its 330 s bound during the
+  hub load, with a foreign build on the host. No other title that uses this path
+  was re-run.
 
 ## Robot platformer: heavy character draws are real content, and same-queue guest-address waits (2026-10-30)
 
@@ -65,13 +70,15 @@ strict 60 fps-limited runs gw180 and gw181, `504361d49` plus temporary probes
 
 - **Hub start outcomes on the same route.** Guest assert: gw146, gw149,
   gw153-155, gw175, gw176, gw178, gw179, and with the geometry change above
-  gw182, gw184, gw185. GPU job timeout: gw144, gw148, gw150, gw152, gw168.
-  Passed: gw147, gw169, gw180, gw181.
+  gw182, gw184, gw185, gw189. GPU job timeout: gw144, gw148, gw150, gw152, gw168
+  (gw168 with the size-table probe). Passed: gw147, gw180, gw181, and gw169 with
+  the probe.
 - **Hub start outcome against host contention** (run-queue wait over run time of
   the emulator's threads, last sample of each run). Passed: gw169 36 %, gw180
-  31 %, gw181 35 %, gw147 54.5 %. Guest assert: gw154 38 %, gw155 81 %, gw178
-  100 %, gw182 69 %, gw184 69 %, gw185 98 %. The assert is more likely under load
-  but also happened at 38 %. `CPU_WEIGHT=1000` did not lower the wait (gw185).
+  31 %, gw181 35 %, gw147 54.5 %. Guest assert: gw154 38 %, gw189 45 %, gw155
+  81 %, gw178 100 %, gw182 69 %, gw184 69 %, gw185 98 %. The correlation is weak:
+  the ranges overlap between 38 % and 54.5 %. `CPU_WEIGHT=1000` did not lower the
+  wait (gw185).
 - **Excluded: a replay defect behind the repeated large draws.** The pixel
   program `cbb6bb28` draws the same vertex program, 32-bit index buffer
   (608,112 indices, 202,704 triangles) and vertex buffer (107,967 records,
