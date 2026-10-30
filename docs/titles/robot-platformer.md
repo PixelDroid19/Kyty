@@ -54,6 +54,16 @@ plus temporary probes, and offline compiles of stored modules at SIMD8
   instructions, and marking the node block pointer non-writable to 39,335,
   against 39,335 for the stored module: the driver already treats these
   loads as uniform and read-only.
+- **Excluded by static analysis: dropping the DS ordering between
+  consecutive LDS reads of the BVH kernel.** Of its 29 DS orderings (one
+  part rendezvous after each DS instruction), 8 follow a read whose next LDS
+  access is another read with no write between; dropping those is sound,
+  because the rendezvous after the last read still orders every read of the
+  run before a later write. All 8 sit outside the kernel's loops (only one
+  ordering, after a read, is inside the traversal loop), so each runs once
+  per invocation: about 0.5 ms per call at the microbenchmark rate, below
+  the kernel's run-to-run spread of 18.5-23.3 ms per call, for the cost of a
+  translator version change. Not built.
 
 ## Robot platformer: shape, inputs and split exchanges of the BVH kernel (2026-10-30)
 
@@ -121,8 +131,10 @@ version 185, `fb7b6f307` plus temporary probes (not committed).
   chosen by `s_ff1` over a mask, plus the 9 `v_readfirstlane`) and 29
   orderings after DS instructions. The guest traverses its BVH
   wave-coherently: one node pointer per wave, children merged across lanes,
-  and a wave stack held in the lanes of `v59`. Each node step costs about
-  eight exchanges, which matches the 55.6 per invocation.
+  and a wave stack held in the lanes of `v59`. How the 55.6 exchanges per
+  invocation split between the traversal loop and straight-line code was
+  not measured: 28 of the 29 DS orderings sit outside the kernel's loops
+  (record above), so a per-node-step count cannot be derived from it.
 - **Static cost by part** (offline compiles of the stored module with
   helper bodies replaced, never run; the baseline is 39,335 instructions,
   spills:fills 538:2225 and 362 live registers at SIMD8). Replacing the part
