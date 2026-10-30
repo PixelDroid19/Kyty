@@ -6,6 +6,55 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: merged loads in the heavy vertex program excluded, and the BVH node fetch (2026-10-30)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
+strict 60 fps-limited runs on the dune route (gw144, gw145), `ad7028e68`
+plus temporary probes, and offline compiles of stored modules at SIMD8
+(`VK_KHR_pipeline_executable_properties`).
+
+- **Vertex program `0x0a0014400c2ae56d`** (pixel key `6bcfb82d`, about 6.6 ms
+  per dune frame). Translator 185 compiles it to 6432 instructions, 139
+  sends, spills:fills 179:264 and 216 live registers.
+  - Its 27 guest-address lookups are dead after compilation: the final NIR
+    holds no global loads, and a copy whose lookup body is replaced by one
+    load compiles to the same statistics. The record below counts them in
+    the SPIR-V only.
+  - Its data comes from 250 one-component storage-buffer loads and 5
+    uniform-block loads. The 125 one-dword loads that carry the guest's
+    multi-dword buffer loads stay separate because each component computes
+    its word index as `(offset + 4k) / 4` with a signed division, which hides
+    from the driver that the words are adjacent.
+- **Excluded: one shared word index per multi-dword raw buffer load.** A
+  translator change (version 186, not committed) emitted `offset >> 2` once
+  and added the component number.
+  - The module the change stored compiles to 5479 instructions and 48 sends
+    (-65%); estimated cycles fell from 50,571 to 45,486 and spills stayed at
+    179.
+  - Dune GPU time per draw of `6bcfb82d` (Vulkan timestamps, 5 s dumps with
+    at least 800 draws): median 307.3 us in gw145 (23 dumps) against
+    314.1 us in gw137 (31 dumps), inside the run-to-run spread (316 and
+    320 us in gw137 and gw138). GPU time per frame stayed at about 76 ms.
+    The arms are different binaries (gw137 is `34c370da8` plus probes).
+  - gw145's dune fps (8.3-9.4) is not comparable: gw144 lost the device
+    before the dunes (2026-10-29 timeout record), so gw145 translated the
+    dune programs during those windows.
+  - Not adopted: no measured gain, and a translator version change makes
+    every shader store recompile (gw144 spent two 30 s windows near 1 fps on
+    a cold store).
+  - Why the draw time did not move was not measured. Lead: the program reads
+    its vertex data from storage buffers in cached system memory, so it may
+    be bound by read latency rather than message count (see the transient
+    pool placement bound in the next record).
+  - The BVH kernel `0x3666fa39` has no multi-dword raw buffer loads (36
+    one-dword sites), so the change does nothing there.
+- **The BVH node fetch is already uniform and vectorised (null result).**
+  The kernel loads each node as eight 16-byte vector loads. Wrapping the
+  node pointer and T# words in a first-lane broadcast compiles to 39,352
+  instructions, and marking the node block pointer non-writable to 39,335,
+  against 39,335 for the stored module: the driver already treats these
+  loads as uniform and read-only.
+
 ## Robot platformer: shape, inputs and split exchanges of the BVH kernel (2026-10-30)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
@@ -143,8 +192,8 @@ about 10 fps.
   - Vertex program `0x0a0014400c2ae56d`: 929 guest instructions (about 440 FP
     VALU, 39 buffer loads) become 65k words. Each four-dword buffer load is
     emitted as four one-dword loads with their own index arithmetic (125
-    one-dword loads), and the program calls the guest address translation 27
-    times.
+    one-dword loads). The SPIR-V calls the guest address translation 27
+    times, but those calls are dead after compilation (record above).
 - **Bound: the transient pool in device-local host-visible memory** (gw133).
   Placing the whole transient pool there with a host shadow moved indexed
   draws from 53.3 to 45.6 us per call with flat fps, about 3 ms of 76. The
@@ -446,6 +495,12 @@ gdb runs.
     sites) logged nothing, and so did the clean gw109 (frame 4282). A Blender render of another session shared the GPU during all three,
     so they ran slower (frames 3101, 3235 and 3555, against 4322 for gw104), and the time-based
     input route then plays differently.
+  - It recurred on 2026-10-30 in gw144 (`ad7028e68` plus an uncommitted
+    translator 186 experiment on a cold private shader store) at the same
+    route point, about frame 3408, during a level load. The kernel reset the
+    render engine for a timed-out `fc_script` job and reported no page fault.
+    The queue timeline wait (`vkWaitSemaphores`) saw the loss; the run kept
+    no submit fault entries.
   - Next step: record the bound V# words (base, `num_records`, binding kind) of the nodes and
     heads buffers for that draw in a bad run, and check the translator's `s_buffer_load` range
     rule against the ISA reference.
