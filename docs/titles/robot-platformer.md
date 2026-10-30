@@ -6,6 +6,41 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: EXEC guard folding in lane-local pixel programs excluded at runtime (2026-10-30)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
+strict 60 fps-limited runs, `4305c2080` plus a temporary translator change
+(version 188, not committed).
+
+- **Excluded: folding the per-lane EXEC guards where the pixel mask-flow
+  proof shows that EXEC holds every launched lane.** The change replaced the
+  load of the lane's own EXEC bit with the constant 1 at those instructions.
+  - Coverage (gw177): of 91 pixel programs, 75 were lane-local and 59 had
+    foldable instructions; 14644 of 59067 instructions folded and 29042 kept
+    their guard. In `8ca0b9ff` the remaining guards sit inside lane-divergent
+    if-regions (save EXEC, narrow, restore), so 780 of its 1482 instructions
+    folded.
+  - Offline, same SPIR-V on ANV: `8ca0b9ff` still compiles at SIMD8 only,
+    4359 -> 2879 instructions, 109 -> 83 sends, estimated cycles
+    39913 -> 30872, live registers 100 -> 81.
+  - Runtime, GPU time per call: on the title `8ca0b9ff` took 50-58 us with
+    translator 185 (gw147) and 44-54 us with the change (gw177); in the ship
+    scene both stay at about 70-77 us. The intro character programs
+    `cbb6bb28` and `9dacb90f` took 6.0 ms and 1.3 ms per call in the one full
+    intro dump of gw178, against 5.6-6.0 ms and 1.2 ms in gw147.
+  - Upper bound (gw179): every guard of `8ca0b9ff`, `cbb6bb28` and `9dacb90f`
+    was patched to the constant 1 in a private shader store, which is wrong
+    for masked lanes and serves only for timing. Offline this also compiles
+    `8ca0b9ff` at SIMD16 (1942 instructions, 25012 cycles for 16 fragments
+    against 39913 for 8). At runtime `8ca0b9ff` took 40-48 us per call on the
+    title and 69-89 us in the ship scene. The run stopped at the start of the
+    intro on the guest assert recorded below, so the character programs were
+    not measured.
+  - So the heavy pixel program is not limited by ALU work or SIMD width,
+    as the offline record of the dune GPU cost predicted from its latency.
+    Branching per lane on EXEC, to fold the guards that remain inside
+    divergent regions, is not pursued for it.
+
 ## Robot platformer: constant loads as uniform buffers excluded, and a guest fault at hub start (2026-10-30)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
@@ -87,6 +122,32 @@ strict 60 fps-limited runs, `ad7028e68` plus temporary probes.
     hardware: which engine pass records into each group, and whether a
     visibility or LOD decision, a GPU write-back or thread timing changes
     that count.
+  - **Why a draw embeds its bone matrices (static, eboot 01.018, and a gdb
+    probe in gw167).** The skinning binder (`0x9004ad1f0`) binds a V# to the
+    skeleton's GPU palette when the render item's palette flag is set, and
+    otherwise copies the whole declared constant buffer (2 x 24 KB) into the
+    command buffer. The render-list builder (`0x907097de0`) sets that flag
+    when the skeleton node holds a GPU palette pointer (node `+0x50`).
+    - The pointer is cleared by the bone-transform setter (`0x9073fd090`),
+      which game jobs call per bone, and set again by the skinning publish
+      (`0x90700a50c`), which allocates the palette from a per-frame GPU ring
+      and stores it at `+0x50`.
+    - In gw167 nodes with and without a palette both alternated every frame.
+      A draw embeds its matrices when the builder reads the node between the
+      clear and the publish, so the number of embedding draws per frame
+      depends on thread timing, not on scene content.
+  - **Larger buffers tested and not adopted (gw168, gw169).** A temporary
+    tool rewrote the size table to 14, 14, 8, 8 and 12 MB through
+    `/proc/<pid>/mem` 0.37 s after launch, before the buffers are created. It
+    was used only as a probe to get past the assert; it is not a fix.
+    - gw168 stopped at 220 s on the GPU job timeout below, right after the
+      hub load.
+    - gw169 passed the hub start and stayed in the hub at 3.2-3.5 fps until
+      the 330 s bound, without reaching `ui_pause_cinematics`.
+    - In both runs the 20 ms sampler saw every buffer peak below 25 % of the
+      doubled size, under 2 MB in the buffers that are 4 MB by default. The
+      default sizes would have held these runs too, so the runs give no
+      evidence that more space helps.
 
 ## Robot platformer: merged loads in the heavy vertex program excluded, and the BVH node fetch (2026-10-30)
 
