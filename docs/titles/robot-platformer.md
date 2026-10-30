@@ -15,8 +15,12 @@ about 10 fps.
 
 - **GPU time per frame** (gw137, Vulkan timestamps over 12 dune windows of
   5 s): about 76 ms of GPU work per frame.
-  - Compute on the async queue: about 26 ms, of which the BVH kernel
-    `0x3666fa39` takes about 22.5 ms (record below).
+  - Compute dispatches recorded on the graphics queue (Kyty queue 8,
+    `QUEUE_GFX`, which runs on the render engine): about 26 ms, of which the
+    BVH kernel `0x3666fa39` takes about 22.5 ms (record below). They
+    serialize with the draws. Dispatches on Kyty compute queues 0-7 (the
+    compute-only family) take about 6 ms per frame, consistent with the
+    compute engine's ~7% busy time below.
   - Indexed draws: about 22 ms. The three heaviest pixel keys take about
     7 ms (`0x210025508ca0b9ff`, 116 us per draw), 6.6 ms
     (`0x210022506bcfb82d`, 316 us per draw) and 4.2 ms
@@ -74,8 +78,8 @@ about 10 fps.
     driver's "concurrent sharing mode" warning disappears in that arm.
   - Result: dune windows 9.9, 10.1, 9.9 fps (two families) against 9.9,
     9.9, 10.1 fps (one family). Per-draw GPU time is unchanged: `8ca0b9ff`
-    116.2 against 116.3 us, `6bcfb82d` 316 against 320 us, async compute
-    about 4.4 ms per call in both. The exclusion covers this scene on this
+    116.2 against 116.3 us, `6bcfb82d` 316 against 320 us, graphics-queue
+    compute about 4.4 ms per call in both. The exclusion covers this scene on this
     GPU, not other titles.
   - One of the two single-family runs (gw136) exited with code 0 about 80 s
     in, while the worldmap loaded, with no error in its log; the other
@@ -104,12 +108,26 @@ about 10 fps.
   costs about 2.4 times a device-local miss. Guest-address loads that resolve
   to flexible-memory snapshots or direct-memory windows read system memory;
   which of them the BVH kernel and the heavy pixel programs read has not been
-  measured.
+  measured. ANV exposes only cached (snooped) system memory on the A770, so
+  an uncached host-visible placement cannot be tested there.
+- **Excluded: EXEC-select folding or lane-local compare masks as a way to
+  compile `8ca0b9ff` wider than SIMD8** (offline, on the final NIR of the
+  gw135 pipeline).
+  - The driver compiles the pixel program at SIMD8 only: 4811 instructions,
+    111 sends, no spills, 132 live registers.
+  - A liveness pass over that NIR peaks at about 171 SIMD8 register units
+    (110 divergent, 61 uniform). Of these, 51 uniform units hold
+    uniform-block loads, 38 are NIR registers and about 24 are EXEC selects.
+  - Rewriting all 934 EXEC-bit selects as plain moves lowers the peak only
+    to about 156 (-9%). SIMD16 doubles every divergent value, so it would
+    need roughly half the peak.
+  - The lane-local plan instead of the per-compare ballot removes ALU work
+    only, and the program waits on latency (3.7 ns per fragment against
+    about 0.56 ns of ALU time, above). Neither change is pursued for this
+    program.
 - **Open levers, by measured share:** the BVH kernel; the pixel programs'
   constant loads (binding scalar-only, read-only V#s as uniform buffers so
-  the driver can push them); vector buffer loads in vertex programs; EXEC
-  and mask code where the mask flow analysis proves the wave full or the
-  value lane-local.
+  the driver can push them); vector buffer loads in vertex programs.
 
 ## Robot platformer: stale modules in the shared shader store, and the BVH kernel cost (2026-10-29)
 
