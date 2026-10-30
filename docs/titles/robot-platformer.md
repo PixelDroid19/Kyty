@@ -83,6 +83,28 @@ about 10 fps.
 - **Descriptor pool pressure.** Mesa reported `VK_ERROR_FRAGMENTED_POOL` 351
   times and `VK_ERROR_OUT_OF_POOL_MEMORY` 22 times in gw135; Kyty recovers by
   allocating new pools. Not measured as a GPU cost.
+- **GPU busy time without timestamps** (gw140, same route, no timestamp
+  queries, engine cycles sampled from the DRM client's `fdinfo` every 5 s):
+  dune windows 10.6, 10.8, 10.8 fps; the render engine is busy about 75% of
+  wall time (about 70 ms per 93 ms frame) and the compute engine about 7%.
+  Timestamps barely distort the stage split above. The remaining ~23 ms per
+  frame is command processing that does not overlap GPU work, so both the
+  GPU program cost and the CP cost bound the frame rate.
+- **Memory latency by placement** (stand-alone Vulkan microbenchmark on the
+  A770: one invocation follows a random index cycle with a 64-byte stride,
+  every load dependent on the previous one):
+
+  | Placement | 16 KB set | 1 MB set | 8 MB set and larger |
+  | --- | --- | --- | --- |
+  | Device-local | ~260 ns | 389 ns | ~420 ns |
+  | Device-local host-visible (BAR) | 88 ns | 372 ns | 421 ns |
+  | System memory (host allocation or imported host pointer) | 95 ns | ~845 ns | ~1000 ns |
+
+  System memory is cached by the GPU for small working sets, but a miss
+  costs about 2.4 times a device-local miss. Guest-address loads that resolve
+  to flexible-memory snapshots or direct-memory windows read system memory;
+  which of them the BVH kernel and the heavy pixel programs read has not been
+  measured.
 - **Open levers, by measured share:** the BVH kernel; the pixel programs'
   constant loads (binding scalar-only, read-only V#s as uniform buffers so
   the driver can push them); vector buffer loads in vertex programs; EXEC
