@@ -6,6 +6,73 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: heavy character draws are real content, and same-queue guest-address waits (2026-10-30)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
+strict 60 fps-limited runs gw180 and gw181, `504361d49` plus temporary probes
+(not committed).
+
+- **Hub start outcomes on the same route.** Guest assert: gw146, gw149,
+  gw153-155, gw175, gw176, gw178, gw179. GPU job timeout: gw144, gw148, gw150,
+  gw152, gw168. Passed: gw147, gw169, gw180, gw181.
+- **Excluded: a replay defect behind the repeated large draws.** The pixel
+  program `cbb6bb28` draws the same vertex program, 32-bit index buffer
+  (608,112 indices, 202,704 triangles) and vertex buffer (107,967 records,
+  stride 76, 11 attributes) several times per frame, but each draw has its own
+  textures, world matrix and bone palette (183 records). A capture at frame
+  3800 shows a crowd of about 60 costumed characters in the intro.
+  - The figure "125,056 triangles per draw" was an average of 9 large and 6
+    small draws per frame: (9 x 202,704 + 6 x 8,584) / 15 = 125,056.
+- **GPU time by program, last 7 windows of gw181** (17 frames in 5 s, about
+  276 ms of GPU work per frame, queue 8 busy about 91 % of the wall clock; the
+  scene was probably the hub, no capture confirms it):
+
+  | Program | ms/frame | Notes |
+  | --- | --- | --- |
+  | pixel `cbb6bb28` | 80 | about 9 ms/draw, 45 ns/triangle |
+  | pixel `9dacb90f` | 66 | 34 draws/frame, 2 ms/draw, 10 ns/triangle, about 68k fragments/draw |
+  | compute `874bd13f` | 35 | |
+  | pixel `28d8852c` | 14 | |
+  | pixel `d4bef057` | 14 | 23.9k triangles/draw |
+  | pixel `bf8ee9fc` | 11 | |
+
+- **Shader statistics, real vertex, geometry and pixel stages compiled
+  together at SIMD8 on ANV.**
+  - Both heavy pixel programs share a byte-identical 594-word interpolation
+    geometry program (154 instructions, 1,598 cycles, no spills), so it does
+    not explain the difference between them.
+  - The vertex stage differs:
+
+    | Vertex program | Instructions | Sends | Cycles | Spills:fills | Live registers |
+    | --- | --- | --- | --- | --- | --- |
+    | `976809a8` | 12,388 | 340 | 115,621 | 195:482 | 264 |
+    | `57572d59` | 4,412 | 133 | 32,559 | 42:72 | 180 |
+    | `a2bb8f2d` | 1,330 | 38 | 9,108 | 0:0 | 83 |
+
+  - Replacing the guest-address lookup of `976809a8` by an identity compiles
+    to 12,005 instructions and 100,985 cycles, spills unchanged, so the lookups
+    are not the lever. This agrees with the record of `0x0a0014400c2ae56d`
+    below.
+  - In the final assembly of `976809a8`, 677 of 1,017 messages are spills and
+    fills. A guest buffer load repeats per component the SIMD absolute value,
+    sign select, shift and multiply of the signed word index.
+- **Open defect: same-queue host waits for guest-address publication.** At the
+  end of gw181 reason `gda-storage`, host wait, same queue: 10,175 waits, 95.8 s;
+  other queue: 2,248 waits, 4.2 s. After frame 3614 about 2,500 waits took about
+  60 s at about 24 ms each, a drain per wait.
+  - State: a draw that reads storage written earlier on its own queue, in
+    `RetryGuestDeviceAddressDraw` (`GraphicsRun.cpp`) through
+    `GpuMemory::PendingStorageWriteBack` (`GpuMemoryWriteback.cpp`, host wait
+    when no publishable entry exists, or the consumer is not ordered, or
+    `StorageIsWholeGuestContent` is false).
+  - Same-queue consumers already count as ordered, so these waits come from a
+    false clause of `StorageIsWholeGuestContent` or from a failed record or
+    mark. Which clause is not yet measured.
+  - Direction: count the failing clause per wait, then satisfy that case with
+    a device-side copy in queue order.
+- CP cost alone is about 75 us/draw in the hub, near 11 fps at 1170 draws with
+  no GPU cost at all, so the GPU work above is not the only limit.
+
 ## Robot platformer: EXEC guard folding in lane-local pixel programs excluded at runtime (2026-10-30)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
