@@ -54,6 +54,19 @@ version 185, `fb7b6f307` plus temporary probes (not committed).
   about 93 ms to about 71 ms (about 14 fps). The other frame costs are the
   indexed draws (about 22 ms) and about 23 ms of command processing that does
   not overlap GPU work.
+- **Native-width census** (gw143, 300 s to the dunes, a temporary print of
+  the native-width proof's verdict once per compute program). Of 61 distinct
+  compute programs, 31 pass the proof and run at their native width. 27 are
+  refused because an instruction reads another lane or a wave-wide count,
+  and 3 because a scalar written inside a lane-conditional region is live at
+  its join. Both refusals are correct: the split run is what keeps those
+  programs exact. The BVH kernel is refused at `v_readfirstlane_b32` of an
+  LDS-loaded value (pc `0x1df0`), and its body holds 44 `v_readlane`,
+  36 `v_writelane`, 30 `s_ff1_i32_b64` and 9 `v_readfirstlane`: per-lane
+  arrays walked with a lane mask, so no width-neutrality proof applies to
+  the whole program. Proving single readfirstlane operands uniform would
+  only remove some exchanges inside the split run; it would not make the
+  kernel native.
 
 ## Robot platformer: dune GPU cost by stage, translated program size, and concurrent sharing excluded (2026-10-30)
 
