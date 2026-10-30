@@ -6,6 +6,55 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: shape, inputs and split exchanges of the BVH kernel (2026-10-30)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
+strict 60 fps-limited runs on the dune route (gw141, gw142), translator
+version 185, `fb7b6f307` plus temporary probes (not committed).
+
+- **Shape (corrects earlier records).** `0x3666fa39` is a direct dispatch of
+  8156x1x1 workgroups of 256 invocations, 2,087,936 invocations per call,
+  once per frame on the graphics queue. Two instruments agree: a print of the
+  dispatch's group counts on the command processor and an invocation counter
+  in the translated program. The count is close to the 2,073,600 pixels of a
+  1920x1080 target; the mapping of invocations to pixels was not checked.
+  The 2026-10-28 record below and `docs/bringup/cp-gpu-sync-chain.md` said
+  one 16x16 workgroup per frame. That was wrong: the kernel is a throughput
+  pass that fills the GPU, not one latency chain.
+- **Inputs** (load counters added by the probe, every dune window alike).
+  - Five storage buffers from the transient pool, in cached system memory
+    (memory type 1), of 16 bytes to 17.9 KB. Each invocation reads about 201
+    dwords from them, all from under 20 KB, which the GPU caches hold (16 KB
+    column of the latency table in the next record). Placement is excluded
+    as a lever for this kernel.
+  - Guest-address loads: about 3 data dwords per invocation, each preceded by
+    a lookup that reads about 17 table dwords (49.6 per invocation, 1.34
+    binary-search iterations per lookup in gw141).
+  - Sampled 2D, 2D-array and 3D images and two storage images (the output)
+    were not counted.
+- **Split exchanges.** Each invocation takes part in 55.6 split-wave
+  exchanges per call; the guest wave64 runs as eight 8-lane parts.
+- **The early returns are wave-uniform.** Of the three returns, the two early
+  ones test a scalar load and the whole-wave EXEC words, so the eight parts of
+  a wave leave together and no exchange waits on a part that has returned.
+- **Not usable: clock attribution inside the kernel.** The probe read the
+  subgroup clock (`VK_KHR_shader_clock`) around the address lookup and the
+  split exchange. No time share is recorded: the split share came out above
+  the whole subgroup lifetime in many windows (up to 1.9), and the compiler
+  may reorder clock reads, which carry no dependency between them. The probe
+  also changed the kernel: spills:fills 538:2225 without it, 654:2864 in
+  gw141 and 955:3487 with 32 KB of scratch in gw142, where dune windows fell
+  from about 10.8 to 7.4 fps.
+- **The shared store holds the current translation of this kernel.** The
+  module the probe build produced differs from the stored one only by probe
+  instructions (opcode histograms). The kernel took 18.5-19.4 ms per call in
+  gw141 against 22.3-23.3 ms (gw118) and about 22.5 ms (gw137); that spread
+  is unexplained run-to-run variation, not a module difference.
+- **Bound.** Removing the kernel entirely would take the dune frame from
+  about 93 ms to about 71 ms (about 14 fps). The other frame costs are the
+  indexed draws (about 22 ms) and about 23 ms of command processing that does
+  not overlap GPU work.
+
 ## Robot platformer: dune GPU cost by stage, translated program size, and concurrent sharing excluded (2026-10-30)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
@@ -106,9 +155,9 @@ about 10 fps.
 
   System memory is cached by the GPU for small working sets, but a miss
   costs about 2.4 times a device-local miss. Guest-address loads that resolve
-  to flexible-memory snapshots or direct-memory windows read system memory;
-  which of them the BVH kernel and the heavy pixel programs read has not been
-  measured. ANV exposes only cached (snooped) system memory on the A770, so
+  to flexible-memory snapshots or direct-memory windows read system memory.
+  The BVH kernel's inputs are cache-resident (record above); what the heavy
+  pixel programs read has not been measured. ANV exposes only cached (snooped) system memory on the A770, so
   an uncached host-visible placement cannot be tested there.
 - **Excluded: EXEC-select folding or lane-local compare masks as a way to
   compile `8ca0b9ff` wider than SIMD8** (offline, on the final NIR of the
@@ -196,9 +245,10 @@ strict 60 fps-limited runs on the dune route (gw111-gw119).
   traversal's loads should hit it; the hit rate was not counted. The module
   with the cache (recipe changed, 140 more words) took 21.6-23.2 ms per call
   in the same dune windows against 22.3-23.3 ms without it, under 2%. The
-  remaining candidates are the spills (538:2225 at SIMD8), the rendezvous of
-  the wave-wide mask and stack steps, and the latency of one workgroup per
-  frame.
+  remaining candidates are the spills (538:2225 at SIMD8) and the rendezvous
+  of the wave-wide mask and stack steps. This record also listed the latency
+  of one workgroup per frame; the dispatch has 8156 workgroups (2026-10-30
+  record), so that candidate does not apply.
 - **Narrowed: the spills follow from the guest's register file** (offline,
   2026-10-29, the gw118 recipe compiled by ANV with its shader cache disabled).
   - The guest program uses v0-v73 and s0-s54. At SIMD8, ANV gives every
@@ -213,8 +263,10 @@ strict 60 fps-limited runs on the dune route (gw111-gw119).
   - Fills are spread over the whole program rather than gathered in one
     region. The outer loop holds 1072 fills and 305 spills. 86 of the 176
     rendezvous spin loops fill and spill one register on every iteration.
-    With one workgroup on one Xe core, each fill stalls a thread that has
-    little other work to switch to.
+    This record assumed one workgroup on one Xe core, where each fill
+    stalls a thread with little other work to switch to; with 8156
+    workgroups per dispatch (2026-10-30 record) other threads can hide fill
+    latency, and the fills cost issue slots and scratch traffic instead.
   - Since the peak is mostly guest values, reshaping the module cannot cut
     it by the 30% that would remove most spills; only `spirv-opt` was tried.
     Keeping cold guest registers in shared memory, which has lower latency
@@ -574,10 +626,12 @@ gdb runs.
   time: compute 36 ms, of which one program (`0x3666fa39`) took 24 ms per
   call, indexed draws 20 ms, the geometry pass 7 ms. The processor waits
   about 46 ms per frame on fences and 36 ms on `WAIT_REG_MEM`.
-- **Localized.** `0x3666fa39` is dispatched as a single 16x16 workgroup
-  (four guest waves; 3316 instructions, 72 VGPRs, scalar find-first-set and
-  `v_readlane` loops ending in an image store), so its cost is latency, not
-  occupancy. As split wave64 on 16-lane host subgroups it spilled heavily:
+- **Localized.** `0x3666fa39` runs 16x16 workgroups (four guest waves each;
+  3316 instructions, 72 VGPRs, scalar find-first-set and `v_readlane` loops
+  ending in an image store). This record first said a single workgroup per
+  dispatch and concluded that the cost was latency, not occupancy; the
+  dispatch has 8156 workgroups (2026-10-30 record), so the pass fills the
+  GPU. As split wave64 on 16-lane host subgroups it spilled heavily:
   offline ANV compiles of the recorded pipeline gave 1574:9325
   spills:fills at SIMD16 and 470:2397 at SIMD8.
 - **Fix 1** (`6242d13ac`): guest programs over 64 VGPRs split into eight

@@ -93,8 +93,9 @@ Each link moves the wait to the next one:
      frame time and CP work per draw are lower, where removing the waits can change the frame
      rate.
    - **The wait under the long compute kernel (measured 2026-10-29, gw111-gw113).** A temporary
-     probe wrote a host-visible word after `0x3666fa39`, a BVH traversal kernel. It runs as one
-     16x16 workgroup per frame on the graphics queue and takes 22-29 ms per call as split wave64 on
+     probe wrote a host-visible word after `0x3666fa39`, a BVH traversal kernel. It runs once per
+     frame on the graphics queue as 8156 workgroups of 256 invocations (corrected 2026-10-30;
+     this record first said one 16x16 workgroup) and takes 22-29 ms per call as split wave64 on
      this GPU. These runs loaded a stale module for that kernel; the committed translator's module
      takes 22.3-23.3 ms in dune windows (gw118, `docs/titles/robot-platformer.md`, stale-module
      record). The probe
