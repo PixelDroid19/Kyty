@@ -796,15 +796,19 @@ inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing
 	return false;
 }
 
-// A colour target declared over exactly a depth target's allocation re-describes
-// it (captured: a 960x540 colour target over a 960x540 depth target and two
-// storage images of a recycled allocation). The inverse of
-// GpuMemoryAllowsDepthStencilReclaimSurface: depth images publish no guest bytes,
-// so the depth object is reclaimed while the other parents stay linked.
+// A colour target declared over a depth target's whole allocation, exactly or
+// within a larger range, re-describes it (captured: a 960x540 colour target over
+// a 960x540 depth target and two storage images of a recycled allocation; a
+// 1920x1080 colour target over a smaller depth target and 13 other views of a
+// recycled transient pool). The inverse of GpuMemoryAllowsDepthStencilReclaimSurface:
+// depth images publish no guest bytes, so the depth object is reclaimed while the
+// other parents stay linked. A depth target that extends past the colour target
+// stays live (GpuMemoryAllowsRenderTargetSurfaceAlias).
 inline bool GpuMemoryAllowsRenderTargetReclaimDepth(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                     GpuMemoryObjectType incoming_type)
 {
-	return existing_type == GpuMemoryObjectType::DepthStencilBuffer && relation == GpuMemoryOverlapType::Equals &&
+	return existing_type == GpuMemoryObjectType::DepthStencilBuffer &&
+	       (relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin) &&
 	       incoming_type == GpuMemoryObjectType::RenderTexture;
 }
 

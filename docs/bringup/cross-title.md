@@ -3936,6 +3936,11 @@ the command-processor thread over 15 s puts 6.7% on the span scan of
   640-wide StorageTexture (IsContainedWithin). This is open. The pool reuses
   the same memory across passes, so it needs an aliasing policy for transient
   GPU-owned memory, not another relation special case.
+  On Intel the cold-boot form of this stop (an incoming 1920x1080
+  RenderTexture over 14 pool objects) had a single blocker, a depth target
+  wholly inside the new colour target. A colour target now reclaims a depth
+  target it fully covers (2026-10-29, `docs/titles/robot-platformer.md`).
+  That closes one relation, not the AMD case above.
 - On Intel the same title stops presenting at about 26 s, before this
   dispatch. The command processor spends about 99% of its time inside the
   Intel Vulkan driver creating a compute pipeline from

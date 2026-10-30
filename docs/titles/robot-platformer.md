@@ -81,15 +81,26 @@ strict 60 fps-limited runs on the dune route (gw111-gw119).
 - **Rule.** A build with an uncommitted or experimental translator runs only
   with a private `KYTY_SPIRV_CACHE` (`docs/BRINGUP.md`, debug and execution
   tactics).
-- **Open: transient-pool stop on a cold boot** (gw114, private empty store,
+- **Transient-pool stop on a cold boot** (gw114, private empty store,
   400 s; the cold boot gw117 on version 185 passed the same point). The run stopped while loading the worldmap on
   `!create_all_the_same` (`GpuMemoryCreate.cpp`): a new 1920x1080
   RenderTexture at `0x53ad00000` (size `0xff0000`) crossed or was contained by
   14 objects of a transient pool, among them StorageTextures, a 2432x1368 and
-  a 1216x684 render target with depth, and 1920x1080 render targets. This is
-  the open transient-pool aliasing class (`docs/bringup/cross-title.md`); the
-  slower cold boot reached it. gw115 and gw116, on warm private stores,
-  passed the same point.
+  a 1216x684 render target with depth, and 1920x1080 render targets. gw115
+  and gw116, on warm private stores, passed the same point.
+  - Cause (2026-10-29, from the gw114 parent table): every parent but one was
+    accepted by the multi-surface render-target alias. The one blocker was a
+    DepthStencilBuffer lying wholly inside the new colour target
+    (IsContainedWithin). The depth reclaim accepted only a depth target of
+    exactly the same range.
+  - Change: a colour target that covers a depth target's whole range now
+    reclaims it, as the exact-range case already did. A depth target that
+    extends past the colour target stays live. Unit test
+    `AllowsRenderTargetMultiSurfaceParents` covers both relations.
+  - Not yet exercised live: the cold boot gw124 (300 s, empty store) reached
+    the dunes at 240 s with clean captures, and a temporary probe on the new
+    branch never fired, so the race did not recur. The AMD case in
+    `docs/bringup/cross-title.md` (an incoming StorageTexture) stays open.
 
 ## Robot platformer: the clock-driven resolution controller is stereo-only, and the GPU clock rate (2026-10-29)
 
