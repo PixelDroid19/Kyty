@@ -142,6 +142,18 @@ buffers without allocating a set or hashing anything.
 
   The misses therefore come from buffers, as stage 1 assumes; bindless images (stage 4) would not
   remove them. At about 8% of CP time, stage 1 is worth about 5-7 ms per frame there.
+- **Deprioritized (2026-10-29, gw125).** A user-time profile of the CP thread over clean dune
+  windows (strict, warm pipeline store, 200-214 us/draw) puts `GetDescriptor` at 8.7% of the
+  thread's user samples. That figure includes a temporary probe that repeats the set lookup.
+  - Stage 1 removes only the cache bookkeeping under it: trimming, indexing and unindexing,
+    allocation, hashing and lookup, about 5-6% of those samples.
+  - It keeps the driver's descriptor writes (about 2.5%), because a push set writes the same
+    descriptors.
+  - User time is about 44% of the thread's wall time, so the gain is about 2-3% of the frame,
+    roughly 3 ms of 130 ms. That is half of the premise above.
+  - Its cost is unchanged: a translator bump, one push set shared by VS and PS, the write-mask
+    binding (missing from the list above), and the tests that pin binding numbers.
+  - Stage 1 stays parked until stage 3 needs stable image sets.
 
 ### Stage 2: resource recipe per shader (replaces per-draw `ShaderParseUsage2`)
 
