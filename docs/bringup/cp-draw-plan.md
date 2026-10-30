@@ -35,6 +35,42 @@ as follows (inclusive):
 | `PrepareGuestDeviceAddressForRead` | 4.5% | |
 | Unattributed (`[unknown]` self) | 24.2% | Driver and libc frames without frame pointers |
 
+A profile with driver and libc symbols on `93f357309` (gw110, 29,434 CP samples, dunes) splits the
+unattributed share. The debug info of the Vulkan driver and of libc comes from debuginfod. perf
+uses it once each file is linked as `debug` under its build id in `~/.debug`; `perf script
+--symfs` crashed and printed wrong symbols, so it is not used. Inclusive shares:
+
+| Function | Share | Main callees |
+| --- | --- | --- |
+| `BindDescriptors` | 35.7% | `PrepareTextures` 12.8 (`GpuMemoryCreateObject` 4.6, `FindRenderTexture` 2.5), `PrepareStorageBuffers` 11.6 (`CaptureTransientSnapshotBuffer` 7.8, `GpuMemoryCreateObject` 2.5), `GetDescriptor` 8.3 (trim 2.1, index 1.5, driver update 1.3, allocate 1.2) |
+| `ShaderGetInputInfoPS` + `VS` + `CS` | 13.8% + 2.6% + 2.0% | `ShaderParseUsage2` 12.0% over all stages |
+| `GpuMemory::CreateObject` | 8.0% | `Update` 2.7% |
+| `RecordDispatch` | 6.3% | |
+| `PrepareGuestDeviceAddressForRead` | 5.4% | |
+| `ResolveIndexedVertexRecords` | 4.9% | Almost all self: the min/max scan over guest index bytes |
+| `PublishPendingStorageToGuestAddress` | 4.2% | The driver's buffer copy; 3.9% is the driver's surface setup for each copy |
+| `GpuMemoryFindObjectsForSubmission` | 3.5% | |
+| `PipelineCache::CreatePipeline` | 3.3% | |
+| `LabelManager::CompleteSubmission` | 3.0% | |
+
+The former unattributed share is libc and driver time spread over these callers:
+
+- allocation (`malloc` family 3.9% self; no caller above 1.5%);
+- `memcmp` 2.4%, mostly the write-back page comparison;
+- `memset` and `memmove` 1.9% each;
+- XXH3 1.5% (object hashes) and mutexes 2.3%;
+- the driver's draw recording (`gfx125_CmdDrawIndexed` 1.9%).
+
+No item holds more than 5%. The per-draw cost is spread over the whole path, so only the
+structural stages below change the total.
+
+**Indexed vertex range from the index snapshot (2026-10-29).** The draw already copies its index
+bytes into a transient snapshot, so `ResolveIndexedVertexRecords` now takes the min/max index from
+that snapshot instead of scanning guest memory again, and the snapshot entry keeps the result until
+its bytes are rewritten. Its CP share fell from 4.9% (gw110) to 0.15% (gw120). The dune run gw121
+(strict, 480 s) reached the dunes with the same image as gw118 at 203 us/draw and 8.9 fps; gw118
+measured 279 us/draw on a loaded host, so only the profile share is attributed to this change.
+
 The evidence from Experiment 0 (2026-10-27, 4 titles) sets the shape of a plan:
 
 - The draw key (pipeline, shaders, render state) repeats 94-99% against frame N-1/N-2.
@@ -266,8 +302,12 @@ Result on `PPSA21567 - Astro Bot` dunes (Intel A770, 340 s, gameplay route, 60 f
 - `CaptureTransientSnapshotBuffer` (8.9%) is a copy of guest data. It shrinks only when the GPU
   reads guest pages in place (the dma-buf import path), not through caching. It is tracked
   separately.
-- 27% of samples are unattributed. A profile with driver symbols has to split them before the
-  dune target can be planned for real.
+- The storage publication copy (4.2% of CP time on gw110). Each publication copies whole storage
+  buffers to the guest-address chunks: about 12.5 copies and 52 MB per dune frame (gw118). Both
+  sides are host-visible system RAM, so the bytes cross PCIe twice. The storage write mask already
+  flags written 4 KiB pages, but the copy does not read it. Whether a copy limited to flagged pages
+  is safe depends on writers the mask does not cover (image stores, and stores through physical
+  storage pointers, not verified). This is open, not excluded.
 
 ## Honest ceiling
 
@@ -275,5 +315,5 @@ If stages 1-3 remove the expected shares, CP time drops by about 35-40%, to roug
 us/draw. That is not 27 us. 60 fps also needs:
 
 - the transient-copy lever;
-- the unattributed 27% split and reduced;
-- fewer host draws per guest draw (`ResolveIndexedVertexRecords` 4.4%, `PrepareGuestDeviceAddressForRead` 3.9%).
+- a cut in the libc and driver time that the gw110 profile spreads over the whole path;
+- fewer host draws per guest draw (`PrepareGuestDeviceAddressForRead` 3.9%).

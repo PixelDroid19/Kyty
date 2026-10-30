@@ -705,6 +705,10 @@ public:
 	// This never rereads guest memory; the buffer must come from the current recording.
 	[[nodiscard]] bool ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,
 	                                               uint64_t size, void* dst) const;
+	// Smallest and largest of the first `count` indexes of `element_size` bytes in an index snapshot
+	// of `expected_vaddr` this recording bound: the bytes the GPU reads. Computed once per snapshot contents.
+	[[nodiscard]] bool TransientSnapshotIndexRange(const VulkanBuffer* snapshot, uint64_t expected_vaddr, uint32_t element_size,
+	                                               uint32_t count, uint32_t* minimum, uint32_t* maximum);
 	// Reusable scratch for commands recorded in this buffer. Callers must order
 	// write/read/write hazards explicitly; lifetime extends through its fence.
 	VulkanBuffer* AllocateTransientScratchBuffer(uint64_t size, uint32_t usage);

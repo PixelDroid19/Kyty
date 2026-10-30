@@ -108,6 +108,18 @@ static std::pair<uint32_t, uint32_t> IndexValueRange(const uint8_t* bytes, uint3
 	return {minimum, maximum};
 }
 
+// Records [first, records) that indexes in [minimum, maximum] fetch after `vertex_offset`.
+VertexRecordRequirement VertexRecordsOfIndexRange(uint32_t minimum, uint32_t maximum, int32_t vertex_offset)
+{
+	const int64_t first = static_cast<int64_t>(minimum) + vertex_offset;
+	const int64_t last  = static_cast<int64_t>(maximum) + vertex_offset;
+	if (first < 0 || last < 0 || last >= UINT32_MAX)
+	{
+		return {.valid = false};
+	}
+	return {.first = static_cast<uint32_t>(first), .records = static_cast<uint32_t>(last) + 1u};
+}
+
 VertexRecordRequirement ResolveIndexedVertexRecords(const void* index_addr, uint32_t index_count, VkIndexType index_type,
 	                                                  int32_t vertex_offset)
 {
@@ -129,18 +141,21 @@ VertexRecordRequirement ResolveIndexedVertexRecords(const void* index_addr, uint
 		return {};
 	}
 
-	const auto* bytes   = static_cast<const uint8_t*>(index_addr);
-	const auto  range   = element_size == 2u ? IndexValueRange<uint16_t>(bytes, index_count) : IndexValueRange<uint32_t>(bytes, index_count);
-	const uint32_t minimum = range.first;
-	const uint32_t maximum = range.second;
+	const auto range = GraphicsRenderIndexValueRange(index_addr, index_count, element_size);
+	return VertexRecordsOfIndexRange(range.first, range.second, vertex_offset);
+}
 
-	const int64_t first = static_cast<int64_t>(minimum) + vertex_offset;
-	const int64_t last  = static_cast<int64_t>(maximum) + vertex_offset;
-	if (first < 0 || last < 0 || last >= UINT32_MAX)
-	{
-		return {.valid = false};
-	}
-	return {.first = static_cast<uint32_t>(first), .records = static_cast<uint32_t>(last) + 1u};
+// The same range over an index snapshot the recording bound. Those are the
+// indexes the GPU reads, and a snapshot whose bytes did not change keeps its range.
+VertexRecordRequirement ResolveSnapshotIndexedVertexRecords(CommandBuffer* buffer, const VulkanBuffer* snapshot, uint64_t index_addr,
+                                                            uint32_t index_count, VkIndexType index_type, int32_t vertex_offset)
+{
+	EXIT_IF(index_type != VK_INDEX_TYPE_UINT16 && index_type != VK_INDEX_TYPE_UINT32);
+	const uint32_t element_size = index_type == VK_INDEX_TYPE_UINT16 ? 2u : 4u;
+	uint32_t       minimum      = 0;
+	uint32_t       maximum      = 0;
+	EXIT_IF(!buffer->TransientSnapshotIndexRange(snapshot, index_addr, element_size, index_count, &minimum, &maximum));
+	return VertexRecordsOfIndexRange(minimum, maximum, vertex_offset);
 }
 
 uint32_t ResolveVertexClipProbeDescriptorSet(const ShaderVertexInputInfo& vs_input_info,
@@ -391,6 +406,13 @@ DepthStencilAttachmentAccess ResolveDrawDepthStencilAccess(CommandBuffer* buffer
 }
 
 } // namespace
+
+std::pair<uint32_t, uint32_t> GraphicsRenderIndexValueRange(const void* indexes, uint32_t count, uint32_t element_size)
+{
+	EXIT_IF(indexes == nullptr || (element_size != 2u && element_size != 4u));
+	const auto* bytes = static_cast<const uint8_t*>(indexes);
+	return element_size == 2u ? IndexValueRange<uint16_t>(bytes, count) : IndexValueRange<uint32_t>(bytes, count);
+}
 
 // DrawIndex, DrawIndexAuto, DispatchDirect, depth-stencil copy
 
@@ -1929,13 +1951,23 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		instance_count = 1;
 		first_instance = 0;
 	}
+	// Outside a geometry pass the vertex range comes from the index snapshot when
+	// there is one: only the snapshot holds the indexes the GPU reads.
+	const uint64_t          index_addr_u64  = reinterpret_cast<uint64_t>(index_addr);
+	VulkanBuffer*           index_snapshot  = nullptr;
+	uint64_t                index_upload_ns = 0;
 	VertexRecordRequirement vertex_requirement {};
 	if (geometry_pass)
 	{
 		vertex_requirement = ResolveLinearVertexRecords(0u, primitive_plan.draw_count);
 	} else
 	{
-		vertex_requirement = ResolveIndexedVertexRecords(index_addr, index_count, index_type, vertex_offset);
+		const auto index_upload_start = DrawStageClock::now();
+		index_snapshot = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		index_upload_ns    = DrawStageElapsedNs(index_upload_start);
+		vertex_requirement = index_snapshot != nullptr ? ResolveSnapshotIndexedVertexRecords(buffer, index_snapshot, index_addr_u64, index_count,
+		                                                                                     index_type, vertex_offset)
+		                                               : ResolveIndexedVertexRecords(index_addr, index_count, index_type, vertex_offset);
 	}
 	if (!vertex_requirement.valid)
 	{
@@ -1966,8 +1998,9 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	if (pipeline->transport != nullptr)
 	{
 		FragmentTransportGeometry geometry {};
-		const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
-		geometry.indices             = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		geometry.indices = geometry_pass
+		                       ? TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
+		                       : index_snapshot;
 		geometry.indices_snapshotted = geometry.indices != nullptr;
 		if (geometry.indices == nullptr)
 		{
@@ -2000,11 +2033,9 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	bool indices_snapshotted = true;
 	if (!geometry_pass)
 	{
-		const uint64_t index_addr_u64              = reinterpret_cast<uint64_t>(index_addr);
-		const auto     index_buffer_binding_start = DrawStageClock::now();
-		VulkanBuffer*  indices =
-		    TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-		indices_snapshotted = indices != nullptr;
+		const auto    index_buffer_binding_start = DrawStageClock::now();
+		VulkanBuffer* indices                    = index_snapshot;
+		indices_snapshotted                      = indices != nullptr;
 		if (indices == nullptr)
 		{
 			indices = static_cast<VulkanBuffer*>(
@@ -2013,7 +2044,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
 
 		vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
-		DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start));
+		DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start) + index_upload_ns);
 	}
 
 	const auto     vertex_buffer_binding_start = DrawStageClock::now();

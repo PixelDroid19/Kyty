@@ -925,6 +925,12 @@ struct TransientBufferEntry
 	uint64_t tracked_generation = 0;
 	// Probes the tracked bytes served without a comparison.
 	uint32_t tracked_reuses = 0;
+	// Smallest and largest of the first `index_range_count` indexes of
+	// `index_range_width` bytes in the snapshot; width 0 until computed for these bytes.
+	uint32_t index_range_width = 0;
+	uint32_t index_range_count = 0;
+	uint32_t index_min         = 0;
+	uint32_t index_max         = 0;
 	// Creation order; the free index hands out the earliest-created fitting entry.
 	uint64_t creation = 0;
 	// Recordings of the shared snapshot pool that bind this entry, and the latest of them.
@@ -1008,6 +1014,7 @@ public:
 		const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
 		UnindexSnapshot(entry);
 		entry->snapshot_valid = false;
+		entry->index_range_width = 0;
 		entry->nonzero_end    = std::max(entry->nonzero_end, size);
 		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
 		Commit(entry, size, true);
@@ -1200,8 +1207,9 @@ public:
 		// A refused capture may already have copied part of the range, so the
 		// entry's previous snapshot is dropped first.
 		UnindexSnapshot(entry);
-		entry->snapshot_valid = false;
-		entry->nonzero_end    = std::max(entry->nonzero_end, capture_end);
+		entry->snapshot_valid    = false;
+		entry->index_range_width = 0;
+		entry->nonzero_end       = std::max(entry->nonzero_end, capture_end);
 		if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(vaddr + capture_begin, capture_end - capture_begin,
 		                                            static_cast<uint8_t*>(entry->mapped) + capture_begin, &atomic_validation_ns, &copy_ns,
 		                                            admission))
@@ -1250,6 +1258,34 @@ public:
 		}
 
 		std::memcpy(dst, static_cast<const uint8_t*>(entry->mapped) + offset, static_cast<size_t>(size));
+		return true;
+	}
+
+	bool SnapshotIndexRange(const VulkanBuffer* snapshot, uint64_t expected_vaddr, uint32_t element_size, uint32_t count,
+	                        uint32_t* minimum, uint32_t* maximum)
+	{
+		EXIT_IF(minimum == nullptr || maximum == nullptr || (element_size != 2u && element_size != 4u));
+		const auto found = m_by_buffer.find(snapshot);
+		if (found == m_by_buffer.end())
+		{
+			return false;
+		}
+		auto* entry = found->second;
+		if (!entry->used || !entry->snapshot_valid || entry->mapped == nullptr || entry->snapshot_vaddr != expected_vaddr ||
+		    entry->snapshot_begin != 0u || static_cast<uint64_t>(count) * element_size > entry->snapshot_size)
+		{
+			return false;
+		}
+		if (entry->index_range_width != element_size || entry->index_range_count != count)
+		{
+			const auto range         = GraphicsRenderIndexValueRange(entry->mapped, count, element_size);
+			entry->index_range_width = element_size;
+			entry->index_range_count = count;
+			entry->index_min         = range.first;
+			entry->index_max         = range.second;
+		}
+		*minimum = entry->index_min;
+		*maximum = entry->index_max;
 		return true;
 	}
 
@@ -2262,6 +2298,18 @@ bool CommandBuffer::ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buff
 	auto*                       shared = m_pool->snapshots;
 	std::lock_guard<std::mutex> lock(shared->mutex);
 	return shared->pool.ReadSnapshot(storage_buffer, expected_vaddr, offset, size, dst);
+}
+
+bool CommandBuffer::TransientSnapshotIndexRange(const VulkanBuffer* snapshot, uint64_t expected_vaddr, uint32_t element_size, uint32_t count,
+                                                uint32_t* minimum, uint32_t* maximum)
+{
+	if (m_snapshot_leases == nullptr)
+	{
+		return false;
+	}
+	auto*                       shared = m_pool->snapshots;
+	std::lock_guard<std::mutex> lock(shared->mutex);
+	return shared->pool.SnapshotIndexRange(snapshot, expected_vaddr, element_size, count, minimum, maximum);
 }
 
 VulkanBuffer* CommandBuffer::AllocateTransientScratchBuffer(uint64_t size, uint32_t usage)

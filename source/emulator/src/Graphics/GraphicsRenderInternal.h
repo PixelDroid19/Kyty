@@ -61,6 +61,7 @@
 #include <list>
 #include <map>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -1746,6 +1747,8 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 // --- Core (color / dump) ---
 
 void FormatTextureList(const ShaderTextureResources& textures, char* buffer, size_t buffer_size);
+// Smallest and largest of `count` indexes of `element_size` (2 or 4) bytes.
+[[nodiscard]] std::pair<uint32_t, uint32_t> GraphicsRenderIndexValueRange(const void* indexes, uint32_t count, uint32_t element_size);
 // Bytes before read_begin are never read through the returned buffer and are not captured.
 VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
                                                VkBufferUsageFlags usage, uint64_t read_begin = 0, bool zero_tail = true);

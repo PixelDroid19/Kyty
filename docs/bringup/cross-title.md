@@ -954,6 +954,23 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 - **Open.** Both fills still write the range to system memory over PCIe.
   Removing that cost needs storage objects in device-local memory with an
   explicit read-back for the CPU write-back.
+- **Placement probe, excluded as a switch (2026-10-29,** `PPSA21567 - Astro Bot`,
+  Intel A770 with resizable BAR, strict 480 s runs on the dune route). A
+  temporary probe allocated storage data, write masks, the transient snapshot
+  pool and vertex buffers in device-local, host-visible memory, with every
+  other line unchanged.
+  - Snapshot pool and vertex buffers (gw122): 0.7-1.3 fps for the whole run,
+    which never left the boot scenes; the base run gw121 reached the dunes at
+    8.9 fps. All four kinds (gw123): frame 100 after about three minutes.
+  - The CPU reads mapped memory of these objects on hot paths, and reads of
+    device-local memory over the BAR are uncached: the snapshot comparison
+    against guest bytes, the index range of a snapshot, the uniform-block
+    deduplication, and the write-back page comparison and adoption.
+  - GPU time per kernel rose 1.5-4.8x against the same scenes of gw121. This
+    does not measure placement: at 1 fps the GPU runs mostly idle, and its
+    clock is not controlled.
+  - Placement can only follow a change that moves every CPU reader of these
+    objects to guest memory or a host-side copy. The GPU gain is not measured.
 
 ## Crash evidence read only for a reported fault (2026-10-23)
 
