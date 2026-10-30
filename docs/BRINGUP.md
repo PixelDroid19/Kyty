@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: PrimitiveId in the interpolation geometry stage limited geometry distribution (2026-10-30)
   - Robot platformer: heavy character draws are real content, and same-queue guest-address waits (2026-10-30)
   - Robot platformer: EXEC guard folding in lane-local pixel programs excluded at runtime (2026-10-30)
   - Robot platformer: constant loads as uniform buffers excluded, and a guest fault at hub start (2026-10-30)

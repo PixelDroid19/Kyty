@@ -4421,7 +4421,8 @@ TEST(EmulatorGraphicsPackets, SeparatesSmoothAndFlatViewsOfOnePixelParameter)
 		Vector<uint32_t> binary;
 		String8 error;
 		EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
-		EXPECT_FALSE(ShaderCompileInterpolationGeometry(input).IsEmpty());
+		EXPECT_FALSE(ShaderCompileInterpolationGeometry(input, false).IsEmpty());
+		EXPECT_FALSE(ShaderCompileInterpolationGeometry(input, true).IsEmpty());
 	}
 }
 

@@ -338,10 +338,12 @@ also needs sufficient host memory for guest state and driver compilation.
 
 ### Primitive identity through interpolation geometry
 
-The generated interpolation geometry stage now copies its input
-`PrimitiveId` to every emitted vertex. Its output-component limits include
-that additional integer. The geometry translation version advances separately
-from vertex, pixel and compute translations, preserving their warm entries.
+The interpolation geometry stage generated for the transport passes copies its
+input `PrimitiveId` to every emitted vertex. Native pixel programs do not read
+the builtin, so their geometry stage leaves it out; the two variants have
+separate module keys. The output-component limits include that additional
+integer. The geometry translation version advances separately from vertex,
+pixel and compute translations, preserving their warm entries.
 
 The public capture replay previously received primitive 1,044,885,012 from a
 two-primitive draw and failed before recording a quad. The geometry stage had

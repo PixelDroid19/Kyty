@@ -1936,8 +1936,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			if (ps_input_info->custom_interpolation.Enabled())
 			{
 				transport_geometry = translation_cache->GetOrCompile(
-				    ShaderModuleKey::Create(ps_id, ShaderModuleStage::Geometry, optimization, next_gen),
-				    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info); });
+				    ShaderModuleKey::Create(ps_id, ShaderModuleStage::GeometryForwardingPrimitiveId, optimization, next_gen),
+				    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info, true); });
 				EXIT_IF(transport_geometry.binary.IsEmpty());
 			}
 			auto* passes = CreateFragmentTransportPasses(framebuffer, *color, *vs_input_info, vs_translation.binary, *ps_input_info,
@@ -1999,7 +1999,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	{
 		geometry_translation = translation_cache->GetOrCompile(
 		    ShaderModuleKey::Create(ps_id, ShaderModuleStage::Geometry, optimization, next_gen),
-		    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info); });
+		    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info, false); });
 		DebugStatsRecordShaderTranslationCache(geometry_translation.hit, geometry_translation.evicted);
 		EXIT_IF(geometry_translation.binary.IsEmpty());
 	}

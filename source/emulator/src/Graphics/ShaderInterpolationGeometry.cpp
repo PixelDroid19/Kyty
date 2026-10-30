@@ -78,13 +78,13 @@ void GeometryLoadRaw(const ShaderPixelInputInfo& info, GeometrySource* source)
 	}
 }
 
-void GeometryEmitVertex(const ShaderPixelInputInfo& info, uint32_t vertex, GeometrySource* source)
+void GeometryEmitVertex(const ShaderPixelInputInfo& info, uint32_t vertex, bool forward_primitive_id, GeometrySource* source)
 {
 	source->body += String8::FromPrintf(
 	    "%%position_ptr_%u = OpAccessChain %%input_vector %%vertices %%u%u %%u0\n"
 	    "%%position_%u = OpLoad %%v4float %%position_ptr_%u\n"
 	    "OpStore %%position_out %%position_%u\n", vertex, vertex, vertex, vertex, vertex);
-	source->body += "OpStore %primitive_out %primitive\n";
+	if (forward_primitive_id) { source->body += "OpStore %primitive_out %primitive\n"; }
 	for (uint32_t input = 0; input < info.input_num; ++input)
 	{
 		ShaderPixelInterpolator decoded {};
@@ -112,24 +112,31 @@ void GeometryEmitVertex(const ShaderPixelInputInfo& info, uint32_t vertex, Geome
 
 } // namespace
 
-Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& info)
+// Only the fragment transport passes read PrimitiveId. Reading it here restricts geometry
+// distribution on some hosts (per instance on A770 ANV), which limits heavy draws to one slice.
+Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& info, bool forward_primitive_id)
 {
 	EXIT_IF(!info.custom_interpolation.Enabled());
 	GeometrySource source;
 	GeometryDeclareInputs(info, &source);
 	source.body = "%main = OpFunction %void None %function\n%entry = OpLabel\n"
-	              "%position_out = OpAccessChain %output_vector %output_vertex %u0\n"
-	              "%primitive = OpLoad %int %primitive_in\n";
+	              "%position_out = OpAccessChain %output_vector %output_vertex %u0\n";
+	if (forward_primitive_id) { source.body += "%primitive = OpLoad %int %primitive_in\n"; }
 	GeometryLoadRaw(info, &source);
-	for (uint32_t vertex = 0; vertex < 3u; ++vertex) { GeometryEmitVertex(info, vertex, &source); }
+	for (uint32_t vertex = 0; vertex < 3u; ++vertex) { GeometryEmitVertex(info, vertex, forward_primitive_id, &source); }
 	source.body += "OpEndPrimitive\nOpReturn\nOpFunctionEnd\n";
-	const String8 header = "OpCapability Shader\nOpCapability Geometry\nOpMemoryModel Logical GLSL450\n"
-	                       "OpEntryPoint Geometry %main \"main\" %vertices %output_vertex %primitive_in %primitive_out";
+	const String8 header = String8("OpCapability Shader\nOpCapability Geometry\nOpMemoryModel Logical GLSL450\n"
+	                               "OpEntryPoint Geometry %main \"main\" %vertices %output_vertex") +
+	                       (forward_primitive_id ? " %primitive_in %primitive_out" : "");
 	const String8 modes = "\nOpExecutionMode %main Triangles\nOpExecutionMode %main OutputTriangleStrip\n"
 	                      "OpExecutionMode %main OutputVertices 3\nOpExecutionMode %main Invocations 1\n"
 	                      "OpMemberDecorate %vertex 0 BuiltIn Position\nOpDecorate %vertex Block\n";
-	const String8 primitive_annotations = "OpDecorate %primitive_in BuiltIn PrimitiveId\n"
-	                                      "OpDecorate %primitive_out BuiltIn PrimitiveId\n";
+	const String8 primitive_annotations = forward_primitive_id ? "OpDecorate %primitive_in BuiltIn PrimitiveId\n"
+	                                                             "OpDecorate %primitive_out BuiltIn PrimitiveId\n"
+	                                                           : "";
+	const String8 primitive_variables = forward_primitive_id ? "%primitive_in = OpVariable %input_primitive Input\n"
+	                                                           "%primitive_out = OpVariable %output_primitive Output\n"
+	                                                         : "";
 	const String8 types = R"(
 %void = OpTypeVoid
 %float = OpTypeFloat 32
@@ -161,14 +168,12 @@ Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& 
 %function = OpTypeFunction %void
 %input_primitive = OpTypePointer Input %int
 %output_primitive = OpTypePointer Output %int
-%primitive_in = OpVariable %input_primitive Input
-%primitive_out = OpVariable %output_primitive Output
 %vertices = OpVariable %input_vertices Input
 %output_vertex = OpVariable %output_vertex_type Output
 )";
 	Vector<uint32_t> binary;
 	String8 error;
-	const auto assembly = header + source.interface + modes + primitive_annotations + source.annotations + types + source.variables + source.body;
+	const auto assembly = header + source.interface + modes + primitive_annotations + source.annotations + types + primitive_variables + source.variables + source.body;
 	EXIT_IF(!ShaderToolchain::Run(assembly, &binary, &error));
 	return binary;
 }

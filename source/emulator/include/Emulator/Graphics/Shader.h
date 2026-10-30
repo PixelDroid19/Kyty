@@ -2695,7 +2695,7 @@ struct ShaderPixelInterpolator
 [[nodiscard]] bool ShaderPixelInputActive(const ShaderPixelInputInfo& info, uint32_t index);
 [[nodiscard]] uint32_t ShaderPixelSystemInputRegister(const ShaderPixelInputInfo& info, uint32_t field);
 void ShaderResolveCustomInterpolation(const ShaderPixelInterpolationUse& use, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info);
-[[nodiscard]] Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& info);
+[[nodiscard]] Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& info, bool forward_primitive_id);
 
 struct ShaderSharp
 {

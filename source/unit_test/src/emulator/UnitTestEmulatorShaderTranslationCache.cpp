@@ -195,6 +195,9 @@ TEST(EmulatorShaderTranslationCache, GeometryUsesItsOwnTranslationVersion)
 	const auto geometry = ShaderModuleKey::Create(id, ShaderModuleStage::Geometry, Config::ShaderOptimizationType::Performance, true);
 	EXPECT_EQ(geometry.translator_version, kShaderGeometryTranslatorVersion);
 	EXPECT_NE(geometry.translator_version, kShaderTranslatorVersion);
+	const auto forwarding = ShaderModuleKey::Create(id, ShaderModuleStage::GeometryForwardingPrimitiveId, Config::ShaderOptimizationType::Performance, true);
+	EXPECT_EQ(forwarding.translator_version, kShaderGeometryTranslatorVersion);
+	EXPECT_NE(forwarding, geometry);
 }
 
 TEST(EmulatorShaderTranslationCache, ExactMissCompilesOnceAndHitDoesNotInvokeCompiler)

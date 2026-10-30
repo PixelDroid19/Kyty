@@ -6,6 +6,35 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: PrimitiveId in the interpolation geometry stage limited geometry distribution (2026-10-30)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
+strict 60 fps-limited runs gw181 (before) and gw182, gw184 (after).
+
+- **Cause.** Every generated interpolation geometry stage read `PrimitiveId`
+  and forwarded it, though only the fragment transport passes read it. The ANV
+  source selects instance-level geometry distribution on DG2-G10 when a
+  geometry stage reads `PrimitiveId` (workaround 14019166699,
+  `update_vfg_distribution_mode`; read in the 26.0 source, the installed
+  driver's behaviour is shown by the timing below). A draw with one instance
+  then stays on one slice. Before the change, those draws used about 70-100 of
+  512 execution units by estimated cycles; one slice has 64.
+- **Change.** Native pipelines compile the stage without the builtin; the
+  transport passes keep it under their own module key (geometry version 95).
+- **Time per triangle** (GPU timestamps over pipeline statistics, crowd scene):
+
+  | Pixel program | gw181 | gw182 | gw184 |
+  | --- | --- | --- | --- |
+  | `cbb6bb28` | 44.5 ns | 12.8 ns | 10.5 ns |
+  | `9dacb90f` | 10.0 ns | 3.4 ns | 3.4 ns |
+  | `d4bef057` (few triangles per draw) | 16.1 ns | 13.4 ns | 14.0 ns |
+
+- **Limits.** gw182, gw184 and gw185 hit the guest assert at hub start (below)
+  within seconds of the first crowd frames, so the "after" figures come from one
+  full window each, and no whole-frame rate in the hub was measured. gw183 ran
+  out of its 330 s bound during the hub load, with a foreign build on the host.
+  No other title that uses this path was re-run.
+
 ## Robot platformer: heavy character draws are real content, and same-queue guest-address waits (2026-10-30)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
@@ -13,8 +42,9 @@ strict 60 fps-limited runs gw180 and gw181, `504361d49` plus temporary probes
 (not committed).
 
 - **Hub start outcomes on the same route.** Guest assert: gw146, gw149,
-  gw153-155, gw175, gw176, gw178, gw179. GPU job timeout: gw144, gw148, gw150,
-  gw152, gw168. Passed: gw147, gw169, gw180, gw181.
+  gw153-155, gw175, gw176, gw178, gw179, and with the geometry change above
+  gw182, gw184, gw185. GPU job timeout: gw144, gw148, gw150, gw152, gw168.
+  Passed: gw147, gw169, gw180, gw181.
 - **Excluded: a replay defect behind the repeated large draws.** The pixel
   program `cbb6bb28` draws the same vertex program, 32-bit index buffer
   (608,112 indices, 202,704 triangles) and vertex buffer (107,967 records,
