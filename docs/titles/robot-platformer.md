@@ -67,6 +67,28 @@ version 185, `fb7b6f307` plus temporary probes (not committed).
   the whole program. Proving single readfirstlane operands uniform would
   only remove some exchanges inside the split run; it would not make the
   kernel native.
+- **Where the exchanges come from.** The translated kernel has 159 exchange
+  call sites: 73 wave-wide ballots, 53 lane reads (44 `v_readlane` at a lane
+  chosen by `s_ff1` over a mask, plus the 9 `v_readfirstlane`) and 29
+  orderings after DS instructions. The guest traverses its BVH
+  wave-coherently: one node pointer per wave, children merged across lanes,
+  and a wave stack held in the lanes of `v59`. Each node step costs about
+  eight exchanges, which matches the 55.6 per invocation.
+- **Static cost by part** (offline compiles of the stored module with
+  helper bodies replaced, never run; the baseline is 39,335 instructions,
+  spills:fills 538:2225 and 362 live registers at SIMD8). Replacing the part
+  rendezvous with a part-local subgroup operation gives 26,776 instructions,
+  323:1353 and 258. Replacing the guest-address lookup with one load gives
+  35,420 instructions, 459:1904 and 350.
+- **Exchange cost bound** (microbenchmark, 8156 workgroups of 256
+  invocations at subgroup size 8, eight parts per 64-lane wave). 56
+  rendezvous per invocation cost about 3.2 ms over the same loop without
+  them, at full occupancy and with almost no work between exchanges. The
+  real kernel runs at lower occupancy, so this is a lower bound.
+- **Excluded: one shared arrival counter per wave** instead of one sequence
+  word per part (one atomic add per arrival, one atomic load per spin). It
+  was about 6% faster in the same microbenchmark (3.52 against 3.73 ms) and
+  was not built into the translator.
 
 ## Robot platformer: dune GPU cost by stage, translated program size, and concurrent sharing excluded (2026-10-30)
 
