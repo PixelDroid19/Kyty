@@ -84,6 +84,33 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   (`docs/titles/survival.md`, 2026-10-27), had 26 of 32 cases interactive
   against 23 of 32. The sweep has not been repeated with this fix.
 
+## Semaphore waiters woke each other without end (2026-10-29, fixed)
+
+- **Observed** (`PPSA21567 - Astro Bot`, Intel Arc A770, strict warm 400 s dune runs, per-thread
+  `/proc` counters read every 30 s):
+  - Eight guest threads were each on CPU about 40% of the time, about 26% of it in the kernel.
+    Each switched context about 116000 times a second. Together they used about 3.2 of the
+    host's 12 CPUs.
+  - A user-time profile (gw125) placed all eight in `KernelWaitSema`, in futex wake and wait.
+- **Cause.** `KernelSemaPrivate::Wait` broadcast the condition variable each time a waiter woke,
+  and again whenever a wait call returned. Only `Cancel` (waiting for the waiter list to empty) and
+  `Delete` (waiting for active calls to end) need those notifications. With two or more waiters
+  on an empty semaphore, one `Signal` started a loop: each woken waiter found no count, rewoke the
+  others and waited again.
+- **Fix.** The waiter notifies only when a cancel is waiting and the waiter list is now empty, or
+  when a delete is waiting and the last active call ends. This is the rule `EventFlag.cpp` already
+  follows.
+- **Verified.**
+  - The new `SemaphoreSignalTakenByOneWaiterDoesNotCreateWakeStorm` test (8 waiters, one
+    `Signal`) used 787 ms of process CPU in a 250 ms sample before the fix and passes after it.
+  - 141 kernel, semaphore and pthread tests pass; one is skipped, as it was before.
+  - gw127 against gw126, same route, store and settings: process CPU fell from about 420% to 96%
+    and the eight threads dropped out of the busiest list.
+  - Frame rate and command-processor cost are unchanged within noise: about 9.7 fps over windows
+    9-13 in both, and 195 against 186 us/draw. Captures match.
+  - The command-processor thread was not starved before the fix (its run-queue time was below 1%).
+    The fix frees host CPU, not frame time, on this 12-CPU host.
+
 ## Open: PPSA01341 - Demon's Souls livelocks at boot (2026-10-29, parked)
 
 - **Observed.**
