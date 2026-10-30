@@ -6,6 +6,88 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: constant loads as uniform buffers excluded, and a guest fault at hub start (2026-10-30)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
+strict 60 fps-limited runs, `ad7028e68` plus temporary probes.
+
+- **Excluded on paper: binding scalar constant loads as uniform buffers**
+  (the open lever in the dune GPU cost record below; not built).
+  - Kyty emits every `S_BUFFER_LOAD` as a load from the storage-buffer
+    array, indexed by the V# slot. In the final NIR of the `8ca0b9ff` pixel
+    program (gw135) the driver already turns 54 of them into wave-uniform
+    block loads with constant offsets (`load_ssbo_uniform_block_intel`) over
+    10 buffers; 18 other storage loads are divergent.
+  - The array index of those loads is dynamic (a pushed V# slot plus a
+    base), and ANV pushes only uniform buffers with a constant binding and
+    index. Pushing them would need one fixed uniform-buffer binding per
+    scalar V#, a descriptor layout redesign, for loads the driver already
+    batches.
+  - The program waits on memory latency, not on load count (3.7 ns per
+    fragment against about 0.56 ns of ALU time), so fewer constant loads
+    would not shorten it measurably.
+- **Guest assert at hub start (open; gw146, gw149, gw153, gw154, gw155).**
+  All five runs (default route `scripts/input/reach_first_gameplay.pad`)
+  stopped right after `LoadLevelResources: hub_crashsite_tutorial` and
+  `SubLevelLocator sublevel_locator3 ... restore to 6`, before
+  `ui_pause_cinematics` starts.
+  - Cause: the title's own assert. The fault (`int 0x42` at guest
+    `rip 0x9004a0c3e`) is in the out-of-space callback of a guest command
+    buffer (`0x9004a0c10`). The callback never chains a new block; it
+    reports `command_buffer_writer.ppr.cpp` line 31 with the message
+    "There are too many objects/batches in this scene." and traps.
+    `rcx = 0xdeadbeef5533ccaa` is Kyty's stack-protector guard value
+    (`LibKernel.cpp`), not a debug fill pattern.
+  - The command buffer grows packets up from its base and embedded constant
+    data down from its top. In gw149 the failing request was a 24 KB
+    embedded constant block (allocator `0x900496f90`), and an earlier block
+    of the same size sat about 53 KB above the base of the 4 MB buffer:
+    embedded constants, not packets, filled it.
+  - Buffer layout (eboot 01.018, static): the title's GPU device object
+    creates five groups of three buffers from a size table of 7, 7, 4, 4
+    and 6 MB (creator `0x9004a38c0`, one end-of-pipe event queue per group).
+    gw150 (gdb on the buffer init function `0x9004a0930`) lists the same 15
+    buffers. Both failing buffers of gw149 and gw150 are 4 MB ones.
+  - Embedding (static): per draw, the embed stage walks the constant slots
+    the bound shader uses and copies each slot not yet uploaded into the
+    buffer through the allocator above; a slot that does not fit calls the
+    callback. The reset routine that rewinds the cursors (`0x9004a05d0`) has
+    no static caller, so the per-frame rewind is reached indirectly.
+  - Content (gw153, gw154): a temporary sampler read the 15 buffer cursors
+    every 20 ms through `/proc/<pid>/mem` and dumped buffers past 90 % use.
+    - The three buffers of a group are used in turn. Over 250 s the buffers
+      of the five groups were rewound about 840, 315, 325, 220 and 2 times
+      each: the 6 MB group is essentially unused.
+    - In crowded frames the embedded data are mostly bone matrices: blocks of
+      1024 matrices of 48 bytes in which only slots 0-70 and 512-582 are
+      non-zero. The 7 MB buffers of the second group held 98-103 such blocks
+      at 6.0-6.3 MB of use, and the 4 MB buffers of the fourth group 74-82 at
+      3.7-4.1 MB (90-98 % full). The intro level already reached 97 % in the
+      fourth group.
+    - In the hub-start frame of gw154 the two fullest buffers held 79 and 82
+      blocks for the draws of four meshes (20, 20, 11 and 10 blocks in one
+      buffer), with no block repeated between the two buffers.
+  - Excluded:
+    - Save state: the title's save memory slot is all zeros and no savedata
+      directory exists, so every run starts a new game.
+    - Render resolution: gw153 at 960x540 failed the same way.
+    - The guest particle heap: `JsParticle heap memory is full!` is printed
+      after the particle heap fails a request, which the title then retries
+      on its engine allocator. With the mspace fix in `docs/bringup/cross-title.md`
+      (2026-10-30), gw155 printed it 0 times and hit the assert at the same
+      point.
+  - Correlation, not a mechanism: the failing runs overlapped a foreign
+    process at 100 % CPU (run-queue wait 11-16 % of run time against 1-2 %
+    in passing runs, CPU pressure avg10 1.3-5.8 against about 0.1).
+  - About 55 earlier runs on this branch loaded the same hub and continued
+    into its cinematic. Of the ten latest runs (gw146-gw155), only gw147
+    passed and gw151 did not reach the hub; gw146, gw149 and gw153-gw155 hit
+    this assert, gw148, gw150 and gw152 the GPU job timeout recorded below.
+  - Direction: find what bounds the number of skinned draws per buffer on
+    hardware: which engine pass records into each group, and whether a
+    visibility or LOD decision, a GPU write-back or thread timing changes
+    that count.
+
 ## Robot platformer: merged loads in the heavy vertex program excluded, and the BVH node fetch (2026-10-30)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
@@ -272,7 +354,8 @@ about 10 fps.
     program.
 - **Open levers, by measured share:** the BVH kernel; the pixel programs'
   constant loads (binding scalar-only, read-only V#s as uniform buffers so
-  the driver can push them); vector buffer loads in vertex programs.
+  the driver can push them; excluded on paper in the record above); vector
+  buffer loads in vertex programs.
 
 ## Robot platformer: stale modules in the shared shader store, and the BVH kernel cost (2026-10-29)
 
@@ -513,9 +596,30 @@ gdb runs.
     render engine for a timed-out `fc_script` job and reported no page fault.
     The queue timeline wait (`vkWaitSemaphores`) saw the loss; the run kept
     no submit fault entries.
-  - Next step: record the bound V# words (base, `num_records`, binding kind) of the nodes and
-    heads buffers for that draw in a bad run, and check the translator's `s_buffer_load` range
-    rule against the ISA reference.
+  - It recurred again in gw148 (`ad7028e68` plus probes, default route, RenderDoc layer loaded):
+    `vkWaitForFences` returned -4 on queue 8, slot 4, host sequence 76005, and the kernel logged
+    a timed-out `fc_script` job. Its hung queue-8 buffer draws VS `0x360038d0f4cfb9a5` with PS
+    `0x21001960c4a8f3bb`, not with the light-list PS.
+  - An offline comparison of the nine kept trails (gw23, gw25, gw42, gw44, gw54, gw77, gw100,
+    gw103, gw148) finds the same tail in seven of them, in the first queue-8 buffer that never
+    completed: one 3-vertex rect draw (VS `0x0a00027047a9c428`, PS `0x210001602712f299`), then
+    the two `0x4c97f40f` fills of 4608 and 8640 groups. The 24-group fills of the same kernel
+    complete in the same trails. gw23 (a queue-7 buffer) and gw25 do not have the tail.
+  - The light-list PS `0x210045a05d93a5ea` is in only two of the four recent trails (gw100,
+    gw103), so the light-list lead above does not explain the timeout on its own.
+  - Neither the rect PS nor the fill kernel can spin: their stored modules have no loop
+    (`OpLoopMerge`). The trail names the buffer that timed out, not the command inside it.
+  - gw148 and gw150 (same binary; gw150 under gdb) timed out at the start of the hub, right
+    after its level load, where gw146 and gw149 hit the guest assert above. In gw150
+    `vkWaitForFences` returned -4 on queue 8, slot 1, host sequence 87154; its hung buffer holds
+    16 point-list draws of VS `0x360038d0f4cfb9a5` with PS `0x21001960c4a8f3bb`, then the rect
+    draw and the two large fills.
+  - gw152 (same binary, default route) lost the device at the same point.
+  - Eight of the ten kept trails (all but gw23 and gw25) hold point-list draws of a
+    `0x3600...` vertex program (`0x360038d0f4cfb9a5` or `0x360043b08e51dd94`) in the hung
+    buffer.
+  - Next step: per-command breadcrumbs (a host-visible marker written after each draw and
+    dispatch of the queue-8 buffer) to name the command the engine stopped on.
 - **Open defect: in-flight write-back refusal** (gw108, strict 340 s, `453fd755a` plus
   diagnostics, frame about 2044, before the dunes).
   - The run stopped with `GpuMemory cannot version an in-flight write-back backing:
