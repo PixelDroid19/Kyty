@@ -2,6 +2,7 @@
 // Original algorithm is from:
 // 	https://sqlite.org/src/file?name=src/mem3.c
 // 	SQLite source code is in the public-domain and is free to everyone to use for any purpose.
+// Released chunks are coalesced at once, and malloc takes the best fit from exact and segregated size bins.
 
 #include "Kyty/Core/MSpace.h"
 
@@ -9,6 +10,10 @@
 #include "Kyty/Core/LinkList.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
+
+#if KYTY_COMPILER != KYTY_COMPILER_CLANG && KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#include <intrin.h>
+#endif
 
 #include <cstdint>
 #include <cstring>
@@ -25,7 +30,7 @@ static uint64_t align(uint64_t v, uint64_t a)
 }
 
 static constexpr uint32_t MSPACE_ARRAY_SMALL = 10;
-static constexpr uint32_t MSPACE_ARRAY_HASH  = 61;
+static constexpr uint32_t MSPACE_ARRAY_LARGE = 116;
 
 struct MSpaceBlock
 {
@@ -52,11 +57,14 @@ struct MSpaceContext
 	Core::Mutex*          mutex                               = nullptr;
 	mspace_dbg_callback_t dbg_callback                        = nullptr;
 	char                  name[MSPACE_NAME_SIZE]              = {0};
-	uint32_t              index_of_key_chunk                  = 0;
-	uint32_t              size_of_key_chunk                   = 0;
 	uint32_t              array_small[MSPACE_ARRAY_SMALL - 1] = {};
-	uint32_t              array_hash[MSPACE_ARRAY_HASH]       = {};
+	uint32_t              array_large[MSPACE_ARRAY_LARGE]     = {};
+	uint64_t              large_map[2]                        = {};
+	uint64_t              inuse_blocks                        = 0;
+	uint64_t              max_inuse_blocks                    = 0;
 };
+
+static_assert(sizeof(MSpaceContext) <= MSPACE_HEADER_SIZE, "MSpaceContext must fit in the fixed header");
 
 struct MSpaceRegistration
 {
@@ -133,6 +141,29 @@ static bool MSpaceNameValid(const char* name)
 	return false;
 }
 
+static uint32_t IntLog2(uint32_t i)
+{
+#if KYTY_COMPILER == KYTY_COMPILER_CLANG || KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+	return 31 - __builtin_clz(i | 1u);
+#else
+	unsigned long temp;
+	_BitScanReverse(&temp, i | 1u);
+	return temp;
+#endif
+}
+
+// Four sub-bins per power of two. Callers pass only chunks above MSPACE_ARRAY_SMALL blocks.
+static uint32_t MSpaceInternalLargeBin(uint32_t num_blocks)
+{
+	const uint32_t log2 = IntLog2(num_blocks);
+	return (log2 - 3u) * 4u + ((num_blocks >> (log2 - 2u)) & 3u);
+}
+
+static bool MSpaceInternalLargeBinIsSet(const MSpaceContext& ctx, uint32_t bin)
+{
+	return ((ctx.large_map[bin / 64u] >> (bin % 64u)) & 1u) != 0u;
+}
+
 static void MSpaceInternalUnlinkFromList(MSpaceContext& ctx, uint32_t i, uint32_t* root)
 {
 	uint32_t next = ctx.base[i].u.list.next;
@@ -153,16 +184,20 @@ static void MSpaceInternalUnlinkFromList(MSpaceContext& ctx, uint32_t i, uint32_
 	ctx.base[i].u.list.prev = 0;
 }
 
+// The chunk size is read from its header, so a chunk must be unlinked before the header changes.
 static void MSpaceInternalUnlink(MSpaceContext& ctx, uint32_t i)
 {
-	uint32_t size = ctx.base[i - 1].u.hdr.size_4x / 4;
+	const uint32_t size = ctx.base[i - 1].u.hdr.size_4x / 4;
 	if (size <= MSPACE_ARRAY_SMALL)
 	{
 		MSpaceInternalUnlinkFromList(ctx, i, &ctx.array_small[size - 2]);
-	} else
+		return;
+	}
+	const uint32_t bin = MSpaceInternalLargeBin(size);
+	MSpaceInternalUnlinkFromList(ctx, i, &ctx.array_large[bin]);
+	if (ctx.array_large[bin] == 0u)
 	{
-		uint32_t hash = size % MSPACE_ARRAY_HASH;
-		MSpaceInternalUnlinkFromList(ctx, i, &ctx.array_hash[hash]);
+		ctx.large_map[bin / 64u] &= ~(1ull << (bin % 64u));
 	}
 }
 
@@ -179,16 +214,15 @@ static void MSpaceInternalLinkIntoList(MSpaceContext& ctx, uint32_t i, uint32_t*
 
 static void MSpaceInternalLink(MSpaceContext& ctx, uint32_t i)
 {
-	uint32_t size = ctx.base[i - 1].u.hdr.size_4x / 4;
-
+	const uint32_t size = ctx.base[i - 1].u.hdr.size_4x / 4;
 	if (size <= MSPACE_ARRAY_SMALL)
 	{
 		MSpaceInternalLinkIntoList(ctx, i, &ctx.array_small[size - 2]);
-	} else
-	{
-		uint32_t hash = size % MSPACE_ARRAY_HASH;
-		MSpaceInternalLinkIntoList(ctx, i, &ctx.array_hash[hash]);
+		return;
 	}
+	const uint32_t bin = MSpaceInternalLargeBin(size);
+	MSpaceInternalLinkIntoList(ctx, i, &ctx.array_large[bin]);
+	ctx.large_map[bin / 64u] |= 1ull << (bin % 64u);
 }
 
 static void MSpaceInternalEnter(MSpaceContext& ctx)
@@ -226,70 +260,110 @@ static void MSpaceInternalOutOfMemory(MSpaceContext& ctx, uint32_t free_bytes, u
 	}
 }
 
+// Hands out the first num_blocks blocks of free chunk i, which must already be unlinked.
+// A remainder of at least two blocks stays free and goes back into its bin.
 static void* MSpaceInternalCheckout(MSpaceContext& ctx, uint32_t i, uint32_t num_blocks)
 {
-	uint32_t x                                   = ctx.base[i - 1].u.hdr.size_4x;
-	ctx.base[i - 1].u.hdr.size_4x                = num_blocks * 4 | 1u | (x & 2u);
-	ctx.base[i + num_blocks - 1].u.hdr.prev_size = num_blocks;
-	ctx.base[i + num_blocks - 1].u.hdr.size_4x |= 2u;
+	const uint32_t chunk_size  = ctx.base[i - 1].u.hdr.size_4x / 4;
+	const uint32_t prev_in_use = ctx.base[i - 1].u.hdr.size_4x & 2u;
+	uint32_t       allocated   = chunk_size;
+
+	if (chunk_size - num_blocks >= 2u)
+	{
+		const uint32_t rest       = chunk_size - num_blocks;
+		const uint32_t rest_index = i + num_blocks;
+		allocated                                    = num_blocks;
+		ctx.base[rest_index - 1].u.hdr.prev_size     = num_blocks;
+		ctx.base[rest_index - 1].u.hdr.size_4x       = rest * 4u | 2u;
+		ctx.base[i + chunk_size - 1].u.hdr.prev_size = rest;
+		MSpaceInternalLink(ctx, rest_index);
+	}
+
+	ctx.base[i - 1].u.hdr.size_4x = allocated * 4u | 1u | prev_in_use;
+	ctx.base[i + allocated - 1].u.hdr.size_4x |= 2u;
+
+	ctx.inuse_blocks += allocated;
+	if (ctx.inuse_blocks > ctx.max_inuse_blocks)
+	{
+		ctx.max_inuse_blocks = ctx.inuse_blocks;
+	}
 	return &ctx.base[i];
 }
 
-static void* MSpaceInternalFromKeyBlk(MSpaceContext& ctx, uint32_t num_blocks)
+// Smallest chunk of at least num_blocks blocks in the list, or 0. An exact fit ends the scan.
+static uint32_t MSpaceInternalBestFit(const MSpaceContext& ctx, uint32_t head, uint32_t num_blocks)
 {
-	if (num_blocks >= ctx.size_of_key_chunk - 1)
+	uint32_t best      = 0;
+	uint32_t best_size = 0;
+	for (uint32_t i = head; i != 0u; i = ctx.base[i].u.list.next)
 	{
-		void* p                = MSpaceInternalCheckout(ctx, ctx.index_of_key_chunk, ctx.size_of_key_chunk);
-		ctx.index_of_key_chunk = 0;
-		ctx.size_of_key_chunk  = 0;
-		return p;
+		const uint32_t size = ctx.base[i - 1].u.hdr.size_4x / 4;
+		if (size == num_blocks)
+		{
+			return i;
+		}
+		if (size > num_blocks && (best == 0u || size < best_size))
+		{
+			best      = i;
+			best_size = size;
+		}
 	}
-
-	uint32_t newi = ctx.index_of_key_chunk + ctx.size_of_key_chunk - num_blocks;
-
-	ctx.base[ctx.index_of_key_chunk + ctx.size_of_key_chunk - 1].u.hdr.prev_size = num_blocks;
-	ctx.base[ctx.index_of_key_chunk + ctx.size_of_key_chunk - 1].u.hdr.size_4x |= 2u;
-	ctx.base[newi - 1].u.hdr.size_4x = num_blocks * 4 + 1;
-	ctx.size_of_key_chunk -= num_blocks;
-	ctx.base[newi - 1].u.hdr.prev_size                 = ctx.size_of_key_chunk;
-	uint32_t x                                         = ctx.base[ctx.index_of_key_chunk - 1].u.hdr.size_4x & 2u;
-	ctx.base[ctx.index_of_key_chunk - 1].u.hdr.size_4x = ctx.size_of_key_chunk * 4 | x;
-	return static_cast<void*>(&ctx.base[newi]);
+	return best;
 }
 
-static void MSpaceInternalMerge(MSpaceContext& ctx, uint32_t* root)
+static uint32_t MSpaceInternalNextLargeBin(const MSpaceContext& ctx, uint32_t from)
 {
-	uint32_t next = 0;
-
-	for (uint32_t i = *root; i > 0; i = next)
+	for (uint32_t bin = from; bin < MSPACE_ARRAY_LARGE; bin++)
 	{
-		next          = ctx.base[i].u.list.next;
-		uint32_t size = ctx.base[i - 1].u.hdr.size_4x;
-		if ((size & 2u) == 0)
+		if (MSpaceInternalLargeBinIsSet(ctx, bin))
 		{
-			MSpaceInternalUnlinkFromList(ctx, i, root);
-			uint32_t prev = i - ctx.base[i - 1].u.hdr.prev_size;
-			if (prev == next)
-			{
-				next = ctx.base[prev].u.list.next;
-			}
-			MSpaceInternalUnlink(ctx, prev);
-			size                                      = i + size / 4 - prev;
-			uint32_t x                                = ctx.base[prev - 1].u.hdr.size_4x & 2u;
-			ctx.base[prev - 1].u.hdr.size_4x          = size * 4 | x;
-			ctx.base[prev + size - 1].u.hdr.prev_size = size;
-			MSpaceInternalLink(ctx, prev);
-			i = prev;
-		} else
-		{
-			size /= 4;
-		}
-		if (size > ctx.size_of_key_chunk)
-		{
-			ctx.index_of_key_chunk = i;
-			ctx.size_of_key_chunk  = size;
+			return bin;
 		}
 	}
+	return MSPACE_ARRAY_LARGE;
+}
+
+// Every chunk in a bin above the first one is larger than the request, so its smallest chunk fits.
+static uint32_t MSpaceInternalFindLargeChunk(const MSpaceContext& ctx, uint32_t first_bin, uint32_t num_blocks)
+{
+	uint32_t bin = MSpaceInternalNextLargeBin(ctx, first_bin);
+	while (bin < MSPACE_ARRAY_LARGE)
+	{
+		const uint32_t i = MSpaceInternalBestFit(ctx, ctx.array_large[bin], num_blocks);
+		if (i != 0u)
+		{
+			return i;
+		}
+		bin = MSpaceInternalNextLargeBin(ctx, bin + 1u);
+	}
+	return 0u;
+}
+
+static uint32_t MSpaceInternalFindFreeChunk(const MSpaceContext& ctx, uint32_t num_blocks)
+{
+	if (num_blocks > MSPACE_ARRAY_SMALL)
+	{
+		return MSpaceInternalFindLargeChunk(ctx, MSpaceInternalLargeBin(num_blocks), num_blocks);
+	}
+	for (uint32_t size = num_blocks; size <= MSPACE_ARRAY_SMALL; size++)
+	{
+		if (ctx.array_small[size - 2u] != 0u)
+		{
+			return ctx.array_small[size - 2u];
+		}
+	}
+	return MSpaceInternalFindLargeChunk(ctx, 0u, num_blocks);
+}
+
+static void* MSpaceInternalTakeFreeChunk(MSpaceContext& ctx, uint32_t num_blocks)
+{
+	const uint32_t i = MSpaceInternalFindFreeChunk(ctx, num_blocks);
+	if (i == 0u)
+	{
+		return nullptr;
+	}
+	MSpaceInternalUnlink(ctx, i);
+	return MSpaceInternalCheckout(ctx, i, num_blocks);
 }
 
 static void* MSpaceInternalMallocUnsafe(MSpaceContext& ctx, uint32_t size, uint32_t report_size)
@@ -304,56 +378,19 @@ static void* MSpaceInternalMallocUnsafe(MSpaceContext& ctx, uint32_t size, uint3
 		num_blocks = (size + 11) / 8;
 	}
 
-	if (num_blocks <= MSPACE_ARRAY_SMALL)
+	void* p = MSpaceInternalTakeFreeChunk(ctx, num_blocks);
+	if (p != nullptr)
 	{
-		uint32_t i = ctx.array_small[num_blocks - 2];
-		if (i > 0)
-		{
-			MSpaceInternalUnlinkFromList(ctx, i, &ctx.array_small[num_blocks - 2]);
-			return MSpaceInternalCheckout(ctx, i, num_blocks);
-		}
-	} else
-	{
-		uint32_t hash = num_blocks % MSPACE_ARRAY_HASH;
-		for (uint32_t i = ctx.array_hash[hash]; i > 0; i = ctx.base[i].u.list.next)
-		{
-			if (ctx.base[i - 1].u.hdr.size_4x / 4 == num_blocks)
-			{
-				MSpaceInternalUnlinkFromList(ctx, i, &ctx.array_hash[hash]);
-				return MSpaceInternalCheckout(ctx, i, num_blocks);
-			}
-		}
-	}
-
-	if (ctx.size_of_key_chunk >= num_blocks)
-	{
-		return MSpaceInternalFromKeyBlk(ctx, num_blocks);
+		return p;
 	}
 
 	for (uint32_t to_free = num_blocks * 16; to_free < (ctx.capacity * 16); to_free *= 2)
 	{
 		MSpaceInternalOutOfMemory(ctx, to_free, report_size);
-		if (ctx.index_of_key_chunk != 0u)
+		p = MSpaceInternalTakeFreeChunk(ctx, num_blocks);
+		if (p != nullptr)
 		{
-			MSpaceInternalLink(ctx, ctx.index_of_key_chunk);
-			ctx.index_of_key_chunk = 0;
-			ctx.size_of_key_chunk  = 0;
-		}
-		for (auto& hash: ctx.array_hash)
-		{
-			MSpaceInternalMerge(ctx, &hash);
-		}
-		for (auto& small: ctx.array_small)
-		{
-			MSpaceInternalMerge(ctx, &small);
-		}
-		if (ctx.size_of_key_chunk != 0u)
-		{
-			MSpaceInternalUnlink(ctx, ctx.index_of_key_chunk);
-			if (ctx.size_of_key_chunk >= num_blocks)
-			{
-				return MSpaceInternalFromKeyBlk(ctx, num_blocks);
-			}
+			return p;
 		}
 	}
 
@@ -364,34 +401,31 @@ static void MSpaceInternalFreeUnsafe(MSpaceContext& ctx, void* old)
 {
 	auto* p = static_cast<MSpaceBlock*>(old);
 
-	uint32_t index = p - ctx.base;
-	uint32_t size  = ctx.base[index - 1].u.hdr.size_4x / 4;
-	ctx.base[index - 1].u.hdr.size_4x &= ~1u;
-	ctx.base[index + size - 1].u.hdr.prev_size = size;
-	ctx.base[index + size - 1].u.hdr.size_4x &= ~2u;
-	MSpaceInternalLink(ctx, index);
+	uint32_t       index = p - ctx.base;
+	uint32_t       size  = ctx.base[index - 1].u.hdr.size_4x / 4;
+	const uint32_t next  = index + size;
+	ctx.inuse_blocks -= size;
 
-	if (ctx.index_of_key_chunk != 0u)
+	// Neighbours are absorbed at once so that two free chunks never sit side by side.
+	uint32_t first = index;
+	if ((ctx.base[next - 1].u.hdr.size_4x & 1u) == 0u)
 	{
-		while ((ctx.base[ctx.index_of_key_chunk - 1].u.hdr.size_4x & 2u) == 0)
-		{
-			size = ctx.base[ctx.index_of_key_chunk - 1].u.hdr.prev_size;
-			ctx.index_of_key_chunk -= size;
-			ctx.size_of_key_chunk += size;
-			MSpaceInternalUnlink(ctx, ctx.index_of_key_chunk);
-			uint32_t x                                         = ctx.base[ctx.index_of_key_chunk - 1].u.hdr.size_4x & 2u;
-			ctx.base[ctx.index_of_key_chunk - 1].u.hdr.size_4x = ctx.size_of_key_chunk * 4 | x;
-			ctx.base[ctx.index_of_key_chunk + ctx.size_of_key_chunk - 1].u.hdr.prev_size = ctx.size_of_key_chunk;
-		}
-		uint32_t x = ctx.base[ctx.index_of_key_chunk - 1].u.hdr.size_4x & 2u;
-		while ((ctx.base[ctx.index_of_key_chunk + ctx.size_of_key_chunk - 1].u.hdr.size_4x & 1u) == 0)
-		{
-			MSpaceInternalUnlink(ctx, ctx.index_of_key_chunk + ctx.size_of_key_chunk);
-			ctx.size_of_key_chunk += ctx.base[ctx.index_of_key_chunk + ctx.size_of_key_chunk - 1].u.hdr.size_4x / 4;
-			ctx.base[ctx.index_of_key_chunk - 1].u.hdr.size_4x                           = ctx.size_of_key_chunk * 4 | x;
-			ctx.base[ctx.index_of_key_chunk + ctx.size_of_key_chunk - 1].u.hdr.prev_size = ctx.size_of_key_chunk;
-		}
+		MSpaceInternalUnlink(ctx, next);
+		size += ctx.base[next - 1].u.hdr.size_4x / 4;
 	}
+	if ((ctx.base[index - 1].u.hdr.size_4x & 2u) == 0u)
+	{
+		const uint32_t prev_size = ctx.base[index - 1].u.hdr.prev_size;
+		first                    = index - prev_size;
+		MSpaceInternalUnlink(ctx, first);
+		size += prev_size;
+	}
+
+	const uint32_t in_use_before                 = ctx.base[first - 1].u.hdr.size_4x & 2u;
+	ctx.base[first - 1].u.hdr.size_4x            = size * 4u | in_use_before;
+	ctx.base[first + size - 1].u.hdr.prev_size   = size;
+	ctx.base[first + size - 1].u.hdr.size_4x &= ~2u;
+	MSpaceInternalLink(ctx, first);
 }
 
 static uint32_t MSpaceInternalSize(void* p)
@@ -677,11 +711,14 @@ static bool MSpaceInternalInit(MSpaceContext& ctx, const char* name, void* base,
 	ctx.base     = static_cast<MSpaceBlock*>(base);
 	ctx.capacity = static_cast<uint32_t>((capacity / sizeof(MSpaceBlock)) - 2);
 
-	ctx.size_of_key_chunk                  = ctx.capacity;
-	ctx.index_of_key_chunk                 = 1;
-	ctx.base[0].u.hdr.size_4x              = (ctx.size_of_key_chunk << 2u) + 2;
+	ctx.base[0].u.hdr.size_4x              = (ctx.capacity << 2u) + 2;
 	ctx.base[ctx.capacity].u.hdr.prev_size = ctx.capacity;
 	ctx.base[ctx.capacity].u.hdr.size_4x   = 1;
+	// A single block cannot be listed (the list links need two blocks), so it stays unlisted.
+	if (ctx.capacity >= 2u)
+	{
+		MSpaceInternalLink(ctx, 1);
+	}
 
 	ctx.mutex        = (thread_safe ? new Core::Mutex : nullptr);
 	ctx.dbg_callback = dbg_callback;
@@ -1117,19 +1154,14 @@ static bool MSpaceInternalStats(MSpaceContext& ctx, MSpaceSize* mmsize)
 	}
 
 	// free area after the fixed control header: (capacity + 2) blocks of 8 bytes.
-	const size_t free_area_bytes =
-	    (static_cast<size_t>(ctx.capacity) + 2u) * sizeof(MSpaceBlock);
-	const size_t system_size = MSPACE_HEADER_SIZE + free_area_bytes;
+	const size_t free_area_bytes = (static_cast<size_t>(ctx.capacity) + 2u) * sizeof(MSpaceBlock);
+	const size_t system_size     = MSPACE_HEADER_SIZE + free_area_bytes;
 
-	// Largest free key chunk approximates remaining free space when the heap is
-	// mostly contiguous (fresh mspace). Fragmentation under-reports free space.
-	const size_t free_bytes = static_cast<size_t>(ctx.size_of_key_chunk) * sizeof(MSpaceBlock);
-	const size_t inuse_bytes = (free_bytes < free_area_bytes) ? (free_area_bytes - free_bytes) : 0;
-
+	// Blocks are counted when a chunk is checked out and released when it is freed.
 	mmsize->max_system_size     = system_size;
 	mmsize->current_system_size = system_size;
-	mmsize->max_inuse_size      = system_size;
-	mmsize->current_inuse_size  = inuse_bytes;
+	mmsize->max_inuse_size      = MSPACE_HEADER_SIZE + static_cast<size_t>(ctx.max_inuse_blocks) * sizeof(MSpaceBlock);
+	mmsize->current_inuse_size  = MSPACE_HEADER_SIZE + static_cast<size_t>(ctx.inuse_blocks) * sizeof(MSpaceBlock);
 	return true;
 }
 
@@ -1161,7 +1193,7 @@ bool MSpaceIsHeapEmpty(mspace_t msp)
 	}
 	auto* ctx = static_cast<MSpaceContext*>(msp);
 	MSpaceInternalEnter(*ctx);
-	const bool empty = (ctx->size_of_key_chunk == ctx->capacity && ctx->index_of_key_chunk == 1u);
+	const bool empty = (ctx->inuse_blocks == 0u);
 	MSpaceInternalLeave(*ctx);
 	return empty;
 }

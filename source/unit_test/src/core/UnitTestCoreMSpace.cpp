@@ -549,4 +549,274 @@ TEST(CoreMSpace, NestedHeapRejectsReallocCallbackBacking)
 	delete[] storage;
 }
 
+TEST(CoreMSpace, MixedWorkloadKeepsLargeRequestsSatisfiable)
+{
+	constexpr size_t   kCapacity   = 8u * 1024u * 1024u;
+	constexpr uint32_t kIterations = 2000;
+	auto*              storage     = new uint8_t[kCapacity];
+	auto*              m           = MSpaceCreate("mixed", storage, kCapacity, true, nullptr);
+	EXPECT_NE(m, nullptr);
+	if (m == nullptr)
+	{
+		delete[] storage;
+		return;
+	}
+
+	void*    kept[kIterations] = {};
+	uint32_t kept_head         = 0;
+	uint32_t kept_tail         = 0;
+	for (uint32_t i = 0; i < kIterations; i++)
+	{
+		void* t = MSpaceMalloc(m, 65536u + (i * 7919u) % 65536u);
+		void* s = MSpaceMalloc(m, 256u + (i * 31u) % 512u);
+		EXPECT_NE(t, nullptr);
+		EXPECT_NE(s, nullptr);
+		if (s != nullptr)
+		{
+			kept[kept_tail++] = s;
+		}
+		EXPECT_TRUE(MSpaceFree(m, t));
+		if (i % 4u == 0u && kept_head < kept_tail)
+		{
+			EXPECT_TRUE(MSpaceFree(m, kept[kept_head++]));
+		}
+	}
+
+	void* large = MSpaceMalloc(m, 4u * 1024u * 1024u);
+	EXPECT_NE(large, nullptr);
+	EXPECT_TRUE(MSpaceFree(m, large));
+
+	for (uint32_t k = kept_head; k < kept_tail; k++)
+	{
+		EXPECT_TRUE(MSpaceFree(m, kept[k]));
+	}
+	EXPECT_TRUE(Core::MSpaceIsHeapEmpty(m));
+	EXPECT_TRUE(MSpaceDestroy(m));
+	delete[] storage;
+}
+
+static constexpr size_t kStressMaxLive = 512;
+
+struct StressAllocation
+{
+	uint8_t* buf   = nullptr;
+	uint32_t id    = 0;
+	size_t   size  = 0;
+	size_t   align = 0;
+};
+
+struct StressHeap
+{
+	Core::mspace_t  mspace  = nullptr;
+	StressAllocation live[kStressMaxLive];
+	size_t          count   = 0;
+	uint32_t        next_id = 1;
+	uint32_t        state   = 0;
+};
+
+static uint8_t StressPattern(uint32_t id, size_t offset)
+{
+	return static_cast<uint8_t>(id * 31u + offset * 7u);
+}
+
+static void StressFill(const StressAllocation& a)
+{
+	for (size_t j = 0; j < a.size; j++)
+	{
+		a.buf[j] = StressPattern(a.id, j);
+	}
+}
+
+static bool StressMatches(const StressAllocation& a, size_t count)
+{
+	for (size_t j = 0; j < count; j++)
+	{
+		if (a.buf[j] != StressPattern(a.id, j))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+// The high half of a 32-bit LCG is used; its low bits have short periods.
+static uint32_t StressNext(uint32_t& state)
+{
+	state = state * 1664525u + 1013904223u;
+	return state >> 16u;
+}
+
+static size_t StressSize(uint32_t& state)
+{
+	if (StressNext(state) % 50u != 0u)
+	{
+		return 1u + StressNext(state) % 4096u;
+	}
+	const uint32_t high = StressNext(state);
+	const uint32_t low  = StressNext(state);
+	return 1u + ((high << 16u) | low) % 524288u;
+}
+
+static void StressAdd(StressHeap& h, bool aligned_request)
+{
+	const size_t size  = StressSize(h.state);
+	size_t       align = 32u;
+	uint8_t*     buf   = nullptr;
+	if (aligned_request)
+	{
+		align = 32u << (StressNext(h.state) % 8u);
+		buf   = static_cast<uint8_t*>(Core::MSpaceMemalign(h.mspace, align, size));
+	} else
+	{
+		buf = static_cast<uint8_t*>(MSpaceMalloc(h.mspace, size));
+	}
+	// Running out of arena is a valid outcome; the next operation tries again.
+	if (buf == nullptr)
+	{
+		return;
+	}
+
+	EXPECT_EQ(reinterpret_cast<uintptr_t>(buf) % align, 0u);
+	EXPECT_GE(Core::MSpaceMallocUsableSize(buf), size);
+
+	StressAllocation& a = h.live[h.count];
+	a.buf               = buf;
+	a.id                = h.next_id++;
+	a.size              = size;
+	a.align             = align;
+	h.count++;
+	StressFill(a);
+}
+
+static void StressRealloc(StressHeap& h, size_t index)
+{
+	StressAllocation& a = h.live[index];
+	// Realloc guarantees only the 32-byte granule, so over-aligned blocks are not resized here.
+	if (a.align != 32u)
+	{
+		return;
+	}
+
+	const size_t size  = StressSize(h.state);
+	auto*        grown = static_cast<uint8_t*>(MSpaceRealloc(h.mspace, a.buf, size));
+	if (grown == nullptr)
+	{
+		EXPECT_TRUE(StressMatches(a, a.size));
+		return;
+	}
+
+	StressAllocation moved = a;
+	moved.buf              = grown;
+	EXPECT_TRUE(StressMatches(moved, a.size < size ? a.size : size));
+
+	EXPECT_EQ(reinterpret_cast<uintptr_t>(grown) % 32u, 0u);
+	EXPECT_GE(Core::MSpaceMallocUsableSize(grown), size);
+
+	moved.size = size;
+	a          = moved;
+	StressFill(a);
+}
+
+static void StressRemove(StressHeap& h, size_t index)
+{
+	const StressAllocation& a = h.live[index];
+	EXPECT_TRUE(StressMatches(a, a.size));
+	EXPECT_TRUE(MSpaceFree(h.mspace, a.buf));
+	h.live[index] = h.live[h.count - 1];
+	h.count--;
+}
+
+TEST(CoreMSpace, RandomizedStressKeepsDataIntact)
+{
+	constexpr size_t   kCapacity = 4u * 1024u * 1024u;
+	constexpr uint32_t kOps      = 20000;
+	auto*              storage   = new uint8_t[kCapacity];
+	auto*              m         = MSpaceCreate("stress", storage, kCapacity, true, nullptr);
+	EXPECT_NE(m, nullptr);
+	if (m == nullptr)
+	{
+		delete[] storage;
+		return;
+	}
+
+	Core::MSpaceSize fresh {};
+	EXPECT_TRUE(Core::MSpaceMallocStats(m, &fresh));
+
+	StressHeap heap;
+	heap.mspace = m;
+	heap.state  = 0x2468ace1u;
+
+	for (uint32_t op = 0; op < kOps; op++)
+	{
+		const uint32_t choice = StressNext(heap.state) % 100u;
+		if (heap.count == 0u || (choice < 60u && heap.count < kStressMaxLive))
+		{
+			StressAdd(heap, choice >= 35u);
+		} else if (choice >= 60u && choice < 80u)
+		{
+			StressRealloc(heap, StressNext(heap.state) % heap.count);
+		} else
+		{
+			StressRemove(heap, StressNext(heap.state) % heap.count);
+		}
+	}
+
+	while (heap.count > 0u)
+	{
+		StressRemove(heap, heap.count - 1u);
+	}
+	EXPECT_TRUE(Core::MSpaceIsHeapEmpty(m));
+
+	Core::MSpaceSize after {};
+	EXPECT_TRUE(Core::MSpaceMallocStats(m, &after));
+	EXPECT_EQ(after.current_inuse_size, fresh.current_inuse_size);
+
+	void* whole = MSpaceMalloc(m, kCapacity - 64u * 1024u);
+	EXPECT_NE(whole, nullptr);
+	EXPECT_TRUE(MSpaceFree(m, whole));
+	EXPECT_TRUE(MSpaceDestroy(m));
+	delete[] storage;
+}
+
+TEST(CoreMSpace, StatsTrackInUseBytes)
+{
+	constexpr size_t kCapacity = 0x10000;
+	constexpr size_t kRequest  = 1000;
+	auto*            buf       = new uint8_t[kCapacity];
+	auto*            m         = MSpaceCreate("inuse", buf, kCapacity, true, nullptr);
+	EXPECT_NE(m, nullptr);
+	if (m == nullptr)
+	{
+		delete[] buf;
+		return;
+	}
+
+	Core::MSpaceSize fresh {};
+	EXPECT_TRUE(Core::MSpaceMallocStats(m, &fresh));
+
+	// The guard keeps the freed block apart from the untouched rest of the arena.
+	void* p     = MSpaceMalloc(m, kRequest);
+	void* guard = MSpaceMalloc(m, 64);
+	EXPECT_NE(p, nullptr);
+	EXPECT_NE(guard, nullptr);
+	Core::MSpaceSize used {};
+	EXPECT_TRUE(Core::MSpaceMallocStats(m, &used));
+	EXPECT_GE(used.current_inuse_size, fresh.current_inuse_size + kRequest + 64);
+	EXPECT_GE(used.max_inuse_size, used.current_inuse_size);
+
+	EXPECT_TRUE(MSpaceFree(m, p));
+	Core::MSpaceSize freed {};
+	EXPECT_TRUE(Core::MSpaceMallocStats(m, &freed));
+	EXPECT_LE(freed.current_inuse_size, used.current_inuse_size - kRequest);
+	EXPECT_GE(freed.max_inuse_size, used.current_inuse_size);
+
+	EXPECT_TRUE(MSpaceFree(m, guard));
+	Core::MSpaceSize empty {};
+	EXPECT_TRUE(Core::MSpaceMallocStats(m, &empty));
+	EXPECT_EQ(empty.current_inuse_size, fresh.current_inuse_size);
+
+	EXPECT_TRUE(MSpaceDestroy(m));
+	delete[] buf;
+}
+
 UT_END();

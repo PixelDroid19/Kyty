@@ -1,3 +1,49 @@
+## Guest mspaces fragmented and reported freed memory as in use (2026-10-30, fixed)
+
+- **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, strict default-route runs):
+  - The title prints `JsParticle heap memory is full!` about 65 times a run, in passing and failing
+    runs alike, for requests of 69 KB to 1.3 MB against a 36 MiB `sceLibcMspace` heap. The title
+    prints it after the particle heap fails a request and then retries the request on its engine
+    allocator, so each message marks a spill, not a lost allocation.
+  - A temporary arena walk at each failed request (gw154) found 16.9 MB free in 467 chunks, the
+    largest 199392 bytes, beside 20.8 MB in use in 8592 chunks. The guest asked for 207915 bytes.
+  - `sceLibcMspaceMallocStats` reported 34 MB in use for the same arena.
+- **Cause.** `MSpace.cpp` kept freed chunks in exact-size lists and carved every other request
+  from one "key" chunk, merging free neighbours only after that chunk ran out. Freed chunks were
+  reused only by a request of exactly their size, so free space splintered between live blocks.
+  The in-use statistic was the arena minus the key chunk, so every listed free chunk counted as
+  used.
+- **Fix.** A freed chunk merges with both free neighbours at once. Malloc takes the best fit:
+  exact lists for chunks of 2-10 blocks, then 116 segregated bins (four per power of two) with a
+  bitmap to find the next non-empty bin. In-use statistics count checked-out blocks. The block
+  format, alignment prefix, out-of-memory callback loop and nested-heap checks are unchanged.
+- **Verified.**
+  - New `CoreMSpace` tests: `MixedWorkloadKeepsLargeRequestsSatisfiable` and
+    `StatsTrackInUseBytes` fail before the fix and pass after it;
+    `RandomizedStressKeepsDataIntact` (20000 operations, aligned and plain blocks, realloc) passes
+    on both. The 9 `CoreMSpace` tests pass; `ctest --no-tests=error -R '^KytyUnitTest$'` runs the
+    whole unit binary (2704 cases) and passes, exit 0.
+  - gw155 (strict default route, 330 s, with the temporary arena probe): the particle heap message
+    appeared 0 times and no mspace request failed. The run reached the hub and stopped at the
+    hub-start command buffer assert of `docs/titles/robot-platformer.md`, so that assert does not
+    depend on the particle heap.
+  - `kyty_agent games-matrix --mode strict` (32 cases, 60 fps limit): 26 interactive, 4
+    launch_failed, 1 host_crash and 1 stalled at its first frames, the same frontier per case as
+    the three matrices of 2026-10-29.
+- **Found, not fixed** (`source/lib/Core/src/MSpace.cpp`, `source/emulator/src/Libs/LibCInternal.cpp`):
+  - `MSpaceInternalRealloc_align` keeps the raw chunk when the new size fits within 128 bytes of
+    the old one, then recomputes the aligned pointer for the new boundary without moving the data.
+    A block from `memalign(4096, n)` resized through the 32-byte path returns a pointer that no
+    longer points at its data. Direction: move the data from the old user offset whenever the
+    aligned pointer changes, bounded by the old usable size.
+  - `MSpaceInternalMallocUnsafe` rounds with `(size + 11) / 8` in 32 bits, which wraps for
+    requests within 11 bytes of 4 GiB, and its out-of-memory loop compares against
+    `ctx.capacity * 16`, which wraps for arenas of 2 GiB or more. Direction: compute both in
+    64 bits and refuse requests larger than the arena.
+  - `LibcMspaceFree` drops the result of `Core::MSpaceFree`, so a refused free (unknown mspace,
+    bad header, pinned block or a block backing a nested arena) leaks without a trace. Not seen in
+    this title. Direction: report the refusal.
+
 ## GDS is shared across queue families (2026-10-24)
 
 - **Observed.** After compute queues moved to a compute-only family, a title
