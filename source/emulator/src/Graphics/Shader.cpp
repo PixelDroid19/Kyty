@@ -6103,7 +6103,7 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 
 	if (input_info->geometry_pull)
 	{
-		ids.Add(0x47504c31u); // GPL1: geometry pass output pull.
+		ids.Add(0x47504c32u); // GPL2: geometry pass output pull, full vertex block.
 		ids.Add(input_info->geometry_pull_parameters);
 		ids.Add(static_cast<uint32_t>(input_info->geometry_pull_layer));
 		ids.Add(input_info->geometry_pull_waves);
