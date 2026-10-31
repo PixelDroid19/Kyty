@@ -5462,3 +5462,21 @@ matched on all of them. Failures shared with main, not caused by this branch:
     Tessellation itself is not translated (`docs/bringup/tessellation-design.md`).
     Direction: keep the mapping for the process lifetime and fail explicitly
     when it cannot be made.
+
+## Intermittent boot crashes on a NULL guest pointer (2026-10-31)
+
+Open defect, seen on the clean tree of commit `38d8a8e53`. Host: Intel Arc A770, ANV 26.2.5, xe, kernel 7.2.11.
+
+- `PPSA03969 - F.I.S.T.: Forged In Shadow Torch`: `PthreadMutexLock(0x58)` called from guest code that receives
+  a NULL object. Clean binary 2 of 9 short runs, translator 193 binary 3 of 9. The same pair of binaries also
+  stops in some runs on the refused `SLoadDwordx4` of a stage 2 program at `pc=4` (`shader emitter missing`).
+- `PPSA03355 - Hades`: a guest row copy writes to a NULL base (`memcpy` to offset `0x1f80`). Crashed with the
+  mask fold disabled and passed with it enabled, so the fold is not its cause.
+- `PPSA09809 - OCTOPATH TRAVELER II`: exit 139 with 2 to 15 presents under `games-matrix`. Clean binary 2 of 4,
+  translator 193 binary 0 of 4 after 2 of 2 in full matrices.
+
+Three full matrices before 2026-10-31 11:07 UTC did not show these; the three after it show them at varying
+rates. No graphics or kernel package changed in between; the only package operation removed the container
+runtime and its dependencies. Not checked: whether the removal or a host state change matters, and which guest
+allocation or query returns NULL. Suggested direction: trace failed memory and network query results on the
+F.I.S.T. boot path, whose crash stack is stable from run to run.

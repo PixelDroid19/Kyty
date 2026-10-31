@@ -3984,3 +3984,34 @@ titles with compute-written mip chains.
 - Offline half-conversion lead for `bf8ee9fc` (cycles, vkstat): base 802k, native
   half 686k, half plus EXEC fold 441k. Not implemented.
 - Crowd scene about 13 fps: far from the 60 fps goal.
+
+## Whole-wave masks in hot pixel programs (2026-10-31)
+
+Title: PPSA21567 - Astro Bot. Host: Intel Arc A770, ANV 26.2.5, xe, kernel 7.2.11.
+
+Observed: the hot pixel programs rebuilt a whole-wave guest mask at every compare and EXEC write, two
+subgroup reductions and seven or more quad broadcasts each. The collectives block NIR folding and SIMD16.
+
+Changed (translator 193):
+
+- An EXEC write the mask flow proves full no longer refreshes EXEC.
+- A mask result read only as its owner's lane bit holds that bit alone in pixel programs, as split compute did.
+- A LaneLocal or QuadLocal program gathers one quad's lanes and drops the wave reduction. The proof already
+  accepts a lane that skips, and it refuses read-first-lane, lane exchanges, MBCNT and DS append or consume.
+
+Measured with GPU timestamps, warm store, same frames and draw counts, 60 fps limit, diagnostic CB scale 2:
+
+| Pixel program | Before | After |
+| --- | --- | --- |
+| `8ca0b9ff` (54 k draws) | 5662 ms | 3792 ms |
+| `d4bef057` (78 k draws) | 5350 ms | 3155 ms |
+| `550e721d` (31 k draws) | 6164 ms | 6595 ms |
+| Compute `3666fa39`, `874bd13f`, `bf8ee9fc` | 21130 ms | 21262 ms |
+| All GPU work in the 300 s run | 212.6 s | 185.6 s |
+
+Compiler statistics: `550e721d` and `d4bef057` now offer SIMD16; `8ca0b9ff` still compiles SIMD8 only with 74
+live registers, cycles 41820 to 25395. The captures of the space scene and its cutscene show no new artifacts.
+
+Not claimed: a frame rate. Gameplay was not reached in these runs, and the CP remains the larger limit in
+crowds. Entry-mask copies still refresh EXEC, because the guest flags them not full while the host launches
+every invocation; that fold and half conversion remain open.
