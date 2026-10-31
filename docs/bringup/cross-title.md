@@ -5480,3 +5480,20 @@ rates. No graphics or kernel package changed in between; the only package operat
 runtime and its dependencies. Not checked: whether the removal or a host state change matters, and which guest
 allocation or query returns NULL. Suggested direction: trace failed memory and network query results on the
 F.I.S.T. boot path, whose crash stack is stable from run to run.
+
+## Wide-string and strlcpy exports bound with the wrong contract (2026-10-31, fixed)
+
+`PPSA02929 - Dreaming Sarah` showed `■Ne    gam` on its first menu frame and kept it until the
+selection changed. The guest vertex buffer already held empty glyph quads with the fallback advance,
+so the host draw path was excluded. A live memory scan found vector elements with size 5 and text
+`*Ne`, and a hardware watchpoint caught the writer: guest vector relocation calling the import
+`Noj9PsJrsa8` with `size + 1` code units.
+
+That NID hashes to `wmemmove`, but it was bound to the byte `memcpy` after an earlier guess from a
+call site. A hash audit of `LIB_FUNC` entries against host libc, libm and libstdc++ exports plus a
+wide-string name list found two more with the wrong contract: `fnUEjBCNRVU` (`wmemchr`, bound to
+`memchr`) and `SfQIZcqvvms` (`strlcpy`, bound to `strncpy`). All three now follow their exported
+contract, and `EmulatorLibcCxxLocale.StringNidsMatchTheirExportedNames` covers them through the symbol
+table. The audit only covers names in that list, so mangled guest C++ exports stay unchecked.
+
+Verified on `PPSA02929`: the menu shows `■New game■`, and a new game reaches the first area at 60 fps.

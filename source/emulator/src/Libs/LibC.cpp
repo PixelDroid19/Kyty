@@ -5668,9 +5668,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("7Xl257M4VNI", LibC::c_pthread_equal);
 	LIB_FUNC("mqQMh1zPPT8", LibC::c_fstat);
 	LIB_FUNC("Q3VBxCXhUHs", LibC::c_memcpy);
-	// Gen5 second memcpy NID — C++ std::string SSO short-assign path
-	// after __cxa_dynamic_cast (Construct Action setup): (dst, src, n=1..).
-	LIB_FUNC("Noj9PsJrsa8", LibC::c_memcpy);
+	LIB_FUNC("Noj9PsJrsa8", LibC::c_wmemmove16);
 	LIB_FUNC("NFLs+dRJGNg", LibC::c_memcpy_s);
 	// Gen5 libc_v1 memmove_s — B59+zQQCcbU after TLS factory / strtoull.
 	LIB_FUNC("B59+zQQCcbU", LibC::c_memmove_s);
@@ -5685,7 +5683,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("6sJWiWSRuqk", LibC::c_strncpy);
 	// Captured Gen5 boot after SaveDataInitialize3: 3-arg call with dest buffer,
 	// "SAVEDATA00" src, n=0x20 — same ABI as strncpy (second NID for same export).
-	LIB_FUNC("SfQIZcqvvms", LibC::c_strncpy);
+	LIB_FUNC("SfQIZcqvvms", LibC::c_strlcpy);
 	LIB_FUNC("Ovb2dSJOAuE", LibC::c_strcmp);
 	LIB_FUNC("aesyjrHVWy4", LibC::c_strncmp);
 	// sceLibc strcasecmp — NID AV6ipCNa4Rw
@@ -5788,7 +5786,7 @@ LIB_DEFINE(InitLibC_1)
 	// string / memory
 	LIB_FUNC("+P6FRGH4LfA", LibC::c_memmove);
 	LIB_FUNC("8u8lPzUEq+U", LibC::c_memchr);
-	LIB_FUNC("fnUEjBCNRVU", LibC::c_memchr);
+	LIB_FUNC("fnUEjBCNRVU", LibC::c_wmemchr16);
 	// Unique wide-mem HLE from bringup (NID does not collide with HEAD Objects).
 	LIB_FUNC("Al8MZJh-4hM", LibC::c_wmemset16);
 	LIB_FUNC("5TjaJwkLWxE", LibC::c_bcmp);

@@ -924,6 +924,50 @@ TEST(EmulatorLibcCxxLocale, Fl3WideCopyMatchesGuestSixteenBitCodeUnits)
 	EXPECT_EQ(std::memcmp(dst, src, sizeof(src) - sizeof(src[0])), 0);
 }
 
+// Each NID below hashes to the public name in its comment; the old bindings used byte semantics.
+TEST(EmulatorLibcCxxLocale, StringNidsMatchTheirExportedNames)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto find = [&symbols](const char32_t* nid) -> uint64_t
+	{
+		Loader::SymbolResolve query {};
+		query.name                 = nid;
+		query.library              = U"libc";
+		query.library_version      = 1;
+		query.module               = U"libc";
+		query.module_version_major = 1;
+		query.module_version_minor = 1;
+		query.type                 = Loader::SymbolType::Func;
+		const auto* rec            = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+		return rec != nullptr ? rec->vaddr : 0;
+	};
+
+	using Wmemmove = KYTY_SYSV_ABI char16_t* (*)(char16_t* dst, const char16_t* src, size_t count);
+	auto* wmemmove = reinterpret_cast<Wmemmove>(find(U"Noj9PsJrsa8"));
+	ASSERT_NE(wmemmove, nullptr);
+	char16_t text[] = u"abcde__";
+	EXPECT_EQ(wmemmove(text + 2, text, 5), text + 2);
+	EXPECT_EQ(std::memcmp(text, u"ababcde", 7 * sizeof(char16_t)), 0);
+
+	using Wmemchr = KYTY_SYSV_ABI char16_t* (*)(const char16_t* src, char16_t value, size_t count);
+	auto* wmemchr = reinterpret_cast<Wmemchr>(find(U"fnUEjBCNRVU"));
+	ASSERT_NE(wmemchr, nullptr);
+	const char16_t wide[] = u"game";
+	EXPECT_EQ(wmemchr(wide, u'm', 4), wide + 2);
+	EXPECT_EQ(wmemchr(wide, u'm', 2), nullptr);
+
+	using Strlcpy = KYTY_SYSV_ABI size_t (*)(char* dst, const char* src, size_t count);
+	auto* strlcpy = reinterpret_cast<Strlcpy>(find(U"SfQIZcqvvms"));
+	ASSERT_NE(strlcpy, nullptr);
+	char small[4] = {'x', 'x', 'x', 'x'};
+	EXPECT_EQ(strlcpy(small, "planet", sizeof(small)), 6u);
+	EXPECT_STREQ(small, "pla");
+}
+
 TEST(EmulatorLibcCxxLocale, NineRMmReturnsClassicLocimp)
 {
 	EnsureLog();

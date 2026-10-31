@@ -245,13 +245,16 @@ KYTY_SYSV_ABI char* c_strcpy(char* d, const char* s)
 	return ::strcpy(d, s);
 }
 // Gen5 libc_v1 wide mem* — NIDs from the public Gen5 export hash (SHA1+suffix, byte-reversed).
-KYTY_SYSV_ABI wchar_t* c_wmemchr(const wchar_t* s, wchar_t c, size_t n)
+KYTY_SYSV_ABI char16_t* c_wmemchr16(const char16_t* s, char16_t c, size_t n)
 {
-	return const_cast<wchar_t*>(std::wmemchr(s, c, n));
-}
-KYTY_SYSV_ABI int      c_wmemcmp(const wchar_t* a, const wchar_t* b, size_t n)
-{
-	return std::wmemcmp(a, b, n);
+	for (size_t i = 0; i < n; i++)
+	{
+		if (s[i] == c)
+		{
+			return const_cast<char16_t*>(s + i);
+		}
+	}
+	return nullptr;
 }
 KYTY_SYSV_ABI int c_wmemcmp16(const char16_t* a, const char16_t* b, size_t n)
 {
@@ -282,13 +285,10 @@ KYTY_SYSV_ABI char16_t* c_wmemcpy16(char16_t* d, const char16_t* s, size_t n)
 	}
 	return d;
 }
-KYTY_SYSV_ABI wchar_t* c_wmemcpy(wchar_t* d, const wchar_t* s, size_t n)
+KYTY_SYSV_ABI char16_t* c_wmemmove16(char16_t* d, const char16_t* s, size_t n)
 {
-	return std::wmemcpy(d, s, n);
-}
-KYTY_SYSV_ABI wchar_t* c_wmemmove(wchar_t* d, const wchar_t* s, size_t n)
-{
-	return std::wmemmove(d, s, n);
+	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(d), n * sizeof(char16_t));
+	return static_cast<char16_t*>(::memmove(d, s, n * sizeof(char16_t)));
 }
 KYTY_SYSV_ABI char16_t* c_wmemset16(char16_t* d, char16_t c, size_t n)
 {
@@ -322,6 +322,17 @@ KYTY_SYSV_ABI int c_strcpy_s(char* d, size_t destsz, const char* s)
 KYTY_SYSV_ABI char* c_strncpy(char* d, const char* s, size_t n)
 {
 	return ::strncpy(d, s, n);
+}
+KYTY_SYSV_ABI size_t c_strlcpy(char* d, const char* s, size_t n)
+{
+	const size_t length = ::strlen(s);
+	if (n != 0)
+	{
+		const size_t copied = length < n ? length : n - 1;
+		::memcpy(d, s, copied);
+		d[copied] = '\0';
+	}
+	return length;
 }
 KYTY_SYSV_ABI int c_strcmp(const char* a, const char* b)
 {

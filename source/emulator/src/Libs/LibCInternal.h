@@ -127,15 +127,14 @@ int                KYTY_SYSV_ABI c_wcstombs_s(size_t* converted_chars, char* dst
 size_t             KYTY_SYSV_ABI c_wcstombs(char* dst, const uint16_t* src, size_t max_bytes);
 size_t             KYTY_SYSV_ABI c_mbstowcs(uint16_t* dst, const char* src, size_t max_units);
 char*              KYTY_SYSV_ABI c_strcpy(char* dst, const char* src);
-wchar_t*           KYTY_SYSV_ABI c_wmemchr(const wchar_t* src, wchar_t value, size_t count);
-int                KYTY_SYSV_ABI c_wmemcmp(const wchar_t* lhs, const wchar_t* rhs, size_t count);
+char16_t*          KYTY_SYSV_ABI c_wmemchr16(const char16_t* src, char16_t value, size_t count);
 int                KYTY_SYSV_ABI c_wmemcmp16(const char16_t* lhs, const char16_t* rhs, size_t count);
 char16_t*          KYTY_SYSV_ABI c_wmemcpy16(char16_t* dst, const char16_t* src, size_t count);
-wchar_t*           KYTY_SYSV_ABI c_wmemcpy(wchar_t* dst, const wchar_t* src, size_t count);
-wchar_t*           KYTY_SYSV_ABI c_wmemmove(wchar_t* dst, const wchar_t* src, size_t count);
+char16_t*          KYTY_SYSV_ABI c_wmemmove16(char16_t* dst, const char16_t* src, size_t count);
 char16_t*          KYTY_SYSV_ABI c_wmemset16(char16_t* dst, char16_t value, size_t count);
 int                KYTY_SYSV_ABI c_strcpy_s(char* dst, size_t dst_size, const char* src);
 char*              KYTY_SYSV_ABI c_strncpy(char* dst, const char* src, size_t count);
+size_t             KYTY_SYSV_ABI c_strlcpy(char* dst, const char* src, size_t count);
 int                KYTY_SYSV_ABI c_strcmp(const char* lhs, const char* rhs);
 int                KYTY_SYSV_ABI c_strncmp(const char* lhs, const char* rhs, size_t count);
 int                KYTY_SYSV_ABI c_strcasecmp(const char* lhs, const char* rhs);
