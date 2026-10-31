@@ -3980,7 +3980,30 @@ titles with compute-written mip chains.
   shaders `0x21001960c4a8f3bb` and `0x210016009aec9d6c`. The first pair is also
   the half-resolution particle draw above (point list, one vertex per draw in
   the dump), which narrows the workload. Cause unknown; the next evidence is a
-  devcoredump.
+  devcoredump. Excluded with translator 194, GPU reset at the same dispatch each time:
+  - driver state re-emission (`INTEL_DEBUG=reemit`): 1 of 2 runs still reset;
+  - the multi-group walker: one single-group `vkCmdDispatchBase` per group passed 3 runs and reset in the 4th, on a
+    pass of one group;
+  - half conversion is not required: 1 of 5 runs reset on the integer path (3 of 5 on the native path, not
+    significant, and the program has no half conversion).
+  The program declares up to 64 output vertices per point, so one point takes a whole 64-lane group; running these
+  groups in one host subgroup would not fit.
+  Also tried in this stretch, none of which removes the reset:
+  - elected-lane-only spin in the exchange: same us/n, 2 of 2 runs reset;
+  - idle submit interval 0.5 to 4 ms: submits fall only 25190 to 21329 per window, run reset;
+  - 8 lanes instead of 16: reset at the same point (gw380);
+  - spin limit 1024 instead of 2^20 on the 8-lane module passed 2 of 2 (gw381, gw382), which does not overturn the
+    earlier exclusion (limits 4096 and 64 still stop, gw198, gw199): the base passes about half of its runs.
+  True 32 lanes passed 2 of 2 but costs 396 us per dispatch against 222 at 16 lanes, so it is not a fix either.
+- Geometry pass width. The pass was already 16 lanes on this host, not 32. vkstat cycles predict its real cost:
+  32 lanes 3.52M cycles and 396 us/dispatch, 16 lanes 1.77M and 222 us; 8 lanes 1.29M with 1436 fills against 5187.
+  The pass now follows the compute rule, 8 lanes above 64 VGPRs: first 60k dispatches 140 to 120 us each (gw380, gw381,
+  gw382), whole window 45.0 to about 42 s, hub 350 to about 240 us each, GPU per dump 4.2 to 3.5 s. Hub frame rate
+  moves little (7.4-7.7 to 7.9 fps), so the hub is not limited by the GPU alone.
+- The cost of a geometry dispatch does not follow its group count: 1 group 222 us, 4 groups 148, 63 groups 146,
+  512 groups 292 (gw369). The first 60k dispatches are a repeatable A/B window (139-146 us each over 8 runs).
+- Dynamic resolution is not a lever here: main passes are already 1920x1080 at the lowest tier (40-70 per frame),
+  960x540 up to 37 per frame, 2432x1368 two, 3840x2160 one, with a 720p reported window (gw368).
 - Offline half-conversion lead for `bf8ee9fc` (cycles, vkstat): base 802k, native
   half 686k, half plus EXEC fold 441k. The native half conversion landed, see "Native half conversion" below;
   the EXEC fold on this program is open.
