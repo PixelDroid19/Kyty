@@ -4047,8 +4047,19 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					}
 					tex         = rtex.At(static_cast<int>(alias_index));
 					materialize = rt_exact ? "rt-exact" : "rt-inexact";
+					// Views of one mip chain must not split between images. The storage surface of this exact range holds the
+					// chain: a write view of the chain belongs to it even when a color alias of one level was drawn more
+					// recently, and any other view reads the color alias only while that holds the newer writes.
+					const auto* chain = rt_exact ? nullptr : FindLatestStorageTexture(buffer, addr, size.size);
+					const bool chain_write = chain != nullptr && textures.desc[i].usage != ShaderTextureUsage::ReadOnly && chain->mip_levels > tex->mip_levels;
+					if (chain_write || (chain != nullptr && chain->storage_write_stamp > std::max(tex->storage_write_stamp, tex->content_stamp)))
+					{
+						tex            = nullptr;
+						render_texture = false;
+						materialize    = "rt-yields-to-chain";
+					}
 					// Storage views and refused sampling address guest texels.
-					if (tex->IsResolutionScaled() && (textures.desc[i].textures2d_without_sampler || scaled_sampling_refused))
+					if (tex != nullptr && tex->IsResolutionScaled() && (textures.desc[i].textures2d_without_sampler || scaled_sampling_refused))
 					{
 						tex = DemoteScaledRenderTexture(submit_id, buffer, rtex.At(static_cast<int>(alias_index)), addr, size.size,
 						                                pass_color);

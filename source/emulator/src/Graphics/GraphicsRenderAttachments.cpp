@@ -2196,6 +2196,8 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 			EXIT("render texture materialized at an unexpected extent: guest=%ux%u expected=%ux%u actual=%ux%u\n", attachment.width,
 			     attachment.height, host.width, host.height, buffer_vulkan->extent.width, buffer_vulkan->extent.height);
 		}
+		// Every bind may write the image (draws, clears); overlapping storage views compare this stamp.
+		buffer_vulkan->content_stamp = VulkanImageNextStamp();
 		attachment.vulkan_buffer     = buffer_vulkan;
 		attachment.attachment_format = buffer_vulkan->format;
 		attachment.attachment_view   = VulkanImage::VIEW_DEFAULT;
