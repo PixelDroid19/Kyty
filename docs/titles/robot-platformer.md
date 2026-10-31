@@ -3982,7 +3982,8 @@ titles with compute-written mip chains.
   the dump), which narrows the workload. Cause unknown; the next evidence is a
   devcoredump.
 - Offline half-conversion lead for `bf8ee9fc` (cycles, vkstat): base 802k, native
-  half 686k, half plus EXEC fold 441k. Not implemented.
+  half 686k, half plus EXEC fold 441k. The native half conversion landed, see "Native half conversion" below;
+  the EXEC fold on this program is open.
 - Crowd scene about 13 fps: far from the 60 fps goal.
 
 ## Whole-wave masks in hot pixel programs (2026-10-31)
@@ -4015,3 +4016,30 @@ live registers, cycles 41820 to 25395. The captures of the space scene and its c
 Not claimed: a frame rate. Gameplay was not reached in these runs, and the CP remains the larger limit in
 crowds. Entry-mask copies still refresh EXEC, because the guest flags them not full while the host launches
 every invocation; that fold and half conversion remain open.
+
+## Native half conversion (2026-10-31)
+
+Observed: the f32 to f16 narrowing and the f16 to f32 widening ran as software bit manipulation in every packed half
+program. On the hottest hub compute programs that cost a large share of the cycles offline.
+
+Changed (translator 194): when the device reports `shaderFloat16`, `shaderInt16`, RTE rounding on 16 and 32 bits,
+denorm and signed-zero/inf/NaN preservation on 16 bits and independent denorm behavior, programs that do half
+arithmetic use `OpFConvert`. A NaN keeps its sign and top payload bits and is quieted, as the integer form does,
+because a conversion only guarantees a NaN. Half multiply-add keeps exact rounding: a TwoSum residue says on which
+side of the binary32 value the exact result lies, and rounding to odd carries that through the second rounding. The
+choice is part of the shader key, so stores of both forms coexist. Other devices stay on the integer path.
+
+Verified on Intel Arc A770 (ANV) with a compute harness running the emitted SPIR-V against exact results:
+
+| Case | Inputs | Mismatches |
+| --- | --- | --- |
+| f32 to f16 | all 2^32 | 0 |
+| f16 to f32, high bits set | all f16 | 0 |
+| Half FMA, residue on | 268 M triples | 0 |
+| Half FMA, residue off (negative control) | 16 M triples | 316 |
+
+In game, with GPU timestamps and a warm store: compute `bf8ee9fc` 13.14 to 8.84 ms per frame (offline estimate -31 %),
+`874bd13f` 5902 to 5099 us per dispatch. A capture of the space scene is clean. Interpretation limit: the runs reached
+different scene mixes, so no frame rate is claimed. The frame stays at 85-130 ms in that scene.
+
+Open: other GPUs untested; native half arithmetic (`OpFAdd` on `%half`) instead of widen, operate, narrow.
