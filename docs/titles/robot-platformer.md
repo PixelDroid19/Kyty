@@ -3920,3 +3920,60 @@ Known approximations and debt recorded by this chain:
   by the full unit suite (2,482 tests, 2,471 passed, 11 skipped, 0 failed)
   and the boundary gate; the title-level effect of the corrected seed is not
   yet observed.
+
+## PPSA21567 - Astro Bot: space scene mosaic and bands (2026-10-31)
+
+Observed on Intel Arc A770 (ANV Mesa 26.2.5), intro space scene. The sky was
+replaced by dark horizontal bands, objects had 16 px block halos, and some cuts
+left dark block-edged silhouettes.
+
+**Cause.** The depth of field chain writes colour plus five mips over a
+960x540 surface of a recycled range with one storage view per level, then
+samples levels 0 to 5. In the same range and frame a one-level 960x540 colour
+target receives half-resolution particle draws. The view of level 0 resolved
+to that colour target (inexact range, one level is enough), levels 1 to 5 and
+the sampled chain resolved to the storage surface, so the blur read a level 0
+nothing had written: bands, alpha 10000. An in-run readback of every bound
+image showed the correct downsample in the colour target and the bands in level
+0 of the storage surface.
+
+**Fix.** A write view of a chain binds the storage surface of the exact range
+when a colour alias holds fewer levels. Other inexact views read the colour
+alias only while it holds the newer writes; colour binds now stamp their image
+so that comparison sees draws. Comparing stamps alone did not fix it: the
+particle target is legitimately newer when the chain is written.
+
+**Verified.** Commit under test on the same host, 17 captures through frames
+3922 to 4551: sky, stars, nebula and soft focus are correct, no bands or block
+halos. The later cuts (frames 4656 and up) were not reached in that run.
+
+**Excluded, with the observation.**
+
+- Depth clear: the HTILE clear is consumed at the first bind of each frame and
+  clears the whole 1920x1080 image to 1.0.
+- HiZ: `INTEL_DEBUG=nohiz` keeps both defects.
+- "Halos have depth below 1": invalid inference. The sky draw overwrites the
+  probe colour and post-processing spreads it.
+- Shader `73c39693`: skipping it keeps the defect; it matters only for cost.
+- Depth of field composite as the faulty stage: skipping `bf8ee9fc` gives a
+  clean frame only because it stops reading the bad blur.
+
+**Earlier fixes in this scene.**
+
+- A storage image at the base of a render target, over a smaller sampled texture
+  and a smaller buffer, stopped on mixed parent types; the multi-parent rule
+  now links those relations. A 600 s run then had no fatal.
+- EXEC stays constant after a full mask write (translator 190): composite
+  `bf8ee9fc` 16.9 to 13.1 ms.
+
+**Open.**
+
+- Intermittent GPU hang at hub load, still inside the geometry compute module
+  of vertex shader `0x360038d0f4cfb9a5`: 3 of 8 runs in this stretch, with pixel
+  shaders `0x21001960c4a8f3bb` and `0x210016009aec9d6c`. The first pair is also
+  the half-resolution particle draw above (point list, one vertex per draw in
+  the dump), which narrows the workload. Cause unknown; the next evidence is a
+  devcoredump.
+- Offline half-conversion lead for `bf8ee9fc` (cycles, vkstat): base 802k, native
+  half 686k, half plus EXEC fold 441k. Not implemented.
+- Crowd scene about 13 fps: far from the 60 fps goal.

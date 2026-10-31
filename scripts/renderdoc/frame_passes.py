@@ -2,13 +2,15 @@
 # and optionally save chosen images as EXR at chosen events.
 # Run with: qrenderdoc --python frame_passes.py ; configuration comes from the environment:
 #   RDOC_CAPTURE (the .rdc), RDOC_OUT (output directory),
-#   RDOC_SAVE ("eid:resource,..." from the table, optional).
+#   RDOC_SAVE ("eid:resource,..." from the table, optional),
+#   RDOC_LAST (list only the last N actions, optional; replaying every event of a heavy frame takes long).
 import os
 import renderdoc as rd
 
 CAPTURE = os.environ["RDOC_CAPTURE"]
 OUT = os.environ["RDOC_OUT"]
 SAVE = [tuple(int(v) for v in item.split(":")) for item in os.environ.get("RDOC_SAVE", "").split(",") if item]
+LAST = int(os.environ.get("RDOC_LAST", "0"))
 os.makedirs(OUT, exist_ok=True)
 log = open(os.path.join(OUT, "frame_passes.txt"), "w")
 
@@ -35,7 +37,10 @@ def main():
     if cap.OpenFile(CAPTURE, "", None) != rd.ResultCode.Succeeded:
         say("open failed")
         return
-    status, controller = cap.OpenCapture(rd.ReplayOptions(), None)
+    # Keeps fewer initial-state copies; the default can exhaust host memory on a large capture.
+    options = rd.ReplayOptions()
+    options.optimisation = rd.ReplayOptimisationLevel.Fastest
+    status, controller = cap.OpenCapture(options, None)
     if status != rd.ResultCode.Succeeded:
         say("replay failed", status)
         return
@@ -43,8 +48,8 @@ def main():
     by_id = {int(rid): rid for rid in textures}
     actions = []
     walk(controller.GetRootActions(), actions)
-    say("# eid kind indices instances W <written> R <read>")
-    for action in actions:
+    say("# %d actions; eid kind indices instances W <written> R <read>" % len(actions))
+    for action in actions[-LAST:]:
         controller.SetFrameEvent(action.eventId, False)
         state = controller.GetPipelineState()
         stage = rd.ShaderStage.Compute if action.flags & rd.ActionFlags.Dispatch else rd.ShaderStage.Pixel

@@ -196,6 +196,13 @@ runs. While the title runs, queue the capture of a host present:
 RDOC_FRAMES=1110 RDOC_TIMEOUT=330 RDOC_STOP=1 RDOC_LOG=<evidence>/queue.log qrenderdoc --python scripts/renderdoc/queue_capture.py
 ```
 
+**Host memory limit.** Replaying a capture of a heavy scene took about 20 GB of
+host memory within 7 s on a 30 GB machine and is not bounded by a systemd memory
+limit on the replay process, so it can freeze the desktop. Prefer in-run evidence
+(native captures, stage skips, a temporary readback of bound images) for such
+scenes, and replay only with a watchdog that stops the process on low available
+memory.
+
 `RDOC_FRAMES` takes a comma-separated list of present numbers, `RDOC_STOP=1`
 ends the title once the captures are written, and the log names each `.rdc`.
 List the frame's passes, and save chosen images as EXR, with:
