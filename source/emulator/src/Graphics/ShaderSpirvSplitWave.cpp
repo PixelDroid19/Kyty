@@ -27,7 +27,8 @@ bool Spirv::UsesSplitComputeWave() const
 
 const ShaderLaneMaskPlan* Spirv::LaneMaskPlan() const
 {
-	if (!UsesSplitComputeWave() || m_code.GetType() != ShaderType::Compute)
+	const bool split_compute = UsesSplitComputeWave() && m_code.GetType() == ShaderType::Compute;
+	if (!split_compute && (m_code.GetType() != ShaderType::Pixel || UsesFragmentCompute()))
 	{
 		return nullptr;
 	}

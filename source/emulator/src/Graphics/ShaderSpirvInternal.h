@@ -159,6 +159,8 @@ public:
 	[[nodiscard]] static String8 NativeExecAllLanes();
 	[[nodiscard]] String8 NativeQuadUniform(const String8& value, const String8& type, const String8& result) const;
 	[[nodiscard]] String8 NativeMaskBallot(const String8& predicate, const String8& result) const;
+	// A mask result only ever read one lane bit at a time by its owner: each invocation holds its own bit.
+	[[nodiscard]] String8 NativeOwnBitMask(const String8& predicate, const String8& result) const;
 	// Pixel: ballot of the wave's valid pixels under the launch EXEC, the non-helper invocations with EXEC set.
 	// `result` is the v4uint ballot and `result`_valid this invocation's membership.
 	[[nodiscard]] String8 NativeValidPixelBallot(const String8& result) const;
@@ -174,6 +176,10 @@ public:
 	// The whole-wave idempotent reductions of a pixel program admitted as FragmentPartialWave; empty otherwise.
 	// Their network steps are not emitted and each read lowers to one subgroup reduction of the seed.
 	[[nodiscard]] const ShaderLaneReductions& LaneReductions() const;
+	// The mask proof of a pixel program, computed once.
+	[[nodiscard]] const ShaderFragmentMaskFlow& FragmentMaskFlow() const;
+	// A pixel program's EXEC write at index leaves every host invocation live: the proof says EXEC is full before the next instruction.
+	[[nodiscard]] bool ExecFullAfter(uint32_t index) const;
 	// ds_*_addtid_b32: a per-lane LDS slot at M0[15:0] + offset + TID*4.
 	// Compute lowers it onto the shared %lds array; other stages carry it in
 	// a function-local spill array since only the writing lane can observe it.
@@ -530,6 +536,8 @@ private:
 	mutable int                   m_native_wave_tier = -1;
 	mutable bool                  m_lane_reductions_ready = false;
 	mutable ShaderLaneReductions m_lane_reductions;
+	mutable bool                  m_fragment_mask_flow_ready = false;
+	mutable ShaderFragmentMaskFlow m_fragment_mask_flow;
 	mutable bool                  m_lane_mask_plan_ready = false;
 	mutable ShaderLaneMaskPlan    m_lane_mask_plan;
 	const ShaderBindResources*    m_bind          = nullptr;

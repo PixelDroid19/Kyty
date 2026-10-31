@@ -151,7 +151,7 @@ String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result)
 	// General subgroup operations may exclude Vulkan helpers. Gather their
 	// bits inside the quad first, so every participating real fragment carries
 	// its quad's complete guest mask into the wave reduction.
-	return String8(R"(
+	const auto gather = String8(R"(
 %<r>_lane = OpLoad %uint %gl_SubgroupInvocationID
 %<r>_shift = OpBitwiseAnd %uint %<r>_lane %uint_31
 %<r>_bit = OpShiftLeftLogical %uint %uint_1 %<r>_shift
@@ -166,10 +166,39 @@ String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result)
 %<r>_upper = OpUGreaterThanEqual %bool %<r>_lane %uint_32
 %<r>_low_part = OpSelect %uint %<r>_upper %uint_0 %<r>_quad
 %<r>_high_part = OpSelect %uint %<r>_upper %<r>_quad %uint_0
+<wave>
+)").ReplaceStr("<p>", predicate).ReplaceStr("<r>", result);
+	// A lane-local program observes a mask only as its own bit or as "any lane" of a branch: the proof
+	// accepts a lane that skips, so one quad's lanes are the whole answer and the wave reduction is not needed.
+	const auto proof = m_ps_input_info != nullptr ? m_ps_input_info->native_wave.proof : ShaderNativeWaveProof::Unclassified;
+	if (!UsesFragmentCompute() && (proof == ShaderNativeWaveProof::LaneLocal || proof == ShaderNativeWaveProof::QuadLocal))
+	{
+		return gather.ReplaceStr("<wave>", "%" + result + " = OpCompositeConstruct %v4uint %" + result + "_low_part %" + result +
+		                                       "_high_part %uint_0 %uint_0");
+	}
+	return gather.ReplaceStr("<wave>", String8(R"(
 %<r>_low = OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %<r>_low_part
 %<r>_high = OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %<r>_high_part
 %<r>_raw = OpCompositeConstruct %v4uint %<r>_low %<r>_high %uint_0 %uint_0
-)").ReplaceStr("<p>", predicate).ReplaceStr("<r>", result) + NativeQuadUniform(result + "_raw", "v4uint", result);
+)").ReplaceStr("<r>", result)) + NativeQuadUniform(result + "_raw", "v4uint", result);
+}
+
+String8 Spirv::NativeOwnBitMask(const String8& predicate, const String8& result) const
+{
+	if (UsesSplitComputeWave())
+	{
+		return "%" + result + " = OpFunctionCall %v4uint %split_part_ballot %" + predicate + "\n";
+	}
+	return String8(R"(
+%<r>_lane = OpLoad %uint %gl_SubgroupInvocationID
+%<r>_shift = OpBitwiseAnd %uint %<r>_lane %uint_31
+%<r>_bit = OpShiftLeftLogical %uint %uint_1 %<r>_shift
+%<r>_local = OpSelect %uint %<p> %<r>_bit %uint_0
+%<r>_upper = OpUGreaterThanEqual %bool %<r>_lane %uint_32
+%<r>_low = OpSelect %uint %<r>_upper %uint_0 %<r>_local
+%<r>_high = OpSelect %uint %<r>_upper %<r>_local %uint_0
+%<r> = OpCompositeConstruct %v4uint %<r>_low %<r>_high %uint_0 %uint_0
+)").ReplaceStr("<p>", predicate).ReplaceStr("<r>", result);
 }
 
 String8 Spirv::NativeValidPixelBallot(const String8& result) const
@@ -270,9 +299,7 @@ String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index
 OpStore %<lo> %mask_out_lo_<tag>
 <store_hi>
 )")
-			        .ReplaceStr("<ballot>", IsLaneLocalMaskResult(index) ? "%mask_out_ballot_" + tag +
-			                                                                 " = OpFunctionCall %v4uint %split_part_ballot %mask_out_active_" +
-			                                                                 tag + "\n"
+			        .ReplaceStr("<ballot>", IsLaneLocalMaskResult(index) ? NativeOwnBitMask("mask_out_active_" + tag, "mask_out_ballot_" + tag)
 			                                                             : NativeMaskBallot("mask_out_active_" + tag, "mask_out_ballot_" + tag))
 			        .ReplaceStr("<store_hi>", !hi.value.IsEmpty() && !NativeWave32() ? "OpStore %<hi> %mask_out_hi_<tag>" : "")
 			        .ReplaceStr("<lo>", lo.value)
@@ -312,7 +339,7 @@ OpStore %<lo> %mask_out_lo_<tag>
 	}
 	if (cmpx || result.ContainsStr("OpStore %exec_lo ") || result.ContainsStr("OpStore %exec_hi "))
 	{
-		result += WritesFullExec(inst, NativeWave32()) ? NativeExecAllLanes() : NativeExecRefresh(tag);
+		result += WritesFullExec(inst, NativeWave32()) || ExecFullAfter(index) ? NativeExecAllLanes() : NativeExecRefresh(tag);
 	}
 	return result.ReplaceStr("%packed_exec_", "%exec_");
 }

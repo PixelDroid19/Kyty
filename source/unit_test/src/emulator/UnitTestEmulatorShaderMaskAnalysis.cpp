@@ -160,6 +160,17 @@ TEST(EmulatorShaderMaskAnalysis, WaveWideScalarReaderNeedsWholeCompare)
 	EXPECT_FALSE(local[0]);
 }
 
+TEST(EmulatorShaderMaskAnalysis, WqmReaderNeedsWholeCompare)
+{
+	// S_WQM widens a lane by its quad neighbours' bits, which a mask of own bits does not hold.
+	const uint32_t kSWqmS6S4 = 0xbe800000u | (6u << 16u) | (10u << 8u) | 4u;
+	const uint32_t shader[]  = {kCmpLtU32S4, kCmpSources, kSWqmS6S4, kCndmaskWord0, kCndmaskSources(6u), kEndpgm};
+	const auto     local     = ShaderLaneMaskPlanOf(ParseShader(shader)).local;
+
+	ASSERT_EQ(local.size(), 4u);
+	EXPECT_FALSE(local[0]);
+}
+
 TEST(EmulatorShaderMaskAnalysis, PointwiseAlgebraGathersItsResultWhenSccIsRead)
 {
 	const uint32_t local_shader[] = {kCmpLtU32S4, kCmpSources, kSAndB64S6S4Exec, kCndmaskWord0, kCndmaskSources(6u), kEndpgm};

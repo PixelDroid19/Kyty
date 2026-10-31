@@ -69,10 +69,11 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B64_Sdst2Ssrc02Ssrc12)
     %tg_bits_<index> = OpShiftRightLogical %uint %tg_word_<index> %tg_shift_<index>
     %tg_bit_<index> = OpBitwiseAnd %uint %tg_bits_<index> %uint_1
     %tg_own_<index> = OpINotEqual %bool %tg_bit_<index> %uint_0
-    %tg_ballot_<index> = OpFunctionCall %v4uint %split_ballot %tg_own_<index>
+    <gather>
     %tb_<index> = OpCompositeExtract %uint %tg_ballot_<index> 0
     %td_<index> = OpCompositeExtract %uint %tg_ballot_<index> 1
 )";
+		params = params.ReplaceStr("<gather>", spirv->NativeMaskBallot("tg_own_<index>", "tg_ballot_<index>"));
 	}
 
 	static const char* text = R"(
