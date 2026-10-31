@@ -5497,3 +5497,47 @@ contract, and `EmulatorLibcCxxLocale.StringNidsMatchTheirExportedNames` covers t
 table. The audit only covers names in that list, so mangled guest C++ exports stay unchecked.
 
 Verified on `PPSA02929`: the menu shows `■New game■`, and a new game reaches the first area at 60 fps.
+
+## Gameplay sweep on the current branch (2026-10-31)
+
+Intel Arc A770, ANV Mesa 26.2.5, xe, 60 fps present limit, generic pad route or agent pad input. One
+bounded run per title, native capture checked by eye, no hardware comparison.
+
+| Title | Reached | fps |
+| --- | --- | --- |
+| `PPSA28311 - Absolum` | first area | 40.7 |
+| `PPSA02929 - Dreaming Sarah` | first area | 60 |
+| `PPSA13579 - Blasphemous 2` | gameplay | 59.9 |
+| `PPSA15552 - Dead Cells` | gameplay | 59.9 |
+| `PPSA09076 - DREDGE` | at sea | 26.4 |
+| `PPSA09804 - GRIS` | first scene | 59.0 |
+| `PPSA03355 - Hades` | gameplay | 59.7 |
+| `PPSA03706 - My Friend Peppa Pig` | gameplay | 60.0 |
+| `PPSA29802 - Plants vs. Zombies: Replanted` | gameplay | 59.6 |
+| `PPSA20052 - Worms Armageddon` | gameplay | 60.0 |
+| `PPSA17189 - Formula Retro Racing` | race | 57.0 |
+| `PPSA03061 - Void Terrarium` | gameplay | 59.8 |
+| `PPSA12544 - Hollow Knight: Silksong` | gameplay, black region still open | 59.9 |
+| `PPSA06084 - Superliminal` | first area | 59.2 |
+| `PPSA21402 - Balatro` | hand in play | 59.8 |
+| `PPSA34971 - Hollow Knight: Voidheart Edition` | gameplay | 59.7 |
+| `PPSA24643 - The Messenger` | gameplay | 60.0 |
+| `PPSA06438 - Let's Build A Zoo` | first task | 59.8 |
+| `PPSA04220 - JoJo's Bizarre Adventure: All-Star Battle R` | gameplay | 37.2 |
+| `PPSA28997 - God of War Sons of Sparta` | gameplay | 59.9 |
+| `PPSA21567 - Astro Bot` | title screen | 22.6 |
+
+Not confirmed in this sweep:
+
+- `PPSA22520 - ANIMAL WELL`: three outcomes on one build. One clean run, one with no presents until the
+  timeout, one stopped 9 s in at `EXIT_IF(old_image_layout ...)`, `Utils.cpp:61` (`set_image_layout`), after
+  "sampled texture type 13 bound as 2D". The image's tracked layout differs from the one the caller expects.
+  Suggested direction: log the caller and both layouts at that check.
+- `PPSA03969 - F.I.S.T.`: one run stopped at `shader emitter missing` (`ShaderSpirvGenerator.cpp`) on stage 2,
+  `SLoadDwordx4` with format `Sdst4SbaseSoffset`, `s[32:35], s[28:29], 896`, crc `7b6e57dc`. The same title
+  also shows the intermittent boot failures above.
+- `PPSA09809 - OCTOPATH TRAVELER II` exit 139 at boot, guest read of NULL; `PPSA07393` exit 139 at about 4 s,
+  guest write of NULL. Both are in the boot record above.
+- `PPSA02070 - Don't Starve Together` stays at its EULA screen at 30.0 fps and needs input that was not sent.
+  Minecraft stays at Select Character at 59.9 fps. Neither was driven further.
+- `PPSA15552 - Dead Cells`: trails lasting seconds were reported by a player; not confirmed fixed.

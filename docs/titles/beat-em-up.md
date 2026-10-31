@@ -6,6 +6,32 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Beat 'em up: every draw scanned and copied a whole shared vertex pool (2026-10-31, fixed)
+
+- **Observed** (Intel Arc A770, Mesa 26.2.5, first area, generic pad route, 60 fps
+  limit): 13-15 fps against 37.8 fps on a 2026-10-25 build, same 335 draws and 345
+  dispatches per frame. Per frame: command processor 24.7 to 74.5 ms, draw state setup
+  1.4 to 24.4 ms, vertex buffer binding 1.0 to 22.2 ms, render pass begins 10 to 105.
+- **Cause.** One vertex object covers a declared stream shared by many draws, and the
+  fix for the black frames below treated that whole stream as read by each draw. A
+  temporary counter (removed) found about 190 pending storage results per copy, about
+  160 bytes each. Each draw scanned them, copied each one behind its own barrier outside
+  the render pass and became a use of each, which also lengthened the device-address scan.
+- **Fix** (`ResolveVertexStreamRead` in `GraphicsRenderBind.cpp`, used by
+  `BindVertexBuffers` and `PrepareVertexStreamsForRead`): indexed draws with an index
+  snapshot resolve their record range first and limit the seed and the copy to the bytes
+  they fetch. Non-indexed draws, depth copies, geometry passes, draws without a snapshot
+  and tail fetches keep the whole range, since their fetch range is unknown or was not measured.
+- **Verified.** First area, three runs on the two steps: 32.7 fps with only the copy limited,
+  40.5 and 40.7 fps with both; 10 render pass begins per frame; picture correct.
+  Seed 19 to 1.5 us per draw, copy 64 to 0.1 us per draw. The black-frame test below, one run with
+  no input and 75 s: 8 flat of 157 captures, all the boot loading screen or a white flash in the
+  cinematic. `PPSA09076 - DREDGE` dock 24.4 fps, picture correct. `PPSA21567 - Astro Bot` title
+  screen 21.1 fps, picture correct, no vertex object used there.
+- **Open.** No source fell inside a draw's range in any of these runs: the intro's vertex ring
+  now binds its storage object directly, so the copy itself did not run. It stays covered
+  only by its use of the range the transient snapshots already rely on.
+
 ## Beat 'em up: black frames in logos, cinematic and loading screens (2026-10-27, fixed)
 
 - **Observed** (Intel Arc A770, Mesa 26.2.5, strict runs at the 60 fps present
