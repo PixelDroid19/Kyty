@@ -49,7 +49,8 @@ def main():
     if pending > 0:
         say("missing", pending)
     target.Shutdown()
-    if os.environ.get("RDOC_STOP") == "1" and pid != 0:
+    # The target stops answering while it writes a large capture; a stop then would discard it.
+    if os.environ.get("RDOC_STOP") == "1" and pid != 0 and pending == 0:
         os.kill(pid, signal.SIGTERM)
         say("stopped", pid)
 
