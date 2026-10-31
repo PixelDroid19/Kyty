@@ -147,6 +147,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Guest `fprintf` read past its buffer and `strto*` dropped range errors (2026-10-30, fixed)
   - Guest mspaces fragmented and reported freed memory as in use (2026-10-30, fixed)
   - Small `DMA_DATA` stores behind a consolidated wait retire it first (2026-10-27, fixed)
+  - Storage objects bound over imported guest pages (2026-10-30)
   - Open: PPSA01341 - Demon's Souls livelocks at boot, parked (2026-10-29)
   - Open: index objects over pending storage (2026-10-27, found by inspection)
   - Open: `KYTY_DUMP_VIDEOOUT` stops on a display image without a guest address (2026-10-27)

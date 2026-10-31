@@ -1,3 +1,36 @@
+## Storage objects bound over imported guest pages (2026-10-30)
+
+- **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, Mesa 26.2.5, strict hub route):
+  publication copies from storage objects to the guest window ran 1,000-2,000 times per 3-second
+  window, moving 1.3-2.2 GB for 230-300 ms of processor time, with same-queue host waits behind them.
+  A CPU and a device write on one page could also clobber each other at write-back, which is a stop
+  (`RejectWriteBackConflict`).
+- **Change:** a writable storage object inside one physical run gets a `VkBuffer` bound to the
+  imported memory of its pages, in a window rounded to 2 MiB and at most 64 MiB. Device writes are
+  guest bytes and CPU stores reach the device, so such an object needs no publication copy and no
+  same-queue wait; a reader on the same queue needs a barrier after each new write. Objects outside
+  one physical run, and hosts without the import, keep the copy path.
+- **Binding is coarser than guest addresses.** The A770 requires 64 bytes for these buffers; a census
+  (gw226) found 39 % of writable objects by count and 42 % by bytes not 64-aligned (all 16-aligned).
+  The buffer then starts below the object and `VulkanBuffer::guest_offset` carries the difference to
+  every consumer: storage descriptors, transfer fills, vertex binds and vertex copies, and GDS copies.
+  The difference must be a multiple of `minStorageBufferOffsetAlignment`; otherwise the object keeps
+  the copy path.
+- **Measured** (one 150 s and one 300 s strict run against gw225, heavy unrelated host load in all of
+  them, so frame rates are not a comparison):
+  - gw228, before unaligned objects: publication calls fell about 60 %, bytes did not.
+  - gw230 and gw231: publication calls are 0 in every window.
+  - Fence wait time in the matching windows: 2.62 s (gw225) to 1.73 s (gw231) in window 4.
+- **Verified:** full `kyty_unit_test`, 2,695 passed; `games-matrix` strict, 26 of 28 titles interactive and
+  every case with the outcome of the baseline (`PPSA07393` crashes at boot, `PPSA01341` is parked; the
+  4 further `launch_failed` cases were loose `decrypted` copies, which discovery now rejects); validation run gw232 (300 s) has only the
+  `VUID-vkCmdDispatch-format-07753` messages already in gw224 (12 in each).
+- **Not established:**
+  - Hosts other than the A770 are untested, including the host-pointer import path.
+  - A reader on another queue now relies on the guest's own ordering and has no host wait. Vulkan gives
+    no availability guarantee between queues without a semaphore, and no failure has been seen.
+  - The queue-8 device time is unchanged: this moves processor work and waits, not the shader cost.
+
 ## Guest `fprintf` read past its buffer and `strto*` dropped range errors (2026-10-30, fixed)
 
 - **Found by review** of `source/emulator/src/Libs/LibC.cpp`; no title is known to reach either
@@ -3004,11 +3037,10 @@ checked against the code; none is hit by a title in the current strict runs.
     - Retries repeating draw preparation: 2 retries in 54,000 waits. Device-address preparation runs
       before descriptor binding.
     - Waiting on read-only uses: every waited buffer had pending writes and one recorded use.
-  - Direction, not yet taken: skipping the wait would need write-backs that become visible in guest
-    memory on the device timeline, ordered before every guest-visible compute signal (label events fire
-    mid-submission). Copying the whole storage object into the guest window is not equivalent, because
-    a dispatch may write only part of the object. Binding storage in physical ranges directly to the
-    imported window is the sound form, and it is a structural change.
+  - Direction, taken 2026-10-30: copying the whole storage object into the guest window is not
+    equivalent to skipping the wait, because a dispatch may write only part of the object. Storage in
+    physical ranges is now bound directly to the imported window; see "Storage objects bound over
+    imported guest pages".
 
 ## Vertex shader identity limited to attribute dwords the program loads (2026-10-16)
 

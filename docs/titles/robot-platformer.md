@@ -926,7 +926,7 @@ gdb runs.
     head, batch position and engine status. Without it, only further blind variations remain.
 - **Validation run at the hub, resolved 2026-10-30 (gw215 one family, gw216 compute family, gw217
   after the fixes, counted without deduplication).** gw217 reports neither of the first two; it ended at 200 s, too early to speak for the third. gw224
-  (340 s, on the pull vertex stage fix) reports neither either, and its `viewType` messages prove it
+  (340 s, on the pull vertex stage fix) also reports neither of them, and its `viewType` messages prove it
   reached the scene of gw215 and gw216.
   - Depth-aspect copies on a compute-only queue: 924 pairs of `vkCmdCopyImageToBuffer` and
     `vkCmdCopyBufferToImage` in gw216, both directions illegal. Intel Arc A770 does not declare
