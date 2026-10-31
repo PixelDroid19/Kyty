@@ -1356,6 +1356,8 @@ struct GpuMemoryStorageWriteIdentity
 	uint64_t            write_uses         = 0;
 	const VulkanBuffer* buffer             = nullptr;
 };
+// The consumer's queue recorded a barrier after this write of an in-place object.
+void GpuMemoryMarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId consumer);
 [[nodiscard]] bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
 // The guest range of the only live StorageBuffer overlapping [vaddr, vaddr + size), read-only or
 // written by shaders, when that one object holds the whole range in a single block.
@@ -1563,6 +1565,7 @@ enum class VulkanMemoryResource
 bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource resource = VulkanMemoryResource::Linear);
 // Frees the pooled blocks of ctx's device; call before destroying the device.
 void VulkanMemoryPoolRelease(GraphicContext* ctx);
+void VulkanAssignMemoryUniqueId(VulkanMemory* mem);
 void VulkanFree(GraphicContext* ctx, VulkanMemory* mem);
 void VulkanMapMemory(GraphicContext* ctx, VulkanMemory* mem, void** data);
 void VulkanUnmapMemory(GraphicContext* ctx, VulkanMemory* mem);

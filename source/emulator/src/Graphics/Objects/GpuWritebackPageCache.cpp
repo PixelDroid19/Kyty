@@ -145,7 +145,11 @@ GpuWritebackResult GpuWritebackPageCache::CopyChangedPages(void* guest_dst, cons
 	                 [&](uint64_t offset, uint64_t bytes, uint64_t pages)
 	                 {
 		                 notify_write(notify_opaque, guest_va + offset, bytes);
-		                 MemcpySkipAbsoluteRanges(guest + offset, gpu + offset, bytes, hole_begin, hole_end, hole_count);
+		                 // An in-place object's device writes are already guest bytes.
+		                 if (guest != gpu)
+		                 {
+			                 MemcpySkipAbsoluteRanges(guest + offset, gpu + offset, bytes, hole_begin, hole_end, hole_count);
+		                 }
 		                 std::memcpy(m_snapshot.data() + offset, gpu + offset, static_cast<size_t>(bytes));
 		                 result.changed_pages += pages;
 		                 result.copied_bytes += bytes;

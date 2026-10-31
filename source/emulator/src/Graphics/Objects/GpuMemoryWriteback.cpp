@@ -555,7 +555,15 @@ bool GpuMemory::PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueu
 			}
 		}
 		if (pending.sequence == 0) { continue; }
-		if (publishable == nullptr || !consumer_ordered || !StorageIsWholeGuestContent(heap_id, object))
+		// An in-place object's bytes are in guest memory, and the guest orders its
+		// queues; readers on this queue need only a barrier after each new write.
+		const bool in_place = static_cast<const VulkanBuffer*>(object.info.object.obj)->guest_in_place;
+		if (in_place && object.info.in_place_ordered_write_uses == object.info.write_uses &&
+		    object.info.in_place_ordered_queue == consumer.Value())
+		{
+			continue;
+		}
+		if (publishable == nullptr || (!in_place && (!consumer_ordered || !StorageIsWholeGuestContent(heap_id, object))))
 		{
 			*dependency = unawaited.sequence != 0 ? unawaited : pending;
 			return true;
@@ -709,6 +717,13 @@ void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQ
 	Vector<Destructor> destructors;
 	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges, consumer))
 	{
+		// Consumers do not wait for an in-place object; its completion writes it back.
+		const auto& info = m_heaps[heap_id].objects[object_id].info;
+		if (static_cast<const VulkanBuffer*>(info.object.obj)->guest_in_place &&
+		    !m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()))
+		{
+			continue;
+		}
 		WriteBackObjectLocked(ctx, heap_id, object_id, &destructors);
 	}
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
@@ -775,6 +790,17 @@ bool GpuMemory::FindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* o
 	*object_vaddr = block.vaddr[0];
 	*object_size  = block.size[0];
 	return true;
+}
+
+void GpuMemory::MarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId consumer)
+{
+	Core::LockGuard lock(m_mutex);
+	auto&           object = m_heaps[identity.heap_id].objects[identity.object_id];
+	if (!object.free && object.info.logical_generation == identity.logical_generation && object.info.object.obj == identity.buffer)
+	{
+		object.info.in_place_ordered_write_uses = identity.write_uses;
+		object.info.in_place_ordered_queue      = consumer.Value();
+	}
 }
 
 bool GpuMemory::MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,

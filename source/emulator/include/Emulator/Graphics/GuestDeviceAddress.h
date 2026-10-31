@@ -15,6 +15,7 @@ namespace Kyty::Libs::Graphics {
 
 struct GraphicContext;
 struct VulkanBuffer;
+struct GuestInPlaceWindow;
 struct GpuMemoryStoragePublication;
 
 // Guest GPU-visible mappings imported as host-pointer device memory, so a
@@ -101,6 +102,13 @@ void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
 // device-address readers through GuestDeviceAddressPendingWriteBack; these need
 // the processor write-back before the reader is recorded.
 [[nodiscard]] bool GuestDeviceAddressPendingWriteBackOutsideStorage();
+
+// Creates `out` directly over the guest pages of [vaddr, vaddr + size), so device
+// writes reach guest memory without a copy and CPU stores reach the device. False:
+// the range is not one bindable run of direct memory, and `out` stays untouched.
+[[nodiscard]] bool GuestDeviceAddressBindInPlace(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint32_t usage,
+                                                 VulkanBuffer* out, GuestInPlaceWindow* window);
+void               GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const GuestInPlaceWindow& window);
 
 // The caller holds the render recording lock through the later write-back.
 // Wait for a returned dependency only after releasing recording locks, then retry.

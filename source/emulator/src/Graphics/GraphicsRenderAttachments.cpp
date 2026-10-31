@@ -407,7 +407,7 @@ bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUnifor
 	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
-	vkCmdFillBuffer(cmd, identity.buffer->buffer, 0, fill.size, words[0]);
+	vkCmdFillBuffer(cmd, identity.buffer->buffer, identity.buffer->guest_offset, fill.size, words[0]);
 	// Flag every page as the dispatch's stores would, for the write-back.
 	vkCmdFillBuffer(cmd, identity.buffer->write_mask->buffer, 0, VK_WHOLE_SIZE, 1u);
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -430,9 +430,14 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 	EXIT_IF(!buffer->GetSubmissionId(&recording));
 	for (const auto& publication: publishable)
 	{
-		if (!GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
-		                                         *publication.identity.buffer, publication.vaddr, publication.size) ||
-		    !GpuMemoryMarkStorageGuestPublished(publication.identity, recording, nullptr))
+		const bool recorded = GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
+		                                                          *publication.identity.buffer, publication.vaddr, publication.size);
+		if (recorded && publication.identity.buffer->guest_in_place)
+		{
+			GpuMemoryMarkInPlaceStorageOrdered(publication.identity, consumer);
+			continue;
+		}
+		if (!recorded || !GpuMemoryMarkStorageGuestPublished(publication.identity, recording, nullptr))
 		{
 			*dependency = publication.dependency;
 			return true;

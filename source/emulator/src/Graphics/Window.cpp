@@ -3391,6 +3391,7 @@ static void VulkanCreate(WindowContext* ctx)
 	physical_device_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
 	physical_device_properties.pNext = &subgroup_properties;
 	vkGetPhysicalDeviceProperties2(ctx->graphic_ctx.physical_device, &physical_device_properties);
+	ctx->graphic_ctx.min_storage_buffer_offset_alignment = physical_device_properties.properties.limits.minStorageBufferOffsetAlignment;
 	ctx->graphic_ctx.subgroup_size       = subgroup_properties.subgroupSize;
 	ctx->graphic_ctx.subgroup_stages     = subgroup_properties.supportedStages;
 	ctx->graphic_ctx.subgroup_operations = subgroup_properties.supportedOperations;

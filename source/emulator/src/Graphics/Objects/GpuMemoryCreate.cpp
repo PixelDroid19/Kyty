@@ -485,7 +485,11 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 
 		const bool pending_uses       = !m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies());
 		const bool write_back_capable = o.write_back_func != nullptr && !o.read_only;
-		const auto mutation           = GpuMemoryChooseMutationAction(need_update, surface_parent, pending_uses, write_back_capable);
+		// The device reads an in-place object's bytes where the CPU stored them. While it is in
+		// flight the write-back snapshot stays as is, so device changes are still reported.
+		const bool in_place_pending = pending_uses && o.object.type == GpuMemoryObjectType::StorageBuffer &&
+		                              static_cast<const VulkanBuffer*>(o.object.obj)->guest_in_place;
+		const auto mutation = GpuMemoryChooseMutationAction(need_update && !in_place_pending, surface_parent, pending_uses, write_back_capable);
 
 		if (mutation == GpuMemoryMutationAction::RejectWriteBackConflict)
 		{

@@ -1035,6 +1035,12 @@ bool GpuMemoryFindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* obj
 	return g_gpu_memory != nullptr && g_gpu_memory->FindStorageContaining(vaddr, size, object_vaddr, object_size);
 }
 
+void GpuMemoryMarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId consumer)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	g_gpu_memory->MarkInPlaceStorageOrdered(identity, consumer);
+}
+
 bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
                                         const GpuWritebackPageCache::UniformWords* uniform_words)
 {

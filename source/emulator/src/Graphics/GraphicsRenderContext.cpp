@@ -441,6 +441,7 @@ bool GdsBuffer::RecordCopyFromBuffer(CommandBuffer* buffer, GraphicContext* ctx,
 
 	const VkCommandBuffer cmd  = GdsCommandBuffer(buffer);
 	const uint64_t        size = dw_count * 4u;
+	src_offset += src->guest_offset;
 	VkBufferCopy          region {};
 	region.srcOffset = src_offset;
 	region.dstOffset = dw_offset * 4u;

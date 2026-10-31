@@ -2611,7 +2611,7 @@ static void CopyPendingStorageIntoVertices(CommandBuffer* buffer, VulkanBuffer* 
 			                     nullptr);
 		}
 		const auto&  source = sources[i];
-		VkBufferCopy region {source.offset, source.vaddr - vaddr, source.size};
+		VkBufferCopy region {source.buffer->guest_offset + source.offset, source.vaddr - vaddr, source.size};
 		vkCmdCopyBuffer(cmd, source.buffer->buffer, vertices->buffer, 1, &region);
 	}
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
@@ -2683,6 +2683,7 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 		}
 		if (vertices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vertices == nullptr condition ignored (continuing)\n"); }
 
+		offset += vertices->guest_offset;
 		vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &vertices->buffer, &offset);
 	}
 }

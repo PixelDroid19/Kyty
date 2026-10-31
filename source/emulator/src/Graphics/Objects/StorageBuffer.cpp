@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Utils.h"
@@ -15,6 +16,26 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+// The bytes the device sees: guest memory itself for an in-place object.
+static void* MapBacking(GraphicContext* ctx, StorageVulkanBuffer* vk_obj)
+{
+	if (vk_obj->guest_in_place)
+	{
+		return reinterpret_cast<void*>(vk_obj->guest_addr);
+	}
+	void* data = nullptr;
+	VulkanMapMemory(ctx, &vk_obj->memory, &data);
+	return data;
+}
+
+static void UnmapBacking(GraphicContext* ctx, StorageVulkanBuffer* vk_obj)
+{
+	if (!vk_obj->guest_in_place)
+	{
+		VulkanUnmapMemory(ctx, &vk_obj->memory);
+	}
+}
 
 static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* obj, const uint64_t* vaddr, const uint64_t* size,
                         int vaddr_num)
@@ -28,14 +49,13 @@ static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* o
 	auto* vk_obj = reinterpret_cast<StorageVulkanBuffer*>(obj);
 
 	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, *size);
-	void*                      data = nullptr;
-	// vkMapMemory(ctx->device, vk_obj->memory.memory, vk_obj->memory.offset, *size, 0, &data);
-	VulkanMapMemory(ctx, &vk_obj->memory, &data);
-	LabelStorageUpload(data, reinterpret_cast<void*>(*vaddr), *size, {{0, *size}}, &vk_obj->writeback_cache, &vk_obj->label_publication);
+	void*                      data = MapBacking(ctx, vk_obj);
+	// A stable upload source is older than the guest bytes an in-place object already shows.
+	LabelStorageUpload(data, vk_obj->guest_in_place ? data : reinterpret_cast<void*>(*vaddr), *size, {{0, *size}}, &vk_obj->writeback_cache,
+	                   &vk_obj->label_publication);
 	// HTILE clears often arrive through GpuMemory Update before the world draw.
 	(void)DepthMetaObserveStorageWrite(vk_obj->depth_meta_addr, data, *size);
-	// vkUnmapMemory(ctx->device, vk_obj->memory.memory);
-	VulkanUnmapMemory(ctx, &vk_obj->memory);
+	UnmapBacking(ctx, vk_obj);
 }
 
 bool StorageBufferUploadRuns(GraphicContext* ctx, void* obj, uint64_t vaddr, uint64_t size, const std::vector<GpuByteRun>& runs)
@@ -52,10 +72,9 @@ bool StorageBufferUploadRuns(GraphicContext* ctx, void* obj, uint64_t vaddr, uin
 		bytes += run.bytes;
 	}
 	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, bytes);
-	void*                      data = nullptr;
-	VulkanMapMemory(ctx, &vk_obj->memory, &data);
+	void*                      data = MapBacking(ctx, vk_obj);
 	LabelStorageUpload(data, reinterpret_cast<void*>(vaddr), size, runs, &vk_obj->writeback_cache, &vk_obj->label_publication);
-	VulkanUnmapMemory(ctx, &vk_obj->memory);
+	UnmapBacking(ctx, vk_obj);
 	return true;
 }
 
@@ -98,7 +117,10 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	                          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	vk_obj->buffer = nullptr;
 
-	VulkanCreateBuffer(ctx, *size, vk_obj);
+	if (!GuestDeviceAddressBindInPlace(ctx, *vaddr, *size, vk_obj->usage, vk_obj, &vk_obj->in_place_window))
+	{
+		VulkanCreateBuffer(ctx, *size, vk_obj);
+	}
 	if (vk_obj->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->buffer == nullptr condition ignored (continuing)\n"); }
 	create_write_mask(ctx, vk_obj);
 
@@ -117,7 +139,12 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
 	EXIT_IF(vk_obj->buffer == nullptr || vk_obj->write_mask == nullptr);
 	EXIT_IF(ctx == nullptr);
 
+	const bool in_place = vk_obj->guest_in_place;
 	VulkanDeleteBuffer(ctx, vk_obj);
+	if (in_place)
+	{
+		GuestDeviceAddressReleaseInPlace(ctx, vk_obj->in_place_window);
+	}
 	VulkanUnmapMemory(ctx, &vk_obj->write_mask->memory);
 	VulkanDeleteBuffer(ctx, vk_obj->write_mask);
 
@@ -136,11 +163,8 @@ static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* /*para
 
 	auto* vk_obj = reinterpret_cast<StorageVulkanBuffer*>(obj);
 
-	void* data = nullptr;
-
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::vkMapMemory");
-	// vkMapMemory(ctx->device, vk_obj->memory.memory, vk_obj->memory.offset, *size, 0, &data);
-	VulkanMapMemory(ctx, &vk_obj->memory, &data);
+	void* data = MapBacking(ctx, vk_obj);
 	KYTY_PROFILER_END_BLOCK;
 
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::memcpy");
@@ -157,8 +181,7 @@ static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* /*para
 	KYTY_PROFILER_END_BLOCK;
 
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::vkUnmapMemory");
-	// vkUnmapMemory(ctx->device, vk_obj->memory.memory);
-	VulkanUnmapMemory(ctx, &vk_obj->memory);
+	UnmapBacking(ctx, vk_obj);
 	KYTY_PROFILER_END_BLOCK;
 	return result;
 }
@@ -185,10 +208,9 @@ bool StorageBufferWriteBackPublishedDevice(GraphicContext* ctx, void* obj, uint6
 	{
 		return false;
 	}
-	void* data = nullptr;
-	VulkanMapMemory(ctx, &vk_obj->memory, &data);
+	void*      data    = MapBacking(ctx, vk_obj);
 	const bool adopted = LabelWriteBackAdoptDevice(vaddr, data, size, &vk_obj->writeback_cache, &vk_obj->label_publication, result);
-	VulkanUnmapMemory(ctx, &vk_obj->memory);
+	UnmapBacking(ctx, vk_obj);
 	return adopted;
 }
 

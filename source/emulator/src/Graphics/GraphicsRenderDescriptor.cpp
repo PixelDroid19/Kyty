@@ -695,7 +695,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		// and null V#). A null entry here is a host bug, not a guest layout.
 		EXIT_IF(storage_buffers[i] == nullptr || storage_buffers[i]->buffer == nullptr);
 		buffer_info[i].buffer = storage_buffers[i]->buffer;
-		buffer_info[i].offset = 0;
+		buffer_info[i].offset = storage_buffers[i]->guest_offset;
 		EXIT_IF(storage_buffers[i]->descriptor_range == 0u);
 		buffer_info[i].range  = storage_buffers[i]->descriptor_range;
 	}

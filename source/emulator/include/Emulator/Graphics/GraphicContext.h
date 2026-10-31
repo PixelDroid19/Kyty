@@ -216,6 +216,7 @@ struct GraphicContext
 	// device address, 64-bit shader integers and a host pointer or dma-buf
 	// import for direct memory).
 	bool guest_device_address_supported = false;
+	VkDeviceSize min_storage_buffer_offset_alignment = 0;
 	// Device-addressable buffers can import host pointers.
 	bool guest_host_pointer_import_supported = false;
 	// Device-addressable buffers can import dma-buf descriptors.
@@ -487,12 +488,23 @@ struct VulkanBuffer
 	// The page flags translated shaders set when they write this buffer; only
 	// storage objects, which are written back page by page, have one.
 	VulkanBuffer* write_mask = nullptr;
+	// Bound to imported guest pages (GuestDeviceAddressBindInPlace): `memory` holds no allocation.
+	bool guest_in_place = false;
+	// Where the guest object starts inside `buffer`: memory binds are coarser than guest addresses.
+	uint64_t guest_offset = 0;
 
 	[[nodiscard]] VulkanBufferDescriptorKey DescriptorKey() const { return {memory.unique_id, descriptor_range}; }
 };
 
+struct GuestInPlaceWindow
+{
+	uint64_t base = 0;
+	uint64_t size = 0;
+};
+
 struct StorageVulkanBuffer: public VulkanBuffer
 {
+	GuestInPlaceWindow    in_place_window;
 	uint64_t              guest_addr      = 0;
 	uint64_t              guest_size      = 0;
 	uint64_t              depth_meta_addr = 0;

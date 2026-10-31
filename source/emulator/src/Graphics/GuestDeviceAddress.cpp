@@ -53,6 +53,8 @@ struct Chunk
 	uint64_t       buffer_offset = 0; // where `guest` lies in `buffer`
 	uint64_t       alias  = 0;       // writable host view that was imported
 	bool           physical = false; // imports the direct-memory pages themselves
+	uint32_t       memory_type = 0;
+	VkExternalMemoryHandleTypeFlags handle_type = 0;
 	bool           windowed = false; // reads through the physical window at `window`
 	uint64_t       window   = 0;
 	void*          copy   = nullptr; // tracked snapshot that was imported
@@ -112,6 +114,9 @@ struct Registry
 	// object on each submit, and titles map thousands of small direct-memory
 	// ranges, so ranges share the windows over their pages.
 	std::map<uint64_t, PhysicalWindow> windows;
+	// Windows that storage objects are bound to in place, by base and size.
+	// They may overlap `windows` and each other.
+	std::map<std::pair<uint64_t, uint64_t>, PhysicalWindow> in_place_windows;
 	// Titles map thousands of ranges. Preparation revisits flexible ranges and
 	// refreshes snapshots every time, and a physical scan visits the physical
 	// ranges with pages not imported yet, so it walks these subsets, not every range.
@@ -384,7 +389,8 @@ bool FindHostImportMemoryType(VkPhysicalDevice physical, uint32_t type_bits, uin
 }
 
 // A zero handle type creates a device-owned buffer.
-VkBuffer CreateAddressBuffer(const GraphicContext* ctx, uint64_t size, VkExternalMemoryHandleTypeFlags handle_type)
+VkBuffer CreateAddressBuffer(const GraphicContext* ctx, uint64_t size, VkExternalMemoryHandleTypeFlags handle_type,
+                             VkBufferUsageFlags extra_usage = 0)
 {
 	const bool external = handle_type != 0;
 	VkExternalMemoryBufferCreateInfo external_info {};
@@ -396,7 +402,7 @@ VkBuffer CreateAddressBuffer(const GraphicContext* ctx, uint64_t size, VkExterna
 	info.pNext       = external ? &external_info : nullptr;
 	info.size        = size;
 	// Imports also receive device-side publications of GPU results.
-	info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | extra_usage;
 	VulkanApplyResourceSharing(*ctx, &info.sharingMode, &info.queueFamilyIndexCount, &info.pQueueFamilyIndices);
 	VkBuffer buffer = nullptr;
 	return vkCreateBuffer(ctx->device, &info, nullptr, &buffer) == VK_SUCCESS ? buffer : nullptr;
@@ -588,6 +594,8 @@ bool ImportPointer(GraphicContext* ctx, void* pointer, uint64_t span, uint64_t h
 		return false;
 	}
 	prepared->Release(out);
+	out->memory_type = type_index;
+	out->handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
 	return true;
 }
 
@@ -631,7 +639,9 @@ bool ImportDmaBuf(GraphicContext* ctx, int dma_buf, uint64_t span, Chunk* out)
 		return false;
 	}
 	prepared.Release(out);
-	out->physical = true;
+	out->physical    = true;
+	out->memory_type = type_index;
+	out->handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 	return true;
 }
 
@@ -726,6 +736,17 @@ bool ImportWindow(GraphicContext* ctx, uint64_t offset, uint64_t size, Chunk* ou
 	Kernel::Memory::KernelUnmapPhysicalAlias(alias);
 	Kernel::Memory::KernelUnpinPhysicalWindow(offset, size);
 	return false;
+}
+
+void ReleaseInPlaceWindowLocked(VkDevice device, Registry* registry, std::map<std::pair<uint64_t, uint64_t>, PhysicalWindow>::iterator window)
+{
+	if (window->second.users != 0)
+	{
+		return;
+	}
+	DestroyImport(device, window->second.import);
+	Kernel::Memory::KernelUnpinPhysicalWindow(window->first.first, window->first.second);
+	registry->in_place_windows.erase(window);
 }
 
 // The window holding direct-memory offset `offset`, imported if none does. A
@@ -1457,6 +1478,103 @@ static void RecordPublicationBarrierAfter(VkCommandBuffer_T* cmd)
 	                     &after, 0, nullptr, 0, nullptr);
 }
 
+
+// A buffer over `size` bytes at `object_offset` of an imported window. Binding is coarser
+// than guest addresses, so it can start below the object, at `*guest_offset` in the buffer.
+static VkBuffer CreateInPlaceBuffer(const GraphicContext* ctx, const Chunk& import, uint64_t object_offset, uint64_t size,
+                                    uint64_t window_size, uint32_t usage, uint64_t* guest_offset)
+{
+	VkBuffer buffer = CreateAddressBuffer(ctx, size, import.handle_type, usage);
+	if (buffer == VK_NULL_HANDLE)
+	{
+		return VK_NULL_HANDLE;
+	}
+	VkMemoryRequirements requirements {};
+	vkGetBufferMemoryRequirements(ctx->device, buffer, &requirements);
+	const uint64_t pad = object_offset % requirements.alignment;
+	if (pad != 0u)
+	{
+		vkDestroyBuffer(ctx->device, buffer, nullptr);
+		if ((pad & 3u) != 0u || pad % ctx->min_storage_buffer_offset_alignment != 0u)
+		{
+			return VK_NULL_HANDLE;
+		}
+		buffer = CreateAddressBuffer(ctx, size + pad, import.handle_type, usage);
+		if (buffer == VK_NULL_HANDLE)
+		{
+			return VK_NULL_HANDLE;
+		}
+		vkGetBufferMemoryRequirements(ctx->device, buffer, &requirements);
+	}
+	const uint64_t memory_offset = object_offset - pad;
+	if ((memory_offset % requirements.alignment) != 0u || ((requirements.memoryTypeBits >> import.memory_type) & 1u) == 0u ||
+	    requirements.size > window_size - memory_offset ||
+	    vkBindBufferMemory(ctx->device, buffer, import.memory, memory_offset) != VK_SUCCESS)
+	{
+		vkDestroyBuffer(ctx->device, buffer, nullptr);
+		return VK_NULL_HANDLE;
+	}
+	*guest_offset = pad;
+	return buffer;
+}
+
+bool GuestDeviceAddressBindInPlace(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint32_t usage, VulkanBuffer* out,
+                                   GuestInPlaceWindow* window)
+{
+	EXIT_IF(ctx == nullptr || out == nullptr || window == nullptr || out->buffer != nullptr || size == 0);
+	uint64_t offset = 0;
+	if (!ctx->guest_device_address_supported || vaddr > UINT64_MAX - size ||
+	    Kernel::Memory::KernelResolvePhysical(vaddr, size, &offset) != Kernel::Memory::KernelPhysicalResolution::Resolved)
+	{
+		return false;
+	}
+	const uint64_t base = offset / kPhysicalImportBlockBytes * kPhysicalImportBlockBytes;
+	const uint64_t end  = (offset + size + kPhysicalImportBlockBytes - 1u) / kPhysicalImportBlockBytes * kPhysicalImportBlockBytes;
+	if (end - base > kChunkBytes)
+	{
+		return false;
+	}
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	auto                        found = registry.in_place_windows.find({base, end - base});
+	if (found == registry.in_place_windows.end())
+	{
+		PhysicalWindow imported;
+		imported.size = end - base;
+		if (!ImportWindow(ctx, base, end - base, &imported.import))
+		{
+			return false;
+		}
+		found = registry.in_place_windows.emplace(std::make_pair(base, end - base), imported).first;
+	}
+	uint64_t       guest_offset = 0;
+	const VkBuffer buffer = CreateInPlaceBuffer(ctx, found->second.import, offset - base, size, end - base, usage, &guest_offset);
+	if (buffer == VK_NULL_HANDLE)
+	{
+		ReleaseInPlaceWindowLocked(ctx->device, &registry, found);
+		return false;
+	}
+	found->second.users++;
+	out->buffer           = buffer;
+	out->descriptor_range = size;
+	out->guest_in_place   = true;
+	out->guest_offset     = guest_offset;
+	VulkanAssignMemoryUniqueId(&out->memory);
+	*window = {base, end - base};
+	return true;
+}
+
+void GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const GuestInPlaceWindow& window)
+{
+	EXIT_IF(ctx == nullptr || window.size == 0);
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	const auto                  found = registry.in_place_windows.find({window.base, window.size});
+	EXIT_IF(found == registry.in_place_windows.end() || found->second.users == 0);
+	found->second.users--;
+	ReleaseInPlaceWindowLocked(ctx->device, &registry, found);
+}
+
 bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source, uint64_t vaddr,
                                          uint64_t size)
 {
@@ -1464,6 +1582,13 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 	    !ctx->guest_device_address_supported)
 	{
 		return false;
+	}
+	if (source.guest_in_place)
+	{
+		// The device wrote these bytes where the consumer reads them.
+		RecordPublicationBarrierBefore(cmd);
+		RecordPublicationBarrierAfter(cmd);
+		return true;
 	}
 	std::vector<PublicationPiece> pieces;
 	auto&                         registry = GetRegistry();

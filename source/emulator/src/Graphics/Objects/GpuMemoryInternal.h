@@ -303,6 +303,7 @@ public:
 	[[nodiscard]] bool PendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges);
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
 	[[nodiscard]] bool FindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
+	void               MarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId consumer);
 	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
 	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
 	[[nodiscard]] GpuMemoryGdsSource AcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
@@ -361,6 +362,8 @@ private:
 		uint64_t                            write_time                 = 0;
 		uint64_t                            device_write_time          = 0;
 		uint64_t                            guest_published_write_uses = 0;
+		uint64_t                            in_place_ordered_write_uses = 0;
+		uint32_t                            in_place_ordered_queue      = 0;
 		uint32_t                            guest_published_queue      = 0;
 		bool                                guest_published_uniform    = false;
 		GpuWritebackPageCache::UniformWords guest_published_words {};

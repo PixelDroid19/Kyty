@@ -817,7 +817,10 @@ void VulkanDeleteBuffer(GraphicContext* gctx, VulkanBuffer* buffer)
 	DeleteDescriptor(buffer);
 
 	vkDestroyBuffer(gctx->device, buffer->buffer, nullptr);
-	VulkanFree(gctx, &buffer->memory);
+	if (!buffer->guest_in_place)
+	{
+		VulkanFree(gctx, &buffer->memory);
+	}
 	buffer->buffer           = nullptr;
 	buffer->descriptor_range = 0;
 }

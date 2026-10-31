@@ -269,7 +269,10 @@ void LabelStoragePublication::Upload(const LabelFenceRegistry& registry, void* g
 	for (const auto& run: runs)
 	{
 		EXIT_IF(run.bytes == 0u || run.offset > size || run.bytes > size - run.offset);
-		std::memcpy(static_cast<uint8_t*>(gpu_dst) + run.offset, static_cast<const uint8_t*>(guest_src) + run.offset, run.bytes);
+		if (gpu_dst != guest_src)
+		{
+			std::memcpy(static_cast<uint8_t*>(gpu_dst) + run.offset, static_cast<const uint8_t*>(guest_src) + run.offset, run.bytes);
+		}
 		if (!whole)
 		{
 			page_cache->Refresh(gpu_dst, run);
