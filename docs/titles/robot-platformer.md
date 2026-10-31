@@ -37,12 +37,18 @@ with the composite running: captures at frames 3675 and 4068 show clean bots and
 depth of field. The first version refused integer D16 stores and stopped at the
 hub (gw253, gw254), so the path is exercised by that title as well. The D16 float
 and integer paths have no dedicated test; `EmulatorShaderMimg` and resource fold
-replay pass.
+replay pass. The integer path was only proven not to stop at its store (compute,
+pc 0x468, dmask 0x1); its output was not inspected.
+
+No regression: strict matrix on this change gives the same outcomes per case as the
+previous one (26 interactive; `case_429dd9d08d87` controlled timeout after 2
+presents; `case_2daaacae7295` exit 139; 4 invalid fixtures). Its bounded windows do
+not prove that no title reaches a D16 load or sample later, which would now stop.
 
 Hub-start assert: without `CB_SCALE=2` runs gw244 and gw246 still end in the guest
 assert of the record below; with it, more than 13 hub passes survived. This
-contradicts the note there that more space shows no gain; the scale is a probe and
-not a fix, and the strict cause remains open.
+contradicts the older "no evidence that more space helps" note in this file (one
+passing run); the scale is a probe and not a fix, and the strict cause remains open.
 
 Open: the A16 bit (word 1 bit 30) is still ignored by
 `source/emulator/src/Graphics/ShaderParseMIMG.cpp`; a program using it would read
