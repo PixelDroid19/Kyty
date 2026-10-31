@@ -1669,6 +1669,12 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	EXIT_IF(buffer == nullptr);
 	EXIT_IF(buffer->IsInvalid());
 
+	// A draw of no indexes fetches nothing and produces no primitives.
+	if (index_count == 0)
+	{
+		return;
+	}
+
 	// Diagnostic A/B: KYTY_AB_SKIP_ALL_DRAWS=1 skips graphics draws (DEVICE_LOST triage).
 	if (static const char* ab = std::getenv("KYTY_AB_SKIP_ALL_DRAWS"); ab != nullptr && ab[0] != '\0')
 	{

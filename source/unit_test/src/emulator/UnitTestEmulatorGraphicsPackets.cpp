@@ -2902,6 +2902,40 @@ TEST(EmulatorGraphicsPackets, BuildsPackedNormalized16BitVertexLayout)
 	EXPECT_FALSE(VulkanBuildVertexInputLayout(input, &layout));
 }
 
+// Every fetch through a V# with no records is out of range and reads zero, so the
+// attribute stays in the layout on a binding of its own past the declared buffers.
+TEST(EmulatorGraphicsPackets, VertexInputLayoutKeepsAttributesOfEmptyDescriptors)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	ShaderVertexInputInfo input {};
+	input.resources_num = 2;
+	input.resources[0].fields[2] = 4u;
+	input.resources[0].fields[3] = (56u << 12u) | DstSel(4, 5, 6, 7);
+	input.resources_dst[0]       = {0, 4};
+	input.resources[1].fields[3] = (56u << 12u) | DstSel(4, 5, 6, 7);
+	input.resources_dst[1]       = {4, 4};
+	input.buffers_num            = 1;
+	input.buffers[0].stride      = 16u;
+	input.buffers[0].num_records = 4u;
+	input.buffers[0].attr_num    = 1;
+
+	VulkanVertexInputLayout layout {};
+	ASSERT_TRUE(VulkanBuildVertexInputLayout(input, &layout));
+	EXPECT_TRUE(VulkanVertexInputHasEmptyResource(input));
+	ASSERT_EQ(layout.binding_count, 2u);
+	EXPECT_EQ(layout.attribute_count, 2u);
+	EXPECT_EQ(layout.bindings[1].binding, 1u);
+	EXPECT_EQ(layout.bindings[1].stride, 0u);
+	EXPECT_EQ(layout.attributes[1].binding, 1u);
+	EXPECT_EQ(layout.attributes[1].offset, 0u);
+	EXPECT_EQ(layout.attributes[1].location, 1u);
+
+	// A resource with records but no buffer is a decoder bug, not guest state.
+	input.resources[1].fields[2] = 4u;
+	EXPECT_FALSE(VulkanBuildVertexInputLayout(input, &layout));
+}
+
 // The attribute word's instance bit makes the fetch index the instance id, so the
 // attribute steps per instance and never shares a per-vertex binding of the same stream.
 TEST(EmulatorGraphicsPackets, InstanceAttributeStepsInItsOwnBinding)

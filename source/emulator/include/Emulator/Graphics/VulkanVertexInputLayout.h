@@ -27,6 +27,11 @@ struct VulkanVertexInputLayout
 // regular and fixed-function expansion pipelines.
 [[nodiscard]] bool VulkanBuildVertexInputLayout(const ShaderVertexInputInfo& input, VulkanVertexInputLayout* layout);
 
+// A V# with no records is valid guest state: every fetch through it is out of
+// range and reads zero. Its attributes share one binding past the declared
+// buffers, at index buffers_num, that must be bound to a zero-filled buffer.
+[[nodiscard]] bool VulkanVertexInputHasEmptyResource(const ShaderVertexInputInfo& input);
+
 // Bytes past a record's start that the binding's attributes fetch; UINT64_MAX
 // when an attribute cannot be resolved.
 [[nodiscard]] uint64_t VulkanVertexInputBindingFetchEnd(const ShaderVertexInputInfo& input, int buffer_index);

@@ -16,6 +16,78 @@ static VulkanVertexInputFormat ResolveVertexInputFormat(const ShaderBufferResour
 	            : VulkanResolveLegacyVertexInputFormat(resource.Dfmt(), resource.Nfmt());
 }
 
+static bool AddVertexInputAttribute(const ShaderVertexInputInfo& input, int resource_index, uint32_t binding, uint32_t offset, bool gen5,
+                                    VulkanVertexInputLayout* layout)
+{
+	const auto& resource   = input.resources[resource_index];
+	const auto& destination = input.resources_dst[resource_index];
+	const auto format = ResolveVertexInputFormat(resource, gen5);
+	if (format.format == VK_FORMAT_UNDEFINED || format.component_count == 0 || resource.AddTid() || resource.SwizzleEnabled())
+	{
+		return false;
+	}
+
+	switch (destination.registers_num)
+	{
+		case 1:
+			if (resource.DstSelX() != DstSel(4))
+			{
+				return false;
+			}
+			break;
+		case 2:
+			// Identity XY (4,5) on a 1-component format selects missing Y=0.
+			if ((format.component_count == 1 && resource.DstSelXY() != DstSel(4, 0) &&
+			     resource.DstSelXY() != DstSel(4, 5)) ||
+			    (format.component_count >= 2 && resource.DstSelXY() != DstSel(4, 5)))
+			{
+				return false;
+			}
+			break;
+		case 3:
+			// Identity XYZ (4,5,6) on a 1/2-component format selects
+			// missing Z=0, same as the explicit 0 constant.
+			if ((format.component_count == 1 && resource.DstSelXYZ() != DstSel(4, 0, 0) &&
+			     resource.DstSelXYZ() != DstSel(4, 5, 6)) ||
+			    (format.component_count == 2 && resource.DstSelXYZ() != DstSel(4, 5, 0) &&
+			     resource.DstSelXYZ() != DstSel(4, 5, 6)) ||
+			    (format.component_count >= 3 && resource.DstSelXYZ() != DstSel(4, 5, 6)))
+			{
+				return false;
+			}
+			break;
+		case 4:
+			// Identity DST_SEL 0xFAC=(4,5,6,7). Hardware fills missing
+			// channels (0 for Y/Z, 1 for W on float), so identity is
+			// the same as the explicit constant forms.
+			if ((format.component_count == 1 && resource.DstSelXYZW() != DstSel(4, 0, 0, 1) &&
+			     resource.DstSelXYZW() != DstSel(4, 5, 6, 7)) ||
+			    (format.component_count == 2 && resource.DstSelXYZW() != DstSel(4, 5, 0, 1) &&
+			     resource.DstSelXYZW() != DstSel(4, 5, 6, 7)) ||
+			    (format.component_count == 3 && resource.DstSelXYZW() != DstSel(4, 5, 6, 1) &&
+			     resource.DstSelXYZW() != DstSel(4, 5, 6, 7)) ||
+			    (format.component_count == 4 && resource.DstSelXYZW() != DstSel(4, 5, 6, 7)))
+			{
+				return false;
+			}
+			break;
+		default: return false;
+	}
+
+	auto& attribute      = layout->attributes[resource_index];
+	attribute.binding    = binding;
+	attribute.location   = static_cast<uint32_t>(resource_index);
+	attribute.offset     = offset;
+	attribute.format     = format.format;
+return true;
+}
+
+bool VulkanVertexInputHasEmptyResource(const ShaderVertexInputInfo& input)
+{
+	return std::any_of(input.resources, input.resources + std::clamp(input.resources_num, 0, ShaderVertexInputInfo::RES_MAX),
+	                   [](const ShaderBufferResource& resource) { return resource.NumRecords() == 0; });
+}
+
 bool VulkanBuildVertexInputLayout(const ShaderVertexInputInfo& input, VulkanVertexInputLayout* layout)
 {
 	if (layout == nullptr || input.resources_num < 0 || input.resources_num > static_cast<int>(VulkanVertexInputLayout::MAX_ATTRIBUTES) ||
@@ -49,79 +121,37 @@ bool VulkanBuildVertexInputLayout(const ShaderVertexInputInfo& input, VulkanVert
 				return false;
 			}
 
-			const auto& resource   = input.resources[resource_index];
-			const auto& destination = input.resources_dst[resource_index];
-			const auto format = ResolveVertexInputFormat(resource, gen5);
-			if (format.format == VK_FORMAT_UNDEFINED || format.component_count == 0 || resource.AddTid() || resource.SwizzleEnabled())
+			if (!AddVertexInputAttribute(input, resource_index, static_cast<uint32_t>(buffer_index), buffer.attr_offsets[attribute_index], gen5, layout))
 			{
 				return false;
 			}
-
-			switch (destination.registers_num)
-			{
-				case 1:
-					if (resource.DstSelX() != DstSel(4))
-					{
-						return false;
-					}
-					break;
-				case 2:
-					// Identity XY (4,5) on a 1-component format selects missing Y=0.
-					if ((format.component_count == 1 && resource.DstSelXY() != DstSel(4, 0) &&
-					     resource.DstSelXY() != DstSel(4, 5)) ||
-					    (format.component_count >= 2 && resource.DstSelXY() != DstSel(4, 5)))
-					{
-						return false;
-					}
-					break;
-				case 3:
-					// Identity XYZ (4,5,6) on a 1/2-component format selects
-					// missing Z=0, same as the explicit 0 constant.
-					if ((format.component_count == 1 && resource.DstSelXYZ() != DstSel(4, 0, 0) &&
-					     resource.DstSelXYZ() != DstSel(4, 5, 6)) ||
-					    (format.component_count == 2 && resource.DstSelXYZ() != DstSel(4, 5, 0) &&
-					     resource.DstSelXYZ() != DstSel(4, 5, 6)) ||
-					    (format.component_count >= 3 && resource.DstSelXYZ() != DstSel(4, 5, 6)))
-					{
-						return false;
-					}
-					break;
-				case 4:
-					// Identity DST_SEL 0xFAC=(4,5,6,7). Hardware fills missing
-					// channels (0 for Y/Z, 1 for W on float), so identity is
-					// the same as the explicit constant forms.
-					if ((format.component_count == 1 && resource.DstSelXYZW() != DstSel(4, 0, 0, 1) &&
-					     resource.DstSelXYZW() != DstSel(4, 5, 6, 7)) ||
-					    (format.component_count == 2 && resource.DstSelXYZW() != DstSel(4, 5, 0, 1) &&
-					     resource.DstSelXYZW() != DstSel(4, 5, 6, 7)) ||
-					    (format.component_count == 3 && resource.DstSelXYZW() != DstSel(4, 5, 6, 1) &&
-					     resource.DstSelXYZW() != DstSel(4, 5, 6, 7)) ||
-					    (format.component_count == 4 && resource.DstSelXYZW() != DstSel(4, 5, 6, 7)))
-					{
-						return false;
-					}
-					break;
-				default: return false;
-			}
-
-			auto& attribute      = layout->attributes[resource_index];
-			attribute.binding    = static_cast<uint32_t>(buffer_index);
-			attribute.location   = static_cast<uint32_t>(resource_index);
-			attribute.offset     = buffer.attr_offsets[attribute_index];
-			attribute.format     = format.format;
 			resource_seen[resource_index] = true;
 		}
 	}
 
+	const auto empty_binding = static_cast<uint32_t>(input.buffers_num);
+	bool       has_empty     = false;
 	for (int resource_index = 0; resource_index < input.resources_num; resource_index++)
 	{
-		if (!resource_seen[resource_index])
+		if (resource_seen[resource_index])
+		{
+			continue;
+		}
+		if (input.resources[resource_index].NumRecords() != 0 || empty_binding >= VulkanVertexInputLayout::MAX_ATTRIBUTES ||
+		    !AddVertexInputAttribute(input, resource_index, empty_binding, 0u, gen5, layout))
 		{
 			return false;
 		}
+		has_empty = true;
+	}
+	if (has_empty)
+	{
+		layout->bindings[empty_binding].binding   = empty_binding;
+		layout->bindings[empty_binding].stride    = 0;
+		layout->bindings[empty_binding].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 	}
 
-	layout->binding_count   = static_cast<uint32_t>(input.buffers_num);
+	layout->binding_count   = empty_binding + (has_empty ? 1u : 0u);
 	layout->attribute_count = static_cast<uint32_t>(input.resources_num);
 	return true;
 }

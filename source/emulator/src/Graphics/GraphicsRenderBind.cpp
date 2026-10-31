@@ -2617,6 +2617,27 @@ static void CopyPendingStorageIntoVertices(CommandBuffer* buffer, VulkanBuffer* 
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
 }
 
+static VkBuffer ZeroVertexBuffer(GraphicContext* ctx)
+{
+	// Large enough for the widest attribute format; a stride of zero keeps every fetch at its start.
+	static constexpr uint64_t kBytes = 32u;
+	static auto* const zero = [ctx]
+	{
+		auto* created            = new VulkanBuffer;
+		created->usage           = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+		created->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		created->buffer          = nullptr;
+		VulkanCreateBuffer(ctx, kBytes, created);
+		EXIT_IF(created->buffer == nullptr);
+		void* data = nullptr;
+		VulkanMapMemory(ctx, &created->memory, &data);
+		std::memset(data, 0, kBytes);
+		VulkanUnmapMemory(ctx, &created->memory);
+		return created;
+	}();
+	return zero->buffer;
+}
+
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
 	                   uint32_t first_record, uint32_t required_records, bool records_exact, uint32_t first_instance,
 	                   uint32_t instance_count)
@@ -2685,6 +2706,12 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 
 		offset += vertices->guest_offset;
 		vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &vertices->buffer, &offset);
+	}
+	if (VulkanVertexInputHasEmptyResource(input))
+	{
+		const VkBuffer     zero   = ZeroVertexBuffer(g_render_ctx->GetGraphicCtx());
+		const VkDeviceSize offset = 0;
+		vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(input.buffers_num), 1, &zero, &offset);
 	}
 }
 
