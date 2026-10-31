@@ -43,6 +43,25 @@
 
 namespace Kyty::Libs::Graphics {
 
+static thread_local SubmissionId* g_mutation_conflict = nullptr;
+
+GpuMemoryMutationConflictScope::GpuMemoryMutationConflictScope(SubmissionId* conflict): m_conflict(conflict)
+{
+	EXIT_IF(conflict == nullptr || g_mutation_conflict != nullptr);
+	g_mutation_conflict = conflict;
+}
+
+GpuMemoryMutationConflictScope::~GpuMemoryMutationConflictScope()
+{
+	(void)Close();
+}
+
+bool GpuMemoryMutationConflictScope::Close()
+{
+	g_mutation_conflict = nullptr;
+	return m_conflict->sequence != 0;
+}
+
 static_assert(GpuObject::PARAMS_MAX == GpuMemoryMaterializationKey::MaxParams,
               "materialization keys must cover every GPU object parameter");
 
@@ -399,6 +418,7 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			}
 		}
 
+		const uint64_t previous_submit_id = o.submit_id;
 		if (submit_id != UINT64_MAX)
 		{
 			o.submit_id = submit_id;
@@ -473,6 +493,13 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			const auto  pending      = std::find_if(dependencies.begin(), dependencies.end(), [this](const auto& dependency)
 			                                        { return !m_deferred_deletions.AreDependenciesComplete({dependency}); });
 			EXIT_IF(pending == dependencies.end());
+			if (g_mutation_conflict != nullptr)
+			{
+				// Keep the stale hash and submit id so the retry sees this change again.
+				*g_mutation_conflict = *pending;
+				o.submit_id          = previous_submit_id;
+				return;
+			}
 			EXIT("GpuMemory cannot version an in-flight write-back backing: type=%s vaddr=0x%016" PRIx64 " size=0x%016" PRIx64
 			     " queue=%" PRIu32 " sequence=%" PRIu64 "\n",
 			     Core::EnumName(o.object.type).C_Str(), h.block.vaddr[0], h.block.size[0], pending->queue.Value(), pending->sequence);

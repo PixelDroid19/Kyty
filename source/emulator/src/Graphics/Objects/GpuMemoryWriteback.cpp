@@ -323,7 +323,11 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 		{
 			o2.hash[vi] = 0;
 		}
-		if (GpuMemoryWriteBackParentActionFor(other.relation) == GpuMemoryWriteBackParentAction::PropagateEquals)
+		// A writable parent with pending uses takes the invalidated bytes at its next use:
+		// versioning it would drop those uses' writes.
+		const bool parent_update_conflicts = o2.write_back_func != nullptr && !o2.read_only &&
+		                                     !m_deferred_deletions.AreDependenciesComplete(o2.submission_uses.Dependencies());
+		if (GpuMemoryWriteBackParentActionFor(other.relation) == GpuMemoryWriteBackParentAction::PropagateEquals && !parent_update_conflicts)
 		{
 			Update(o.submit_id, ctx, heap_id, other.object_id, destructors);
 		}

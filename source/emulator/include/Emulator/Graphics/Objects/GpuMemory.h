@@ -1380,6 +1380,25 @@ struct GpuMemoryStoragePublication
 [[nodiscard]] bool GpuMemoryPendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
                                                     const std::vector<SubmissionId>&          device_awaited,
                                                     std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
+// While armed on this thread, guest bytes that changed under a write-back-capable
+// backing with pending uses report one such use through `conflict` and leave the object
+// as it was, instead of stopping. The operation records only idempotent binding work
+// before Close: on a conflict it abandons itself, and its processor waits for the use
+// without recording locks, so the use is written back before the retry uploads the bytes.
+class GpuMemoryMutationConflictScope
+{
+public:
+	explicit GpuMemoryMutationConflictScope(SubmissionId* conflict);
+	~GpuMemoryMutationConflictScope();
+	GpuMemoryMutationConflictScope(const GpuMemoryMutationConflictScope&)            = delete;
+	GpuMemoryMutationConflictScope& operator=(const GpuMemoryMutationConflictScope&) = delete;
+
+	// Disarms the scope and tells whether a conflict was reported.
+	[[nodiscard]] bool Close();
+
+private:
+	SubmissionId* m_conflict = nullptr;
+};
 // An object seeded from guest bytes in [vaddr, vaddr + size) on the host misses the
 // writable StorageBuffer results overlapping it until they are written back, even
 // when they are also published to the device-address view. Writes back the completed

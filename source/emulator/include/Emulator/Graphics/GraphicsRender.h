@@ -839,7 +839,7 @@ enum class ComputeDispatchResult
 	IndirectArgumentsOnHost,
 };
 // Preparation and recording share one resource analysis. A required write-back
-// or submission wait leaves the command buffer untouched; retry with fresh inputs.
+// or submission wait records no dispatch; retry with fresh inputs.
 // A nonzero indirect_args_address takes the group counts from that guest record on
 // the device and ignores the thread_group arguments.
 [[nodiscard]] ComputeDispatchResult GraphicsRenderDispatchDirect(

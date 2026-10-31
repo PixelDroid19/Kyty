@@ -943,24 +943,28 @@ gdb runs.
   - A built-in block mismatch: VS output {Position, PointSize, ClipDistance, CullDistance}
     against the generated geometry stage input {Position} (`ShaderSpirvGeometry.cpp`).
     Direction: declare the same block on both sides.
-- **Open defect: in-flight write-back refusal** (gw108, strict 340 s, `453fd755a` plus
-  diagnostics, frame about 2044, before the dunes).
-  - The run stopped with `GpuMemory cannot version an in-flight write-back backing:
-    type=StorageBuffer vaddr=0x553ba3a50 size=0x1fa40 queue=7 sequence=6253`
-    (`GpuMemoryCreate.cpp`, `GpuMemoryChooseMutationAction` returns `RejectWriteBackConflict`).
-  - Trigger: the guest bytes of a write-back-capable storage buffer changed while a
-    compute-queue (queue 7) submission that uses the backing had not completed. Versioning the
-    backing would drop that submission's writes, so the strict path stops.
-  - It is the first time this stop appears in the saved runs of this route; gw104-gw107, gw109
-    and the earlier runs passed the same point. It is timing-dependent.
-  - Lead, not verified: the device-side `DISPATCH_INDIRECT` read (`0a7dc5b29`) applies on every
-    queue, compute queues included. It removed the host argument reads that used to submit and
-    wait for each queue's work, so a compute queue now keeps uses of its storage pending for
-    longer. The run kept no record of what queue 7 sequence 6253 dispatched, so the link to that
-    change is not shown.
-  - Suggested direction: decide from evidence which order the guest relies on (its own label
-    wait before the CPU store, or none), then either wait for the pending use and write it back
-    before the in-place update, or prove the GPU write and the CPU store cover disjoint bytes.
+- **In-flight write-back refusal: the stop became a host wait** (gw108 `453fd755a` plus
+  diagnostics, frame about 2044; gw209 `fd6dcbf8b` plus diagnostics, about 107 s, worldmap load).
+  - Both runs stopped with `GpuMemory cannot version an in-flight write-back backing:
+    type=StorageBuffer size=0x1fa40 queue=7` (`GpuMemoryCreate.cpp`, `GpuMemoryChooseMutationAction`
+    returns `RejectWriteBackConflict`). In gw209 the pending use was queue 7 sequence 6120, with 3
+    device-indirect dispatches and no arguments inside the object.
+  - Change: `GpuMemoryMutationConflictScope`. The indexed draw, auto draw, geometry pass and compute
+    dispatch paths arm it after preparation. A conflict leaves the object as it was and reports the
+    pending use; the operation abandons itself before its first draw or dispatch, and the processor
+    waits for the use without recording locks, as for other pending dependencies. The use is
+    written back first and the retry uploads the changed bytes. A parent invalidated by a write-back
+    while it has its own pending writable uses now takes the bytes at its next use.
+  - Verification: gw213 forced the conflict on one in 200 writable in-flight binds. It fired 62
+    times (queue 7: 48, queue 8: 14), with no stop and no failed retry, and the run reached the hub
+    bound of 150 s. gw210 and gw211 passed the same route, with no natural conflict.
+  - What triggers the natural case is not shown: neither stop reproduced after the backtrace and
+    alias listing were added (gw210-gw213). gw212 counted 95000 ordinary rehashes of write-back
+    storage with no pending use, so ordinary rebinds are not the route. Lead, not verified: the
+    write-back invalidation of an aliased object, which clears `submit_id` and the hash.
+  - Open limits: the fragment transport path and uploads outside a draw or dispatch keep the strict
+    stop, because they cannot abandon. Bytes the guest stored in a page that the pending use also
+    wrote can still be overwritten by the write-back, as for any store during a use.
 - **Dune wait sites** (gw78, same binary, whole run, fence waits of 0.2 ms or longer, by call site):
 
   | Call site | Wait time | Waits |

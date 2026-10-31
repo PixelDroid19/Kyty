@@ -1639,7 +1639,7 @@ static void                  RecordGeometryPass(uint64_t submit_id, CommandBuffe
                                                 const HW::Shader& sh_ctx, ShaderVertexInputInfo* front, const GeometryDrawPlan& plan,
                                                 int32_t first_vertex, uint32_t first_instance,
                                                 const GuestDeviceAddressTable* device_address_table, ShaderVertexInputInfo* pull,
-                                                uint64_t index_address);
+                                                uint64_t index_address, const SubmissionId* mutation_conflict);
 
 // Without attachments only the scissors bound the rasterized area; an empty
 // scissor leaves no pixel for the shader. The pass starts at the origin, so
@@ -1898,6 +1898,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	{
 		return;
 	}
+	GpuMemoryMutationConflictScope mutation_conflict(pending_submission);
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
 	RequireSupportedRenderResolutionPlan(depth_only_resolution);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
@@ -1946,7 +1947,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	if (geometry_pass)
 	{
 		RecordGeometryPass(submit_id, buffer, *ctx, *sh_ctx, &geometry_front, geometry_plan, vertex_offset, first_instance,
-		                   &device_address_table, &vs_input_info, reinterpret_cast<uint64_t>(index_addr));
+		                   &device_address_table, &vs_input_info, reinterpret_cast<uint64_t>(index_addr), pending_submission);
+		if (pending_submission->sequence != 0)
+		{
+			return;
+		}
 		vertex_offset  = 0;
 		instance_count = 1;
 		first_instance = 0;
@@ -2142,6 +2147,10 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum,
 	                stencil_attached_depth, nullptr, &device_address_table, ResolvePixelScaledImageReadAccess(ps_input_info),
 	                &color_info);
+	if (mutation_conflict.Close())
+	{
+		return;
+	}
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
@@ -2840,7 +2849,7 @@ static ShaderVertexInputInfo MakeGeometryPullInput(const ShaderVertexInputInfo& 
 static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& ctx, const HW::Shader& sh_ctx,
                                ShaderVertexInputInfo* front, const GeometryDrawPlan& plan, int32_t first_vertex,
                                uint32_t first_instance, const GuestDeviceAddressTable* device_address_table,
-                               ShaderVertexInputInfo* pull, uint64_t index_address)
+                               ShaderVertexInputInfo* pull, uint64_t index_address, const SubmissionId* mutation_conflict)
 {
 	const uint64_t bytes  = static_cast<uint64_t>(plan.groups) * plan.info.GroupDwords() * 4u;
 	auto*          output = buffer->GeometryOutput(bytes);
@@ -2885,6 +2894,10 @@ static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const 
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, front->bind, VK_SHADER_STAGE_COMPUTE_BIT,
 	                DescriptorCache::Stage::Compute, 0, nullptr, vs.gs_regs.chksum, nullptr, nullptr, device_address_table);
+	if (mutation_conflict->sequence != 0)
+	{
+		return;
+	}
 	// Binding may record host commands; restore the pass pipeline before dispatch.
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 	vkCmdDispatch(vk_buffer, plan.groups, 1u, 1u);
@@ -3110,6 +3123,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	{
 		return;
 	}
+	GpuMemoryMutationConflictScope mutation_conflict(pending_submission);
 	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
 	RequireSupportedRenderResolutionPlan(depth_only_resolution);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
@@ -3158,7 +3172,11 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	if (geometry_pass)
 	{
 		RecordGeometryPass(submit_id, buffer, *ctx, *sh_ctx, &geometry_front, geometry_plan, resolved_first_vertex, first_instance,
-		                   &device_address_table, &vs_input_info, 0u);
+		                   &device_address_table, &vs_input_info, 0u, pending_submission);
+		if (pending_submission->sequence != 0)
+		{
+			return;
+		}
 		resolved_first_vertex = 0;
 		instance_count        = 1;
 		first_instance        = 0;
@@ -3325,6 +3343,10 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum,
 	                stencil_attached_depth, nullptr, &device_address_table, ResolvePixelScaledImageReadAccess(ps_input_info),
 	                &color_info);
+	if (mutation_conflict.Close())
+	{
+		return;
+	}
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
 
@@ -3667,6 +3689,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		case GuestDeviceAddressReadPreparation::PendingReader:
 			return ComputeDispatchResult::ReaderCompletionRequired;
 	}
+	GpuMemoryMutationConflictScope mutation_conflict(pending_submission);
 
 	const auto& cs_regs = sh_ctx->GetCs();
 	// Diagnostic A/B only (not a product fix):
@@ -3798,6 +3821,10 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
 	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask, nullptr,
 	                cs_regs.cs_regs.chksum, nullptr, input_info.storage_image_tile_coverage, &device_address_table);
+	if (mutation_conflict.Close())
+	{
+		return ComputeDispatchResult::SubmissionCompletionRequired;
+	}
 	if (!indirect)
 	{
 		(void)TryPublishComputeDepthMetaFill(submit_id, input_info, thread_group_x, thread_group_y, thread_group_z);
