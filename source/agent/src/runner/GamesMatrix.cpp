@@ -691,7 +691,12 @@ std::string InvalidPackageReason(const std::string& root)
 	{
 		return "not_a_directory";
 	}
-	return fs::is_regular_file(fs::path(root) / kPrimaryName, ec) ? std::string() : "missing_primary_executable";
+	if (!fs::is_regular_file(fs::path(root) / kPrimaryName, ec))
+	{
+		return "missing_primary_executable";
+	}
+	// The launcher scripts need the title id, so an executable alone (a loose decrypted copy) cannot start.
+	return fs::is_regular_file(fs::path(root) / "sce_sys" / "param.json", ec) ? std::string() : "missing_content_metadata";
 }
 
 std::string AnonymousCaseId(const std::string& games_root, const std::string& package_root)
