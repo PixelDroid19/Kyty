@@ -4002,6 +4002,9 @@ titles with compute-written mip chains.
   moves little (7.4-7.7 to 7.9 fps), so the hub is not limited by the GPU alone.
 - The cost of a geometry dispatch does not follow its group count: 1 group 222 us, 4 groups 148, 63 groups 146,
   512 groups 292 (gw369). The first 60k dispatches are a repeatable A/B window (139-146 us each over 8 runs).
+- The command buffer split between a dispatch and a draw is not a frame-rate lever: dropping it under
+  `INTEL_DEBUG=reemit` lowers the cost after the last mark from 111 to 48 us per buffer, but a gap of the same size
+  appears between steps; first 60k geometry dispatches 45.1 s against 43.6 s, same frame rate (gw383 against gw381).
 - Dynamic resolution is not a lever here: main passes are already 1920x1080 at the lowest tier (40-70 per frame),
   960x540 up to 37 per frame, 2432x1368 two, 3840x2160 one, with a 720p reported window (gw368).
 - Offline half-conversion lead for `bf8ee9fc` (cycles, vkstat): base 802k, native
