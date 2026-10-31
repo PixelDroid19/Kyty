@@ -55,10 +55,13 @@ bool ShaderNativeWave32PhysicalLocal(const uint32_t (&guest_local)[3], uint32_t 
 	return true;
 }
 
-uint32_t ShaderSplitWavePartLanes(const ShaderComputeWaveCapabilities& capabilities) noexcept
+uint32_t ShaderSplitWavePartLanes(const ShaderComputeWaveCapabilities& capabilities, uint32_t vgprs) noexcept
 {
-	return capabilities.min_subgroup_size <= kSplitNarrowLanes && capabilities.max_subgroup_size >= kSplitNarrowLanes ? kSplitNarrowLanes
-	                                                                                                                  : kNativeSubgroupSize;
+	if (capabilities.min_subgroup_size > kSplitNarrowLanes || capabilities.max_subgroup_size < kSplitNarrowLanes)
+	{
+		return kNativeSubgroupSize;
+	}
+	return capabilities.min_subgroup_size <= kSplitNarrowestLanes && vgprs > kSplitNarrowVgprs ? kSplitNarrowestLanes : kSplitNarrowLanes;
 }
 
 ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComputeWaveRequest&      request,
@@ -89,11 +92,7 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	// GFX10.3's ORDER_MODE selects ordered versus out-of-order wave launch. Both
 	// values preserve the dispatch grid and do not alter this layout decision.
 
-	uint32_t part_lanes = ShaderSplitWavePartLanes(capabilities);
-	if (part_lanes == kSplitNarrowLanes && capabilities.min_subgroup_size <= kSplitNarrowestLanes && request.vgprs > kSplitNarrowVgprs)
-	{
-		part_lanes = kSplitNarrowestLanes;
-	}
+	const uint32_t part_lanes = ShaderSplitWavePartLanes(capabilities, request.vgprs);
 	if (!capabilities.size_control_enabled || !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
 	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > part_lanes ||
 	    capabilities.max_subgroup_size < part_lanes)
