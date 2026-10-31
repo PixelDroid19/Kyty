@@ -85,6 +85,13 @@ bool Spirv::EmitNativeMaskBit(const ShaderOperand& mask, const String8& result, 
 	return true;
 }
 
+// The host compiler cannot see through the lane shift of a full mask, and every
+// guarded write of the region that follows then stays a per-lane selection.
+String8 Spirv::NativeExecAllLanes()
+{
+	return "OpStore %exec_lane_lo %uint_1\nOpStore %exec_lane_hi %uint_0\nOpStore %execz %uint_0\n";
+}
+
 String8 Spirv::NativeExecRefresh(const String8& tag) const
 {
 	ShaderOperand exec {};
@@ -188,6 +195,15 @@ String8 Spirv::NativeValidPixelBallot(const String8& result) const
 %<r>_valid = OpLogicalAnd %bool %<r>_live %<r>_real
 %<r> = OpGroupNonUniformBallot %v4uint %uint_3 %<r>_valid
 )").ReplaceStr("<r>", result);
+}
+
+static bool WritesFullExec(const ShaderInstruction& inst, bool wave32)
+{
+	const bool whole_mask = inst.type == ShaderInstructionType::SMovB64 || (inst.type == ShaderInstructionType::SMovB32 && wave32);
+	const auto& source = inst.src[0];
+	return whole_mask && inst.dst.type == ShaderOperandType::ExecLo &&
+	       ((source.type == ShaderOperandType::IntegerInlineConstant && source.constant.i == -1) ||
+	        (source.type == ShaderOperandType::LiteralConstant && source.constant.u == 0xffffffffu));
 }
 
 String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index, const String8& source) const
@@ -296,7 +312,7 @@ OpStore %<lo> %mask_out_lo_<tag>
 	}
 	if (cmpx || result.ContainsStr("OpStore %exec_lo ") || result.ContainsStr("OpStore %exec_hi "))
 	{
-		result += NativeExecRefresh(tag);
+		result += WritesFullExec(inst, NativeWave32()) ? NativeExecAllLanes() : NativeExecRefresh(tag);
 	}
 	return result.ReplaceStr("%packed_exec_", "%exec_");
 }

@@ -2401,7 +2401,13 @@ void Spirv::WriteLocalVariables()
 	m_source += "%native_initial_lo = OpCompositeExtract %uint %native_initial_ballot 0\n"
 	            "%native_initial_hi = OpCompositeExtract %uint %native_initial_ballot 1\n"
 	            "OpStore %exec_lo %native_initial_lo\nOpStore %exec_hi %native_initial_hi\n";
-	m_source += NativeExecRefresh("initial");
+	// A dispatch of whole waves starts every lane live: the membership test above is always true.
+	const bool whole_waves = UsesNativeComputeWave() && !(m_bind != nullptr && m_bind->thread_limits_used) &&
+	                         (m_cs_input_info->wave_layout.guest_local[0] * m_cs_input_info->wave_layout.guest_local[1] *
+	                          m_cs_input_info->wave_layout.guest_local[2]) %
+	                                 m_cs_input_info->wave_layout.guest_wave_size ==
+	                             0u;
+	m_source += whole_waves ? NativeExecAllLanes() : NativeExecRefresh("initial");
 	if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog && !UsesGeometryCompute())
 	{
 		// One host subgroup is one guest wave (see ShaderNggFront.h): s3 counts every lane

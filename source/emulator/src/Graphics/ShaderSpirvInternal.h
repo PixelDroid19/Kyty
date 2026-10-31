@@ -156,6 +156,7 @@ public:
 	// explicit numeric operand loads are marked until the strategy is resolved.
 	[[nodiscard]] bool NativeWave32() const;
 	[[nodiscard]] String8 NativeExecRefresh(const String8& tag) const;
+	[[nodiscard]] static String8 NativeExecAllLanes();
 	[[nodiscard]] String8 NativeQuadUniform(const String8& value, const String8& type, const String8& result) const;
 	[[nodiscard]] String8 NativeMaskBallot(const String8& predicate, const String8& result) const;
 	// Pixel: ballot of the wave's valid pixels under the launch EXEC, the non-helper invocations with EXEC set.
