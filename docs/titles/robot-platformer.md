@@ -945,9 +945,10 @@ gdb runs.
     "requires FLOAT"). An image atomic is refused unless its descriptor is a proven 2D `R32_UINT`
     (`ShaderImageAtomicResourceSupported`), so the atomic on `R16G16B16A16_SFLOAT` is never executed.
     Not confirmed with GPU-assisted validation.
-  - GPU timeout after the gate: gw218, default mode, 300 s through the hub with no engine reset,
-    fps windows 9.6 to 15.9 under foreign CPU load. One run; compute family hung 9 of 11 and one
-    family 1 of 3 before it, a correlation only, since the hang is a dispatch on the render engine.
+  - GPU timeout after the gate: gw218, gw221, gw222 and gw223, default mode, 300 s each through
+    the hub with no engine reset, fps windows 3.7 to 16.8 under foreign CPU load. Before it the
+    compute family hung 9 of 11 runs and one family 1 of 3, so one family is 1 of 7 so far. This is
+    a correlation: the hang is a dispatch on the render engine and its cause is still open.
   - Open, found while fixing the block: the interpolation geometry stage forwards no `ClipDistance`,
     so a vertex shader exporting clip distance 0 through that stage loses it
     (`ShaderInterpolationGeometry.cpp`). No run shows a visible effect yet. Direction: forward it when
