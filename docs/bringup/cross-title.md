@@ -890,7 +890,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   anime fighter reached its consent screen at 14.4 fps with correct output
   and no validation error. That run did not confirm that a compute-family
   queue recorded work before it ended.
-- **Not verified:** the robot platformer; async compute on the AMD host.
+- **Not verified:** async compute on the AMD host. The robot platformer records on this family and hits an open GPU timeout on the render engine, 9 of 11 hub starts against 0 of 2 on one family, with no cause separated; depth-aspect copies on this family are an open specification defect (`docs/titles/robot-platformer.md`, GPU job timeout).
 - **Later (2026-10-30): compression cost of concurrent sharing.** On Intel
   before Xe2, ANV disables CCS compression, HiZ and fast clears for
   concurrent images when the device has more than one queue, so this layout

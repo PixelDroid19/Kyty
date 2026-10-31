@@ -48,7 +48,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Robot platformer: shape, inputs and split exchanges of the BVH kernel (2026-10-30)
   - Robot platformer: dune GPU cost by stage, translated program size, and concurrent sharing excluded (2026-10-30)
   - Robot platformer: stale modules in the shared shader store, and the BVH kernel cost (2026-10-29)
-  - Robot platformer: GPU job timeout before the dunes, and dune wait sites (2026-10-29, open)
+  - Robot platformer: GPU job timeout before the dunes, and dune wait sites (2026-10-29, localized to one dispatch 2026-10-30, open)
   - Robot platformer: Gen5 AGC HLE run reaches the tutorial level load (2026-10-26)
   - Robot platformer: fragment wave transport executes (2026-10-24)
   - Robot platformer: gameplay level stops at the fragment transport gate (2026-10-24)

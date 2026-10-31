@@ -873,8 +873,76 @@ gdb runs.
   - Eight of the ten kept trails (all but gw23 and gw25) hold point-list draws of a
     `0x3600...` vertex program (`0x360038d0f4cfb9a5` or `0x360043b08e51dd94`) in the hung
     buffer.
-  - Next step: per-command breadcrumbs (a host-visible marker written after each draw and
-    dispatch of the queue-8 buffer) to name the command the engine stopped on.
+  - **Localized on 2026-10-30 (`1cd28c3d2` plus probes, Intel A770, xe, Mesa 26.2.5).**
+    Per-command buffer markers name the command. Every timed-out run with markers stops
+    inside the `vkCmdDispatch` of the geometry compute program of VS `0x360038d0f4cfb9a5`,
+    between the marker after its descriptor bind and the marker after the dispatch
+    (gw197-gw199, gw202, gw204, gw206; 2 or 15 groups). The same pipeline completed in the
+    steps just before, the pass end, the fill and the bind all land, and the kernel reports
+    no page fault. The stop lasts about 0.6-1.1 s before the device loss in five runs, near the
+    640 ms engine preempt timeout, and 6.1 s in gw198, the 5 s job timeout.
+  - Marker semantics, read from the Mesa source (main branch, 26.2.5 not compared): ANV adds
+    an end-of-pipe sync before every buffer marker at any stage, so a landed marker means the
+    earlier command finished, and the probe serialises the buffer.
+  - **Excluded, each with the program patched in a private store and the file confirmed
+    unchanged after the run:**
+    - the 2^20 rendezvous spin limit as the holder: 4096 (gw198) and 64 (gw199) still stop at
+      the same step;
+    - the 6 workgroup-scope execution barriers: rescoped to subgroup (gw202) still stops;
+    - the only other loop, the guest-address binary search, whose `(lo + hi) >> 1` wraps in
+      32 bits if a table word reads above 2^31: an overflow-safe midpoint on top of the two
+      changes above (gw206) still stops. With every loop bounded and no workgroup barrier
+      left, the program text cannot spin, so what holds the engine is not known.
+    - a part-divergent branch around a rendezvous, statically: 0 sites, and a hand-built
+      positive was reported. Not checked: uniformity of the early-return condition before 11
+      rendezvous.
+    - overlap with the compute family as a requirement: with each submit first waiting for the
+      other family's queues (200 ms bound), gw204 still stopped, and it hit that bound only
+      after the stop began.
+  - **An instrument failure to avoid:** gw205 looked like a pass of the patched program, but
+    its header payload size was stale, so the store rejected the file and regenerated the
+    original. It counts as an unpatched pass. Re-disassemble the store entry after each run.
+  - **Compute family against one family (not separated).** Hub-start runs on this binary with
+    the bone-palette probe or until the guest assert:
+
+    | Layout | Stopped by timeout | Passed the hub start | Ended early by the guest assert |
+    | --- | --- | --- | --- |
+    | Compute family | 9 (gw192-gw194, gw197-gw199, gw202, gw204, gw206) | 2 (gw205, gw208) | 1 (gw203) |
+    | One family | 0 | 2 (gw201, gw207) | 1 (gw200) |
+
+    Two passes against a rate of about 80% is suggestive, not proof. An earlier count of 6/6
+    against 0/2 overstated it: gw200 ended before the timeout point and the compute-family
+    passes came later. Level load time does not separate the outcomes either (timeouts at
+    3.8-9.4 s, passes at 4.2-8.9 s), so the earlier fast-load table no longer holds. One
+    family does not lower the crowd rate: gw201 and gw207 read about 5-7 fps, gw191 about 7.
+  - **Next step:** the engine state of a timeout. The xe core dump
+    (`/sys/class/drm/card0/device/devcoredump/data`, root only, kept 5 minutes) holds the ring
+    head, batch position and engine status. Without it, only further blind variations remain.
+- **Open defects from a validation run at the hub (gw196, 3 reports per message, so counts are
+  not known).** None is proven to cause the timeout; none is fixed.
+  - Depth-aspect copies on a compute-only queue: `UtilCopyTexelBits` (`Utils.cpp`, callers
+    `GraphicsRenderCommandBuffer.cpp`, `GraphicsRenderBind.cpp`, `DepthStencilBuffer.cpp`,
+    `GpuMemoryCreate.cpp`) records `vkCmdCopyImageToBuffer` and `vkCmdCopyBufferToImage` on
+    D32 without `DEPTH_COPY_ON_COMPUTE_QUEUE`, undefined behaviour since the compute family
+    arrived. gw208 counted about 5,400 of them, all on queue 7 at 960x540, about 9.5 per
+    second through the route until the hub load, in a run that passed, so it does not by
+    itself stop a run. Direction: run these copies on a graphics-capable queue unless the
+    format reports the feature.
+  - `vkCmdDispatch` with a sampled binding declared unsigned integer over an `R8_UNORM` view
+    (`VUID-vkCmdDispatch-format-07753`, bindings 6 and 7). Direction: make the view and the
+    declared sampled type agree where the descriptor is prepared (`PrepareTextures`).
+  - `vkCmdDispatch` with a storage image declared arrayed over a 2D view
+    (`VUID-vkCmdDispatch-viewType-07752`, binding 2). Direction: choose the storage view type
+    from the declared dimension.
+  - A storage image atomic on `R16G16B16A16_SFLOAT` without `STORAGE_IMAGE_ATOMIC`
+    (`VUID-vkCmdDispatch-None-02691`, emitted through `ShaderSpirvImageAtomic.cpp`). Direction:
+    establish from the guest program whether this is really an atomic on this format.
+  - A barrier to `COLOR_ATTACHMENT_OPTIMAL` on an image with only transfer usage
+    (`VUID-VkImageMemoryBarrier-oldLayout-01208`). Direction: use the image's upload layout
+    (`UtilGetImageUploadSourceLayout`) for images without attachment usage.
+  - A built-in block mismatch: VS output {Position, PointSize, ClipDistance, CullDistance}
+    against the generated geometry stage input {Position} (`ShaderSpirvGeometry.cpp`).
+    Direction: declare the same block on both sides.
 - **Open defect: in-flight write-back refusal** (gw108, strict 340 s, `453fd755a` plus
   diagnostics, frame about 2044, before the dunes).
   - The run stopped with `GpuMemory cannot version an in-flight write-back backing:
