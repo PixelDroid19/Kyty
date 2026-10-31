@@ -1868,6 +1868,24 @@ void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision
 // The draw fetches only records [first_record, required_records); zero required_records means every declared record.
 // records_exact says the GPU reads the same draw range the host resolved, so fetches cannot pass it.
 // Per-instance streams fetch records [0, first_instance + instance_count) instead.
+struct VertexStreamDrawRange
+{
+	uint32_t first_record;
+	uint32_t required_records;
+	bool     records_exact;
+	uint32_t first_instance;
+	uint32_t instance_count;
+};
+// The stream bytes [address, address + size) a draw binds, of which it fetches from
+// read_begin on. With tail_fetched it can also fetch past them.
+struct VertexStreamRead
+{
+	uint64_t address;
+	uint64_t size;
+	uint64_t read_begin;
+	bool     tail_fetched;
+};
+VertexStreamRead ResolveVertexStreamRead(const ShaderVertexInputInfo& input, int stream, const VertexStreamDrawRange& range);
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
 	                   uint32_t first_record, uint32_t required_records, bool records_exact, uint32_t first_instance,
 	                   uint32_t instance_count);

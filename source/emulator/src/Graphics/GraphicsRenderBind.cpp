@@ -2579,9 +2579,10 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 	return result;
 }
 
-// The vertex object over [vaddr, vaddr + size) was seeded from guest bytes; storage
-// results of this queue the guest does not hold yet are copied over it before the draw.
-static void CopyPendingStorageIntoVertices(CommandBuffer* buffer, VulkanBuffer* vertices, uint64_t vaddr, uint64_t size)
+// The vertex object at object_addr was seeded from guest bytes; storage results of this
+// queue the guest does not hold yet are copied over the bytes the draw reads, [vaddr,
+// vaddr + size). A shared vertex pool can hold hundreds of them; other draws copy their own.
+static void CopyPendingStorageIntoVertices(CommandBuffer* buffer, VulkanBuffer* vertices, uint64_t object_addr, uint64_t vaddr, uint64_t size)
 {
 	SubmissionId reader;
 	EXIT_IF(!buffer->GetSubmissionId(&reader));
@@ -2611,7 +2612,7 @@ static void CopyPendingStorageIntoVertices(CommandBuffer* buffer, VulkanBuffer* 
 			                     nullptr);
 		}
 		const auto&  source = sources[i];
-		VkBufferCopy region {source.buffer->guest_offset + source.offset, source.vaddr - vaddr, source.size};
+		VkBufferCopy region {source.buffer->guest_offset + source.offset, source.vaddr - object_addr, source.size};
 		vkCmdCopyBuffer(cmd, source.buffer->buffer, vertices->buffer, 1, &region);
 	}
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
@@ -2638,38 +2639,47 @@ static VkBuffer ZeroVertexBuffer(GraphicContext* ctx)
 	return zero->buffer;
 }
 
+VertexStreamRead ResolveVertexStreamRead(const ShaderVertexInputInfo& input, int stream, const VertexStreamDrawRange& range)
+{
+	const auto& buffer_info = input.buffers[stream];
+	const bool  instance    = buffer_info.instance;
+	// An instance range past 32 bits is unknown; the stream then keeps every declared record.
+	const uint64_t instance_end     = static_cast<uint64_t>(range.first_instance) + range.instance_count;
+	const uint32_t instance_records = instance_end > UINT32_MAX ? 0u : static_cast<uint32_t>(instance_end);
+	const uint32_t stream_offset    = ShaderVertexStreamRecordOffset(input);
+	// A base beyond the declared records cannot shift the stream; the fetch
+	// then reads from the buffer base as before. The vertex offset never
+	// shifts a stream indexed by the instance id.
+	const uint32_t shift     = !instance && stream_offset < buffer_info.num_records ? stream_offset : 0u;
+	const uint32_t available = buffer_info.num_records - shift;
+	const uint32_t required  = instance ? instance_records : range.required_records;
+	const uint32_t first     = instance ? 0u : range.first_record;
+	const uint32_t records   = required == 0 ? available : std::min(available, required);
+
+	VertexStreamRead read;
+	read.address = buffer_info.addr + static_cast<uint64_t>(shift) * buffer_info.stride;
+	read.size    = ShaderBufferByteSize(buffer_info.stride, records);
+	// Records below the draw's first vertex are never fetched.
+	read.read_begin = buffer_info.stride != 0u && first < records ? static_cast<uint64_t>(buffer_info.stride) * first : 0u;
+	// Fetches past the captured records only exist when the draw range is unknown or
+	// clamped, or when an attribute reaches beyond its record. The instance range
+	// comes from the draw itself, so it is always exact.
+	read.tail_fetched = (!instance && !range.records_exact) || required == 0 || required > available ||
+	                    VulkanVertexInputBindingFetchEnd(input, stream) > buffer_info.stride;
+	return read;
+}
+
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
 	                   uint32_t first_record, uint32_t required_records, bool records_exact, uint32_t first_instance,
 	                   uint32_t instance_count)
 {
 	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
 
-	const uint32_t stream_offset = ShaderVertexStreamRecordOffset(input);
-	// An instance range past 32 bits is unknown; the stream then keeps every declared record.
-	const uint64_t instance_end     = static_cast<uint64_t>(first_instance) + instance_count;
-	const uint32_t instance_records = instance_end > UINT32_MAX ? 0u : static_cast<uint32_t>(instance_end);
+	const VertexStreamDrawRange range {first_record, required_records, records_exact, first_instance, instance_count};
 	for (int i = 0; i < input.buffers_num; i++)
 	{
 		const auto& buffer_info = input.buffers[i];
-		const bool  instance    = buffer_info.instance;
-		// A base beyond the declared records cannot shift the stream; the fetch
-		// then reads from the buffer base as before. The vertex offset never
-		// shifts a stream indexed by the instance id.
-		const uint32_t shift     = !instance && stream_offset < buffer_info.num_records ? stream_offset : 0u;
-		const uint64_t address   = buffer_info.addr + static_cast<uint64_t>(shift) * buffer_info.stride;
-		const uint32_t available = buffer_info.num_records - shift;
-		const uint32_t required  = instance ? instance_records : required_records;
-		const uint32_t first     = instance ? 0u : first_record;
-		const uint32_t records   = required == 0 ? available : std::min(available, required);
-		const uint64_t size     = ShaderBufferByteSize(buffer_info.stride, records);
-		// Records below the draw's first vertex are never fetched.
-		const uint64_t read_begin =
-		    buffer_info.stride != 0u && first < records ? static_cast<uint64_t>(buffer_info.stride) * first : 0u;
-		// Fetches past the captured records only exist when the draw range is unknown or
-		// clamped, or when an attribute reaches beyond its record. The instance range
-		// comes from the draw itself, so it is always exact.
-		const bool tail_fetched = (!instance && !records_exact) || required == 0 || required > available ||
-		                          VulkanVertexInputBindingFetchEnd(input, i) > buffer_info.stride;
+		const auto [address, size, read_begin, tail_fetched] = ResolveVertexStreamRead(input, i, range);
 
 		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin,
 		                                                  tail_fetched);
@@ -2699,7 +2709,13 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 			offset   = address - object_addr;
 			if (vertices != nullptr)
 			{
-				CopyPendingStorageIntoVertices(buffer, vertices, object_addr, object_size);
+				// With the fetch range unknown the draw can read anywhere in the object.
+				const uint64_t copy_addr = tail_fetched ? object_addr : address + read_begin;
+				const uint64_t copy_size = tail_fetched ? object_size : size - read_begin;
+				if (copy_size != 0u)
+				{
+					CopyPendingStorageIntoVertices(buffer, vertices, object_addr, copy_addr, copy_size);
+				}
 			}
 		}
 		if (vertices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vertices == nullptr condition ignored (continuing)\n"); }

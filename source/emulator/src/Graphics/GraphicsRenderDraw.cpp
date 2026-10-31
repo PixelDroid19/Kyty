@@ -1436,15 +1436,27 @@ static GuestDeviceAddressReadPreparation PrepareGuestDeviceAddressForRead(
 
 // A vertex stream over writable storage binds an object seeded from guest bytes
 // (BindVertexBuffers), which copies in the storage results of the draw's queue the
-// guest bytes do not hold yet. A result of another queue is a dependency.
-static bool PrepareVertexStreamsForRead(CommandBuffer* buffer, const ShaderVertexInputInfo& input, SubmissionId* pending_submission)
+// guest bytes do not hold yet. A result of another queue is a dependency. Only the
+// bytes a known draw range fetches matter; a shared pool holds results of other draws.
+static bool PrepareVertexStreamsForRead(CommandBuffer* buffer, const ShaderVertexInputInfo& input, const VertexStreamDrawRange* draw_range,
+                                        SubmissionId* pending_submission)
 {
 	const GpuQueueId consumer(static_cast<uint32_t>(buffer->GetQueueIndex()));
 	for (int i = 0; i < input.buffers_num; i++)
 	{
 		const auto& stream = input.buffers[i];
-		if (GpuMemoryWriteBackStorageForGuestSeed(g_render_ctx->GetGraphicCtx(), stream.addr,
-		                                          ShaderBufferByteSize(stream.stride, stream.num_records), consumer, pending_submission))
+		uint64_t    addr   = stream.addr;
+		uint64_t    size   = ShaderBufferByteSize(stream.stride, stream.num_records);
+		if (draw_range != nullptr)
+		{
+			const auto read = ResolveVertexStreamRead(input, i, *draw_range);
+			if (!read.tail_fetched)
+			{
+				addr = read.address + read.read_begin;
+				size = read.size - read.read_begin;
+			}
+		}
+		if (size != 0u && GpuMemoryWriteBackStorageForGuestSeed(g_render_ctx->GetGraphicCtx(), addr, size, consumer, pending_submission))
 		{
 			return false;
 		}
@@ -1898,7 +1910,33 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	}
 	ValidatePixelProbeSelection(sh_ctx->GetPs(), ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
 	GuestDeviceAddressTable device_address_table {};
-	if (!PrepareVertexStreamsForRead(buffer, vs_input_info, pending_submission) ||
+	int32_t vertex_offset = 0;
+	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), geometry_pass ? geometry_front : vs_input_info, &vertex_offset,
+	                               vertex_offset_add))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indexed vertex offset is outside int32 range; draw skipped\n");
+		return;
+	}
+	// Outside a geometry pass the vertex range comes from the index snapshot when
+	// there is one: only the snapshot holds the indexes the GPU reads. A snapshot
+	// excludes writable storage over the indexes, so the seed below leaves them alone.
+	const uint64_t          index_addr_u64  = reinterpret_cast<uint64_t>(index_addr);
+	VulkanBuffer*           index_snapshot  = nullptr;
+	uint64_t                index_upload_ns = 0;
+	VertexRecordRequirement vertex_requirement {};
+	if (!geometry_pass)
+	{
+		const auto index_upload_start = DrawStageClock::now();
+		index_snapshot  = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		index_upload_ns = DrawStageElapsedNs(index_upload_start);
+		if (index_snapshot != nullptr)
+		{
+			vertex_requirement = ResolveSnapshotIndexedVertexRecords(buffer, index_snapshot, index_addr_u64, index_count, index_type, vertex_offset);
+		}
+	}
+	const VertexStreamDrawRange draw_range {vertex_requirement.first, vertex_requirement.records, true, first_instance, instance_count};
+	const bool                  draw_range_known = index_snapshot != nullptr && vertex_requirement.valid;
+	if (!PrepareVertexStreamsForRead(buffer, vs_input_info, draw_range_known ? &draw_range : nullptr, pending_submission) ||
 	    PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front.bind : vs_input_info.bind, &ps_input_info.bind,
 	                                     &device_address_table, pending_submission) != GuestDeviceAddressReadPreparation::Ready)
 	{
@@ -1940,13 +1978,6 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	auto* vk_buffer = buffer->RecordState();
 
-	int32_t vertex_offset = 0;
-	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), geometry_pass ? geometry_front : vs_input_info, &vertex_offset,
-	                               vertex_offset_add))
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indexed vertex offset is outside int32 range; draw skipped\n");
-		return;
-	}
 	// The geometry pass reads the guest index buffer itself, through the
 	// device-address table, so GPU-written indexes are seen in queue order; the
 	// pull stage then draws the output records without an index buffer.
@@ -1962,23 +1993,12 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		instance_count = 1;
 		first_instance = 0;
 	}
-	// Outside a geometry pass the vertex range comes from the index snapshot when
-	// there is one: only the snapshot holds the indexes the GPU reads.
-	const uint64_t          index_addr_u64  = reinterpret_cast<uint64_t>(index_addr);
-	VulkanBuffer*           index_snapshot  = nullptr;
-	uint64_t                index_upload_ns = 0;
-	VertexRecordRequirement vertex_requirement {};
 	if (geometry_pass)
 	{
 		vertex_requirement = ResolveLinearVertexRecords(0u, primitive_plan.draw_count);
-	} else
+	} else if (index_snapshot == nullptr)
 	{
-		const auto index_upload_start = DrawStageClock::now();
-		index_snapshot = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-		index_upload_ns    = DrawStageElapsedNs(index_upload_start);
-		vertex_requirement = index_snapshot != nullptr ? ResolveSnapshotIndexedVertexRecords(buffer, index_snapshot, index_addr_u64, index_count,
-		                                                                                     index_type, vertex_offset)
-		                                               : ResolveIndexedVertexRecords(index_addr, index_count, index_type, vertex_offset);
+		vertex_requirement = ResolveIndexedVertexRecords(index_addr, index_count, index_type, vertex_offset);
 	}
 	if (!vertex_requirement.valid)
 	{
@@ -2542,7 +2562,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		{
 			return;
 		}
-		if (!PrepareVertexStreamsForRead(buffer, guest_vertex_input, pending_submission) ||
+		if (!PrepareVertexStreamsForRead(buffer, guest_vertex_input, nullptr, pending_submission) ||
 		    PrepareGuestDeviceAddressForRead(buffer, guest_vertex_input.bind, nullptr, &device_address_table,
 		                                     pending_submission) != GuestDeviceAddressReadPreparation::Ready)
 		{
@@ -3123,7 +3143,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	}
 	ValidatePixelProbeSelection(pixel_shader_info, shader_regs, &vs_input_info, &ps_input_info);
 	GuestDeviceAddressTable device_address_table {};
-	if (!PrepareVertexStreamsForRead(buffer, vs_input_info, pending_submission) ||
+	if (!PrepareVertexStreamsForRead(buffer, vs_input_info, nullptr, pending_submission) ||
 	    PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front.bind : vs_input_info.bind, &ps_input_info.bind,
 	                                     &device_address_table, pending_submission) != GuestDeviceAddressReadPreparation::Ready)
 	{
