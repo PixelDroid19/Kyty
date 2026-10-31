@@ -925,7 +925,9 @@ gdb runs.
     (`/sys/class/drm/card0/device/devcoredump/data`, root only, kept 5 minutes) holds the ring
     head, batch position and engine status. Without it, only further blind variations remain.
 - **Validation run at the hub, resolved 2026-10-30 (gw215 one family, gw216 compute family, gw217
-  after the fixes, counted without deduplication).** gw217 reports none of the first three.
+  after the fixes, counted without deduplication).** gw217 reports neither of the first two; it ended at 200 s, too early to speak for the third. gw224
+  (340 s, on the pull vertex stage fix) reports neither either, and its `viewType` messages prove it
+  reached the scene of gw215 and gw216.
   - Depth-aspect copies on a compute-only queue: 924 pairs of `vkCmdCopyImageToBuffer` and
     `vkCmdCopyBufferToImage` in gw216, both directions illegal. Intel Arc A770 does not declare
     `DEPTH_COPY_ON_COMPUTE_QUEUE` for any depth format. Queue selection now uses a compute-only
@@ -937,14 +939,14 @@ gdb runs.
   - A built-in block mismatch between VS output {Position, PointSize, ClipDistance, CullDistance}
     and the interpolation geometry stage input {Position}: the input now declares the full block.
     Geometry translator 96.
-  - Excluded as a static over-approximation of the layer, not a defect: `VUID-vkCmdDispatch-format-07753`,
+  - Believed to be a static over-approximation of the layer, unconfirmed by GPU-assisted validation: `VUID-vkCmdDispatch-format-07753`,
     `viewType-07752` and `None-02691` on bindings 1, 2, 6 and 7. Those bindings hold aliased SPIR-V
     variables, one per typed view (`ShaderPlanStorageImages`, `mirror_unfilled_bank`), and every
     access goes through the variable matching its descriptor, while the layer checks each variable
     against every array element. The paired counts agree (RGBA16F "requires UINT" equals R32_UINT
-    "requires FLOAT"). An image atomic is refused unless its descriptor is a proven 2D `R32_UINT`
-    (`ShaderImageAtomicResourceSupported`), so the atomic on `R16G16B16A16_SFLOAT` is never executed.
-    Not confirmed with GPU-assisted validation.
+    "requires FLOAT"). The atomic case is settled: an image atomic is refused unless its descriptor
+    is a proven 2D `R32_UINT` (`ShaderImageAtomicResourceSupported`), so the atomic on
+    `R16G16B16A16_SFLOAT` is never executed.
   - GPU timeout after the gate: gw218, gw221, gw222 and gw223, default mode, 300 s each through
     the hub with no engine reset, fps windows 3.7 to 16.8 under foreign CPU load. Before it the
     compute family hung 9 of 11 runs and one family 1 of 3, so one family is 1 of 7 so far. This is

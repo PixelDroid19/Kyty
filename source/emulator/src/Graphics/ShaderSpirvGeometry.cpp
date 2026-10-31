@@ -358,12 +358,17 @@ String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometr
 	static const char* head = R"(               OpCapability Shader
                OpCapability Int64
                OpCapability PhysicalStorageBufferAddresses
+               OpCapability ClipDistance
+               OpCapability CullDistance
 <layer_capability>               OpExtension "SPV_KHR_physical_storage_buffer"
        %glsl = OpExtInstImport "GLSL.std.450"
                OpMemoryModel PhysicalStorageBuffer64 GLSL450
                OpEntryPoint Vertex %main "main" %gl_VertexIndex %outPerVertex %geometry<interface>
                OpDecorate %gl_VertexIndex BuiltIn VertexIndex
                OpMemberDecorate %gl_PerVertex 0 BuiltIn Position
+               OpMemberDecorate %gl_PerVertex 1 BuiltIn PointSize
+               OpMemberDecorate %gl_PerVertex 2 BuiltIn ClipDistance
+               OpMemberDecorate %gl_PerVertex 3 BuiltIn CullDistance
                OpDecorate %gl_PerVertex Block
                OpMemberDecorate %GeometryBlock 0 Offset 0
                OpMemberDecorate %GeometryBlock 1 Offset 4
@@ -399,7 +404,8 @@ String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometr
   %v4float_0 = OpConstantComposite %v4float %float_0 %float_0 %float_0 %float_0
 %_ptr_Input_int = OpTypePointer Input %int
 %gl_VertexIndex = OpVariable %_ptr_Input_int Input
-%gl_PerVertex = OpTypeStruct %v4float
+%single_float = OpTypeArray %float %uint_1
+%gl_PerVertex = OpTypeStruct %v4float %float %single_float %single_float
 %_ptr_Output_gl_PerVertex = OpTypePointer Output %gl_PerVertex
 %outPerVertex = OpVariable %_ptr_Output_gl_PerVertex Output
 %_ptr_Output_v4float = OpTypePointer Output %v4float
