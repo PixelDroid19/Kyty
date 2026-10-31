@@ -1854,6 +1854,30 @@ struct VulkanQueues
 	Vector<QueueInfo> present;
 };
 
+
+// Depth planes are copied through buffers around compute dispatches, which a compute-only family may do only
+// when the host declares it for every depth format it can render to.
+static bool VulkanCopiesDepthOnComputeQueue(VkPhysicalDevice device)
+{
+	VkPhysicalDeviceMaintenance10FeaturesKHR maintenance10 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_10_FEATURES_KHR};
+	VkPhysicalDeviceFeatures2 features {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &maintenance10};
+	vkGetPhysicalDeviceFeatures2(device, &features);
+	if (maintenance10.maintenance10 != VK_TRUE) { return false; }
+	for (VkFormat format: {VK_FORMAT_D16_UNORM, VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT})
+	{
+		VkFormatProperties3 features3 {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3};
+		VkFormatProperties2 properties {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &features3};
+		vkGetPhysicalDeviceFormatProperties2(device, format, &properties);
+		const auto tiling = features3.optimalTilingFeatures;
+		if ((tiling & VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT) != 0u &&
+		    (tiling & VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_COMPUTE_QUEUE_BIT_KHR) == 0u)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, VulkanQueues* out)
 {
 	EXIT_IF(device == nullptr);
@@ -1922,7 +1946,7 @@ static bool VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, Vulk
 	// A single common queue would run every compute submission behind queued
 	// graphics work, so compute moves to a compute-only family that runs beside it.
 	uint32_t compute_family = UINT32_MAX;
-	if (selected.queue_count == 1 &&
+	if (selected.queue_count == 1 && VulkanCopiesDepthOnComputeQueue(device) &&
 	    VulkanSelectComputeOnlyFamily(capabilities.GetData(), capabilities.Size(), &compute_family) == VulkanQueueSelectionResult::Success)
 	{
 		const auto&    compute = capabilities[compute_family];
@@ -2289,6 +2313,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features.geometryShader = supported_features.geometryShader;
 	device_features.depthClamp = supported_features.depthClamp;
 	device_features.shaderClipDistance = supported_features.shaderClipDistance;
+	device_features.shaderCullDistance = supported_features.shaderCullDistance;
+	device_features.shaderTessellationAndGeometryPointSize = supported_features.shaderTessellationAndGeometryPointSize;
 	const auto blend_features = VulkanPlanBlendFeatures(supported_features, true, true);
 	device_features.independentBlend = blend_features.independent_blend;
 	device_features.dualSrcBlend = blend_features.dual_source_blend;
@@ -2379,6 +2405,13 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	{
 		color_write_ext.pNext = device_feature_chain;
 		device_feature_chain  = &color_write_ext;
+	}
+	VkPhysicalDeviceMaintenance10FeaturesKHR maintenance10 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_10_FEATURES_KHR};
+	maintenance10.maintenance10 = VK_TRUE;
+	if (queues.compute.At(0).family != queues.graphics.At(0).family)
+	{
+		maintenance10.pNext  = device_feature_chain;
+		device_feature_chain = &maintenance10;
 	}
 
 	VkDeviceCreateInfo create_info {};
@@ -3081,6 +3114,8 @@ static void VulkanCreate(WindowContext* ctx)
 		std::fflush(stdout);
 		EXIT("Could not find a suitable Vulkan 1.4 device");
 	}
+
+	if (queues.compute.At(0).family != queues.graphics.At(0).family) { device_extensions.Add(VK_KHR_MAINTENANCE_10_EXTENSION_NAME); }
 
 	// Detect VK_EXT_color_write_enable support; drop it from the enabled extension
 	// list when absent (MoltenVK) so device creation still succeeds.

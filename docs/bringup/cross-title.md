@@ -899,6 +899,16 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   (`docs/titles/robot-platformer.md`, 2026-10-30 record); other titles are
   not measured.
 
+- **Update 2026-10-30: gated on depth copies.** The family is now used only when the host
+  declares `DEPTH_COPY_ON_COMPUTE_QUEUE` for every depth format it renders to, because depth
+  storage planes are seeded and stored back through buffers around dispatches, which is otherwise
+  invalid on a compute-only queue (924 copy pairs in a 200 s run of `PPSA21567 - Astro Bot`). Intel
+  Arc A770 (Mesa 26.2.5) does not declare it, so it runs every queue on the graphics family again.
+  Cost on that host is not settled: `PPSA04220 - JoJo's Bizarre Adventure: All-Star Battle R`, one
+  150 s run per arm on the default menu route under heavy foreign CPU load, gave fps windows 60, 43,
+  40, 34 with the gate and 58, 22, 26, 42 without it, which shows no loss and proves no gain. The
+  story-scene measurement behind the earlier +21 % was not repeated.
+
 ## Early submissions at least half a millisecond apart (2026-10-24)
 
 - **Observed** (sandbox title in the world, Intel A770, Mesa ANV, strict

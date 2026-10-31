@@ -125,12 +125,17 @@ Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& 
 	GeometryLoadRaw(info, &source);
 	for (uint32_t vertex = 0; vertex < 3u; ++vertex) { GeometryEmitVertex(info, vertex, forward_primitive_id, &source); }
 	source.body += "OpEndPrimitive\nOpReturn\nOpFunctionEnd\n";
-	const String8 header = String8("OpCapability Shader\nOpCapability Geometry\nOpMemoryModel Logical GLSL450\n"
+	const String8 header = String8("OpCapability Shader\nOpCapability Geometry\nOpCapability GeometryPointSize\n"
+	                               "OpCapability ClipDistance\nOpCapability CullDistance\nOpMemoryModel Logical GLSL450\n"
 	                               "OpEntryPoint Geometry %main \"main\" %vertices %output_vertex") +
 	                       (forward_primitive_id ? " %primitive_in %primitive_out" : "");
 	const String8 modes = "\nOpExecutionMode %main Triangles\nOpExecutionMode %main OutputTriangleStrip\n"
 	                      "OpExecutionMode %main OutputVertices 3\nOpExecutionMode %main Invocations 1\n"
-	                      "OpMemberDecorate %vertex 0 BuiltIn Position\nOpDecorate %vertex Block\n";
+	                      "OpMemberDecorate %vertex 0 BuiltIn Position\nOpDecorate %vertex Block\n"
+	                      // Built-in blocks shared between stages must match, so the input repeats the whole vertex stage block.
+	                      "OpMemberDecorate %vertex_input 0 BuiltIn Position\nOpMemberDecorate %vertex_input 1 BuiltIn PointSize\n"
+	                      "OpMemberDecorate %vertex_input 2 BuiltIn ClipDistance\nOpMemberDecorate %vertex_input 3 BuiltIn CullDistance\n"
+	                      "OpDecorate %vertex_input Block\n";
 	const String8 primitive_annotations = forward_primitive_id ? "OpDecorate %primitive_in BuiltIn PrimitiveId\n"
 	                                                             "OpDecorate %primitive_out BuiltIn PrimitiveId\n"
 	                                                           : "";
@@ -155,7 +160,9 @@ Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& 
 %weight1 = OpConstantComposite %v2float %f1 %f0
 %weight2 = OpConstantComposite %v2float %f0 %f1
 %vertex = OpTypeStruct %v4float
-%vertices_type = OpTypeArray %vertex %u3
+%single_float = OpTypeArray %float %u1
+%vertex_input = OpTypeStruct %v4float %float %single_float %single_float
+%vertices_type = OpTypeArray %vertex_input %u3
 %triangle = OpTypeArray %v4float %u3
 %raw_triangle = OpTypeArray %v4uint %u3
 %input_vertices = OpTypePointer Input %vertices_type

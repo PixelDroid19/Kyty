@@ -924,31 +924,34 @@ gdb runs.
   - **Next step:** the engine state of a timeout. The xe core dump
     (`/sys/class/drm/card0/device/devcoredump/data`, root only, kept 5 minutes) holds the ring
     head, batch position and engine status. Without it, only further blind variations remain.
-- **Open defects from a validation run at the hub (gw196, 3 reports per message, so counts are
-  not known).** None is proven to cause the timeout; none is fixed.
-  - Depth-aspect copies on a compute-only queue: `UtilCopyTexelBits` (`Utils.cpp`, callers
-    `GraphicsRenderCommandBuffer.cpp`, `GraphicsRenderBind.cpp`, `DepthStencilBuffer.cpp`,
-    `GpuMemoryCreate.cpp`) records `vkCmdCopyImageToBuffer` and `vkCmdCopyBufferToImage` on
-    D32 without `DEPTH_COPY_ON_COMPUTE_QUEUE`, undefined behaviour since the compute family
-    arrived. gw208 counted about 5,400 of them, all on queue 7 at 960x540, about 9.5 per
-    second through the route until the hub load, in a run that passed, so it does not by
-    itself stop a run. Direction: run these copies on a graphics-capable queue unless the
-    format reports the feature.
-  - `vkCmdDispatch` with a sampled binding declared unsigned integer over an `R8_UNORM` view
-    (`VUID-vkCmdDispatch-format-07753`, bindings 6 and 7). Direction: make the view and the
-    declared sampled type agree where the descriptor is prepared (`PrepareTextures`).
-  - `vkCmdDispatch` with a storage image declared arrayed over a 2D view
-    (`VUID-vkCmdDispatch-viewType-07752`, binding 2). Direction: choose the storage view type
-    from the declared dimension.
-  - A storage image atomic on `R16G16B16A16_SFLOAT` without `STORAGE_IMAGE_ATOMIC`
-    (`VUID-vkCmdDispatch-None-02691`, emitted through `ShaderSpirvImageAtomic.cpp`). Direction:
-    establish from the guest program whether this is really an atomic on this format.
-  - A barrier to `COLOR_ATTACHMENT_OPTIMAL` on an image with only transfer usage
-    (`VUID-VkImageMemoryBarrier-oldLayout-01208`). Direction: use the image's upload layout
-    (`UtilGetImageUploadSourceLayout`) for images without attachment usage.
-  - A built-in block mismatch: VS output {Position, PointSize, ClipDistance, CullDistance}
-    against the generated geometry stage input {Position} (`ShaderSpirvGeometry.cpp`).
-    Direction: declare the same block on both sides.
+- **Validation run at the hub, resolved 2026-10-30 (gw215 one family, gw216 compute family, gw217
+  after the fixes, counted without deduplication).** gw217 reports none of the first three.
+  - Depth-aspect copies on a compute-only queue: 924 pairs of `vkCmdCopyImageToBuffer` and
+    `vkCmdCopyBufferToImage` in gw216, both directions illegal. Intel Arc A770 does not declare
+    `DEPTH_COPY_ON_COMPUTE_QUEUE` for any depth format. Queue selection now uses a compute-only
+    family only when the host declares it for every depth format it renders to (with
+    `VK_KHR_maintenance10` enabled), so this host runs all queues on the graphics family.
+  - A barrier to `COLOR_ATTACHMENT_OPTIMAL` on the transfer-only presentation stage image, about
+    2,600 per run: `UtilBlitImageTo` now restores that layout only for images with attachment
+    usage.
+  - A built-in block mismatch between VS output {Position, PointSize, ClipDistance, CullDistance}
+    and the interpolation geometry stage input {Position}: the input now declares the full block.
+    Geometry translator 96.
+  - Excluded as a static over-approximation of the layer, not a defect: `VUID-vkCmdDispatch-format-07753`,
+    `viewType-07752` and `None-02691` on bindings 1, 2, 6 and 7. Those bindings hold aliased SPIR-V
+    variables, one per typed view (`ShaderPlanStorageImages`, `mirror_unfilled_bank`), and every
+    access goes through the variable matching its descriptor, while the layer checks each variable
+    against every array element. The paired counts agree (RGBA16F "requires UINT" equals R32_UINT
+    "requires FLOAT"). An image atomic is refused unless its descriptor is a proven 2D `R32_UINT`
+    (`ShaderImageAtomicResourceSupported`), so the atomic on `R16G16B16A16_SFLOAT` is never executed.
+    Not confirmed with GPU-assisted validation.
+  - GPU timeout after the gate: gw218, default mode, 300 s through the hub with no engine reset,
+    fps windows 9.6 to 15.9 under foreign CPU load. One run; compute family hung 9 of 11 and one
+    family 1 of 3 before it, a correlation only, since the hang is a dispatch on the render engine.
+  - Open, found while fixing the block: the interpolation geometry stage forwards no `ClipDistance`,
+    so a vertex shader exporting clip distance 0 through that stage loses it
+    (`ShaderInterpolationGeometry.cpp`). No run shows a visible effect yet. Direction: forward it when
+    `UsesVertexClipDistance0Export` holds.
 - **In-flight write-back refusal: the stop became a host wait** (gw108 `453fd755a` plus
   diagnostics, frame about 2044; gw209 `fd6dcbf8b` plus diagnostics, about 107 s, worldmap load).
   - Both runs stopped with `GpuMemory cannot version an in-flight write-back backing:

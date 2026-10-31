@@ -715,8 +715,12 @@ void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_
 	vkCmdBlitImage(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain_image.image,
 	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, filter);
 
-	set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-	                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	// A presentation stage has no attachment usage and is only ever blitted from or to.
+	if ((src_image->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0u)
+	{
+		set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	}
 }
 
 void UtilBlitImageToImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, VkFilter filter, uint64_t dst_layout)
