@@ -55,6 +55,31 @@ Open: the A16 bit (word 1 bit 30) is still ignored by
 packed 16-bit coordinates as 32-bit ones. Direction: honour it, or stop on it as
 D16 does now. The scene itself runs at 6-7 fps in this window.
 
+## Robot platformer: where the render thread blocks, GPU-paced list start excluded (2026-10-31)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5, 60
+fps-limited runs gw256 and gw257 with the `CB_SCALE=2` probe, sampled at about 1 kHz
+from `/proc` task syscall state and guest return addresses on the stack (not committed).
+
+- **Excluded: the render thread waits for the GPU before it starts a frame.** From its
+  wake to its first submit it takes a median of 1.2-2.0 ms in every frame period bucket
+  from under 20 ms to over 400 ms (3523 frames), and it runs without blocking in that
+  time. This does not reproduce the first-list growth of the older debugger timeline
+  below, and it does not time the list build itself, which runs on job workers.
+- **The frame is bound by submit.** In the crowd window (90 s, 736 frames) the render
+  thread spent about 87 s inside four submit sites (`0x2aaca9` 33 s, `0x2aadb9` 29 s,
+  `0x2aad99` 19 s, `0x2aacf9` 6 s), blocked on the per-batch decode completion in
+  `GraphicsRing::Submit`, while the game thread waited for it (79 s at `0x2a4ac7`). The
+  frame period is therefore the command processor's decode time, including what that
+  thread waits for.
+- **Excluded: job workers poll for work.** The eleven workers wake about 500 times per
+  second with almost no run time, but they sleep in a blocking guest wait (`0xaea6c8`)
+  and the timeline above does not show a poll-sized delay. The 500 Hz is consistent
+  with a periodic host wake of an interruptible wait; that source was not read.
+- **Open.** What decides that the clear runs before all lists of a crowd frame is still
+  unknown. Host CPU is not saturated, which makes guest priority or affinity unlikely
+  but does not exclude them.
+
 ## Robot platformer: hub-start guest assert, frame timeline (2026-10-30)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5, 60

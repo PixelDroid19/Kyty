@@ -40,6 +40,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
   - Robot platformer: green blocks in the crowd scene were MIMG D16 stores read as 32-bit (2026-10-31, fixed)
+  - Robot platformer: where the render thread blocks, GPU-paced list start excluded (2026-10-31)
   - Robot platformer: hub-start guest assert, frame timeline (2026-10-30)
   - Robot platformer: PrimitiveId in the interpolation geometry stage limited geometry distribution (2026-10-30)
   - Robot platformer: heavy character draws are real content, and same-queue guest-address waits (2026-10-30)
