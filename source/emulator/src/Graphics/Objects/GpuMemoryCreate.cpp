@@ -1833,7 +1833,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
-			// Multi-parent StorageTexture over the same range as a sampled view and a buffer view, each of which the
+			// Multi-parent StorageTexture over sampled views and buffer views, or inside a render target, each of which the
 			// single-parent path links. The image seeds from guest bytes, so every parent must have published its
 			// content there: no buffer with an unfinished write-back, no texture materialized from a device image.
 			bool multi_storage_texture_alias = info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
@@ -1847,7 +1847,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				EXIT_IF(h.free);
 				const auto& o = h.info;
 				multi_storage_texture_alias =
-				    GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type) &&
+				    (GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type) ||
+				     GpuMemoryAllowsStorageTextureContainedInRenderTarget(o.object.type, obj.relation, info.type) ||
+				     GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type) ||
+				     GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type)) &&
 				    o.content_origin != GpuMemoryContentOrigin::GpuAliasMaterialization &&
 				    !GpuMemoryHasPendingWritableWriteBack(o.in_use, o.read_only, o.write_back_func != nullptr,
 				                                          m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies()));
