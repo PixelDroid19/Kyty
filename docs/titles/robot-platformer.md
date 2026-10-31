@@ -3925,7 +3925,7 @@ Known approximations and debt recorded by this chain:
 
 Observed on Intel Arc A770 (ANV Mesa 26.2.5), intro space scene. The sky was
 replaced by dark horizontal bands, objects had 16 px block halos, and some cuts
-left dark block-edged silhouettes.
+left dark block-edged silhouettes (not re-checked, see Open).
 
 **Cause.** The depth of field chain writes colour plus five mips over a
 960x540 surface of a recycled range with one storage view per level, then
@@ -3943,9 +3943,14 @@ alias only while it holds the newer writes; colour binds now stamp their image
 so that comparison sees draws. Comparing stamps alone did not fix it: the
 particle target is legitimately newer when the chain is written.
 
-**Verified.** Commit under test on the same host, 17 captures through frames
-3922 to 4551: sky, stars, nebula and soft focus are correct, no bands or block
-halos. The later cuts (frames 4656 and up) were not reached in that run.
+**Verified.** Binary `0ad5559b4` plus the fix and inactive temporary diagnostics,
+with the diagnostic `CB_SCALE=2` setting, so not a strict run. 17 captures through
+frames 3922 to 4551 show correct sky, stars, nebula and soft focus, with no bands
+or block halos. Strict games matrix: 26 interactive, unchanged;
+`case_429dd9d08d87` went from controlled timeout to presenting, and
+`case_2daaacae7295` is still a host crash. The matrix does not inspect images, and
+`playable-regression` was not run, so this is not a no-regression claim for
+titles with compute-written mip chains.
 
 **Excluded, with the observation.**
 
@@ -3968,6 +3973,8 @@ halos. The later cuts (frames 4656 and up) were not reached in that run.
 
 **Open.**
 
+- Dark block-edged silhouettes after later cuts (frames 4656 and up): not re-checked
+  after the fix.
 - Intermittent GPU hang at hub load, still inside the geometry compute module
   of vertex shader `0x360038d0f4cfb9a5`: 3 of 8 runs in this stretch, with pixel
   shaders `0x21001960c4a8f3bb` and `0x210016009aec9d6c`. The first pair is also
