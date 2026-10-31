@@ -6,6 +6,49 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: green blocks in the crowd scene were MIMG D16 stores read as 32-bit (2026-10-31, fixed)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5, 60
+fps-limited runs. All runs used the undeclared `CB_SCALE=2` debugger probe to
+pass the hub-start assert below, so none of them is a strict run.
+
+Observed: from about frame 3500, dark green rectangular blocks with stripes of
+period 8 rows covered the ship and the bots. Dispatch dumps placed the depth of
+field chain before them. Skipping one compute program of the chain, the
+composite `bf8ee9fc` (groups 152x86, writes the 2432x1368 colour target), removed
+the green at frames 3661 and 4172 (run gw251; the same arm also hit the GPU job
+timeout in gw250).
+
+Cause: the guest program holds eight `ImageStore` instructions with overlapping
+data registers such as `v[5:8]` and `v[7:10]`, which only make sense with the D16
+bit of the MIMG encoding (word 1 bit 31): two 16-bit components per VGPR, low half
+first, with the format deciding float or integer (RDNA2 ISA, MIMG D16). The parser
+ignored the bit, so packed dwords were stored as one 32-bit float per channel.
+
+Fix: the parser records D16 on `image_store` and sizes the data operand by VGPR.
+The emitter unpacks half floats for float views and zero-extends the half for
+integer views, and every other MIMG opcode with D16 set now stops instead of
+reading the wrong registers. Storage store proofs refuse D16 stores. Translator
+version 189 (186 and 188 were used only by excluded private experiments), resource
+fold capture schema 4.
+
+Verified: run gw255 (330 s bound, no fatal, no job timeout) reached the crowd scene
+with the composite running: captures at frames 3675 and 4068 show clean bots and
+depth of field. The first version refused integer D16 stores and stopped at the
+hub (gw253, gw254), so the path is exercised by that title as well. The D16 float
+and integer paths have no dedicated test; `EmulatorShaderMimg` and resource fold
+replay pass.
+
+Hub-start assert: without `CB_SCALE=2` runs gw244 and gw246 still end in the guest
+assert of the record below; with it, more than 13 hub passes survived. This
+contradicts the note there that more space shows no gain; the scale is a probe and
+not a fix, and the strict cause remains open.
+
+Open: the A16 bit (word 1 bit 30) is still ignored by
+`source/emulator/src/Graphics/ShaderParseMIMG.cpp`; a program using it would read
+packed 16-bit coordinates as 32-bit ones. Direction: honour it, or stop on it as
+D16 does now. The scene itself runs at 6-7 fps in this window.
+
 ## Robot platformer: hub-start guest assert, frame timeline (2026-10-30)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5, 60

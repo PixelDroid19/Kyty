@@ -1046,6 +1046,8 @@ struct ShaderInstruction
 	// MIMG component mask. For image_get_resinfo it maps result components to
 	// consecutive destination VGPRs.
 	uint8_t mimg_dmask = 0;
+	// MIMG D16: each data VGPR packs two 16-bit components, low half first.
+	bool mimg_d16 = false;
 	// MIMG DIM field. It defines the instruction's coordinate contract and is
 	// independent from the set of descriptors bound by the pipeline.
 	uint8_t mimg_dimension = 0;

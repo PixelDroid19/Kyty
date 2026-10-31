@@ -3177,6 +3177,11 @@ void Spirv::FindConstants()
 	}
 	for (const auto& inst: m_code.GetInstructions())
 	{
+		if (inst.mimg_d16)
+		{
+			AddConstantUint(0u);
+			AddConstantUint(16u);
+		}
 		if (!ShaderSdwaPartialDestinationSupported(inst)) { continue; }
 		const auto select = SdwaDestinationSelect(inst);
 		for (const uint32_t value: {0u, select.width, select.offset, select.field, ~select.field})

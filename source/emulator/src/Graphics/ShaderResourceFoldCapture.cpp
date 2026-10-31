@@ -207,6 +207,7 @@ void WriteInstruction(DocumentWriter& w, const ShaderInstruction& inst)
 	w.EndArray();
 	w.Int(inst.mimg_address_num);
 	w.Int(inst.mimg_dmask);
+	w.Bool(inst.mimg_d16);
 	w.Int(inst.mimg_dimension);
 	w.Bool(inst.mimg_explicit_lod);
 	w.Bool(inst.mimg_offset);
@@ -741,6 +742,7 @@ bool ReadInstruction(StrictReader& r, ShaderInstruction* inst)
 	    !ReadElement(r, &inst->vop3p_op_sel_hi, 0, 255) || !ReadElement(r, &inst->vop_sdwa, 0, 1) ||
 	    !ReadElement(r, &inst->vop_sdwa_ctrl, 0, k_u32_max) || !ReadOperands(r, inst->mimg_address, k_mimg_address_slots) ||
 	    !ReadElement(r, &inst->mimg_address_num, 0, k_mimg_address_slots) || !ReadElement(r, &inst->mimg_dmask, 0, 255) ||
+	    !ReadElement(r, &inst->mimg_d16, 0, 1) ||
 	    !ReadElement(r, &inst->mimg_dimension, 0, 255) || !ReadElement(r, &inst->mimg_explicit_lod, 0, 1) ||
 	    !ReadElement(r, &inst->mimg_offset, 0, 1) || !ReadElement(r, &inst->mimg_return_old_value, 0, 1) ||
 	    !ReadElement(r, &inst->smem_imm_offset, INT32_MIN, INT32_MAX) || !ReadElement(r, &inst->flat_offset, INT16_MIN, INT16_MAX) ||

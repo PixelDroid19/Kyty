@@ -4723,10 +4723,39 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 				continue;
 			}
 
-			const auto source = operand_variable_to_str(inst.dst, source_component++);
+			const int  packed_half = source_component % 2;
+			const auto source      = operand_variable_to_str(inst.dst, inst.mimg_d16 ? source_component / 2 : source_component);
+			source_component++;
 			if (source.type != SpirvType::Float)
 			{
 				return false;
+			}
+			if (inst.mimg_d16 && uint_images)
+			{
+				const auto half_offset = spirv->GetConstantUint(packed_half == 0 ? 0u : 16u);
+				const auto half_bits   = spirv->GetConstantUint(16u);
+				if (half_offset.StartsWith("unknown_") || half_bits.StartsWith("unknown_"))
+				{
+					return false;
+				}
+				component_loads += String8::FromPrintf("         %%image_store_value_%u_%u = OpLoad %%float %%%s\n"
+				                                      "         %%image_store_bits_%u_%u = OpBitcast %%uint %%image_store_value_%u_%u\n"
+				                                      "         %%image_store_component_%u_%u = OpBitFieldUExtract %%uint %%image_store_bits_%u_%u %%%s %%%s\n",
+				                                      index, component, source.value.c_str(), index, component, index, component, index,
+				                                      component, index, component, half_offset.c_str(), half_bits.c_str());
+				values[component] = String8::FromPrintf(" %%image_store_component_%u_%u", index, component);
+				continue;
+			}
+			if (inst.mimg_d16)
+			{
+				component_loads += String8::FromPrintf("         %%image_store_value_%u_%u = OpLoad %%float %%%s\n"
+				                                      "         %%image_store_bits_%u_%u = OpBitcast %%uint %%image_store_value_%u_%u\n"
+				                                      "         %%image_store_halves_%u_%u = OpExtInst %%v2float %%GLSL_std_450 UnpackHalf2x16 %%image_store_bits_%u_%u\n"
+				                                      "         %%image_store_component_%u_%u = OpCompositeExtract %%float %%image_store_halves_%u_%u %d\n",
+				                                      index, component, source.value.c_str(), index, component, index, component, index,
+				                                      component, index, component, index, component, index, component, packed_half);
+				values[component] = String8::FromPrintf(" %%image_store_component_%u_%u", index, component);
+				continue;
 			}
 			component_loads += String8::FromPrintf("         %%image_store_value_%u_%u = OpLoad %%float %%%s\n"
 			                                      "         %%image_store_component_%u_%u = %s %%%s %%image_store_value_%u_%u\n",

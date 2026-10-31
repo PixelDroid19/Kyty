@@ -2341,7 +2341,7 @@ static ShaderStorageImageTileCoverage AnalyzeShaderStorageImageMetadataOriginGri
 			typed_read_count++;
 		} else if (inst.type == ShaderInstructionType::ImageStore)
 		{
-			if (target_store_index != UINT32_MAX || inst.mimg_dimension != 1 ||
+			if (target_store_index != UINT32_MAX || inst.mimg_d16 || inst.mimg_dimension != 1 ||
 			    inst.mimg_dmask == 0u || (inst.mimg_dmask & 0xf0u) != 0u || (inst.mimg_dmask & full_store_mask) != full_store_mask ||
 			    !ShaderBoundedGridStoreCoordinatesMatch(inst, x_final_register, y_final_register) ||
 			    ShaderFindImageStorageTextureDescriptor(code, index, bind, 0) != texture_index)
@@ -2575,7 +2575,7 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageBoundedGridCoverage(cons
 			}
 			if (inst.type == ShaderInstructionType::ImageStore && image_index == texture_index)
 			{
-				if (inst.mimg_dimension != 1 || inst.mimg_dmask != full_mask ||
+				if (inst.mimg_d16 || inst.mimg_dimension != 1 || inst.mimg_dmask != full_mask ||
 				    !ShaderBoundedGridStoreCoordinatesMatch(inst, x_reg, y_reg))
 				{
 					return {};
@@ -2696,7 +2696,7 @@ bool ShaderPairedSplitFindFlow(const ShaderCode& code, const ShaderBindResources
 			    (ShaderInstructionReadsImageResource(inst.type) && image_index == texture_index) ||
 			    (ShaderInstructionWritesImageResource(inst.type) &&
 			     (image_index != texture_index || inst.type != ShaderInstructionType::ImageStore ||
-			      inst.mimg_dimension != 1 || (inst.mimg_dmask & full_mask) != full_mask)))
+			      inst.mimg_d16 || inst.mimg_dimension != 1 || (inst.mimg_dmask & full_mask) != full_mask)))
 			{
 				return false;
 			}
@@ -2848,7 +2848,7 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImagePairedLinearCoverage(con
 			    (ShaderInstructionReadsImageResource(inst.type) && image_index == texture_index) ||
 			    (ShaderInstructionWritesImageResource(inst.type) &&
 			     (image_index != texture_index || inst.type != ShaderInstructionType::ImageStore ||
-			      inst.mimg_dimension != 1 || (inst.mimg_dmask & full_mask) != full_mask)))
+			      inst.mimg_d16 || inst.mimg_dimension != 1 || (inst.mimg_dmask & full_mask) != full_mask)))
 			{
 				return {};
 			}
@@ -3051,7 +3051,7 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageGridCoverage(const Shade
 			}
 			if (resource_index == texture_index)
 			{
-				if (!restored || inst.mimg_dimension != 1 || inst.mimg_dmask != 1)
+				if (!restored || inst.mimg_d16 || inst.mimg_dimension != 1 || inst.mimg_dmask != 1)
 				{
 					return {};
 				}
@@ -3148,7 +3148,7 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const Shade
 			}
 			if (resource_index == texture_index)
 			{
-				if (inst.type != ShaderInstructionType::ImageStore || inst.mimg_dimension != 1 || inst.mimg_dmask != 0xf)
+				if (inst.type != ShaderInstructionType::ImageStore || inst.mimg_d16 || inst.mimg_dimension != 1 || inst.mimg_dmask != 0xf)
 				{
 					return {};
 				}

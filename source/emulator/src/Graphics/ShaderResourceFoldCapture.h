@@ -16,7 +16,7 @@ namespace Kyty::Libs::Graphics {
 // Exact evaluator-input replay of ShaderParseUsage2. The captured input is the
 // owned ShaderCode and metadata that the evaluator consumes; it is not a replay
 // of the ISA parser, and no raw instruction words are retained or required.
-constexpr uint32_t SHADER_RESOURCE_FOLD_SCHEMA_VERSION      = 3;
+constexpr uint32_t SHADER_RESOURCE_FOLD_SCHEMA_VERSION      = 4;
 constexpr uint32_t SHADER_RESOURCE_FOLD_MAX_CAPTURES        = 8;
 constexpr uint32_t SHADER_RESOURCE_FOLD_MAX_READS           = 256;
 constexpr uint32_t SHADER_RESOURCE_FOLD_MAX_DOCUMENT_BYTES  = 4u * 1024u * 1024u;

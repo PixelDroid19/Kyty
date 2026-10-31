@@ -37,6 +37,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	uint32_t srsrc = (buffer[1] >> 16u) & 0x1fu; // T#
 	uint32_t vdata = (buffer[1] >> 8u) & 0xffu;
 	uint32_t vaddr = (buffer[1] >> 0u) & 0xffu;
+	uint32_t d16   = next_gen ? (buffer[1] >> 31u) & 0x1u : 0u;
 
 	// BVH has a separate address tuple and a 128-bit resource, not a texture.
 	if (next_gen && opcode == 0xe6u) { return shader_parse_bvh(pc, src, buffer, dst, next_gen); }
@@ -51,6 +52,8 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	EXIT_NOT_IMPLEMENTED(slc == 1);
 	EXIT_NOT_IMPLEMENTED(unrm == 1);
 	// EXIT_NOT_IMPLEMENTED(dmask != 0xf && dmask != 0x7);
+	// Only stores read packed data so far; another D16 operation must not silently take the dword layout.
+	EXIT_NOT_IMPLEMENTED(d16 == 1 && opcode != 0x08u);
 
 	// RDNA2 8.2.3/Table 42 and 12.16: these admitted image operations have
 	// no sampler. The manual does not establish that nonzero SSAMP is ignored
@@ -127,10 +130,15 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			inst.src_num     = 2;
 			inst.format      = ShaderInstructionFormat::VdataVaddr3StDmask;
 			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
+			inst.mimg_d16    = d16 != 0u;
 			inst.dst.size    = 0;
 			for (uint32_t component = 0; component < 4; component++)
 			{
 				inst.dst.size += static_cast<int>((dmask >> component) & 1u);
+			}
+			if (inst.mimg_d16)
+			{
+				inst.dst.size = (inst.dst.size + 1) / 2;
 			}
 			break;
 		case 0x09:

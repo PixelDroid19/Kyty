@@ -765,12 +765,12 @@ TEST(EmulatorShaderResourceFoldReplay, StrictDocumentGrammarRejectsHostileInput)
 	ASSERT_FALSE(Rejected(valid));
 	EXPECT_FALSE(Rejected(valid + "\n"));
 
-	const std::string schema = "{\"schema_version\":3,";
-	EXPECT_TRUE(Rejected(Replace(valid, schema, "{\"schema_version\":3.0,")));
-	EXPECT_TRUE(Rejected(Replace(valid, schema, "{\"schema_version\":3e0,")));
-	EXPECT_TRUE(Rejected(Replace(valid, schema, "{\"schema_version\":03,")));
-	EXPECT_TRUE(Rejected(Replace(valid, schema, "{\"schema_version\":2,")));
-	EXPECT_TRUE(Rejected(Replace(valid, schema, "{\"schema_version\":3,\"schema_version\":3,")));
+	const std::string schema = "{\"schema_version\":4,";
+	EXPECT_TRUE(Rejected(Replace(valid, schema, "{\"schema_version\":4.0,")));
+	EXPECT_TRUE(Rejected(Replace(valid, schema, "{\"schema_version\":4e0,")));
+	EXPECT_TRUE(Rejected(Replace(valid, schema, "{\"schema_version\":04,")));
+	EXPECT_TRUE(Rejected(Replace(valid, schema, "{\"schema_version\":3,")));
+	EXPECT_TRUE(Rejected(Replace(valid, schema, "{\"schema_version\":4,\"schema_version\":4,")));
 	EXPECT_TRUE(Rejected(Replace(valid, "\"initial_output\":{\"push_constant_offset\"", "\"initial_output\":{\"push_constant_size\"")));
 	EXPECT_TRUE(Rejected(Replace(valid, "\"user_sgpr_num\":30", "\"user_sgpr_num\":-30")));
 	EXPECT_TRUE(Rejected(Replace(valid, "\"user_sgpr_num\":30", "\"user_sgpr_num\":30000000000")));
