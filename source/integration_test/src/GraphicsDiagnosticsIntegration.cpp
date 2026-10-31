@@ -2091,12 +2091,12 @@ void VerifyTextureBlockDumpSpecContract()
 
 void VerifyEventWritePacketContract()
 {
-	uint32_t storage[8] = {};
+	uint32_t storage[12] = {};
 	TestCommandBuffer cb {};
 	cb.bottom      = storage;
-	cb.top         = storage + 8;
+	cb.top         = storage + 12;
 	cb.cursor_up   = storage;
-	cb.cursor_down = storage + 8;
+	cb.cursor_down = storage + 12;
 
 	auto* addressed = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x39u,
 	                                                reinterpret_cast<const volatile void*>(0x124e80f48ull));
@@ -2112,12 +2112,19 @@ void VerifyEventWritePacketContract()
 	Expect(ordinary[0] == KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u) && ordinary[1] == 0x07u,
 	       "ordinary EVENT_WRITE preserves its short encoding");
 
-	auto* unsupported_address = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x38u,
+	auto* second_addressed = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x38u,
+	                                                      reinterpret_cast<const volatile void*>(0x124e80f48ull));
+	Expect(second_addressed == storage + 6, "event 0x38 follows the ordinary packet");
+	Expect(cb.cursor_up == storage + 10, "event 0x38 takes the addressed form");
+	Expect(second_addressed[0] == KYTY_PM4(4, Pm4::IT_EVENT_WRITE, 0u) && second_addressed[1] == 0x138u,
+	       "event 0x38 selects event index one");
+
+	auto* unsupported_address = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x3au,
 	                                                         reinterpret_cast<const volatile void*>(0x124e80f48ull));
-	Expect(unsupported_address == storage + 6, "unsupported addressed event follows the ordinary packet");
-	Expect(cb.cursor_up == storage + 8, "event 0x38 remains short without a matching consumer contract");
-	Expect(unsupported_address[0] == KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u) && unsupported_address[1] == 0x38u,
-	       "event 0x38 does not invent an addressed packet form");
+	Expect(unsupported_address == storage + 10, "unsupported addressed event follows the addressed packet");
+	Expect(cb.cursor_up == storage + 12, "event 0x3a has no addressed form");
+	Expect(unsupported_address[0] == KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u) && unsupported_address[1] == 0x3au,
+	       "event 0x3a does not invent an addressed packet form");
 }
 
 std::vector<uint32_t> AssembleValidSpirv(const Kyty::Core::String8& source, const char* message)

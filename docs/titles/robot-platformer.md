@@ -813,7 +813,7 @@ strict 60 fps-limited runs on the dune route (gw111-gw119).
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5,
 strict 60 fps-limited runs on the dune route (gw84-gw88). Evidence came from
-an uncommitted `DIAG-DRS` probe, a static read of the title's eboot and two
+an uncommitted probe, a static read of the title's eboot and two
 gdb runs.
 
 - **Question.** Is the title rendering at a high internal resolution because
@@ -1068,7 +1068,7 @@ gdb runs.
 - **Excluded: eliding `DRAW_INDEX_INDIRECT` record reads by register rule.** One reference skips
   the CPU read when `INDEX_BUFFER_SIZE` cannot hold one input primitive. In the dunes these
   draws are point lists (`prim=1`) with `INDEX_BUFFER_SIZE` 1-2, so one index already draws a
-  point (gw79, `DIAG-IDXIND`):
+  point (gw79):
 
   | Records | Count | Argument-read wait |
   | --- | --- | --- |

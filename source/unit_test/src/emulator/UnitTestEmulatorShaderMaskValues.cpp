@@ -149,12 +149,13 @@ public:
 		Run(spirv.NativeExecRefresh("test").c_str());
 	}
 
-	String8 Emit(const ShaderInstruction& instruction)
+	String8 Emit(const ShaderInstruction& instruction, const std::vector<ShaderInstruction>& readers = {})
 	{
 		if (!ShaderInstructionLoweringPreconditions(instruction)) { Fail("shared precondition rejected fixture"); }
 		ShaderCode code;
 		code.SetType(pixel ? ShaderType::Pixel : ShaderType::Compute);
 		code.GetInstructions().Add(instruction);
+		for (const auto& reader: readers) { code.GetInstructions().Add(reader); }
 		spirv.SetCode(code);
 		for (int s = 0; s < instruction.src_num; ++s)
 		{
@@ -168,7 +169,8 @@ public:
 		return spirv.ResolveMaskAccesses(instruction, 0, source);
 	}
 
-	void Execute(const ShaderInstruction& instruction) { Run(Emit(instruction).c_str()); }
+	// `readers` follow the instruction in the program: the lowering of a mask depends on how it is read.
+	void Execute(const ShaderInstruction& instruction, const std::vector<ShaderInstruction>& readers = {}) { Run(Emit(instruction, readers).c_str()); }
 
 	void BranchCondition(ShaderInstructionType type)
 	{
@@ -637,10 +639,12 @@ TEST(EmulatorShaderMaskValues, FragmentMaskPackingAndReadfirstRetainHelperValues
 		Wave wave(32, true);
 		for (uint32_t lane = 0; lane < 4; ++lane) { wave.active[lane] = lane == real; }
 		const uint32_t helper = (real + 1u) % 4u;
+		const auto to_exec = Move(Reg(ShaderOperandType::ExecLo, 0, 2), Reg(ShaderOperandType::VccLo, 0, 2));
 		wave.Execute(Inst(ShaderInstructionType::VCmpEqU32, ShaderInstructionFormat::SmaskVsrc0Vsrc1,
-		                  Reg(ShaderOperandType::VccLo, 0, 2), {Literal(1000u + helper), Reg(ShaderOperandType::Vgpr, 0)}));
+		                  Reg(ShaderOperandType::VccLo, 0, 2), {Literal(1000u + helper), Reg(ShaderOperandType::Vgpr, 0)}),
+		             {to_exec, ReadFirst()});
 		for (uint32_t lane = 0; lane < 32; ++lane) { EXPECT_EQ(wave.Get("%vcc_lo", lane), 1u << helper); }
-		wave.Execute(Move(Reg(ShaderOperandType::ExecLo, 0, 2), Reg(ShaderOperandType::VccLo, 0, 2)));
+		wave.Execute(to_exec);
 		wave.Execute(ReadFirst());
 		for (uint32_t lane = 0; lane < 32; ++lane) { EXPECT_EQ(wave.Get("%s0", lane), 1000u + helper); }
 	}
