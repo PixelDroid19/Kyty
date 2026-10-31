@@ -6,6 +6,27 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Depth wiped mid-frame by the write-back of a fill (2026-10-31)
+
+PPSA15552 - Dead Cells lost sprites while moving or attacking: for several consecutive frames only the scarf and the
+head flame of the character remained. A pixel history showed the character quad passing its depth test and later
+draws overwriting it under LessEqual with a farther depth, after a `vkCmdClearDepthStencilImage` at the start of the
+second command buffer of the same G-buffer pass.
+
+- **Cause.** The guest clears HTILE with a compute fill before the pass, and the fill publishes its clear when it is
+  recorded. The later write-back of that same storage saw the clear pattern and published a second clear, which the
+  next draw consumed. Log of the events for one depth target: fill, fill, write-back, repeating every frame.
+- **Fix.** A write-back that carries an already published fill is that same write and publishes nothing. A write-back
+  with no published fill to account for it still reports a clear made by a shader the fill proof does not recognize.
+- **Verified.** Run on Intel Arc A770 (ANV) with no permissive flags: consumed events in a logged 60 ms window went from a
+  repeating fill and write-back pair to fills only, and the character is whole in 8 of 8 frames captured while
+  walking and attacking. PPSA21567 - Astro Bot title screen stays free of the depth ghosts.
+- **Excluded while localizing.** The hard moving edge on walls is the head-flame light polygon against the blocks. A
+  G-buffer target holding the previous final image at pass start is harmless: the guest shares that target and
+  overwrites it during the pass. The full-screen yellow and brown flash is the intro cutscene.
+- **Open.** The maintainer also reported trails lasting seconds. The dust after breaking a door looks like a game
+  effect, but no reference from original hardware was compared, so that report stays open until confirmed in play.
+
 ## A roguelike reaches gameplay (2026-10-07)
 
 A 2D roguelike froze after its second frame: the main thread waited on an event flag that its render thread only

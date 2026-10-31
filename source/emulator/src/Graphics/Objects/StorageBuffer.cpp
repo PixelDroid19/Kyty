@@ -170,14 +170,7 @@ static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* /*para
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::memcpy");
 	const auto result =
 	    LabelWriteBackCopy(reinterpret_cast<void*>(*vaddr), data, *size, &vk_obj->writeback_cache, &vk_obj->label_publication);
-	if (vk_obj->depth_meta_addr != 0 && DepthMetaIsClearPattern(data, *size))
-	{
-		DepthMetaPatternSnapshot pattern {};
-		if (DepthMetaInspectPattern(data, *size, &pattern))
-		{
-			DepthMetaMarkClear(vk_obj->depth_meta_addr, DepthMetaClearSource::StorageWriteback, &pattern, *size);
-		}
-	}
+	(void)DepthMetaObserveStorageWriteback(vk_obj->depth_meta_addr, data, *size);
 	KYTY_PROFILER_END_BLOCK;
 
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::vkUnmapMemory");

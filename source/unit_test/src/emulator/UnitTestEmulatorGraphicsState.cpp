@@ -7723,6 +7723,32 @@ TEST(EmulatorGraphicsState, ConsumesTrackedHtileClearOnce)
 	EXPECT_FALSE(DepthMetaConsumeClear(address));
 }
 
+TEST(EmulatorGraphicsState, HtileWritebackOfPublishedFillIsNotANewClear)
+{
+	constexpr uint64_t address = 0x12347000u;
+	uint32_t clear_words[8];
+	for (auto& word: clear_words)
+	{
+		word = 0xfffffff0u;
+	}
+	DepthMetaStorageIdentity identity {};
+	identity.address                     = address;
+	identity.size                        = sizeof(clear_words);
+	identity.logical_generation          = 1u;
+	identity.backing_generation          = 1u;
+	identity.producer_or_consumer_submit = 1u;
+
+	ASSERT_TRUE(DepthMetaPublishComputeFill(identity, 0xfffffff0u));
+	ASSERT_TRUE(DepthMetaConsumeClear(identity));
+
+	EXPECT_FALSE(DepthMetaObserveStorageWriteback(address, clear_words, sizeof(clear_words)));
+	EXPECT_FALSE(DepthMetaConsumeClear(address));
+
+	// With no published fill to account for it, a write-back is the only evidence of a shader clear.
+	EXPECT_TRUE(DepthMetaObserveStorageWriteback(address, clear_words, sizeof(clear_words)));
+	EXPECT_TRUE(DepthMetaConsumeClear(address));
+}
+
 TEST(EmulatorGraphicsState, RepeatedIdenticalHtileWriteRearmsConsumedClear)
 {
 	constexpr uint64_t address = 0x12346000u;

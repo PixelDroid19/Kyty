@@ -4,6 +4,7 @@
 #include <array>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -16,6 +17,7 @@ constexpr uint32_t kPendingCapacity         = 64u;
 
 std::mutex                                  g_mutex;
 std::unordered_map<uint64_t, DepthMetaClearEvent> g_pending;
+std::unordered_set<uint64_t>                g_fills_awaiting_writeback;
 std::array<DepthMetaClearEvent, kConsumedHistoryCapacity> g_consumed {};
 uint64_t                                    g_next_sequence = 1u;
 uint32_t                                    g_consumed_next  = 0u;
@@ -138,6 +140,22 @@ bool DepthMetaObserveStorageFlush(uint64_t storage_address, uint64_t storage_siz
 	return ObserveStorageWriteWithSource(htile_address, storage_data, storage_size, DepthMetaClearSource::StorageFlush);
 }
 
+bool DepthMetaObserveStorageWriteback(uint64_t address, const void* data, uint64_t size)
+{
+	if (address == 0)
+	{
+		return false;
+	}
+	{
+		std::lock_guard lock(g_mutex);
+		if (g_fills_awaiting_writeback.erase(address) != 0u)
+		{
+			return false;
+		}
+	}
+	return ObserveStorageWriteWithSource(address, data, size, DepthMetaClearSource::StorageWriteback);
+}
+
 void DepthMetaMarkClear(uint64_t address, DepthMetaClearSource source, const DepthMetaPatternSnapshot* pattern, uint64_t size)
 {
 	if (address == 0)
@@ -179,6 +197,11 @@ bool DepthMetaPublishComputeFill(const DepthMetaStorageIdentity& identity, uint3
 	event.pattern.first_word = fill_word;
 	event.pattern.word_count = identity.size / sizeof(uint32_t);
 	RetainPendingBounded(event);
+	if (g_fills_awaiting_writeback.size() >= kPendingCapacity)
+	{
+		g_fills_awaiting_writeback.erase(g_fills_awaiting_writeback.begin());
+	}
+	g_fills_awaiting_writeback.insert(identity.address);
 	return true;
 }
 
