@@ -908,13 +908,19 @@ gdb runs.
     | Layout | Stopped by timeout | Passed the hub start | Ended early by the guest assert |
     | --- | --- | --- | --- |
     | Compute family | 9 (gw192-gw194, gw197-gw199, gw202, gw204, gw206) | 2 (gw205, gw208) | 1 (gw203) |
-    | One family | 0 | 2 (gw201, gw207) | 1 (gw200) |
+    | One family | 1 (gw214) | 2 (gw201, gw207) | 1 (gw200) |
 
     Two passes against a rate of about 80% is suggestive, not proof. An earlier count of 6/6
     against 0/2 overstated it: gw200 ended before the timeout point and the compute-family
     passes came later. Level load time does not separate the outcomes either (timeouts at
     3.8-9.4 s, passes at 4.2-8.9 s), so the earlier fast-load table no longer holds. One
     family does not lower the crowd rate: gw201 and gw207 read about 5-7 fps, gw191 about 7.
+    gw214 (`8325dc821` plus diagnostics, one family) stopped the same way: the kernel reported
+    `Engine reset: engine_class=rcs` and a timed-out job about 180 s into the run. So one family
+    does not prevent the timeout, and no compute-queue job is needed for it. gw210 (one family,
+    220 s bound) reached the hub with no timeout; gw211-gw213 ended at their bound soon after the
+    hub load and are not counted. The order-9 page allocation failure in that kernel report comes
+    from the core dump capture of the GuC log, after the reset, so it is not a cause.
   - **Next step:** the engine state of a timeout. The xe core dump
     (`/sys/class/drm/card0/device/devcoredump/data`, root only, kept 5 minutes) holds the ring
     head, batch position and engine status. Without it, only further blind variations remain.
