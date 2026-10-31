@@ -130,17 +130,16 @@ KYTY_RECOMPILER_FUNC(Recompile_VFmaMixLoF16)
 		source += String8("%<t>_bits = OpBitcast %uint %<t>_wide\n").ReplaceStr("<t>", tag);
 		source += F16Arithmetic::Narrow(spirv, tag + "_bits", tag + "_half", tag, 0u, (mode.value & 0x80u) == 0u,
 		                                mode.fp16_overflow, "");
-		source += F16Arithmetic::Expand(tag + "_half", tag + "_narrow", tag);
+		source += F16Arithmetic::Expand(spirv, tag + "_half", tag + "_narrow", tag);
 		source += String8("%<t> = OpCopyObject %float %<t>_narrow\n").ReplaceStr("<t>", tag);
 	}
 	// A product of two finite halves is exact in binary32; the addition error
-	// is recovered in integers so an intermediate binary32 tie cannot introduce
-	// double rounding.
+	// is recovered so an intermediate binary32 tie cannot introduce double rounding.
 	source += String8(R"(
 %fh_product_<index> = OpFMul %float %h0_<index> %h1_<index>
 %t_<index> = OpFAdd %float %fh_product_<index> %h2_<index>
 )").ReplaceStr("<index>", index_str);
-	source += F16Arithmetic::FmaResidue(index_str);
+	source += F16Arithmetic::FmaResidue(spirv, index_str);
 	source += String8("%fh_value_bits_<index> = OpBitcast %uint %t_<index>\n").ReplaceStr("<index>", index_str);
 	source += F16Arithmetic::Narrow(spirv, "fh_value_bits_" + index_str, "fh_result_" + index_str, index_str, 0u,
 	                                (mode.value & 0x80u) == 0u, mode.fp16_overflow, "fh_residue_" + index_str);
@@ -217,7 +216,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VPkF16)
 %fh_product_<index> = OpFMul %float %h0_<index> %h1_<index>
 %t_<index> = OpFAdd %float %fh_product_<index> %h2_<index>
 )").ReplaceStr("<index>", half_index);
-			source += F16Arithmetic::FmaResidue(half_index);
+			source += F16Arithmetic::FmaResidue(spirv, half_index);
 		} else if (inst.type == ShaderInstructionType::VPkMinF16 || inst.type == ShaderInstructionType::VPkMaxF16)
 		{
 			source += F16Arithmetic::MinMax("h0_" + half_index, "h1_" + half_index, "t_" + half_index, half_index,

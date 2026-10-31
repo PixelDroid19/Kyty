@@ -16,7 +16,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-inline constexpr uint32_t kShaderTranslatorVersion         = 193;
+inline constexpr uint32_t kShaderTranslatorVersion         = 194;
 inline constexpr uint32_t kShaderGeometryTranslatorVersion = 97;
 
 // Names the on-disk stores that hold translator output, so each translator
@@ -25,6 +25,11 @@ inline constexpr uint32_t kShaderGeometryTranslatorVersion = 97;
 {
 	return "-t" + std::to_string(kShaderTranslatorVersion) + "-g" + std::to_string(kShaderGeometryTranslatorVersion);
 }
+
+// Whether the device's float controls make binary16 conversions exact, so that translated
+// half arithmetic can use them. Set once when the device is created, before any translation.
+void ShaderSetNativeHalfConversion(bool supported);
+[[nodiscard]] bool ShaderNativeHalfConversion();
 
 class SpirvBinaryCacheStore;
 

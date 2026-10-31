@@ -17,6 +17,7 @@
 #include "Emulator/Graphics/ShaderMetadataResourceIndex.h"
 #include "Emulator/Graphics/ShaderNggFront.h"
 #include "Emulator/Graphics/ShaderStorageImage.h"
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Log.h"
 
@@ -328,6 +329,24 @@ bool Spirv::EmitSdwaPartialDestinationInstruction(const RecompilerFunc* func, co
 	return true;
 }
 
+// The error of a sum exists only while each step keeps its own rounding.
+static String8 FmaErrorTermDecorations(const String8& body)
+{
+	// At the start of a line: the defining occurrence, not an operand.
+	static const String8 first_term = "\n%hs_bb_";
+	String8              decorations;
+	for (uint32_t at = body.FindIndex(first_term); at != Core::STRING8_INVALID_INDEX; at = body.FindIndex(first_term, at + 1u))
+	{
+		const uint32_t index_begin = at + first_term.Size();
+		const String8  index       = body.Mid(index_begin, body.FindIndex(' ', index_begin) - index_begin);
+		for (const char* term: {"t_", "hs_bb_", "hs_rest_", "hs_da_", "hs_db_", "hs_err_"})
+		{
+			decorations += "       OpDecorate %" + String8(term) + index + " NoContraction\n";
+		}
+	}
+	return decorations;
+}
+
 void Spirv::GenerateSource()
 {
 	m_source.Clear();
@@ -421,7 +440,9 @@ void Spirv::GenerateSource()
 		CheckSplitWaveCollectives(m_source.Mid(main_begin));
 	}
 	WriteFunctions();
-	MarkStorageWrites(annotations_end, main_begin);
+	const String8 fma_error_terms = FmaErrorTermDecorations(m_source.Mid(main_begin));
+	m_source                      = m_source.InsertAt(annotations_end, fma_error_terms);
+	MarkStorageWrites(annotations_end + fma_error_terms.Size(), main_begin + fma_error_terms.Size());
 }
 
 // A completion write-back compares and copies only the pages flagged here. A
@@ -568,6 +589,23 @@ static bool spirv_uses_f64(const ShaderCode& code)
 }
 
 // FP16 (half) is used when the shader has f16 ALU or 16-bit float compares.
+// Every instruction that goes through the half conversions of F16Arithmetic.
+static bool spirv_uses_half_arithmetic(const ShaderCode& code)
+{
+	for (const auto& inst: code.GetInstructions())
+	{
+		const auto name = magic_enum::enum_name(inst.type);
+		// Comparisons and the packing conversions read halves through their own GLSL forms.
+		if (name.rfind("VCmp", 0) == 0 || inst.type == ShaderInstructionType::VCvtPkrtzF16F32 ||
+		    inst.type == ShaderInstructionType::VDot2cF32F16)
+		{
+			continue;
+		}
+		if (name.find("F16") != std::string_view::npos || name.find("Mix") != std::string_view::npos) { return true; }
+	}
+	return false;
+}
+
 static bool spirv_uses_f16(const ShaderCode& code)
 {
 	return code.HasAnyOf({ShaderInstructionType::VCmpFF16, ShaderInstructionType::VCmpLtF16, ShaderInstructionType::VCmpEqF16,
@@ -636,7 +674,16 @@ void Spirv::WriteHeader()
 	Core::StringList8 capabilities;
 	Core::StringList8 extensions;
 	Core::StringList8 imports;
+	const bool        native_half = ShaderNativeHalfConversion() && spirv_uses_half_arithmetic(m_code);
 	Core::StringList8 execution_modes;
+	if (native_half)
+	{
+		// Some hosts only accept one rounding mode across widths; nearest is what binary32 already uses.
+		execution_modes.Add("OpExecutionMode %main RoundingModeRTE 32");
+		execution_modes.Add("OpExecutionMode %main RoundingModeRTE 16");
+		execution_modes.Add("OpExecutionMode %main DenormPreserve 16");
+		execution_modes.Add("OpExecutionMode %main SignedZeroInfNanPreserve 16");
+	}
 
 	imports.Add("%GLSL_std_450 = OpExtInstImport \"GLSL.std.450\"");
 
@@ -726,13 +773,19 @@ void Spirv::WriteHeader()
 		capabilities.Add("OpCapability PhysicalStorageBufferAddresses");
 		extensions.Add("OpExtension \"SPV_KHR_physical_storage_buffer\"");
 	}
-	if (spirv_uses_f16(m_code))
+	if (spirv_uses_f16(m_code) || native_half)
 	{
 		capabilities.Add("OpCapability Float16");
 	}
-	if (spirv_uses_i16(m_code))
+	if (spirv_uses_i16(m_code) || native_half)
 	{
 		capabilities.Add("OpCapability Int16");
+	}
+	if (native_half)
+	{
+		capabilities.Add("OpCapability RoundingModeRTE");
+		capabilities.Add("OpCapability DenormPreserve");
+		capabilities.Add("OpCapability SignedZeroInfNanPreserve");
 	}
 
 	if (m_bind != nullptr)
@@ -1460,11 +1513,12 @@ static const char* compute_types = R"(
 	{
 		optional_types += "\n %double = OpTypeFloat 64\n";
 	}
-	if (spirv_uses_f16(m_code))
+	const bool native_half = ShaderNativeHalfConversion() && spirv_uses_half_arithmetic(m_code);
+	if (spirv_uses_f16(m_code) || native_half)
 	{
 		optional_types += "\n  %half = OpTypeFloat 16\n";
 	}
-	if (spirv_uses_i16(m_code))
+	if (spirv_uses_i16(m_code) || native_half)
 	{
 		optional_types += "\n %short = OpTypeInt 16 1\n %ushort = OpTypeInt 16 0\n";
 	}
@@ -3285,6 +3339,11 @@ void Spirv::FindConstants()
 	if (SpirvUsesGen5BufferFormatLoads(m_code))
 	{
 		SpirvAddGen5BufferFormatConstants(this);
+	}
+	if (ShaderNativeHalfConversion() && spirv_uses_half_arithmetic(m_code))
+	{
+		AddConstantUint(0x00007e00u);
+		AddConstantInt(-1);
 	}
 	AddConstantFloat(0.0f);
 	AddConstantFloat(0.5f);

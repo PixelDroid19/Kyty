@@ -1,3 +1,4 @@
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/Window.h"
 
 #include "Kyty/Core/Common.h"
@@ -2253,6 +2254,28 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 	*out_queues = std::move(best_queues);
 }
 
+// The translator converts binary16 natively only where the host states that the conversion
+// rounds to nearest, keeps denormals and keeps the sign of zero, infinity and NaN.
+static bool DeviceHasExactHalfConversion(VkPhysicalDevice device)
+{
+	VkPhysicalDeviceVulkan12Features features_12 {};
+	features_12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	VkPhysicalDeviceFeatures2 features {};
+	features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	features.pNext = &features_12;
+	vkGetPhysicalDeviceFeatures2(device, &features);
+	VkPhysicalDeviceVulkan12Properties properties_12 {};
+	properties_12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+	VkPhysicalDeviceProperties2 properties {};
+	properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+	properties.pNext = &properties_12;
+	vkGetPhysicalDeviceProperties2(device, &properties);
+	return features_12.shaderFloat16 == VK_TRUE && features.features.shaderInt16 == VK_TRUE &&
+	       properties_12.shaderRoundingModeRTEFloat16 == VK_TRUE && properties_12.shaderRoundingModeRTEFloat32 == VK_TRUE &&
+	       properties_12.shaderDenormPreserveFloat16 == VK_TRUE && properties_12.shaderSignedZeroInfNanPreserveFloat16 == VK_TRUE &&
+	       properties_12.denormBehaviorIndependence != VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
+}
+
 static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VulkanExtensions* r,
                                    const VulkanQueues& queues, const Vector<const char*>& device_extensions,
                                    bool color_write_enable_supported, bool depth_clip_enable_supported,
@@ -3391,6 +3414,7 @@ static void VulkanCreate(WindowContext* ctx)
 	physical_device_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
 	physical_device_properties.pNext = &subgroup_properties;
 	vkGetPhysicalDeviceProperties2(ctx->graphic_ctx.physical_device, &physical_device_properties);
+	ShaderSetNativeHalfConversion(DeviceHasExactHalfConversion(ctx->graphic_ctx.physical_device));
 	ctx->graphic_ctx.min_storage_buffer_offset_alignment = physical_device_properties.properties.limits.minStorageBufferOffsetAlignment;
 	ctx->graphic_ctx.subgroup_size       = subgroup_properties.subgroupSize;
 	ctx->graphic_ctx.subgroup_stages     = subgroup_properties.supportedStages;

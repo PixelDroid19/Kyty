@@ -4,6 +4,7 @@
 
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <limits>
 #include <memory>
@@ -13,6 +14,18 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+static std::atomic_bool g_native_half_conversion {false};
+
+void ShaderSetNativeHalfConversion(bool supported)
+{
+	g_native_half_conversion.store(supported, std::memory_order_relaxed);
+}
+
+bool ShaderNativeHalfConversion()
+{
+	return g_native_half_conversion.load(std::memory_order_relaxed);
+}
 
 ShaderModuleKey ShaderModuleKey::Create(const ShaderId& shader_id, ShaderModuleStage stage, Config::ShaderOptimizationType optimization,
 	                                    bool next_gen, bool debug_printf_enabled, uint64_t diagnostic_identity)
@@ -24,9 +37,11 @@ ShaderModuleKey ShaderModuleKey::Create(const ShaderId& shader_id, ShaderModuleS
 	key.next_gen           = next_gen;
 	key.debug_printf_enabled = debug_printf_enabled;
 	key.diagnostic_identity = (stage == ShaderModuleStage::Vertex || stage == ShaderModuleStage::Pixel) ? diagnostic_identity : 0;
-	key.translator_version = stage == ShaderModuleStage::Geometry || stage == ShaderModuleStage::GeometryForwardingPrimitiveId
-	                             ? kShaderGeometryTranslatorVersion
-	                             : kShaderTranslatorVersion;
+	// The persisted store outlives a GPU change, and these modules declare float controls.
+	key.translator_version = (stage == ShaderModuleStage::Geometry || stage == ShaderModuleStage::GeometryForwardingPrimitiveId
+	                              ? kShaderGeometryTranslatorVersion
+	                              : kShaderTranslatorVersion) |
+	                         (ShaderNativeHalfConversion() ? 0x80000000u : 0u);
 	return key;
 }
 
