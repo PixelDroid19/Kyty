@@ -4175,7 +4175,8 @@ Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whos
   test, so the work before that point stays. At best about 4 ms of the 34 ms per frame, and it changes the program where
   the hub GPU hang stops. Not built.
 - **Resolved: the "two submit modes" are one stall inside the measured window.** Submits from the command processor
-  stay at 32-40 per frame in all 26 kept 14 s windows; what varies is the utility queue, 1 to 94 submits per frame.
+  stay at 31-40 per frame in 24 of the 26 kept 14 s windows (25 with the idle-GPU rule off, 79 in the profile training
+  build); what varies is the utility queue, 1 to 94 submits per frame.
   It rises with how much of a stall at one route point falls in the window, which starts at a fixed wall-clock time
   while load time moves. The earlier rule to quote submits per frame is replaced by the fix and the measure below. The
   run with the idle-GPU rule off keeps its record: its 26 submits per frame at 17.2 fps had no utility submits, so
@@ -4211,8 +4212,8 @@ timestamp dumps rather than by a window mean.
   | Utility fence wait time (burst dumps) | 1.94 s | 0.34 s |
 
   Frames over the last nine dumps go from 923 to 959. Frames in the burst still dip to 87-104 against about 110, and
-  the array is still re-detiled in full for each store. Validation over a 110 s run reports no copy error and did report
-  the known dispatch messages. A capture after the burst shows no corruption. `PPSA09809 - OCTOPATH TRAVELER II`
+  the array is still re-detiled in full for each store. Validation over a 110 s run reports no copy error; it did report 46
+  `vkCmdDispatch` messages, so the layer was active, and whether those predate this change was not checked. A capture after the burst shows no corruption. `PPSA09809 - OCTOPATH TRAVELER II`
   reached only its loading screen in an 85 s run, so its cube arrays were not checked.
 - **The 16 % tail is a different thing.** It stays at 15-18 % of GPU time and about 5 ms per frame while submits per
   frame vary from 26 to 86, and it did not change with this fix (15.8 % and 15.0 %). That fits the earlier reading,
