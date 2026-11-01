@@ -296,9 +296,9 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		default: KYTY_UNKNOWN_OP();
 	}
 
-	// DPP VOP1 is currently represented only for v_mov_b32, whose lane routing
-	// can be emitted exactly. Other VOP1 operations need their own modifiers.
-	EXIT_NOT_IMPLEMENTED(dpp && inst.type != ShaderInstructionType::VMovB32);
+	// DPP VOP1 is represented only where the emitter routes the source through
+	// the generic operand load. Other VOP1 operations need their own modifiers.
+	EXIT_NOT_IMPLEMENTED(dpp && inst.type != ShaderInstructionType::VMovB32 && inst.type != ShaderInstructionType::VCvtU32F32);
 
 	dst->GetInstructions().Add(inst);
 
