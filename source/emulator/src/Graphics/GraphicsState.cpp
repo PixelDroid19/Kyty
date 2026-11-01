@@ -470,7 +470,7 @@ DualSourceBlendDecision ResolveDualSourceBlend(const DualSourceBlendInputs& in)
 
 bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, bool alpha_to_mask)
 {
-	if ((target_mask & shader.m_cbShaderMask) != 0 || shader.shader_z_format != 0 ||
+	if ((target_mask & shader.m_cbShaderMask) != 0 ||
 	    (alpha_to_mask && shader.target_output_mode[0] != 0))
 	{
 		return true;

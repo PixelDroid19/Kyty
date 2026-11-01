@@ -4770,9 +4770,10 @@ TEST(EmulatorGraphicsState, RequiresPixelShaderOnlyForObservableFragmentWork)
 	shader.target_output_mode[1] = 4u;
 	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, true));
 
+	// SPI_SHADER_Z_FORMAT only describes the export; DB_SHADER_CONTROL enables its use.
 	shader                 = {};
 	shader.shader_z_format = 1u;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, false));
 
 	shader                                      = {};
 	shader.db_shader_control.shader_kill_enable = true;
