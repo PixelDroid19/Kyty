@@ -1648,6 +1648,10 @@ static uint64_t ReadSuspendedRunValue(const CommandProcessor::SuspendedRun& susp
 }
 
 
+// A guest store has no host signal, so a suspended wait polls. Waits sit on the frame's critical path a few times a frame,
+// and half a poll is lost on each.
+static constexpr int SUSPENDED_WAIT_POLL_MICROS = 100;
+
 static bool SuspendedRunReady(const CommandProcessor::SuspendedRun& suspended)
 {
 	const auto value = ReadSuspendedRunValue(suspended);
@@ -1711,7 +1715,7 @@ static void WaitForSuspendedRuns(CommandProcessor* cp, CommandProcessor::Suspend
 		cp->RunLock();
 		(void)cp->PumpCompletedSubmissions();
 		cp->RunUnlock();
-		Core::Thread::SleepMicro(1000);
+		Core::Thread::SleepMicro(SUSPENDED_WAIT_POLL_MICROS);
 	}
 }
 
