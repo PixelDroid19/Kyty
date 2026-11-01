@@ -5486,6 +5486,12 @@ weak object pointer lookup (index and serial checked against the object array), 
 returned NULL on a stale or flagged object, so the failure here is a guest object lifetime race and not a failed
 allocation. What shifts its timing was not found.
 
+Games matrix on `74552a64a` with LTO (2026-11-01, strict, 60 fps cap, same host): 25 interactive, 2 host crashes,
+1 controlled timeout, 5 invalid fixtures. `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` crashed with exit 139 after
+27 presents, the intermittent crash recorded above. `PPSA07393` crashed as it did in the 2026-10-29 baseline, and
+`PPSA01341` is still slow to present (2 presents). Four invalid fixtures are the former launch failures, now labelled by
+the missing metadata; the fifth is a folder of patch files that holds no title. No other case changed.
+
 ## Wide-string and strlcpy exports bound with the wrong contract (2026-10-31, fixed)
 
 `PPSA02929 - Dreaming Sarah` showed `■Ne    gam` on its first menu frame and kept it until the
