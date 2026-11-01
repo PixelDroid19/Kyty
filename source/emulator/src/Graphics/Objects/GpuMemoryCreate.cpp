@@ -2423,6 +2423,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					storage_links_materialized = true;
 					continue;
 				}
+				// A sampled texture around the view in another format or tile mode holds nothing the view can
+				// read, whatever wrote it (captured: a 240x135 mode-27 view inside a mode-24 chain that a device
+				// write last updated, beside the targets and storage views of the same recycled range).
+				if (!links_cpu_texture(h, obj) && o.object.type == GpuMemoryObjectType::Texture &&
+				    obj.relation == OverlapType::Contains && StorageTextureRedescribesRange(o.params, info.params, false))
+				{
+					storage_links_redescribed = true;
+					continue;
+				}
 				multi_storage_texture_over_caches = links_cpu_texture(h, obj);
 			}
 			// The uniform path below has no relation for these parents, so a
