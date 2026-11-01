@@ -4176,6 +4176,10 @@ Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whos
   at 20-24 fps (fence waits 8-16 ms per frame) and about 67-95 at 16.5-18 fps (14-22 ms). The clean LTO binary gave 22.3
   and 16.6 fps. What selects the mode is not known; it is most of the spread between runs, so fps comparisons on this
   route must quote submits per frame.
+  A caller histogram of one window at 49 submits per frame puts at least 26 % under the idle-GPU rule; most other stacks
+  come from the draw path, where the rule that submits between a dispatch and a draw also runs, but they were not
+  separated. More idle submits can be a symptom of a GPU waiting for the processor rather than the cause of the lower
+  rate; which one was not tested.
 - **Fixed:** the same stop also came up in a clean strict build, without this experiment, in one of six runs of
   the route to the hub: the 1216-wide view crossing a depth buffer in the transient arena. A depth buffer crossing
   such a view now links like the other crossing surfaces.
