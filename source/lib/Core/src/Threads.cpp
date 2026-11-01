@@ -20,6 +20,7 @@
 #include <climits>
 #include <ctime>
 #include <linux/futex.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -332,6 +333,10 @@ static std::atomic<int> g_thread_counter = 0;
 
 void ThreadsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	// Guest sleeps and host polls time frame pacing; the default slack adds 50 us to each. New threads inherit it.
+	EXIT_NOT_IMPLEMENTED(prctl(PR_SET_TIMERSLACK, 1000UL) != 0);
+#endif
 #ifdef KYTY_SDL_THREADS
 	g_main_thread = SDL_GetCurrentThreadID();
 #else
