@@ -1898,7 +1898,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				     GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type) ||
 				     (o.object.type == GpuMemoryObjectType::StorageTexture &&
 				      StorageTextureRedescribesRange(o.params, info.params, compare_layout)) ||
-				     (o.object.type == GpuMemoryObjectType::Texture && holds_surface_pixels(o) &&
+				     (o.object.type == GpuMemoryObjectType::Texture && (holds_surface_pixels(o) || o.device_write_time != 0u) &&
 				      StorageTextureRedescribesRange(o.params, info.params, compare_layout)) ||
 				     (o.object.type == GpuMemoryObjectType::RenderTexture &&
 				      StorageTextureRedescribesRenderTarget(o.params, info.params, compare_layout)));
