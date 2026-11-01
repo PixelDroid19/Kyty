@@ -1381,13 +1381,13 @@ constexpr ShaderGen5SampledTextureShape ShaderGen5SampledTextureShapeForType(uin
 
 // MIMG DIM selects the address layout the instruction supplies; the T# type selects the
 // addressing the texture unit performs. A volume DIM therefore cannot turn a resource
-// whose type is not 3D into a volume: a 2D or array resource ignores the extra
-// coordinate, so the descriptor keeps the shape of its own type. (The other
+// whose type is not 3D into a volume, and no other DIM can turn a volume into a flat
+// resource: the descriptor keeps the shape of its own type. (The other
 // instruction-derived shapes stay: an array resource read as a plain 2D slice, for
 // example, is a usage the renderer resolves per instruction.)
 constexpr bool ShaderGen5InstructionShapeAppliesToType(uint8_t type, ShaderGen5SampledTextureShape shape)
 {
-	return shape != ShaderGen5SampledTextureShape::ThreeDimensional || type == 10u;
+	return (shape == ShaderGen5SampledTextureShape::ThreeDimensional) == (type == 10u);
 }
 
 constexpr uint8_t ShaderGen5HostSampledTextureType(uint8_t guest_type, ShaderGen5SampledTextureShape shape)
