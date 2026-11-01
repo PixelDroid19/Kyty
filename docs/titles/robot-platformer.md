@@ -4156,6 +4156,11 @@ Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whos
   retired. Before that stop, still at boot and not in the hub, 1143 of 2285 consolidated waits met an alias lookup. If
   the hub is similar, a wait at the consumer would still run in about half of them, which bounds the gain near
   3 ms per frame. Not built further.
+- **Open lead, geometry `f4cfb9a5` (17 % of GPU time):** the pass sizes each point's group from the declared
+  `VGT_GS_MAX_VERT_OUT` of 64, so it always runs 64 lanes as 8 host parts with rendezvous. How many vertices a point
+  really allocates (`gs_alloc_req`) was not measured. If it is small, the parts holding no live lane do only scalar work
+  and exchanges, and could leave early. At best that saves about 4 ms of the 34 ms per frame, near 2 fps at the current
+  rate, and it changes the program where the hub GPU hang stops. Not built.
 - **Fixed:** the same stop also came up in a clean strict build, without this experiment, in one of six runs of
   the route to the hub: the 1216-wide view crossing a depth buffer in the transient arena. A depth buffer crossing
   such a view now links like the other crossing surfaces.
