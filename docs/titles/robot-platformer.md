@@ -4069,3 +4069,21 @@ In game, with GPU timestamps and a warm store: compute `bf8ee9fc` 13.14 to 8.84 
 different scene mixes, so no frame rate is claimed. The frame stays at 85-130 ms in that scene.
 
 Open: other GPUs untested; native half arithmetic (`OpFAdd` on `%half`) instead of widen, operate, narrow.
+
+## EXEC fold outside pixel programs, GPU gaps (2026-10-31)
+
+Title: PPSA21567 - Astro Bot. Host: Intel Arc A770, ANV 26.2.5, xe, kernel 7.2.11.
+
+- The EXEC fold is not a lever for compute and vertex programs. A linear scan of the 113 hub modules that keep a lane
+  variable, tracking which SGPRs hold the initial full mask: about 34000 compute selects sit under a mask that is not
+  provably full, under 100 under a provable one, outside one module (1761 selects). In the largest modules the writes
+  are `ballot(exec & compare)` and `exec & ~saved`, real divergent regions of up to 1049 selects. A write of all ones
+  already folds in every stage. Limit: the scan ignores joins, so it estimates and is not a proof.
+- Time between GPU steps is not a lever in a normal run. With marks around the pass begin (gw384, 81 s of timestamps):
+  compute gaps 2.7 s, everything before a pass begins 1.3 s, barriers up to the begin 0.09 s, and the 4.8 s of gaps
+  before non-indexed draws seen in gw383 is absent: it came with `INTEL_DEBUG=reemit`. The largest single pair is 393 us
+  per frame step after a non-indexed draw before compute `1609d289`, about 1 % of the GPU.
+- The 17 % after the last mark of each buffer (107 us each, 127k buffers) is mostly the completion of the draws before
+  it, as the dispatch and draw split result above shows.
+- Native half conversion reaches 2 of the last 150 modules in the store, so native half arithmetic is not a hub-wide
+  lever either; it stays open for those programs.

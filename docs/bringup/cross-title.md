@@ -5541,3 +5541,19 @@ Not confirmed in this sweep:
 - `PPSA02070 - Don't Starve Together` stays at its EULA screen at 30.0 fps and needs input that was not sent.
   Minecraft stays at Select Character at 59.9 fps. Neither was driven further.
 - `PPSA15552 - Dead Cells`: trails lasting seconds were reported by a player; not confirmed fixed.
+
+## Link-time optimization on Linux packages (2026-10-31)
+
+Host: Intel Arc A770, ANV 26.2.5, xe, kernel 7.2.11, GCC 16.2. Same source, same settings, 14 s window at the same
+point of the route, one run at a time.
+
+| Title | Scene | Without | With LTO |
+| --- | --- | --- | --- |
+| PPSA09076 - DREDGE | Dock, limited by the command processor | 26.5, 24.9 fps | 28.6, 26.7 fps |
+| PPSA28311 - Absolum | First area, limited by GPU fences | 40.3 fps, 338 draws per frame | 37.3 fps, 370 draws per frame |
+| PPSA21567 - Astro Bot | Bounded route | no error | no error, GPU totals equal |
+
+Processor-bound scenes gain 7-8 % in both run orders. The Absolum runs reached a different draw count, so they show it
+runs correctly and no speed claim. `scripts/package_linux.sh` now sets `CMAKE_INTERPROCEDURAL_OPTIMIZATION`: the emulator
+and launcher build and link, and the launcher starts offscreen. Development builds stay without it: a link takes about a
+minute. Windows packages stay without it because MinGW LTO was not tested.
