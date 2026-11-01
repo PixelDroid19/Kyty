@@ -4180,6 +4180,11 @@ Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whos
   come from the draw path, where the rule that submits between a dispatch and a draw also runs, but they were not
   separated. More idle submits can be a symptom of a GPU waiting for the processor rather than the cause of the lower
   rate; which one was not tested.
+- **Pixel program `55db270b` (7 % of GPU time, about 900 us per draw).** Pipeline statistics over 992 draws: about 1,530
+  primitives and 837,000 fragments per draw, so 1.1 ns per fragment and the cost is shading, not vertices. With vertex
+  program `7abe409a` the driver compiles it at SIMD8 with no spills: 6,280 instructions, 129 SENDs, 19 loops, 71,485
+  estimated cycles. Nothing here points at a translation defect, and no change was tried. The pairing with `4e1ef13e`
+  printed no driver statistics.
 - **Fixed:** the same stop also came up in a clean strict build, without this experiment, in one of six runs of
   the route to the hub: the 1216-wide view crossing a depth buffer in the transient arena. A depth buffer crossing
   such a view now links like the other crossing surfaces.
