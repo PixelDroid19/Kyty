@@ -5557,3 +5557,30 @@ Processor-bound scenes gain 7-8 % in both run orders. The Absolum runs reached a
 runs correctly and no speed claim. `scripts/package_linux.sh` now sets `CMAKE_INTERPROCEDURAL_OPTIMIZATION`: the emulator
 and launcher build and link, and the launcher starts offscreen. Development builds stay without it: a link takes about a
 minute. Windows packages stay without it because MinGW LTO was not tested.
+
+## Physical windows are whole 64 MiB chunks (2026-10-31)
+
+- **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, xe, Mesa 26.2.5, gameplay route):
+  `vkQueueSubmit` took 172-274 us per call on the command-processor thread, 16-19 % of its wall time,
+  against 11 us on `PPSA21402 - Balatro`. Temporary counters showed 2,360 live physical windows (1,871
+  of them 2 MiB) against 16 imports on the lighter title, which gives about 0.1 us per imported object.
+  The windows held 7,814 MiB inside only 142 aligned 64 MiB chunks. The per-object link to the kernel
+  was not traced; it rests on this scaling and on the fall below.
+- **Change:** a window is now the aligned 64 MiB chunk of the backing around the first page used,
+  replacing the power-of-two sizes in "Shared physical device-address windows". 64 MiB is also the
+  default `udmabuf` size limit. Discards still zero pinned pages in place, so a page that shares a
+  chunk with a live range keeps its contract; unallocated pages in a used chunk are pinned and
+  populated.
+- **Measured** (same binary apart from the change; temporary counters in both):
+
+  | Title | Windows | Pinned MiB | Submit us | Frames |
+  | --- | --- | --- | --- | --- |
+  | `PPSA21567 - Astro Bot` | 2,432 → 137 | 7,836 → 8,768 | 143-274 → 21-24 | 14.9, 14.7 → 17.3 fps at 295-297 draws/frame |
+  | `PPSA28311 - Absolum` | 1,348 → 56 | 3,196 → 3,584 | 58-114 → 9-14 | different scene, no speed claim |
+  | `PPSA09076 - DREDGE` | 711 → 38 | 2,152 → 2,432 | 39-59 → 11 | different scene, no speed claim |
+
+  Peak process memory on DREDGE stayed at 2,717 → 2,702 MiB. Astro's was not measured at baseline;
+  its pinned memory grows 12 %. `PPSA21402 - Balatro` holds 60 fps with 6 windows.
+- **Open:** one Astro run per side after a repeat of the baseline; the first use of a chunk now
+  imports 64 MiB at once and that single stall was not timed. Storage objects bound in place keep
+  their own windows (35 of 36 lie inside a chunk window on Astro).

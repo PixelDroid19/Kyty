@@ -34,8 +34,9 @@ namespace {
 // zero prefix), in chunks bounded to keep each pin modest.
 constexpr uint64_t kChunkBytes = 64ull << 20u;
 constexpr uint64_t kPageBytes  = kGuestDeviceAddressPageBytes;
-// Physical ranges read direct memory through shared windows: aligned
-// power-of-two intervals of whole blocks, at most one chunk long.
+// Physical ranges read direct memory through shared windows, one per aligned
+// chunk of the backing. Each imported object adds to the cost of every submit
+// on hosts that lock external objects per submit, about 0.1 us on xe.
 constexpr uint64_t kPhysicalImportBlockBytes = 2ull << 20u;
 // Bound host padding independently from the guest-visible chunk size.
 constexpr uint64_t kMaxHostImportPaddingBytes = 2ull << 20u;
@@ -749,40 +750,23 @@ void ReleaseInPlaceWindowLocked(VkDevice device, Registry* registry, std::map<st
 	registry->in_place_windows.erase(window);
 }
 
-// The window holding direct-memory offset `offset`, imported if none does. A
-// new window is the largest aligned power-of-two run of blocks, at most one
-// chunk, that starts at the block of `offset` and ends by `limit` and before
-// the next window.
-PhysicalWindow* AcquireWindow(GraphicContext* ctx, Registry* registry, uint64_t offset, uint64_t limit, uint64_t* base)
+// The window of the chunk holding direct-memory offset `offset`, imported if
+// it is the first use of that chunk.
+PhysicalWindow* AcquireWindow(GraphicContext* ctx, Registry* registry, uint64_t offset, uint64_t* base)
 {
-	auto next = registry->windows.upper_bound(offset);
-	if (next != registry->windows.begin())
+	const uint64_t start = offset / kChunkBytes * kChunkBytes;
+	*base                = start;
+	if (auto holder = registry->windows.find(start); holder != registry->windows.end())
 	{
-		auto holder = std::prev(next);
-		if (offset - holder->first < holder->second.size)
-		{
-			*base = holder->first;
-			return &holder->second;
-		}
-	}
-	const uint64_t start = offset / kPhysicalImportBlockBytes * kPhysicalImportBlockBytes;
-	if (next != registry->windows.end())
-	{
-		limit = std::min(limit, next->first);
-	}
-	uint64_t size = kPhysicalImportBlockBytes;
-	while (size < kChunkBytes && start % (size * 2u) == 0 && limit - start >= size * 2u)
-	{
-		size *= 2u;
+		return &holder->second;
 	}
 	PhysicalWindow window;
-	window.size = size;
-	if (!ImportWindow(ctx, start, size, &window.import))
+	window.size = kChunkBytes;
+	if (!ImportWindow(ctx, start, kChunkBytes, &window.import))
 	{
-		std::fprintf(stderr, "guest physical window import failed: offset=0x%012" PRIx64 " size=0x%" PRIx64 "\n", start, size);
+		std::fprintf(stderr, "guest physical window import failed: offset=0x%012" PRIx64 " size=0x%" PRIx64 "\n", start, kChunkBytes);
 		return nullptr;
 	}
-	*base = start;
 	return &registry->windows.emplace(start, window).first->second;
 }
 
@@ -790,12 +774,11 @@ PhysicalWindow* AcquireWindow(GraphicContext* ctx, Registry* registry, uint64_t 
 // the windows over those pages, one chunk per window.
 bool ImportPhysicalRun(GraphicContext* ctx, Registry* registry, Range* range, uint64_t guest, uint64_t offset, uint64_t size)
 {
-	const uint64_t end   = offset + size;
-	const uint64_t limit = (end + kPhysicalImportBlockBytes - 1u) / kPhysicalImportBlockBytes * kPhysicalImportBlockBytes;
+	const uint64_t end = offset + size;
 	for (uint64_t cursor = offset; cursor < end;)
 	{
 		uint64_t        base   = 0;
-		PhysicalWindow* window = AcquireWindow(ctx, registry, cursor, limit, &base);
+		PhysicalWindow* window = AcquireWindow(ctx, registry, cursor, &base);
 		if (window == nullptr)
 		{
 			return false;
