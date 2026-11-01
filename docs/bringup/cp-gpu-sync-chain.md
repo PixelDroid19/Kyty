@@ -184,3 +184,8 @@ only, not code):
   - `WAIT_REG_MEM` labels were not classified.
 - **Measuring each link.** Each link has to be removed with an exact twin and measured with
   `KYTY_DIAG_FENCE_STACK` on the dunes, on Intel first and then on AMD.
+- **Measured in the hub (2026-11-01).** With the frame at 28 ms and the GPU at 21 ms, removing
+  links one at a time confirmed that each one moves the wait: 679 frames per 20 s with device label
+  waits, 701 with the cross-queue dispatch read too, 738 with an unguarded aliased label
+  consolidation. A guarded form keeps about half of that, because 51 % of those waits are followed
+  by a lookup of a non-storage alias. See `docs/titles/robot-platformer.md`.

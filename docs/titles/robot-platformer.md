@@ -4274,3 +4274,40 @@ Also fixed: a storage texture over an uploaded texture that the device later wro
 Regression: `PPSA06084 - Superliminal`, `PPSA28311 - Absolum` and `PPSA15552 - Dead Cells` ran 70 s each to their menus
 on the EXEC change, with no stop and a correct capture. They have not been checked in gameplay, and not on the relative
 move change. The unit suite passes on both.
+
+## Frame partition and removed sync links in the hub (2026-11-01)
+
+`PPSA21567 - Astro Bot`, first hub view, Intel Arc A770, ANV Mesa 26.2.5, xe, clean LTO build of
+44ba18678: 3382 to 4088 presents in 20 s, 35.3 fps, GPU busy about 75 %, GPU about 21 ms per frame
+(ceiling about 47 fps), command processor thread 15.4 ms per frame.
+
+Per frame on the instrumented build: 5 guest submits, 35 graphics queue submissions, submitters
+blocked 24-28 ms, guest between submits 2.3 ms. Blocking links on the graphics queue thread in a
+20 s window of 704 frames:
+
+| Link | Share | Cost |
+| --- | --- | --- |
+| Label wait with aliased pending storage, own queue, current submission | 1 per frame | 2.75 ms/frame |
+| `DRAW_INDEX_INDIRECT` argument read, one zero-instance record | 1 per frame | 2.55 ms/frame |
+| `DISPATCH_INDIRECT` argument read, producer on the compute queue | 1 per frame | 2.2 ms/frame |
+| `WAIT_REG_MEM` 64-bit, other effects | | 0.35 ms/frame |
+
+Each experiment ran one 20 s window against a baseline of 679-680 frames:
+
+- Device waits for cross-queue labels only: suspensions on the graphics queue dropped from 4.6-8
+  to 0.2 ms per frame and frames stayed at 679. The wait moved to the next link.
+- Adding the cross-queue `DISPATCH_INDIRECT` read on the device: 701 frames, with the wait moved
+  to the indirect draw and the aliased label (same-code spread is about 7 %).
+- Also consolidating the aliased label with no guard, which is not a shippable behavior: 738
+  frames (36.9 fps, +8 %), GPU busy 79 %, no fatal stop through the route, capture matches the
+  baseline. It still leaves 2.98 s of indirect draw waits per 20 s.
+
+The guard this needs is not free. In that run 5506 of 10815 consolidated waits (51 %) were followed
+by a lookup of a non-storage alias before the write-back: 483185 exact `DepthStencilBuffer` lookups
+(the HTILE range), 45668 `RenderTexture`, 3443 `Texture`. A correct guard turns those lookups back
+into a wait, so roughly half of the 8 % remains. The indirect draw needs a device twin of the
+geometry draw plan. The whole chain stays parked until the GPU frame is shorter: GPU work on the
+critical path should shorten the frame directly, because the blocked links wait for that work.
+
+Excluded here: vblank quantization (no present waits on the interval), spinning for 200 us before
+sleeping on hand-offs (679 against 682 frames).
