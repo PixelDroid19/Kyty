@@ -389,20 +389,22 @@ inline bool GpuMemoryContentFollowsGuestBytes(GpuMemoryContentOrigin origin)
 	return origin == GpuMemoryContentOrigin::CpuUpload || origin == GpuMemoryContentOrigin::AliasInvalidation;
 }
 
-// Incoming StorageTexture at or inside a CPU-uploaded sampled Texture
+// Incoming StorageTexture at, inside or crossing a CPU-uploaded sampled Texture
 // (captured: a 0x30000 storage view at the base of a 0x120000 texture, and a
 // 0x120000 six-layer view over the exact range of a texture of another shape,
 // in recycled allocations that render targets and vertex buffers also
 // describe; a view inside a 0x1e0000 texture that is the only parent; and a
 // 0x30000 view inside a 1248x1440 texture invalidated by a write-back, beside a
-// render target and a read-only storage buffer). Only a CPU upload or a
+// render target and a read-only storage buffer; a 0x20000 view crossing a
+// 0x1e000 texture in a recycled allocation). Only a CPU upload or a
 // write-back invalidation proves the texture holds no bytes newer than guest
 // memory.
 inline bool GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                          GpuMemoryContentOrigin existing_origin, GpuMemoryObjectType incoming_type)
 {
 	return existing_type == GpuMemoryObjectType::Texture &&
-	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals) &&
+	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals ||
+	        relation == GpuMemoryOverlapType::Crosses) &&
 	       GpuMemoryContentFollowsGuestBytes(existing_origin) && incoming_type == GpuMemoryObjectType::StorageTexture;
 }
 

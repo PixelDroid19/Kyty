@@ -6954,8 +6954,11 @@ TEST(EmulatorGraphicsState, ReclaimsReadOnlyVertexBuffersUnderStorageTexture)
 	                                                           GpuMemoryObjectType::StorageTexture));
 	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
 	                                                           GpuMemoryContentOrigin::Unknown, GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
+	                                                          GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
 	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
-	                                                           GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
+	                                                           GpuMemoryContentOrigin::GpuAliasMaterialization,
+	                                                           GpuMemoryObjectType::StorageTexture));
 }
 
 TEST(EmulatorGraphicsState, LinksExistingIndexViewsIntoIncomingTexture)
