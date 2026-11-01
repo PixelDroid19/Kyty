@@ -4219,5 +4219,11 @@ timestamp dumps rather than by a window mean.
   frame vary from 26 to 86, and it did not change with this fix (15.8 % and 15.0 %). That fits the earlier reading,
   completion of the draws before it, and no lever was found in it. The windows of those two counts do not line up
   exactly, so this is a comparison of ranges.
-- **Hub GPU hang: unchanged.** The engine state still needs a devcoredump, which is root-only by default. A udev rule
-  that changes the mode of `data` when the dump appears would avoid running a root command after each reset.
+- **Hub GPU hang: not reproduced since 2026-10-31.** Runs that reached the hub ended in a device loss in 31 of 84 cases
+  up to 11:40 on 2026-10-31, mostly 121-185 s into the run, and in 0 of 57 after it. Only 8 of those 57 are known to
+  have lasted 180 s or more; the others ended earlier or have no usable start time. Four of the 8 are new 270 s runs on
+  `197093a4e` plus diagnostics, all past the hub load. If the old rate still applied, 8 clean runs would have about a
+  6 % chance. The kernel log also shows one engine reset at 00:36 on 2026-11-01 that matches no recorded run, so the
+  hang is not proven gone, and no commit is proven to have removed it. A udev rule now makes `data` readable, but no
+  dump has appeared since, so the rule is untested. Hunting a reset that no longer shows brings no frame rate, so this
+  stays closed until a run hits it again.
