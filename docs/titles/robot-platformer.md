@@ -4087,3 +4087,14 @@ Title: PPSA21567 - Astro Bot. Host: Intel Arc A770, ANV 26.2.5, xe, kernel 7.2.1
   it, as the dispatch and draw split result above shows.
 - Native half conversion reaches 2 of the last 150 modules in the store, so native half arithmetic is not a hub-wide
   lever either; it stays open for those programs.
+
+## Title screen stop on mixed storage parents (2026-10-31)
+
+`PPSA21567 - Astro Bot`, intermittent, one strict run in about a dozen on the
+title screen: `!create_all_the_same` for a new 240x135 mode-27 storage view inside
+11 parents of a recycled range. Ten were already linkable. The stop was a sampled
+mode-24 chain whose last update was a device write, so it was neither a CPU-backed
+texture nor a storage view. A texture in another format or tile mode now links as a
+redescribed range. Verified only by the rule and by runs that did not stop; the
+stop was not reproduced on demand, so its absence in three later runs is weak
+evidence.

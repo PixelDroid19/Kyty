@@ -5558,6 +5558,24 @@ runs correctly and no speed claim. `scripts/package_linux.sh` now sets `CMAKE_IN
 and launcher build and link, and the launcher starts offscreen. Development builds stay without it: a link takes about a
 minute. Windows packages stay without it because MinGW LTO was not tested.
 
+## Suspended register waits poll every 100 us (2026-10-31)
+
+Observed on `PPSA21567 - Astro Bot` gameplay route, Intel Arc A770: about 3.5
+suspended `WAIT_REG_MEM` per frame whose producer is a guest store, so no host
+signal exists and the wait polls. A 1 ms poll measured 1.1 ms, about 0.55 ms lost
+per wait. Same binary, two runs per arm: 1000 us 16.7 and 17.3 fps, 100 us 18.7
+and 19.9 fps. The gain is larger than the polling arithmetic predicts; the rest
+was not explained. The route's scene mix varies between runs, so read this as
+about +11 %, not an exact figure. A 100 us request measured about 170 us.
+
+## Released descriptor sets stay held up to 65536 (2026-10-31)
+
+Past the old 8192 limit released sets returned to their pools. Allocation cost
+went from 0.4 us to about 13 us per set once frees began, up to 50 ms per 5 s on
+the same route. At 65536 frees were zero and allocation under 5 ms per 5 s. Frame
+rate did not move (17.3 fps); the change removes bursts, not average cost. Peak
+memory stayed within run-to-run noise (8.3-9.4 GiB), not separately isolated.
+
 ## Physical windows are whole 64 MiB chunks (2026-10-31)
 
 - **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, xe, Mesa 26.2.5, gameplay route):
