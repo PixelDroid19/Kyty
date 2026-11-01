@@ -4311,3 +4311,42 @@ critical path should shorten the frame directly, because the blocked links wait 
 
 Excluded here: vblank quantization (no present waits on the interval), spinning for 200 us before
 sleeping on hand-offs (679 against 682 frames).
+
+## Where the hub frame can still shrink (2026-11-01)
+
+`PPSA21567 - Astro Bot`, first hub view, same host and route, one 20 s window per experiment. Clean LTO build of
+44ba18678: 706 frames. The instrumented build: 679-680 frames.
+
+| Experiment | Build | Frames | Reading |
+| --- | --- | --- | --- |
+| `INTEL_DEBUG=noccs,nohiz` | clean | 665 (-6 %) | Driver compression is active and memory bandwidth is not the limit |
+| `INTEL_SIMD_DEBUG` without `fs8`, private driver cache, warm | clean | 651 (-8 %) | Excluded: forcing SIMD16 makes the heavy pixel programs spill |
+| Compute-only queue family (forced) | instrumented | 688 (+1 %) | Within the spread; this family also hung the hub in earlier runs |
+| 3 us of added CP time per indexed draw | instrumented | 680 (0 %) | |
+| 12 us of added CP time per indexed draw | instrumented | 664 (-2 %) | |
+
+**CP sensitivity.** The added time raised the CP thread from 54.2 % to 57.3 % of a core between the two delays, so the
+hub has about 100 indexed draws per frame and 12 us is about 1.2 ms per frame. The frame grew about 0.7 ms, a slope of
+about 0.6 for one run per point. CP savings do reach the frame, at a discount: taking 30 % off the 15.4 ms of CP work
+would be worth about 2.5 ms. The profile under it stays flat: resource binding 27 %, input info 16 %, write-back compare
+5.9 %, hash 4.2 %. The per-program usage recipe stays excluded (`docs/bringup/cp-draw-plan.md`).
+
+**Compute programs are not wasteful.** Driver statistics joined with GPU cost: the width comes from the driver, and the
+hot programs spill little or not at all. `ff2adfc8`, 2.26 ms per frame, runs SIMD16 with 2,754 instructions, 134 sends
+and no spills. `90c95e2d`, 0.72 ms, has 78 spills and 343 fills. Only `a8eff16a` runs at SIMD32 with heavy spills, and it
+costs 0.014 ms per frame.
+
+**Vertex programs are bound by their own loops.** Vertex reuse is healthy: 3.4-4.8 indices per invocation for the indexed
+programs measured, 1.9 for `827d31eb`. `550e721d` takes 184 us per draw with 846 vertices and `827d31eb` 174 us with 2,217,
+so the time does not scale with vertices. It behaves like the latency of one thread. The guest program runs real
+per-vertex math in loops (3,113 guest instructions, of which 1,658 multiplications and fused multiply-adds, and 60
+sines and cosines), which also explains why cutting static instructions by 48 % moved the draw only 13 %. This reading is
+inferred from these counts, with no hardware counters behind it.
+
+**Pixel programs that stay at SIMD8** (`8ca0b9ff`, `c4a8f3bb`, `55db270b`, `96d1762d`, `5ed3c02d`) report 108-151 live
+registers. Programs that do offer SIMD16 are at 46-57. Lowering that pressure is the open GPU lead; how much each
+program would gain is not measured.
+
+**Reading.** GPU work on the frame is flat: the largest program is 2.56 ms of about 21 ms. With the guarded label wait
+(about +4 %), 30 % of CP work (about 2.5 ms) and pressure work on pixel programs, the first hub view could approach
+43 fps. 60 fps needs the GPU frame at 16 ms, and no measured lever gets there.
