@@ -4346,6 +4346,115 @@ static bool MovrelUnitValueSet(const ShaderCode& code, uint32_t index, int unit,
 	return false;
 }
 
+static uint32_t MovrelUnitAlignment(const ShaderCode& code, uint32_t index, int unit, int depth);
+
+static uint32_t MovrelOperandAlignment(const ShaderCode& code, uint32_t index, const ShaderOperand& op, int depth)
+{
+	if (MovrelOperandIsLiteral(op))
+	{
+		return op.constant.u == 0u ? 32u : static_cast<uint32_t>(__builtin_ctz(op.constant.u));
+	}
+	const int unit = MovrelOperandUnit(op);
+	return unit >= 0 ? MovrelUnitAlignment(code, index, unit, depth) : 0u;
+}
+
+// Low bits known to be zero in the result of a scalar definition; these survive 32-bit wrap-around.
+static uint32_t MovrelDefinitionAlignment(const ShaderCode& code, uint32_t index, int depth)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.dst.size > 1)
+	{
+		return 0u;
+	}
+	if (inst.type == ShaderInstructionType::SMovB32 && inst.src_num == 1)
+	{
+		return MovrelOperandAlignment(code, index, inst.src[0], depth);
+	}
+	if (inst.src_num != 2)
+	{
+		return 0u;
+	}
+	if (inst.type == ShaderInstructionType::SLshlB32 && MovrelOperandIsLiteral(inst.src[1]))
+	{
+		return std::min(MovrelOperandAlignment(code, index, inst.src[0], depth) + (inst.src[1].constant.u & 31u), 32u);
+	}
+	if (inst.type == ShaderInstructionType::SAddI32 || inst.type == ShaderInstructionType::SAddU32)
+	{
+		return std::min(MovrelOperandAlignment(code, index, inst.src[0], depth), MovrelOperandAlignment(code, index, inst.src[1], depth));
+	}
+	return 0u;
+}
+
+// Low bits known to be zero in |unit| on entry to |index|, from its reaching
+// definition along the unique-predecessor chain.
+static uint32_t MovrelUnitAlignment(const ShaderCode& code, uint32_t index, int unit, int depth)
+{
+	if (depth > 8)
+	{
+		return 0u;
+	}
+	uint32_t i    = index;
+	uint32_t next = index;
+	for (; MovrelUniquePredecessor(code, next, &i); next = i)
+	{
+		const auto& inst = code.GetInstructions().At(i);
+		if (inst.type == ShaderInstructionType::SSwappcB64 || inst.type == ShaderInstructionType::SSetpcB64 ||
+		    MovrelOperandWritesUnit(inst.dst2, unit))
+		{
+			return 0u;
+		}
+		if (MovrelOperandWritesUnit(inst.dst, unit))
+		{
+			return MovrelDefinitionAlignment(code, i, depth + 1);
+		}
+	}
+	return 0u;
+}
+
+static bool MovrelOperandWritesVgpr(const ShaderOperand& op, int vgpr)
+{
+	return op.type == ShaderOperandType::Vgpr && vgpr >= op.register_id && vgpr < op.register_id + std::max(op.size, 1);
+}
+
+// Low bits known to be zero in a per-lane index VGPR at |index|: a v_lshlrev by
+// a literal under the same EXEC. Under another EXEC a lane could hold an older value.
+static uint32_t MovrelLaneAlignment(const ShaderCode& code, uint32_t index, int vgpr)
+{
+	uint32_t i    = index;
+	uint32_t next = index;
+	for (; MovrelUniquePredecessor(code, next, &i); next = i)
+	{
+		const auto& inst = code.GetInstructions().At(i);
+		if (MovrelOperandWritesVgpr(inst.dst, vgpr))
+		{
+			const bool plain = inst.type == ShaderInstructionType::VLshlrevB32 && inst.src_num == 2 && !inst.vop_sdwa && !inst.dst.clamp &&
+			                   MovrelOperandIsLiteral(inst.src[0]);
+			return plain ? inst.src[0].constant.u & 31u : 0u;
+		}
+		if (MovrelOperandWritesVgpr(inst.dst2, vgpr) || ShaderInstructionWritesExec(inst) || inst.type == ShaderInstructionType::VMovreldB32 ||
+		    inst.type == ShaderInstructionType::VMovrelsdB32 || inst.type == ShaderInstructionType::SSwappcB64 ||
+		    inst.type == ShaderInstructionType::SSetpcB64)
+		{
+			return 0u;
+		}
+	}
+	return 0u;
+}
+
+static Vector<int> MovrelAlignedRegisters(const Vector<int>& regs, int base, uint32_t alignment)
+{
+	const uint32_t mask = alignment >= 32u ? UINT32_MAX : (1u << alignment) - 1u;
+	Vector<int>    aligned;
+	for (const auto reg: regs)
+	{
+		if ((static_cast<uint32_t>(reg - base) & mask) == 0u)
+		{
+			aligned.Add(reg);
+		}
+	}
+	return aligned;
+}
+
 // Every VGPR index statically named by the program at or above |base|. A
 // relative access can only observe registers that some instruction names —
 // on hardware an index landing outside them reads undefined register-file
@@ -4412,7 +4521,7 @@ static Vector<int> MovrelReachableRegisters(const ShaderCode& code, uint32_t ind
 	Vector<uint32_t> offsets;
 	if (!MovrelUnitValueSet(code, index, kMovrelUnitM0, 0, &offsets))
 	{
-		return regs;
+		return MovrelAlignedRegisters(regs, base, MovrelUnitAlignment(code, index, kMovrelUnitM0, 0));
 	}
 	Vector<int> reachable;
 	for (const auto reg: regs)
@@ -4564,7 +4673,9 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovrelsB32_SVdstSVsrc0)
 		                                             "%%rel_m0_%u = OpBitcast %%uint %%rel_lane_%u\n",
 		                                             index, inst.src[1].register_id, index, index);
 		return EmitMovrelsDynamic(static_cast<int>(index), inst.dst, inst.src[0].register_id, offset_load,
-		                          MovrelCandidateRegisters(code, inst.src[0].register_id), dst_source, spirv);
+		                          MovrelAlignedRegisters(MovrelCandidateRegisters(code, inst.src[0].register_id), inst.src[0].register_id,
+		                                                 MovrelLaneAlignment(code, index, inst.src[1].register_id)),
+		                          dst_source, spirv);
 	}
 	if (MovrelProvenLiteralM0(code, index, &m0))
 	{
@@ -4612,7 +4723,9 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovreldB32_SVdstSVsrc0)
 		                                             "%%rel_m0_%u = OpBitcast %%uint %%rel_lane_%u\n",
 		                                             index, inst.src[1].register_id, index, index);
 		return EmitMovreldDynamic(index, inst.dst.register_id, offset_load, src_load, "%rel_src_" + index_str,
-		                          MovrelCandidateRegisters(code, inst.dst.register_id), dst_source);
+		                          MovrelAlignedRegisters(MovrelCandidateRegisters(code, inst.dst.register_id), inst.dst.register_id,
+		                                                 MovrelLaneAlignment(code, index, inst.src[1].register_id)),
+		                          dst_source);
 	}
 	if (MovrelProvenLiteralM0(code, index, &m0))
 	{

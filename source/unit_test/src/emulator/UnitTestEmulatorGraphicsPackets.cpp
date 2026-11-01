@@ -8273,6 +8273,22 @@ TEST(EmulatorGraphicsPackets, NarrowsDynamicMovrelsToBoundedM0Values)
 	EXPECT_NE(guarded_source.FindIndex("%rel_v_4_6 = OpLoad %float %v6"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(guarded_source.FindIndex("%rel_v_4_7 "), Core::STRING8_INVALID_INDEX);
 
+	// m0 = (s0 << 2) + 4 stays a multiple of 4 whatever s0 holds: v8 is reachable from v4, v9 is not.
+	const uint32_t aligned[] = {
+	    0x80000000u | (0x1eu << 23u) | (1u << 16u) | (0x82u << 8u),      // s_lshl_b32 s1, s0, 2
+	    0x80000000u | (0x02u << 23u) | (1u << 16u) | (0x84u << 8u) | 1u, // s_add_i32 s1, s1, 4
+	    0xbefc0301u,                                                     // s_mov_b32 m0, s1
+	    (0x3fu << 25u) | (9u << 17u) | (0x01u << 9u) | 264u,             // v_mov_b32 v9, v8
+	    (0x3fu << 25u) | (5u << 17u) | (0x43u << 9u) | 260u,             // v_movrels_b32 v5, v4
+	    0xbf810000u};
+	ShaderCode aligned_code;
+	aligned_code.SetType(ShaderType::Pixel);
+	ShaderParse(aligned, &aligned_code);
+	ASSERT_EQ(aligned_code.GetInstructions().At(4).type, ShaderInstructionType::VMovrelsB32);
+	const auto aligned_source = SpirvGenerateSource(aligned_code, nullptr, &input, nullptr);
+	EXPECT_NE(aligned_source.FindIndex("%rel_v_4_8 = OpLoad %float %v8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(aligned_source.FindIndex("%rel_v_4_9 "), Core::STRING8_INVALID_INDEX);
+
 	// M0's source joins a branch and a fallthrough: every candidate stays.
 	const uint32_t joined[] = {
 	    0xbf840001u,                                          // s_cbranch_scc0 -> s_mov_b32 m0, s1
