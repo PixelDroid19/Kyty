@@ -65,6 +65,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Robot platformer: hub ground samples mips below the T# MIN_LOD (2026-10-28, fixed)
   - Robot platformer: hub vertex streams re-uploaded every frame (2026-10-28, fixed)
   - Native half conversion (2026-10-31)
+  - Game patch trial and geometry cost (2026-11-01)
   - Whole-wave masks in hot pixel programs (2026-10-31)
   - PPSA21567 - Astro Bot: space scene mosaic and bands (2026-10-31)
   - Robot platformer: packed half arithmetic in a hub compute program (2026-10-27)

@@ -4108,3 +4108,34 @@ Main ring thread after these changes, 150 samples: 54 % busy and flat, 22 % fenc
 waits, 16 % register wait polls. No guest thread is busy. `DRAW_INDEX_INDIRECT`
 argument reads are 5 %; removing them needs device draws, parked because indexed
 draw recording consumes the index count on the CPU.
+
+## Game patch trial and geometry cost (2026-11-01)
+
+`PPSA21567 - Astro Bot` 01.018.000, A770, Mesa 26.2.5, `KYTY_PRESENT_FPS_LIMIT=60`,
+private shader store, same route, same 14 s window at the hub level.
+[Game patches](../game-patches.md) were user files; none of these are strict runs.
+
+| Mods enabled | fps | Note |
+| --- | --- | --- |
+| None | 18.5 | Two earlier runs of this route reached the space scene by the window: 13.1, 13.6 |
+| Deferred non-RT renderer, GI probes off | 20.6, 20.9 | |
+| Same, fixed 1080p | 20.4 | |
+| Same, plus frame time unlink, CPU limiter wait off, 144 fps limit | 18.3 | Reached the same hub state |
+| Those plus the physics, Havok, video and intro mods | none | GPU job timeout and engine reset on the title level, one run |
+
+The renderer mods remove most of the frame's `cs-q8` compute (12.5 s to 5.3 s of
+GPU time in 120 s) and add `rp-pre` (about 1 s to 6 s). Geometry `f4cfb9a5` stays
+at 120 us per dispatch. The fixed resolution mod did not move the rate. Frame
+pacing mods remove no cost here: nothing suggests a guest limiter holds the frame.
+Unmodified cost stays the limit, so these mods do not reach 60 fps on this host.
+Not separated: which mod in the last row caused the reset. Not checked: whether
+the non-RT image is correct; a capture showed the ship as a dark silhouette in
+space, with no reference to compare it to.
+
+The non-RT renderer stopped at `!create_all_the_same`: a 1216x684 storage view
+over a transient arena with parents of every kind. Such a view now links as the
+last case before that stop, so views handled earlier take the same paths as before.
+
+Excluded: start-up cost as the source of the 120 us geometry dispatch. Issuing
+vertex shader `f4cfb9a5`'s dispatch twice in a row, with a barrier, costs 122.4 and
+114.5 us, so the cost is shader work and not a first-dispatch penalty.
