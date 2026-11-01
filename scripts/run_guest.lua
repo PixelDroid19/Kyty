@@ -63,6 +63,7 @@ local cfg = {
 	PresentationFsrSharpness = env_number('KYTY_PRESENTATION_FSR_SHARPNESS', 90);
 	PresentFpsLimit = env_number('KYTY_PRESENT_FPS_LIMIT', 0);
 	InputProfileFile = env_or('KYTY_INPUT_PROFILE', '');
+	GamePatchFile = env_or('KYTY_GAME_PATCH', '');
 	TextureAnisotropy = env_or('KYTY_TEXTURE_ANISOTROPY', 'Guest');
 	Neo = true;
 	VulkanValidationEnabled = env_bool('KYTY_VULKAN_VALIDATION', false);

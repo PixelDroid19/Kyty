@@ -114,6 +114,7 @@ String                 GetShaderLogFolder();
 
 // Absolute path of a kyty_input_profile_v1 file, empty for the built-in profile.
 String GetInputProfileFile();
+String GetGamePatchFile();
 
 bool   CommandBufferDumpEnabled();
 String GetCommandBufferDumpFolder();

@@ -31,7 +31,7 @@ constexpr int MIN_EXTENT = 320;
 constexpr int MAX_EXTENT = 8192;
 
 // Fields that say which game runs, as opposed to how the emulator runs it.
-const QStringList GAME_IDENTITY_KEYS = {"name", "folder", "basedir", "param_file", "elfs", "custom_settings"};
+const QStringList GAME_IDENTITY_KEYS = {"name", "folder", "basedir", "param_file", "game_patch_file", "elfs", "custom_settings"};
 
 // Output paths that must be filled when their option is enabled.
 bool RequiredPathsFilled(const QVariantMap& f)
@@ -90,6 +90,7 @@ QVariantMap ConfigurationToFields(const Kyty::Configuration& info)
 	f["name"]                         = info.name;
 	f["basedir"]                      = info.basedir;
 	f["param_file"]                   = info.param_file;
+	f["game_patch_file"]              = info.game_patch_file;
 	f["custom_settings"]              = info.custom_settings;
 	f["screen_width"]                 = info.screen_width;
 	f["screen_height"]                = info.screen_height;
@@ -183,6 +184,7 @@ QString ApplyFields(const QVariantMap& fields, Kyty::Configuration* info)
 	info->name            = fields.value("name").toString().trimmed();
 	info->basedir         = fields.value("basedir").toString().trimmed();
 	info->param_file      = fields.value("param_file").toString();
+	info->game_patch_file = fields.value("game_patch_file").toString().trimmed();
 	info->custom_settings = fields.value("custom_settings").toBool();
 
 	// Only ELFs that still exist on disk are kept, as the Qt widget editor did.

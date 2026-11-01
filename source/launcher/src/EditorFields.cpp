@@ -12,6 +12,7 @@ const QVector<EditorField> GAME_FIELDS = {
 	 QT_TRANSLATE_NOOP("EditorPageItem", "General")},
     {"basedir", QT_TRANSLATE_NOOP("EditorPageItem", "Game folder"), FieldType::Path, nullptr, true},
     {"param_file", QT_TRANSLATE_NOOP("EditorPageItem", "Parameters file"), FieldType::Path},
+    {"game_patch_file", QT_TRANSLATE_NOOP("EditorPageItem", "Game patch file"), FieldType::Path},
     {"custom_settings", QT_TRANSLATE_NOOP("EditorPageItem", "Custom emulator settings"), FieldType::Toggle},
 };
 

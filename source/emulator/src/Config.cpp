@@ -40,6 +40,7 @@ struct Config
 	String                 profiler_output_file        = U"_profile.prof";
 	// Empty selects the built-in input profile.
 	String                 input_profile_file;
+	String                 game_patch_file;
 	bool                   spirv_debug_printf_enabled  = false;
 	bool                   pipeline_dump_enabled       = false;
 	String                 pipeline_dump_folder        = U"_Pipelines";
@@ -141,6 +142,7 @@ void Load(const ConfigSource& cfg)
 	LoadStr(g_config->printf_output_file, cfg, U"PrintfOutputFile");
 	LoadStr(g_config->printf_output_folder, cfg, U"PrintfOutputFolder");
 	LoadStr(g_config->input_profile_file, cfg, U"InputProfileFile");
+	LoadStr(g_config->game_patch_file, cfg, U"GamePatchFile");
 	LoadEnum(g_config->profiler_direction, cfg, U"ProfilerDirection");
 	LoadStr(g_config->profiler_output_file, cfg, U"ProfilerOutputFile");
 	LoadBool(g_config->spirv_debug_printf_enabled, cfg, U"SpirvDebugPrintfEnabled");
@@ -231,6 +233,11 @@ String GetShaderLogFolder()
 String GetInputProfileFile()
 {
 	return g_config->input_profile_file;
+}
+
+String GetGamePatchFile()
+{
+	return g_config->game_patch_file;
 }
 
 bool CommandBufferDumpEnabled()

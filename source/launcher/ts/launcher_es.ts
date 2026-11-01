@@ -430,6 +430,10 @@
         <translation>Archivo de parámetros</translation>
     </message>
     <message>
+        <source>Game patch file</source>
+        <translation>Archivo de parches del juego</translation>
+    </message>
+    <message>
         <source>Custom emulator settings</source>
         <translation>Ajustes de emulador propios</translation>
     </message>

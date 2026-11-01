@@ -18,6 +18,7 @@
 #include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Loader/Elf.h"
+#include "Emulator/Loader/GamePatch.h"
 #include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/GuestProgramName.h"
 #include "Emulator/Loader/Instrumentation.h"
@@ -1872,6 +1873,10 @@ void RuntimeLinker::Execute()
 		EXIT("failed to allocate main guest stack\n");
 	}
 	RelocateAll();
+	if (const auto game_patch = Config::GetGamePatchFile(); !game_patch.IsEmpty())
+	{
+		GamePatchApply(game_patch, m_programs);
+	}
 	StartAllModulesOnStack(main_stack_top);
 
 	// After load+reloc the main image is final. Rewrite TLS GD call prefixes

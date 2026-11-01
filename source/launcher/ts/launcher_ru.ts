@@ -432,6 +432,10 @@
         <translation>Файл параметров</translation>
     </message>
     <message>
+        <source>Game patch file</source>
+        <translation>Файл патчей игры</translation>
+    </message>
+    <message>
         <source>Custom emulator settings</source>
         <translation>Свои настройки эмулятора</translation>
     </message>
