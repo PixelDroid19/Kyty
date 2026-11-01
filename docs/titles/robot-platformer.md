@@ -4178,8 +4178,11 @@ Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whos
   route must quote submits per frame.
   A caller histogram of one window at 49 submits per frame puts at least 26 % under the idle-GPU rule; most other stacks
   come from the draw path, where the rule that submits between a dispatch and a draw also runs, but they were not
-  separated. More idle submits can be a symptom of a GPU waiting for the processor rather than the cause of the lower
-  rate; which one was not tested.
+  separated. One run with the idle-GPU rule off, same last route state: 26 submits per frame, the lowest seen, at 17.2
+  fps with fence waits of 19.5 ms per frame, which are the rate and waits of the slow mode (register waits 15.2 ms per
+  frame against 8-13). Fewer submits alone did not bring the fast mode, so the rule does not select it and the submit
+  count does not explain the rate. What selects the mode stays open, and one run does not show whether the rule helps
+  or hurts within a mode.
 - **Pixel program `55db270b` (7 % of GPU time, about 900 us per draw).** Pipeline statistics over 992 draws: about 1,530
   primitives and 837,000 fragments per draw, so 1.1 ns per fragment and the cost is shading, not vertices. With vertex
   program `7abe409a` the driver compiles it at SIMD8 with no spills: 6,280 instructions, 129 SENDs, 19 loops, 71,485
