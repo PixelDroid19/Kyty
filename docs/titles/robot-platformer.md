@@ -4096,5 +4096,15 @@ title screen: `!create_all_the_same` for a new 240x135 mode-27 storage view insi
 mode-24 chain whose last update was a device write, so it was neither a CPU-backed
 texture nor a storage view. A texture in another format or tile mode now links as a
 redescribed range. Verified only by the rule and by runs that did not stop; the
-stop was not reproduced on demand, so its absence in three later runs is weak
-evidence.
+stop was not reproduced on demand, so its absence in about eight later runs is
+weak evidence.
+
+**Excluded: deferring texture uploads caused by `DMA_DATA` to their next use.** A
+profile showed `UtilFillImage` under `DMA_DATA` at 5 % of the main ring thread, but
+the flushes are bursts: 0 in most 5 s windows, about 150 in one. Deferring them on
+one run gave 19.9 fps against a same-code spread of 18.0-20.5.
+
+Main ring thread after these changes, 150 samples: 54 % busy and flat, 22 % fence
+waits, 16 % register wait polls. No guest thread is busy. `DRAW_INDEX_INDIRECT`
+argument reads are 5 %; removing them needs device draws, parked because indexed
+draw recording consumes the index count on the CPU.

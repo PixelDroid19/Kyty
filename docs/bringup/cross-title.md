@@ -5568,6 +5568,12 @@ and 19.9 fps. The gain is larger than the polling arithmetic predicts; the rest
 was not explained. The route's scene mix varies between runs, so read this as
 about +11 %, not an exact figure. A 100 us request measured about 170 us.
 
+A 1 us timer slack (`PR_SET_TIMERSLACK`, Linux) cut that poll to about 120 us, but
+frame rate did not measurably move. Five runs with it: 18.0, 18.4, 19.8, 20.2,
+20.5 fps, mean 19.3; two without: 18.7, 19.9, mean 19.3. Commit b949f593b quoted
+only the best two and overstates the gain. Same-code runs on this route spread by
+2.5 fps, so a single A/B below about 10 % says nothing here.
+
 ## Released descriptor sets stay held up to 65536 (2026-10-31)
 
 Past the old 8192 limit released sets returned to their pools. Allocation cost
