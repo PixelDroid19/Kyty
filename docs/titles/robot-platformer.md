@@ -4103,6 +4103,8 @@ weak evidence.
 profile showed `UtilFillImage` under `DMA_DATA` at 5 % of the main ring thread, but
 the flushes are bursts: 0 in most 5 s windows, about 150 in one. Deferring them on
 one run gave 19.9 fps against a same-code spread of 18.0-20.5.
+That spread came from the stall recorded under "Array uploads under guest stores", so a window mean could not judge
+this trial. Deferral has not been retested since; the fix there batches the uploads instead.
 
 Main ring thread after these changes, 150 samples: 54 % busy and flat, 22 % fence
 waits, 16 % register wait polls. No guest thread is busy. `DRAW_INDEX_INDIRECT`
@@ -4172,17 +4174,12 @@ Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whos
 - **Open lead, parts with no live lane.** They could leave early, but the guest decides the allocation after its own
   test, so the work before that point stays. At best about 4 ms of the 34 ms per frame, and it changes the program where
   the hub GPU hang stops. Not built.
-- **Open: same code, two submit modes.** Windows at the same last route state split into about 33-38 submits per frame
-  at 20-24 fps (fence waits 8-16 ms per frame) and about 67-95 at 16.5-18 fps (14-22 ms). The clean LTO binary gave 22.3
-  and 16.6 fps. What selects the mode is not known; it is most of the spread between runs, so fps comparisons on this
-  route must quote submits per frame.
-  A caller histogram of one window at 49 submits per frame puts at least 26 % under the idle-GPU rule; most other stacks
-  come from the draw path, where the rule that submits between a dispatch and a draw also runs, but they were not
-  separated. One run with the idle-GPU rule off, same last route state: 26 submits per frame, the lowest seen, at 17.2
-  fps with fence waits of 19.5 ms per frame, which are the rate and waits of the slow mode (register waits 15.2 ms per
-  frame against 8-13). Fewer submits alone did not bring the fast mode, so the rule does not select it and the submit
-  count does not explain the rate. What selects the mode stays open, and one run does not show whether the rule helps
-  or hurts within a mode.
+- **Resolved: the "two submit modes" are one stall inside the measured window.** Submits from the command processor
+  stay at 32-40 per frame in all 26 kept 14 s windows; what varies is the utility queue, 1 to 94 submits per frame.
+  It rises with how much of a stall at one route point falls in the window, which starts at a fixed wall-clock time
+  while load time moves. The earlier rule to quote submits per frame is replaced by the fix and the measure below. The
+  run with the idle-GPU rule off keeps its record: its 26 submits per frame at 17.2 fps had no utility submits, so
+  it was slow for another reason, not because of this stall.
 - **Pixel program `55db270b` (7 % of GPU time, about 900 us per draw).** Pipeline statistics over 992 draws: about 1,530
   primitives and 837,000 fragments per draw, so 1.1 ns per fragment and the cost is shading, not vertices. With vertex
   program `7abe409a` the driver compiles it at SIMD8 with no spills: 6,280 instructions, 129 SENDs, 19 loops, 71,485
@@ -4191,3 +4188,35 @@ Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whos
 - **Fixed:** the same stop also came up in a clean strict build, without this experiment, in one of six runs of
   the route to the hub: the 1216-wide view crossing a depth buffer in the transient arena. A depth buffer crossing
   such a view now links like the other crossing surfaces.
+
+## Array uploads under guest stores (2026-11-01)
+
+`PPSA21567 - Astro Bot`, A770, Mesa 26.2.5, same route, one run per arm on one diagnostic build, compared by 5 s
+timestamp dumps rather than by a window mean.
+
+- **Observed.** At one route point, in every kept run, buffers per 5 s rise from about 3,600 to 15,000 and frames per
+  5 s fall from 107 to 49 (gp-ga3). The extra buffers hold no draws. They are utility-queue submits, each followed by
+  a fence wait on the ring thread: 13,825 waits and 2.1 s in that one dump.
+- **Cause.** One `DMA_DATA` store of 4, 16 or 64 KiB into a 17.3 MB texture array re-detiles and uploads the whole
+  array, with one submit and one fence for each of its 192 layers. Per-object counts: 149 such flushes caused 28,608
+  fills. Fence stacks symbolized against the matching binary point at the layer loop. An array this size touches one
+  object per flush, so overlapping objects are not the cause.
+- **Fix.** Layers are uploaded in batches of up to 32 MiB per submit. Larger arrays still stream, as before.
+
+  | Burst, per 5 s dump | Before | After |
+  | --- | --- | --- |
+  | Buffers (worst dump) | 10,625 | 3,612 |
+  | Frames (worst dump) | 71 | 87 |
+  | Utility fence waits (burst dumps) | 13,835 | 216 |
+  | Utility fence wait time (burst dumps) | 1.94 s | 0.34 s |
+
+  Frames over the last nine dumps go from 923 to 959. Frames in the burst still dip to 87-104 against about 110, and
+  the array is still re-detiled in full for each store. Validation over a 110 s run reports no copy error and did report
+  the known dispatch messages. A capture after the burst shows no corruption. `PPSA09809 - OCTOPATH TRAVELER II`
+  reached only its loading screen in an 85 s run, so its cube arrays were not checked.
+- **The 16 % tail is a different thing.** It stays at 15-18 % of GPU time and about 5 ms per frame while submits per
+  frame vary from 26 to 86, and it did not change with this fix (15.8 % and 15.0 %). That fits the earlier reading,
+  completion of the draws before it, and no lever was found in it. The windows of those two counts do not line up
+  exactly, so this is a comparison of ranges.
+- **Hub GPU hang: unchanged.** The engine state still needs a devcoredump, which is root-only by default. A udev rule
+  that changes the mode of `data` when the dump appears would avoid running a root command after each reset.
