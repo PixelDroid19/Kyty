@@ -1483,7 +1483,7 @@ int PhysicalReleaseRetiresDeviceAddressRangeProbe()
 	return status;
 }
 
-// Physical pages written one at a time are imported as their whole 2 MiB block:
+// Physical pages written one at a time are imported as their whole 64 MiB chunk:
 // two separate writes give one entry, repeated preparation imports nothing new
 // and leaves the untouched block unpopulated, and a write there adds its block.
 int PhysicalImportCoversResidentBlockProbe()
@@ -1492,7 +1492,7 @@ int PhysicalImportCoversResidentBlockProbe()
 	GuestLoad              load;
 	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
 
-	constexpr uint64_t kBlockBytes = 0x200000;
+	constexpr uint64_t kBlockBytes = 0x4000000;
 	constexpr uint64_t kBytes      = 2u * kBlockBytes;
 	constexpr uint64_t kBlockPages = kBlockBytes / kGuestDeviceAddressPageBytes;
 	int64_t            physical    = 0;

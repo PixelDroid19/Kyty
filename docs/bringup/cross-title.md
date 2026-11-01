@@ -5576,8 +5576,8 @@ minute. Windows packages stay without it because MinGW LTO was not tested.
   | Title | Windows | Pinned MiB | Submit us | Frames |
   | --- | --- | --- | --- | --- |
   | `PPSA21567 - Astro Bot` | 2,432 → 137 | 7,836 → 8,768 | 143-274 → 21-24 | 14.9, 14.7 → 17.3 fps at 295-297 draws/frame |
-  | `PPSA28311 - Absolum` | 1,348 → 56 | 3,196 → 3,584 | 58-114 → 9-14 | different scene, no speed claim |
-  | `PPSA09076 - DREDGE` | 711 → 38 | 2,152 → 2,432 | 39-59 → 11 | different scene, no speed claim |
+  | `PPSA28311 - Absolum` | 1,348 → 56 | 3,196 → 3,584 | 58-130 → 9-16 | different scene, no speed claim |
+  | `PPSA09076 - DREDGE` | 711 → 38 | 2,152 → 2,432 | 39-58 → 11 | different scene, no speed claim |
 
   Peak process memory on DREDGE stayed at 2,717 → 2,702 MiB. Astro's was not measured at baseline;
   its pinned memory grows 12 %. `PPSA21402 - Balatro` holds 60 fps with 6 windows.

@@ -936,12 +936,13 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 	return false;
 }
 
-// Marks every page of an import block that holds a resident page. `resident`
-// covers consecutive direct-memory pages from page index `first`; blocks are
-// counted in direct memory and clipped to that span.
+// Marks every page of a window chunk that holds a resident page: pinning the
+// window populates the rest of it anyway. `resident` covers consecutive
+// direct-memory pages from page index `first`; chunks are counted in direct
+// memory and clipped to that span.
 void ExpandToImportBlocks(uint64_t first, std::vector<uint8_t>* resident)
 {
-	constexpr uint64_t block_pages = kPhysicalImportBlockBytes / kPageBytes;
+	constexpr uint64_t block_pages = kChunkBytes / kPageBytes;
 	const uint64_t     pages       = resident->size();
 	for (uint64_t page = 0; page < pages;)
 	{
@@ -1048,9 +1049,9 @@ bool ImportPhysicalSpan(GraphicContext* ctx, Registry* registry, uint64_t base, 
 		return true;
 	}
 	// Guest writes reach physical pages one at a time, and importing each newly
-	// resident run gave a chunk per page or two. Whole blocks bound the chunks
-	// per range; the pages a block import populates are imported with it, and a
-	// block without a resident page is not pinned.
+	// resident run gave a chunk per page or two. Whole window chunks bound the
+	// entries per range; the pages an import populates are imported with it, and
+	// a window chunk without a resident page is not pinned.
 	ExpandToImportBlocks(offset / kPageBytes, resident);
 	for (uint64_t page = 0; page < pages;)
 	{
