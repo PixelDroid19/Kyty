@@ -1893,7 +1893,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				multi_arena_storage_texture =
 				    (GpuMemoryAllowsStorageTextureContainedInRenderTarget(o.object.type, obj.relation, info.type) ||
 				     (obj.relation == OverlapType::Crosses && (o.object.type == GpuMemoryObjectType::StorageTexture ||
-				                                               o.object.type == GpuMemoryObjectType::RenderTexture)) ||
+				                                               o.object.type == GpuMemoryObjectType::RenderTexture ||
+				                                               o.object.type == GpuMemoryObjectType::DepthStencilBuffer)) ||
 				     GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type) ||
 				     (o.object.type == GpuMemoryObjectType::StorageTexture &&
 				      StorageTextureRedescribesRange(o.params, info.params, compare_layout)) ||

@@ -4156,5 +4156,6 @@ Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whos
   retired. Before that stop, still at boot and not in the hub, 1143 of 2285 consolidated waits met an alias lookup. If
   the hub is similar, a wait at the consumer would still run in about half of them, which bounds the gain near
   3 ms per frame. Not built further.
-- **Open:** the same mixed-parent stop can be reached by a view crossing a depth buffer without this experiment;
-  it has not been seen in a normal run.
+- **Fixed:** the same stop also came up in a clean strict build, without this experiment, in one of six runs of
+  the route to the hub: the 1216-wide view crossing a depth buffer in the transient arena. A depth buffer crossing
+  such a view now links like the other crossing surfaces.
