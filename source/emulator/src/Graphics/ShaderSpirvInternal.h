@@ -180,6 +180,8 @@ public:
 	[[nodiscard]] const ShaderFragmentMaskFlow& FragmentMaskFlow() const;
 	// A pixel program's EXEC write at index leaves every host invocation live: the proof says EXEC is full before the next instruction.
 	[[nodiscard]] bool ExecFullAfter(uint32_t index) const;
+	// A fused vertex program run by the graphics pipeline: every lane of a host subgroup is a live vertex.
+	[[nodiscard]] bool HasFusedVertexLanes() const { return m_vs_input_info != nullptr && m_vs_input_info->gs_prolog && !UsesGeometryCompute(); }
 	// ds_*_addtid_b32: a per-lane LDS slot at M0[15:0] + offset + TID*4.
 	// Compute lowers it onto the shared %lds array; other stages carry it in
 	// a function-local spill array since only the writing lane can observe it.
@@ -538,6 +540,8 @@ private:
 	mutable ShaderLaneReductions m_lane_reductions;
 	mutable bool                  m_fragment_mask_flow_ready = false;
 	mutable ShaderFragmentMaskFlow m_fragment_mask_flow;
+	mutable bool                  m_vertex_exec_full_ready = false;
+	mutable std::vector<bool>     m_vertex_exec_full;
 	mutable bool                  m_lane_mask_plan_ready = false;
 	mutable ShaderLaneMaskPlan    m_lane_mask_plan;
 	const ShaderBindResources*    m_bind          = nullptr;

@@ -37,6 +37,7 @@ UT_LINK(EmulatorVertexProgram);
 UT_LINK(EmulatorNggPassthroughProof);
 UT_LINK(EmulatorNggFront);
 UT_LINK(EmulatorFragmentMaskFlow);
+UT_LINK(EmulatorVertexExecFlow);
 UT_LINK(EmulatorFragmentTransport);
 UT_LINK(EmulatorComputeColorFill);
 UT_LINK(EmulatorSyncOnAddressLibrary);

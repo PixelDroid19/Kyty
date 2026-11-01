@@ -1,4 +1,5 @@
 #include "ShaderSpirvInternal.h"
+#include "Emulator/Graphics/ShaderVertexExecFlow.h"
 
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveLayout.h"
@@ -182,6 +183,15 @@ const ShaderFragmentMaskFlow& Spirv::FragmentMaskFlow() const
 
 bool Spirv::ExecFullAfter(uint32_t index) const
 {
+	if (HasFusedVertexLanes())
+	{
+		if (!m_vertex_exec_full_ready)
+		{
+			m_vertex_exec_full_ready = true;
+			m_vertex_exec_full       = ShaderAnalyzeVertexExecFull(m_code, NativeWave32());
+		}
+		return index + 1u < m_vertex_exec_full.size() && m_vertex_exec_full[index + 1u];
+	}
 	// A transported lane starts from its captured EXEC bit, not from a live host invocation.
 	if (UsesFragmentCompute() || m_code.GetType() != ShaderType::Pixel || m_ps_input_info == nullptr ||
 	    m_ps_input_info->native_wave.refusal_reason != nullptr)

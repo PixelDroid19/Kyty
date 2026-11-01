@@ -2461,7 +2461,7 @@ void Spirv::WriteLocalVariables()
 	                          m_cs_input_info->wave_layout.guest_local[2]) %
 	                                 m_cs_input_info->wave_layout.guest_wave_size ==
 	                             0u;
-	m_source += whole_waves ? NativeExecAllLanes() : NativeExecRefresh("initial");
+	m_source += whole_waves || HasFusedVertexLanes() ? NativeExecAllLanes() : NativeExecRefresh("initial");
 	if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog && !UsesGeometryCompute())
 	{
 		// One host subgroup is one guest wave (see ShaderNggFront.h): s3 counts every lane
