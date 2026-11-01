@@ -1977,13 +1977,15 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 
 // The value a scalar instruction writes into its single destination SGPR when
 // every source is a constant.
+static bool ShaderOperandIsPlainConstant(const ShaderOperand& operand)
+{
+	return (operand.type == ShaderOperandType::IntegerInlineConstant || operand.type == ShaderOperandType::LiteralConstant) &&
+	       operand.multiplier == 1.0f && !operand.absolute && !operand.negate;
+}
+
 static bool ShaderConstantSgprWrite(const ShaderInstruction& inst, uint32_t* value)
 {
-	const auto constant = [](const ShaderOperand& operand)
-	{
-		return (operand.type == ShaderOperandType::IntegerInlineConstant || operand.type == ShaderOperandType::LiteralConstant) &&
-		       operand.multiplier == 1.0f && !operand.absolute && !operand.negate;
-	};
+	const auto constant = ShaderOperandIsPlainConstant;
 	if (inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != 1)
 	{
 		return false;
@@ -1998,6 +2000,28 @@ static bool ShaderConstantSgprWrite(const ShaderInstruction& inst, uint32_t* val
 	{
 		// RDNA2 ISA: D.u = ((1 << S0.u[4:0]) - 1) << S1.u[4:0].
 		*value = ((uint32_t {1} << (inst.src[0].constant.u & 31u)) - 1u) << (inst.src[1].constant.u & 31u);
+		return true;
+	}
+	return false;
+}
+
+// S_MOV_B64 of a constant whose sign bit is clear (the high word is zero either way), or S_BFM_B64.
+static bool ShaderConstantSgprPairWrite(const ShaderInstruction& inst, uint64_t* value)
+{
+	const auto constant = ShaderOperandIsPlainConstant;
+	if (inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != 2)
+	{
+		return false;
+	}
+	if (inst.type == ShaderInstructionType::SMovB64 && inst.src_num == 1 && constant(inst.src[0]) && (inst.src[0].constant.u >> 31u) == 0u)
+	{
+		*value = inst.src[0].constant.u;
+		return true;
+	}
+	if (inst.type == ShaderInstructionType::SBfmB64 && inst.src_num == 2 && constant(inst.src[0]) && constant(inst.src[1]))
+	{
+		// RDNA2 ISA: D.u64 = ((1 << S0.u[5:0]) - 1) << S1.u[5:0].
+		*value = ((uint64_t {1} << (inst.src[0].constant.u & 63u)) - 1u) << (inst.src[1].constant.u & 63u);
 		return true;
 	}
 	return false;
@@ -2088,6 +2112,15 @@ std::vector<ShaderConstantSamplerRead> ShaderFindConstantSamplerReads(const Shad
 		{
 			outgoing.values[static_cast<size_t>(inst.dst.register_id)] = value;
 			outgoing.known.set(static_cast<size_t>(inst.dst.register_id));
+		}
+		uint64_t pair_value = 0;
+		if (ShaderConstantSgprPairWrite(inst, &pair_value))
+		{
+			const auto reg = static_cast<size_t>(inst.dst.register_id);
+			outgoing.values[reg]     = static_cast<uint32_t>(pair_value);
+			outgoing.values[reg + 1] = static_cast<uint32_t>(pair_value >> 32u);
+			outgoing.known.set(reg);
+			outgoing.known.set(reg + 1);
 		}
 		if (ShaderInstructionHasStaticBranchTarget(inst.type))
 		{
