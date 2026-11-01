@@ -4357,11 +4357,14 @@ no overlap. The reported figure scales with width, so SIMD8 and SIMD16 compiles 
 | Share of the pressure above 120: phi web registers, uniform blocks, vertex inputs | 52 %, 10 %, 10 % |
 
 Per-lane values exceed the guest's whole register budget by more than 50, so at least that excess comes from the
-translation. Which translated construct holds them is not established. In the pixel program `550e721d`, 486 of 1,909
+translation. One construct accounts for part of it: of 110 registers live at the peak, 34 are next read only as the
+old-value arm of an EXEC select, in linear order and typically 600-800 NIR lines later. Across the program that arm is
+1,286 of 3,470 register reads. The offline count above allows dropping only 258 of 1,277 such guards, so that proof
+alone would free few of the 34, and the rest of the excess is not attributed. In the pixel program `550e721d`, 486 of 1,909
 definitions are selects, and 267 of those share one condition: the lane bit of the WQM mask after the discard. The host
 already demotes a quad with no live lane, so that bit should be true on every lane that still matters, but this has not
-been built. An earlier run with such guards removed outright bounded the gain near -4 %, and that run did not look at
-compiled width. The time spills cost a vertex thread is not measured either.
+been built. An earlier run with such guards removed outright bounded the gain near -4 %, and its record does not say whether
+compiled width changed. The time spills cost a vertex thread is not measured either.
 
 **Reading.** GPU work on the frame is flat: the largest program is 2.56 ms of about 21 ms. 60 fps needs the GPU frame at
 16 ms, and no measured lever gets there. The guarded label wait is estimated at about +4 %, half of one unguarded run and
