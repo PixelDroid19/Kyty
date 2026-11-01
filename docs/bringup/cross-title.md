@@ -5584,3 +5584,30 @@ minute. Windows packages stay without it because MinGW LTO was not tested.
 - **Open:** one Astro run per side after a repeat of the baseline; the first use of a chunk now
   imports 64 MiB at once and that single stall was not timed. Storage objects bound in place keep
   their own windows (35 of 36 lie inside a chunk window on Astro).
+
+## Huge pages for direct memory: not adopted, GPU reads go through the IOMMU (2026-10-31)
+
+- **Host fact** (Intel Arc A770, Ryzen 5 7600, kernel 7.2.11, default command line): the GPU's IOMMU
+  group is in `DMA-FQ`, so every device read of system memory is translated. Identity mapping needs a
+  reboot with another command line and was not tested, so its effect is unknown.
+- **Microbenchmark** (stand-alone Vulkan compute, one invocation chasing a random 64-byte-stride cycle):
+
+  | Set | Host pointer 4 KiB | Host pointer 2 MiB | dma-buf 4 KiB | dma-buf 2 MiB |
+  | --- | --- | --- | --- | --- |
+  | 16 MiB | 818-822 ns | 734-735 ns | 816 ns | 736-737 ns |
+  | 64 MiB | 1,176-1,178 ns | 1,028-1,029 ns | 1,174 ns | 1,027-1,028 ns |
+  | 512 MiB | 1,185-1,186 ns | 1,033-1,034 ns | not run | not run |
+
+  The 2 MiB arms were confirmed with `AnonHugePages` and `ShmemPmdMapped`. `shmem_enabled=advise` on
+  this host allows them without root; other hosts may not.
+- **Trial** (`PPSA21567 - Astro Bot`, one run, temporary switch): `MADV_HUGEPAGE` on guest views plus
+  populating each chunk through a 2 MiB-aligned view before its pin.
+  - Only 1,110 MiB of 7,488 MiB became huge, because the guest touches most pages first through views
+    with other alignments or on pages already split.
+  - Some memory-heavy programs ran 5-10 % faster per call (`f4cfb9a5` 139.9 → 127.2 us, `ff2adfc8`
+    3,057 → 2,739 us), others not at all (`c4a8f3bb` 70.8 → 70.1 us). The scenes were not identical.
+  - The route was behind at the same wall time (117 against 129 windows, 43 s of GPU work against
+    70 s), and the window held 12.2 fps. The cause of that delay was not traced.
+- **Decision:** not adopted on one run with a slower load. Raising coverage means choosing page size
+  before the guest's first touch, across view alignments. Open lead: at most 10-13 % per system-memory
+  miss.

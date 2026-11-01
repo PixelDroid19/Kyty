@@ -354,5 +354,8 @@ on the A770 host (12 CPUs). In dune windows the command-processor thread was:
   `GuestDeviceAddressPrepareForRead`, syncobj waits, and `mprotect` from the dirty-page tracker.
   Kernel samples need `perf_event_paranoid` 1 or lower, so the kernel time is **open and
   unattributed**. Its upper bound is about 13-15 ms per frame.
+  Later, `vkQueueSubmit` alone proved to be 16-19 % of this thread's wall time on the gameplay route,
+  and whole-chunk windows cut it about tenfold (`cross-title.md`, "Physical windows are whole 64 MiB
+  chunks", 2026-10-31).
 - Every stage above works on user time. Even removed entirely, the user share leaves the frame bound
   by the GPU (about 77 ms per frame in the dunes) and by these kernel and wait buckets.
