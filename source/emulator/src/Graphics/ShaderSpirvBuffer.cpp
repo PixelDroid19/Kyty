@@ -4167,7 +4167,7 @@ static bool recompile_sload_guest(uint32_t index, const ShaderInstruction& inst,
 	const bool pair_base = inst.src[0].type == ShaderOperandType::Sgpr || inst.src[0].type == ShaderOperandType::VccLo;
 	if (!spirv->UsesGuestDeviceAddress() || bind == nullptr || !pair_base ||
 	    (bind->extended.used && inst.src[0].type == ShaderOperandType::Sgpr &&
-	     inst.src[0].register_id == bind->extended.start_register) ||
+	     inst.src[0].register_id == bind->extended.start_register && !ShaderEudDescriptorLoadIsUnmapped(*bind, inst)) ||
 	    spirv->GetDynamicSLoadOffset(inst.pc, &mapped_offset))
 	{
 		return false;

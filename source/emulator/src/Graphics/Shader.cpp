@@ -3814,6 +3814,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		}
 	}
 
+	if (bind->extended.read_at_runtime)
+	{
+		direct_sgprs[bind->extended.start_register]     = true;
+		direct_sgprs[bind->extended.start_register + 1] = true;
+	}
 	for (int i = 0; i < HW::UserSgprInfo::SGPRS_MAX; i++)
 	{
 		if (direct_sgprs[i])
@@ -4319,7 +4324,8 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 	{
 		return false;
 	}
-	if (inst.src[0].type == ShaderOperandType::Sgpr && bind.extended.used && inst.src[0].register_id == bind.extended.start_register)
+	if (inst.src[0].type == ShaderOperandType::Sgpr && bind.extended.used && inst.src[0].register_id == bind.extended.start_register &&
+	    !ShaderEudDescriptorLoadIsUnmapped(bind, inst))
 	{
 		return false;
 	}

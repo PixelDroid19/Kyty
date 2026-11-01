@@ -1327,6 +1327,60 @@ const std::vector<ShaderDynamicSLoadUse>& ShaderCodeResourceMemo::DescriptorSLoa
 	return m_descriptor_sload_uses;
 }
 
+static bool ShaderEudDwordHasStaticResource(const ShaderBindResources& bind, int offset_dw)
+{
+	const int  reg    = offset_dw + 16;
+	const auto within = [reg](int start, int dwords) { return reg >= start && reg < start + dwords; };
+	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	{
+		if (bind.storage_buffers.extended[i] && !bind.storage_buffers.dynamic_sload[i] && within(bind.storage_buffers.start_register[i], 4))
+		{
+			return true;
+		}
+	}
+	for (int i = 0; i < bind.textures2D.textures_num; ++i)
+	{
+		const auto& texture = bind.textures2D.desc[i];
+		if (texture.extended && !texture.dynamic_sload && within(texture.start_register, 8))
+		{
+			return true;
+		}
+	}
+	for (int i = 0; i < bind.samplers.samplers_num; ++i)
+	{
+		if (bind.samplers.extended[i] && !bind.samplers.dynamic_sload[i] && within(bind.samplers.start_register[i], 4))
+		{
+			return true;
+		}
+	}
+	for (int i = 0; i < bind.gds_pointers.pointers_num; ++i)
+	{
+		if (bind.gds_pointers.extended[i] && within(bind.gds_pointers.start_register[i], 1))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool ShaderEudDescriptorLoadIsUnmapped(const ShaderBindResources& bind, const ShaderInstruction& sload)
+{
+	int offset_dw = 0;
+	if (!bind.extended.used || ShaderDescriptorSLoadDwords(sload) == 0 || sload.src[0].register_id != bind.extended.start_register ||
+	    !ShaderGetSmemConstantDwordOffset(sload, &offset_dw) || offset_dw < 0)
+	{
+		return false;
+	}
+	for (int word = 0; word < sload.dst.size; ++word)
+	{
+		if (!ShaderEudDwordHasStaticResource(bind, offset_dw + word))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 ShaderEudDescriptorLoads ShaderFindEudDescriptorLoads(const ShaderCode& code)
 {
 	ShaderEudDescriptorLoads loads;
@@ -1560,6 +1614,13 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 		{
 			continue;
 		}
+		const auto use = memo_uses != nullptr ? (*memo_uses)[index] : ShaderFindDynamicSLoadUse(code, index, sload);
+		// A V# the program also spills has registers no binding can track: the
+		// program reads the table and the buffers through guest addresses.
+		if ((!use.valid || !use.found) && ShaderEudDescriptorLoadIsUnmapped(*bind, sload))
+		{
+			bind->extended.read_at_runtime = true;
+		}
 		// offset_dw is the EUD table index (byte_offset/4). Metadata eud_size_dw is a
 		// lower bound — same overrun policy as ShaderGen5EudSpanAllowed (api = 16+idx).
 		const uint32_t span_dw = static_cast<uint32_t>(dword_count);
@@ -1570,7 +1631,6 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 			continue;
 		}
 
-		const auto use = memo_uses != nullptr ? (*memo_uses)[index] : ShaderFindDynamicSLoadUse(code, index, sload);
 		if (!use.valid || !use.found || !ShaderDescriptorLoadInPass(use, pass))
 		{
 			continue;

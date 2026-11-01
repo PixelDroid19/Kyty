@@ -2186,6 +2186,7 @@ struct ShaderExtendedResources
 	int                    eud_user_sgpr_num = 0;
 	uint16_t               eud_size_dw       = 0;
 	int                    eud_offset_base    = 0;
+	bool                   read_at_runtime    = false;
 	ShaderExtendedResource data;
 };
 

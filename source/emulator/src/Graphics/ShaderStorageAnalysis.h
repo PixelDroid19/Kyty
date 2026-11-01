@@ -269,6 +269,8 @@ bool ShaderInstructionIsScalarBufferLoad(const ShaderInstruction& inst);
 // Bound storage buffers use API user-data indices; the fused vertex front emits them at s8.
 bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst,
                                              int user_data_register_base = 0);
+// A whole-descriptor S_LOAD through the EUD pointer whose dwords no resource maps.
+bool ShaderEudDescriptorLoadIsUnmapped(const ShaderBindResources& bind, const ShaderInstruction& sload);
 void ShaderAccumulateScalarBufferLoadSpan(const ShaderInstruction& inst, uint64_t* required_bytes, bool* dynamic_offset);
 void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                          ShaderParsedUsage* info, const uint32_t* extended_buffer, uint16_t eud_size_dw,
