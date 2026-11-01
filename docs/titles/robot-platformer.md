@@ -4139,3 +4139,22 @@ last case before that stop, so views handled earlier take the same paths as befo
 Excluded: start-up cost as the source of the 120 us geometry dispatch. Issuing
 vertex shader `f4cfb9a5`'s dispatch twice in a row, with a barrier, costs 122.4 and
 114.5 us, so the cost is shader work and not a first-dispatch penalty.
+
+## Label waits over aliased storage in the hub (2026-11-01)
+
+Title: PPSA21567 - Astro Bot. Host: Intel Arc A770, ANV 26.2.5, 14 s windows of the gameplay route.
+
+Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whose release also writes back
+(2670 waits with a pending alias), 7.1 s reading `DRAW_INDEX_INDIRECT` arguments (3707 reads), 2.9 s in
+`DMA_DATA` image fills.
+
+- **Who blocks.** In 18400 label waits, 9222 had no pending alias and 3641 only aliases that never read guest
+  bytes. The rest are depth buffers crossing the storage (about 1950 alone), storage buffers containing it
+  (875, always with a depth buffer) and one 960x540 texture (199).
+- **Still excluded: consolidating them all.** Doing so stopped early at `!create_all_the_same`: a 1216-wide
+  storage view crossing a depth buffer and two storage views still linked because their submissions had not
+  retired. Before that stop, still at boot and not in the hub, 1143 of 2285 consolidated waits met an alias lookup. If
+  the hub is similar, a wait at the consumer would still run in about half of them, which bounds the gain near
+  3 ms per frame. Not built further.
+- **Open:** the same mixed-parent stop can be reached by a view crossing a depth buffer without this experiment;
+  it has not been seen in a normal run.

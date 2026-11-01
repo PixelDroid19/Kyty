@@ -5655,3 +5655,25 @@ Host: Intel Arc A770, ANV 26.2.5, Ryzen 5 7600. 14 s offline window of the gamep
   resolve on the graphics thread. Both have to fall; neither alone reaches 60 fps.
 - **GPU top:** geometry `f4cfb9a5` 17 %, end-of-batch segment 15 % (its count follows submits; cause unverified), index
   `c4a8f3bb` 7.8 %, `55db270b` 7.2 %, compute `ff2adfc8` 5.8 %.
+
+## Profile-guided optimization on Linux (2026-11-01)
+
+Host: Intel Arc A770, ANV 26.2.5, Ryzen 5 7600, GCC 16.2. Same source, LTO in both arms, one 240 s training run of
+PPSA21567 - Astro Bot, then the same title in an 18 s window at the same route state (252 draws per frame in both arms):
+
+| Measure | LTO | LTO + profile |
+| --- | --- | --- |
+| Draw processing | 71.1 us | 63.2 us |
+| Dispatch processing | 57.8 us | 49.0 us |
+| Frame rate | 23.5 fps | 24.6 fps |
+
+Per-draw work falls 11-15 %. The frame rate gain is inside the same-code spread (about 2.5 fps): the freed time moves
+into GPU waits here. A second pair ended at different scenes (draws 67.9 and 62 us), so it gives no frame rate claim.
+Other titles were not measured.
+
+Not adopted: a profile matches one exact source revision and needs a run of real titles, which CI cannot do. Recipe
+for a local build: configure with `-fprofile-generate -fprofile-update=prefer-atomic`, run titles, have the process
+write its counters (it was stopped by a signal here, so a thread called `__gcov_dump`), then rebuild in the same
+directory with `-fprofile-use -fprofile-correction -fprofile-partial-training`. Partial training keeps unexecuted code
+optimized for speed, which other titles depend on. An instrumented build plus a rebuild take under 2 minutes each with
+six jobs.
