@@ -4341,10 +4341,28 @@ so the time does not scale with vertices. It behaves like the latency of one thr
 per-vertex math in its own loops (3,113 guest instructions, with 36 sines, 24 cosines and 35 square roots), which would also explain why cutting static instructions by 48 % moved the draw only 13 %. This reading is
 inferred from these counts, with no hardware counters behind it.
 
-**Register pressure does not separate pixel program width.** The 19 programs compiled only at SIMD8 have 67-177 live
-registers, median 108. The 38 that also get SIMD16 have a median of 77 and reach 129. `550e721d`, with 85 at SIMD8 and no
-spills, sits below programs that do widen, so why the driver keeps it narrow is not established. Pressure work has no
-measured gain behind it, and forced width lost 8 % above.
+**Register pressure gates pixel program width.** Compared in the same unit, the live registers of each program's SIMD8
+compile: the 38 pixel programs that also get a wider compile have 11-57, and the 19 that stay at SIMD8 have 67-177, with
+no overlap. The reported figure scales with width, so SIMD8 and SIMD16 compiles cannot be compared directly.
+
+**The translator inflates that pressure.** Peak liveness computed from the final NIR agrees with the driver on `550e721d`
+(84 against 85), and gives 208 against 230 on vertex program `8b21b61c`, whose peak sits in the guest's own loops.
+
+| `8b21b61c` | Value |
+| --- | --- |
+| Guest VGPRs named by the program | 128 (v0-v127) |
+| Host values live at the peak, per-lane | about 184 (114 of them registers from phi webs) |
+| Host uniform values at the peak | about 24 GRF |
+| NIR lines above 120 live | 48 % |
+| Share of the pressure above 120: phi web registers, uniform blocks, vertex inputs | 52 %, 10 %, 10 % |
+
+Per-lane values exceed the guest's whole register budget by more than 50, so at least that excess comes from the
+translation. Which translated construct holds them is not established. In the pixel program `550e721d`, 486 of 1,909
+definitions are selects, and 267 of those share one condition: the lane bit of the WQM mask after the discard. The host
+already demotes a quad with no live lane, so that bit should be true on every lane that still matters, but this has not
+been built. An earlier run with such guards removed outright bounded the gain near -4 %, and that run did not look at
+compiled width. The time spills cost a vertex thread is not measured either.
 
 **Reading.** GPU work on the frame is flat: the largest program is 2.56 ms of about 21 ms. 60 fps needs the GPU frame at
-16 ms, and no measured lever gets there. The only measured gain still open is the guarded label wait, about +4 %.
+16 ms, and no measured lever gets there. The guarded label wait is estimated at about +4 %, half of one unguarded run and
+inside the same-code spread. Host register pressure is the open shader lead.
