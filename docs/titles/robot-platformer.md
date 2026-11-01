@@ -4227,3 +4227,50 @@ timestamp dumps rather than by a window mean.
   hang is not proven gone, and no commit is proven to have removed it. A udev rule now makes `data` readable, but no
   dump has appeared since, so the rule is untested. Hunting a reset that no longer shows brings no frame rate, so this
   stays closed until a run hits it again.
+
+## Vertex program cost: EXEC and relative moves (2026-11-01)
+
+Measured with GPU timestamps per program over the hub dumps of `PPSA21567 - Astro Bot`, Arc A770, ANV 26.2.5, private
+SPIR-V stores, one run per change. The per-frame map before the first change was 30.3 ms of GPU work per frame.
+
+- **Merged-stage prolog.** 64 of the 70 vertex programs build EXEC with `s_sub_i32 vcc_lo, 0, s3` and
+  `s_lshr_b64 exec, -1, vcc_lo`. On the host, s3 is the highest live lane span, so that mask is all ones for every live
+  invocation, but the translator re-read it from a ballot and the driver could not fold it. Every guarded write stayed a
+  select that kept the old value live. `b15968379` follows the prolog words and their spill slots through a forward
+  dataflow and emits full EXEC where it is proven. Programs run through geometry compute keep the ballot. The sum of
+  vertex instructions over the same programs goes from 170,110 to 147,462, and hub GPU from 30.29 to 25.13 ms per frame:
+  `550e721d` 300 to 218 us per draw, `96d1762d` 90 to 35 us, `827d31eb` 297 to 237 us.
+- **Relative moves.** Three large vertex programs read an array of vectors with `v_movrels` at offset `counter << 2`,
+  22 sites in the largest, and each site was a chain of about 115 selects, one per VGPR named at or above its base. The
+  low bits of the offset are known to be zero, so `44ba18678` keeps only the registers it can reach. The largest
+  program goes from 36,439 to 18,961 instructions, fills from 4,480 to 1,371, spills from 841 to 342. Its compiler cycle
+  estimate falls 56 %, but the draw falls less: `550e721d` 218 to 189 us (-13 %), `827d31eb` 223 to 180 us (-19 %), hub
+  GPU 25.13 to 24.31 ms per frame. The two hub windows do not line up exactly. The same program is geometry-bound (a
+  1-pixel scissor does not move it), so most of what is left is not instruction count.
+- **Clean binary.** LTO build of `44ba18678` without diagnostics, warm store, console at warning level: 672 frames
+  in 22 s over the first hub view, 30.5 fps. No frame-rate figure from the same window exists for the code before these
+  changes, so this is a current level, not a measured gain. GPU work is 23.35 ms per frame there, so the next limit is
+  still both GPU and CPU.
+- **Instrument trap.** `KYTY_DIAG_SCLK` instruments compute programs when they are translated, and the result lands in
+  the SPIR-V store. A later run on the same store without the variable still paid for it: `ff2adfc8` read 14.4 ms
+  instead of 2.3 ms. Never reuse a store written with that variable for timing.
+
+Excluded in this work, with what excluded each:
+
+| Hypothesis | Observation |
+| --- | --- |
+| `robustBufferAccess` costs frame time | Turning it off moved `550e721d` by +3 %, `ff2adfc8` by +5 %, GPU 35.0 to 35.9 ms per frame |
+| Direct guest-address lookup instead of the walk | Loops in one program 19 to 0, instructions 6,316 to 6,676, per-program time flat |
+| Extending whole-wave masks in pixel programs | Upper bound about -4 % with the guard removed outright |
+| Dropping partial-EXEC guards when no inactive lane reads the old value | Offline count with nested EXEC regions on the largest vertex program: 258 of 1,277 writes qualify, about 500 of 18,961 instructions, because each relative move reads every candidate register |
+| Bounding the relative move offset from the guest | The loop limit comes from a rounded vertex attribute, so the guest gives no bound; the array looks like 12 registers but nothing proves it |
+
+Still open: 640 selects from relative moves and 1,387 from partial EXEC stay in the largest vertex program, with 1,713
+spill and fill messages per invocation. `ff2adfc8` is one dispatch of 2.2 ms. The frame tail is unchanged at 4 ms.
+
+Also fixed: a storage texture over an uploaded texture that the device later wrote ended the run with
+`!create_all_the_same` at about 145 s, depending on timing. `4f4a3df13` gives that parent the same arena crossing.
+
+Regression: `PPSA06084 - Superliminal`, `PPSA28311 - Absolum` and `PPSA15552 - Dead Cells` ran 70 s each to their menus
+on the EXEC change, with no stop and a correct capture. They have not been checked in gameplay, and not on the relative
+move change. The unit suite passes on both.
