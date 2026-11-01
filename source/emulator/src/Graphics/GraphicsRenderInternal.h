@@ -480,9 +480,10 @@ private:
 	// Released sets wait for reuse by the next set of their layout, up to this
 	// many in all; past it the oldest returns to its pool. Pools never give memory
 	// back to the system, so a held set only reserves pool space, while a driver
-	// free and reallocation walks the pool's free list. The limit holds several
-	// trim batches so a trim does not overflow it.
-	static constexpr uint32_t RECYCLED_SETS_MAX = TRIM_SETS * 4;
+	// free and reallocation walks the pool's free list: past a few thousand frees
+	// an allocation costs about thirty times more. The limit holds many trim
+	// batches so scene changes reuse sets instead of freeing them.
+	static constexpr uint32_t RECYCLED_SETS_MAX = TRIM_SETS * 32;
 
 	int                  FindSet(const Set& s);
 	void                 IndexSet(int index);
