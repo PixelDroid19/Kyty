@@ -4156,11 +4156,26 @@ Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whos
   retired. Before that stop, still at boot and not in the hub, 1143 of 2285 consolidated waits met an alias lookup. If
   the hub is similar, a wait at the consumer would still run in about half of them, which bounds the gain near
   3 ms per frame. Not built further.
-- **Open lead, geometry `f4cfb9a5` (17 % of GPU time):** the pass sizes each point's group from the declared
-  `VGT_GS_MAX_VERT_OUT` of 64, so it always runs 64 lanes as 8 host parts with rendezvous. How many vertices a point
-  really allocates (`gs_alloc_req`) was not measured. If it is small, the parts holding no live lane do only scalar work
-  and exchanges, and could leave early. At best that saves about 4 ms of the 34 ms per frame, near 2 fps at the current
-  rate, and it changes the program where the hub GPU hang stops. Not built.
+- **Geometry groups are almost all empty (2026-11-01).** The pass sizes each point's group from the declared
+  `VGT_GS_MAX_VERT_OUT` of 64, so it runs 64 lanes as 8 host parts with rendezvous. A probe copied the header, the first
+  two primitive words and the first record of every group of the first 40000 dispatches, boot to hub: 855,713 of about
+  856,200 groups of `fc3d1580`, `f4cfb9a5` and `0e89d742` allocate 1 vertex and 1 primitive (`gs_alloc_req` payload
+  `0x1001`) and export primitive word 0, the degenerate triangle 0,0,0. The rest, only in `f4cfb9a5`, are real, up to 64
+  vertices and 32 primitives, so the probe does report live output.
+- **Excluded: skipping the pull draw of an empty pass.** The pass raised the instance count of an indirect draw only
+  when a lane exported a primitive that can rasterize, so an empty pass drew zero instances instead of 192 vertices per
+  group. Paired by draw count with `f4cfb9a5`, `c4a8f3bb` stayed at 66-69 us per draw, and fps did not move beyond the
+  spread (below). The vertex work was not the cost; the change was not kept. The pairing is inferred, not traced.
+- **Excluded: cache invalidation after the pass.** With that draw, leaving the shader read out of the barrier's
+  destination access gave 70 us per draw for `c4a8f3bb`. A draw that follows no geometry pass costs 24-32 us
+  (`55ce09b9`, `adbba919`); what fills the difference is not known.
+- **Open lead, parts with no live lane.** They could leave early, but the guest decides the allocation after its own
+  test, so the work before that point stays. At best about 4 ms of the 34 ms per frame, and it changes the program where
+  the hub GPU hang stops. Not built.
+- **Open: same code, two submit modes.** Windows at the same last route state split into about 33-38 submits per frame
+  at 20-24 fps (fence waits 8-16 ms per frame) and about 67-95 at 16.5-18 fps (14-22 ms). The clean LTO binary gave 22.3
+  and 16.6 fps. What selects the mode is not known; it is most of the spread between runs, so fps comparisons on this
+  route must quote submits per frame.
 - **Fixed:** the same stop also came up in a clean strict build, without this experiment, in one of six runs of
   the route to the hub: the 1216-wide view crossing a depth buffer in the transient arena. A depth buffer crossing
   such a view now links like the other crossing surfaces.
