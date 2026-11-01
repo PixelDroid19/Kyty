@@ -5481,6 +5481,11 @@ runtime and its dependencies. Not checked: whether the removal or a host state c
 allocation or query returns NULL. Suggested direction: trace failed memory and network query results on the
 F.I.S.T. boot path, whose crash stack is stable from run to run.
 
+F.I.S.T. trace: the mutex address `0x58` comes from guest `lea 0x58(%rsi),%r14`, where `rsi` is the result of a guest
+weak object pointer lookup (index and serial checked against the object array), called without a null check. The lookup
+returned NULL on a stale or flagged object, so the failure here is a guest object lifetime race and not a failed
+allocation. What shifts its timing was not found.
+
 ## Wide-string and strlcpy exports bound with the wrong contract (2026-10-31, fixed)
 
 `PPSA02929 - Dreaming Sarah` showed `■Ne    gam` on its first menu frame and kept it until the
@@ -5635,3 +5640,18 @@ memory stayed within run-to-run noise (8.3-9.4 GiB), not separately isolated.
 - **Decision:** not adopted on one run with a slower load. Raising coverage means choosing page size
   before the guest's first touch, across view alignments. Open lead: at most 10-13 % per system-memory
   miss.
+
+## Frame budget of `PPSA21567 - Astro Bot` against native rate (2026-10-31)
+
+Host: Intel Arc A770, ANV 26.2.5, Ryzen 5 7600. 14 s offline window of the gameplay route: 19.9 fps, 272 draws per frame.
+
+- **GPU:** about 36 ms per frame as the sum of timed segments (overlap between segments not excluded), so the GPU alone caps
+  near 27 fps. 60 fps needs at most 16.6 ms.
+- **Command processor:** 44.8 ms per frame including waits: draws 24.4 ms (89 us per draw), dispatches 8.2 ms, fence wait
+  9.6 ms, register wait 8.2 ms. 35.6 submits and 113 render pass begins per frame.
+- **Graphics thread samples:** 77 of 150 in our own command processing, 66 waiting, 7 in the driver. Moving only Vulkan
+  recording to another thread would buy about 5 %.
+- **Reading:** guest CPU code already runs natively, so the distance to native rate is GPU work per frame plus per-draw
+  resolve on the graphics thread. Both have to fall; neither alone reaches 60 fps.
+- **GPU top:** geometry `f4cfb9a5` 17 %, end-of-batch segment 15 % (its count follows submits; cause unverified), index
+  `c4a8f3bb` 7.8 %, `55db270b` 7.2 %, compute `ff2adfc8` 5.8 %.
