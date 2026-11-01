@@ -4325,28 +4325,26 @@ sleeping on hand-offs (679 against 682 frames).
 | 3 us of added CP time per indexed draw | instrumented | 680 (0 %) | |
 | 12 us of added CP time per indexed draw | instrumented | 664 (-2 %) | |
 
-**CP sensitivity.** The added time raised the CP thread from 54.2 % to 57.3 % of a core between the two delays, so the
-hub has about 100 indexed draws per frame and 12 us is about 1.2 ms per frame. The frame grew about 0.7 ms, a slope of
-about 0.6 for one run per point. CP savings do reach the frame, at a discount: taking 30 % off the 15.4 ms of CP work
-would be worth about 2.5 ms. The profile under it stays flat: resource binding 27 %, input info 16 %, write-back compare
-5.9 %, hash 4.2 %. The per-program usage recipe stays excluded (`docs/bringup/cp-draw-plan.md`).
+**CP sensitivity is not resolved.** The added delay moved the frame count by 0 and by 16 frames. The same code spreads
+by about 2.5 fps, about 50 frames in this window, so with one run per point these two runs put no usable slope on CP
+time. About 100 indexed draws per frame is an estimate from the CPU difference between the two runs, so 12 us is about
+1.2 ms per frame. Neither a saving from CP work nor its absence on the critical path follows from this.
 
 **Compute programs are not wasteful.** Driver statistics joined with GPU cost: the width comes from the driver, and the
 hot programs spill little or not at all. `ff2adfc8`, 2.26 ms per frame, runs SIMD16 with 2,754 instructions, 134 sends
 and no spills. `90c95e2d`, 0.72 ms, has 78 spills and 343 fills. Only `a8eff16a` runs at SIMD32 with heavy spills, and it
 costs 0.014 ms per frame.
 
-**Vertex programs are bound by their own loops.** Vertex reuse is healthy: 3.4-4.8 indices per invocation for the indexed
-programs measured, 1.9 for `827d31eb`. `550e721d` takes 184 us per draw with 846 vertices and `827d31eb` 174 us with 2,217,
+**Vertex programs are bound by their own loops.** Vertex reuse is healthy: 3.4-4.8 indices per invocation for most programs
+measured, 1.9 for `827d31eb` and 1.5 for `c4a8f3bb`. `550e721d` takes 184 us per draw with 846 vertices and `827d31eb` 174 us with 2,217,
 so the time does not scale with vertices. It behaves like the latency of one thread. The guest program runs real
-per-vertex math in loops (3,113 guest instructions, of which 1,658 multiplications and fused multiply-adds, and 60
-sines and cosines), which also explains why cutting static instructions by 48 % moved the draw only 13 %. This reading is
+per-vertex math in its own loops (3,113 guest instructions, with 36 sines, 24 cosines and 35 square roots), which would also explain why cutting static instructions by 48 % moved the draw only 13 %. This reading is
 inferred from these counts, with no hardware counters behind it.
 
-**Pixel programs that stay at SIMD8** (`8ca0b9ff`, `c4a8f3bb`, `55db270b`, `96d1762d`, `5ed3c02d`) report 108-151 live
-registers. Programs that do offer SIMD16 are at 46-57. Lowering that pressure is the open GPU lead; how much each
-program would gain is not measured.
+**Register pressure does not separate pixel program width.** The 19 programs compiled only at SIMD8 have 67-177 live
+registers, median 108. The 38 that also get SIMD16 have a median of 77 and reach 129. `550e721d`, with 85 at SIMD8 and no
+spills, sits below programs that do widen, so why the driver keeps it narrow is not established. Pressure work has no
+measured gain behind it, and forced width lost 8 % above.
 
-**Reading.** GPU work on the frame is flat: the largest program is 2.56 ms of about 21 ms. With the guarded label wait
-(about +4 %), 30 % of CP work (about 2.5 ms) and pressure work on pixel programs, the first hub view could approach
-43 fps. 60 fps needs the GPU frame at 16 ms, and no measured lever gets there.
+**Reading.** GPU work on the frame is flat: the largest program is 2.56 ms of about 21 ms. 60 fps needs the GPU frame at
+16 ms, and no measured lever gets there. The only measured gain still open is the guarded label wait, about +4 %.
