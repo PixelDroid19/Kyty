@@ -1301,6 +1301,9 @@ bool Body::ScalarAlu(const ShaderInstruction& inst)
 	const bool uniform_and = (inst.type == Type::SAndB64 || inst.type == Type::SOrB64) && inst.src_num == 2 && inst.dst.size == 2 &&
 	                         inst.src[0].size == 2 && inst.src[1].size == 2 &&
 	                         IsUniformMask(inst.src[0]) && IsUniformMask(inst.src[1]);
+	// A launch-free SCC picks the launched lanes or none, the same choice for every lane.
+	const bool uniform_select = inst.type == Type::SCselectB64 && inst.src_num == 2 && m_shape.exec == 0 && inst.src[0].type == Operand::ExecLo &&
+	                            ZeroConstant(inst.src[1]);
 	const int   scope = (taint & kDiverged) != 0u ? SourceScope(inst) : -1;
 	CompareMask exec_compare {};
 	const bool  restricted = ExecRestrictedCompare(inst, &exec_compare);
@@ -1317,7 +1320,7 @@ bool Body::ScalarAlu(const ShaderInstruction& inst)
 	Define(inst.dst2, taint);
 	SetScope(inst.dst, scope);
 	SetScope(inst.dst2, scope);
-	if (uniform_copy || uniform_and) { DefineUniformMask(inst.dst, true); }
+	if (uniform_copy || uniform_and || uniform_select) { DefineUniformMask(inst.dst, true); }
 	if (exec_copy >= 0)
 	{
 		unsigned first = 0;
