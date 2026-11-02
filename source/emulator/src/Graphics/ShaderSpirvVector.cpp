@@ -3920,6 +3920,68 @@ static bool RecompileSplitPermlane16(uint32_t index, const ShaderCode& code, Str
 	return true;
 }
 
+// A native wave32 compute shader holds one guest lane per host invocation of a
+// full 32-lane subgroup, so every target exists. A target lane outside EXEC reads
+// zero unless OP_SEL[0] (FI) fetches it; rows never run past the wave, so
+// BOUND_CTRL has nothing to bound.
+static bool RecompileNativeComputePermlane16(uint32_t index, const ShaderCode& code, String8* dst_source, Spirv* spirv, bool x16)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (!operand_is_variable(inst.dst) || inst.dst.type != ShaderOperandType::Vgpr || inst.src_num < 3 ||
+	    inst.src[0].type != ShaderOperandType::Vgpr || inst.vop3_omod != 0u || (inst.vop3_op_sel & ~3u) != 0u ||
+	    inst.vop_sdwa || inst.dst.clamp || inst.dst.multiplier != 1.0f)
+	{
+		return false;
+	}
+	const auto index_str = String8::FromPrintf("%u", index);
+	String8    load0;
+	String8    load1;
+	String8    load2;
+	if (!operand_load_uint(spirv, inst.src[0], "perm_src0_<index>", index_str, &load0) ||
+	    !operand_load_uint(spirv, inst.src[1], "perm_src1_<index>", index_str, &load1) ||
+	    !operand_load_uint(spirv, inst.src[2], "perm_src2_<index>", index_str, &load2))
+	{
+		return false;
+	}
+	static const char* text = R"(
+        <load0>
+        <load1>
+        <load2>
+          %perm_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
+         %perm_local_<index> = OpBitwiseAnd %uint %perm_lane_<index> %uint_15
+        %perm_second_<index> = OpUGreaterThanEqual %bool %perm_local_<index> %uint_8
+         %perm_table_<index> = OpSelect %uint %perm_second_<index> %perm_src2_<index> %perm_src1_<index>
+        %perm_nibble_<index> = OpBitwiseAnd %uint %perm_local_<index> %uint_7
+         %perm_shift_<index> = OpShiftLeftLogical %uint %perm_nibble_<index> %uint_2
+       %perm_shifted_<index> = OpShiftRightLogical %uint %perm_table_<index> %perm_shift_<index>
+      %perm_selected_<index> = OpBitwiseAnd %uint %perm_shifted_<index> %uint_15
+           %perm_row_<index> = OpBitwiseAnd %uint %perm_lane_<index> %uint_16
+        %perm_row_in_<index> = OpBitwiseXor %uint %perm_row_<index> %<row_xor>
+        %perm_target_<index> = OpBitwiseOr %uint %perm_row_in_<index> %perm_selected_<index>
+         %perm_fetch_<index> = OpGroupNonUniformShuffle %uint %uint_3 %perm_src0_<index> %perm_target_<index>
+          %perm_exec_<index> = OpLoad %uint %exec_lane_lo
+<inactive>         %perm_write_<index> = OpINotEqual %bool %perm_exec_<index> %uint_0
+           %perm_old_<index> = OpLoad %float %<dst>
+         %perm_old_u_<index> = OpBitcast %uint %perm_old_<index>
+        %perm_result_<index> = OpSelect %uint %perm_write_<index> %perm_value_<index> %perm_old_u_<index>
+       %perm_result_f_<index> = OpBitcast %float %perm_result_<index>
+               OpStore %<dst> %perm_result_f_<index>
+)";
+	const String8 inactive = (inst.vop3_op_sel & 1u) != 0u ? String8("%perm_value_<index> = OpCopyObject %uint %perm_fetch_<index>\n")
+	                                                       : String8("%perm_live_<index> = OpGroupNonUniformShuffle %uint %uint_3 %perm_exec_<index> %perm_target_<index>\n"
+	                                                                 "%perm_live_b_<index> = OpINotEqual %bool %perm_live_<index> %uint_0\n"
+	                                                                 "%perm_value_<index> = OpSelect %uint %perm_live_b_<index> %perm_fetch_<index> %uint_0\n");
+	*dst_source += String8(text)
+	                   .ReplaceStr("<inactive>", inactive)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<load2>", load2)
+	                   .ReplaceStr("<dst>", operand_variable_to_str(inst.dst).value)
+	                   .ReplaceStr("<row_xor>", x16 ? "uint_16" : "uint_0")
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 static bool RecompilePermlane16(uint32_t index, const ShaderCode& code, String8* dst_source, Spirv* spirv, bool x16)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -3987,12 +4049,14 @@ static bool RecompilePermlane16(uint32_t index, const ShaderCode& code, String8*
 KYTY_RECOMPILER_FUNC(Recompile_VPermlane16B32_VdstVsrc0Vsrc1Vsrc2)
 {
 	if (spirv->UsesSplitComputeWave()) { return RecompileSplitPermlane16(index, code, dst_source, spirv, false); }
+	if (spirv->UsesNativeComputeWave()) { return RecompileNativeComputePermlane16(index, code, dst_source, spirv, false); }
 	return RecompilePermlane16(index, code, dst_source, spirv, false);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VPermlanex16B32_VdstVsrc0Vsrc1Vsrc2)
 {
 	if (spirv->UsesSplitComputeWave()) { return RecompileSplitPermlane16(index, code, dst_source, spirv, true); }
+	if (spirv->UsesNativeComputeWave()) { return RecompileNativeComputePermlane16(index, code, dst_source, spirv, true); }
 	return RecompilePermlane16(index, code, dst_source, spirv, true);
 }
 
