@@ -5772,21 +5772,57 @@ reuse it.
 Going faster exposed a further stop, fixed: a 2688x1512 storage view over a 336x189x32 volume at the same address, a
 recycled arena the multi-parent path already accepted; the single-parent path now compares layouts the same way.
 
-## Guest small-block free lists found corrupted (2026-11-01, open)
+## Guest small-block free lists corrupted by partial-line device writes (2026-11-01, fixed 2026-11-02)
 
-Two Unreal titles fault popping the 16-byte bin of the per-thread free list, reached through `pthread_getspecific`:
-`PPSA09809 - OCTOPATH TRAVELER II` reads through `0x100000000` at `0x901449749`, `PPSA03969` reads through `-1` at
-`0x900dc6c0e` (list head at offset 0 of the cache block, one fault in the runs of this record). The head came from the
-first eight bytes of a block on the list, so something wrote `{0, 1}` or `-1` into a freed 16-byte block. Writer unknown:
-a guest use-after-free that timing exposes, a late host write (labels, HLE out-parameters) or device writes are all open.
-Faults depend on timing and repeat poorly under tools. Direction: log the host's small guest writes in a bounded ring
-and compare it with the bad block at the fault.
+Host: Ryzen 5 7600, Arc A770, ANV Mesa 26.2.5, clean LTO build, 60 fps limit. Fixed by `0c26c49a8`.
+
+`PPSA09809 - OCTOPATH TRAVELER II` faulted popping the 16-byte bin of the per-thread free list, reached through
+`pthread_getspecific` (read through `0x100000000` at `0x901449749`). `PPSA03969` faulted the same way once, reading
+through `-1` at `0x900dc6c0e`. The list head came from the first eight bytes of a block on the list, so a freed block held
+stale bytes. Baseline on `PPSA09809`: about 1 crash in 5 boots.
+
+Cause: the guest binds writable storage V#s on 4-byte counters inside small heap blocks whose 16-byte neighbours hold
+free-list links. `GuestDeviceAddressBindInPlace` bound them over imported guest pages, so device writes hit guest memory.
+A standalone Vulkan test (memfd, udmabuf, imported memory; one CPU thread stores in a line while the GPU writes 4 bytes of
+it) shows the mechanism without any title:
+
+| Device access on the 4 bytes | Arc A770 | Raphael iGPU (RADV) |
+| --- | --- | --- |
+| Store, atomic, fill or copy, CPU bytes in the same 64-byte line | reverted to an older value about once per submit (45,782 in 45,891 submits) | 0 |
+| Same, CPU bytes at +64 | 0 | 0 |
+| Shader read only | 0 | 0 |
+| Fill of the full line | 0 | 0 |
+
+All 6 importable memory types behave the same on Arc, so import memory type is not a cure. NVIDIA not tested.
+
+Runtime evidence on `PPSA09809`, 25 s boots: in-place binding off 0 crashes in 15; rejecting partial-line binds 0 in 15;
+the shipped rule, clean binary, 0 in 15, and 45-60 fps over a 60 s run.
+
+Fix: a device write into guest memory is allowed only for whole lines or ranges of at least 64 KiB, checked at bind,
+publication and fill. Smaller partial-line ranges take the host write-back, which copies exact bytes. The size limit exists
+because `PPSA21567 - Astro Bot` keeps its heavy storage in 10-32 MB objects with 16-byte starts: refusing those cost
+24-27.5 fps against 29.5-31.5 in the hub. With the limit, the hub measures 28.5-32.9 fps warm against the earlier 31-39, a
+loss of 2-5 % inside a same-code spread of about 2.5 fps, spent on a few small objects with pending publications (a counter
+right after a 16 MB buffer, for one). The first run after a rebuild measures 15-26 fps: pipeline creation, not this rule.
+
+Strict matrix, 33 folders: 27 interactive, 1 presenting, 5 invalid, 0 crashes, against 25, 0, 5 and 2 host crashes before.
+`PPSA03969 - F.I.S.T.: Forged In Shadow Torch.` went from a host crash to interactive; its boot crash was not traced separately, so sharing this
+cause is inferred from the change. On an earlier revision of the rule one `Blasphemous 2` boot exited 0 at launch; it did not
+repeat in 2 reruns or in this matrix, unexplained. `PPSA09809` presented 15 in this matrix against 276 in the earlier one:
+the window ends at stability, and the 60 s run above shows the rate.
+
+Excluded on the way: guest double free at the API level, physical aliasing, recorded emulator writes, page tracking, stale
+pointer writes of 16 bytes or less, wrong import binding (the GOT holds the right mutex and self functions), allocator lock
+violations (none in a crashing run), a CPU self-copy of in-place ranges, out-of-bounds shader access (robustBufferAccess on).
+
+Open: the two edge lines of objects of 64 KiB or more remain exposed on Arc. Rejected ranges were guest memory type 12 in
+`PPSA09809` and type 11 in `PPSA21567`; a rule keyed on the type could recover the Astro cost, but the meaning of the types
+has no evidence yet and the rule would leave CPU-hot data in type 11 unprotected, so it was not adopted. The cause inside the
+Arc memory path was not identified; the test shows the behavior only.
 
 The preset weak-pointer fault recorded in `docs/titles/mechanical-fist-platformer.md` also got more frequent as the cache
-warmed: 2 faults in 4 warm clean runs, at under 30 s, and none in the one run with `perf` attached.
-
-The list head in the crash registers is 64 KiB aligned in all three faults recorded so far (`0x205bb40000`, `0x2001ae0000`,
-`0x2001ad0000`). `PPSA09809` faulted in 2 of 8 runs. The later scan runs were saturated by matches in code regions.
+warmed: 2 faults in 4 warm clean runs, at under 30 s, and none in the one run with `perf` attached. Not retested as its own
+case after this fix.
 
 ## Storage scans and image fills in `PPSA28311 - Absolum` (2026-11-01)
 

@@ -4393,7 +4393,7 @@ read 31-39 fps; the same code spreads about 2.5 fps between windows.
 
 - Timeline of one 3 s window on an instrumented build: GPU busy 73.5 %, idle about 10 ms per frame,
   of which 4.4 ms between submissions of the guest's second compute queue, 2.2 ms between
-  submissions of its first, the rest around presents and label waits. In those gaps the GPU has
+  submissions of its first. In those gaps the GPU has
   finished and the command processor is still recording.
 - Per frame in the same scene: 174 draws, 87 dispatches, 38 submissions, draw processing 12.7 ms,
   dispatch processing 5.8 ms.

@@ -151,7 +151,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Render engine hang evidence for `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` (2026-11-01)
   - Static TLS offsets follow the module alignment (2026-11-01)
   - Pipeline cache: working set, lookup and persistence (2026-11-01)
-  - Guest small-block free lists found corrupted (2026-11-01, open)
+  - Guest small-block free lists corrupted by partial-line device writes (2026-11-01, fixed 2026-11-02)
   - Storage scans and image fills in `PPSA28311 - Absolum` (2026-11-01)
   - Render target aliased by a storage view of another format (2026-11-01)
   - [Per-draw plan design](bringup/cp-draw-plan.md): stage 3a lookup-miss memo, texture binding 19-23 -> 14 us/draw (2026-10-28); stage 2 first slice excluded, 14.5% hits (2026-10-29)
