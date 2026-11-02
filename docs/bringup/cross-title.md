@@ -5887,10 +5887,22 @@ instead of 110-130 s, with no 0 fps window and 11.7 fps. Capture correct. Unit s
 pass. One boot crash in the five runs (exit 139 before the agent endpoint, no dump),
 consistent with the open NULL guest pointer crash but not proven to be it.
 
-Open: vertex programs without guest device addresses load the words as live constants;
-their remaining variants differ only in bits 27-31. Masking needs a demanded-bits proof
-on the guest consumers. The priming cost is one cold pass for every title that used
-these ids. AMD and NVIDIA not run.
+Programs without guest device addresses load the words as live constants. A scan of the
+guest code now keeps only the bits it can observe: a straight line of `S_BFE_U32`,
+`S_AND_B32` with a constant, `S_LSHL_B32` whose SCC is dead and `S_MOV_B32`; any other
+reader, a branch or a live SCC keeps the whole word. Result, warm run with timed creates:
+16 driver compiles for 3.0 s, against 142 for 37 s before, 317 VS and 427 variant pairs.
+Clean warm: 11.7 fps, gameplay at t=50-60 s. Full tests: 108 of 108 CTest entries passed.
+Strict matrix: 27 interactive, 1 controlled timeout, 5 invalid fixtures, as before.
+
+Image check: masked and unmasked runs both render correct characters and geometry, but
+the cinematic advances by wall clock, so equal frame numbers show different shots and no
+pixel comparison was possible. One masked capture in a fast shot shows blur with white
+streaks; the same shot was not captured unmasked.
+
+Open: 14 variants remain on bit 27 where a shifted word reaches an `S_LOAD` offset, kept
+because that reader demands the whole shifted value. The priming cost is one cold pass
+for every title that used these ids. AMD and NVIDIA not run.
 
 ## Render engine hang evidence for `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` (2026-11-01)
 
