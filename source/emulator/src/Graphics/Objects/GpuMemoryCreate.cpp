@@ -1529,6 +1529,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			} else if (info.type == GpuMemoryObjectType::StorageTexture &&
 			           ((o.object.type == GpuMemoryObjectType::StorageTexture &&
 			             StorageTextureRedescribesRange(o.params, info.params, obj.relation != OverlapType::Contains)) ||
+			            (o.object.type == GpuMemoryObjectType::Texture && obj.relation == OverlapType::Contains &&
+			             StorageTextureRedescribesRange(o.params, info.params, false)) ||
 			            (o.object.type == GpuMemoryObjectType::RenderTexture &&
 			             StorageTextureRedescribesRenderTarget(o.params, info.params, RedescriptionComparesLayout(obj.relation))) ||
 			            (o.object.type == GpuMemoryObjectType::DepthStencilBuffer && obj.relation == OverlapType::Equals &&
