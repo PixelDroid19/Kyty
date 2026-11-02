@@ -265,7 +265,7 @@ inline bool SdwaHalfDestinationSupported(const ShaderInstruction& inst)
 	const uint32_t src1_sel = (control >> 24u) & 7u;
 	const bool     sext     = (control & (1u << 19u)) != 0u;
 	const auto half_select = [](uint32_t select) { return select >= 4u && select <= 6u; };
-	if (sext || dst_u > 2u || (control & 0xe000u) != 0u || !half_select(dst_sel) || !half_select(src0_sel))
+	if (sext || dst_u > 2u || (control & 0xc000u) != 0u || !half_select(dst_sel) || !half_select(src0_sel))
 	{
 		return false;
 	}
@@ -687,7 +687,7 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	const bool sdwa_half_destination = SdwaHalfDestinationSupported(inst);
 	if (inst.vop_sdwa && !((operation == Operation::ToFloat && SdwaWideningSupported(inst)) ||
 	                       (operation == Operation::FromFloat && SdwaWholeWordSupported(inst)) ||
-	                       ((arithmetic || integer_output) && sdwa_half_destination)))
+	                       ((arithmetic || integer_input || integer_output) && sdwa_half_destination)))
 	{
 		return reject("unsupported-sdwa");
 	}

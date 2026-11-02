@@ -154,17 +154,23 @@ bool ShaderSdwaPartialDestinationSupported(const ShaderInstruction& instruction)
 	const bool select = instruction.type == ShaderInstructionType::VCndmaskB32 &&
 	                    instruction.format == ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2 && instruction.src_num == 3 &&
 	                    (control & ((3u << 20u) | (3u << 28u))) == 0u;
-	if (!instruction.vop_sdwa || (!vop1 && !vop2 && !select) || dst_sel > 5u || dst_u > 2u || (control & 0xe000u) != 0u)
+	if (!instruction.vop_sdwa || (!vop1 && !vop2 && !select) || dst_sel > 5u || dst_u > 2u || (control & 0xc000u) != 0u)
 	{
 		return false;
 	}
 	// Accumulating forms read the destination as an operand.
 	const auto name = ShaderInstructionTypeName(instruction.type);
+	// Only the half emitters clamp the whole-dword result this wrapper merges.
+	if (instruction.dst.clamp && name.find("F16") == std::string_view::npos)
+	{
+		return false;
+	}
 	if (name.find("Mac") != std::string_view::npos || name.find("Dot") != std::string_view::npos)
 	{
 		return false;
 	}
-	const auto& dst = instruction.dst;
+	auto dst  = instruction.dst;
+	dst.clamp = false;
 	return OperandIsPlain(dst) && dst.type == ShaderOperandType::Vgpr && dst.size == 1 &&
 	       RegisterRangeIsValid(dst.register_id, dst.size, kMaxVgpr) && instruction.dst2.type == ShaderOperandType::Unknown &&
 	       instruction.dst2.size == 0;
