@@ -5703,6 +5703,8 @@ DREDGE. Unit test `StaticOffsetFollowsModuleAlignment`.
 storage view of exactly the stencil plane of a 3456x1944 D32S8 target (tile 24), type 13 array, one layer, in a compute
 pass. An arrayed stencil view only moved the refusal to `storage image has no compatible Vulkan view` (the plane has no
 storage format), so it was reverted. A fix needs an R8 storage plane with store-back, as depth storage planes have.
+Later: the run passes this stop and reaches its settings screen; the seed and store-back of that stencil plane remain
+unverified. See "Large wave32 compute in `PPSA07393 - Gori: Cuddly Carnage`".
 
 Storage views also gained two overlaps found by the same sweep: a view crossing a CPU-uploaded texture
 (`PPSA34971`, back from exit 65 to 60.15 fps) and a storage texture inside a writable CPU-uploaded storage buffer with no
@@ -5803,3 +5805,72 @@ plan accepted only equal formats and the 8-bit four-channel family. Memory holds
 whatever its format, and Vulkan copies between any two formats of one texel size unchanged. The plan now accepts any such
 pair; different texel sizes stay refused. The title then ran the full 120 s run without a stop. Pixels of this view were
 not compared against a reference.
+
+## Large wave32 compute in `PPSA07393 - Gori: Cuddly Carnage` (2026-11-02)
+
+The title stood at 3.9 fps on its brightness settings screen on an Intel Arc A770 (ANV, Mesa 26.2.5), clean LTO binary,
+fixed input route, frame limit 60. Shader `eb48c258` is one flat block of about 143,000 SPIR-V operations using 16-bit
+packed arithmetic and 404 `ds_swizzle` and `ds_bpermute` instructions, and took 128 ms per dispatch. The guest aborted
+when a cold compile stalled it near 120 s.
+
+| Change | Result on the screen above |
+| --- | --- |
+| Wave-sensitive wave32 above 64 VGPRs runs as two 16-lane parts where the host allows exact width 16 | 5.8 fps; no cold stall abort |
+| 64 KiB `R_X` storage detile by whole blocks, zero blocks skipped | 8.2 fps |
+| Per-lane exchange fixed, one rendezvous instead of two | 11.0 fps; frame byte-identical to the previous capture |
+| Float min and max through `NMin`/`NMax` and one equality test | 12.7 fps, offline 100,933 -> 61,013 instructions and 3.26 M -> 1.69 M estimated cycles at SIMD16 |
+
+`eb48c258` now takes 39 ms per dispatch; the frame is 77 ms with 57 ms of fence wait, so the title stays GPU-limited.
+AMD and NVIDIA hosts keep native wave32 (minimum or fixed width 32) and were not tested; the min and max lowering is the
+only one of these changes that reaches them.
+
+**Defect fixed.** `%split_read` lowers through `OpGroupNonUniformBroadcast` with one elected publisher per part, which is
+only correct when every lane asks for the same lane. `ds_swizzle` and `ds_bpermute` compute a target per lane and went
+through it, so all lanes received one value on every split wave. They now use `%split_lane_read`. That helper stores
+every lane in the exchange area and keeps two banks selected by exchange parity: the bank of one exchange cannot be
+reused before every part has finished reading it, so the second rendezvous is gone. The exchange area therefore grows
+by 128 dwords per guest wave on every split shader, and the rendezvous `SplitWaveDsOrder` adds is skipped for these two
+instructions, which touch no LDS. The menu frame did not change, so this screen does not show the correction by
+itself; a scene whose output depends on those values was not identified.
+
+**Min and max.** The old lowering compared each operand against zero and tested both for NaN. `NMin`/`NMax` give the
+result for one NaN operand. A NaN first operand still selects the second, which keeps two NaNs returning the second
+operand. An equality test routes equal operands to a bitwise OR (min) or AND (max), which is the identity for equal
+non-zero values and orders signed zeros. The arithmetic interpreter suite runs the emitted contract, including
+signaling NaN. On a host that flushes denormals, a denormal compared equal to zero can pass through min unflushed.
+
+**Excluded by measurement on `eb48c258`:**
+
+- Rendezvous cost: replacing `%split_lane_read` with a subgroup shuffle (wrong results on purpose, private cache) gave
+  48.6 ms per dispatch against 39 ms, so the exchange is not what limits it.
+- EXEC guards: rewriting all 3,902 guarded selects offline leaves the instruction count at 61,001 of 61,013; the
+  compiler already folds them because this shader keeps a constant EXEC.
+- Forwarding written 16-bit halves to later extracts within a block: offline 1,083 of 5,905 extracts, 61,013 -> 59,246
+  instructions, 3 %.
+
+**Validation.** Strict matrix, warm cache, against the previous baseline of the same day: 27 interactive and 1 controlled
+timeout (unchanged) against 25, 2 and 1 host crash. `PPSA09809 - OCTOPATH TRAVELER II` crashes
+intermittently before these changes, so its clean pass here is not a fix. `PPSA21567 - Astro Bot` warm: main menu 22-25
+fps and 31 fps entering the hub at the end of the bounded run, no visual change at the capture. Hub fps past that point
+was not re-measured in this run.
+
+**Open:** the frame still creates about 8 objects per flip in one arena (shaders `41a73222` and `ff442d33` write
+transient storage textures; zero-seeded guest bytes change their hash each frame). The route stops at this settings
+screen, so gameplay of this title has not been measured.
+
+## Render engine hang evidence for `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` (2026-11-01)
+
+About 1 run in 6 reset the render engine (`Timedout job`, `vkWaitForFences` -4 after about 680 ms). Two kernel
+devcoredumps stopped at the identical draw sequence by kernel hash, and the only loops in those kernels are the GDA
+binary search. Its midpoint `(lo + hi) >> 1` wraps for `hi >= 2^31` and loops forever on any vendor, so the search now
+halves the gap and is bounded to 32 steps. After the change no reset in 5 warm runs that reached gameplay. With the old
+rate that has a 33 % chance by luck, so the cure is not proven; a recurrence at the same draws would exclude the loop.
+The table lifetime was audited without finding why `hi` could be garbage: only CP-level end and execute submit, readers
+per queue clear on exact acknowledgment, and quiesced release drains the rings.
+
+**Recipe:** the driver exposes the last dump in sysfs under `devcoredump/data`; writing to it dismisses the dump so the
+next hang is captured. Batch buffers and kernels decode with `iga64`; compare kernel hashes between two hangs.
+
+**Excluded by measurement:** `-march=x86-64-v3` (11.6 against 11.7 fps), a shared empty `Vector` (29.7 against 28.9
+us/draw), skipping the wait of a DMA copy (the fence only moves), a free-list index in the transient pool (31 against 29
+us/draw). `spirv-opt` performance passes do not shrink `eb48c258`'s compile enough to matter.

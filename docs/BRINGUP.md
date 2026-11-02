@@ -147,6 +147,8 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Large wave32 compute in `PPSA07393 - Gori: Cuddly Carnage`: split, per-lane exchange fix, min and max (2026-11-02)
+  - Render engine hang evidence for `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` (2026-11-01)
   - Static TLS offsets follow the module alignment (2026-11-01)
   - Pipeline cache: working set, lookup and persistence (2026-11-01)
   - Guest small-block free lists found corrupted (2026-11-01, open)
