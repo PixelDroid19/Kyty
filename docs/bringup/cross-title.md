@@ -5486,6 +5486,16 @@ weak object pointer lookup (index and serial checked against the object array), 
 returned NULL on a stale or flagged object, so the failure here is a guest object lifetime race and not a failed
 allocation. What shifts its timing was not found.
 
+Cause narrowed (2026-11-02, gdb trap on the NULL mutex address, 2 of 17 short tries): the crashing thread is the audio
+render thread, on the first process call of a submix effect, whose setup resolves its preset through the weak pointer
+without a null check. At the trap the object is valid and carries no flag. Sampling the object's array entry from a parent
+process shows `Unreachable` set for only 1.5 to 7.5 ms per collection, the first collection at about 8 s of boot. The heap
+block of the effect is allocated within tens of milliseconds of that collection, so its first process call lands near the
+window with a probability close to window / audio period. No emulator contract is involved in the weak pointer: flags and
+serial match guest writes. The race is in the guest and its rate depends on when the effect is created relative to the
+first collection. No general fix is available; patching the read or delaying a thread would be a title hack. A retry of
+the run passes.
+
 Games matrix on `74552a64a` with LTO (2026-11-01, strict, 60 fps cap, same host): 25 interactive, 2 host crashes,
 1 controlled timeout, 5 invalid fixtures. `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` crashed with exit 139 after
 27 presents, the intermittent crash recorded above. `PPSA07393` crashed as it did in the 2026-10-29 baseline, and
@@ -5913,6 +5923,13 @@ halves the gap and is bounded to 32 steps. After the change no reset in 5 warm r
 rate that has a 33 % chance by luck, so the cure is not proven; a recurrence at the same draws would exclude the loop.
 The table lifetime was audited without finding why `hi` could be garbage: only CP-level end and execute submit, readers
 per queue clear on exact acknowledgment, and quiesced release drains the rings.
+
+Recurrence (2026-11-02, translator 202, boot under gdb, 1 of 17 tries): a render engine reset at the same two draws
+(94308 and 42012 vertices, same vertex program and fragment program sizes), waiting at the CS stall after them. Every
+loop left in those kernels is the bounded search: `lo < hi`, the midpoint lies in `[lo, hi)`, and each step shrinks the
+gap whatever the table holds. So a shader loop no longer explains the hang and the midpoint change is not its cure. The
+hung job starts with several driver rectangle operations before the first of those draws, in both dumps. Lead not tested:
+`INTEL_DEBUG=reemit` cured a driver stale-state hang on this host before; at this rate it needs many runs per arm.
 
 **Recipe:** the driver exposes the last dump in sysfs under `devcoredump/data`; writing to it dismisses the dump so the
 next hang is captured. Batch buffers and kernels decode with `iga64`; compare kernel hashes between two hangs.

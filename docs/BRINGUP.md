@@ -161,7 +161,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - [GPU-indexed descriptor tables](bringup/bindless-tables-design.md): table-selected T#/S# and ray-tracing dispatch needs (2026-10-29, design)
   - [Temporal upscalers decision](bringup/temporal-upscalers-decision.md): no DLSS/XeSS now; temporal inputs first, FSR 2 before proprietary SDKs (2026-10-29, decided)
   - Guest `fprintf` read past its buffer and `strto*` dropped range errors (2026-10-30, fixed)
-  - Intermittent boot crashes on a NULL guest pointer (2026-10-31, open)
+  - Intermittent boot crashes on a NULL guest pointer (2026-10-31, F.I.S.T. traced to a guest race 2026-11-02)
   - Guest mspaces fragmented and reported freed memory as in use (2026-10-30, fixed)
   - Small `DMA_DATA` stores behind a consolidated wait retire it first (2026-10-27, fixed)
   - Storage objects bound over imported guest pages (2026-10-30)
