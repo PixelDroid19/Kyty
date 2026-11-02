@@ -2567,6 +2567,20 @@ void CommandBuffer::AwaitSubmissionOnDevice(SubmissionId submission, VkSemaphore
 	m_device_wait_values.push_back(value);
 }
 
+void CommandBuffer::AwaitImageFills()
+{
+	if (m_image_fill_batch)
+	{
+		return;
+	}
+	const uint64_t value = UtilFlushImageFills();
+	if (value != 0)
+	{
+		AwaitSubmissionOnDevice(SubmissionId {GpuQueueId {GraphicContext::QUEUE_UTIL}, value},
+		                        g_render_ctx->GetGraphicCtx()->queues[GraphicContext::QUEUE_UTIL].timeline, value);
+	}
+}
+
 bool CommandBuffer::AwaitsSubmissionOnDevice(SubmissionId submission) const
 {
 	return std::any_of(m_device_awaited.begin(), m_device_awaited.end(), [&](const SubmissionId& awaited)
@@ -2633,6 +2647,7 @@ bool CommandBuffer::GetTimeline(VkDevice* device, VkSemaphore* semaphore, uint64
 void CommandBuffer::Execute()
 {
 	EXIT_IF(IsInvalid());
+	AwaitImageFills();
 
 	auto* buffer = m_pool->buffers[m_index];
 	auto* fence  = m_pool->fences[m_index];
@@ -2666,7 +2681,7 @@ void CommandBuffer::Execute()
 	    {
 		    EXIT_IF(queue.mutex == nullptr);
 		    Core::LockGuard queue_lock(*queue.mutex);
-		    AttachSubmitSignals(&queue, nullptr, m_has_submission, &signals, &submit_info, &m_timeline_value);
+		    AttachSubmitSignals(&queue, nullptr, m_has_submission || m_image_fill_batch, &signals, &submit_info, &m_timeline_value);
 		    AttachSubmitWaits(m_device_wait_semaphores, m_device_wait_values, &signals, &submit_info);
 		    MarkRecentDrawsSubmitCalled();
 		    return VulkanTraceSubmitAttempt(trail, attempt, [&] { return vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence); },
@@ -2690,6 +2705,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 {
 	EXIT_IF(IsInvalid());
 	EXIT_IF(signal_semaphore == nullptr);
+	AwaitImageFills();
 
 	auto* buffer = m_pool->buffers[m_index];
 	auto* fence  = m_pool->fences[m_index];

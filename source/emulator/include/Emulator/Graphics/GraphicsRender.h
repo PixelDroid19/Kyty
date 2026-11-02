@@ -662,6 +662,8 @@ public:
 		m_submission     = submission;
 		m_has_submission = true;
 	}
+	// This buffer carries asynchronous image fills: it signals the queue timeline and waits for no other fill.
+	void               MarkImageFillBatch() { m_image_fill_batch = true; }
 	[[nodiscard]] int GetQueueIndex() const { return m_queue; }
 	// False on a compute-only queue family: no graphics commands or stages.
 	[[nodiscard]] bool SupportsGraphics() const;
@@ -736,6 +738,8 @@ public:
 	// A submission of another queue this recording waits for on the device before it executes, through that
 	// queue's timeline value; later submissions of a queue complete after earlier ones.
 	void AwaitSubmissionOnDevice(SubmissionId submission, VkSemaphore timeline, uint64_t value);
+	// Flushes recorded image fills and makes this submission wait for them on the device.
+	void AwaitImageFills();
 	[[nodiscard]] bool AwaitsSubmissionOnDevice(SubmissionId submission) const;
 	[[nodiscard]] const std::vector<SubmissionId>& DeviceAwaitedSubmissions() const { return m_device_awaited; }
 
@@ -762,6 +766,7 @@ private:
 	SubmissionId       m_submission;
 	bool               m_has_submission = false;
 	uint64_t           m_timeline_value = 0;
+	bool               m_image_fill_batch = false;
 	TransientBufferPool* m_transient_buffers = nullptr;
 	TransientBufferPool* m_transient_scratch_buffers = nullptr;
 	TransientBufferPool* m_transient_copy_buffers    = nullptr;

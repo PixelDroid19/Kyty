@@ -284,6 +284,8 @@ struct VulkanImageViewDescriptor
 
 struct VulkanImage
 {
+	// Last batch of asynchronous fills that writes this image (0: none).
+	uint64_t fill_batch = 0;
 	static constexpr int VIEW_STORAGE_MIP_BASE  = 11;
 	static constexpr int VIEW_STORAGE_MIP_COUNT = 16;
 	static constexpr int VIEW_MAX               = VIEW_STORAGE_MIP_BASE + VIEW_STORAGE_MIP_COUNT;

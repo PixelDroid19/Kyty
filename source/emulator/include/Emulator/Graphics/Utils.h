@@ -893,6 +893,13 @@ void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void*
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, const Vector<BufferImageCopy>& regions,
                    uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
+// Submits the region fills recorded so far. Returns the util queue timeline value the next submission must wait for
+// on the device (0: every fill already completed).
+[[nodiscard]] uint64_t UtilFlushImageFills();
+// Call before destroying an image: returns once no fill writes it.
+void UtilAwaitImageFill(VulkanImage* image);
+// Completes and releases every recorded fill; for a device that is about to go away.
+void UtilCompleteImageFills();
 void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image, uint64_t src_layout,
                     uint32_t src_array_layer = 0);
 void UtilFillDepthBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image,

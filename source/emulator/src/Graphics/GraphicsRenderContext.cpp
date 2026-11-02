@@ -89,6 +89,7 @@ bool GraphicsRenderUnbindContextForTesting(GraphicContext* ctx)
 	{
 		return false;
 	}
+	UtilCompleteImageFills();
 	// The fixture waits for submitted work and releases its current recording first,
 	// so cache-owned objects and descriptor references can now be destroyed safely.
 	g_command_pool.DeleteAllForTesting();

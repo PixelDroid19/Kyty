@@ -742,6 +742,7 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 		}
 	}
 
+	UtilAwaitImageFill(vk_obj);
 	vkDestroyImage(ctx->device, vk_obj->image, nullptr);
 
 	VulkanFree(ctx, mem);

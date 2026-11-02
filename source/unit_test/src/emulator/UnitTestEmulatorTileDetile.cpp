@@ -161,6 +161,7 @@ public:
 				(void)TileGpuDetileReleaseContext(&context);
 			}
 			(void)vkDeviceWaitIdle(context.device);
+			vkDestroySemaphore(context.device, context.queues[GraphicContext::QUEUE_UTIL].timeline, nullptr);
 			VulkanMemoryPoolRelease(&context);
 			vkDestroyDevice(context.device, nullptr);
 		}
@@ -270,8 +271,12 @@ public:
 				queue_info.queueFamilyIndex = family;
 				queue_info.queueCount       = 1;
 				queue_info.pQueuePriorities = &priority;
+				VkPhysicalDeviceTimelineSemaphoreFeatures timeline_enabled {};
+				timeline_enabled.sType             = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+				timeline_enabled.timelineSemaphore = VK_TRUE;
 				VkDeviceCreateInfo device_info {};
 				device_info.sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+				device_info.pNext                = &timeline_enabled;
 				device_info.queueCreateInfoCount = 1;
 				device_info.pQueueCreateInfos    = &queue_info;
 				VkDevice device                  = VK_NULL_HANDLE;
@@ -300,7 +305,13 @@ public:
 					context.queues[GraphicContext::QUEUE_UTIL].index    = 0;
 					context.queues[GraphicContext::QUEUE_UTIL].mutex    = &context.queue_mutexes[0];
 					context.queue_mutex_count                           = 1;
-					return true;
+					VkSemaphoreTypeCreateInfo timeline_type {};
+					timeline_type.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+					timeline_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+					VkSemaphoreCreateInfo timeline_info {};
+					timeline_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+					timeline_info.pNext = &timeline_type;
+					return vkCreateSemaphore(device, &timeline_info, nullptr, &context.queues[GraphicContext::QUEUE_UTIL].timeline) == VK_SUCCESS;
 				}
 		}
 		return false;
