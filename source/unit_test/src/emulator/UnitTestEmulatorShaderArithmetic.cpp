@@ -1016,7 +1016,7 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 		// One guest wave spans several host subgroups, so a subgroup shuffle
 		// cannot reach every source lane and the exchange must carry it. The
 		// wave64 permute stays inside the source lane's 32-lane half.
-		if (source.FindIndex("OpFunctionCall %uint %split_read %bpermute_0_published %bpermute_0_lane") ==
+		if (source.FindIndex("OpFunctionCall %uint %split_lane_read %bpermute_0_published %bpermute_0_lane") ==
 		        Core::STRING8_INVALID_INDEX ||
 		    source.FindIndex("OpBitwiseAnd %uint %bpermute_0_guest %uint_32") == Core::STRING8_INVALID_INDEX ||
 		    source.FindIndex("OpGroupNonUniformShuffle") != Core::STRING8_INVALID_INDEX)

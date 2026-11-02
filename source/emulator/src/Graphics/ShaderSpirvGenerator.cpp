@@ -3065,7 +3065,9 @@ void Spirv::WriteInstructions()
 		{
 			dst = GuardImageDestinationStores(dst, inst, static_cast<uint32_t>(index));
 		}
-		if (UsesSplitComputeWave() && Core::EnumName8(inst.type).StartsWith("Ds"))
+		// ds_swizzle and ds_bpermute touch no LDS and rendezvous on their own.
+		if (UsesSplitComputeWave() && Core::EnumName8(inst.type).StartsWith("Ds") && inst.type != ShaderInstructionType::DsSwizzleB32 &&
+		    inst.type != ShaderInstructionType::DsBpermuteB32)
 		{
 			dst += SplitWaveDsOrder(static_cast<uint32_t>(index));
 		}

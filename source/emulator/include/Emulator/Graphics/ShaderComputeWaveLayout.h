@@ -74,11 +74,11 @@ struct ShaderComputeWaveLayout
 
 // Workgroup dwords each split guest wave reserves to exchange wave-wide values
 // between its host subgroups of <part_lanes> lanes: a sequence and two words
-// per subgroup, and with 16- or 8-lane subgroups one dword per guest lane for
-// the lane exchanges that cross them.
+// per subgroup, and two banks of one dword per guest lane for the lane
+// exchanges that cross them.
 [[nodiscard]] constexpr uint32_t ShaderSplitWaveExchangeDwords(uint32_t part_lanes) noexcept
 {
-	return 64u / part_lanes * 3u + (part_lanes < 32u ? 64u : 0u);
+	return 64u / part_lanes * 3u + 128u;
 }
 
 // Host subgroup width of each split guest wave's parts: 16 lanes where the host

@@ -15,10 +15,9 @@ namespace Kyty::Libs::Graphics {
 //
 // Per guest wave the exchange area (ShaderSplitWaveExchangeDwords) holds
 // [0..P-1] the number of exchanges each part has published, [P..3P-1] the
-// words they published (P + part * 2 + parity) and, with parts under 32
-// lanes, one dword per guest lane for exchanges that cross parts. Two parities
-// suffice: a part reuses a slot only after every other part reached the
-// following exchange.
+// words they published (P + part * 2 + parity) and two banks of one dword per
+// guest lane for exchanges that cross parts. Two parities suffice: a part
+// reuses a slot only after every other part reached the following exchange.
 
 bool Spirv::UsesSplitComputeWave() const
 {
@@ -317,9 +316,9 @@ static String8 SplitWaveBallotFunction(uint32_t parts, uint32_t lanes)
 	return text;
 }
 
-// Reads one guest lane through a dword per lane in the exchange area; the
-// first rendezvous publishes the stores, the second keeps the area until every
-// part has read it.
+// Reads one guest lane per invocation through a dword per lane in the exchange
+// area; the rendezvous publishes the stores, and the bank of this exchange's
+// parity stays intact until every part has finished reading it.
 static String8 SplitWaveLaneReadFunction()
 {
 	return R"(
@@ -330,7 +329,12 @@ static String8 SplitWaveLaneReadFunction()
 %split_lane_read_subgroup = OpLoad %uint %gl_SubgroupID
 %split_lane_read_wave = OpShiftRightLogical %uint %split_lane_read_subgroup %split_parts_shift
 %split_lane_read_base = OpIMul %uint %split_lane_read_wave %split_stride
-%split_lane_read_area = OpIAdd %uint %split_lane_read_base %split_lane_area
+%split_lane_read_previous = OpLoad %uint %split_count
+%split_lane_read_n = OpIAdd %uint %split_lane_read_previous %split_c1
+%split_lane_read_parity = OpBitwiseAnd %uint %split_lane_read_n %split_c1
+%split_lane_read_bank = OpShiftLeftLogical %uint %split_lane_read_parity %split_c6
+%split_lane_read_banks = OpIAdd %uint %split_lane_read_base %split_lane_area
+%split_lane_read_area = OpIAdd %uint %split_lane_read_banks %split_lane_read_bank
 %split_lane_read_guest = OpLoad %uint %gl_SubgroupInvocationID
 %split_lane_read_own_index = OpIAdd %uint %split_lane_read_area %split_lane_read_guest
 %split_lane_read_own_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_lane_read_own_index
@@ -341,8 +345,6 @@ OpControlBarrier %split_scope_subgroup %split_scope_workgroup %split_acq_rel
 %split_lane_read_index = OpIAdd %uint %split_lane_read_area %split_lane_read_source
 %split_lane_read_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_lane_read_index
 %split_lane_read_result = OpLoad %uint %split_lane_read_ptr
-OpControlBarrier %split_scope_subgroup %split_scope_workgroup %split_acq_rel
-%split_lane_read_done = OpFunctionCall %uint %split_sync
 OpReturnValue %split_lane_read_result
 OpFunctionEnd
 )";
@@ -441,10 +443,7 @@ OpFunctionEnd
 OpReturnValue %split_first_result
 OpFunctionEnd
 )";
-	if (lanes < 32u)
-	{
-		text += SplitWaveLaneReadFunction();
-	}
+	text += SplitWaveLaneReadFunction();
 	return text;
 }
 

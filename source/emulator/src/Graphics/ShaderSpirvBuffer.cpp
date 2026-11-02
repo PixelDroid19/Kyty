@@ -2710,7 +2710,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsBpermuteB32_VdstVsrc0Vsrc1)
 		return false;
 	}
 	// Split compute spreads one guest wave over several host subgroups, so only
-	// %split_read reaches a lane in another part. In wave64 the permute addresses
+	// %split_lane_read reaches another lane per invocation. In wave64 the permute addresses
 	// 32 lanes of the current half (ISA 10.4.4), so the guest lane supplies the
 	// half and the index only its five low lane bits.
 	const bool split = spirv->UsesSplitComputeWave();
@@ -2732,7 +2732,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsBpermuteB32_VdstVsrc0Vsrc1)
 %<t>_own = OpLoad %uint %exec_lane_lo
 %<t>_active = OpINotEqual %bool %<t>_own %uint_0
 %<t>_published = OpSelect %uint %<t>_active %<t>_value %uint_0
-%<t>_result = OpFunctionCall %uint %split_read %<t>_published %<t>_lane
+%<t>_result = OpFunctionCall %uint %split_lane_read %<t>_published %<t>_lane
 )").ReplaceStr("<t>", tag)
 	          : String8(R"(
 %<t>_own = OpLoad %uint %exec_lane_lo
@@ -2891,7 +2891,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsSwizzleB32_VdstVsrc0)
 %<t>_own = OpLoad %uint %exec_lane_lo
 %<t>_active = OpINotEqual %bool %<t>_own %uint_0
 %<t>_published = OpSelect %uint %<t>_active %<t>_value %uint_0
-%<t>_result = OpFunctionCall %uint %split_read %<t>_published %<t>_lane
+%<t>_result = OpFunctionCall %uint %split_lane_read %<t>_published %<t>_lane
 )")
 	                                                    : String8(R"(
 %<t>_own = OpLoad %uint %exec_lane_lo
