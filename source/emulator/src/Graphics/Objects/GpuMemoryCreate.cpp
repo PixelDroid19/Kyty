@@ -1521,7 +1521,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				overlap = true;
 			} else if (info.type == GpuMemoryObjectType::StorageTexture &&
 			           ((o.object.type == GpuMemoryObjectType::StorageTexture &&
-			             StorageTextureRedescribesRange(o.params, info.params, RedescriptionComparesLayout(obj.relation))) ||
+			             StorageTextureRedescribesRange(o.params, info.params, obj.relation != OverlapType::Contains)) ||
 			            (o.object.type == GpuMemoryObjectType::RenderTexture &&
 			             StorageTextureRedescribesRenderTarget(o.params, info.params, RedescriptionComparesLayout(obj.relation))) ||
 			            (o.object.type == GpuMemoryObjectType::DepthStencilBuffer && obj.relation == OverlapType::Equals &&
@@ -1530,7 +1530,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// A recycled allocation (captured: a 1x1 R32F view of one 64 KiB block after
 				// a 32x32 RGBA16F view and an 8x8 RGBA16F target there, and inside a
 				// 256x256 RGBA16F view; a 960x540 R11G11B10 mode-27 view over a 960x540
-				// D32 target). Link both; the new view seeds from guest bytes.
+				// D32 target; a 2688x1512 view over a 336x189x32 volume at the same address). Link
+				// both; the new view seeds from guest bytes.
 				overlap = true;
 			} else if (GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type))
 			{
