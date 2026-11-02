@@ -258,6 +258,38 @@ KYTY_RECOMPILER_FUNC(Recompile_VPkF16)
 	return true;
 }
 
+// A pair of half values moved, not computed: the modifiers apply and denormals
+// follow the FP16 mode.
+KYTY_RECOMPILER_FUNC(Recompile_VPackB32F16)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.src_num != 2 || inst.vop3_op_sel > 3u || inst.vop3_omod != 0u || inst.dst.clamp || inst.vop_sdwa ||
+	    inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || inst.dst.multiplier != 1.0f)
+	{
+		return false;
+	}
+	F16Arithmetic::Mode mode;
+	if (!F16Arithmetic::ReadMode(spirv, &mode))
+	{
+		return false;
+	}
+	const bool    flush     = (mode.value & 0xc0u) != 0xc0u;
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8       source;
+	for (uint32_t operand = 0; operand < 2u; ++operand)
+	{
+		if (!F16Arithmetic::LoadHalf(spirv, inst, operand, index_str, flush, F16Arithmetic::HalfValue::ModifiedBits, &source))
+		{
+			return false;
+		}
+	}
+	source += String8("%fh_packed_<index> = OpBitFieldInsert %uint %fh_bits_0_<index> %fh_bits_1_<index> %uint_16 %uint_16\n")
+	              .ReplaceStr("<index>", index_str);
+	source += F16Arithmetic::Store(inst, index_str, "fh_packed_" + index_str);
+	*dst_source += source;
+	return true;
+}
+
 // Packed 16-bit integers: OPSEL picks the source halves of the low result and
 // OPSEL_HI those of the high one. Inline floats and the saturation CLAMP have
 // no contract here and are refused.

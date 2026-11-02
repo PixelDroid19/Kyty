@@ -64,7 +64,7 @@ inline bool ReadMode(const Spirv* spirv, Mode* mode)
 // needs them exact, including NaN. Host arithmetic does not preserve a NaN payload anyway.
 enum class HalfValue
 {
-	Bits,
+	Bits, ModifiedBits,
 	Binary32,
 	ArithmeticBinary32,
 	Half,
@@ -640,6 +640,7 @@ inline bool LoadHalf(Spirv* spirv, const ShaderInstruction& inst, uint32_t sourc
                      bool flush_input, HalfValue value, String8* text)
 {
 	const bool integer = value == HalfValue::Bits;
+	const bool bits_only = integer || value == HalfValue::ModifiedBits;
 	auto operand = inst.src[source];
 	// SDWA word selects (admitted by SdwaWideningSupported): the operand load
 	// already zero-extends the selected word into bits 15:0.
@@ -700,7 +701,7 @@ inline bool LoadHalf(Spirv* spirv, const ShaderInstruction& inst, uint32_t sourc
 %fh_short_<s> = OpUConvert %ushort %fh_bits_<s>
 %<result> = OpBitcast %half %fh_short_<s>
 )").ReplaceStr("<s>", suffix).ReplaceStr("<result>", result);
-	} else if (!integer)
+	} else if (!bits_only)
 	{
 		*text += Expand(spirv, "fh_bits_" + suffix, result, suffix, value == HalfValue::Binary32);
 	}

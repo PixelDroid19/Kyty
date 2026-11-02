@@ -34,7 +34,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 	uint32_t   src2           = (buffer[1] >> 18u) & 0x1ffu;
 	const bool permlane = next_gen && (opcode == 0x377u || opcode == 0x378u);
 	const bool half_opsel = next_gen && (opcode == 0x34bu || opcode == 0x351u || opcode == 0x354u || opcode == 0x357u ||
-	                                     (opcode >= 0x303u && opcode <= 0x30eu && opcode != 0x306u) || opcode == 0x314u);
+	                                     (opcode >= 0x303u && opcode <= 0x30eu && opcode != 0x306u) || opcode == 0x311u || opcode == 0x314u);
 	// OPSEL selects 16-bit halves; only these emitters read it.
 	if (op_sel != 0 && !permlane && !half_opsel)
 	{
@@ -750,7 +750,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.dst2      = operand_parse(sdst);
 			inst.dst2.size = 2;
 			break;
-		case 0x311: KYTY_NI("v_pack_b32_f16"); break;
+		case 0x311: binary16(ShaderInstructionType::VPackB32F16); break;
 		case 0x312: KYTY_NI("v_cvt_pknorm_i16_f16"); break;
 		case 0x313: KYTY_NI("v_cvt_pknorm_u16_f16"); break;
 		case 0x314: binary16(ShaderInstructionType::VLshlrevB16); break;

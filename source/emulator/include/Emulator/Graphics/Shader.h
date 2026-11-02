@@ -642,6 +642,7 @@ enum class ShaderInstructionType : uint32_t
 	VLshrrevB16,
 	VAshrrevI16,
 	VLshlrevB16,
+	VPackB32F16,
 	VPkMulLoU16,
 	VPkAddI16,
 	VPkSubI16,

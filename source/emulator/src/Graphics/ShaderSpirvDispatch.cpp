@@ -746,6 +746,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VPkF16, ShaderInstructionType::VPkAddF16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {"%t_<index> = OpFAdd %float %h0_<index> %h1_<index>"}},
     {Recompile_VPkF16, ShaderInstructionType::VPkMulF16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {"%t_<index> = OpFMul %float %h0_<index> %h1_<index>"}},
     {Recompile_VPkF16, ShaderInstructionType::VPkMinF16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
+    {Recompile_VPackB32F16, ShaderInstructionType::VPackB32F16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
     {Recompile_VPkF16, ShaderInstructionType::VPkMaxF16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
     {Recompile_VPkI16, ShaderInstructionType::VPkMulLoU16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {"%t_<index> = OpIMul %uint %i0x_<index> %i1x_<index>"}},
     {Recompile_VPkI16, ShaderInstructionType::VPkAddI16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {"%t_<index> = OpIAdd %uint %i0x_<index> %i1x_<index>", "s"}},
