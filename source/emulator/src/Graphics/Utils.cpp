@@ -285,13 +285,12 @@ static VkImageAspectFlags TexelBitsLayoutAspect(const VulkanImage* image)
 	return IsTexelBitsDepthFormat(image->format) ? DepthFormatAspectMask(image->format) : VK_IMAGE_ASPECT_COLOR_BIT;
 }
 
-bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout)
+// Moves one plane of each image through a tightly packed buffer, which is the only copy Vulkan
+// guarantees between a depth or stencil aspect and a colour image.
+static bool CopyPlaneBits(CommandBuffer* buffer, VulkanImage* src_image, VkImageAspectFlags src_aspect, VulkanImage* dst_image,
+                          VkImageAspectFlags dst_aspect, uint32_t texel_bytes, uint64_t dst_layout)
 {
-	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_image == nullptr || src_image->image == nullptr || dst_image->image == nullptr);
-	const uint32_t texel_bytes = TexelBitsColorBytes(IsTexelBitsDepthFormat(src_image->format) ? dst_image->format : src_image->format);
-	const bool     to_depth    = texel_bytes != 0u && TexelBitsDepthBytes(dst_image->format) == texel_bytes;
-	const bool     from_depth  = texel_bytes != 0u && TexelBitsDepthBytes(src_image->format) == texel_bytes;
-	if ((!to_depth && !from_depth) || src_image->layout == VK_IMAGE_LAYOUT_UNDEFINED || src_image->samples != VK_SAMPLE_COUNT_1_BIT ||
+	if (src_image->layout == VK_IMAGE_LAYOUT_UNDEFINED || src_image->samples != VK_SAMPLE_COUNT_1_BIT ||
 	    dst_image->samples != VK_SAMPLE_COUNT_1_BIT || src_image->array_layers != 1u || dst_image->array_layers != 1u ||
 	    src_image->extent.width != dst_image->extent.width || src_image->extent.height != dst_image->extent.height ||
 	    (src_image->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u || (dst_image->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u)
@@ -316,7 +315,7 @@ bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImag
 
 	const VkImageLayout src_layout = src_image->layout;
 	VkBufferImageCopy   region {};
-	region.imageSubresource.aspectMask = TexelBitsAspect(src_image);
+	region.imageSubresource.aspectMask = src_aspect;
 	region.imageSubresource.layerCount = 1u;
 	region.imageExtent                 = {src_image->extent.width, src_image->extent.height, 1u};
 	set_image_layout(buffer, vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), src_layout,
@@ -330,13 +329,39 @@ bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImag
 	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u, nullptr,
 	                     0u, nullptr);
 
-	region.imageSubresource.aspectMask = TexelBitsAspect(dst_image);
+	region.imageSubresource.aspectMask = dst_aspect;
 	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 	vkCmdCopyBufferToImage(vk_buffer, scratch->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
 	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 	                 static_cast<VkImageLayout>(dst_layout));
 	return true;
+}
+
+bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout)
+{
+	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_image == nullptr || src_image->image == nullptr || dst_image->image == nullptr);
+	const uint32_t texel_bytes = TexelBitsColorBytes(IsTexelBitsDepthFormat(src_image->format) ? dst_image->format : src_image->format);
+	const bool     to_depth    = texel_bytes != 0u && TexelBitsDepthBytes(dst_image->format) == texel_bytes;
+	const bool     from_depth  = texel_bytes != 0u && TexelBitsDepthBytes(src_image->format) == texel_bytes;
+	if (!to_depth && !from_depth)
+	{
+		return false;
+	}
+	return CopyPlaneBits(buffer, src_image, TexelBitsAspect(src_image), dst_image, TexelBitsAspect(dst_image), texel_bytes, dst_layout);
+}
+
+bool UtilCopyStencilBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout)
+{
+	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_image == nullptr || src_image->image == nullptr || dst_image->image == nullptr);
+	const bool to_stencil = src_image->format == VK_FORMAT_R8_UINT && (DepthFormatAspectMask(dst_image->format) & VK_IMAGE_ASPECT_STENCIL_BIT) != 0u;
+	const bool from_stencil = dst_image->format == VK_FORMAT_R8_UINT && (DepthFormatAspectMask(src_image->format) & VK_IMAGE_ASPECT_STENCIL_BIT) != 0u;
+	if (!to_stencil && !from_stencil)
+	{
+		return false;
+	}
+	return CopyPlaneBits(buffer, src_image, to_stencil ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_STENCIL_BIT, dst_image,
+	                     to_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 1u, dst_layout);
 }
 
 void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch, uint64_t src_layout,

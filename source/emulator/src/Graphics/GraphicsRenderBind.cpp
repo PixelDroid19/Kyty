@@ -3871,7 +3871,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		// An 8-bit unsigned read of a live depth target's stencil plane reads the
 		// stencil the device wrote; guest memory holds only the plane's last upload.
-		if (!lookups_missed && gen5 && check_depth_texture && fmt == 5u && !arrayed_2d && !three_dimensional)
+		// A dispatch's storage view of it binds a colour copy, as a depth plane's does.
+		const bool stencil_storage_view = compute_stage && textures.desc[i].textures2d_without_sampler && levels == 1u && base_level == 0u &&
+		                                  view_layers == 1u && base_array == 0u;
+		if (!lookups_missed && gen5 && check_depth_texture && fmt == 5u && (!arrayed_2d || stencil_storage_view) && !three_dimensional)
 		{
 			tex = FindStencilPlane(buffer, addr, size.size, width, height);
 			if (tex != nullptr)
@@ -3879,6 +3882,20 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				depth_texture   = true;
 				stencil_texture = true;
 				materialize     = "stencil-plane";
+				if (stencil_storage_view && tex->samples == VK_SAMPLE_COUNT_1_BIT && !tex->IsResolutionScaled())
+				{
+					auto* depth_image = static_cast<DepthStencilVulkanImage*>(tex);
+					auto* plane       = DepthStencilBufferGetStencilStoragePlane(g_render_ctx->GetGraphicCtx(), depth_image);
+					if (!UtilCopyStencilBits(buffer, depth_image, plane, static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL)))
+					{
+						EXIT("stencil storage plane seed failed: extent=%ux%u format=%u layout=%u\n", depth_image->extent.width,
+						     depth_image->extent.height, static_cast<uint32_t>(depth_image->format),
+						     static_cast<uint32_t>(depth_image->layout));
+					}
+					buffer->DeferStencilPlaneStoreBack(depth_image);
+					tex         = plane;
+					materialize = "stencil-storage-plane";
+				}
 			}
 		}
 		if (!lookups_missed && check_depth_texture && !stencil_texture)

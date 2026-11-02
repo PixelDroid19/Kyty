@@ -162,19 +162,12 @@ VkFormat DepthStencilBufferStoragePlaneFormat(VkFormat depth_format)
 	}
 }
 
-StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+static StorageTextureVulkanImage* CreateStoragePlane(GraphicContext* ctx, const DepthStencilVulkanImage* depth, VkFormat format,
+                                                     VulkanMemory* memory)
 {
-	EXIT_IF(ctx == nullptr || depth == nullptr);
-	static std::mutex          create_mutex;
-	std::lock_guard<std::mutex> lock(create_mutex);
-	if (depth->storage_plane != nullptr)
-	{
-		return depth->storage_plane;
-	}
-
 	auto* plane = new StorageTextureVulkanImage;
 	plane->SetNativeExtent(depth->extent.width, depth->extent.height);
-	plane->format       = DepthStencilBufferStoragePlaneFormat(depth->format);
+	plane->format       = format;
 	plane->image        = nullptr;
 	plane->layout       = VK_IMAGE_LAYOUT_UNDEFINED;
 	plane->array_layers = 1u;
@@ -188,7 +181,7 @@ StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx
 	image_descriptor.extent = {depth->extent.width, depth->extent.height, 1u};
 	image_descriptor.format = plane->format;
 	image_descriptor.usage  = StorageTextureGetImageUsage();
-	if (!VulkanCreateDeviceImage(ctx, VulkanBuildImageCreateInfo(image_descriptor), plane, &depth->storage_plane_memory))
+	if (!VulkanCreateDeviceImage(ctx, VulkanBuildImageCreateInfo(image_descriptor), plane, memory))
 	{
 		EXIT("depth storage plane image creation failed: extent=%ux%u\n", depth->extent.width, depth->extent.height);
 	}
@@ -200,14 +193,36 @@ StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx
 	view_descriptor.view_type   = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
 	view_descriptor.layer_count = 1u;
 	EXIT_IF(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &plane->image_view[VulkanImage::VIEW_STORAGE_ARRAY]));
-
-	depth->storage_plane = plane;
 	return plane;
 }
 
-static void DeleteStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
 {
-	auto* plane = depth->storage_plane;
+	EXIT_IF(ctx == nullptr || depth == nullptr);
+	static std::mutex          create_mutex;
+	std::lock_guard<std::mutex> lock(create_mutex);
+	if (depth->storage_plane == nullptr)
+	{
+		depth->storage_plane = CreateStoragePlane(ctx, depth, DepthStencilBufferStoragePlaneFormat(depth->format), &depth->storage_plane_memory);
+	}
+	return depth->storage_plane;
+}
+
+StorageTextureVulkanImage* DepthStencilBufferGetStencilStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+{
+	EXIT_IF(ctx == nullptr || depth == nullptr);
+	static std::mutex          create_mutex;
+	std::lock_guard<std::mutex> lock(create_mutex);
+	if (depth->stencil_storage_plane == nullptr)
+	{
+		depth->stencil_storage_plane = CreateStoragePlane(ctx, depth, VK_FORMAT_R8_UINT, &depth->stencil_storage_plane_memory);
+	}
+	return depth->stencil_storage_plane;
+}
+
+static void DeleteStoragePlane(GraphicContext* ctx, StorageTextureVulkanImage** plane_slot, VulkanMemory* memory)
+{
+	auto* plane = *plane_slot;
 	if (plane == nullptr)
 	{
 		return;
@@ -221,9 +236,9 @@ static void DeleteStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* dep
 		}
 	}
 	vkDestroyImage(ctx->device, plane->image, nullptr);
-	VulkanFree(ctx, &depth->storage_plane_memory);
+	VulkanFree(ctx, memory);
 	delete plane;
-	depth->storage_plane = nullptr;
+	*plane_slot = nullptr;
 }
 
 DepthSliceArray* DepthStencilBufferGetSliceArray(GraphicContext* ctx, DepthStencilVulkanImage* owner, uint32_t width, uint32_t height,
@@ -324,7 +339,8 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 	EXIT_IF(ctx == nullptr);
 
 	DeleteFramebuffer(vk_obj);
-	DeleteStoragePlane(ctx, vk_obj);
+	DeleteStoragePlane(ctx, &vk_obj->storage_plane, &vk_obj->storage_plane_memory);
+	DeleteStoragePlane(ctx, &vk_obj->stencil_storage_plane, &vk_obj->stencil_storage_plane_memory);
 	DeleteSliceArrays(ctx, vk_obj);
 
 	for (auto& view: vk_obj->image_view)

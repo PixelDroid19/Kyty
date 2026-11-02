@@ -423,6 +423,9 @@ struct DepthStencilVulkanImage: public VulkanImage
 	// first use and destroyed with this image.
 	StorageTextureVulkanImage* storage_plane = nullptr;
 	VulkanMemory               storage_plane_memory;
+	// R8 copy of the stencil plane, for the same reason and with the same lifetime.
+	StorageTextureVulkanImage* stencil_storage_plane = nullptr;
+	VulkanMemory               stencil_storage_plane_memory;
 	// DB slice index of the last bind as a render target: the guest bytes of its depth plane XOR it into every
 	// 64 KiB block (Tile.h).
 	uint32_t depth_slice = 0;

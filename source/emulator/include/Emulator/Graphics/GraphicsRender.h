@@ -734,6 +734,7 @@ public:
 	// A dispatch binds a storage view of a depth plane through the depth image's colour copy of it
 	// (DepthStencilVulkanImage::storage_plane); the copy returns to the depth plane once the dispatch is recorded.
 	void DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth);
+	void DeferStencilPlaneStoreBack(DepthStencilVulkanImage* depth);
 	void StoreBackDepthPlanes();
 	// A submission of another queue this recording waits for on the device before it executes, through that
 	// queue's timeline value; later submissions of a queue complete after earlier ones.
@@ -780,6 +781,7 @@ private:
 	bool                         m_resetting = false;
 	std::optional<OpenRenderPass> m_open_render_pass;
 	std::vector<DepthStencilVulkanImage*> m_depth_plane_store_backs;
+	std::vector<DepthStencilVulkanImage*> m_stencil_plane_store_backs;
 	std::vector<SubmissionId>             m_device_awaited;
 	std::vector<VkSemaphore>              m_device_wait_semaphores;
 	std::vector<uint64_t>                 m_device_wait_values;

@@ -881,6 +881,8 @@ void UtilTransitionColorImageLayout(CommandBuffer* buffer, VulkanImage* image, u
 // B10G11R11 color. Returns false for any other pair.
 // A depth destination keeps every word only on a device with unrestricted depth (VUID-VkCopyBufferToImageInfo2-pRegions-07931).
 [[nodiscard]] bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout);
+// The same copy between the stencil plane of a depth image and an R8 color image. Returns false for any other pair.
+[[nodiscard]] bool UtilCopyStencilBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter);
 // Blit the whole source into [0, dst_extent) of dst_image, which ends in TRANSFER_DST_OPTIMAL (its prior contents are discarded).
 void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_image, VkExtent2D dst_extent, VkFilter filter);

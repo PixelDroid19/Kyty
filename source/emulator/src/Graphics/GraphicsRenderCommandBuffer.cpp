@@ -2456,6 +2456,15 @@ void CommandBuffer::DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth)
 	}
 }
 
+void CommandBuffer::DeferStencilPlaneStoreBack(DepthStencilVulkanImage* depth)
+{
+	EXIT_IF(depth == nullptr || depth->stencil_storage_plane == nullptr);
+	if (std::find(m_stencil_plane_store_backs.begin(), m_stencil_plane_store_backs.end(), depth) == m_stencil_plane_store_backs.end())
+	{
+		m_stencil_plane_store_backs.push_back(depth);
+	}
+}
+
 void CommandBuffer::StoreBackDepthPlanes()
 {
 	for (auto* depth: m_depth_plane_store_backs)
@@ -2468,6 +2477,16 @@ void CommandBuffer::StoreBackDepthPlanes()
 		depth->content_stamp = VulkanImageNextStamp();
 	}
 	m_depth_plane_store_backs.clear();
+	for (auto* depth: m_stencil_plane_store_backs)
+	{
+		if (!UtilCopyStencilBits(this, depth->stencil_storage_plane, depth, static_cast<uint64_t>(depth->layout)))
+		{
+			EXIT("stencil storage plane store-back failed: extent=%ux%u format=%u\n", depth->extent.width, depth->extent.height,
+			     static_cast<uint32_t>(depth->format));
+		}
+		depth->content_stamp = VulkanImageNextStamp();
+	}
+	m_stencil_plane_store_backs.clear();
 }
 
 void CommandBuffer::End()
