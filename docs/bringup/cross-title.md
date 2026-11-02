@@ -5806,7 +5806,7 @@ loss of 2-5 % inside a same-code spread of about 2.5 fps, spent on a few small o
 right after a 16 MB buffer, for one). The first run after a rebuild measures 15-26 fps: pipeline creation, not this rule.
 
 Strict matrix, 33 folders: 27 interactive, 1 presenting, 5 invalid, 0 crashes, against 25, 0, 5 and 2 host crashes before.
-`PPSA03969 - F.I.S.T.: Forged In Shadow Torch.` went from a host crash to interactive; its boot crash was not traced separately, so sharing this
+`PPSA03969 - F.I.S.T.: Forged In Shadow Torch` went from a host crash to interactive; its boot crash was not traced separately, so sharing this
 cause is inferred from the change. On an earlier revision of the rule one `Blasphemous 2` boot exited 0 at launch; it did not
 repeat in 2 reruns or in this matrix, unexplained. `PPSA09809` presented 15 in this matrix against 276 in the earlier one:
 the window ends at stability, and the 60 s run above shows the rate.
@@ -5819,6 +5819,9 @@ Open: the two edge lines of objects of 64 KiB or more remain exposed on Arc. Rej
 `PPSA09809` and type 11 in `PPSA21567`; a rule keyed on the type could recover the Astro cost, but the meaning of the types
 has no evidence yet and the rule would leave CPU-hot data in type 11 unprotected, so it was not adopted. The cause inside the
 Arc memory path was not identified; the test shows the behavior only.
+
+`pthread_getspecific` is not a performance lever: in a 20 s profile of the `PPSA21567 - Astro Bot` hub it and the mutex under it
+take about 1.5 % of process samples, spread over guest workers, and the command processor thread holds 50 of the 330 mutex samples.
 
 The preset weak-pointer fault recorded in `docs/titles/mechanical-fist-platformer.md` also got more frequent as the cache
 warmed: 2 faults in 4 warm clean runs, at under 30 s, and none in the one run with `perf` attached. Not retested as its own
