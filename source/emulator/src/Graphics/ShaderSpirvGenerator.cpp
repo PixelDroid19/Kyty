@@ -3326,7 +3326,7 @@ void Spirv::FindConstants()
 			AddConstantUint(value);
 		}
 	}
-	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU16U32})) { AddConstantUint(0xffffu); }
+	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU16U32}) || spirv_uses_i16(m_code)) { AddConstantUint(0xffffu); }
 	if (m_code.HasAnyOf({ShaderInstructionType::VAddI16, ShaderInstructionType::VAddU16, ShaderInstructionType::VSubI16,
 	                     ShaderInstructionType::VSubU16, ShaderInstructionType::VMulI16, ShaderInstructionType::VMulU16,
 	                     ShaderInstructionType::VMinI16, ShaderInstructionType::VMinU16, ShaderInstructionType::VMaxI16,

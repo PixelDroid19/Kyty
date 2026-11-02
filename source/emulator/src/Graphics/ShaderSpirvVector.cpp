@@ -2572,8 +2572,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpU16_XXX_SmaskVsrc0Vsrc1)
 	static const char* text = R"(
           <load0>
           <load1>
-          %i0x_<index> = OpBitwiseAnd %uint %t0_<index> %uint_0xffff
-          %i1x_<index> = OpBitwiseAnd %uint %t1_<index> %uint_0xffff
+          %i0x_<index> = OpBitwiseAnd %uint %t0_<index> %<mask>
+          %i1x_<index> = OpBitwiseAnd %uint %t1_<index> %<mask>
           %t2_<index> = <param> %bool %i0x_<index> %i1x_<index>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
           OpStore %<dst0> %t3_<index>
@@ -2586,6 +2586,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpU16_XXX_SmaskVsrc0Vsrc1)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<param>", param[0])
+	                   .ReplaceStr("<mask>", spirv->GetConstantUint(0xffffu))
 	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
@@ -2637,8 +2638,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx16_XXX_SmaskVsrc0Vsrc1)
 	} else
 	{
 		extend = R"(
-          %i0x_<index> = OpBitwiseAnd %uint %t0_<index> %uint_0xffff
-          %i1x_<index> = OpBitwiseAnd %uint %t1_<index> %uint_0xffff
+          %i0x_<index> = OpBitwiseAnd %uint %t0_<index> %<mask>
+          %i1x_<index> = OpBitwiseAnd %uint %t1_<index> %<mask>
 )";
 	}
 	*dst_source += String8(text)
@@ -2648,6 +2649,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx16_XXX_SmaskVsrc0Vsrc1)
 	                   .ReplaceStr("<extend1>", "")
 	                   .ReplaceStr("<predicate>", param[0])
 	                   .ReplaceStr("<execz>", EXECZ)
+	                   .ReplaceStr("<mask>", spirv->GetConstantUint(0xffffu))
 	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
