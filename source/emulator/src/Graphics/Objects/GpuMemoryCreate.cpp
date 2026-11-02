@@ -1514,7 +1514,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				overlap = true;
 			} else if (GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type) ||
 			           links_cpu_texture(h, obj) ||
-			           GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type))
+			           GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type) ||
+			           GpuMemoryAllowsStorageTextureInsideWritableStorageUpload(o.object.type, obj.relation, o.content_origin,
+			                                                                    o.device_write_time >= o.gpu_update_time, info.type))
 			{
 				overlap = true;
 			} else if (info.type == GpuMemoryObjectType::StorageTexture &&

@@ -486,6 +486,20 @@ inline bool GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType ex
 	        relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin);
 }
 
+// Incoming StorageTexture inside a CPU-uploaded StorageBuffer whose current use
+// can still write and which holds no device write yet (captured: a 0x560000
+// view at the base of a 0x1a28000 buffer). The view seeds from guest memory;
+// queue order keeps the buffer's use first and its write-back, if the bytes
+// changed, invalidates the linked view.
+inline bool GpuMemoryAllowsStorageTextureInsideWritableStorageUpload(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                                    GpuMemoryContentOrigin existing_origin, bool existing_has_device_write,
+                                                                    GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::StorageBuffer && relation == GpuMemoryOverlapType::Contains &&
+	       existing_origin == GpuMemoryContentOrigin::CpuUpload && !existing_has_device_write &&
+	       incoming_type == GpuMemoryObjectType::StorageTexture;
+}
+
 // Incoming StorageTexture fully inside a live RenderTexture allocation.
 // Captured worldmap load: a 240x135 fmt-64 storage view (0x43800) inside a
 // 2432x1368 R16G16B16A16 target. The guest reuses part of the target's tiled
