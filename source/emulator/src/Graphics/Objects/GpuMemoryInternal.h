@@ -46,6 +46,9 @@
 
 namespace Kyty::Libs::Graphics {
 
+// Changes when a device-address read may have new storage work; see StorageScanMemo.
+extern std::atomic<uint64_t> g_storage_scan_generation;
+
 struct StorageTextureRawRenderSource;
 
 constexpr int VADDR_BLOCKS_MAX = GPU_MEMORY_RANGE_SET_MAX;
@@ -537,6 +540,24 @@ private:
 	// the per-draw pending-write scans, which titles with thousands of live
 	// storage buffers otherwise pay in full for every device-address draw.
 	std::set<std::pair<int, int>> m_writable_storage;
+	// The per-draw scans above mostly repeat with nothing new to do. A consumer's
+	// scan that found nothing stays true until g_storage_scan_generation changes,
+	// except for the in-place objects bound since, listed in m_storage_scan_changes;
+	// the write-back scan skips those while they are in flight, so it waits for a
+	// completion instead. Every scan asks about the same device-address ranges.
+	struct StorageScanMemo
+	{
+		uint32_t queue                  = 0;
+		uint64_t pending_generation     = 0;
+		size_t   pending_changes_seen   = 0;
+		uint64_t write_back_generation  = 0;
+		uint64_t write_back_completions = 0;
+	};
+	std::vector<StorageScanMemo>     m_storage_scan_memos;
+	std::vector<std::pair<int, int>> m_storage_scan_changes;
+	StorageScanMemo&                 StorageScanMemoFor(GpuQueueId consumer);
+	void                             RecordStorageScanChange(int heap_id, int object_id);
+	[[nodiscard]] bool               StorageScanCandidate(int heap_id, int object_id, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const;
 	// (heap id, object id) of every live object whose GPU writes are not yet
 	// written back (in use, writable, with a write-back): the only candidates
 	// of a completed-submission write-back, which otherwise visits every object

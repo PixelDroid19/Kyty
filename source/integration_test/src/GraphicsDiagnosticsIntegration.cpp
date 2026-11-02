@@ -399,9 +399,12 @@ struct ProvenanceContractStorageGpuObject final: public GpuObject
 
 	create_func_t GetCreateFunc() const override
 	{
-		return [](GraphicContext* /*ctx*/, const uint64_t* params, const uint64_t* /*vaddr*/, const uint64_t* /*size*/,
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, const uint64_t* /*vaddr*/, const uint64_t* /*size*/,
 		          int /*vaddr_num*/, VulkanMemory* /*mem*/) -> void*
-		{ return reinterpret_cast<void*>(params[0]); };
+		{
+			static VulkanBuffer storage {};
+			return &storage;
+		};
 	}
 
 	create_from_objects_func_t GetCreateFromObjectsFunc() const override { return nullptr; }

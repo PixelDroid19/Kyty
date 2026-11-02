@@ -1395,6 +1395,8 @@ struct GpuMemoryStoragePublication
 // there instead of being reported; uses of other queues that the consumer's
 // recording awaits on the device (`device_awaited`) are in that order too. A use
 // of another queue the recording does not await yet is reported first.
+// Device-address ranges gained a range the storage scans below have not seen. Takes no lock.
+void GpuMemoryInvalidateStorageScans();
 [[nodiscard]] bool GpuMemoryPendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
                                                     const std::vector<SubmissionId>&          device_awaited,
                                                     std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);

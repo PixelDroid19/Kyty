@@ -466,31 +466,38 @@ void GpuMemory::Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
 }
 
+bool GpuMemory::StorageScanCandidate(int heap_id, int object_id, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const
+{
+	const auto& object = m_heaps[heap_id].objects[object_id];
+	EXIT_IF(object.free);
+	const auto& info = object.info;
+	if (!info.in_use || info.read_only || info.object.obj == nullptr)
+	{
+		return false;
+	}
+	if (info.guest_published_write_uses != 0u && info.guest_published_write_uses == info.write_uses &&
+	    info.guest_published_queue == consumer.Value())
+	{
+		return false;
+	}
+	for (int block = 0; block < object.block.vaddr_num; block++)
+	{
+		if (object.block.size[block] != 0 && ranges(object.block.vaddr[block], object.block.size[block]))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const
 {
 	std::vector<std::pair<int, int>> found;
-	const auto&                      heaps = m_heaps;
 	for (const auto& [heap_id, object_id]: m_writable_storage)
 	{
-		const auto& object = heaps[heap_id].objects[object_id];
-		EXIT_IF(object.free);
-		const auto& info = object.info;
-		if (!info.in_use || info.read_only || info.object.obj == nullptr)
+		if (StorageScanCandidate(heap_id, object_id, ranges, consumer))
 		{
-			continue;
-		}
-		if (info.guest_published_write_uses != 0u && info.guest_published_write_uses == info.write_uses &&
-		    info.guest_published_queue == consumer.Value())
-		{
-			continue;
-		}
-		for (int block = 0; block < object.block.vaddr_num; block++)
-		{
-			if (object.block.size[block] != 0 && ranges(object.block.vaddr[block], object.block.size[block]))
-			{
-				found.emplace_back(heap_id, object_id);
-				break;
-			}
+			found.emplace_back(heap_id, object_id);
 		}
 	}
 	return found;
@@ -535,8 +542,28 @@ bool GpuMemory::PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueu
 	};
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
-	const auto&     heaps = m_heaps;
-	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges, consumer))
+	auto&           memo       = StorageScanMemoFor(consumer);
+	const uint64_t  generation = g_storage_scan_generation.load(std::memory_order_acquire);
+	const size_t    changes    = m_storage_scan_changes.size();
+	std::vector<std::pair<int, int>> candidates;
+	if (memo.pending_generation != generation)
+	{
+		candidates = CollectWritableStorage(ranges, consumer);
+	} else
+	{
+		for (size_t i = memo.pending_changes_seen; i < changes; i++)
+		{
+			const auto& [heap_id, object_id] = m_storage_scan_changes[i];
+			if (m_writable_storage.count({heap_id, object_id}) != 0u && StorageScanCandidate(heap_id, object_id, ranges, consumer))
+			{
+				candidates.emplace_back(heap_id, object_id);
+			}
+		}
+		std::sort(candidates.begin(), candidates.end());
+		candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+	}
+	const auto& heaps = m_heaps;
+	for (const auto& [heap_id, object_id]: candidates)
 	{
 		const auto&  object = heaps[heap_id].objects[object_id];
 		SubmissionId pending;
@@ -575,6 +602,11 @@ bool GpuMemory::PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueu
 		publication.size       = object.block.size[0];
 		publication.dependency = pending;
 		publishable->push_back(publication);
+	}
+	if (publishable == nullptr || publishable->empty())
+	{
+		memo.pending_generation   = generation;
+		memo.pending_changes_seen = changes;
 	}
 	return false;
 }
@@ -714,7 +746,15 @@ void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQ
 	EXIT_IF(ctx == nullptr);
 	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard    lock(m_mutex);
+	auto&          memo        = StorageScanMemoFor(consumer);
+	const uint64_t generation  = g_storage_scan_generation.load(std::memory_order_acquire);
+	const uint64_t completions = m_deferred_deletions.CompletionCount();
+	if (memo.write_back_generation == generation && memo.write_back_completions == completions)
+	{
+		return;
+	}
 	Vector<Destructor> destructors;
+	bool               nothing_written = true;
 	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges, consumer))
 	{
 		// Consumers do not wait for an in-place object; its completion writes it back.
@@ -724,7 +764,13 @@ void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQ
 		{
 			continue;
 		}
+		nothing_written = false;
 		WriteBackObjectLocked(ctx, heap_id, object_id, &destructors);
+	}
+	if (nothing_written)
+	{
+		memo.write_back_generation  = generation;
+		memo.write_back_completions = completions;
 	}
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
 }

@@ -93,6 +93,7 @@ GpuDeferredDeletionResult GpuDeferredDeletionQueue::CompleteSubmission(Submissio
 		{
 			completed->sequence = std::max(completed->sequence, submission.sequence);
 		}
+		m_completions.fetch_add(1, std::memory_order_release);
 	}
 	DrainReady();
 	return GpuDeferredDeletionResult::Success;

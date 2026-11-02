@@ -1310,6 +1310,7 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physica
 	}
 	registry.dirty              = true;
 	registry.population_scanned = false;
+	GpuMemoryInvalidateStorageScans();
 }
 
 void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size)

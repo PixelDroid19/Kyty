@@ -1674,6 +1674,8 @@ bool                    g_versioned_gpu_object_block_second   = false;
 bool                    g_versioned_gpu_object_second_entered = false;
 bool                    g_versioned_gpu_object_release_second = false;
 
+static StorageVulkanBuffer g_test_gpu_object_backing;
+
 struct TestGpuObject: public GpuObject
 {
 	explicit TestGpuObject(GpuMemoryObjectType object_type = GpuMemoryObjectType::StorageBuffer, bool is_read_only = false,
@@ -1690,7 +1692,7 @@ struct TestGpuObject: public GpuObject
 	create_func_t GetCreateFunc() const override
 	{
 		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, const uint64_t* /*vaddr*/, const uint64_t* /*size*/,
-		          int /*vaddr_num*/, VulkanMemory* /*mem*/) -> void* { return reinterpret_cast<void*>(0x51515151ull); };
+		          int /*vaddr_num*/, VulkanMemory* /*mem*/) -> void* { return &g_test_gpu_object_backing; };
 	}
 
 	create_from_objects_func_t GetCreateFromObjectsFunc() const override { return nullptr; }
@@ -1700,7 +1702,7 @@ struct TestGpuObject: public GpuObject
 	{
 		return [](GraphicContext* /*ctx*/, void* obj, VulkanMemory* /*mem*/)
 		{
-			if (obj == reinterpret_cast<void*>(0x51515151ull))
+			if (obj == static_cast<void*>(&g_test_gpu_object_backing))
 			{
 				g_test_gpu_object_deletes++;
 			}
@@ -2435,7 +2437,7 @@ TEST(EmulatorGraphicsState, GpuMemoryFindForSubmissionDefersDeletionUntilComplet
 	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, obj_addr, obj_size, TestGpuObject()), nullptr);
 	const auto found = GpuMemoryFindObjectsForSubmission(submission, obj_addr, obj_size, GpuMemoryObjectType::StorageBuffer, true, false);
 	ASSERT_EQ(found.Size(), 1u);
-	EXPECT_EQ(found[0].obj, reinterpret_cast<void*>(0x51515151ull));
+	EXPECT_EQ(found[0].obj, static_cast<void*>(&g_test_gpu_object_backing));
 
 	GpuMemoryFree(&ctx, obj_addr, obj_size);
 

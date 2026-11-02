@@ -268,6 +268,7 @@ void GpuMemory::VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vec
 	current_info.object.obj      = new_object;
 	current_info.mem             = new_memory;
 	current_info.submission_uses = {};
+	g_storage_scan_generation.fetch_add(1, std::memory_order_acq_rel);
 	EXIT_IF(current_info.backing_generation == UINT64_MAX);
 	current_info.backing_generation++;
 	destructors->Add(retired);
@@ -1072,6 +1073,12 @@ String GpuMemory::create_dbg_parents(int heap_id, const Vector<OverlappedBlock>&
 void GpuMemory::RecordUse(ObjectInfo* object, SubmissionId submission)
 {
 	EXIT_IF(object == nullptr);
+	// A completed copy-backed object's new use is pending work; an in-place object's bytes are already guest memory.
+	if (!object->read_only && object->object.type == GpuMemoryObjectType::StorageBuffer && object->object.obj != nullptr &&
+	    !static_cast<const VulkanBuffer*>(object->object.obj)->guest_in_place)
+	{
+		g_storage_scan_generation.fetch_add(1, std::memory_order_acq_rel);
+	}
 	if (object->submission_uses.RecordUse(submission) != GpuDeferredDeletionResult::Success)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8,

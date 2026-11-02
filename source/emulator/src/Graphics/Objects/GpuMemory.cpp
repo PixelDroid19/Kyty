@@ -334,6 +334,41 @@ void GpuMemory::ForgetHeapStorageObjects(int removed_heap_id)
 	m_storage_objects    = shift(m_storage_objects);
 	m_writable_storage   = shift(m_writable_storage);
 	m_pending_write_back = shift(m_pending_write_back);
+	m_storage_scan_changes.clear();
+	GpuMemoryInvalidateStorageScans();
+}
+
+std::atomic<uint64_t> g_storage_scan_generation {1};
+
+GpuMemory::StorageScanMemo& GpuMemory::StorageScanMemoFor(GpuQueueId consumer)
+{
+	for (auto& memo: m_storage_scan_memos)
+	{
+		if (memo.queue == consumer.Value())
+		{
+			return memo;
+		}
+	}
+	m_storage_scan_memos.push_back({consumer.Value()});
+	return m_storage_scan_memos.back();
+}
+
+void GpuMemory::RecordStorageScanChange(int heap_id, int object_id)
+{
+	static constexpr size_t MAX_CHANGES = 4096;
+	const auto*             storage     = static_cast<const VulkanBuffer*>(m_heaps[heap_id].objects[object_id].info.object.obj);
+	if (!storage->guest_in_place || m_storage_scan_changes.size() >= MAX_CHANGES)
+	{
+		m_storage_scan_changes.clear();
+		GpuMemoryInvalidateStorageScans();
+		return;
+	}
+	m_storage_scan_changes.emplace_back(heap_id, object_id);
+}
+
+void GpuMemoryInvalidateStorageScans()
+{
+	g_storage_scan_generation.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void GpuMemory::SyncWriteBackIndexes(int heap_id, int object_id)
@@ -352,6 +387,7 @@ void GpuMemory::SyncWriteBackIndexes(int heap_id, int object_id)
 	if (pending && object.info.object.obj != nullptr && m_storage_objects.count(key) != 0u)
 	{
 		m_writable_storage.insert(key);
+		RecordStorageScanChange(heap_id, object_id);
 	} else
 	{
 		m_writable_storage.erase(key);
