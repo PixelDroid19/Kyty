@@ -1434,7 +1434,7 @@ void PipelineCache::SaveDriverCacheIfDue()
 	    m_driver_cache_attempted_once
 	        ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now - m_last_driver_cache_attempt).count())
 	        : 0u;
-	if (!PipelineCacheStoreCheckpointDue(m_driver_cache_dirty, m_driver_cache_attempted_once, elapsed_seconds))
+	if (!PipelineCacheStoreCheckpointDue(m_driver_cache_dirty, m_driver_cache_attempted_once, elapsed_seconds, m_driver_cache_bytes_attempted))
 	{
 		return;
 	}

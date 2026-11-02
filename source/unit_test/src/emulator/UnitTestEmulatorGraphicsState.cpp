@@ -2023,10 +2023,13 @@ TEST(EmulatorGraphicsState, PipelineCacheRejectsMalformedOrForeignData)
 
 TEST(EmulatorGraphicsState, PipelineCacheCheckpointsAreDirtyAndRateLimited)
 {
-	EXPECT_FALSE(PipelineCacheStoreCheckpointDue(false, false, 0));
-	EXPECT_TRUE(PipelineCacheStoreCheckpointDue(true, false, 0));
-	EXPECT_FALSE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds() - 1));
-	EXPECT_TRUE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds()));
+	EXPECT_FALSE(PipelineCacheStoreCheckpointDue(false, false, 0, 0));
+	EXPECT_TRUE(PipelineCacheStoreCheckpointDue(true, false, 0, 0));
+	EXPECT_FALSE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds(0) - 1, 0));
+	EXPECT_TRUE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds(0), 0));
+	const size_t written = 256u * 1024u * 1024u;
+	EXPECT_FALSE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds(0), written));
+	EXPECT_TRUE(PipelineCacheStoreCheckpointDue(true, true, PipelineCacheStoreCheckpointSeconds(written), written));
 
 	const size_t budget = PipelineCacheStoreSessionWriteBudgetBytes();
 	EXPECT_TRUE(PipelineCacheStoreWriteBudgetAllows(0, budget));
