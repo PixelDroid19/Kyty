@@ -5858,6 +5858,40 @@ was not re-measured in this run.
 transient storage textures; zero-seeded guest bytes change their hash each frame). The route stops at this settings
 screen, so gameplay of this title has not been measured.
 
+## Attribute words in shader identity for `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` (2026-11-02)
+
+Observed: the title compiled for minutes on every boot and its SPIR-V store kept
+growing (105.8, 127.6, 175.7 MB over three runs). 140 s run with timed creates: 157
+driver compiles for 81.5 s; 1038 creates held 299 guest VS as 626 variants, 308 guest
+PS as 539 variants, 340 guest pairs as 889 variant pairs. Driver hits cost about 0 ms,
+so extended dynamic state is not the lever for this title.
+
+Cause: two equal-size store entries of one program differed only in `OpConstant`
+values with no reference in the module, the attribute-table words. Bits 27-31 of those
+words change (`0x2540`, `0xc0002540`, `0xf8002540`) with the low 27 bits fixed. They fed
+both the shader id and the module bytes, so the driver saw a new program. Whether the
+bits are stale guest memory is not established.
+
+Changed:
+
+- When a program uses guest device addresses, a table `S_LOAD` reads guest memory at
+  run time and the snapshot never reaches the module, so the snapshot is cleared. A
+  load mapped by a dynamic record or an extended base keeps it.
+- Unwritten pixel targets clear their stale order and number; no emitter reads them
+  after the mode check.
+- `OutOfBounds` left the vertex id: only logs and traces read it.
+
+Verified (Intel Arc A770, ANV 26.2.5): same 340 guest pairs now give 333 VS, 377 PS and
+444 variant pairs. Two priming runs, then a clean warm run reaches gameplay at t=50 s
+instead of 110-130 s, with no 0 fps window and 11.7 fps. Capture correct. Unit suites
+pass. One boot crash in the five runs (exit 139 before the agent endpoint, no dump),
+consistent with the open NULL guest pointer crash but not proven to be it.
+
+Open: vertex programs without guest device addresses load the words as live constants;
+their remaining variants differ only in bits 27-31. Masking needs a demanded-bits proof
+on the guest consumers. The priming cost is one cold pass for every title that used
+these ids. AMD and NVIDIA not run.
+
 ## Render engine hang evidence for `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` (2026-11-01)
 
 About 1 run in 6 reset the render engine (`Timedout job`, `vkWaitForFences` -4 after about 680 ms). Two kernel
