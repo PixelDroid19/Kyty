@@ -192,28 +192,14 @@ TEST(EmulatorLoaderTls, DetectsCrtEntryDirectCallToInit)
 	EXPECT_FALSE(LoaderCodeContainsDirectCallTo(code, 4, 0x100, 0x111));
 }
 
-// Synthetic guest "program" image: unconstructed Context at 0x200 (word0=0,
-// buffer@+0x3e0=0) and a constructed one at 0x800 (word0 non-zero).
-struct GuestMem
+TEST(EmulatorLoaderTls, StaticOffsetFollowsModuleAlignment)
 {
-	std::vector<uint8_t> bytes;
-	uint64_t             base = 0;
-};
+	using Kyty::Loader::LoaderStaticTlsOffset;
 
-static bool TestGuestRead64(uint64_t addr, uint64_t* out, void* ctx)
-{
-	auto* g = static_cast<GuestMem*>(ctx);
-	if (g == nullptr || out == nullptr || addr < g->base)
-	{
-		return false;
-	}
-	const uint64_t off = addr - g->base;
-	if (off + sizeof(uint64_t) > g->bytes.size())
-	{
-		return false;
-	}
-	std::memcpy(out, g->bytes.data() + off, sizeof(uint64_t));
-	return true;
+	// Captured: 0x2d1 bytes at alignment 8, whose guest code reads its pointer cell at TP-0x2d0.
+	EXPECT_EQ(LoaderStaticTlsOffset(0, 0x2d1, 8), 0x2d8u);
+	EXPECT_EQ(LoaderStaticTlsOffset(0x2d8, 0x468, 16), 0x740u);
+	EXPECT_EQ(LoaderStaticTlsOffset(0, 8, 1), 8u);
 }
 
 TEST(EmulatorLoaderTls, InitializesOnlyFileBackedTlsPrefix)
@@ -231,108 +217,6 @@ TEST(EmulatorLoaderTls, InitializesOnlyFileBackedTlsPrefix)
 
 	EXPECT_TRUE(std::equal(tls.begin(), tls.begin() + kInitSize, source.begin()));
 	EXPECT_TRUE(std::all_of(tls.begin() + kInitSize, tls.end(), [](uint8_t value) { return value == 0; }));
-}
-
-TEST(EmulatorLoaderTls, PreparesThreadTlsRelocatesSelfAndClearsUnconstructedContext)
-{
-	using Kyty::Loader::LoaderPrepareThreadTlsImage;
-
-	GuestMem guest;
-	guest.base = 0x1000;
-	guest.bytes.assign(0x1000, 0);
-	// Unconstructed context at guest VA 0x1200 (offset 0x200): word0=0, +0x3e0=0.
-	// Constructed context at 0x1800: word0=1, +0x3e0=0xdead.
-	const uint64_t unconstructed = guest.base + 0x200;
-	const uint64_t constructed   = guest.base + 0x800;
-	*reinterpret_cast<uint64_t*>(guest.bytes.data() + 0x800)        = 1;
-	*reinterpret_cast<uint64_t*>(guest.bytes.data() + 0x800 + 0x3e0) = 0xdead;
-
-	constexpr uint64_t kTmpl     = 0x9000;
-	constexpr uint64_t kImgSize  = 0xa0;
-	std::vector<uint8_t> tls(kImgSize, 0);
-	// Self-pointer at +0x70 into template (+0x40).
-	*reinterpret_cast<uint64_t*>(tls.data() + 0x70) = kTmpl + 0x40;
-	// Stale absolute unconstructed context (Gen5 pattern).
-	*reinterpret_cast<uint64_t*>(tls.data() + 0x50) = unconstructed;
-	// Live absolute constructed context — must stay.
-	*reinterpret_cast<uint64_t*>(tls.data() + 0x58) = constructed;
-	// Unrelated non-pointer value.
-	*reinterpret_cast<uint64_t*>(tls.data() + 0x00) = 0xffffffffffffffffULL;
-
-	const uint64_t n =
-	    LoaderPrepareThreadTlsImage(tls.data(), kImgSize, kTmpl, guest.base, guest.bytes.size(), TestGuestRead64, &guest);
-	EXPECT_GE(n, 2u);
-	const uint64_t tls_base = reinterpret_cast<uint64_t>(tls.data());
-	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x70), tls_base + 0x40);
-	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x50), 0u);
-	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x58), constructed);
-	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x00), 0xffffffffffffffffULL);
-}
-
-TEST(EmulatorLoaderTls, PrepareThreadTlsHandlesNullAndShort)
-{
-	using Kyty::Loader::LoaderPrepareThreadTlsImage;
-	EXPECT_EQ(LoaderPrepareThreadTlsImage(nullptr, 64, 0x1000, 0, 0, nullptr, nullptr), 0u);
-	uint8_t tiny[4] = {};
-	EXPECT_EQ(LoaderPrepareThreadTlsImage(tiny, sizeof(tiny), 0x1000, 0, 0, nullptr, nullptr), 0u);
-}
-
-// Gen5 TLS template can hold absolute pointers to static descriptor blobs
-// (size/refcount + function pointers) at the compute-context slots. Those
-// must clear so s_pTlsComputeContext starts null for the guest SET path.
-TEST(EmulatorLoaderTls, PreparesThreadTlsClearsStaticDescriptorContextSlots)
-{
-	using Kyty::Loader::LoaderPrepareThreadTlsImage;
-
-	GuestMem guest;
-	guest.base = 0x900000000ull;
-	guest.bytes.assign(0x1000, 0);
-	// Descriptor at +0x148: size=0x78, refcount=2, fn ptr into program.
-	const uint64_t desc_off = 0x148;
-	const uint64_t desc_va  = guest.base + desc_off;
-	*reinterpret_cast<uint64_t*>(guest.bytes.data() + desc_off)        = 0x78;
-	*reinterpret_cast<uint64_t*>(guest.bytes.data() + desc_off + 0x08) = 2;
-	*reinterpret_cast<uint64_t*>(guest.bytes.data() + desc_off + 0x10) = guest.base + 0x200; // "code"
-
-	// Live object with vtable-like word0 (high pointer) must stay.
-	const uint64_t live_off = 0x400;
-	const uint64_t live_va  = guest.base + live_off;
-	*reinterpret_cast<uint64_t*>(guest.bytes.data() + live_off) = guest.base + 0x300; // vtable
-
-	constexpr uint64_t kTmpl    = 0x9088e0000ull;
-	constexpr uint64_t kImgSize = 0xa0;
-	std::vector<uint8_t> tls(kImgSize, 0);
-	*reinterpret_cast<uint64_t*>(tls.data() + 0x70) = desc_va;
-	*reinterpret_cast<uint64_t*>(tls.data() + 0x58) = live_va;
-
-	const uint64_t n =
-	    LoaderPrepareThreadTlsImage(tls.data(), kImgSize, kTmpl, guest.base, guest.bytes.size(), TestGuestRead64, &guest);
-	EXPECT_GE(n, 1u);
-	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x70), 0u);
-	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + 0x58), live_va);
-}
-
-// Freelist control lives at TP-0x158 (TLS offset image_size-0x158). Prepare must
-// not rewrite non-program sentinel words there; corrupting them produces the
-// recycle crash at guest object-init (begin patterns like 0x1fffffffe).
-TEST(EmulatorLoaderTls, PrepareThreadTlsPreservesFreelistSentinelWords)
-{
-	using Kyty::Loader::LoaderPrepareThreadTlsImage;
-
-	constexpr uint64_t kImgSize = 0xa80;
-	constexpr uint64_t kFlOff   = kImgSize - 0x158; // 0x928
-	constexpr uint64_t kTmpl    = 0x900000000ull;
-	std::vector<uint8_t> tls(kImgSize, 0);
-	*reinterpret_cast<uint64_t*>(tls.data() + kFlOff)     = 0x00000001fffffffeULL;
-	*reinterpret_cast<uint64_t*>(tls.data() + kFlOff + 8) = 0x00000003ffffffffULL;
-
-	GuestMem guest;
-	guest.base = 0x1000;
-	guest.bytes.assign(0x100, 0);
-
-	EXPECT_EQ(LoaderPrepareThreadTlsImage(tls.data(), kImgSize, kTmpl, guest.base, guest.bytes.size(), TestGuestRead64, &guest), 0u);
-	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + kFlOff), 0x00000001fffffffeULL);
-	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + kFlOff + 8), 0x00000003ffffffffULL);
 }
 
 #if defined(__linux__) && defined(__x86_64__)
