@@ -4370,3 +4370,18 @@ compiled width changed. The time spills cost a vertex thread is not measured eit
 **Reading.** GPU work on the frame is flat: the largest program is 2.56 ms of about 21 ms. 60 fps needs the GPU frame at
 16 ms, and no measured lever gets there. The guarded label wait is estimated at about +4 %, half of one unguarded run and
 inside the same-code spread. Host register pressure is the open shader lead.
+
+
+## Full memory barriers in the hub (2026-11-02)
+
+`PPSA21567 - Astro Bot`, first hub view, clean LTO build of translator 203, counters in an `LD_PRELOAD` shim. About 1,280 barriers per frame; 750 are
+the guest-flush `ALL_COMMANDS` memory barrier. About 604 of those follow another one with no draw, dispatch or copy in between; 48 sit between two
+dispatches and 12 between two draws.
+
+| Arm (one run, windows at 130, 140, 150 s) | fps |
+| --- | --- |
+| Unchanged | 31.4, 37.4, 35.4 |
+| Repeated barriers dropped and access masks narrowed to shader read and write | 32.0, 38.1, 33.5 |
+
+Excluded on this host: the difference is inside the 2.5 fps same-code spread, and the driver defers these flushes to the next draw, so repeats cost
+little. The experiment ignored layout transitions between barriers, so it is not a shippable change.

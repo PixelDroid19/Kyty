@@ -5937,3 +5937,20 @@ next hang is captured. Batch buffers and kernels decode with `iga64`; compare ke
 **Excluded by measurement:** `-march=x86-64-v3` (11.6 against 11.7 fps), a shared empty `Vector` (29.7 against 28.9
 us/draw), skipping the wait of a DMA copy (the fence only moves), a free-list index in the transient pool (31 against 29
 us/draw). `spirv-opt` performance passes do not shrink `eb48c258`'s compile enough to matter.
+
+
+## Descriptors loaded from guest tables and the AMD matrix (2026-11-02)
+
+- **Observed.** `kyty_agent games-matrix` on RADV (AMD Raphael iGPU, 2 CUs, Mesa 26.2.5, clean build on translator 202): 28 attempted, 25
+  interactive, one controlled timeout, one presenting at exit, and `PPSA01341 - Demon's Souls` stopped by a GPU VM fault (`SQC (data)`,
+  permission fault, then a gfx ring timeout). The fps of this GPU say nothing; the run checks correctness only. NVIDIA has no host here.
+- **Cause found.** Nested-table and GS user-data loads keep reading guest memory, and their records only name the bound resource. Their
+  image and buffer consumers still use the descriptor's first register as the descriptor slot, so they indexed the array with the raw guest
+  base. `RADV_DEBUG=hang` reports showed the faulting address equal to the descriptor set plus that base shifted by the descriptor size. Mesa's
+  Intel driver clamps an out-of-range index, which hides the defect when one resource is bound and picks the wrong one otherwise.
+- **Change.** The guest load stores its binding's words into the mapped dwords, as a mapped load does. Translator 203, geometry 98.
+- **Verified.** Unit and integration suite 108 of 108. Intel matrix: 26 interactive, 5 invalid fixtures, Demon's Souls presenting, and F.I.S.T.
+  `PPSA03969` one known boot crash (exit 139 at 27 presents, the recorded guest race). `PPSA21567 - Astro Bot` reaches the hub at 37 fps.
+- **Open.** Demon's Souls still faults on RADV after this change (same address in two of three runs, another in one). The shader of the last
+  report samples through a raw register slot of a load the fix should have covered; that report predates the generalised fix, and the fault after
+  it has no report yet. The fix is therefore recorded as correct by contract and not as the cure of this title.
