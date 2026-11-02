@@ -219,7 +219,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - A waiter takes on count alone, and `Signal` still wakes every waiter, so no waiter can be
     left asleep with count available.
 
-## Open: PPSA01341 - Demon's Souls livelocks at boot (2026-10-29, parked)
+## Open: PPSA01341 - Demon's Souls stalls at boot (2026-10-29, parked)
 
 - **Observed.**
   - Intel A770, kernel `7.2.11-zen1`, `8f3b5d6b6`. Strict runs des1 and des2 (300 s and 260 s)
@@ -237,6 +237,23 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     poll loop on an unset flag or label spins this way.
   - The word the workers poll and its producer are not identified. Two attempts to sample their
     stacks as perf's parent lost the data when the harness killed perf (`EXIT=137`).
+- **Boot cost, fixed (2026-11-02).**
+  - The guest resolves its whole package (223,261 files, 19,698 directories) in batched path
+    resolves; temporary counters showed more than 90,000 resolves at about 1,000 per second, no
+    misses, about 30 host system calls per path. `05f79da2f` resolves a package file with one
+    lookup, with the host directory cached. "Starting main loop" moved from 52-66 s to 17-18 s.
+    Not rerun on other titles beyond the suite and the matrix.
+- **Stall after the main loop, localized (2026-11-02).**
+  - It is not a poll on the GPU. The 12 workers are the guest's normal idle spin in its job
+    scheduler and the main thread waits for its frame event. A debugger dump of the scheduler's
+    job queues shows a chain: the game loop job and the render thread job wait on a counter
+    that the render job completes, and the render job waits on an early counter that stays at 1.
+    The owner of that counter is not identified, and a hardware watch on it reported no write at
+    all, not even initialization, so that watch is not trusted.
+  - The title's own "job system deadlocked" message is not logged.
+- **Unverified lead, not implemented.** `DRAW_INDEX_INDIRECT` drops the base vertex and start
+  instance register fields of the packet (`GraphicsRunOpParsers.cpp`). It cannot be verified on
+  this title until it boots.
 - **Parked** at the maintainer's request (2026-10-29) in favour of `PPSA21567 - Astro Bot`
   performance.
 - **Next step.**

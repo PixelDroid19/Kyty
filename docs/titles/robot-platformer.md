@@ -4385,3 +4385,17 @@ dispatches and 12 between two draws.
 
 Excluded on this host: the difference is inside the 2.5 fps same-code spread, and the driver defers these flushes to the next draw, so repeats cost
 little. The experiment ignored layout transitions between barriers, so it is not a shippable change.
+
+## Hub GPU idle time and early compute submits (2026-11-02)
+
+`PPSA21567 - Astro Bot`, hub, Intel Arc A770, ANV Mesa 26.2.5, xe, clean LTO build. Windows of 10 s
+read 31-39 fps; the same code spreads about 2.5 fps between windows.
+
+- Timeline of one 3 s window on an instrumented build: GPU busy 73.5 %, idle about 10 ms per frame,
+  of which 4.4 ms between submissions of the guest's second compute queue, 2.2 ms between
+  submissions of its first, the rest around presents and label waits. In those gaps the GPU has
+  finished and the command processor is still recording.
+- Per frame in the same scene: 174 draws, 87 dispatches, 38 submissions, draw processing 12.7 ms,
+  dispatch processing 5.8 ms.
+- Excluded: submitting recorded compute work as soon as the GPU is idle, as graphics work already
+  does. 31.5, 39.3 and 32.6 fps against 31.4, 37.4 and 35.4 fps.
