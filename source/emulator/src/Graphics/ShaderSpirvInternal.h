@@ -440,29 +440,35 @@ public:
 			{
 				continue;
 			}
-
-			const int resource_index = record.resource_index;
-			const int resource_field = record.resource_field_offset + offset - first_dword;
-			switch (record.kind)
-			{
-				case ShaderDynamicSLoadResourceKind::StorageBuffer:
-					if (resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num condition ignored (continuing)\n"); }
-					*buffer = resource_index;
-					*field  = resource_field;
-					return true;
-				case ShaderDynamicSLoadResourceKind::Texture:
-					if (resource_index < 0 || resource_index >= m_bind->textures2D.textures_num || resource_field >= 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->textures2D.textures_num || resource_field >= 8 condition ignored (continuing)\n"); }
-					*buffer = m_bind->storage_buffers.buffers_num + resource_index * 2 + resource_field / 4;
-					*field  = resource_field % 4;
-					return true;
-				case ShaderDynamicSLoadResourceKind::Sampler:
-					if (resource_index < 0 || resource_index >= m_bind->samplers.samplers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->samplers.samplers_num condition ignored (continuing)\n"); }
-					*buffer = m_bind->storage_buffers.buffers_num + m_bind->textures2D.textures_num * 2 + resource_index;
-					*field  = resource_field;
-					return true;
-			}
+			GetDynamicSLoadRecordField(record, offset - first_dword, buffer, field);
+			return true;
 		}
 		return false;
+	}
+
+	// Metadata row and field holding one dword of a mapped load's resource.
+	void GetDynamicSLoadRecordField(const ShaderDynamicSLoadMapping& record, int word, int* buffer, int* field) const
+	{
+		const int resource_index = record.resource_index;
+		const int resource_field = record.resource_field_offset + word;
+		switch (record.kind)
+		{
+			case ShaderDynamicSLoadResourceKind::StorageBuffer:
+				if (resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num condition ignored (continuing)\n"); }
+				*buffer = resource_index;
+				*field  = resource_field;
+				break;
+			case ShaderDynamicSLoadResourceKind::Texture:
+				if (resource_index < 0 || resource_index >= m_bind->textures2D.textures_num || resource_field >= 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->textures2D.textures_num || resource_field >= 8 condition ignored (continuing)\n"); }
+				*buffer = m_bind->storage_buffers.buffers_num + resource_index * 2 + resource_field / 4;
+				*field  = resource_field % 4;
+				break;
+			case ShaderDynamicSLoadResourceKind::Sampler:
+				if (resource_index < 0 || resource_index >= m_bind->samplers.samplers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->samplers.samplers_num condition ignored (continuing)\n"); }
+				*buffer = m_bind->storage_buffers.buffers_num + m_bind->textures2D.textures_num * 2 + resource_index;
+				*field  = resource_field;
+				break;
+		}
 	}
 
 private:

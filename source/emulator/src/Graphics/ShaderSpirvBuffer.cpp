@@ -4214,6 +4214,25 @@ static bool recompile_sload_guest(uint32_t index, const ShaderInstruction& inst,
 		const auto dst = dword_count == 1 ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, word);
 		source += String8::FromPrintf("               OpStore %%%s %%%s_d%d\n", dst.value.c_str(), i.c_str(), word);
 	}
+	// A descriptor bound from this load is consumed through its binding, whose base dword is
+	// the descriptor slot; the raw guest base would index the descriptor array out of range.
+	for (const auto& record: bind->dynamic_sloads.records)
+	{
+		if (record.instruction_pc != inst.pc || !record.guest_load)
+		{
+			continue;
+		}
+		for (int word = 0; word < record.dword_count; word++)
+		{
+			int row   = 0;
+			int field = 0;
+			spirv->GetDynamicSLoadRecordField(record, word, &row, &field);
+			const auto dst = operand_variable_to_str(inst.dst, record.destination_register - inst.dst.register_id + word);
+			const auto id  = String8::FromPrintf("%s_bound_%d_%d", i.c_str(), record.destination_register, word);
+			source += spirv->EmitMetadataLoad(row, field, id);
+			source += String8::FromPrintf("               OpStore %%%s %%%s\n", dst.value.c_str(), id.c_str());
+		}
+	}
 	*dst_source += source;
 	return true;
 }
