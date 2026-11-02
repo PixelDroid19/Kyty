@@ -990,9 +990,9 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x1D1: inst.type = ShaderInstructionType::VCvtF16I16; break;
 		case 0x1D2: inst.type = ShaderInstructionType::VCvtU16F16; break;
 		case 0x1D3: inst.type = ShaderInstructionType::VCvtI16F16; break;
-		case 0x1D4: KYTY_NI("v_rcp_f16"); break;
+		case 0x1D4: inst.type = ShaderInstructionType::VRcpF16; break;
 		case 0x1D5: inst.type = ShaderInstructionType::VSqrtF16; break;
-		case 0x1D6: KYTY_NI("v_rsq_f16"); break;
+		case 0x1D6: inst.type = ShaderInstructionType::VRsqF16; break;
 		case 0x1D7: inst.type = ShaderInstructionType::VLogF16; break;
 		case 0x1D8: inst.type = ShaderInstructionType::VExpF16; break;
 		case 0x1D9: KYTY_NI("v_frexp_mant_f16"); break;

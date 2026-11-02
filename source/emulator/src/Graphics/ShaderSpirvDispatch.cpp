@@ -462,6 +462,8 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VF16_Unary_SVdstSVsrc0,         ShaderInstructionType::VFloorF16,          ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpExtInst %float %GLSL_std_450 Floor %h0_<index>"}},
     {Recompile_VF16_Unary_SVdstSVsrc0,         ShaderInstructionType::VRndneF16,          ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpExtInst %float %GLSL_std_450 RoundEven %h0_<index>"}},
     {Recompile_VF16_Unary_SVdstSVsrc0,         ShaderInstructionType::VSqrtF16,           ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpExtInst %float %GLSL_std_450 Sqrt %h0_<index>"}},
+    {Recompile_VF16_Unary_SVdstSVsrc0,         ShaderInstructionType::VRcpF16,            ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpFDiv %float %<float_one> %h0_<index>"}},
+    {Recompile_VF16_Unary_SVdstSVsrc0,         ShaderInstructionType::VRsqF16,            ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpExtInst %float %GLSL_std_450 InverseSqrt %h0_<index>"}},
     // Trig reduces turns before converting to radians and fixes quadrant axes.
     {Recompile_VF16_Unary_SVdstSVsrc0,         ShaderInstructionType::VSinF16,            ShaderInstructionFormat::SVdstSVsrc0, {""}},
     {Recompile_VF16_Unary_SVdstSVsrc0,         ShaderInstructionType::VCosF16,            ShaderInstructionFormat::SVdstSVsrc0, {""}},
