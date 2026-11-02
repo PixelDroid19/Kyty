@@ -59,11 +59,78 @@ inline bool ReadMode(const Spirv* spirv, Mode* mode)
 	return false;
 }
 
+// How a half reaches its operation. A fused half operation needs binary32 for the exact
+// product; an operation that only copies the bits (conversions, min/max through binary32)
+// needs them exact, including NaN. Host arithmetic does not preserve a NaN payload anyway.
+enum class HalfValue
+{
+	Bits,
+	Binary32,
+	ArithmeticBinary32,
+	Half,
+};
+
+// Add, multiply and select are exact in the host's half width under the float controls that
+// ShaderNativeHalfConversion requires, so they need no binary32 round trip. Finite overflow
+// saturation has no host form.
+inline bool OperatesInHostHalf(const Mode& mode, ShaderInstructionType type)
+{
+	if (!ShaderNativeHalfConversion() || mode.fp16_overflow)
+	{
+		return false;
+	}
+	switch (type)
+	{
+		case ShaderInstructionType::VAddF16:
+		case ShaderInstructionType::VSubF16:
+		case ShaderInstructionType::VSubrevF16:
+		case ShaderInstructionType::VMulF16:
+		case ShaderInstructionType::VFmaF16:
+		case ShaderInstructionType::VMinF16:
+		case ShaderInstructionType::VMaxF16:
+		case ShaderInstructionType::VMin3F16:
+		case ShaderInstructionType::VMax3F16:
+		case ShaderInstructionType::VMed3F16:
+		case ShaderInstructionType::VPkFmaF16:
+		case ShaderInstructionType::VPkAddF16:
+		case ShaderInstructionType::VPkMulF16:
+		case ShaderInstructionType::VPkMinF16:
+		case ShaderInstructionType::VPkMaxF16: return true;
+		default: return false;
+	}
+}
+
+inline String8 StoreNarrowed(const String8& result, bool flush_output)
+{
+	const String8 store = flush_output ? R"(
+%hn_result_exp_<s> = OpBitwiseAnd %uint %hn_signed_<s> %uint_0x00007c00
+%hn_flush_<s> = OpIEqual %bool %hn_result_exp_<s> %uint_0
+%<result> = OpSelect %uint %hn_flush_<s> %hn_sign_<s> %hn_signed_<s>
+)" : "%<result> = OpCopyObject %uint %hn_signed_<s>\n";
+	return store.ReplaceStr("<result>", result);
+}
+
+// The raw bits of a host half result.
+inline String8 HalfResultBits(const String8& value, const String8& result, const String8& suffix, bool flush_output)
+{
+	String8 text = R"(
+%hn_short_<s> = OpBitcast %ushort %<value>
+%hn_signed_<s> = OpUConvert %uint %hn_short_<s>
+)";
+	if (flush_output)
+	{
+		text += "%hn_sign_<s> = OpBitwiseAnd %uint %hn_signed_<s> %uint_0x00008000\n";
+	}
+	text += StoreNarrowed(result, flush_output);
+	return text.ReplaceStr("<value>", value).ReplaceStr("<s>", suffix);
+}
+
 // Nearest-even narrowing by the host's conversion, which its float controls make
 // exact for the half width. A NaN keeps its sign and top payload bits and is quieted, as
 // the integer form does, because a conversion only guarantees that the result is a NaN.
 // A residue states on which side of the rounded binary32 value the exact result lies:
-// rounding to odd keeps that information through the second rounding.
+// rounding to odd keeps that information through the second rounding. It comes with an
+// arithmetic result, whose NaN payload the host already chose, so the NaN needs no repair.
 inline String8 NarrowNative(const Spirv* spirv, const String8& bits, const String8& result, const String8& suffix, bool flush_output,
                             const String8& residue)
 {
@@ -75,14 +142,17 @@ inline String8 NarrowNative(const Spirv* spirv, const String8& bits, const Strin
 %hn_half_<s> = OpFConvert %half %hn_float_<s>
 %hn_short_<s> = OpBitcast %ushort %hn_half_<s>
 %hn_native_<s> = OpUConvert %uint %hn_short_<s>
+<nan>
+<result>
+)";
+	const String8 nan = !residue.IsEmpty() ? String8("%hn_signed_<s> = OpCopyObject %uint %hn_native_<s>\n") : String8(R"(
 %hn_mag_<s> = OpBitwiseAnd %uint %<bits> %uint_0x7fffffff
 %hn_is_nan_<s> = OpUGreaterThan %bool %hn_mag_<s> %<float_inf>
 %hn_nan_mant_<s> = OpBitFieldUExtract %uint %<bits> %uint_13 %uint_10
 %hn_quiet_<s> = OpBitwiseOr %uint %hn_nan_mant_<s> %<half_qnan>
 %hn_nan_<s> = OpBitwiseOr %uint %hn_quiet_<s> %hn_sign_<s>
 %hn_signed_<s> = OpSelect %uint %hn_is_nan_<s> %hn_nan_<s> %hn_native_<s>
-<result>
-)";
+)");
 	const String8 odd = residue.IsEmpty() ? String8("%hn_odd_<s> = OpCopyObject %uint %<bits>\n") : String8(R"(
 %hn_residue_nonzero_<s> = OpINotEqual %bool %<residue> %int_0
 %hn_residue_negative_<s> = OpSLessThan %bool %<residue> %int_0
@@ -95,13 +165,9 @@ inline String8 NarrowNative(const Spirv* spirv, const String8& bits, const Strin
 %hn_delta_<s> = OpSelect %uint %hn_move_<s> %hn_step_<s> %uint_0
 %hn_odd_<s> = OpIAdd %uint %<bits> %hn_delta_<s>
 )").ReplaceStr("<residue>", residue).ReplaceStr("<all_ones>", spirv->GetConstantUint(0xffffffffu));
-	const String8 store = flush_output ? R"(
-%hn_result_exp_<s> = OpBitwiseAnd %uint %hn_signed_<s> %uint_0x00007c00
-%hn_flush_<s> = OpIEqual %bool %hn_result_exp_<s> %uint_0
-%<result> = OpSelect %uint %hn_flush_<s> %hn_sign_<s> %hn_signed_<s>
-)" : "%<result> = OpCopyObject %uint %hn_signed_<s>\n";
 	return text.ReplaceStr("<odd>", odd)
-	    .ReplaceStr("<result>", store.ReplaceStr("<result>", result))
+	    .ReplaceStr("<nan>", nan)
+	    .ReplaceStr("<result>", StoreNarrowed(result, flush_output))
 	    .ReplaceStr("<bits>", bits)
 	    .ReplaceStr("<s>", suffix)
 	    .ReplaceStr("<float_inf>", spirv->GetConstantUint(0x7f800000u))
@@ -203,14 +269,9 @@ inline String8 Narrow(const Spirv* spirv, const String8& bits, const String8& re
 	// The separate special-value selection above still preserves true INF
 	// and quieted NaN sign/payload rather than saturating their bit patterns.
 	if (fp16_overflow) { overflow = "%hn_overflow_value_<s> = OpCopyObject %uint %uint_0x00007bff\n"; }
-	const String8 store = flush_output ? R"(
-%hn_result_exp_<s> = OpBitwiseAnd %uint %hn_signed_<s> %uint_0x00007c00
-%hn_flush_<s> = OpIEqual %bool %hn_result_exp_<s> %uint_0
-%<result> = OpSelect %uint %hn_flush_<s> %hn_sign_<s> %hn_signed_<s>
-)" : "%<result> = OpCopyObject %uint %hn_signed_<s>\n";
 	return text.ReplaceStr("<round>", rounding)
 	    .ReplaceStr("<overflow>", overflow)
-	    .ReplaceStr("<result>", store.ReplaceStr("<result>", result))
+	    .ReplaceStr("<result>", StoreNarrowed(result, flush_output))
 	    .ReplaceStr("<bits>", bits)
 	    .ReplaceStr("<s>", suffix)
 	    .ReplaceStr("uint_103", spirv->GetConstantUint(103))
@@ -353,8 +414,16 @@ inline String8 FmaResidue(const Spirv* spirv, const String8& index)
 // Widen without a host half operation. In particular, preserve denormals and
 // NaN sign/payload while quieting signaling NaNs, which UnpackHalf2x16 is not
 // required to preserve bit-for-bit on every implementation.
-inline String8 Expand(const Spirv* spirv, const String8& bits, const String8& result, const String8& suffix)
+inline String8 Expand(const Spirv* spirv, const String8& bits, const String8& result, const String8& suffix, bool exact_nan = true)
 {
+	if (ShaderNativeHalfConversion() && !exact_nan)
+	{
+		return String8(R"(
+%he_short_<s> = OpUConvert %ushort %<bits>
+%he_half_<s> = OpBitcast %half %he_short_<s>
+%<result> = OpFConvert %float %he_half_<s>
+)").ReplaceStr("<bits>", bits).ReplaceStr("<result>", result).ReplaceStr("<s>", suffix);
+	}
 	if (ShaderNativeHalfConversion())
 	{
 		return String8(R"(
@@ -409,8 +478,30 @@ inline String8 Expand(const Spirv* spirv, const String8& bits, const String8& re
 // IEEE_MODE=0 min/max: one NaN yields the other input. Unlike GLSL FMin/
 // FMax, the ISA also fixes which signed zero is selected. Operate on the
 // binary32 images of unpacked halves so neither choice loses payload bits.
-inline String8 MinMax(const String8& a, const String8& b, const String8& result, const String8& suffix, bool maximum)
+inline String8 MinMax(const String8& a, const String8& b, const String8& result, const String8& suffix, bool maximum, bool host_half = false)
 {
+	if (host_half)
+	{
+		return String8(R"(
+%hm_zero_value_<s> = OpFConvert %half %<float_zero>
+%hm_a_bits_<s> = OpBitcast %ushort %<a>
+%hm_b_bits_<s> = OpBitcast %ushort %<b>
+%hm_a_nan_<s> = OpIsNan %bool %<a>
+%hm_b_nan_<s> = OpIsNan %bool %<b>
+%hm_a_zero_<s> = OpFOrdEqual %bool %<a> %hm_zero_value_<s>
+%hm_b_zero_<s> = OpFOrdEqual %bool %<b> %hm_zero_value_<s>
+%hm_both_zero_<s> = OpLogicalAnd %bool %hm_a_zero_<s> %hm_b_zero_<s>
+%hm_zero_<s> = <zero_op> %ushort %hm_a_bits_<s> %hm_b_bits_<s>
+%hm_compare_<s> = <compare> %bool %<a> %<b>
+%hm_ordered_<s> = OpSelect %ushort %hm_compare_<s> %hm_a_bits_<s> %hm_b_bits_<s>
+%hm_ordered_zero_<s> = OpSelect %ushort %hm_both_zero_<s> %hm_zero_<s> %hm_ordered_<s>
+%hm_b_nan_value_<s> = OpSelect %ushort %hm_b_nan_<s> %hm_a_bits_<s> %hm_ordered_zero_<s>
+%hm_bits_<s> = OpSelect %ushort %hm_a_nan_<s> %hm_b_bits_<s> %hm_b_nan_value_<s>
+%<result> = OpBitcast %half %hm_bits_<s>
+)").ReplaceStr("<a>", a).ReplaceStr("<b>", b).ReplaceStr("<result>", result).ReplaceStr("<s>", suffix)
+		    .ReplaceStr("<zero_op>", maximum ? "OpBitwiseAnd" : "OpBitwiseOr")
+		    .ReplaceStr("<compare>", maximum ? "OpFOrdGreaterThan" : "OpFOrdLessThan");
+	}
 	return String8(R"(
 %hm_a_bits_<s> = OpBitcast %uint %<a>
 %hm_b_bits_<s> = OpBitcast %uint %<b>
@@ -546,8 +637,9 @@ inline String8 Unary(const ShaderInstruction& inst, const char* const* params, c
 }
 
 inline bool LoadHalf(Spirv* spirv, const ShaderInstruction& inst, uint32_t source, const String8& index,
-                     bool flush_input, bool integer, String8* text)
+                     bool flush_input, HalfValue value, String8* text)
 {
+	const bool integer = value == HalfValue::Bits;
 	auto operand = inst.src[source];
 	// SDWA word selects (admitted by SdwaWideningSupported): the operand load
 	// already zero-extends the selected word into bits 15:0.
@@ -601,9 +693,16 @@ inline bool LoadHalf(Spirv* spirv, const ShaderInstruction& inst, uint32_t sourc
 	{
 		*text += String8("%fh_bits_<s> = OpCopyObject %uint %fh_modified_<s>\n").ReplaceStr("<s>", suffix);
 	}
-	if (!integer)
+	const String8 result = String8::FromPrintf("h%u_", source) + index;
+	if (value == HalfValue::Half)
 	{
-		*text += Expand(spirv, "fh_bits_" + suffix, String8::FromPrintf("h%u_", source) + index, suffix);
+		*text += String8(R"(
+%fh_short_<s> = OpUConvert %ushort %fh_bits_<s>
+%<result> = OpBitcast %half %fh_short_<s>
+)").ReplaceStr("<s>", suffix).ReplaceStr("<result>", result);
+	} else if (!integer)
+	{
+		*text += Expand(spirv, "fh_bits_" + suffix, result, suffix, value == HalfValue::Binary32);
 	}
 	return true;
 }
@@ -719,6 +818,8 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	if (integer_output && inst.dst.clamp) { return reject("unsupported-integer-clamp"); }
 	// Legacy MAD's intermediate rounding is not the fused-half contract.
 	if (inst.type == ShaderInstructionType::VMadF16) { return reject("unsupported-legacy-mad"); }
+	const bool host_half = arithmetic && OperatesInHostHalf(mode, inst.type);
+	const auto typed = [&](const String8& source) { return host_half ? source.ReplaceStr("%float", "%half") : source; };
 	String8 text;
 	if (operation == Operation::FromFloat)
 	{
@@ -753,7 +854,11 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	{
 		for (int source = 0; source < sources; ++source)
 		{
-			if (!LoadHalf(spirv, inst, source, index, arithmetic && (mode.value & 0x40u) == 0u, integer_input, &text))
+			const HalfValue value = integer_input ? HalfValue::Bits :
+			                        host_half ? HalfValue::Half :
+			                        inst.type == ShaderInstructionType::VFmaF16 ? HalfValue::ArithmeticBinary32 :
+			                                                                      HalfValue::Binary32;
+			if (!LoadHalf(spirv, inst, source, index, arithmetic && (mode.value & 0x40u) == 0u, value, &text))
 			{
 				return reject("unsupported-source-operand");
 			}
@@ -795,7 +900,10 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 			text += "%fh_result_<index> = OpBitcast %uint %h0_<index>\n";
 		} else if (inst.type == ShaderInstructionType::VMinF16 || inst.type == ShaderInstructionType::VMaxF16)
 		{
-			text += MinMax("h0_<index>", "h1_<index>", "t_<index>", index, inst.type == ShaderInstructionType::VMaxF16);
+			text += MinMax("h0_<index>", "h1_<index>", "t_<index>", index, inst.type == ShaderInstructionType::VMaxF16, host_half);
+		} else if (inst.type == ShaderInstructionType::VFmaF16 && host_half)
+		{
+			text += "%t_<index> = OpExtInst %half %GLSL_std_450 Fma %h0_<index> %h1_<index> %h2_<index>\n";
 		} else if (inst.type == ShaderInstructionType::VFmaF16)
 		{
 			// A product of two finite halves is exact in binary32 (22
@@ -810,15 +918,15 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 		} else if (operation == Operation::Ternary)
 		{
 			const bool maximum = inst.type == ShaderInstructionType::VMax3F16;
-			text += MinMax("h0_<index>", "h1_<index>", "fh_min01_<index>", "min01_" + index, maximum);
-			text += MinMax("fh_min01_<index>", "h2_<index>", "fh_min3_<index>", "min3_" + index, maximum);
+			text += MinMax("h0_<index>", "h1_<index>", "fh_min01_<index>", "min01_" + index, maximum, host_half);
+			text += MinMax("fh_min01_<index>", "h2_<index>", "fh_min3_<index>", "min3_" + index, maximum, host_half);
 			if (inst.type == ShaderInstructionType::VMed3F16)
 			{
-				text += MinMax("h0_<index>", "h1_<index>", "fh_max01_<index>", "max01_" + index, true);
-				text += MinMax("h0_<index>", "h2_<index>", "fh_max02_<index>", "max02_" + index, true);
-				text += MinMax("h1_<index>", "h2_<index>", "fh_max12_<index>", "max12_" + index, true);
-				text += MinMax("fh_max01_<index>", "h2_<index>", "fh_max3_<index>", "max3_" + index, true);
-				text += R"(
+				text += MinMax("h0_<index>", "h1_<index>", "fh_max01_<index>", "max01_" + index, true, host_half);
+				text += MinMax("h0_<index>", "h2_<index>", "fh_max02_<index>", "max02_" + index, true, host_half);
+				text += MinMax("h1_<index>", "h2_<index>", "fh_max12_<index>", "max12_" + index, true, host_half);
+				text += MinMax("fh_max01_<index>", "h2_<index>", "fh_max3_<index>", "max3_" + index, true, host_half);
+				text += typed(R"(
 %fh_max_is0_<index> = OpFOrdEqual %bool %fh_max3_<index> %h0_<index>
 %fh_max_is1_<index> = OpFOrdEqual %bool %fh_max3_<index> %h1_<index>
 %fh_med12_<index> = OpSelect %float %fh_max_is1_<index> %fh_max02_<index> %fh_max01_<index>
@@ -829,10 +937,10 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 %fh_nan01_<index> = OpLogicalOr %bool %fh_nan0_<index> %fh_nan1_<index>
 %fh_nan_any_<index> = OpLogicalOr %bool %fh_nan01_<index> %fh_nan2_<index>
 %t_<index> = OpSelect %float %fh_nan_any_<index> %fh_min3_<index> %fh_med_<index>
-)";
+)");
 			} else
 			{
-				text += "%t_<index> = OpCopyObject %float %fh_min3_<index>\n";
+				text += typed("%t_<index> = OpCopyObject %float %fh_min3_<index>\n");
 			}
 		} else if (inst.type == ShaderInstructionType::VSinF16 || inst.type == ShaderInstructionType::VCosF16)
 		{
@@ -846,16 +954,19 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 			{
 				if (params[p] != nullptr)
 				{
-					text += String8(params[p]).ReplaceStr("%hf0_", "%h0_").ReplaceStr("%hf1_", "%h1_") + "\n";
+					text += typed(String8(params[p]).ReplaceStr("%hf0_", "%h0_").ReplaceStr("%hf1_", "%h1_")) + "\n";
 				}
 			}
 		}
-		if (!integer_output && operation != Operation::ToFloat)
+		if (!integer_output && operation != Operation::ToFloat && !host_half)
 		{
 			text += "%fh_value_bits_<index> = OpBitcast %uint %t_<index>\n";
 		}
 	}
-	if (!integer_output && operation != Operation::ToFloat)
+	if (host_half)
+	{
+		text += HalfResultBits("t_<index>", "fh_result_<index>", index, (mode.value & 0x80u) == 0u);
+	} else if (!integer_output && operation != Operation::ToFloat)
 	{
 		// CVT_F16_F32 explicitly creates denormals irrespective of FP_DENORM.
 		text += Narrow(spirv, "fh_value_bits_<index>", "fh_result_<index>", index, (mode.value >> 2u) & 3u,

@@ -193,6 +193,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VPkF16)
 	{
 		return false;
 	}
+	const bool    host_half = F16Arithmetic::OperatesInHostHalf(mode, inst.type);
+	const auto    value = host_half ? F16Arithmetic::HalfValue::Half : F16Arithmetic::HalfValue::ArithmeticBinary32;
 	const String8 index_str = String8::FromPrintf("%u", index);
 	String8       source;
 	for (uint32_t high = 0; high < 2u; ++high)
@@ -207,12 +209,15 @@ KYTY_RECOMPILER_FUNC(Recompile_VPkF16)
 		const String8 half_index = index_str + (high != 0u ? "_hi" : "_lo");
 		for (uint32_t operand = 0; operand < sources; ++operand)
 		{
-			if (!F16Arithmetic::LoadHalf(spirv, half, operand, half_index, (mode.value & 0x40u) == 0u, false, &source))
+			if (!F16Arithmetic::LoadHalf(spirv, half, operand, half_index, (mode.value & 0x40u) == 0u, value, &source))
 			{
 				return false;
 			}
 		}
-		if (fused)
+		if (fused && host_half)
+		{
+			source += String8("%t_<index> = OpExtInst %half %GLSL_std_450 Fma %h0_<index> %h1_<index> %h2_<index>\n").ReplaceStr("<index>", half_index);
+		} else if (fused)
 		{
 			source += String8(R"(
 %fh_product_<index> = OpFMul %float %h0_<index> %h1_<index>
@@ -222,15 +227,22 @@ KYTY_RECOMPILER_FUNC(Recompile_VPkF16)
 		} else if (inst.type == ShaderInstructionType::VPkMinF16 || inst.type == ShaderInstructionType::VPkMaxF16)
 		{
 			source += F16Arithmetic::MinMax("h0_" + half_index, "h1_" + half_index, "t_" + half_index, half_index,
-			                                inst.type == ShaderInstructionType::VPkMaxF16);
+			                                inst.type == ShaderInstructionType::VPkMaxF16, host_half);
 		} else
 		{
-			source += String8(param[0]).ReplaceStr("<index>", half_index) + "\n";
+			const String8 operation = String8(param[0]).ReplaceStr("<index>", half_index);
+			source += (host_half ? operation.ReplaceStr("%float", "%half") : operation) + "\n";
 		}
-		source += String8("%fh_value_bits_<index> = OpBitcast %uint %t_<index>\n").ReplaceStr("<index>", half_index);
-		source += F16Arithmetic::Narrow(spirv, "fh_value_bits_" + half_index, "fh_result_" + half_index, half_index, 0u,
-		                                (mode.value & 0x80u) == 0u, mode.fp16_overflow,
-		                                fused ? "fh_residue_" + half_index : String8());
+		if (host_half)
+		{
+			source += F16Arithmetic::HalfResultBits("t_" + half_index, "fh_result_" + half_index, half_index, (mode.value & 0x80u) == 0u);
+		} else
+		{
+			source += String8("%fh_value_bits_<index> = OpBitcast %uint %t_<index>\n").ReplaceStr("<index>", half_index);
+			source += F16Arithmetic::Narrow(spirv, "fh_value_bits_" + half_index, "fh_result_" + half_index, half_index, 0u,
+			                                (mode.value & 0x80u) == 0u, mode.fp16_overflow,
+			                                fused ? "fh_residue_" + half_index : String8());
+		}
 		if (inst.dst.clamp)
 		{
 			source += F16Arithmetic::Clamp(mode).ReplaceStr("<index>", half_index);
