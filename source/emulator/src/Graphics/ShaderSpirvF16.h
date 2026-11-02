@@ -64,7 +64,8 @@ inline bool ReadMode(const Spirv* spirv, Mode* mode)
 // needs them exact, including NaN. Host arithmetic does not preserve a NaN payload anyway.
 enum class HalfValue
 {
-	Bits, ModifiedBits,
+	Bits,
+	ModifiedBits,
 	Binary32,
 	ArithmeticBinary32,
 	Half,
@@ -786,7 +787,7 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	// operation may name the half it reads and the half it writes.
 	const bool sdwa_half_destination = SdwaHalfDestinationSupported(inst);
 	if (inst.vop_sdwa && !((operation == Operation::ToFloat && SdwaWideningSupported(inst)) ||
-	                       (operation == Operation::FromFloat && SdwaWholeWordSupported(inst)) ||
+	                       (operation == Operation::FromFloat && (SdwaWholeWordSupported(inst) || sdwa_half_destination)) ||
 	                       ((arithmetic || integer_input || integer_output) && sdwa_half_destination)))
 	{
 		return reject("unsupported-sdwa");
