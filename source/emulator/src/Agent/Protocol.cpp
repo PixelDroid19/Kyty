@@ -837,6 +837,7 @@ void AppendRenderResolutionPerformanceJson(const Libs::Graphics::RenderResolutio
 			case Config::PresentationFilter::Linear: return "linear";
 			case Config::PresentationFilter::Nearest: return "nearest";
 			case Config::PresentationFilter::Fsr: return "fsr";
+			case Config::PresentationFilter::Fsr3: return "fsr3";
 		}
 		return "unknown";
 	};

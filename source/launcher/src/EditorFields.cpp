@@ -30,7 +30,7 @@ const QVector<EditorField> DISPLAY_FIELDS = {
 	 [](const QVariantMap& f) { return Is(f, "render_resolution_mode", "Fixed"); }},
     {"presentation_filter", QT_TRANSLATE_NOOP("EditorPageItem", "Presentation filter"), FieldType::Choice, "presentation_filter"},
     {"presentation_fsr_sharpness", QT_TRANSLATE_NOOP("EditorPageItem", "FSR sharpness (0–100)"), FieldType::Number, nullptr, false,
-	 [](const QVariantMap& f) { return Is(f, "presentation_filter", "Fsr"); }},
+	 [](const QVariantMap& f) { return Is(f, "presentation_filter", "Fsr") || Is(f, "presentation_filter", "Fsr3"); }},
     {"texture_anisotropy", QT_TRANSLATE_NOOP("EditorPageItem", "Texture anisotropy"), FieldType::Choice, "texture_anisotropy"},
     {"neo", QT_TRANSLATE_NOOP("EditorPageItem", "Neo mode"), FieldType::Toggle},
 };

@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/PresentationFsr3.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
@@ -2943,6 +2944,10 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	{
 		DebugStatsRecordRenderPassContinuation();
 		return;
+	}
+	if (Config::GetPresentationFilter() == Config::PresentationFilter::Fsr3)
+	{
+		PresentationFsr3NoteRenderPass(*color, *depth);
 	}
 	CloseRenderPass();
 

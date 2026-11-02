@@ -66,7 +66,8 @@ enum class PresentationFilter
 {
 	Linear,
 	Nearest,
-	Fsr
+	Fsr,
+	Fsr3
 };
 
 // Host texture filtering override. Guest keeps each sampler's own anisotropy;

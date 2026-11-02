@@ -85,6 +85,15 @@ add_library(kyty_graphics STATIC
 	src/Hle/LibVideoOut.cpp
 	src/Hle/Registration.cpp
 )
+# FSR 3.1 upscaler of the Fsr3 presentation filter: the directory holds the SDK's include and bin/ffx_sdk trees.
+set(KYTY_FFX_SDK_DIR "" CACHE PATH "FidelityFX SDK built with the Vulkan backend and the FSR 3 upscaler")
+if(KYTY_FFX_SDK_DIR)
+	target_include_directories(kyty_graphics PRIVATE "${KYTY_FFX_SDK_DIR}/include")
+	target_compile_definitions(kyty_graphics PRIVATE KYTY_FSR3_ENABLED)
+	target_link_libraries(kyty_graphics PRIVATE
+		"${KYTY_FFX_SDK_DIR}/bin/ffx_sdk/libffx_fsr3upscaler_x64.a"
+		"${KYTY_FFX_SDK_DIR}/bin/ffx_sdk/libffx_backend_vk_x64.a")
+endif()
 add_library(kyty_hle STATIC ${hle_src} ${hle_domain_src})
 add_library(kyty_audio_video_backend STATIC src/AudioVideoBackend.cpp)
 add_library(emulator STATIC ${emulator_src})

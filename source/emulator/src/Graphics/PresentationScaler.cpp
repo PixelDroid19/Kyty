@@ -6,6 +6,7 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/PresentationFsr.h"
+#include "Emulator/Graphics/PresentationFsr3.h"
 #include "Emulator/Graphics/Utils.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -25,6 +26,9 @@ namespace {
 		case Config::PresentationFilter::Linear: return VK_FILTER_LINEAR;
 		// FSR only upscales; a source larger than the swapchain is reduced with the linear filter.
 		case Config::PresentationFilter::Fsr: return VK_FILTER_LINEAR;
+		case Config::PresentationFilter::Fsr3:
+			if (PresentationFsr3Available()) { return VK_FILTER_LINEAR; }
+			break;
 	}
 	*status = PresentationScaleStatus::UnsupportedFilter;
 	return VK_FILTER_NEAREST;
@@ -269,8 +273,19 @@ PresentationScaleStatus PresentationScalerBlitFinalImage(CommandBuffer* command_
 		return PresentationScaleStatus::UnsupportedDestinationFormat;
 	}
 
-	if (Config::GetPresentationFilter() == Config::PresentationFilter::Fsr &&
-	    PresentationFsrApplies(source->extent, destination->swapchain_extent))
+	const auto     presentation_filter = Config::GetPresentationFilter();
+	const bool     upscales            = PresentationFsrApplies(source->extent, destination->swapchain_extent);
+	const VkFormat content_format      = source->format;
+	VulkanImage*   temporal            = nullptr;
+	if (presentation_filter == Config::PresentationFilter::Fsr3)
+	{
+		temporal = PresentationFsr3Record(command_buffer, context, source, destination->swapchain_extent,
+		                                  Config::GetPresentationFsrSharpness(), &destination->fsr3_stage);
+	}
+	if (temporal != nullptr)
+	{
+		source = temporal;
+	} else if (upscales && presentation_filter != Config::PresentationFilter::Nearest && presentation_filter != Config::PresentationFilter::Linear)
 	{
 		// The passes encode and decode sRGB themselves, so no encode stage is needed.
 		return PresentationFsrRecord(command_buffer, context, source, destination->swapchain_images[destination->current_index],
@@ -296,7 +311,7 @@ PresentationScaleStatus PresentationScalerBlitFinalImage(CommandBuffer* command_
 			source              = &stage->image;
 		}
 	}
-	if (!PresentationNeedsEncodeStage(source->format, destination->swapchain_format))
+	if (!PresentationNeedsEncodeStage(content_format, destination->swapchain_format))
 	{
 		UtilBlitImage(command_buffer, source, destination, filter);
 		return PresentationScaleStatus::Success;

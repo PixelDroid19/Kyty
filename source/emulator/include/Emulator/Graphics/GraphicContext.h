@@ -73,6 +73,7 @@ namespace Kyty::Libs::Graphics {
 struct PresentationEncodeStage;
 struct PresentationDownscaleStage;
 struct PresentationFsrStage;
+struct PresentationFsr3Stage;
 struct TransientSnapshotPool;
 struct VulkanBuffer;
 
@@ -93,6 +94,8 @@ struct VulkanSwapchain
 	PresentationDownscaleStage* downscale_stage = nullptr;
 	// FSR 1.0 passes of the Fsr presentation filter; owned by PresentationScaler.
 	PresentationFsrStage* fsr_stage = nullptr;
+	// FSR 3.1 upscaler of the Fsr3 presentation filter; owned by PresentationScaler.
+	PresentationFsr3Stage* fsr3_stage = nullptr;
 };
 
 struct VulkanCommandPool

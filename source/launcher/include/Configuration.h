@@ -124,7 +124,8 @@ public:
 	{
 		Linear,
 		Nearest,
-		Fsr
+		Fsr,
+		Fsr3
 	};
 	Q_ENUM(PresentationFilter)
 
