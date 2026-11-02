@@ -178,14 +178,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VPkF16)
 	const auto  sources = static_cast<uint32_t>(fused ? 3 : 2);
 	if (inst.src_num != static_cast<int>(sources) || inst.vop3p_op_sel_hi > 7u || inst.vop3_op_sel > 7u ||
 	    inst.vop3_omod != 0u || inst.vop_sdwa || inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 ||
-	    inst.dst.register_id < 0 || inst.dst.register_id > 255 || inst.dst.multiplier != 1.0f || inst.dst.clamp ||
-	    inst.dst.absolute || inst.dst.negate || inst.dst.dpp || inst.dst.swizzle != 6u)
+	    inst.dst.register_id < 0 || inst.dst.register_id > 255 || inst.dst.multiplier != 1.0f || inst.dst.absolute ||
+	    inst.dst.negate || inst.dst.dpp || inst.dst.swizzle != 6u)
 	{
 		return false;
-	}
-	for (uint32_t operand = 0; operand < sources; ++operand)
-	{
-		if (operand_is_constant(inst.src[operand])) { return false; }
 	}
 	F16Arithmetic::Mode mode;
 	if (!F16Arithmetic::ReadMode(spirv, &mode) || !mode.fp16_overflow_known)
@@ -235,13 +231,95 @@ KYTY_RECOMPILER_FUNC(Recompile_VPkF16)
 		source += F16Arithmetic::Narrow(spirv, "fh_value_bits_" + half_index, "fh_result_" + half_index, half_index, 0u,
 		                                (mode.value & 0x80u) == 0u, mode.fp16_overflow,
 		                                fused ? "fh_residue_" + half_index : String8());
+		if (inst.dst.clamp)
+		{
+			source += F16Arithmetic::Clamp(mode).ReplaceStr("<index>", half_index);
+		}
 	}
-	source += String8("%fh_packed_<index> = OpBitFieldInsert %uint %fh_result_<index>_lo %fh_result_<index>_hi %uint_16 %uint_16\n")
+	source += String8("%fh_packed_<index> = OpBitFieldInsert %uint %<half>_<index>_lo %<half>_<index>_hi %uint_16 %uint_16\n")
+	              .ReplaceStr("<half>", inst.dst.clamp ? "fh_clamped" : "fh_result")
 	              .ReplaceStr("<index>", index_str);
 	source += F16Arithmetic::Store(inst, index_str, "fh_packed_" + index_str);
 	*dst_source += source.ReplaceStr("<float_zero>", spirv->GetConstantFloat(0.0f))
 	                   .ReplaceStr("uint_112", spirv->GetConstantUint(112))
 	                   .ReplaceStr("uint_255", spirv->GetConstantUint(255));
+	return true;
+}
+
+// Packed 16-bit integers: OPSEL picks the source halves of the low result and
+// OPSEL_HI those of the high one. Inline floats and the saturation CLAMP have
+// no contract here and are refused.
+KYTY_RECOMPILER_FUNC(Recompile_VPkI16)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	// OPSEL_HI's third bit names a source these two-operand forms do not have.
+	if (inst.src_num != 2 || inst.vop3_op_sel > 3u || inst.vop_sdwa || inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 ||
+	    inst.dst.clamp)
+	{
+		return false;
+	}
+	String8 source;
+	const String8 index_str = String8::FromPrintf("%u", index);
+	for (int operand = 0; operand < 2; ++operand)
+	{
+		// A literal or inline integer is read as its 32-bit value, whose halves OPSEL selects. An inline float's
+		// precision in packed math has no contract in the ISA.
+		auto src = inst.src[operand];
+		if (src.type == ShaderOperandType::FloatInlineConstant) { return false; }
+		src.negate   = false;
+		src.absolute = false;
+		String8 load;
+		if (!operand_load_uint(spirv, src, String8::FromPrintf("t%d_", operand) + "<index>", index_str, &load)) { return false; }
+		source += load + "\n";
+	}
+	const bool is_signed = strcmp(param[1] == nullptr ? "" : param[1], "s") == 0;
+	const auto extend = [&](int operand, uint32_t select, bool negated, const String8& half_index)
+	{
+		String8 text = R"(
+%h<s>_<index> = OpBitFieldUExtract %uint %t<s>_<base> %<first> %<uint_16>
+)";
+		// NEG flips the selected half's top bit: the live pattern -(0x7fff) only makes sense as -1, not -32767.
+		text += negated ? R"(
+%sign<s>_<index> = OpShiftLeftLogical %uint %uint_1 %<uint_15>
+%n<s>_<index> = OpBitwiseXor %uint %h<s>_<index> %sign<s>_<index>
+)"
+		                : R"(
+%n<s>_<index> = OpCopyObject %uint %h<s>_<index>
+)";
+		text += is_signed ? R"(
+%x<s>_<index> = OpShiftLeftLogical %uint %n<s>_<index> %<uint_16>
+%i<s>x_<index> = OpShiftRightArithmetic %uint %x<s>_<index> %<uint_16>
+)"
+		                  : R"(
+%i<s>x_<index> = OpCopyObject %uint %n<s>_<index>
+)";
+		const bool high = ((select >> operand) & 1u) != 0u;
+		return text.ReplaceStr("<s>", String8::FromPrintf("%d", operand))
+		    .ReplaceStr("<first>", high ? "<uint_16>" : "uint_0")
+		    .ReplaceStr("<base>", index_str)
+		    .ReplaceStr("<index>", half_index);
+	};
+	for (uint32_t high = 0; high < 2u; ++high)
+	{
+		const String8 half_index = index_str + (high != 0u ? "_hi" : "_lo");
+		const uint32_t select = high != 0u ? inst.vop3p_op_sel_hi : inst.vop3_op_sel;
+		const auto negated = [&](int operand) { return high != 0u ? inst.src[operand].absolute : inst.src[operand].negate; };
+		source += extend(0, select, negated(0), half_index) + extend(1, select, negated(1), half_index);
+		source += String8(param[0]).ReplaceStr("<index>", half_index) + "\n";
+	}
+	source += R"(
+%packed_<index> = OpBitFieldInsert %uint %t_<index>_lo %t_<index>_hi %<uint_16> %<uint_16>
+%packed_f_<index> = OpBitcast %float %packed_<index>
+%exec_lo_u_<index> = OpLoad %uint %exec_lo
+%exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+%tdst_<index> = OpLoad %float %<dst>
+%tval_<index> = OpSelect %float %exec_lo_b_<index> %packed_f_<index> %tdst_<index>
+OpStore %<dst> %tval_<index>
+)";
+	*dst_source += source.ReplaceStr("<dst>", operand_variable_to_str(inst.dst).value)
+	                   .ReplaceStr("<uint_15>", spirv->GetConstantUint(15u))
+	                   .ReplaceStr("<uint_16>", spirv->GetConstantUint(16u))
+	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
 

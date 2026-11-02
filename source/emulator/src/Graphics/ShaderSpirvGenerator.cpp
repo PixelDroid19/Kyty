@@ -3254,7 +3254,19 @@ void Spirv::FindConstants()
 	                     ShaderInstructionType::VSubU16, ShaderInstructionType::VMulI16, ShaderInstructionType::VMulU16,
 	                     ShaderInstructionType::VMinI16, ShaderInstructionType::VMinU16, ShaderInstructionType::VMaxI16,
 	                     ShaderInstructionType::VMaxU16, ShaderInstructionType::VLshrrevB16, ShaderInstructionType::VAshrrevI16,
-	                     ShaderInstructionType::VLshlrevB16}))
+	                     ShaderInstructionType::VLshlrevB16,
+	                     ShaderInstructionType::VPkMulLoU16,
+	                     ShaderInstructionType::VPkAddI16,
+	                     ShaderInstructionType::VPkSubI16,
+	                     ShaderInstructionType::VPkLshlrevB16,
+	                     ShaderInstructionType::VPkLshrrevB16,
+	                     ShaderInstructionType::VPkAshrrevI16,
+	                     ShaderInstructionType::VPkMaxI16,
+	                     ShaderInstructionType::VPkMinI16,
+	                     ShaderInstructionType::VPkAddU16,
+	                     ShaderInstructionType::VPkSubU16,
+	                     ShaderInstructionType::VPkMaxU16,
+	                     ShaderInstructionType::VPkMinU16}))
 	{
 		AddConstantUint(15u);
 		AddConstantUint(16u);

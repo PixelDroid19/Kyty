@@ -9,8 +9,9 @@ KYTY_SHADER_PARSER(shader_parse_vop3p)
 	EXIT_IF(dst == nullptr || src == nullptr || buffer == nullptr || buffer < src);
 	KYTY_TYPE_STR("vop3p");
 	const uint32_t opcode = (buffer[0] >> 16u) & 0x7fu;
-	// Packed half FMA, ADD, MUL, MIN and MAX (opcodes 14-18) and the mixed FMA (32-34).
-	const bool     packed = opcode >= 0xeu && opcode <= 0x12u;
+	// Packed integers (1-13 without the multiply-adds), packed half FMA, ADD, MUL, MIN and MAX (14-18)
+	// and the mixed FMA (32-34).
+	const bool     packed = opcode >= 0x1u && opcode <= 0x12u && opcode != 0x9u;
 	if (!next_gen || (buffer[0] & 0xff800000u) != 0xcc000000u ||
 	    (opcode != 0x20u && opcode != 0x21u && opcode != 0x22u && !packed))
 	{
@@ -19,7 +20,19 @@ KYTY_SHADER_PARSER(shader_parse_vop3p)
 
 	ShaderInstruction inst;
 	inst.pc = pc;
-	inst.type = opcode == 0xeu  ? ShaderInstructionType::VPkFmaF16 :
+	inst.type = opcode == 0x1u  ? ShaderInstructionType::VPkMulLoU16 :
+	            opcode == 0x2u  ? ShaderInstructionType::VPkAddI16 :
+	            opcode == 0x3u  ? ShaderInstructionType::VPkSubI16 :
+	            opcode == 0x4u  ? ShaderInstructionType::VPkLshlrevB16 :
+	            opcode == 0x5u  ? ShaderInstructionType::VPkLshrrevB16 :
+	            opcode == 0x6u  ? ShaderInstructionType::VPkAshrrevI16 :
+	            opcode == 0x7u  ? ShaderInstructionType::VPkMaxI16 :
+	            opcode == 0x8u  ? ShaderInstructionType::VPkMinI16 :
+	            opcode == 0xau  ? ShaderInstructionType::VPkAddU16 :
+	            opcode == 0xbu  ? ShaderInstructionType::VPkSubU16 :
+	            opcode == 0xcu  ? ShaderInstructionType::VPkMaxU16 :
+	            opcode == 0xdu  ? ShaderInstructionType::VPkMinU16 :
+	            opcode == 0xeu  ? ShaderInstructionType::VPkFmaF16 :
 	            opcode == 0xfu  ? ShaderInstructionType::VPkAddF16 :
 	            opcode == 0x10u ? ShaderInstructionType::VPkMulF16 :
 	            opcode == 0x11u ? ShaderInstructionType::VPkMinF16 :
@@ -27,7 +40,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3p)
 	            opcode == 0x20u ? ShaderInstructionType::VFmaMixF32 :
 	            opcode == 0x21u ? ShaderInstructionType::VFmaMixLoF16 :
 	                              ShaderInstructionType::VFmaMixHiF16;
-	const bool binary = opcode >= 0xfu && opcode <= 0x12u;
+	const bool binary = packed && opcode != 0xeu;
 	inst.format = binary ? ShaderInstructionFormat::SVdstSVsrc0SVsrc1 : ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
 	inst.dst = operand_parse(256u + (buffer[0] & 0xffu));
 	inst.dst.clamp = ((buffer[0] >> 15u) & 1u) != 0u;
@@ -48,7 +61,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3p)
 			operand.constant.u = buffer[2];
 			has_literal = true;
 		}
-		// The ISA does not give the inline-constant contract of packed math; its emitter refuses constants.
+		// The ISA does not give the inline-float contract of packed math; its emitter decides what it admits.
 		if (packed)
 		{
 			continue;
