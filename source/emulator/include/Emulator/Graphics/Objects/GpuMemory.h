@@ -486,18 +486,23 @@ inline bool GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType ex
 	        relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin);
 }
 
-// Incoming StorageTexture inside a CPU-uploaded StorageBuffer whose current use
-// can still write and which holds no device write yet (captured: a 0x560000
-// view at the base of a 0x1a28000 buffer). The view seeds from guest memory;
+// Incoming StorageTexture over a StorageBuffer whose content was published to
+// guest memory (uploaded, written back or invalidated), whose current use can
+// still write and which holds no device write since (captured: a 0x560000
+// view at the base of a 0x1a28000 buffer, a 0xe00000 view around a 0x1c000
+// buffer). The view seeds from guest memory;
 // queue order keeps the buffer's use first and its write-back, if the bytes
 // changed, invalidates the linked view.
-inline bool GpuMemoryAllowsStorageTextureInsideWritableStorageUpload(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+inline bool GpuMemoryAllowsStorageTextureOverWritableStorageUpload(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                                     GpuMemoryContentOrigin existing_origin, bool existing_has_device_write,
                                                                     GpuMemoryObjectType incoming_type)
 {
-	return existing_type == GpuMemoryObjectType::StorageBuffer && relation == GpuMemoryOverlapType::Contains &&
-	       existing_origin == GpuMemoryContentOrigin::CpuUpload && !existing_has_device_write &&
-	       incoming_type == GpuMemoryObjectType::StorageTexture;
+	return existing_type == GpuMemoryObjectType::StorageBuffer &&
+	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
+	        relation == GpuMemoryOverlapType::IsContainedWithin) &&
+	       (existing_origin == GpuMemoryContentOrigin::CpuUpload || existing_origin == GpuMemoryContentOrigin::GpuWriteBack ||
+	        existing_origin == GpuMemoryContentOrigin::AliasInvalidation) &&
+	       !existing_has_device_write && incoming_type == GpuMemoryObjectType::StorageTexture;
 }
 
 // Incoming StorageTexture fully inside a live RenderTexture allocation.

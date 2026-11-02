@@ -1522,7 +1522,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			} else if (GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type) ||
 			           links_cpu_texture(h, obj) ||
 			           GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type) ||
-			           GpuMemoryAllowsStorageTextureInsideWritableStorageUpload(o.object.type, obj.relation, o.content_origin,
+			           GpuMemoryAllowsStorageTextureOverWritableStorageUpload(o.object.type, obj.relation, o.content_origin,
 			                                                                    o.device_write_time >= o.gpu_update_time, info.type))
 			{
 				overlap = true;
@@ -1890,7 +1890,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// A guest reusing a transient arena mixes every kind of parent under one view (captured: a 1216x684
 			// view inside five 2432x1368 surfaces and a materialized copy, holding three smaller targets, and
 			// crossing a 1920x1080 one). Each parent is re-described, encloses the view as a render target, is
-			// offset from it, or caches guest bytes: link them all, the new view seeds from guest bytes.
+			// offset from it, or caches guest bytes: link them all, the new view seeds from guest bytes. A view can
+			// also enclose the arena's smaller resources (captured: 3456x1944 over a mip chain, a 1728x972 target and
+			// CPU-uploaded buffers whose use can still write, which holds no device write yet). A view of another
+			// pitch inside a surface addresses other texels, even in its format (captured: 128x1 at the base of
+			// 3456x1944 and 3584-pitch views and of a CPU-uploaded buffer).
 			bool multi_arena_storage_texture = info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
 			for (const auto& obj: others)
 			{
@@ -1902,12 +1906,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				const bool  compare_layout = obj.relation != OverlapType::Contains;
 				multi_arena_storage_texture =
 				    (GpuMemoryAllowsStorageTextureContainedInRenderTarget(o.object.type, obj.relation, info.type) ||
-				     (obj.relation == OverlapType::Crosses && (o.object.type == GpuMemoryObjectType::StorageTexture ||
-				                                               o.object.type == GpuMemoryObjectType::RenderTexture ||
-				                                               o.object.type == GpuMemoryObjectType::DepthStencilBuffer)) ||
+				     ((obj.relation == OverlapType::Crosses || obj.relation == OverlapType::IsContainedWithin) &&
+				      (o.object.type == GpuMemoryObjectType::StorageTexture || o.object.type == GpuMemoryObjectType::RenderTexture ||
+				       o.object.type == GpuMemoryObjectType::DepthStencilBuffer)) ||
 				     GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type) ||
+				     GpuMemoryAllowsStorageTextureOverWritableStorageUpload(o.object.type, obj.relation, o.content_origin,
+				                                                              o.device_write_time != 0u, info.type) ||
 				     (o.object.type == GpuMemoryObjectType::StorageTexture &&
-				      StorageTextureRedescribesRange(o.params, info.params, compare_layout)) ||
+				      (StorageTextureRedescribesRange(o.params, info.params, compare_layout) ||
+				       o.params[StorageTextureObject::PARAM_PITCH] != info.params[StorageTextureObject::PARAM_PITCH])) ||
 				     (o.object.type == GpuMemoryObjectType::Texture && (holds_surface_pixels(o) || o.device_write_time != 0u) &&
 				      StorageTextureRedescribesRange(o.params, info.params, compare_layout)) ||
 				     (o.object.type == GpuMemoryObjectType::RenderTexture &&
