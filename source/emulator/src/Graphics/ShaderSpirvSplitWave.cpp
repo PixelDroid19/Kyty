@@ -5,8 +5,9 @@
 
 namespace Kyty::Libs::Graphics {
 
-// A split guest wave64 runs as P host subgroups of L lanes each (P = 64 / L,
-// L = 32, 16 or 8): subgroup P*w + p holds guest lanes p*L .. p*L+L-1 of wave w.
+// A split guest wave runs as P host subgroups of L lanes each (wave64: P = 64 / L,
+// L = 32, 16 or 8; wave32: P = 2, L = 16): subgroup P*w + p holds guest lanes
+// p*L .. p*L+L-1 of wave w.
 // The per-lane emitters see the guest lane in %gl_SubgroupInvocationID and
 // call the helpers below for every wave-wide value; each helper call is a
 // rendezvous of the parts, which execute the same sequence of calls because
@@ -70,7 +71,7 @@ String8 Spirv::SplitWaveTypes() const
 		return {};
 	}
 	const uint32_t lanes  = SplitWavePartLanes();
-	const uint32_t parts  = 64u / lanes;
+	const uint32_t parts  = m_cs_input_info->wave_layout.guest_wave_size / lanes;
 	const uint32_t stride = ShaderSplitWaveExchangeDwords(lanes);
 	return String8::FromPrintf(R"(
 %%split_c0 = OpConstant %%uint 0
@@ -295,6 +296,11 @@ static String8 SplitWaveBallotFunction(uint32_t parts, uint32_t lanes)
 	for (uint32_t word = 0; word < 2u; ++word)
 	{
 		const char* name   = word == 0u ? "lo" : "hi";
+		if (word * per_word >= parts)
+		{
+			text += String8::FromPrintf("%%split_ballot_%s = OpCopyObject %%uint %%split_c0\n", name);
+			continue;
+		}
 		String8     merged = String8::FromPrintf("split_ballot_word%u", word * per_word);
 		for (uint32_t slot = 1; slot < per_word; ++slot)
 		{
@@ -349,7 +355,7 @@ String8 Spirv::SplitWaveFunctions() const
 		return {};
 	}
 	const uint32_t lanes = SplitWavePartLanes();
-	const uint32_t parts = 64u / lanes;
+	const uint32_t parts = m_cs_input_info->wave_layout.guest_wave_size / lanes;
 	// %function_u_u is (uint, uint) -> uint and %function_gen5_buffer_format_bytes
 	// is (uint) -> uint; SPIR-V forbids declaring a function type twice.
 	String8 text = SplitWavePublishFunction(parts);

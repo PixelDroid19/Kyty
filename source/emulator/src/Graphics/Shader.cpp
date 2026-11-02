@@ -4817,6 +4817,11 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		{
 			info->native_wave_sensitive = ShaderUsesNativeWaveState(code);
 			info->required_subgroup_size = info->native_wave_sensitive ? 32u : 0u;
+			if (info->native_wave_sensitive && info->wave32_split_valid)
+			{
+				info->wave_layout            = info->wave32_split_layout;
+				info->required_subgroup_size = info->wave_layout.native_subgroup_size;
+			}
 		}
 		// Resource-coupled S_LOAD admission needs the exact per-PC EUD mapping.
 		// This is still before shader-cache, pipeline and descriptor preparation.
@@ -4835,7 +4840,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 				EXIT("wave64 dispatch reads DPP quads across a partial quad: local=%ux%ux%u\n", info->threads_num[0],
 				     info->threads_num[1], info->threads_num[2]);
 			}
-		} else if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32)
+		} else if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32 && info->wave_layout.guest_wave_size == 64u)
 		{
 			// A program proven wave-width independent runs one guest lane per
 			// invocation without exchanges between the halves of a guest wave.
@@ -4906,9 +4911,10 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 				continue;
 			}
 			const bool native_xy_thread_ids =
-			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Native && info->thread_ids_num >= 2;
-			const bool paired_xy_thread_ids =
-			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32 && info->thread_ids_num >= 2;
+			    (info->wave_layout.strategy == ShaderComputeWaveStrategy::Native || info->wave_layout.guest_wave_size == 32u) &&
+			    info->thread_ids_num >= 2;
+			const bool paired_xy_thread_ids = info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32 &&
+			                                  info->wave_layout.guest_wave_size == 64u && info->thread_ids_num >= 2;
 			auto coverage = AnalyzeShaderStorageImageTileCoverage(code, info->bind, i, info->workgroup_register, info->threads_num,
 			                                                       native_xy_thread_ids, info->group_id[0] && info->group_id[1],
 			                                                       paired_xy_thread_ids);

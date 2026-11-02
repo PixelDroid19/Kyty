@@ -84,7 +84,10 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	{
 		return ShaderComputeWaveLayoutStatus::UnsupportedDispatchMode;
 	}
-	if ((mode & kWave32Enable) != 0)
+	// Wave32 fits one host subgroup; it splits only for the allocation that
+	// spills at that width, on a host with exact width 16.
+	const bool wave32 = (mode & kWave32Enable) != 0;
+	if (wave32 && request.vgprs <= kSplitNarrowVgprs)
 	{
 		return ShaderComputeWaveLayoutStatus::UnsupportedWidth;
 	}
@@ -92,7 +95,8 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	// GFX10.3's ORDER_MODE selects ordered versus out-of-order wave launch. Both
 	// values preserve the dispatch grid and do not alter this layout decision.
 
-	const uint32_t part_lanes = ShaderSplitWavePartLanes(capabilities, request.vgprs);
+	const uint32_t guest_wave_size = wave32 ? kNativeSubgroupSize : kGuestWaveSize;
+	const uint32_t part_lanes      = wave32 ? kSplitNarrowLanes : ShaderSplitWavePartLanes(capabilities, request.vgprs);
 	if (!capabilities.size_control_enabled || !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
 	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > part_lanes ||
 	    capabilities.max_subgroup_size < part_lanes)
@@ -128,15 +132,15 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	// The padding lanes of a trailing partial wave start with EXEC clear.
 	// Quotient/remainder avoids overflowing the rounding addition for a valid
 	// uint32_t local product near UINT32_MAX.
-	const uint32_t waves            = guest_invocations / kGuestWaveSize + (guest_invocations % kGuestWaveSize != 0u ? 1u : 0u);
+	const uint32_t waves            = guest_invocations / guest_wave_size + (guest_invocations % guest_wave_size != 0u ? 1u : 0u);
 	uint32_t       physical_local_x = 0;
-	if (!MultiplyU32(waves, kGuestWaveSize, &physical_local_x))
+	if (!MultiplyU32(waves, guest_wave_size, &physical_local_x))
 	{
 		return ShaderComputeWaveLayoutStatus::HostLimitExceeded;
 	}
 
 	uint32_t host_subgroups = 0;
-	if (!MultiplyU32(waves, kGuestWaveSize / part_lanes, &host_subgroups))
+	if (!MultiplyU32(waves, guest_wave_size / part_lanes, &host_subgroups))
 	{
 		return ShaderComputeWaveLayoutStatus::HostLimitExceeded;
 	}
@@ -169,7 +173,7 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	candidate.physical_local[0]    = physical_local_x;
 	candidate.physical_local[1]    = 1;
 	candidate.physical_local[2]    = 1;
-	candidate.guest_wave_size      = kGuestWaveSize;
+	candidate.guest_wave_size      = guest_wave_size;
 	candidate.native_subgroup_size = part_lanes;
 	candidate.banks                = 1;
 	candidate.waves                = waves;

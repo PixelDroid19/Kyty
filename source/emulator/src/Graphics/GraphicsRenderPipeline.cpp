@@ -986,7 +986,7 @@ static ComputePipelineRecipe BuildComputePipelineRecipe(const ShaderComputeInput
 	{
 		// A split guest wave identifies its parts by SubgroupId, so it always requires the exact width.
 		const bool split = input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32;
-		if (split ? input_info->wave_layout.guest_wave_size != 64u ||
+		if (split ? (input_info->wave_layout.guest_wave_size != 64u && input_info->wave_layout.guest_wave_size != 32u) ||
 		                input_info->required_subgroup_size != input_info->wave_layout.native_subgroup_size
 		          : input_info->required_subgroup_size != 32u || input_info->wave_layout.strategy != ShaderComputeWaveStrategy::Native ||
 		                input_info->wave_layout.guest_wave_size != 32u)

@@ -2559,6 +2559,9 @@ struct ShaderComputeInputInfo
 	// See ShaderComputeWaveDispatchPlan::native_equivalent_layout.
 	bool                    native_equivalent_valid = false;
 	ShaderComputeWaveLayout native_equivalent_layout;
+	// See ShaderComputeWaveDispatchPlan::wave32_split_layout.
+	bool                    wave32_split_valid = false;
+	ShaderComputeWaveLayout wave32_split_layout;
 	bool                    native_equivalence_required = false;
 	bool                    thread_limits_used          = false;
 	uint32_t                thread_limits[3]            = {0, 0, 0};

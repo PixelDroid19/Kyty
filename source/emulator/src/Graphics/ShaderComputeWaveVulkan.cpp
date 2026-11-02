@@ -369,7 +369,8 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 	// Split waves use two whole 32-lane or four whole 16-lane subgroups and
 	// exchange wave-wide values through workgroup memory.
 	const uint32_t part_lanes = layout.native_subgroup_size;
-	if (!require_size || layout.strategy != ShaderComputeWaveStrategy::Split64On32 || layout.guest_wave_size != kGuestWaveSize ||
+	if (!require_size || layout.strategy != ShaderComputeWaveStrategy::Split64On32 ||
+	    (layout.guest_wave_size != kGuestWaveSize && (layout.guest_wave_size != kNativeSubgroupSize || part_lanes != 16u)) ||
 	    (part_lanes != 8u && part_lanes != 16u && part_lanes != 32u) || layout.banks != 1u || layout.waves == 0 ||
 	    !capabilities.size_control_enabled || !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
 	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > part_lanes ||
@@ -377,7 +378,7 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 	{
 		return false;
 	}
-	const uint32_t host_subgroups_per_wave = kGuestWaveSize / part_lanes;
+	const uint32_t host_subgroups_per_wave = layout.guest_wave_size / part_lanes;
 	const uint32_t exchange_dwords         = ShaderSplitWaveExchangeDwords(part_lanes);
 
 	uint64_t guest_invocations = 1;
@@ -394,8 +395,8 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 	uint64_t wave_exchange_dwords = 0;
 	uint64_t lds_bytes = 0;
 	// The trailing guest wave may be partial.
-	if (guest_invocations / kGuestWaveSize + (guest_invocations % kGuestWaveSize != 0u ? 1u : 0u) != layout.waves ||
-	    !MultiplyU64(layout.waves, kGuestWaveSize, &expected_physical_x) ||
+	if (guest_invocations / layout.guest_wave_size + (guest_invocations % layout.guest_wave_size != 0u ? 1u : 0u) != layout.waves ||
+	    !MultiplyU64(layout.waves, layout.guest_wave_size, &expected_physical_x) ||
 	    !MultiplyU64(layout.waves, host_subgroups_per_wave, &host_subgroups) ||
 	    !MultiplyU64(layout.waves, exchange_dwords, &wave_exchange_dwords) ||
 	    !MultiplyU64(wave_exchange_dwords + layout.lds_dwords, sizeof(uint32_t), &lds_bytes))

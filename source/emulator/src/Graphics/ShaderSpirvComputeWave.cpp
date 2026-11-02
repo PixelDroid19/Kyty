@@ -29,7 +29,7 @@ bool NativeComputeWaveInputIsValid(const ShaderComputeInputInfo* input)
 	{
 		return false;
 	}
-	if (split ? layout.guest_wave_size != kGuestWaveSize || (layout.native_subgroup_size != 8u && layout.native_subgroup_size != 16u && layout.native_subgroup_size != 32u) ||
+	if (split ? (layout.guest_wave_size != kGuestWaveSize && (layout.guest_wave_size != kNativeSubgroupSize || layout.native_subgroup_size != 16u)) || (layout.native_subgroup_size != 8u && layout.native_subgroup_size != 16u && layout.native_subgroup_size != 32u) ||
 	                layout.waves == 0u
 	          : layout.strategy != ShaderComputeWaveStrategy::Native || layout.guest_wave_size != kNativeSubgroupSize ||
 	                (layout.native_subgroup_size != 0u && layout.native_subgroup_size != kNativeSubgroupSize) || layout.waves != 0u)
@@ -49,12 +49,12 @@ bool NativeComputeWaveInputIsValid(const ShaderComputeInputInfo* input)
 	if (split)
 	{
 		// Whole guest waves: the trailing one keeps its padding lanes inactive.
-		const uint64_t waves = (static_cast<uint64_t>(physical_local[0]) + kGuestWaveSize - 1u) / kGuestWaveSize;
-		if (waves != layout.waves || waves * kGuestWaveSize > UINT32_MAX)
+		const uint64_t waves = (static_cast<uint64_t>(physical_local[0]) + layout.guest_wave_size - 1u) / layout.guest_wave_size;
+		if (waves != layout.waves || waves * layout.guest_wave_size > UINT32_MAX)
 		{
 			return false;
 		}
-		physical_local[0] = static_cast<uint32_t>(waves * kGuestWaveSize);
+		physical_local[0] = static_cast<uint32_t>(waves * layout.guest_wave_size);
 	}
 
 	for (uint32_t axis = 0; axis < 3u; axis++)

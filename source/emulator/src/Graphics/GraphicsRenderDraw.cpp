@@ -3625,6 +3625,8 @@ static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint
 	input_info->wave_layout                 = plan->wave_layout;
 	input_info->native_equivalent_valid     = plan->native_equivalent_valid;
 	input_info->native_equivalent_layout    = plan->native_equivalent_layout;
+	input_info->wave32_split_valid          = plan->wave32_split_valid;
+	input_info->wave32_split_layout         = plan->wave32_split_layout;
 	input_info->native_equivalence_required = plan->native_equivalence_required;
 	input_info->thread_limits_used          = plan->thread_limits_used;
 	for (int axis = 0; axis < 3; axis++)

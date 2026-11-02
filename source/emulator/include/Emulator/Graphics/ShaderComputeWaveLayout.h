@@ -92,7 +92,8 @@ struct ShaderComputeWaveLayout
 // the host allows exact width 16, of 8 lanes when the host also allows width 8
 // and the guest allocates more VGPRs than a 16-lane part holds, else of 32
 // lanes (SubgroupId P*w .. P*w+P-1 with P = 64 / lanes); the workgroup keeps
-// guest lane order, padded to whole guest waves.
+// guest lane order, padded to whole guest waves. Wave32 takes this layout only
+// with more than 64 <vgprs> and exact host width 16: two parts per guest wave.
 [[nodiscard]] ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComputeWaveRequest&      request,
                                                                               const ShaderComputeWaveCapabilities& capabilities,
                                                                               ShaderComputeWaveLayout*             layout);
