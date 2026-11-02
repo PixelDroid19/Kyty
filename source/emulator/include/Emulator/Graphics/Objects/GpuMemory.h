@@ -591,8 +591,8 @@ inline bool GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType existing
 // dual-strict: Texture Contains IndexBuffer (vaddr size 0xe4 under a larger
 // Texture). Link both — never reclaim the Texture for a tiny index range.
 // Same surface types as VertexContainedInSurface, including its depth rule: a
-// small index range crossing an active depth target's planes links instead of
-// reclaiming the depth state. Peer IndexBuffer reclaim stays on the
+// small index range crossing an active depth target's planes, or inside them, links
+// instead of reclaiming the depth state. Peer IndexBuffer reclaim stays on the
 // ObjectsRelation delete_all path.
 inline bool GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                    GpuMemoryObjectType incoming_type)
@@ -603,7 +603,7 @@ inline bool GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType existing_
 	}
 	if (existing_type == GpuMemoryObjectType::DepthStencilBuffer)
 	{
-		return relation == GpuMemoryOverlapType::Crosses;
+		return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::Contains;
 	}
 	if (existing_type != GpuMemoryObjectType::StorageBuffer && existing_type != GpuMemoryObjectType::RenderTexture &&
 	    existing_type != GpuMemoryObjectType::Texture && existing_type != GpuMemoryObjectType::StorageTexture)

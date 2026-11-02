@@ -3452,7 +3452,7 @@ TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
 
 	auto depth_inside            = surface;
 	depth_inside.entries[0].type = GpuMemoryObjectType::DepthStencilBuffer;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(depth_inside, false, GpuMemorySnapshotAdmission::IndexView));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(depth_inside, false, GpuMemorySnapshotAdmission::IndexView));
 	depth_inside.entries[0].relation = GpuMemoryOverlapType::Crosses;
 	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(depth_inside, false, GpuMemorySnapshotAdmission::IndexView));
 
@@ -6650,8 +6650,8 @@ TEST(EmulatorGraphicsState, AllowsIndexContainedInTextureSurface)
 	                                                   GpuMemoryObjectType::IndexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
 	                                                   GpuMemoryObjectType::IndexBuffer));
-	EXPECT_FALSE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
-	                                                    GpuMemoryObjectType::IndexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
+	                                                   GpuMemoryObjectType::IndexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
 	                                                    GpuMemoryObjectType::IndexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
