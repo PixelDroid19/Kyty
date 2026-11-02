@@ -72,6 +72,13 @@ bool WritesScc(Type type)
 	return !AnyPrefix(type, {"SMov", "SCmov", "SCselect", "SGetpc"});
 }
 
+bool MayReadVcc(Type type)
+{
+	const auto name = ShaderInstructionTypeName(type);
+	const auto has  = [&](std::string_view part) { return name.find(part) != std::string_view::npos; };
+	return AnyPrefix(type, {"SCbranchVcc"}) || (StartsWith(type, "V") && (has("Cndmask") || has("Co") || has("Div")));
+}
+
 bool IsMaskAlgebra(Type type)
 {
 	// Pointwise on lane bits, including the forms that also replace EXEC (SAnd*Saveexec

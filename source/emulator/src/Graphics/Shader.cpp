@@ -3992,9 +3992,9 @@ static std::shared_ptr<const ShaderVertexStreamAccessScan> VertexProgramStreamSc
 	return scan;
 }
 
-// An attribute-table dword the program never loads is not guest-visible. A hole between
-// declared semantics holds unrelated memory that changes per draw; keeping it would split
-// the shader identity and recompile the same program for every value.
+// Attribute-table bits the program cannot observe are not guest-visible. A hole between
+// declared semantics and the unused high bits of a dword change per draw; keeping them would
+// split the shader identity and recompile the same program for every value.
 static void ClearUnreadAttribData(ShaderVertexInputInfo* info, const ShaderVertexStreamAccessScan& scan)
 {
 	// With guest device addresses a table load reads guest memory at run time unless a
@@ -4012,10 +4012,7 @@ static void ClearUnreadAttribData(ShaderVertexInputInfo* info, const ShaderVerte
 	                             std::none_of(scan.attrib_load_pcs.begin(), scan.attrib_load_pcs.end(), load_is_mapped);
 	for (int i = 0; i < info->fetch_attrib_data_num; i++)
 	{
-		if (snapshot_unused || (scan.attrib_dwords_read & (1u << static_cast<uint32_t>(i))) == 0)
-		{
-			info->fetch_attrib_data[i] = 0;
-		}
+		info->fetch_attrib_data[i] = snapshot_unused ? 0u : info->fetch_attrib_data[i] & scan.attrib_demanded_bits[i];
 	}
 }
 

@@ -1,5 +1,7 @@
 #include "Kyty/Core/MagicEnum.h"
 #include "ShaderSpirvInternal.h"
+
+#include "ShaderLaneFlow.h"
 #include "ShaderSpirvScJoin.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveSdwa.h"
@@ -2850,14 +2852,113 @@ static int AttribTableLoadDwords(ShaderInstructionType type)
 
 // Dwords of the attribute table that scalar loads of the fused-front attribute register
 // read. A load with a non-constant offset may reach any dword.
+static bool OperandCoversScalar(const ShaderOperand& op, unsigned word)
+{
+	unsigned first = 0;
+	unsigned count = 0;
+	return LaneFlow::ScalarRange(op, &first, &count) && word >= first && word < first + count;
+}
+
+static bool EndsStraightLine(ShaderInstructionType type)
+{
+	return LaneFlow::AnyPrefix(type, {"SBranch", "SCbranch", "SSetpc", "SSwappc", "SCall", "SEndpgm"});
+}
+
+// SCC of the instruction before `first` cannot be read: a definite SCC writer comes first.
+static bool SccDeadFrom(const ShaderCode& code, uint32_t first)
+{
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t i = first; i < instructions.Size(); i++)
+	{
+		const auto& inst = instructions.At(i);
+		if (inst.type == ShaderInstructionType::SEndpgm)
+		{
+			return true;
+		}
+		if (EndsStraightLine(inst.type) || LaneFlow::ReadsSccImplicitly(inst.type) ||
+		    std::any_of(inst.src, inst.src + inst.src_num, [](const auto& op) { return op.type == ShaderOperandType::Scc; }))
+		{
+			return false;
+		}
+		if (LaneFlow::AnyPrefix(inst.type, {"SCmp", "SAnd", "SOr", "SXor", "SLsh", "SBfe"}))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// Bits of scalar `word` that code from instruction `first` on can observe. Only a straight
+// line of field extractions is followed; any other reader demands the whole word.
+static uint32_t ScalarDemandedBits(const ShaderCode& code, uint32_t first, unsigned word, int depth)
+{
+	if (depth > 8 || word > LaneFlow::kVccLoWord + 1u)
+	{
+		return ~0u;
+	}
+	const bool  is_vcc       = word >= LaneFlow::kVccLoWord;
+	const auto& instructions = code.GetInstructions();
+	uint32_t    demanded     = 0;
+	for (uint32_t i = first; i < instructions.Size(); i++)
+	{
+		const auto& inst = instructions.At(i);
+		if (inst.type == ShaderInstructionType::SEndpgm)
+		{
+			return demanded;
+		}
+		if (EndsStraightLine(inst.type) || (is_vcc && LaneFlow::MayReadVcc(inst.type)))
+		{
+			return ~0u;
+		}
+		for (int s = 0; s < inst.src_num; s++)
+		{
+			if (!OperandCoversScalar(inst.src[s], word))
+			{
+				continue;
+			}
+			const bool     constant_other = inst.src_num == 2 && operand_is_constant(inst.src[1 - s]);
+			const uint32_t other          = constant_other ? inst.src[1 - s].constant.u : 0u;
+			unsigned       dst_word       = 0;
+			unsigned       dst_count      = 0;
+			const bool     dst_scalar     = LaneFlow::ScalarRange(inst.dst, &dst_word, &dst_count) && dst_count == 1u;
+			if (inst.type == ShaderInstructionType::SAndB32 && constant_other)
+			{
+				demanded |= other;
+			} else if (inst.type == ShaderInstructionType::SBfeU32 && s == 0 && constant_other)
+			{
+				const uint32_t width = (other >> 16u) & 0x7fu;
+				demanded |= (width >= 32u ? ~0u : (1u << width) - 1u) << (other & 31u);
+			} else if (inst.type == ShaderInstructionType::SLshlB32 && s == 0 && constant_other && dst_scalar && SccDeadFrom(code, i + 1))
+			{
+				demanded |= ScalarDemandedBits(code, i + 1, dst_word, depth + 1) >> (other & 31u);
+			} else if (inst.type == ShaderInstructionType::SMovB32 && dst_scalar)
+			{
+				demanded |= ScalarDemandedBits(code, i + 1, dst_word, depth + 1);
+			} else
+			{
+				return ~0u;
+			}
+		}
+		if (OperandCoversScalar(inst.dst, word))
+		{
+			const bool always_written =
+			    (LaneFlow::IsScalarAlu(inst.type) && !LaneFlow::StartsWith(inst.type, "SCmov")) || LaneFlow::IsScalarLoad(inst.type);
+			return always_written ? demanded : ~0u;
+		}
+	}
+	return ~0u;
+}
+
 static void ScanAttribTableLoads(const ShaderCode& code, int fetch_attrib_reg, ShaderVertexStreamAccessScan* scan)
 {
 	constexpr int kGsFrontUserDataBase = 8;
 	constexpr int kDwords              = ShaderVertexInputInfo::RES_MAX;
-	static_assert(kDwords <= 32);
-	for (const auto& inst: code.GetInstructions())
+	auto&         demanded             = scan->attrib_demanded_bits;
+	const auto&   instructions         = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); index++)
 	{
-		const int count = AttribTableLoadDwords(inst.type);
+		const auto& inst  = instructions.At(index);
+		const int   count = AttribTableLoadDwords(inst.type);
 		if (count == 0 || inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].register_id != fetch_attrib_reg + kGsFrontUserDataBase)
 		{
 			continue;
@@ -2865,13 +2966,15 @@ static void ScanAttribTableLoads(const ShaderCode& code, int fetch_attrib_reg, S
 		scan->attrib_load_pcs.Add(inst.pc);
 		if (!operand_is_constant(inst.src[1]) || inst.src[1].constant.i < 0)
 		{
-			scan->attrib_dwords_read = ~0u;
+			std::fill(std::begin(demanded), std::end(demanded), ~0u);
 			continue;
 		}
 		const int first = inst.src[1].constant.i / 4;
 		for (int i = first; i < first + count && i < kDwords; i++)
 		{
-			scan->attrib_dwords_read |= 1u << static_cast<uint32_t>(i);
+			demanded[i] |= inst.dst.type == ShaderOperandType::Sgpr
+			                   ? ScalarDemandedBits(code, index + 1, static_cast<unsigned>(inst.dst.register_id + i - first), 0)
+			                   : ~0u;
 		}
 	}
 }

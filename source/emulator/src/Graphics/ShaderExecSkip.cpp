@@ -48,12 +48,6 @@ bool MayWriteVcc(Type type)
 }
 
 // Over-approximates the implicit VCC readers: selects, carry-ins and the VCC branches.
-bool MayReadVcc(Type type)
-{
-	return AnyPrefix(type, {"SCbranchVcc"}) || (StartsWith(type, "V") && (Contains(type, "Cndmask") || Contains(type, "Co") ||
-	                                                                       Contains(type, "Div")));
-}
-
 bool Reads(const ShaderInstruction& inst, unsigned word)
 {
 	for (int source = 0; source < inst.src_num; ++source)

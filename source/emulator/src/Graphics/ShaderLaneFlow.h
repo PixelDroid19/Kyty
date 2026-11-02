@@ -49,6 +49,7 @@ constexpr uint8_t kExtent     = kOuter | kNotFull | kMissesQuad;
 [[nodiscard]] bool ReadsSccImplicitly(ShaderInstructionType type);
 // Every scalar ALU form defines SCC except moves, selects and the program counter.
 [[nodiscard]] bool WritesScc(ShaderInstructionType type);
+[[nodiscard]] bool MayReadVcc(ShaderInstructionType type);
 // S_MOV/S_AND/S_OR/... on lane masks: pointwise, so a mask in gives a mask out.
 [[nodiscard]] bool IsMaskAlgebra(ShaderInstructionType type);
 [[nodiscard]] bool IsSelect(ShaderInstructionType type);
