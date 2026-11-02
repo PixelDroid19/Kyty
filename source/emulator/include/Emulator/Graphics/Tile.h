@@ -188,6 +188,7 @@ enum class TileDetileProductionPath : uint32_t
 	Unsupported,
 	ComputeStyle,
 	StandardContiguous,
+	Sw64kRxBlocks,
 };
 
 [[nodiscard]] TileDetileProductionPath TileDetileGetProductionPathForTesting(const TileDetileRequest& request);

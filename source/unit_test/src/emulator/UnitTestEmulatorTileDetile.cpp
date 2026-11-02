@@ -614,6 +614,36 @@ TEST(EmulatorTileDetile, Sw64kRx8bppProductionMatchesReference)
 
 // One-byte SW_64K_R_X, 16 pipes: x0 x1 x2 y1 y0 y2 x3 y4 | x3^y3 x4^y4 x6^y5 x5^y6 | y6 x6 y7 x7 in a
 // 256x256 block, with slice bits Z0..Z3 XORed into offset bits 11..8.
+// A clipped surface with an all-zero block, at every element size and on a later slice.
+TEST(EmulatorTileDetile, Sw64kRxBlocksMatchReferenceAcrossClippingZeroBlocksAndSlices)
+{
+	for (const uint32_t bpp: {1u, 2u, 4u, 8u, 16u})
+	{
+		const uint32_t       block_w = TileGet64KBBlockWidth(bpp);
+		const uint32_t       block_h = 65536u / (block_w * bpp);
+		const uint32_t       width   = block_w * 2u + 3u;
+		const uint32_t       height  = block_h + 5u;
+		const uint64_t       bytes   = 3u * 2u * 65536u;
+		std::vector<uint8_t> tiled(bytes);
+		for (size_t i = 65536u; i < tiled.size(); ++i)
+		{
+			tiled[i] = static_cast<uint8_t>((i * 17u + 31u) | 1u);
+		}
+		const uint64_t       linear_bytes = static_cast<uint64_t>(width) * height * bpp;
+		std::vector<uint8_t> ref(linear_bytes, 0xAAu);
+		std::vector<uint8_t> prod(linear_bytes, 0xBBu);
+		for (const uint32_t slice: {0u, 5u})
+		{
+			auto ref_req  = MakeRequest(ref.data(), tiled.data(), width, height, width, width, bpp, TileDetileLayout::Sw64kRx, bytes);
+			auto prod_req = MakeRequest(prod.data(), tiled.data(), width, height, width, width, bpp, TileDetileLayout::Sw64kRx, bytes);
+			ref_req.slice = prod_req.slice = slice;
+			ASSERT_TRUE(TileDetileReference(ref_req));
+			ASSERT_TRUE(TileDetile(prod_req));
+			EXPECT_EQ(prod, ref) << "bpp=" << bpp << " slice=" << slice;
+		}
+	}
+}
+
 TEST(EmulatorTileDetile, Sw64kRx1bppFollowsPublishedPatternAndSlice)
 {
 	EXPECT_EQ(TileGetSw64kRxOffset(5u, 0u, 256u, 1u), 0x005u);

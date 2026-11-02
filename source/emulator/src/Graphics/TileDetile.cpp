@@ -4,6 +4,7 @@
 
 #include "Emulator/Graphics/DebugStats.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -333,8 +334,76 @@ void DetileStandardContiguousRange(uint8_t* dst, const uint8_t* src, uint32_t wi
 	}
 }
 
+bool BlockIsZero(const uint8_t* block)
+{
+	for (uint64_t at = 0; at < k_64kb_block_bytes; at += 64u)
+	{
+		uint64_t line[8];
+		std::memcpy(line, block + at, sizeof(line));
+		if ((line[0] | line[1] | line[2] | line[3] | line[4] | line[5] | line[6] | line[7]) != 0u)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+// Every SW_64K_R_X offset bit is a XOR of coordinate bits, so the within-block
+// offset of (x, y) is offset(x, 0) ^ offset(0, y). Whole blocks are copied one at
+// a time; a known source extent lets an all-zero block, the usual state of a
+// transient target the guest only touches through the GPU, skip the swizzle.
+template <uint32_t Bpe>
+void DetileSw64kRxBlocks(const TileDetileRequest& request, uint32_t pitch, uint32_t dst_pitch)
+{
+	const uint32_t block_w  = TileGet64KBBlockWidth(Bpe);
+	const uint32_t block_h  = static_cast<uint32_t>(k_64kb_block_bytes / (block_w * Bpe));
+	const uint32_t blocks_x = DivideRoundUp(pitch, block_w);
+	const uint64_t within   = k_64kb_block_bytes - 1u;
+	const uint32_t slice    = static_cast<uint32_t>(OffsetSw64kRx(0u, 0u, pitch, Bpe, request.slice) & within);
+
+	std::vector<uint32_t> column(request.width);
+	for (uint32_t x = 0; x < request.width; ++x)
+	{
+		column[x] = static_cast<uint32_t>(OffsetSw64kRx(x, 0u, pitch, Bpe, 0u) & within);
+	}
+	const auto* src = static_cast<const uint8_t*>(request.src);
+	auto*       dst = static_cast<uint8_t*>(request.dst);
+	for (uint32_t y0 = 0; y0 < request.height; y0 += block_h)
+	{
+		const uint32_t y1 = std::min(y0 + block_h, request.height);
+		std::vector<uint32_t> row(y1 - y0);
+		for (uint32_t y = y0; y < y1; ++y)
+		{
+			row[y - y0] = static_cast<uint32_t>(OffsetSw64kRx(0u, y, pitch, Bpe, 0u) & within) ^ slice;
+		}
+		for (uint32_t x0 = 0; x0 < request.width; x0 += block_w)
+		{
+			const uint32_t x1    = std::min(x0 + block_w, request.width);
+			const uint8_t* block = src + (static_cast<uint64_t>(y0 / block_h) * blocks_x + x0 / block_w) * k_64kb_block_bytes;
+			const bool     zero  = request.src_bytes != 0u && BlockIsZero(block);
+			for (uint32_t y = y0; y < y1; ++y)
+			{
+				uint8_t* out = dst + (static_cast<uint64_t>(y) * dst_pitch + x0) * Bpe;
+				if (zero)
+				{
+					std::memset(out, 0, static_cast<size_t>(x1 - x0) * Bpe);
+					continue;
+				}
+				for (uint32_t x = x0; x < x1; ++x, out += Bpe)
+				{
+					std::memcpy(out, block + (column[x] ^ row[y - y0]), Bpe);
+				}
+			}
+		}
+	}
+}
+
 TileDetileProductionPath GetProductionPathUnchecked(const TileDetileRequest& request)
 {
+	if (request.layout == TileDetileLayout::Sw64kRx)
+	{
+		return TileDetileProductionPath::Sw64kRxBlocks;
+	}
 	const bool standard = request.layout == TileDetileLayout::Standard4KB || request.layout == TileDetileLayout::Standard64KB;
 	return standard ? TileDetileProductionPath::StandardContiguous : TileDetileProductionPath::ComputeStyle;
 }
@@ -381,6 +450,19 @@ bool RunDetile(const TileDetileRequest& request, bool reference, bool compute_st
 		{
 			DetileStandardContiguousRange<OffsetStandard64KB>(dst, src, request.width, request.height, pitch, dst_pitch,
 			                                                  request.bytes_per_element);
+		}
+		return true;
+	}
+	if (standard_contiguous && GetProductionPathUnchecked(request) == TileDetileProductionPath::Sw64kRxBlocks)
+	{
+		switch (request.bytes_per_element)
+		{
+			case 1u: DetileSw64kRxBlocks<1u>(request, pitch, dst_pitch); break;
+			case 2u: DetileSw64kRxBlocks<2u>(request, pitch, dst_pitch); break;
+			case 4u: DetileSw64kRxBlocks<4u>(request, pitch, dst_pitch); break;
+			case 8u: DetileSw64kRxBlocks<8u>(request, pitch, dst_pitch); break;
+			case 16u: DetileSw64kRxBlocks<16u>(request, pitch, dst_pitch); break;
+			default: return false;
 		}
 		return true;
 	}
