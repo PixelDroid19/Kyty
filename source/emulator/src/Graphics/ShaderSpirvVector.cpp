@@ -70,18 +70,12 @@ static String8 FloatMinMaxPair(const Spirv* spirv, const String8& tag, const Str
         %<t>_ab = OpBitcast %uint %<a>
         %<t>_bb = OpBitcast %uint %<b>
         %<t>_an = OpIsNan %bool %<a>
-        %<t>_bn = OpIsNan %bool %<b>
         %<t>_num = OpExtInst %float %GLSL_std_450 <op> %<a> %<b>
-        %<t>_am = OpBitwiseAnd %uint %<t>_ab %uint_0x7fffffff
-        %<t>_bm = OpBitwiseAnd %uint %<t>_bb %uint_0x7fffffff
-        %<t>_az = OpIEqual %bool %<t>_am %uint_0
-        %<t>_bz = OpIEqual %bool %<t>_bm %uint_0
-        %<t>_zz = OpLogicalAnd %bool %<t>_az %<t>_bz
-        %<t>_zbits = <zero_op> %uint %<t>_ab %<t>_bb
-        %<t>_zero = OpBitcast %float %<t>_zbits
-        %<t>_ordered = OpSelect %float %<t>_zz %<t>_zero %<t>_num
-        %<t>_second_nan = OpSelect %float %<t>_bn %<a> %<t>_ordered
-        %<t>_quiet = OpSelect %float %<t>_an %<b> %<t>_second_nan
+        %<t>_equal = OpFOrdEqual %bool %<a> %<b>
+        %<t>_merged = <zero_op> %uint %<t>_ab %<t>_bb
+        %<t>_tied = OpBitcast %float %<t>_merged
+        %<t>_ordered = OpSelect %float %<t>_equal %<t>_tied %<t>_num
+        %<t>_quiet = OpSelect %float %<t>_an %<b> %<t>_ordered
 <ieee>)";
 	static const char* ieee = R"(
         %<t>_ae = OpBitwiseAnd %uint %<t>_ab %uint_0x7fc00000
@@ -106,7 +100,7 @@ static String8 FloatMinMaxPair(const Spirv* spirv, const String8& tag, const Str
 )";
 	return String8(text)
 	    .ReplaceStr("<ieee>", spirv->IsIeeeModeEnabled() ? ieee : plain)
-	    .ReplaceStr("<op>", maximum ? "FMax" : "FMin")
+	    .ReplaceStr("<op>", maximum ? "NMax" : "NMin")
 	    .ReplaceStr("<zero_op>", maximum ? "OpBitwiseAnd" : "OpBitwiseOr")
 	    .ReplaceStr("<t>", tag)
 	    .ReplaceStr("<a>", a)

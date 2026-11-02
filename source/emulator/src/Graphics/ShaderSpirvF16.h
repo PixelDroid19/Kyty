@@ -484,43 +484,34 @@ inline String8 MinMax(const String8& a, const String8& b, const String8& result,
 	if (host_half)
 	{
 		return String8(R"(
-%hm_zero_value_<s> = OpFConvert %half %<float_zero>
 %hm_a_bits_<s> = OpBitcast %ushort %<a>
 %hm_b_bits_<s> = OpBitcast %ushort %<b>
 %hm_a_nan_<s> = OpIsNan %bool %<a>
-%hm_b_nan_<s> = OpIsNan %bool %<b>
-%hm_a_zero_<s> = OpFOrdEqual %bool %<a> %hm_zero_value_<s>
-%hm_b_zero_<s> = OpFOrdEqual %bool %<b> %hm_zero_value_<s>
-%hm_both_zero_<s> = OpLogicalAnd %bool %hm_a_zero_<s> %hm_b_zero_<s>
-%hm_zero_<s> = <zero_op> %ushort %hm_a_bits_<s> %hm_b_bits_<s>
-%hm_compare_<s> = <compare> %bool %<a> %<b>
-%hm_ordered_<s> = OpSelect %ushort %hm_compare_<s> %hm_a_bits_<s> %hm_b_bits_<s>
-%hm_ordered_zero_<s> = OpSelect %ushort %hm_both_zero_<s> %hm_zero_<s> %hm_ordered_<s>
-%hm_b_nan_value_<s> = OpSelect %ushort %hm_b_nan_<s> %hm_a_bits_<s> %hm_ordered_zero_<s>
-%hm_bits_<s> = OpSelect %ushort %hm_a_nan_<s> %hm_b_bits_<s> %hm_b_nan_value_<s>
+%hm_equal_<s> = OpFOrdEqual %bool %<a> %<b>
+%hm_merged_<s> = <zero_op> %ushort %hm_a_bits_<s> %hm_b_bits_<s>
+%hm_number_<s> = OpExtInst %half %GLSL_std_450 <op> %<a> %<b>
+%hm_number_bits_<s> = OpBitcast %ushort %hm_number_<s>
+%hm_ordered_<s> = OpSelect %ushort %hm_equal_<s> %hm_merged_<s> %hm_number_bits_<s>
+%hm_bits_<s> = OpSelect %ushort %hm_a_nan_<s> %hm_b_bits_<s> %hm_ordered_<s>
 %<result> = OpBitcast %half %hm_bits_<s>
 )").ReplaceStr("<a>", a).ReplaceStr("<b>", b).ReplaceStr("<result>", result).ReplaceStr("<s>", suffix)
 		    .ReplaceStr("<zero_op>", maximum ? "OpBitwiseAnd" : "OpBitwiseOr")
-		    .ReplaceStr("<compare>", maximum ? "OpFOrdGreaterThan" : "OpFOrdLessThan");
+		    .ReplaceStr("<op>", maximum ? "NMax" : "NMin");
 	}
 	return String8(R"(
 %hm_a_bits_<s> = OpBitcast %uint %<a>
 %hm_b_bits_<s> = OpBitcast %uint %<b>
 %hm_a_nan_<s> = OpIsNan %bool %<a>
-%hm_b_nan_<s> = OpIsNan %bool %<b>
-%hm_a_zero_<s> = OpFOrdEqual %bool %<a> %<float_zero>
-%hm_b_zero_<s> = OpFOrdEqual %bool %<b> %<float_zero>
-%hm_both_zero_<s> = OpLogicalAnd %bool %hm_a_zero_<s> %hm_b_zero_<s>
-%hm_zero_<s> = <zero_op> %uint %hm_a_bits_<s> %hm_b_bits_<s>
-%hm_compare_<s> = <compare> %bool %<a> %<b>
-%hm_ordered_<s> = OpSelect %uint %hm_compare_<s> %hm_a_bits_<s> %hm_b_bits_<s>
-%hm_ordered_zero_<s> = OpSelect %uint %hm_both_zero_<s> %hm_zero_<s> %hm_ordered_<s>
-%hm_b_nan_value_<s> = OpSelect %uint %hm_b_nan_<s> %hm_a_bits_<s> %hm_ordered_zero_<s>
-%hm_bits_<s> = OpSelect %uint %hm_a_nan_<s> %hm_b_bits_<s> %hm_b_nan_value_<s>
+%hm_equal_<s> = OpFOrdEqual %bool %<a> %<b>
+%hm_merged_<s> = <zero_op> %uint %hm_a_bits_<s> %hm_b_bits_<s>
+%hm_number_<s> = OpExtInst %float %GLSL_std_450 <op> %<a> %<b>
+%hm_number_bits_<s> = OpBitcast %uint %hm_number_<s>
+%hm_ordered_<s> = OpSelect %uint %hm_equal_<s> %hm_merged_<s> %hm_number_bits_<s>
+%hm_bits_<s> = OpSelect %uint %hm_a_nan_<s> %hm_b_bits_<s> %hm_ordered_<s>
 %<result> = OpBitcast %float %hm_bits_<s>
 )").ReplaceStr("<a>", a).ReplaceStr("<b>", b).ReplaceStr("<result>", result).ReplaceStr("<s>", suffix)
 	    .ReplaceStr("<zero_op>", maximum ? "OpBitwiseAnd" : "OpBitwiseOr")
-	    .ReplaceStr("<compare>", maximum ? "OpFOrdGreaterThan" : "OpFOrdLessThan");
+	    .ReplaceStr("<op>", maximum ? "NMax" : "NMin");
 }
 
 inline String8 Trig(const String8& index, bool cosine)
