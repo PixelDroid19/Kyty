@@ -5755,3 +5755,51 @@ and compare it with the bad block at the fault.
 
 The preset weak-pointer fault recorded in `docs/titles/mechanical-fist-platformer.md` also got more frequent as the cache
 warmed: 2 faults in 4 warm clean runs, at under 30 s, and none in the one run with `perf` attached.
+
+The list head in the crash registers is 64 KiB aligned in all three faults recorded so far (`0x205bb40000`, `0x2001ae0000`,
+`0x2001ad0000`). `PPSA09809` faulted in 2 of 8 runs. The later scan runs were saturated by matches in code regions.
+
+## Storage scans and image fills in `PPSA28311 - Absolum` (2026-11-01)
+
+Host: Ryzen 5 7600, Arc A770, ANV Mesa 26.2.5, clean LTO build, 60 fps limit. AMD and NVIDIA not tested.
+
+Averages hid the limiter: frame time was bimodal (p50 17 ms, p95 112 ms, 416 of 1206 frames above 50 ms). A fence stack
+trace attributed the waits:
+
+| Site | Wait in 62 s | Calls |
+| --- | --- | --- |
+| Command buffer release in flip | 6.13 s | 721 |
+| Region fill, new sampled image | 3.16 s | 8594 |
+| Region fill, new storage image | 2.54 s | 8128 |
+| Submit backpressure | 2.61 s | 735 |
+| Quiesce per guest map or unmap | 2.22 s | 7607 |
+
+Changes:
+
+- **Incremental storage scans.** Each draw walked about 250 writable storage objects, about 90 times per frame, because one
+  compute shader binds a small writable buffer at a new address about 2900 times per second. A memo per consumer queue now
+  scans only the objects that changed since its last clean scan. Anything that is not an in-place object, a heap removal and a
+  device-address registration invalidates the memos. Command processor CPU 44.2 -> 31.6 % of a core, no fps change alone. A
+  single global memo was measured first and is useless here, since every walk has about 0.5 inserts.
+- **Image fills without a CPU wait.** Region fills copied into staging and waited on a fence, about 0.33 ms each and 270 per
+  second. They now record into one batch on the util queue. Every later submission flushes the batch first and waits for it
+  with the util queue timeline on the device, so ordering against consumers holds on any queue. The batch is bounded to
+  64 MiB open and 4 in flight. Destroying an image waits only if a batch still writes it. Nothing here depends on the vendor.
+  Fills through other paths still wait as before.
+
+Result: the first gameplay window went 33.9 -> 39.9 fps in the sweep, and held 41 fps with no frame above 50 ms in the 10 s
+windows from 60 s to 90 s of a 100 s run. The same sweep on `PPSA21567`, `PPSA21402`, `PPSA09076`, `PPSA09804`, `PPSA03355`
+and `PPSA17221` shows no change and no crash. `PPSA02070` reached a different menu screen, so its 30 vs 40 fps does not
+compare.
+
+Open in this title: `GpuMemory::RebuildHeapIndex` and its sort are 57 % of the guest thread (38 % of a core), rebuilt on every
+heap add and remove. Staging is still allocated per fill.
+
+## Render target aliased by a storage view of another format (2026-11-01)
+
+`PPSA03969 - F.I.S.T.: Forged In Shadow Torch` stopped at `RenderTexture - Equals - StorageTexture`: a device-written
+`B8G8R8A8` render target and a `10_11_11` storage view over the same 64 KiB blocks, 2688x1512, tile 27, EXIT 65. The alias
+plan accepted only equal formats and the 8-bit four-channel family. Memory holds one set of bytes, so the view sees them
+whatever its format, and Vulkan copies between any two formats of one texel size unchanged. The plan now accepts any such
+pair; different texel sizes stay refused. The title then ran the full 120 s run without a stop. Pixels of this view were
+not compared against a reference.
