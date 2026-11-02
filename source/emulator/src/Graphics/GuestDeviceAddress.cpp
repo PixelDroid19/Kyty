@@ -1503,12 +1503,24 @@ static VkBuffer CreateInPlaceBuffer(const GraphicContext* ctx, const Chunk& impo
 	return buffer;
 }
 
+// A device store, fill or copy into part of a cache line reverts what the CPU
+// stored elsewhere in that line (measured on Arc A770 over imported pages, not
+// on RADV), so small ranges reach guest memory through the host write-back,
+// which copies exact bytes. Large objects keep their device path: their copies
+// cost whole frames, and only their two edge lines stay exposed.
+static bool DeviceMayWriteGuestRange(uint64_t vaddr, uint64_t size)
+{
+	constexpr uint64_t kCacheLineBytes    = 64u;
+	constexpr uint64_t kExactCopyMaxBytes = 64u * 1024u;
+	return size >= kExactCopyMaxBytes || ((vaddr | size) & (kCacheLineBytes - 1u)) == 0u;
+}
+
 bool GuestDeviceAddressBindInPlace(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint32_t usage, VulkanBuffer* out,
                                    GuestInPlaceWindow* window)
 {
 	EXIT_IF(ctx == nullptr || out == nullptr || window == nullptr || out->buffer != nullptr || size == 0);
 	uint64_t offset = 0;
-	if (!ctx->guest_device_address_supported || vaddr > UINT64_MAX - size ||
+	if (!ctx->guest_device_address_supported || vaddr > UINT64_MAX - size || !DeviceMayWriteGuestRange(vaddr, size) ||
 	    Kernel::Memory::KernelResolvePhysical(vaddr, size, &offset) != Kernel::Memory::KernelPhysicalResolution::Resolved)
 	{
 		return false;
@@ -1575,6 +1587,10 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 		RecordPublicationBarrierAfter(cmd);
 		return true;
 	}
+	if (!DeviceMayWriteGuestRange(vaddr, size))
+	{
+		return false;
+	}
 	std::vector<PublicationPiece> pieces;
 	auto&                         registry = GetRegistry();
 	std::lock_guard<std::mutex>   lock(registry.mutex);
@@ -1594,7 +1610,8 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 
 bool GuestDeviceAddressRecordFill(GraphicContext* ctx, VkCommandBuffer_T* cmd, uint32_t word, uint64_t vaddr, uint64_t size)
 {
-	if (ctx == nullptr || cmd == nullptr || size == 0 || vaddr > UINT64_MAX - size || !ctx->guest_device_address_supported)
+	if (ctx == nullptr || cmd == nullptr || size == 0 || vaddr > UINT64_MAX - size || !ctx->guest_device_address_supported ||
+	    !DeviceMayWriteGuestRange(vaddr, size))
 	{
 		return false;
 	}
