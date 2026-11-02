@@ -1913,7 +1913,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				       o.object.type == GpuMemoryObjectType::DepthStencilBuffer)) ||
 				     GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type) ||
 				     GpuMemoryAllowsStorageTextureOverWritableStorageUpload(o.object.type, obj.relation, o.content_origin,
-				                                                              o.device_write_time != 0u, info.type) ||
+				                                                              o.device_write_time >= o.gpu_update_time, info.type) ||
 				     (o.object.type == GpuMemoryObjectType::StorageTexture &&
 				      (StorageTextureRedescribesRange(o.params, info.params, compare_layout) ||
 				       o.params[StorageTextureObject::PARAM_PITCH] != info.params[StorageTextureObject::PARAM_PITCH])) ||

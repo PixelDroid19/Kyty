@@ -84,6 +84,45 @@ KYTY_RECOMPILER_FUNC(Recompile_SBcnt_XXX)
 }
 
 // s_ff1_i32_b{32,64}: index of the least significant set bit, or -1.
+KYTY_RECOMPILER_FUNC(Recompile_SFlbitI32_XXX)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const bool  wide      = inst.src[0].size == 2;
+	const auto  dst       = operand_variable_to_str(inst.dst);
+	const auto  index_str = String8::FromPrintf("%u", index);
+	String8     load_lo;
+	String8     load_hi;
+	if (dst.type != SpirvType::Uint || !operand_load_uint(spirv, inst.src[0], "fl_lo_<index>", index_str, &load_lo, wide ? 0 : -1) ||
+	    (wide && !operand_load_uint(spirv, inst.src[0], "fl_hi_<index>", index_str, &load_hi, 1)))
+	{
+		return false;
+	}
+	// FindUMsb yields -1 for a zero word; 31 - msb counts the zeros above a set bit.
+	String8 source = load_lo + "\n" + load_hi + R"(
+%fl_msb_lo_<index> = OpExtInst %uint %GLSL_std_450 FindUMsb %fl_lo_<index>
+%fl_zeros_lo_<index> = OpISub %uint %<c31> %fl_msb_lo_<index>
+%fl_lo_any_<index> = OpINotEqual %bool %fl_lo_<index> %uint_0
+%fl_low_word_<index> = OpSelect %uint %fl_lo_any_<index> %fl_zeros_lo_<index> %fl_msb_lo_<index>
+)";
+	if (wide)
+	{
+		source += R"(
+%fl_msb_hi_<index> = OpExtInst %uint %GLSL_std_450 FindUMsb %fl_hi_<index>
+%fl_zeros_hi_<index> = OpISub %uint %<c31> %fl_msb_hi_<index>
+%fl_below_<index> = OpIAdd %uint %fl_zeros_lo_<index> %uint_32
+%fl_low_result_<index> = OpSelect %uint %fl_lo_any_<index> %fl_below_<index> %fl_msb_lo_<index>
+%fl_hi_any_<index> = OpINotEqual %bool %fl_hi_<index> %uint_0
+%fl_result_<index> = OpSelect %uint %fl_hi_any_<index> %fl_zeros_hi_<index> %fl_low_result_<index>
+)";
+	} else
+	{
+		source += "%fl_result_<index> = OpCopyObject %uint %fl_low_word_<index>\n";
+	}
+	source += "               OpStore %<dst> %fl_result_<index>\n";
+	*dst_source += source.ReplaceStr("<dst>", dst.value).ReplaceStr("<c31>", spirv->GetConstantUint(31u)).ReplaceStr("<index>", index_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_SFf1I32_XXX)
 {
 	const auto& inst      = code.GetInstructions().At(index);

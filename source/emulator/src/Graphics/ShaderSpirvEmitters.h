@@ -40,6 +40,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsCmpst_VaddrVdata2Offset);
 KYTY_RECOMPILER_FUNC(Recompile_SBitcmp_XXX);
 KYTY_RECOMPILER_FUNC(Recompile_SBcnt_XXX);
 KYTY_RECOMPILER_FUNC(Recompile_SFf1I32_XXX);
+KYTY_RECOMPILER_FUNC(Recompile_SFlbitI32_XXX);
 KYTY_RECOMPILER_FUNC(Recompile_SLoadDwordx16_Sdst16SbaseSoffset);
 KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4);
 KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U64);

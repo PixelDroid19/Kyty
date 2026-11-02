@@ -128,6 +128,8 @@ enum class ShaderInstructionType : uint32_t
 	SBcnt1I32B64,
 	SFf1I32B32,
 	SFf1I32B64,
+	SFlbitI32B32,
+	SFlbitI32B64,
 	STrap,
 	VCmpLtU64,
 	VCmpEqU64,
