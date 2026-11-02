@@ -2435,7 +2435,8 @@ struct ShaderVertexStreamAccessScan
 	bool                             unconditional_reader = false;
 	Vector<std::pair<uint32_t, int>> fetch_candidates;
 	// Attribute-table dwords (bit i = dword i) the program loads from fetch_attrib_reg.
-	uint32_t attrib_dwords_read = 0;
+	uint32_t         attrib_dwords_read = 0;
+	Vector<uint32_t> attrib_load_pcs;
 };
 [[nodiscard]] ShaderVertexStreamAccessScan ShaderScanVertexStreamAccesses(const ShaderCode& code, int fetch_attrib_reg,
                                                                           int fetch_buffer_reg);

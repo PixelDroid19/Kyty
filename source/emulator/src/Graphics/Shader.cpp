@@ -3997,9 +3997,22 @@ static std::shared_ptr<const ShaderVertexStreamAccessScan> VertexProgramStreamSc
 // the shader identity and recompile the same program for every value.
 static void ClearUnreadAttribData(ShaderVertexInputInfo* info, const ShaderVertexStreamAccessScan& scan)
 {
+	// With guest device addresses a table load reads guest memory at run time unless a
+	// binding maps it, so the snapshot never reaches the program. Its unused high bits
+	// differ between boots and would otherwise recompile the same program on every run.
+	constexpr int kGsFrontUserDataBase = 8;
+	const auto&   bind                 = info->bind;
+	const auto    load_is_mapped       = [&](uint32_t pc)
+	{
+		return std::any_of(bind.dynamic_sloads.records.begin(), bind.dynamic_sloads.records.end(),
+		                   [&](const auto& record) { return record.instruction_pc == pc && !record.guest_load; });
+	};
+	const bool snapshot_unused = bind.device_address_used &&
+	                             !(bind.extended.used && bind.extended.start_register == scan.fetch_attrib_reg + kGsFrontUserDataBase) &&
+	                             std::none_of(scan.attrib_load_pcs.begin(), scan.attrib_load_pcs.end(), load_is_mapped);
 	for (int i = 0; i < info->fetch_attrib_data_num; i++)
 	{
-		if ((scan.attrib_dwords_read & (1u << static_cast<uint32_t>(i))) == 0)
+		if (snapshot_unused || (scan.attrib_dwords_read & (1u << static_cast<uint32_t>(i))) == 0)
 		{
 			info->fetch_attrib_data[i] = 0;
 		}
@@ -4531,10 +4544,16 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	// whatever SPI_SHADER_COL_FORMAT and the stale CB_COLOR*_INFO say.
 	for (int i = 0; i < 8; i++)
 	{
-		const bool written              = State::ResolveColorWriteMask(cb_target_mask, sh->m_cbShaderMask, static_cast<uint32_t>(i)) != 0u;
-		ps_info->target_output_mode[i]  = written ? sh->target_output_mode[i] : 0u;
-		ps_info->target_output_order[i] = sh->target_output_order[i];
-		ps_info->target_output_number[i] = sh->target_output_number[i];
+		const bool written             = State::ResolveColorWriteMask(cb_target_mask, sh->m_cbShaderMask, static_cast<uint32_t>(i)) != 0u;
+		ps_info->target_output_mode[i] = written ? sh->target_output_mode[i] : 0u;
+		// A discarded target's order and type are stale registers. No emitter reads
+		// them, and in the shader identity they would split one program into variants
+		// the driver compiles again.
+		if (ps_info->target_output_mode[i] != 0u)
+		{
+			ps_info->target_output_order[i]  = sh->target_output_order[i];
+			ps_info->target_output_number[i] = sh->target_output_number[i];
+		}
 	}
 
 	bool ps5 = Config::IsNextGen();
@@ -6090,7 +6109,6 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 		if (gen5)
 		{
 			ids.Add(r.Format());
-			ids.Add(r.OutOfBounds());
 		} else
 		{
 			ids.Add(r.Nfmt());

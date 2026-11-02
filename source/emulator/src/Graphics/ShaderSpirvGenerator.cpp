@@ -2850,12 +2850,11 @@ static int AttribTableLoadDwords(ShaderInstructionType type)
 
 // Dwords of the attribute table that scalar loads of the fused-front attribute register
 // read. A load with a non-constant offset may reach any dword.
-static uint32_t AttribTableDwordsRead(const ShaderCode& code, int fetch_attrib_reg)
+static void ScanAttribTableLoads(const ShaderCode& code, int fetch_attrib_reg, ShaderVertexStreamAccessScan* scan)
 {
 	constexpr int kGsFrontUserDataBase = 8;
 	constexpr int kDwords              = ShaderVertexInputInfo::RES_MAX;
 	static_assert(kDwords <= 32);
-	uint32_t read = 0;
 	for (const auto& inst: code.GetInstructions())
 	{
 		const int count = AttribTableLoadDwords(inst.type);
@@ -2863,17 +2862,18 @@ static uint32_t AttribTableDwordsRead(const ShaderCode& code, int fetch_attrib_r
 		{
 			continue;
 		}
+		scan->attrib_load_pcs.Add(inst.pc);
 		if (!operand_is_constant(inst.src[1]) || inst.src[1].constant.i < 0)
 		{
-			return ~0u;
+			scan->attrib_dwords_read = ~0u;
+			continue;
 		}
 		const int first = inst.src[1].constant.i / 4;
 		for (int i = first; i < first + count && i < kDwords; i++)
 		{
-			read |= 1u << static_cast<uint32_t>(i);
+			scan->attrib_dwords_read |= 1u << static_cast<uint32_t>(i);
 		}
 	}
-	return read;
 }
 
 ShaderVertexStreamAccessScan ShaderScanVertexStreamAccesses(const ShaderCode& code, int fetch_attrib_reg, int fetch_buffer_reg)
@@ -2881,7 +2881,7 @@ ShaderVertexStreamAccessScan ShaderScanVertexStreamAccesses(const ShaderCode& co
 	ShaderVertexStreamAccessScan scan;
 	scan.fetch_attrib_reg   = fetch_attrib_reg;
 	scan.fetch_buffer_reg   = fetch_buffer_reg;
-	scan.attrib_dwords_read = AttribTableDwordsRead(code, fetch_attrib_reg);
+	ScanAttribTableLoads(code, fetch_attrib_reg, &scan);
 	for (const auto& [inst, semantic]: DetectVertexFetchSemantics(code, fetch_attrib_reg, fetch_buffer_reg))
 	{
 		scan.fetch_candidates.Add(std::pair<uint32_t, int> {inst.pc, semantic});
