@@ -4356,7 +4356,8 @@ no overlap. The reported figure scales with width, so SIMD8 and SIMD16 compiles 
 | NIR lines above 120 live | 48 % |
 | Share of the pressure above 120: phi web registers, uniform blocks, vertex inputs | 52 %, 10 %, 10 % |
 
-Per-lane values exceed the guest's whole register budget by more than 50, so at least that excess comes from the
+Guest liveness of the same program peaks at 125 VGPRs (mean 78, six bone loops of 265-770 instructions), so much of the
+pressure is inherent. Per-lane values peak at 184, about 60 above the guest's own peak, so at least that excess comes from the
 translation. One construct accounts for part of it: of 110 registers live at the peak, 34 are next read only as the
 old-value arm of an EXEC select, in linear order and typically 600-800 NIR lines later. Across the program that arm is
 1,286 of 3,470 register reads. The offline count above allows dropping only 258 of 1,277 such guards, so that proof

@@ -5683,3 +5683,75 @@ write its counters (it was stopped by a signal here, so a thread called `__gcov_
 directory with `-fprofile-use -fprofile-correction -fprofile-partial-training`. Partial training keeps unexecuted code
 optimized for speed, which other titles depend on. An instrumented build plus a rebuild take under 2 minutes each with
 six jobs.
+
+## Static TLS offsets follow the module alignment (2026-11-01)
+
+`PPSA07393 - Gori: Cuddly Carnage` faulted at boot: guest code at `0x9018ef83d` reads a pointer at `fs:-0x2d0` and
+increments through it. The module declares a TLS size of `0x2d1` with alignment 8, so the linker placed its block at
+offset `0x2d8`; the loader rounded to 16 and used `0x2e0`. The read landed in zeroed TLS instead of the relocated cell.
+
+The offset now rounds to the module's own `p_align`, and the thread pointer alone stays 16-aligned. The old layout was
+wrong in seven titles: `PPSA13579 - Blasphemous 2`, `PPSA09076 - DREDGE`, `PPSA03969 - F.I.S.T.: Forged In Shadow Torch`,
+`PPSA09804 - GRIS`, `PPSA34971 - Hollow Knight: Voidheart Edition`, `PPSA07393` and `PPSA28997 - God of War Sons of Sparta`.
+A rewrite that cleared thread TLS pointers by their shape was removed with it; it had been added when TLS BSS was copied
+wrongly and hid the same class of error.
+
+**Verified:** 75 s strict runs at 60.15 fps in Blasphemous 2, GRIS and Hollow Knight, 60.2 in God of War and 48.15 in
+DREDGE. Unit test `StaticOffsetFollowsModuleAlignment`.
+
+**Open in `PPSA07393`:** the boot passes and the run now exits at `DepthStencilBuffer - Crosses - StorageTexture`: a
+storage view of exactly the stencil plane of a 3456x1944 D32S8 target (tile 24), type 13 array, one layer, in a compute
+pass. An arrayed stencil view only moved the refusal to `storage image has no compatible Vulkan view` (the plane has no
+storage format), so it was reverted. A fix needs an R8 storage plane with store-back, as depth storage planes have.
+
+Storage views also gained two overlaps found by the same sweep: a view crossing a CPU-uploaded texture
+(`PPSA34971`, back from exit 65 to 60.15 fps) and a storage texture inside a writable CPU-uploaded storage buffer with no
+device write (`PPSA07393`). The second is only verified to pass the stop; coherence of its seed against an in-flight
+write was not checked.
+
+## Pipeline cache: working set, lookup and persistence (2026-11-01)
+
+`PPSA03969 - F.I.S.T.: Forged In Shadow Torch` looked frozen for 20-35 s at a time after its first load. Agent and
+`perf` samples put the command processor in `vkCreateGraphicsPipelines`. Three separate defects, none vendor specific:
+
+1. **Eviction by age.** The in-memory cache held 512 pipelines and evicted in slot order, so the entries a title draws
+   with every frame went first. The title uses over 1,000. It now evicts the least recently used entry and holds 4,096.
+   Driver blobs keep the compiled code either way, so the cap costs little more than the entry objects.
+2. **Linear lookups.** Every draw scanned the entries, and releasing a lease scanned them per pipeline. Lookup now goes
+   through a hash of the shader identities, and a pipeline remembers its slot.
+3. **Blobs never saved.** Each title's blob was capped at 128 MiB, equal to the session write budget, and every checkpoint
+   rewrites the whole blob. This title's blob reached 122.9 MB: one write used the budget, so pipelines compiled later were
+   compiled again on every launch. `PPSA21567 - Astro Bot` (63.6 MB) got two writes per session. The cap is now 512 MiB and
+   the budget four caps. The checkpoint interval grows with the bytes the session wrote (30 s per 64 MiB), so a title that
+   keeps adding pipelines writes less often, and a session with no new pipeline writes nothing.
+
+Same route, 120 s, Intel Arc A770, ANV Mesa 26.2.5:
+
+| | Before (clean build) | After (diagnostic build, slower) |
+| --- | --- | --- |
+| Evictions | 799 | 0 |
+| Graphics pipeline misses | 1,197 | 960 |
+| Time in misses | 58.1 s | 44.7 s |
+| Presents at 120 s | 1,300, stalled since before 90 s | 1,469, no miss since 90 s |
+
+With saving fixed the blob grew from 122.9 MB to 212.7 MB over four clean runs, and presents at 40 s reached 1,091 where
+the clean build had 1,103 only at 60 s. Driver feedback from one run: 837 of 907 creations hit the driver cache in under
+20 ms, 26 misses took over 200 ms and account for most of the time (up to 5 s for one pipeline). A counter of shader pairs
+compiled again was misleading (415 with no eviction at all): two entries with equal hashes can differ in `ids`. Do not
+reuse it.
+
+Going faster exposed a further stop, fixed: a 2688x1512 storage view over a 336x189x32 volume at the same address, a
+recycled arena the multi-parent path already accepted; the single-parent path now compares layouts the same way.
+
+## Guest small-block free lists found corrupted (2026-11-01, open)
+
+Two Unreal titles fault popping the 16-byte bin of the per-thread free list, reached through `pthread_getspecific`:
+`PPSA09809 - OCTOPATH TRAVELER II` reads through `0x100000000` at `0x901449749`, `PPSA03969` reads through `-1` at
+`0x900dc6c0e` (list head at offset 0 of the cache block, one fault in the runs of this record). The head came from the
+first eight bytes of a block on the list, so something wrote `{0, 1}` or `-1` into a freed 16-byte block. Writer unknown:
+a guest use-after-free that timing exposes, a late host write (labels, HLE out-parameters) or device writes are all open.
+Faults depend on timing and repeat poorly under tools. Direction: log the host's small guest writes in a bounded ring
+and compare it with the bad block at the fault.
+
+The preset weak-pointer fault recorded in `docs/titles/mechanical-fist-platformer.md` also got more frequent as the cache
+warmed: 2 faults in 4 warm clean runs, at under 30 s, and none in the one run with `perf` attached.

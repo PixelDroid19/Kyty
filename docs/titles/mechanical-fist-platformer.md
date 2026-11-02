@@ -6,6 +6,8 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+Later records: pipeline stalls and free-list corruption in `docs/bringup/cross-title.md` (2026-11-01).
+
 ## Mechanical-fist platformer startup frontier (2026-10-08, not gameplay)
 
 These runs used the full local candidate, including changes held from publication. They used Silent logging,
