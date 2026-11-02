@@ -273,6 +273,76 @@ SdwaSelect SdwaDestinationSelect(const ShaderInstruction& instruction)
 }
 } // namespace
 
+static int D16ReadComponents(const ShaderInstruction& inst)
+{
+	return __builtin_popcount(inst.mimg_dmask);
+}
+
+bool Spirv::EmitImageReadHalves(const RecompilerFunc* func, uint32_t index, String8* output)
+{
+	auto& instruction   = m_code.GetInstructions()[index];
+	bool  returns_float = false;
+	if (func == nullptr || func->type != instruction.type || func->format != instruction.format ||
+	    !ImageReadNumericKnown(m_code, index, this, &returns_float))
+	{
+		return false;
+	}
+	// RDNA2 ISA 8.1: D16 returns the enabled components as packed 16-bit values, low half first.
+	const int vgpr   = instruction.dst.register_id;
+	const int count  = D16ReadComponents(instruction);
+	const int packed = instruction.dst.size;
+	for (int reg = 0; reg < count; reg++)
+	{
+		*output += String8::FromPrintf("%%d16_old_%u_%d = OpLoad %%float %%v%d\n", index, reg, vgpr + reg);
+	}
+	// The emitter fills one register per component.
+	instruction.dst.size = count;
+	String8    whole;
+	const bool emitted = func->func(static_cast<int>(index), m_code, &whole, this, func->param, func->scc_check);
+	instruction.dst.size = packed;
+	if (!emitted)
+	{
+		return false;
+	}
+	*output += whole;
+	*output += String8::FromPrintf("%%d16_exec_%u = OpLoad %%uint %%exec_lo\n"
+	                               "%%d16_active_%u = OpINotEqual %%bool %%d16_exec_%u %%uint_0\n",
+	                               index, index, index);
+	String8 stores;
+	for (int reg = 0; reg < packed; reg++)
+	{
+		const int low  = vgpr + reg * 2;
+		const int high = reg * 2 + 1 < count ? low + 1 : low;
+		*output += String8::FromPrintf("%%d16_low_%u_%d = OpLoad %%float %%v%d\n"
+		                               "%%d16_high_%u_%d = OpLoad %%float %%v%d\n",
+		                               index, reg, low, index, reg, high);
+		// An integer format keeps the low 16 bits of each component; the rest convert to binary16.
+		*output += returns_float
+		               ? String8::FromPrintf("%%d16_pair_%u_%d = OpCompositeConstruct %%v2float %%d16_low_%u_%d %%d16_high_%u_%d\n"
+		                                     "%%d16_both_%u_%d = OpExtInst %%uint %%GLSL_std_450 PackHalf2x16 %%d16_pair_%u_%d\n",
+		                                     index, reg, index, reg, index, reg, index, reg, index, reg)
+		               : String8::FromPrintf("%%d16_low_bits_%u_%d = OpBitcast %%uint %%d16_low_%u_%d\n"
+		                                     "%%d16_high_bits_%u_%d = OpBitcast %%uint %%d16_high_%u_%d\n"
+		                                     "%%d16_both_%u_%d = OpBitFieldInsert %%uint %%d16_low_bits_%u_%d %%d16_high_bits_%u_%d %%%s %%%s\n",
+		                                     index, reg, index, reg, index, reg, index, reg, index, reg, index, reg, index, reg,
+		                                     GetConstantUint(16u).c_str(), GetConstantUint(16u).c_str());
+		// An odd component count leaves the top half of the last register without a value.
+		*output += low == high ? String8::FromPrintf("%%d16_bits_%u_%d = OpBitFieldUExtract %%uint %%d16_both_%u_%d %%%s %%%s\n", index, reg, index,
+		                                             reg, GetConstantUint(0u).c_str(), GetConstantUint(16u).c_str())
+		                       : String8::FromPrintf("%%d16_bits_%u_%d = OpCopyObject %%uint %%d16_both_%u_%d\n", index, reg, index, reg);
+		*output += String8::FromPrintf("%%d16_float_%u_%d = OpBitcast %%float %%d16_bits_%u_%d\n"
+		                               "%%d16_value_%u_%d = OpSelect %%float %%d16_active_%u %%d16_float_%u_%d %%d16_old_%u_%d\n",
+		                               index, reg, index, reg, index, reg, index, index, reg, index, reg);
+		stores += String8::FromPrintf("OpStore %%v%d %%d16_value_%u_%d\n", vgpr + reg, index, reg);
+	}
+	for (int reg = packed; reg < count; reg++)
+	{
+		stores += String8::FromPrintf("OpStore %%v%d %%d16_old_%u_%d\n", vgpr + reg, index, reg);
+	}
+	*output += stores;
+	return true;
+}
+
 bool Spirv::EmitSdwaPartialDestinationInstruction(const RecompilerFunc* func, const ShaderInstruction& instruction, uint32_t index,
                                               String8* output)
 {
@@ -2945,7 +3015,8 @@ void Spirv::WriteInstructions()
 		}
 		if (fragment_emitted)
 		{
-			ok = true;
+			// The per-lane fragment emitter has no packed D16 form.
+			ok = !inst.mimg_d16;
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::GeometryExport)
 		{
 			ok = EmitGeometryExport(inst, static_cast<uint32_t>(index), &dst);
@@ -2962,8 +3033,14 @@ void Spirv::WriteInstructions()
 		{
 			EXIT_IF(func->type != inst.type);
 			EXIT_IF(func->format != inst.format);
-			ok = low_destination ? EmitSdwaPartialDestinationInstruction(func, inst, static_cast<uint32_t>(index), &dst)
-			                     : func->func(index, m_code, &dst, this, func->param, func->scc_check);
+			if (inst.mimg_d16 && inst.type != ShaderInstructionType::ImageStore)
+			{
+				ok = EmitImageReadHalves(func, static_cast<uint32_t>(index), &dst);
+			} else
+			{
+				ok = low_destination ? EmitSdwaPartialDestinationInstruction(func, inst, static_cast<uint32_t>(index), &dst)
+				                     : func->func(index, m_code, &dst, this, func->param, func->scc_check);
+			}
 		}
 
 		if (!ok)
@@ -3836,6 +3913,10 @@ void Spirv::FindVariables()
 		const auto& inst = m_code.GetInstructions().At(index);
 		AddVariable(inst.dst);
 		AddVariable(inst.dst2);
+		if (inst.mimg_d16 && inst.type != ShaderInstructionType::ImageStore)
+		{
+			AddVariable(ShaderOperandType::Vgpr, inst.dst.register_id, D16ReadComponents(inst));
+		}
 		for (int i = 0; i < inst.src_num; i++)
 		{
 			AddVariable(inst.src[i]);

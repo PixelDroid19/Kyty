@@ -206,6 +206,9 @@ public:
 	// (ShaderSdwaPartialDestinationSupported): the whole-dword result, then the merge into the prior bits.
 	[[nodiscard]] bool EmitSdwaPartialDestinationInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
 	                                                     uint32_t index, String8* output);
+	// A D16 image read: the whole-width emitter's components, packed by pairs into half-float VGPRs. The
+	// registers it wrote above those keep their prior value.
+	[[nodiscard]] bool EmitImageReadHalves(const RecompilerFunc* func, uint32_t index, String8* output);
 	[[nodiscard]] String8 EmitMetadataLoad(int row, int field, const String8& id) const;
 	// Writes the metadata of each assembled V# the instruction consumes into its
 	// descriptor SGPRs (see ShaderAssembledDescriptor).
@@ -588,6 +591,9 @@ bool UsesUnsignedIntegerImages(const ShaderBindResources* bind);
 int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction_index,
                                    const ShaderBindResources& bind, int user_data_register_base);
 bool UsesMixedSampledImageNumericTypes(const ShaderBindResources* bind);
+// Whether the image read at index returns floats in its registers; integer texels have no D16 layout here yet.
+// False when the read mixes numeric types with no descriptor to tell which one it fetches.
+bool ImageReadNumericKnown(const ShaderCode& code, uint32_t index, const Spirv* spirv, bool* returns_float);
 bool UsesFormatlessStorageImages(const ShaderCode& code, const ShaderBindResources* bind);
 bool UsesExtendedStorageImageFormats(const ShaderCode& code, const ShaderBindResources* bind);
 // The aliased views WriteHeader declares over the storage binding, in view order.

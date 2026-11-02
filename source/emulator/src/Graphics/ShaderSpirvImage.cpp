@@ -4412,6 +4412,40 @@ OpBranch %storage_load_merge_<index>
 	return true;
 }
 
+bool ImageReadNumericKnown(const ShaderCode& code, uint32_t index, const Spirv* spirv, bool* returns_float)
+{
+	const auto* bind_info = spirv->GetBindInfo();
+	if (bind_info == nullptr)
+	{
+		return false;
+	}
+	const int user_data_register_base = ImageUserDataRegisterBase(spirv);
+	if (bind_info->textures2D.textures2d_storage_num > 0 &&
+	    ShaderFindImageStorageTextureDescriptor(code, index, *bind_info, user_data_register_base) >= 0)
+	{
+		ShaderStorageImageView view;
+		if (!ResolveStorageImageView(code, index, *bind_info, user_data_register_base, &view))
+		{
+			return false;
+		}
+		*returns_float = !view.unsigned_integer;
+		return true;
+	}
+	const auto& inst       = code.GetInstructions().At(index);
+	const int   descriptor = ShaderFindImageSampledTextureDescriptor(inst, *bind_info, user_data_register_base);
+	if (descriptor >= 0)
+	{
+		*returns_float = VulkanGen5ImageNumericType(bind_info->textures2D.desc[descriptor].texture.Format()) == GuestImageNumericType::FloatingPoint;
+		return true;
+	}
+	if (UsesMixedSampledImageNumericTypes(bind_info))
+	{
+		return false;
+	}
+	*returns_float = !UsesUnsignedIntegerImages(bind_info);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_VdataVaddr3StDmask)
 {
 	if (ViolatesOneDimensionalArrayContract(code, index, spirv))

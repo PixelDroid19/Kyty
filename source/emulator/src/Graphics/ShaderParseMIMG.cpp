@@ -72,8 +72,13 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	EXIT_NOT_IMPLEMENTED(slc == 1);
 	EXIT_NOT_IMPLEMENTED(unrm == 1);
 	// EXIT_NOT_IMPLEMENTED(dmask != 0xf && dmask != 0x7);
-	// Only stores read packed data so far; another D16 operation must not silently take the dword layout.
-	EXIT_NOT_IMPLEMENTED(d16 == 1 && opcode != 0x08u);
+	// Stores, loads and the plain samples have a packed layout; another D16 operation must not silently take the dword one.
+	const bool d16_admitted = opcode == 0x00u || opcode == 0x01u || opcode == 0x08u || opcode == 0x20u || opcode == 0x24u ||
+	                          opcode == 0x25u || opcode == 0x27u;
+	if (d16 == 1 && !d16_admitted)
+	{
+		EXIT("unsupported D16 MIMG: opcode=0x%02" PRIx32 " pc=0x%08" PRIx32 "\n", opcode, pc);
+	}
 
 	// RDNA2 8.2.3/Table 42 and 12.16: these admitted image operations have
 	// no sampler. The manual does not establish that nonzero SSAMP is ignored
@@ -644,6 +649,13 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		     pc, dmask, dim);
 	}
 
+	inst.mimg_d16 = d16 != 0u;
+	if (inst.mimg_d16 && opcode != 0x08u)
+	{
+		// The written registers: analyses must see the ones above them keep their values.
+		inst.mimg_dmask = static_cast<uint8_t>(dmask);
+		inst.dst.size   = (MimgDmaskComponents(dmask) + 1) / 2;
+	}
 	dst->GetInstructions().Add(inst);
 
 	return size;

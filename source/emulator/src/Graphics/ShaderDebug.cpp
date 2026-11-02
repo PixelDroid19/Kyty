@@ -589,7 +589,13 @@ String8 ShaderCode::DbgInstructionToStr(const ShaderInstruction& inst)
 	String8 format = dbg_fmt_to_str(inst);
 
 	ret += String8::FromPrintf("%-20s [%-30s] ", name.c_str(), format.c_str());
-	ret += dbg_fmt_print(inst);
+	// The format strings name one register per component; a D16 read packs them.
+	auto printed = inst;
+	if (inst.mimg_d16 && inst.type != ShaderInstructionType::ImageStore)
+	{
+		printed.dst.size = __builtin_popcount(inst.mimg_dmask);
+	}
+	ret += dbg_fmt_print(printed);
 	if (inst.mimg_address_num > 0)
 	{
 		ret += String8::FromPrintf(" dim:%u nsa:", static_cast<unsigned>(inst.mimg_dimension));
