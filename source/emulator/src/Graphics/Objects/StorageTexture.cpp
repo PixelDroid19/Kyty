@@ -1035,18 +1035,13 @@ int StorageTextureResolveArrayStorageView(VkDevice device, StorageTextureVulkanI
 	return VulkanGetOrCreateCachedImageView(device, image, descriptor, create);
 }
 
-// A render-target alias copies texel bytes unchanged. Equal formats alias, and so
-// do the 8-bit four-channel formats, whose texels store the guest bytes in order
-// whatever their channel order or sRGB encoding.
+// A render-target alias copies texel bytes unchanged, so any two color formats of one
+// texel size alias: the guest reinterprets the same bytes, and Vulkan copies between them as is.
 static bool RenderAliasFormatsMatch(VkFormat render_format, VkFormat storage_format)
 {
-	const auto rgba8 = [](VkFormat format)
-	{
-		return format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_UNORM ||
-		       format == VK_FORMAT_B8G8R8A8_SRGB;
-	};
+	const uint32_t texel_bytes = VulkanColorTexelBytes(render_format);
 	return render_format != VK_FORMAT_UNDEFINED &&
-	       (render_format == storage_format || (rgba8(render_format) && rgba8(storage_format)));
+	       (render_format == storage_format || (texel_bytes != 0u && texel_bytes == VulkanColorTexelBytes(storage_format)));
 }
 
 static uint32_t RenderAliasBytesPerElement(const uint64_t* render_params, const uint64_t* storage_params)

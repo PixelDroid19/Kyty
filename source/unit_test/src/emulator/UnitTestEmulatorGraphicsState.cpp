@@ -3240,7 +3240,7 @@ TEST(EmulatorGraphicsState, RenderTargetStorageAliasCopiesOnlyMatchingGuestBlock
 	ASSERT_TRUE(StorageTexturePlanRenderAlias(source.params, source_address, 8u * block_bytes, destination.params,
 	                                          destination_address, 15u * block_bytes, &copies));
 	EXPECT_EQ(copied_texels(), 6u * block_width * block_height);
-	const RenderTextureObject wrong_format(RenderTextureFormat::R16G16B16A16Unorm, 4u * block_width,
+	const RenderTextureObject wrong_format(RenderTextureFormat::R8G8B8A8Unorm, 4u * block_width,
 	                                       2u * block_height, true, false, 4u * block_width, false);
 	EXPECT_FALSE(StorageTexturePlanRenderAlias(wrong_format.params, source_address, 8u * block_bytes, destination.params,
 	                                           destination_address, 15u * block_bytes, &copies));
