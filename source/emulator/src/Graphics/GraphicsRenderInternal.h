@@ -217,6 +217,8 @@ struct VulkanPipeline
 	// Set when the draw runs through the fragment wave transport. The record
 	// path then uses capture/shade/resolve passes instead of this pipeline.
 	FragmentTransportPasses* transport = nullptr;
+	// Entry of the pipeline cache that owns this pipeline; lease release runs per recorded pipeline.
+	uint32_t cache_slot = 0;
 };
 
 // A cache entry remains alive while a recorded executable command buffer can
@@ -260,26 +262,20 @@ private:
 	bool     m_retirement_requested = false;
 };
 
-template <typename IsEvictable>
-[[nodiscard]] inline uint32_t PipelineCacheNextEvictableIndex(uint32_t size, uint32_t* cursor, IsEvictable is_evictable)
+// A title's working set can exceed the cache: evicting by age would throw away
+// the pipelines it draws with every frame and recompile them on the render thread.
+template <typename IsEvictable, typename LastUse>
+[[nodiscard]] inline uint32_t PipelineCacheLeastRecentlyUsedIndex(uint32_t size, IsEvictable is_evictable, LastUse last_use)
 {
-	if (size == 0 || cursor == nullptr)
+	uint32_t oldest = UINT32_MAX;
+	for (uint32_t index = 0; index < size; index++)
 	{
-		return UINT32_MAX;
-	}
-
-	const uint32_t first = *cursor % size;
-	for (uint32_t offset = 0; offset < size; offset++)
-	{
-		const uint32_t index = (first + offset) % size;
-		if (is_evictable(index))
+		if (is_evictable(index) && (oldest == UINT32_MAX || last_use(index) < last_use(oldest)))
 		{
-			*cursor = (index + 1u) % size;
-			return index;
+			oldest = index;
 		}
 	}
-
-	return UINT32_MAX;
+	return oldest;
 }
 
 class PipelineCache
@@ -309,7 +305,7 @@ public:
 private:
 	friend class PipelineLifetimeTestAccess;
 
-	static constexpr uint32_t MAX_PIPELINES = 512;
+	static constexpr uint32_t MAX_PIPELINES = 4096;
 
 	struct Pipeline
 	{
@@ -322,9 +318,12 @@ private:
 		PipelineStaticParameters*  static_params  = nullptr;
 		PipelineDynamicParameters* dynamic_params = nullptr;
 		PipelineLifetimeState      lifetime;
+		uint64_t                   last_use       = 0;
 	};
 
-	[[nodiscard]] Pipeline* Find(const Pipeline& p);
+	[[nodiscard]] static uint64_t PipelineIndexKey(const Pipeline& p);
+	[[nodiscard]] Pipeline*       Find(const Pipeline& p);
+	void                          StorePipeline(uint32_t slot, const Pipeline& p);
 	[[nodiscard]] uint32_t  FindAvailableSlot();
 	void                    AttachPipelineLease(CommandBuffer* recording_buffer, Pipeline& pipeline);
 
@@ -335,7 +334,8 @@ private:
 	void DumpPipeline(const char* action, uint32_t id);
 
 	Vector<Pipeline>                      m_pipelines;
-	uint32_t                              m_evict_cursor = 0;
+	std::unordered_multimap<uint64_t, uint32_t> m_pipeline_index;
+	uint64_t                              m_use_clock = 0;
 	Core::Mutex                           m_mutex;
 	std::chrono::steady_clock::time_point m_last_driver_cache_attempt {};
 	bool                                  m_driver_cache_attempted_once         = false;

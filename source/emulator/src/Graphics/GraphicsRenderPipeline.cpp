@@ -1286,6 +1286,16 @@ void PipelineCache::DeletePipelineInternal(uint32_t id)
 
 	DumpPipeline("delete", id);
 
+	const auto [first, last] = m_pipeline_index.equal_range(PipelineIndexKey(p));
+	for (auto it = first; it != last; ++it)
+	{
+		if (it->second == id)
+		{
+			m_pipeline_index.erase(it);
+			break;
+		}
+	}
+
 	delete p.static_params;
 	delete p.dynamic_params;
 
@@ -1311,16 +1321,51 @@ void PipelineCache::DeletePipelineInternal(uint32_t id)
 
 PipelineCache::Pipeline* PipelineCache::Find(const Pipeline& p)
 {
-	for (auto& pn: m_pipelines)
+	const auto [first, last] = m_pipeline_index.equal_range(PipelineIndexKey(p));
+	for (auto it = first; it != last; ++it)
 	{
+		auto& pn = m_pipelines[it->second];
 		if (pn.pipeline != nullptr && !pn.lifetime.RetirementRequested() && p.vs_shader_id == pn.vs_shader_id &&
 		    p.ps_shader_id == pn.ps_shader_id && p.cs_shader_id == pn.cs_shader_id && p.render_pass == pn.render_pass &&
 		    *p.static_params == *pn.static_params && *p.dynamic_params == *pn.dynamic_params)
 		{
+			pn.last_use = ++m_use_clock;
 			return &pn;
 		}
 	}
 	return nullptr;
+}
+
+uint64_t PipelineCache::PipelineIndexKey(const Pipeline& p)
+{
+	uint64_t key = 0;
+	for (const uint32_t part: {p.vs_shader_id.hash0, p.vs_shader_id.crc32, p.ps_shader_id.hash0, p.ps_shader_id.crc32,
+	                           p.cs_shader_id.hash0, p.cs_shader_id.crc32})
+	{
+		key = (key ^ part) * 0x100000001b3ULL;
+	}
+	return key;
+}
+
+void PipelineCache::StorePipeline(uint32_t slot, const Pipeline& p)
+{
+	if (slot < m_pipelines.Size())
+	{
+		if (m_pipelines[slot].pipeline != nullptr)
+		{
+			DebugStatsRecordPipelineEviction();
+			DeletePipelineInternal(slot);
+		}
+		m_pipelines[slot] = p;
+	} else
+	{
+		EXIT_IF(slot != m_pipelines.Size());
+		m_pipelines.Add(p);
+	}
+	auto& entry                = m_pipelines[slot];
+	entry.last_use             = ++m_use_clock;
+	entry.pipeline->cache_slot = slot;
+	m_pipeline_index.emplace(PipelineIndexKey(entry), slot);
 }
 
 uint32_t PipelineCache::FindAvailableSlot()
@@ -1338,9 +1383,10 @@ uint32_t PipelineCache::FindAvailableSlot()
 		return m_pipelines.Size();
 	}
 
-	const auto evict =
-	    PipelineCacheNextEvictableIndex(m_pipelines.Size(), &m_evict_cursor, [this](uint32_t index)
-	                                    { return m_pipelines[index].pipeline != nullptr && m_pipelines[index].lifetime.CanEvict(); });
+	const auto evict = PipelineCacheLeastRecentlyUsedIndex(
+	    m_pipelines.Size(),
+	    [this](uint32_t index) { return m_pipelines[index].pipeline != nullptr && m_pipelines[index].lifetime.CanEvict(); },
+	    [this](uint32_t index) { return m_pipelines[index].last_use; });
 	if (evict == UINT32_MAX)
 	{
 		EXIT("pipeline cache limit reached: all %u pipeline entries are leased by recorded command buffers\n",
@@ -1949,19 +1995,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			p.transport                   = passes;
 			p.pipeline->transport         = passes;
 			p.pipeline->framebuffer_extent = framebuffer->extent;
-			if (transport_slot < m_pipelines.Size())
-			{
-				if (m_pipelines[static_cast<int>(transport_slot)].pipeline != nullptr)
-				{
-					DebugStatsRecordPipelineEviction();
-					DeletePipelineInternal(transport_slot);
-				}
-				m_pipelines[static_cast<int>(transport_slot)] = p;
-			} else
-			{
-				EXIT_IF(transport_slot != m_pipelines.Size());
-				m_pipelines.Add(p);
-			}
+			StorePipeline(transport_slot, p);
 			AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(transport_slot)]);
 			m_driver_cache_dirty = true;
 			SaveDriverCacheIfDue();
@@ -2012,19 +2046,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 	p.pipeline->framebuffer_extent = framebuffer->extent;
 
-	if (slot < m_pipelines.Size())
-	{
-		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
-		{
-			DebugStatsRecordPipelineEviction();
-			DeletePipelineInternal(slot);
-		}
-		m_pipelines[static_cast<int>(slot)] = p;
-	} else
-	{
-		EXIT_IF(slot != m_pipelines.Size());
-		m_pipelines.Add(p);
-	}
+	StorePipeline(slot, p);
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
@@ -2100,19 +2122,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 
-	if (slot < m_pipelines.Size())
-	{
-		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
-		{
-			DebugStatsRecordPipelineEviction();
-			DeletePipelineInternal(slot);
-		}
-		m_pipelines[static_cast<int>(slot)] = p;
-	} else
-	{
-		EXIT_IF(slot != m_pipelines.Size());
-		m_pipelines.Add(p);
-	}
+	StorePipeline(slot, p);
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
@@ -2174,19 +2184,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 
 	const uint32_t slot = FindAvailableSlot();
 	p.pipeline          = CreatePipelineInternal(&host, translation.binary, p.static_params, p.dynamic_params);
-	if (slot < m_pipelines.Size())
-	{
-		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
-		{
-			DebugStatsRecordPipelineEviction();
-			DeletePipelineInternal(slot);
-		}
-		m_pipelines[static_cast<int>(slot)] = p;
-	} else
-	{
-		EXIT_IF(slot != m_pipelines.Size());
-		m_pipelines.Add(p);
-	}
+	StorePipeline(slot, p);
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
@@ -2225,18 +2223,14 @@ void PipelineCache::ReleasePipelineLease(VulkanPipeline* pipeline)
 {
 	EXIT_IF(pipeline == nullptr);
 	Core::LockGuard lock(m_mutex);
-	const auto      index = m_pipelines.Find(pipeline, [](const auto& entry, const auto* value) { return value == entry.pipeline; });
-	EXIT_IF(!m_pipelines.IndexValid(index));
-	if (!m_pipelines.IndexValid(index))
-	{
-		return;
-	}
+	const uint32_t  index = pipeline->cache_slot;
+	EXIT_IF(!m_pipelines.IndexValid(index) || m_pipelines[index].pipeline != pipeline);
 
 	Pipeline& entry = m_pipelines[index];
 	EXIT_IF(entry.lifetime.ReferenceCount() == 0);
 	if (entry.lifetime.Release())
 	{
-		DeletePipelineInternal(static_cast<uint32_t>(index));
+		DeletePipelineInternal(index);
 	}
 }
 
