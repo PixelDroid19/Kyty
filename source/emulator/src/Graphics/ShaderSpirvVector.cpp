@@ -2716,8 +2716,9 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
-	// integer operation ignores these VOP3 encoding bits.
+	// OMOD applies to floating-point results only (ISA 6.2). The integer
+	// saturation CLAMP selects is not translated.
+	if (inst.dst.clamp) { return false; }
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -2732,21 +2733,29 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 		return false;
 	}
 
+	// OPSEL[1:0] pick the source halves (ISA 6.2.5).
+	const auto half = [&](int source) {
+		return String8(R"(
+        %h<s>_<index> = <op> %uint %t<s>_<index> <count>
+)").ReplaceStr("<s>", String8::FromPrintf("%d", source))
+		    .ReplaceStr("<op>", (inst.vop3_op_sel >> source) & 1u ? "OpShiftRightLogical" : "OpCopyObject")
+		    .ReplaceStr("<count>", (inst.vop3_op_sel >> source) & 1u ? "%<uint_16>" : "");
+	};
 	const bool is_signed = (param[1] != nullptr && strcmp(param[1], "s") == 0);
-	String8 extend;
+	String8 extend = half(0) + half(1);
 	if (is_signed)
 	{
-		extend = R"(
-        %i0s_<index> = OpShiftLeftLogical %uint %t0_<index> %uint_16
-        %i0x_<index> = OpShiftRightArithmetic %uint %i0s_<index> %uint_16
-        %i1s_<index> = OpShiftLeftLogical %uint %t1_<index> %uint_16
-        %i1x_<index> = OpShiftRightArithmetic %uint %i1s_<index> %uint_16
+		extend += R"(
+        %i0s_<index> = OpShiftLeftLogical %uint %h0_<index> %<uint_16>
+        %i0x_<index> = OpShiftRightArithmetic %uint %i0s_<index> %<uint_16>
+        %i1s_<index> = OpShiftLeftLogical %uint %h1_<index> %<uint_16>
+        %i1x_<index> = OpShiftRightArithmetic %uint %i1s_<index> %<uint_16>
 )";
 	} else
 	{
-		extend = R"(
-        %i0x_<index> = OpBitwiseAnd %uint %t0_<index> %uint_0xffff
-        %i1x_<index> = OpBitwiseAnd %uint %t1_<index> %uint_0xffff
+		extend += R"(
+        %i0x_<index> = OpBitwiseAnd %uint %h0_<index> %<uint_ffff>
+        %i1x_<index> = OpBitwiseAnd %uint %h1_<index> %<uint_ffff>
 )";
 	}
 
@@ -2755,11 +2764,13 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
     <load1>
     <extend>
         <param0>
-        %masked_<index> = OpBitwiseAnd %uint %t_<index> %uint_0xffff
+        %tdst_<index> = OpLoad %float %<dst>
+        %tdst_u_<index> = OpBitcast %uint %tdst_<index>
+        %merged_<index> = OpBitFieldInsert %uint %tdst_u_<index> %t_<index> %<dst_offset> %<uint_16>
+        %merged_f_<index> = OpBitcast %float %merged_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %masked_<index> %tdst_<index>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %merged_f_<index> %tdst_<index>
                OpStore %<dst> %tval_<index>
 )";
 	*dst_source += String8(text)
@@ -2768,6 +2779,10 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 	                   .ReplaceStr("<extend>", extend)
 	                   .ReplaceStr("<param0>", param[0])
 	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<dst_offset>", (inst.vop3_op_sel & 8u) != 0u ? "<uint_16>" : "uint_0")
+	                   .ReplaceStr("<uint_15>", spirv->GetConstantUint(15u))
+	                   .ReplaceStr("<uint_16>", spirv->GetConstantUint(16u))
+	                   .ReplaceStr("<uint_ffff>", spirv->GetConstantUint(0xffffu))
 	                   .ReplaceStr("<index>", index_str);
 	return true;
 }

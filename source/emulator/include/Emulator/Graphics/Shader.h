@@ -639,6 +639,9 @@ enum class ShaderInstructionType : uint32_t
 	ImageAtomicAnd,
 	ImageAtomicOr,
 	ImageAtomicXor,
+	VLshrrevB16,
+	VAshrrevI16,
+	VLshlrevB16,
 
 	ZMax
 };
