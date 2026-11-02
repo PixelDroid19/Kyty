@@ -48,7 +48,8 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 // table reads, enough for a large dispatch to outlast GPU preemption. The
 // directory (GuestDeviceAddressBuildDirectory) narrows the search to the
 // entries of the address's region, a few dependent reads instead of one per
-// halving of the whole table.
+// halving of the whole table. The midpoint cannot wrap, so the interval shrinks
+// on every step whatever the bounds hold and the loop cannot hang the GPU.
 String8 Spirv::GuestDeviceAddressFunction() const
 {
 	static const char* text = R"(
@@ -112,8 +113,9 @@ OpBranch %gda_cond
 %gda_more = OpULessThan %bool %gda_lo %gda_hi
 OpBranchConditional %gda_more %gda_body %gda_merge
 %gda_body = OpLabel
-%gda_sum = OpIAdd %uint %gda_lo %gda_hi
-%gda_mid = OpShiftRightLogical %uint %gda_sum %uint_1
+%gda_gap = OpISub %uint %gda_hi %gda_lo
+%gda_half = OpShiftRightLogical %uint %gda_gap %uint_1
+%gda_mid = OpIAdd %uint %gda_lo %gda_half
 %gda_moff = OpIMul %uint %gda_mid %uint_32
 %gda_moff64 = OpUConvert %ulong %gda_moff
 %gda_m = OpIAdd %ulong %gda_entries %gda_moff64
