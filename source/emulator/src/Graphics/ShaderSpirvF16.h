@@ -634,6 +634,23 @@ OpStore %<dst> %fh_stored_float_<index>
 	    .ReplaceStr("<index>", index);
 }
 
+// CLAMP of the half in fh_result_<index> to [0, 1] as fh_clamped_<index>.
+inline String8 Clamp(const Mode& mode)
+{
+	String8 text = R"(
+%fh_clamp_magnitude_<index> = OpBitFieldUExtract %uint %fh_result_<index> %uint_0 %uint_15
+%fh_clamp_sign_<index> = OpBitwiseAnd %uint %fh_result_<index> %uint_0x00008000
+%fh_clamp_nan_<index> = OpUGreaterThan %bool %fh_clamp_magnitude_<index> %uint_0x00007c00
+%fh_clamp_low_<index> = OpINotEqual %bool %fh_clamp_sign_<index> %uint_0
+%fh_one_<index> = OpShiftLeftLogical %uint %uint_15 %uint_10
+%fh_clamp_nonnegative_<index> = OpSelect %uint %fh_clamp_low_<index> %uint_0 %fh_result_<index>
+%fh_clamp_high_<index> = OpUGreaterThan %bool %fh_clamp_nonnegative_<index> %fh_one_<index>
+%fh_clamp_finite_<index> = OpSelect %uint %fh_clamp_high_<index> %fh_one_<index> %fh_clamp_nonnegative_<index>
+%fh_clamped_<index> = OpSelect %uint %fh_clamp_nan_<index> %<nan_result> %fh_clamp_finite_<index>
+)";
+	return text.ReplaceStr("<nan_result>", mode.dx10_clamp ? "uint_0" : "fh_result_<index>");
+}
+
 inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* output, Spirv* spirv,
                  const char* const* params, Operation operation)
 {
@@ -669,7 +686,7 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	const bool sdwa_half_destination = SdwaHalfDestinationSupported(inst);
 	if (inst.vop_sdwa && !((operation == Operation::ToFloat && SdwaWideningSupported(inst)) ||
 	                       (operation == Operation::FromFloat && SdwaWholeWordSupported(inst)) ||
-	                       (arithmetic && sdwa_half_destination)))
+	                       ((arithmetic || integer_output) && sdwa_half_destination)))
 	{
 		return reject("unsupported-sdwa");
 	}
@@ -699,10 +716,6 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	}
 	if (arithmetic && mode.ieee) { return reject("unsupported-arithmetic-ieee-mode"); }
 	if (integer_output && inst.dst.clamp) { return reject("unsupported-integer-clamp"); }
-	// Do not conflate saturation with OMOD/denormal-mode interactions. Admit
-	// half saturation only with output denormals disabled; the preservation
-	// combination needs a separate contract before applying an output modifier.
-	if (inst.dst.clamp && !mode.ieee && (mode.value & 0x80u) != 0u) { return reject("unsupported-output-denorm-clamp"); }
 	// Legacy MAD's intermediate rounding is not the fused-half contract.
 	if (inst.type == ShaderInstructionType::VMadF16) { return reject("unsupported-legacy-mad"); }
 	String8 text;
@@ -855,18 +868,7 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 		{
 			// F32 conversion destinations need a distinct float clamp contract.
 			if (operation == Operation::ToFloat) { return reject("unsupported-widening-clamp"); }
-			text += R"(
-%fh_clamp_magnitude_<index> = OpBitFieldUExtract %uint %fh_result_<index> %uint_0 %uint_15
-%fh_clamp_sign_<index> = OpBitwiseAnd %uint %fh_result_<index> %uint_0x00008000
-%fh_clamp_nan_<index> = OpUGreaterThan %bool %fh_clamp_magnitude_<index> %uint_0x00007c00
-%fh_clamp_low_<index> = OpINotEqual %bool %fh_clamp_sign_<index> %uint_0
-%fh_one_<index> = OpShiftLeftLogical %uint %uint_15 %uint_10
-%fh_clamp_nonnegative_<index> = OpSelect %uint %fh_clamp_low_<index> %uint_0 %fh_result_<index>
-%fh_clamp_high_<index> = OpUGreaterThan %bool %fh_clamp_nonnegative_<index> %fh_one_<index>
-%fh_clamp_finite_<index> = OpSelect %uint %fh_clamp_high_<index> %fh_one_<index> %fh_clamp_nonnegative_<index>
-%fh_clamped_<index> = OpSelect %uint %fh_clamp_nan_<index> %<nan_result> %fh_clamp_finite_<index>
-)";
-			text = text.ReplaceStr("<nan_result>", mode.dx10_clamp ? "uint_0" : "fh_result_<index>");
+			text += Clamp(mode);
 			text += Store(inst, index, "fh_clamped_<index>");
 		}
 	} else

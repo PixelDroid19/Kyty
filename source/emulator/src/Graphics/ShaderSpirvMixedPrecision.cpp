@@ -89,7 +89,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VFmaMixLoF16)
 	const auto& inst = code.GetInstructions().At(index);
 	if (inst.src_num != 3 || inst.vop3p_op_sel_hi > 7u || inst.vop3_op_sel > 7u || inst.vop3_omod != 0u ||
 	    inst.vop_sdwa || inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 ||
-	    inst.dst.register_id < 0 || inst.dst.register_id > 255 || inst.dst.multiplier != 1.0f || inst.dst.clamp ||
+	    inst.dst.register_id < 0 || inst.dst.register_id > 255 || inst.dst.multiplier != 1.0f ||
 	    inst.dst.absolute || inst.dst.negate || inst.dst.dpp || inst.dst.swizzle != 6u)
 	{
 		return false;
@@ -143,18 +143,24 @@ KYTY_RECOMPILER_FUNC(Recompile_VFmaMixLoF16)
 	source += String8("%fh_value_bits_<index> = OpBitcast %uint %t_<index>\n").ReplaceStr("<index>", index_str);
 	source += F16Arithmetic::Narrow(spirv, "fh_value_bits_" + index_str, "fh_result_" + index_str, index_str, 0u,
 	                                (mode.value & 0x80u) == 0u, mode.fp16_overflow, "fh_residue_" + index_str);
-	// The low half of the destination is written, the high half is kept.
+	String8 half = "fh_result_" + index_str;
+	if (inst.dst.clamp)
+	{
+		source += F16Arithmetic::Clamp(mode).ReplaceStr("<index>", index_str);
+		half = "fh_clamped_" + index_str;
+	}
+	// The selected half of the destination is written, the other half is kept.
 	source += String8(R"(
 %fh_old_float_<index> = OpLoad %float %<dst>
 %fh_old_<index> = OpBitcast %uint %fh_old_float_<index>
-%fh_merged_<index> = OpBitFieldInsert %uint %fh_old_<index> %fh_result_<index> %uint_<offset> %uint_16
+%fh_merged_<index> = OpBitFieldInsert %uint %fh_old_<index> %<half> %uint_<offset> %uint_16
 %fh_exec_<index> = OpLoad %uint %exec_lo
 %fh_active_<index> = OpINotEqual %bool %fh_exec_<index> %uint_0
 %fh_stored_<index> = OpSelect %uint %fh_active_<index> %fh_merged_<index> %fh_old_<index>
 %fh_stored_float_<index> = OpBitcast %float %fh_stored_<index>
 OpStore %<dst> %fh_stored_float_<index>
 )").ReplaceStr("<index>", index_str).ReplaceStr("<offset>", (param[0] != nullptr && param[0][0] == 'h') ? "16" : "0")
-	   .ReplaceStr("<dst>", operand_variable_to_str(inst.dst).value);
+	   .ReplaceStr("<dst>", operand_variable_to_str(inst.dst).value).ReplaceStr("<half>", half);
 	*dst_source += source;
 	return true;
 }

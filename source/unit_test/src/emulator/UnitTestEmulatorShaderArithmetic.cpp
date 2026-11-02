@@ -1036,7 +1036,7 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 enum class Rejected
 {
 	OpSel, Sdwa, Dpp, Omod, Round, RoundDown, RoundZero, Ieee, UnknownComputeMode,
-	UnknownOverflowConversion, UnknownOverflowInteger, UnknownOverflowArithmetic, IntClamp, BfeClamp, DenormClamp
+	UnknownOverflowConversion, UnknownOverflowInteger, UnknownOverflowArithmetic, IntClamp, BfeClamp
 };
 
 // Whole-word selects with the SDWA CLMP bit: SDWA clamping stays unmodeled.
@@ -1081,7 +1081,6 @@ Core::String8 RejectionDiagnostic(Rejected rejected, ShaderType stage)
 			type = ShaderInstructionType::VCvtI16F16;
 			reason = "unsupported-integer-clamp";
 			break;
-		case Rejected::DenormClamp: reason = "unsupported-output-denorm-clamp"; break;
 		default: Fail("missing rejection diagnostic contract");
 	}
 	return Core::String8::FromPrintf("shader fp16 unsupported: stage=%u instruction=%u pc=0x00000000 reason=%s sdwa=0x%08x\n",
@@ -1129,7 +1128,6 @@ void CaptureRejectionStdout()
 		case Rejected::Ieee: ieee = true; break;
 		case Rejected::IntClamp: inst.dst.clamp = true; break;
 		case Rejected::BfeClamp: inst.dst.clamp = true; break;
-		case Rejected::DenormClamp: inst.dst.clamp = true; break;
 		case Rejected::UnknownOverflowConversion:
 		case Rejected::UnknownOverflowInteger:
 		case Rejected::UnknownOverflowArithmetic:
@@ -1395,7 +1393,7 @@ TEST(EmulatorShaderArithmetic, ComputeFp16OverflowModeFiniteAndTrueInfinity)
 TEST(EmulatorShaderArithmetic, Fp16RefusesUnmodeledControlDomains)
 {
 	for (const auto rejected: {Rejected::OpSel, Rejected::Sdwa, Rejected::Dpp, Rejected::Omod, Rejected::Round, Rejected::RoundDown,
-	                          Rejected::RoundZero, Rejected::Ieee, Rejected::IntClamp, Rejected::BfeClamp, Rejected::DenormClamp,
+	                          Rejected::RoundZero, Rejected::Ieee, Rejected::IntClamp, Rejected::BfeClamp,
 	                          Rejected::UnknownOverflowConversion, Rejected::UnknownOverflowInteger, Rejected::UnknownOverflowArithmetic})
 	{
 		for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
