@@ -1039,8 +1039,8 @@ enum class Rejected
 	UnknownOverflowConversion, UnknownOverflowInteger, UnknownOverflowArithmetic, IntClamp, BfeClamp
 };
 
-// Whole-word selects with the SDWA CLMP bit: SDWA clamping stays unmodeled.
-constexpr uint32_t kRejectedSdwaControl = (6u << 8u) | (6u << 16u) | (1u << 13u);
+// A byte destination select: only whole-word and half selects are modeled.
+constexpr uint32_t kRejectedSdwaControl = (6u << 16u);
 
 Core::String8 RejectionDiagnostic(Rejected rejected, ShaderType stage)
 {

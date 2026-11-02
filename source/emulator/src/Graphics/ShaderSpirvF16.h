@@ -313,7 +313,7 @@ inline bool SdwaWholeWordSupported(const ShaderInstruction& inst)
 // applies the source selects; the generator's per-lane pass merges the
 // whole-dword result into DST_SEL under DST_U. DST_SEL DWORD selects every bit,
 // so the write is the instruction's own unmodified store. Byte selects, source
-// sign extension and CLMP/OMOD stay refused.
+// sign extension and OMOD stay refused.
 inline bool SdwaHalfDestinationSupported(const ShaderInstruction& inst)
 {
 	if (!inst.vop_sdwa)
