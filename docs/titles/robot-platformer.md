@@ -45,6 +45,27 @@ does not appear under its hash at 960x540; where its work went was not traced.
 Command processor work and fence waits now each take about 30 ms of a 55-60 ms
 frame, so 60 fps also needs the command processor cut.
 
+**Wait sites at 960x540.** Fence waits of 0.2 ms or longer, 40 s of dunes. Three
+storage publications per frame, all smaller than 64 bytes, are refused by the partial
+line rule (`docs/bringup/cross-title.md`, 2026-11-02), so `DRAW_INDEX_AUTO` submits and
+waits for the CPU copy: 16.7 s in 3,700 waits, nearly all of the wait time. A one-run
+ceiling with the rule forced off, not a fix:
+
+| Rule | fps | Fence waits per 10 s | Largest sites in 40 s |
+| --- | --- | --- | --- |
+| On | 16.9-18.5 | 4.6-5.1 s | `DRAW_INDEX_AUTO` 16.7 s |
+| Off | 18.5-19.5 | 4.1-4.7 s | `WAIT_REG_MEM` 13.2 s, `DRAW_INDEX_INDIRECT` reads 6.8 s |
+
+The waits move again: the guest's own label waits and argument reads take over, so
+removing this one wait is worth about 5-8 %, which does not justify exposing the
+crash the rule prevents. Command processor time is flat, led by descriptor binding
+(39 % of its samples) and shader input parsing (19 %); no single item stands out.
+
+**Excluded as a playable option: lighter lighting patches.** The non-tiled renderer
+plus GI off at 960x540 gives 20-22 fps, and frames over 50 ms nearly disappear. The one
+capture at 225 s is a washed-out image with no texture detail, against a full
+scene at 240 s on the same route without them. Not compared at the same frame.
+
 **FSR 3.1.** Guides follow the general rule in
 [render-resolution.md](../render-resolution.md).
 - Instrument: the first two runs looked fine but never ran the upscaler, because
@@ -64,9 +85,22 @@ frame, so 60 fps also needs the command processor cut.
   fixed, and the layer has not been run again since. It also reported `rw_luma_history`, declared `rgba8` by the SDK's own shader
   and bound to a half-float image; not investigated.
 
-**Open.** A veil covers Astro in the dunes at every resolution, with and without
-the filter, in the guest's image. Whether that is the game's dust or a defect is not
-checked. No other title has run with `Fsr3`. AMD and NVIDIA have not run it.
+**Other titles and AMD.** Strict matrix with `Fsr3` selected, 33 folders, clean build:
+27 interactive, 1 controlled timeout, 5 invalid, 0 crashes. The timeout is the title at 2
+presents that has moved between presenting and timeout in earlier matrices too. Grids
+at or above the window never engage the upscaler, so this mostly checks the fallback.
+On the Raphael iGPU with RADV, the 960x540 route stops after about 90 s with
+`native-wave admission stage=0x1 guest=32 proof=1 host_default=64`
+(`GraphicsRenderPipeline.cpp`, `CreatePipelineInternal`): a vertex program needs exactly 32
+lanes and RADV has no exact width for that stage. This is the fail-closed limit already
+recorded for `docs/titles/role-playing.md`, reached before any confirmed upscaler
+frame, so `Fsr3` has not been verified on AMD. Whether the unpatched route stops at
+the same point was not measured. Suggested direction: a width-neutral proof for that
+vertex program. NVIDIA has no host here.
+
+**Open.** In the dunes a white haze grows toward the camera and covers Astro at every
+resolution, with and without the filter, while the distant scene stays clear. It looks
+like a defect, not dust, but the cause has not been investigated. No other title has run with `Fsr3`. AMD and NVIDIA have not run it.
 
 ## Robot platformer: green blocks in the crowd scene were MIMG D16 stores read as 32-bit (2026-10-31, fixed)
 
