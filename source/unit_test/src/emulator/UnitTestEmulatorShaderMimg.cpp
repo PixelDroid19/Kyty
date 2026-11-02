@@ -2161,10 +2161,11 @@ TEST(EmulatorShaderMimg, PreservesAtomicDataSourceWithoutSamplerOperand)
 	ASSERT_EXIT(
 	    ([] {
 		    InitMimgParser();
-		    // IMAGE_ATOMIC_SWAP (0x0f) and IMAGE_ATOMIC_ADD (0x11), each without and with the GLC return.
-		    const std::array<std::pair<uint32_t, ShaderInstructionType>, 2> atomics {
-		        {{0x0fu, ShaderInstructionType::ImageAtomicSwap}, {0x11u, ShaderInstructionType::ImageAtomicAdd}}};
-		    for (uint32_t form = 0; form < 4u; form++)
+		    // Atomics with a direct SPIR-V operation, each without and with the GLC return.
+		    const std::array<std::pair<uint32_t, ShaderInstructionType>, 3> atomics {
+		        {{0x0fu, ShaderInstructionType::ImageAtomicSwap}, {0x11u, ShaderInstructionType::ImageAtomicAdd},
+		         {0x17u, ShaderInstructionType::ImageAtomicUMax}}};
+		    for (uint32_t form = 0; form < 6u; form++)
 		    {
 			    const auto [opcode, type] = atomics[form / 2u];
 			    const uint32_t glc        = form % 2u;
@@ -2175,6 +2176,12 @@ TEST(EmulatorShaderMimg, PreservesAtomicDataSourceWithoutSamplerOperand)
 			                   inst.mimg_return_old_value == (glc != 0u), "atomic's third source is real VGPR data, not SSAMP");
 			    RequireMimgTail(ShaderInstructionLoweringPreconditions(inst), "atomic data source passes the unchanged validator");
 		    }
+		    // NSA: X stays in VADDR, Y comes from the first address byte of the extra dword.
+		    const auto nsa_code = ParseMimgTailInstruction(0x17u, 0u, 1u, 1u, ShaderType::Compute);
+		    const auto& nsa_inst = nsa_code.GetInstructions().At(0);
+		    RequireMimgTail(ShaderImageAtomicSupported(nsa_inst) && nsa_inst.mimg_address_num == 2 && nsa_inst.src[0].size == 1 &&
+		                        nsa_inst.mimg_address[0] == TileVgpr(4) && nsa_inst.mimg_address[1] == TileVgpr(0x11),
+		                    "NSA atomic reads its coordinates from the address list");
 		    std::_Exit(0);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");

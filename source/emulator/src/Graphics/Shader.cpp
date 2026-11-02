@@ -2873,8 +2873,8 @@ bool ShaderPreventsNoopPixelElision(const ShaderCode& code)
 	                      ShaderInstructionType::DsSubU32, ShaderInstructionType::DsXorB32, ShaderInstructionType::DsWriteB32,
 	                      ShaderInstructionType::DsWrite2B32, ShaderInstructionType::DsWrite2St64B32,
 	                      ShaderInstructionType::DsWrite2B64, ShaderInstructionType::DsWrite2St64B64,
-	                      ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
-	                      ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
+	                      ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip}) ||
+	                  ShaderHasImageAtomic(code);
 
 	return prevents;
 }

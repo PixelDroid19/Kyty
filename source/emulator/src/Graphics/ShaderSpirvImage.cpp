@@ -961,6 +961,14 @@ bool IsImageInstruction(const ShaderInstruction& inst)
 		case ShaderInstructionType::ImageStore:
 		case ShaderInstructionType::ImageAtomicAdd:
 		case ShaderInstructionType::ImageAtomicSwap:
+		case ShaderInstructionType::ImageAtomicSub:
+		case ShaderInstructionType::ImageAtomicSMin:
+		case ShaderInstructionType::ImageAtomicUMin:
+		case ShaderInstructionType::ImageAtomicSMax:
+		case ShaderInstructionType::ImageAtomicUMax:
+		case ShaderInstructionType::ImageAtomicAnd:
+		case ShaderInstructionType::ImageAtomicOr:
+		case ShaderInstructionType::ImageAtomicXor:
 		case ShaderInstructionType::ImageStoreMip: return true;
 		default: return false;
 	}

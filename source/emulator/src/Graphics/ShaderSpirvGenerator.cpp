@@ -1792,7 +1792,7 @@ static const char* textures_loaded_types = R"(
 				                .ReplaceStr("ImageL", view.image_type)
 				                .ReplaceStr("textures2D_L", view.variable);
 			}
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap}))
+			if (ShaderHasImageAtomic(m_code))
 			{
 				m_source += "%_ptr_Image_uint = OpTypePointer Image %uint\n";
 			}

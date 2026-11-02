@@ -631,6 +631,14 @@ enum class ShaderInstructionType : uint32_t
 	VFfblB32,
 	VFfbhU32,
 	VFfbhI32,
+	ImageAtomicSub,
+	ImageAtomicSMin,
+	ImageAtomicUMin,
+	ImageAtomicSMax,
+	ImageAtomicUMax,
+	ImageAtomicAnd,
+	ImageAtomicOr,
+	ImageAtomicXor,
 
 	ZMax
 };
@@ -2243,6 +2251,7 @@ struct ShaderBindResources
                                                          int user_data_register_base);
 // IMAGE_ATOMIC_ADD and IMAGE_ATOMIC_SWAP: 32-bit read-modify-writes of one storage image texel.
 [[nodiscard]] bool ShaderIsImageAtomic(ShaderInstructionType type);
+[[nodiscard]] bool ShaderHasImageAtomic(const ShaderCode& code);
 [[nodiscard]] bool ShaderImageAtomicSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderImageAtomicResourceSupported(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind);
 [[nodiscard]] bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction);

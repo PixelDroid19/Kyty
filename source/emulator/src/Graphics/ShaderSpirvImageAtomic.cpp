@@ -7,7 +7,26 @@
 
 namespace Kyty::Libs::Graphics {
 
-// IMAGE_ATOMIC_ADD and IMAGE_ATOMIC_SWAP on one R32 texel; GLC returns the pre-op value (RDNA2 8.1.10).
+static const char* ImageAtomicOp(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::ImageAtomicSwap: return "OpAtomicExchange";
+		case ShaderInstructionType::ImageAtomicAdd: return "OpAtomicIAdd";
+		case ShaderInstructionType::ImageAtomicSub: return "OpAtomicISub";
+		case ShaderInstructionType::ImageAtomicSMin: return "OpAtomicSMin";
+		case ShaderInstructionType::ImageAtomicUMin: return "OpAtomicUMin";
+		case ShaderInstructionType::ImageAtomicSMax: return "OpAtomicSMax";
+		case ShaderInstructionType::ImageAtomicUMax: return "OpAtomicUMax";
+		case ShaderInstructionType::ImageAtomicAnd: return "OpAtomicAnd";
+		case ShaderInstructionType::ImageAtomicOr: return "OpAtomicOr";
+		case ShaderInstructionType::ImageAtomicXor: return "OpAtomicXor";
+		default: EXIT("not an image atomic\n");
+	}
+	return nullptr;
+}
+
+// One integer read-modify-write on one R32 texel; GLC returns the pre-op value (RDNA2 8.1.10).
 KYTY_RECOMPILER_FUNC(Recompile_ImageAtomic)
 {
 	const auto& instruction = code.GetInstructions().At(index);
@@ -19,8 +38,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageAtomic)
 	ShaderStorageImageView view;
 	if (descriptor < 0 || !ResolveStorageImageView(code, index, *bind, 0, &view)) { return false; }
 	const auto binding = spirv->GetConstantUint(static_cast<uint32_t>(descriptor));
-	const auto x = operand_variable_to_str(instruction.src[0], 0);
-	const auto y = operand_variable_to_str(instruction.src[0], 1);
+	const auto x = mimg_address_to_str(instruction, 0);
+	const auto y = mimg_address_to_str(instruction, 1);
 	const auto value = operand_variable_to_str(instruction.src[2]);
 	if (binding.StartsWith("unknown_") || x.type != SpirvType::Float || y.type != SpirvType::Float || value.type != SpirvType::Float)
 	{
@@ -61,7 +80,7 @@ OpBranchConditional %image_atomic_enabled_<index> %image_atomic_update_<index> %
 <store>OpBranch %image_atomic_merge_<index>
 %image_atomic_merge_<index> = OpLabel
 )";
-	const char* atomic = instruction.type == ShaderInstructionType::ImageAtomicSwap ? "OpAtomicExchange" : "OpAtomicIAdd";
+	const char* atomic = ImageAtomicOp(instruction.type);
 	*dst_source += String8(text).ReplaceStr("ImageLU", view.image_type)
 	                          .ReplaceStr("textures2D_LU", view.variable)
 	                          .ReplaceStr("<store>", store)

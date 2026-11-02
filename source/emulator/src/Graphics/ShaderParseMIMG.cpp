@@ -12,6 +12,25 @@ static int MimgDmaskComponents(uint32_t dmask)
 	return count;
 }
 
+// RDNA2 MIMG atomic opcodes with a direct SPIR-V integer atomic.
+static ShaderInstructionType MimgImageAtomicType(uint32_t opcode)
+{
+	switch (opcode)
+	{
+		case 0x0f: return ShaderInstructionType::ImageAtomicSwap;
+		case 0x11: return ShaderInstructionType::ImageAtomicAdd;
+		case 0x12: return ShaderInstructionType::ImageAtomicSub;
+		case 0x14: return ShaderInstructionType::ImageAtomicSMin;
+		case 0x15: return ShaderInstructionType::ImageAtomicUMin;
+		case 0x16: return ShaderInstructionType::ImageAtomicSMax;
+		case 0x17: return ShaderInstructionType::ImageAtomicUMax;
+		case 0x18: return ShaderInstructionType::ImageAtomicAnd;
+		case 0x19: return ShaderInstructionType::ImageAtomicOr;
+		case 0x1A: return ShaderInstructionType::ImageAtomicXor;
+		default: return ShaderInstructionType::Unknown;
+	}
+}
+
 KYTY_SHADER_PARSER(shader_parse_mimg)
 {
 	EXIT_IF(dst == nullptr);
@@ -47,8 +66,9 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	EXIT_NOT_IMPLEMENTED(r128 == 1);
 	EXIT_NOT_IMPLEMENTED(tff == 1);
 	EXIT_NOT_IMPLEMENTED(lwe == 1);
+	const auto image_atomic = MimgImageAtomicType(opcode);
 	// GLC on an atomic selects the pre-op return (RDNA2 8.1.10); load and store cache policy is not admitted.
-	EXIT_NOT_IMPLEMENTED(glc == 1 && !(next_gen && (opcode == 0x0fu || opcode == 0x11u)));
+	EXIT_NOT_IMPLEMENTED(glc == 1 && !(next_gen && image_atomic != ShaderInstructionType::Unknown));
 	EXIT_NOT_IMPLEMENTED(slc == 1);
 	EXIT_NOT_IMPLEMENTED(unrm == 1);
 	// EXIT_NOT_IMPLEMENTED(dmask != 0xf && dmask != 0x7);
@@ -60,7 +80,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	// for them (its explicit SSAMP=0 restriction is for BVH). Admit the zero
 	// encoding only, without inventing a sampler read or erasing unknown bits.
 	const bool samplerless = opcode == 0x00u || opcode == 0x01u || opcode == 0x08u || opcode == 0x09u || opcode == 0x0eu ||
-	                         opcode == 0x0fu || opcode == 0x11u;
+	                         image_atomic != ShaderInstructionType::Unknown;
 	if (samplerless && ssamp != 0u)
 	{
 		EXIT("unsupported samplerless MIMG SSAMP: opcode=0x%02" PRIx32 " ssamp=0x%02" PRIx32 " pc=0x%08" PRIx32
@@ -172,28 +192,29 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		}
 		case 0x0f:
 		case 0x11:
-			EXIT_NOT_IMPLEMENTED(!next_gen || dim != 1u || dmask != 1u || nsa != 0u || (buffer[1] & 0x80000000u) != 0);
-			inst.type                  = opcode == 0x0fu ? ShaderInstructionType::ImageAtomicSwap : ShaderInstructionType::ImageAtomicAdd;
+		case 0x12:
+		case 0x14:
+		case 0x15:
+		case 0x16:
+		case 0x17:
+		case 0x18:
+		case 0x19:
+		case 0x1A:
+			EXIT_NOT_IMPLEMENTED(!next_gen || dim != 1u || dmask != 1u || nsa > 1u || (buffer[1] & 0x80000000u) != 0);
+			inst.type                  = image_atomic;
 			inst.format                = ShaderInstructionFormat::Vdata1Vaddr2StVsrc2Dmask1;
 			inst.dst.size              = 1;
-			inst.src[0].size           = 2;
+			inst.src[0].size           = nsa != 0u ? 1 : 2;
 			inst.src[1].size           = 8;
 			inst.src[2]                = inst.dst;
 			inst.src_num               = 3;
 			inst.mimg_dmask            = 1;
+			if (nsa != 0u) { inst.mimg_address_num = 2; }
 			inst.mimg_return_old_value = glc != 0;
 			EXIT_NOT_IMPLEMENTED(!ShaderImageAtomicSupported(inst));
 			break;
 		case 0x10: KYTY_NI("image_atomic_cmpswap"); break;
-		case 0x12: KYTY_NI("image_atomic_sub"); break;
 		case 0x13: KYTY_NI("image_atomic_rsub"); break;
-		case 0x14: KYTY_NI("image_atomic_smin"); break;
-		case 0x15: KYTY_NI("image_atomic_umin"); break;
-		case 0x16: KYTY_NI("image_atomic_smax"); break;
-		case 0x17: KYTY_NI("image_atomic_umax"); break;
-		case 0x18: KYTY_NI("image_atomic_and"); break;
-		case 0x19: KYTY_NI("image_atomic_or"); break;
-		case 0x1A: KYTY_NI("image_atomic_xor"); break;
 		case 0x1B: KYTY_NI("image_atomic_inc"); break;
 		case 0x1C: KYTY_NI("image_atomic_dec"); break;
 		case 0x1D: KYTY_NI("image_atomic_fcmpswap"); break;
