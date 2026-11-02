@@ -435,16 +435,20 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		}
 		auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
 		std::memset(temp_buf, 0, static_cast<size_t>(linear_bytes));
-		const auto* src = reinterpret_cast<const uint8_t*>(*vaddr);
-		for (uint32_t y = 0; y < static_cast<uint32_t>(height); y++)
+		TileDetileRequest detile {};
+		detile.dst               = temp_buf;
+		detile.src               = reinterpret_cast<const void*>(*vaddr);
+		detile.width             = static_cast<uint32_t>(width);
+		detile.height            = static_cast<uint32_t>(height);
+		detile.pitch_elems       = pitch_elems;
+		detile.dst_pitch_elems   = pitch_elems;
+		detile.bytes_per_element = bytes_per_element;
+		detile.layout            = (tile == 9) ? TileDetileLayout::Standard64KB : TileDetileLayout::Sw64kRx;
+		detile.src_bytes         = *size;
+		if (!TileDetile(detile))
 		{
-			for (uint32_t x = 0; x < static_cast<uint32_t>(width); x++)
-			{
-				const uint64_t tiled  = (tile == 9) ? TileGetStandard64KBOffset(x, y, pitch_elems, bytes_per_element)
-				                                    : TileGetSw64kRxOffset(x, y, pitch_elems, bytes_per_element);
-				const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * bytes_per_element;
-				std::memcpy(temp_buf + linear, src + tiled, bytes_per_element);
-			}
+			delete[] temp_buf;
+			EXIT("Gen5 storage detile failed for tile=%u bpe=%u\n", static_cast<unsigned>(tile), bytes_per_element);
 		}
 		regions[0].offset = 0;
 		regions[0].pitch  = pitch_elems;
