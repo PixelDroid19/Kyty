@@ -576,7 +576,8 @@ inline bool LoadHalf(Spirv* spirv, const ShaderInstruction& inst, uint32_t sourc
 		raw = "fh_inline_" + suffix;
 	}
 	const uint32_t half = (inst.vop3_op_sel >> source) & 1u;
-	if (half != 0u && operand_is_constant(operand)) { return false; }
+	// A literal is a 32-bit source whose halves OPSEL selects; an inline constant has no upper half contract.
+	if (half != 0u && operand_is_constant(operand) && operand.type != ShaderOperandType::LiteralConstant) { return false; }
 	*text += String8(R"(
 %fh_abs_mask_<s> = OpBitwiseXor %uint %uint_0x0000ffff %<abs_sign>
 %fh_selected_<s> = OpBitFieldUExtract %uint %<raw> %uint_<offset> %uint_16
