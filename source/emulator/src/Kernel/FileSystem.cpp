@@ -2697,6 +2697,58 @@ bool AprTryGetHostPath(uint32_t file_id, String* out_host_path)
 	return true;
 }
 
+// The host directory holding the files of a guest directory below /app0, empty
+// when its files need the full resolve (a patch directory may override them, or
+// it is no plain directory inside a mount). The result is cached because a title
+// can resolve its whole package in batches, and validating every component of
+// every path on a slow host filesystem then delays its boot by minutes.
+static std::string PackageHostDirectory(const std::string& guest_directory)
+{
+	constexpr size_t kMaxDirectories = size_t {1} << 16u;
+
+	static Core::Mutex                                  mutex;
+	static std::unordered_map<std::string, std::string> directories;
+	{
+		Core::LockGuard lock(mutex);
+		const auto      it = directories.find(guest_directory);
+		if (it != directories.end()) { return it->second; }
+	}
+
+	const auto   guest = String::FromUtf8(guest_directory.c_str());
+	const String host  = g_mount_points->GetRealFilename(guest);
+	const String patch = g_mount_points->GetRealFilename(U"/app0_patch" + guest.RemoveFirst(5));
+
+	std::string host_directory;
+	if (Core::File::IsDirectoryExisting(host) && !Core::File::IsDirectoryExisting(patch) && g_mount_points->IsHostFilenameAllowed(host))
+	{
+		host_directory = host.C_Str();
+	}
+
+	Core::LockGuard lock(mutex);
+	if (directories.size() >= kMaxDirectories) { directories.clear(); }
+	directories.emplace(guest_directory, host_directory);
+	return host_directory;
+}
+
+// Resolves an exactly spelled regular file below /app0 with one lookup per file.
+// Anything else (other case, symlink, alias, absent file) goes to the full resolve.
+static bool TryResolvePackageFile(const char* guest_path, String* host_path, uint64_t* size)
+{
+	const auto guest = Path::NormalizeGuest(guest_path);
+	if (guest.rfind("/app0/", 0) != 0) { return false; }
+	const auto name_position  = guest.rfind('/');
+	const auto host_directory = PackageHostDirectory(guest.substr(0, name_position));
+	if (host_directory.empty()) { return false; }
+
+	const auto      file = std::filesystem::u8path(host_directory) / std::filesystem::u8path(guest.substr(name_position + 1));
+	std::error_code error;
+	if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(file, error))) { return false; }
+	*size = std::filesystem::file_size(file, error);
+	if (error) { return false; }
+	*host_path = String::FromUtf8(file.u8string().c_str());
+	return true;
+}
+
 static int AprResolveOnePath(const char* guest_path, uint32_t* out_id, uint64_t* out_size)
 {
 	if (guest_path == nullptr || guest_path[0] == '\0')
@@ -2707,14 +2759,23 @@ static int AprResolveOnePath(const char* guest_path, uint32_t* out_id, uint64_t*
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-	const String path_s         = String::FromUtf8(guest_path);
-	const auto   real_file_name = ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s));
-	if (!Core::File::IsFileExisting(real_file_name))
+	const String path_s = String::FromUtf8(guest_path);
+	String       real_file_name;
+	uint64_t     file_size = 0;
+	if (TryResolvePackageFile(guest_path, &real_file_name, &file_size))
 	{
-		return KERNEL_ERROR_ENOENT;
+		RememberOdHostPath(path_s, real_file_name);
 	}
-	const uint64_t file_size = Core::File::Size(real_file_name);
-	uint32_t       file_id   = 0;
+	else
+	{
+		real_file_name = ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s));
+		if (!Core::File::IsFileExisting(real_file_name))
+		{
+			return KERNEL_ERROR_ENOENT;
+		}
+		file_size = Core::File::Size(real_file_name);
+	}
+	uint32_t file_id = 0;
 	{
 		Core::LockGuard lock(g_apr_mutex);
 		const auto [it, inserted] = g_apr_path_to_id.emplace(guest_path, g_apr_next_file_id);
