@@ -21,6 +21,16 @@ Evidence labels, used the same way in every section:
 - Sentences marked "(judgement)" are reasoning from the cited facts. They are
   not evidence.
 
+## Update 2026-11-02
+
+The maintainer asked for a temporal upscaler, so step 2 below went ahead with FSR
+3.1 instead of FSR 2, as an opt-in build and filter (see
+[render-resolution.md](../render-resolution.md)). Measured on `PPSA21567 - Astro
+Bot`, step 1 is met only in part: the motion target was checked against the
+frames (warping with it halves the frame difference, see the title record), and
+depth direction was checked against depth values. Jitter and the camera are still
+not known in general. DLSS and XeSS remain as decided.
+
 ## Decision
 
 Do not add DLSS or XeSS now. FSR 1.0 stays the only upscaler.

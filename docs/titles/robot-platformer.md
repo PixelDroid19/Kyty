@@ -6,6 +6,68 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: real gameplay frame rate, internal resolution and FSR 3.1 (2026-11-02)
+
+Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5, Ryzen 5
+7600, 1280x720 window, 60 fps limit, clean link-time optimized build, user route.
+Runs with a game patch are not strict runs and support no compatibility claim.
+
+**Correction.** The records below that quote a "hub" at 30-39 fps measured the
+space cinematic (about 128 s into the route) and the RESUME/SKIP pause menu (about
+148 s). Play after the route ends, in the crash-site dunes from about 200 s,
+measures 12-13 fps at the guest's own 1920x1080. Quote this title only from there.
+
+**Why it holds there.** GPU timestamps sum to 60.7 ms per frame. The largest items
+are the BVH kernel `0x3666fa39` 22.6 ms, `0x874bd13f` 12.75 ms, indexed draws
+6.9 ms, draw tail 4.5 ms and geometry 3.3 ms. In the same state the command processor runs at about 49 %
+of a CPU core and waits about 45 % on fences; no other host thread passes 5 %, so
+the guest CPU is not the limit.
+
+**Excluded.**
+- Removing command processor reads of one-index indirect arguments: 13.7-14 fps
+  with fence waits unchanged. The waits move.
+- `RenderResolutionScope = RenderTargets` as a test of resolution. At 640x360 the
+  main passes stay 1920x1080, since only targets of the 3840x2160 display extent
+  are planned, and the presented image stays 3840x2160. The earlier reading that
+  resolution does not help came from this test and is withdrawn.
+
+**Internal resolution is the lever.** `0x3666fa39` runs 2,087,936 invocations per
+call, close to the pixels of 1920x1080. With a game patch that lowers the guest's
+grid to 960x540, measured on a build with diagnostics:
+
+| Per frame | 1920x1080 | 960x540 |
+| --- | --- | --- |
+| GPU timestamps, sum | 60.7 ms | 36.0 ms |
+| `0x3666fa39` | 22.64 ms | 6.45 ms |
+
+The clean build measures 16.6-18.1 fps in the dunes against 12-13. `0x874bd13f`
+does not appear under its hash at 960x540; where its work went was not traced.
+Command processor work and fence waits now each take about 30 ms of a 55-60 ms
+frame, so 60 fps also needs the command processor cut.
+
+**FSR 3.1.** Guides follow the general rule in
+[render-resolution.md](../render-resolution.md).
+- Instrument: the first two runs looked fine but never ran the upscaler, because
+  the presented image was larger than the window. A trace showed `upscales=0`.
+  Only the guide grid decides now, and 5,160 dispatches were counted in one route.
+- Motion guide: raw dumps of consecutive frames. Warping the newer frame by
+  `-motion` lowers the frame difference (0.00035 against 0.00067 unwarped and
+  0.00070 with `+motion`; 0.00277, 0.0031 and 0.0032 in a second pair), so the
+  target is normalized motion from the previous position to the current one. About
+  55-64 pixels carry a marker value of 128 and are passed unchanged. Static frames
+  show a uniform offset of 0.04-0.08 pixels, consistent with jitter left in the target.
+- Depth: not inverted, read from dumps (0.988 at the bottom of the frame, 0.9986 at the top).
+- Cost: 16.6-18 fps with and without the filter at 960x540, so no measurable loss
+  in these single runs. No crash on a full route. Two captures look correct;
+  no side-by-side against linear was made and motion quality is not verified.
+- Validation layer: the two upscaler issues found (usage flags, depth aspect) are
+  fixed, and the layer has not been run again since. It also reported `rw_luma_history`, declared `rgba8` by the SDK's own shader
+  and bound to a half-float image; not investigated.
+
+**Open.** A veil covers Astro in the dunes at every resolution, with and without
+the filter, in the guest's image. Whether that is the game's dust or a defect is not
+checked. No other title has run with `Fsr3`. AMD and NVIDIA have not run it.
+
 ## Robot platformer: green blocks in the crowd scene were MIMG D16 stores read as 32-bit (2026-10-31, fixed)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5, 60

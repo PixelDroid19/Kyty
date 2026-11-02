@@ -5801,8 +5801,7 @@ the shipped rule, clean binary, 0 in 15, and 45-60 fps over a 60 s run.
 Fix: a device write into guest memory is allowed only for whole lines or ranges of at least 64 KiB, checked at bind,
 publication and fill. Smaller partial-line ranges take the host write-back, which copies exact bytes. The size limit exists
 because `PPSA21567 - Astro Bot` keeps its heavy storage in 10-32 MB objects with 16-byte starts: refusing those cost
-24-27.5 fps against 29.5-31.5 in the hub. With the limit, the hub measures 28.5-32.9 fps warm against the earlier 31-39, a
-loss of 2-5 % inside a same-code spread of about 2.5 fps, spent on a few small objects with pending publications (a counter
+24-27.5 fps against 29.5-31.5 in the hub. With the limit, the scene then called the hub measures 28.5-32.9 fps warm against the earlier 31-39. That window was a cinematic and a pause menu, not play (`docs/titles/robot-platformer.md`, 2026-11-02). In the dunes, single runs give 12.3-13 fps with the limit and 13.6-14 without, a loss of about 7-10 %, spent on a few small objects with pending publications (a counter
 right after a 16 MB buffer, for one). The first run after a rebuild measures 15-26 fps: pipeline creation, not this rule.
 
 Strict matrix, 33 folders: 27 interactive, 1 presenting, 5 invalid, 0 crashes, against 25, 0, 5 and 2 host crashes before.
