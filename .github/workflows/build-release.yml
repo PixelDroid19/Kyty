@@ -70,7 +70,6 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item build/fc_script.exe dist/
-          Copy-Item source/3rdparty/winpthread/bin/libwinpthread-1.dll dist/
           Copy-Item scripts/run_guest.lua,README.md,CHANGELOG.md,LICENSE dist/
 
       # windeployqt copies Qt itself; the MinGW runtime, the shader toolchain and Qt's own dependencies
@@ -85,6 +84,14 @@ jobs:
             cp -n "$library" dist/
           done
           test -f dist/launcher.exe && test -f dist/Qt6Quick.dll && test -f dist/platforms/qwindows.dll
+
+      # Outside the MSYS2 shell nothing but the package provides the DLLs, so a missing one stops the emulator here.
+      - name: Check the emulator starts from the package
+        shell: pwsh
+        working-directory: dist
+        run: |
+          $usage = & ./fc_script.exe | Out-String
+          if ($usage -notmatch 'fc_script <lua_script>') { throw "fc_script.exe did not start (exit code $LASTEXITCODE)" }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
