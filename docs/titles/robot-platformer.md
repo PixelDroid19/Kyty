@@ -61,6 +61,35 @@ removing this one wait is worth about 5-8 %, which does not justify exposing the
 crash the rule prevents. Command processor time is flat, led by descriptor binding
 (39 % of its samples) and shader input parsing (19 %); no single item stands out.
 
+**Wait sites at 1920x1080.** Same 40 s dune window, on a build with fence stacks
+(9.4-11.5 fps with that overhead): indexed draws 11.2 s, of which 10.0 s in 803 waits
+overlap `0x3666fa39` in flight, `WAIT_REG_MEM` 5.1 s, `DRAW_INDEX_AUTO` 0.8 s. Removing
+every wait still leaves the GPU sum of 52-60 ms per frame, about 18 fps at best.
+
+**Excluded: removing EXEC guards by register liveness in compute.** Offline, on the
+translated modules, a guard was dropped when no later read could observe the old value
+in an inactive lane. That removed 1,649 of 2,047 guarded stores in `0x3666fa39`, 2,370
+of 3,857 in `0x874bd13f` and 829 of 1,012 in `0xbf8ee9fc`. `0x3666fa39` fell from 40,981
+to 35,475 instructions and from 2,594 to 1,867 fills; `0x874bd13f` from 79,488 to 65,587
+instructions and from 10,024 to 7,653 fills. Loaded into a dune run in place of the
+translated modules, the static gain did not reach the frame:
+
+| Last 35 s of the route | Translated | Guards removed |
+| --- | --- | --- |
+| `0x3666fa39`, mean per call | 21.85 ms (369 calls) | 19.77 ms (470 calls) |
+| fps | 11.9-12.7 | 12.2-13.5 |
+
+The scene mix differs between the runs, since `0x874bd13f` ran every frame only in the
+second, so about 2 ms is a ceiling on the gain, not a clean A/B, and `0x874bd13f` has no
+comparable baseline. The bound also ignored cross-lane reads and the image was not
+compared, so it does not justify a whole-program analysis that touches every compute
+shader.
+
+**Where this leaves 60 fps.** Native 60 fps in the dunes needs GPU work to fall from
+52-60 ms to under 16 ms on the Arc A770, and no measured lever approaches that. Occlusion
+queries are no lever here: their results are published on the command processor without
+a wait.
+
 **Excluded as a playable option: lighter lighting patches.** The non-tiled renderer
 plus GI off at 960x540 gives 20-22 fps, and frames over 50 ms nearly disappear. The one
 capture at 225 s is a washed-out image with no texture detail, against a full
