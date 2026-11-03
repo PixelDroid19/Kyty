@@ -242,10 +242,23 @@ language when the set has it, with each unlock time and the progress of
 progressive trophies; a locked hidden trophy shows neither its name nor its
 description. The page reads the progress file again every time it opens.
 
-The game itself still sees nothing unlocked: the `NpTrophy2` query layouts and
-the unlock callback are not sourced, so those calls keep returning empty
-results. Trophies with a server unlock type are evaluated locally from the same
-stats.
+The game reads the same set and unlocks through `NpTrophy2`:
+
+- `GetGameInfo` reports the title name, the number of extra groups, the
+  trophies per grade, the unlocked ones per grade and the percentage of
+  trophies unlocked.
+- `GetTrophyInfo` and `GetTrophyInfoArray` (offset and limit in id order)
+  report id, grade (1 platinum to 4 bronze), group (0 for the base game),
+  hidden and reward flags, name and description in the set's default
+  language, and for an unlocked trophy its unlock time in microseconds since
+  0001-01-01 UTC. An id outside the set is rejected.
+
+The layouts come from two independent implementations that agree on every
+offset. The progress fields of progressive trophies, the reward text and the
+unlock callback stay empty or unused. On 2026-11-03, `PPSA03355 - Hades` read
+all 50 trophies at boot, and `PPSA03061 - Void Terrarium`
+read its 32 trophies with the two unlocks of a prepared progress file. Trophies
+with a server unlock type are evaluated locally from the same stats.
 
 ## Focused verification
 
