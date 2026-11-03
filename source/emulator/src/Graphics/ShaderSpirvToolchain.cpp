@@ -136,9 +136,9 @@ static bool SpirvRun(const String8& src, Vector<uint32_t>* dst, String8* err_msg
 
 	const auto optimization = static_cast<uint32_t>(Config::GetShaderOptimizationType());
 	const bool validation   = Config::ShaderValidationEnabled();
+	const bool use_cache    = Config::ShaderCacheEnabled();
 	auto&      cache        = SpirvBinaryCacheDefaultStore();
-	const auto lookup       = cache.Load(src, optimization, validation, dst);
-	if (lookup == SpirvBinaryCacheLoadResult::Hit)
+	if (use_cache && cache.Load(src, optimization, validation, dst) == SpirvBinaryCacheLoadResult::Hit)
 	{
 		return true;
 	}
@@ -148,7 +148,7 @@ static bool SpirvRun(const String8& src, Vector<uint32_t>* dst, String8* err_msg
 		DebugStatsScopedTimer timer(DebugStatsRecordSpirvCompile);
 		compiled = SpirvCompile(src, dst, err_msg);
 	}
-	if (compiled)
+	if (compiled && use_cache)
 	{
 		(void)cache.QueueStore(src, optimization, validation, *dst);
 	}

@@ -1,6 +1,7 @@
 #include "Emulator/Graphics/PipelineCacheStore.h"
 
 #include "Emulator/AtomicFile.h"
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Host/Platform.h"
 #include "Emulator/SystemContentPort.h"
@@ -133,6 +134,10 @@ bool MatchesPersisted(const std::vector<uint8_t>& data)
 
 std::vector<uint8_t> PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& properties)
 {
+	if (!Config::ShaderCacheEnabled())
+	{
+		return {};
+	}
 	const auto path = CachePath(properties);
 	if (path.empty())
 	{
@@ -172,6 +177,10 @@ PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineC
 	if (device == VK_NULL_HANDLE || cache == VK_NULL_HANDLE)
 	{
 		return PipelineCacheStoreSaveResult::Failed;
+	}
+	if (!Config::ShaderCacheEnabled())
+	{
+		return PipelineCacheStoreSaveResult::Unchanged;
 	}
 
 	size_t size   = 0;

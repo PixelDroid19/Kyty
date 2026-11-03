@@ -99,6 +99,25 @@ Controller add, remove and remap events are routed through the same event
 pipeline as axis/button input. Removal closes only the matching SDL controller
 instance; remap does not fabricate a disconnect.
 
+## Host and console settings
+
+The launcher writes these keys to the run script; each has one consumer in the
+runtime, and a value out of range ends the start with an error.
+
+| Key | Values (default) | Effect |
+| --- | --- | --- |
+| `GpuDevice` | Vulkan device name (empty) | Runs on the device with exactly that name; a name that is absent or lacks what the renderer needs ends the start with an error. Empty prefers a discrete device. Two identical cards share a name, so the choice between them is not controllable. |
+| `PresentMode` | `Mailbox`, `Immediate`, `Fifo` (`Mailbox`) | `Fifo` always holds. `Mailbox` falls back to `Immediate`, and `Immediate` to `Fifo`, when the surface lacks the mode. |
+| `FullscreenEnabled` | boolean (`false`) | Enters full screen when the window opens. |
+| `HideCursorEnabled` | boolean (`false`) | Hides the cursor in windowed mode too. |
+| `PerfOverlayEnabled` | boolean (`false`) | Shows the performance overlay from the first frame. |
+| `ShaderCacheEnabled` | boolean (`true`) | Off neither reads nor writes the SPIR-V and pipeline caches on disk. |
+| `ConsoleLanguage` | `0` to `29` (`1`) | The value of the system language parameter guests read. |
+| `UserName` | 1 to 16 UTF-8 bytes (`Kyty`) | The name of the user service and of the online id. It is not part of save paths. |
+| `NoticeScreenSkipEnabled` | boolean (`false`) | The answer guests get when they ask whether a start notice may be skipped. |
+| `NetworkConnected` | boolean (`true`) | Off reports the network state as disconnected and fails network info requests with the not-connected code. |
+| `ControllerVibration` | `0` to `100` (`100`) | Scales guest vibration requests before they reach the host pad. |
+
 ## Audio pause and queueing
 
 `F9` closes the audio producer gate before pausing SDL devices. Resume starts

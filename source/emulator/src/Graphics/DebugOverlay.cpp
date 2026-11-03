@@ -4,6 +4,7 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Host/HostWindow.h"
@@ -162,7 +163,7 @@ void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext
 	EXIT_IF(swapchain == nullptr);
 	EXIT_IF(g_initialized);
 
-	g_visible = EnvHudEnabledByDefault();
+	g_visible = EnvHudEnabledByDefault() || Config::PerfOverlayEnabled();
 	DebugStatsInit();
 
 	IMGUI_CHECKVERSION();

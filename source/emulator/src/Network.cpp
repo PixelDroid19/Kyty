@@ -8,6 +8,7 @@
 #include "Kyty/Core/Vector.h"
 #include "Kyty/Core/VirtualMemory.h"
 
+#include "Emulator/Config.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -4417,6 +4418,8 @@ int KYTY_SYSV_ABI HttpDeleteRequest(int req_id)
 
 namespace NetCtl {
 
+constexpr int NET_CTL_ERROR_NOT_CONNECTED = -2143215352; /* 0x80412108 */
+
 LIB_NAME("NetCtl", "NetCtl");
 
 struct NetInAddr
@@ -4507,8 +4510,9 @@ int KYTY_SYSV_ABI NetCtlGetState(int* state)
 	PRINT_NAME();
 
 	// The emulated network is local only: the loopback address GetInfo reports
-	// is assigned, so the state is IP-obtained (3), not Disconnected (0).
-	const int staged = 3;
+	// is assigned, so the state is IP-obtained (3) unless the user disconnected
+	// the console (0).
+	const int staged = Config::NetworkConnected() ? 3 : 0;
 	return Net::CopyGuestOutput(state, reinterpret_cast<const uint8_t*>(&staged), sizeof(staged));
 }
 
@@ -4526,6 +4530,11 @@ int KYTY_SYSV_ABI NetCtlGetInfo(int code, NetCtlInfo* info)
 	PRINT_NAME();
 
 	KYTY_LOG_DEBUG("\t code = %d\n", code);
+
+	if (!Config::NetworkConnected())
+	{
+		return NET_CTL_ERROR_NOT_CONNECTED;
+	}
 
 	NetCtlInfo output {};
 	memset(&output, 0, sizeof(output));
@@ -4690,9 +4699,8 @@ int KYTY_SYSV_ABI NpGetNpId(int user_id, NpId* np_id)
 
 	if (np_id == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
-	int s = snprintf(np_id->handle.data, 16, "Kyty");
-
-	if (s >= 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	// The id fills all 16 bytes when it is that long; its terminator is the next field.
+	strncpy(np_id->handle.data, Config::GetUserName().utf8_str().GetData(), 16);
 
 	np_id->handle.term = 0;
 
@@ -4707,9 +4715,8 @@ int KYTY_SYSV_ABI NpGetOnlineId(int user_id, NpOnlineId* online_id)
 
 	if (online_id == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
-	int s = snprintf(online_id->data, 16, "Kyty");
-
-	if (s >= 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	// The id fills all 16 bytes when it is that long; its terminator is the next field.
+	strncpy(online_id->data, Config::GetUserName().utf8_str().GetData(), 16);
 
 	online_id->term = 0;
 

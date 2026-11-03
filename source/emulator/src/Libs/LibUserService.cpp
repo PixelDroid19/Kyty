@@ -3,6 +3,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Config.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
@@ -117,7 +118,8 @@ static KYTY_SYSV_ABI int UserServiceGetUserName(int user_id, char* name, size_t 
 	if (user_id != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	if (size < 5) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
-	int s = snprintf(name, size, "%s", "Kyty");
+	const auto user_name = Config::GetUserName().utf8_str();
+	int        s         = snprintf(name, size, "%s", user_name.GetData());
 
 	if (static_cast<size_t>(s) >= size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
