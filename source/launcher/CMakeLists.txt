@@ -45,9 +45,10 @@ endif()
 add_dependencies(launcher KytyBuildInfo)
 
 if(WIN32)
-    find_program(QT_WINDEPLOYQT NAMES windeployqt PATHS "${Qt6_DIR}/../../../bin" "${QT6_INSTALL_PREFIX}/bin" NO_DEFAULT_PATH)
+    # MSYS2 names the Qt 6 tool windeployqt6.
+    find_program(QT_WINDEPLOYQT NAMES windeployqt windeployqt6 PATHS "${Qt6_DIR}/../../../bin" "${QT6_INSTALL_PREFIX}/bin" NO_DEFAULT_PATH)
     if(NOT QT_WINDEPLOYQT)
-        find_program(QT_WINDEPLOYQT NAMES windeployqt)
+        find_program(QT_WINDEPLOYQT NAMES windeployqt windeployqt6)
     endif()
     if(QT_WINDEPLOYQT)
         set(launcher_name "launcher")
@@ -56,11 +57,10 @@ if(WIN32)
         install(CODE "
     		execute_process(
     			COMMAND ${QT_WINDEPLOYQT} \"\${CMAKE_INSTALL_PREFIX}/${launcher_name}.exe\"
-                --no-angle
-                --no-opengl
                 --no-opengl-sw
                 --no-system-d3d-compiler
     				--no-translations
+    			COMMAND_ERROR_IS_FATAL ANY
     		)
     ")
     else()

@@ -3,6 +3,9 @@ name: Build and Release
 on:
   push:
     tags: ["v*"]
+  # Pull requests build both packages so a Windows-only break shows before a release.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -37,6 +40,10 @@ jobs:
             mingw-w64-x86_64-vulkan-loader
             mingw-w64-x86_64-spirv-headers
             mingw-w64-x86_64-spirv-tools
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-declarative
+            mingw-w64-x86_64-qt6-svg
+            mingw-w64-x86_64-qt6-tools
 
       - name: Configure
         shell: msys2 {0}
@@ -45,29 +52,39 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DKYTY_PROJECT_NAME=Emulator
           -DKYTY_WARNINGS_ARE_ERRORS=OFF
-          -DKYTY_BUILD_LAUNCHER=OFF
+          -DKYTY_BUILD_LAUNCHER=ON
           -DKYTY_BUILD_DEVTOOLS=OFF
           -DKYTY_BUILD_UNIT_TESTS=OFF
           -DKYTY_GENERATE_MAP_CSV=OFF
 
       - name: Build
         shell: msys2 {0}
-        run: cmake --build build --target fc_script --parallel 4
+        run: cmake --build build --target fc_script launcher --parallel 4
+
+      # Installing only the launcher directory runs windeployqt without the vendored libraries' install rules.
+      - name: Stage launcher
+        shell: msys2 {0}
+        run: cmake --install build/launcher --prefix dist
 
       - name: Stage archive
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item build/fc_script.exe dist/
           Copy-Item source/3rdparty/winpthread/bin/libwinpthread-1.dll dist/
           Copy-Item scripts/run_guest.lua,README.md,CHANGELOG.md,LICENSE dist/
 
-      - name: Stage shader toolchain runtime libraries
+      # windeployqt copies Qt itself; the MinGW runtime, the shader toolchain and Qt's own dependencies
+      # (ICU, HarfBuzz, zstd, ...) come from MSYS2 and are copied here.
+      - name: Stage MSYS2 runtime libraries
         shell: msys2 {0}
         run: |
-          for library in /mingw64/bin/libSPIRV-Tools*.dll; do
-            if [ -f "$library" ]; then cp "$library" dist/; fi
+          set -euo pipefail
+          find dist -name '*.exe' -o -name '*.dll' | while read -r binary; do
+            ldd "$binary" | awk '$3 ~ /^\/mingw64\/bin\// { print $3 }'
+          done | sort -u | while read -r library; do
+            cp -n "$library" dist/
           done
+          test -f dist/launcher.exe && test -f dist/Qt6Quick.dll && test -f dist/platforms/qwindows.dll
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
