@@ -5244,11 +5244,13 @@ int c_fs_make_dir(const char* path, const char* permissions_source)
 		}
 		mode = status.permissions();
 	}
-	if (std::filesystem::create_directory(path, mode, ec))
+	if (!std::filesystem::create_directory(path, ec))
 	{
-		return 1;
+		return ec ? -(ec.value() & 0xffff) : 0;
 	}
-	return ec ? -(ec.value() & 0xffff) : 0;
+	// The standard library takes the permissions separately from the creation.
+	std::filesystem::permissions(path, mode, ec);
+	return ec ? -(ec.value() & 0xffff) : 1;
 #else
 	mode_t mode = 0777;
 	if (permissions_source != nullptr)
