@@ -490,6 +490,14 @@
         <translation>Shaders y validación</translation>
     </message>
     <message>
+        <source>Add-on content folder</source>
+        <translation>Carpeta de contenido adicional</translation>
+    </message>
+    <message>
+        <source>Environment variables</source>
+        <translation>Variables de entorno</translation>
+    </message>
+    <message>
         <source>Graphics card</source>
         <translation>Tarjeta gráfica</translation>
     </message>
@@ -514,6 +522,10 @@
         <translation>Ocultar el cursor</translation>
     </message>
     <message>
+        <source>Picture shape</source>
+        <translation>Forma de la imagen</translation>
+    </message>
+    <message>
         <source>System language</source>
         <translation>Idioma del sistema</translation>
     </message>
@@ -536,6 +548,14 @@
     <message>
         <source>Vibration strength (0–100)</source>
         <translation>Vibración (0–100)</translation>
+    </message>
+    <message>
+        <source>Light bar colour</source>
+        <translation>Color de la barra de luz</translation>
+    </message>
+    <message>
+        <source>Controller speaker volume (0–100)</source>
+        <translation>Volumen del altavoz del mando (0–100)</translation>
     </message>
     <message>
         <source>Shader cache</source>
@@ -676,6 +696,26 @@
     <message>
         <source>Launcher window</source>
         <translation>Ventana del launcher</translation>
+    </message>
+    <message>
+        <source>A colour here replaces the one games choose.</source>
+        <translation>Un color aquí sustituye al que eligen los juegos.</translation>
+    </message>
+    <message>
+        <source>Sounds games send to the controller&apos;s speaker play on the computer at this volume. 0 keeps them silent.</source>
+        <translation>Los sonidos que los juegos envían al altavoz del mando suenan en el ordenador a este volumen. 0 los silencia.</translation>
+    </message>
+    <message>
+        <source>Stretch fills the window. Fit keeps the game&apos;s shape with black bars. Whole-pixel steps also keeps every pixel the same size while the picture fits the window.</source>
+        <translation>Estirar llena la ventana. Ajustar mantiene la forma del juego con franjas negras. Píxeles enteros además mantiene todos los píxeles del mismo tamaño mientras la imagen quepa en la ventana.</translation>
+    </message>
+    <message>
+        <source>A folder with one folder per game ID, each holding that game&apos;s installed add-ons. Add-ons listed in the game&apos;s own dlc_emu.ini are found without it.</source>
+        <translation>Una carpeta con una subcarpeta por ID de juego, cada una con los complementos instalados de ese juego. Los complementos listados en el dlc_emu.ini del propio juego se encuentran sin ella.</translation>
+    </message>
+    <message>
+        <source>Extra settings for the emulator process, as NAME=value pairs separated by &apos;;&apos;.</source>
+        <translation>Ajustes extra para el proceso del emulador, como pares NOMBRE=valor separados por &apos;;&apos;.</translation>
     </message>
     <message>
         <source>The folder that holds the game&apos;s files.</source>
@@ -935,6 +975,26 @@
     <message>
         <source>Nearest</source>
         <translation>Vecino más cercano</translation>
+    </message>
+    <message>
+        <source>Stretch to the window</source>
+        <translation>Estirar a la ventana</translation>
+    </message>
+    <message>
+        <source>Fit, keep the shape</source>
+        <translation>Ajustar, mantener la forma</translation>
+    </message>
+    <message>
+        <source>Whole-pixel steps</source>
+        <translation>Píxeles enteros</translation>
+    </message>
+    <message>
+        <source>Red</source>
+        <translation>Rojo</translation>
+    </message>
+    <message>
+        <source>White</source>
+        <translation>Blanco</translation>
     </message>
     <message>
         <source>As the game asks</source>
@@ -1386,6 +1446,18 @@
     <message>
         <source>Vibration must be between 0 and 100</source>
         <translation>La vibración debe estar entre 0 y 100</translation>
+    </message>
+    <message>
+        <source>The controller speaker volume must be between 0 and 100</source>
+        <translation>El volumen del altavoz del mando debe estar entre 0 y 100</translation>
+    </message>
+    <message>
+        <source>Choose a light bar colour from the list</source>
+        <translation>Elige un color de la barra de luz de la lista</translation>
+    </message>
+    <message>
+        <source>Environment variables must be NAME=value pairs separated by &apos;;&apos;</source>
+        <translation>Las variables de entorno deben ser pares NOMBRE=valor separados por &apos;;&apos;</translation>
     </message>
     <message>
         <source>Emulator not found. Set its path in Settings.</source>

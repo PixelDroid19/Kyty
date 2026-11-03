@@ -4,6 +4,7 @@
 #include "GpuDevices.h"
 
 #include <QCoreApplication>
+#include <QRegularExpression>
 #include <QStringList>
 #include <QVariant>
 #include <QVariantList>
@@ -32,7 +33,19 @@ constexpr int MIN_EXTENT = 320;
 constexpr int MAX_EXTENT = 8192;
 
 // Fields that say which game runs, as opposed to how the emulator runs it.
-const QStringList GAME_IDENTITY_KEYS = {"name", "folder", "basedir", "param_file", "game_patch_file", "elfs", "custom_settings"};
+const QStringList GAME_IDENTITY_KEYS = {"name",           "folder",      "basedir", "param_file", "game_patch_file",
+                                       "addcont_folder", "environment", "elfs",    "custom_settings"};
+
+struct LightBarColor
+{
+	const char* name;
+	const char* hex;
+};
+
+const LightBarColor LIGHT_BAR_COLORS[] = {
+    {"Guest", ""},          {"Blue", "#0000ff"},   {"Red", "#ff0000"},    {"Green", "#00ff00"},
+    {"Pink", "#ff3399"},    {"Violet", "#8000ff"}, {"Orange", "#ff6600"}, {"White", "#ffffff"},
+};
 
 // Output paths that must be filled when their option is enabled.
 bool RequiredPathsFilled(const QVariantMap& f)
@@ -106,6 +119,8 @@ QVariantMap ConfigurationToFields(const Kyty::Configuration& info)
 	f["basedir"]                      = info.basedir;
 	f["param_file"]                   = info.param_file;
 	f["game_patch_file"]              = info.game_patch_file;
+	f["addcont_folder"]               = info.addcont_folder;
+	f["environment"]                  = info.environment;
 	f["custom_settings"]              = info.custom_settings;
 	f["screen_width"]                 = info.screen_width;
 	f["screen_height"]                = info.screen_height;
@@ -114,6 +129,7 @@ QVariantMap ConfigurationToFields(const Kyty::Configuration& info)
 	f["render_resolution_height"]     = info.render_resolution_height;
 	f["render_resolution_scope"]      = EnumToText(info.render_resolution_scope);
 	f["presentation_filter"]          = EnumToText(info.presentation_filter);
+	f["presentation_scaling"]         = EnumToText(info.presentation_scaling);
 	f["presentation_fsr_sharpness"]   = info.presentation_fsr_sharpness;
 	f["texture_anisotropy"]           = EnumToText(info.texture_anisotropy);
 	// Presets are not stored, so a loaded configuration always starts as custom.
@@ -129,6 +145,8 @@ QVariantMap ConfigurationToFields(const Kyty::Configuration& info)
 	f["notice_screen_skip_enabled"]   = info.notice_screen_skip_enabled;
 	f["network_connected"]            = info.network_connected;
 	f["controller_vibration"]         = info.controller_vibration;
+	f["controller_light_bar"]         = info.controller_light_bar;
+	f["controller_speaker_volume"]    = info.controller_speaker_volume;
 	f["shader_cache_enabled"]         = info.shader_cache_enabled;
 	f["neo"]                          = info.neo;
 	f["vulkan_validation_enabled"]    = info.vulkan_validation_enabled;
@@ -178,6 +196,14 @@ QString ApplyEmulatorFields(const QVariantMap& fields, Kyty::Configuration* info
 	{
 		return QCoreApplication::translate("Launcher", "Vibration must be between 0 and 100");
 	}
+	if (!NumberInRange(fields, "controller_speaker_volume", 0, 100))
+	{
+		return QCoreApplication::translate("Launcher", "The controller speaker volume must be between 0 and 100");
+	}
+	if (!ControllerLightBarNames().contains(fields.value("controller_light_bar").toString()))
+	{
+		return QCoreApplication::translate("Launcher", "Choose a light bar colour from the list");
+	}
 
 	const auto text = [&fields](const char* key) { return fields.value(key).toString(); };
 
@@ -192,6 +218,8 @@ QString ApplyEmulatorFields(const QVariantMap& fields, Kyty::Configuration* info
 	info->notice_screen_skip_enabled  = fields.value("notice_screen_skip_enabled").toBool();
 	info->network_connected           = fields.value("network_connected").toBool();
 	info->controller_vibration        = fields.value("controller_vibration").toInt();
+	info->controller_light_bar        = text("controller_light_bar");
+	info->controller_speaker_volume   = fields.value("controller_speaker_volume").toInt();
 	info->shader_cache_enabled        = fields.value("shader_cache_enabled").toBool();
 	info->screen_width                = fields.value("screen_width").toInt();
 	info->screen_height               = fields.value("screen_height").toInt();
@@ -200,6 +228,7 @@ QString ApplyEmulatorFields(const QVariantMap& fields, Kyty::Configuration* info
 	info->render_resolution_height    = fields.value("render_resolution_height").toInt();
 	info->render_resolution_scope     = TextToEnum<Config::RenderResolutionScope>(text("render_resolution_scope"));
 	info->presentation_filter         = TextToEnum<Config::PresentationFilter>(text("presentation_filter"));
+	info->presentation_scaling        = TextToEnum<Config::PresentationScaling>(text("presentation_scaling"));
 	info->presentation_fsr_sharpness  = fields.value("presentation_fsr_sharpness").toInt();
 	info->texture_anisotropy          = TextToEnum<Config::TextureAnisotropy>(text("texture_anisotropy"));
 	info->neo                         = fields.value("neo").toBool();
@@ -228,6 +257,10 @@ QString ApplyFields(const QVariantMap& fields, Kyty::Configuration* info)
 	{
 		return QCoreApplication::translate("Launcher", "Please fill all mandatory fields");
 	}
+	if (!ParseEnvironment(fields.value("environment").toString(), nullptr))
+	{
+		return QCoreApplication::translate("Launcher", "Environment variables must be NAME=value pairs separated by ';'");
+	}
 	if (const auto error = ApplyEmulatorFields(fields, info); !error.isEmpty())
 	{
 		return error;
@@ -237,6 +270,8 @@ QString ApplyFields(const QVariantMap& fields, Kyty::Configuration* info)
 	info->basedir         = fields.value("basedir").toString().trimmed();
 	info->param_file      = fields.value("param_file").toString();
 	info->game_patch_file = fields.value("game_patch_file").toString().trimmed();
+	info->addcont_folder  = fields.value("addcont_folder").toString().trimmed();
+	info->environment     = fields.value("environment").toString().trimmed();
 	info->custom_settings = fields.value("custom_settings").toBool();
 
 	// Only ELFs that still exist on disk are kept, as the Qt widget editor did.
@@ -350,6 +385,51 @@ QString ConsoleLanguageName(int language)
 	return language >= 0 && language < CONSOLE_LANGUAGE_COUNT ? QString::fromUtf8(NAMES[language]) : QString();
 }
 
+QStringList ControllerLightBarNames()
+{
+	QStringList names;
+	for (const auto& color: LIGHT_BAR_COLORS)
+	{
+		names << color.name;
+	}
+	return names;
+}
+
+QString ControllerLightBarHex(const QString& name)
+{
+	for (const auto& color: LIGHT_BAR_COLORS)
+	{
+		if (name == QLatin1String(color.name))
+		{
+			return color.hex;
+		}
+	}
+	return {};
+}
+
+bool ParseEnvironment(const QString& text, QList<QPair<QString, QString>>* pairs)
+{
+	static const QRegularExpression PAIR(R"(^([A-Za-z_][A-Za-z0-9_]*)=(.*)$)");
+	for (const auto& entry: text.split(';', Qt::SkipEmptyParts))
+	{
+		const auto trimmed = entry.trimmed();
+		if (trimmed.isEmpty())
+		{
+			continue;
+		}
+		const auto match = PAIR.match(trimmed);
+		if (!match.hasMatch())
+		{
+			return false;
+		}
+		if (pairs != nullptr)
+		{
+			pairs->append({match.captured(1), match.captured(2)});
+		}
+	}
+	return true;
+}
+
 QVariantMap ConfigurationChoices()
 {
 	QVariantMap choices;
@@ -364,6 +444,8 @@ QVariantMap ConfigurationChoices()
 	choices["render_resolution_mode"]    = EnumToList<Config::RenderResolutionMode>();
 	choices["render_resolution_scope"]   = EnumToList<Config::RenderResolutionScope>();
 	choices["presentation_filter"]       = EnumToList<Config::PresentationFilter>();
+	choices["presentation_scaling"]      = EnumToList<Config::PresentationScaling>();
+	choices["controller_light_bar"]      = ControllerLightBarNames();
 	choices["texture_anisotropy"]        = EnumToList<Config::TextureAnisotropy>();
 	choices["graphics_preset"]           = EnumToList<Config::GraphicsPreset>();
 	choices["shader_optimization_type"]  = EnumToList<Config::ShaderOptimizationType>();

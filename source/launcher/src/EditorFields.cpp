@@ -13,6 +13,8 @@ const QVector<EditorField> GAME_FIELDS = {
     {"basedir", QT_TRANSLATE_NOOP("EditorPageItem", "Game folder"), FieldType::Path, nullptr, true},
     {"param_file", QT_TRANSLATE_NOOP("EditorPageItem", "Parameters file"), FieldType::Path},
     {"game_patch_file", QT_TRANSLATE_NOOP("EditorPageItem", "Game patch file"), FieldType::Path},
+    {"addcont_folder", QT_TRANSLATE_NOOP("EditorPageItem", "Add-on content folder"), FieldType::Path, nullptr, true},
+    {"environment", QT_TRANSLATE_NOOP("EditorPageItem", "Environment variables"), FieldType::Text},
     {"custom_settings", QT_TRANSLATE_NOOP("EditorPageItem", "Custom emulator settings"), FieldType::Toggle},
 };
 
@@ -35,6 +37,7 @@ const QVector<EditorField> DISPLAY_FIELDS = {
     {"render_resolution_height", QT_TRANSLATE_NOOP("EditorPageItem", "Render height"), FieldType::Number, nullptr, false,
 	 [](const QVariantMap& f) { return Is(f, "render_resolution_mode", "Fixed"); }},
     {"presentation_filter", QT_TRANSLATE_NOOP("EditorPageItem", "Presentation filter"), FieldType::Choice, "presentation_filter"},
+    {"presentation_scaling", QT_TRANSLATE_NOOP("EditorPageItem", "Picture shape"), FieldType::Choice, "presentation_scaling"},
     {"presentation_fsr_sharpness", QT_TRANSLATE_NOOP("EditorPageItem", "FSR sharpness (0–100)"), FieldType::Number, nullptr, false,
 	 [](const QVariantMap& f) { return Is(f, "presentation_filter", "Fsr") || Is(f, "presentation_filter", "Fsr3"); }},
     {"texture_anisotropy", QT_TRANSLATE_NOOP("EditorPageItem", "Texture anisotropy"), FieldType::Choice, "texture_anisotropy"},
@@ -48,6 +51,8 @@ const QVector<EditorField> SYSTEM_FIELDS = {
     {"network_connected", QT_TRANSLATE_NOOP("EditorPageItem", "Network connected"), FieldType::Toggle},
     {"notice_screen_skip_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Skip notice screens"), FieldType::Toggle},
     {"controller_vibration", QT_TRANSLATE_NOOP("EditorPageItem", "Vibration strength (0–100)"), FieldType::Number},
+    {"controller_light_bar", QT_TRANSLATE_NOOP("EditorPageItem", "Light bar colour"), FieldType::Choice, "controller_light_bar"},
+    {"controller_speaker_volume", QT_TRANSLATE_NOOP("EditorPageItem", "Controller speaker volume (0–100)"), FieldType::Number},
 };
 
 const QVector<EditorField> SHADER_FIELDS = {
@@ -134,6 +139,11 @@ const Help HELP[] = {
     {"network_connected", QT_TRANSLATE_NOOP("EditorPageItem", "Off tells games the console has no network. On reports a local connection; there is no online play.")},
     {"notice_screen_skip_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Tells games that show a notice at the start that it may be skipped. Not every game asks.")},
     {"controller_vibration", QT_TRANSLATE_NOOP("EditorPageItem", "How strongly the controller follows the vibration games request. 0 turns it off.")},
+    {"controller_light_bar", QT_TRANSLATE_NOOP("EditorPageItem", "A colour here replaces the one games choose.")},
+    {"controller_speaker_volume", QT_TRANSLATE_NOOP("EditorPageItem", "Sounds games send to the controller's speaker play on the computer at this volume. 0 keeps them silent.")},
+    {"presentation_scaling", QT_TRANSLATE_NOOP("EditorPageItem", "Stretch fills the window. Fit keeps the game's shape with black bars. Whole-pixel steps also keeps every pixel the same size while the picture fits the window.")},
+    {"addcont_folder", QT_TRANSLATE_NOOP("EditorPageItem", "A folder with one folder per game ID, each holding that game's installed add-ons. Add-ons listed in the game's own dlc_emu.ini are found without it.")},
+    {"environment", QT_TRANSLATE_NOOP("EditorPageItem", "Extra settings for the emulator process, as NAME=value pairs separated by ';'.")},
     {"shader_cache_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Keeps compiled shaders on disk so games load and run smoothly the next time. Turn it off only to rule out a bad cache.")},
     {"basedir", QT_TRANSLATE_NOOP("EditorPageItem", "The folder that holds the game's files.")},
     {"custom_settings", QT_TRANSLATE_NOOP("EditorPageItem", "Off runs the game with the emulator settings from Settings.")},

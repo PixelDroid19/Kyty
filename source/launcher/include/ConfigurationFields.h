@@ -3,7 +3,10 @@
 
 #include "Common.h"
 
+#include <QList>
+#include <QPair>
 #include <QString>
+#include <QStringList>
 #include <QVariantMap>
 
 namespace Kyty {
@@ -37,5 +40,13 @@ inline constexpr char AUTOMATIC_GPU[] = "Auto";
 
 inline constexpr int CONSOLE_LANGUAGE_COUNT = 30;
 QString              ConsoleLanguageName(int language);
+
+// The light bar colours the launcher offers; the first, Guest, leaves the colour to the game.
+QStringList ControllerLightBarNames();
+// "#RRGGBB" of a light bar colour, empty for Guest.
+QString ControllerLightBarHex(const QString& name);
+
+// The NAME=value pairs of an environment field, separated by ';'. Returns false when a pair is malformed.
+bool ParseEnvironment(const QString& text, QList<QPair<QString, QString>>* pairs);
 
 #endif /* LAUNCHER_INCLUDE_CONFIGURATION_FIELDS_H_ */

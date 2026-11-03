@@ -492,6 +492,14 @@
         <translation>Шейдеры и проверка</translation>
     </message>
     <message>
+        <source>Add-on content folder</source>
+        <translation>Папка дополнений</translation>
+    </message>
+    <message>
+        <source>Environment variables</source>
+        <translation>Переменные окружения</translation>
+    </message>
+    <message>
         <source>Graphics card</source>
         <translation>Видеокарта</translation>
     </message>
@@ -516,6 +524,10 @@
         <translation>Скрывать курсор</translation>
     </message>
     <message>
+        <source>Picture shape</source>
+        <translation>Форма изображения</translation>
+    </message>
+    <message>
         <source>System language</source>
         <translation>Язык системы</translation>
     </message>
@@ -538,6 +550,14 @@
     <message>
         <source>Vibration strength (0–100)</source>
         <translation>Вибрация (0–100)</translation>
+    </message>
+    <message>
+        <source>Light bar colour</source>
+        <translation>Цвет световой панели</translation>
+    </message>
+    <message>
+        <source>Controller speaker volume (0–100)</source>
+        <translation>Громкость динамика контроллера (0–100)</translation>
     </message>
     <message>
         <source>Shader cache</source>
@@ -678,6 +698,26 @@
     <message>
         <source>Launcher window</source>
         <translation>Окно лаунчера</translation>
+    </message>
+    <message>
+        <source>A colour here replaces the one games choose.</source>
+        <translation>Выбранный здесь цвет заменяет цвет, заданный игрой.</translation>
+    </message>
+    <message>
+        <source>Sounds games send to the controller&apos;s speaker play on the computer at this volume. 0 keeps them silent.</source>
+        <translation>Звуки, которые игры отправляют на динамик контроллера, звучат на компьютере с этой громкостью. 0 — без звука.</translation>
+    </message>
+    <message>
+        <source>Stretch fills the window. Fit keeps the game&apos;s shape with black bars. Whole-pixel steps also keeps every pixel the same size while the picture fits the window.</source>
+        <translation>«Растянуть» заполняет окно. «Вписать» сохраняет пропорции игры с чёрными полосами. «Целые пиксели» также сохраняет одинаковый размер пикселей, пока изображение помещается в окно.</translation>
+    </message>
+    <message>
+        <source>A folder with one folder per game ID, each holding that game&apos;s installed add-ons. Add-ons listed in the game&apos;s own dlc_emu.ini are found without it.</source>
+        <translation>Папка с отдельной папкой для каждого ID игры, где лежат установленные дополнения этой игры. Дополнения из собственного dlc_emu.ini игры находятся и без неё.</translation>
+    </message>
+    <message>
+        <source>Extra settings for the emulator process, as NAME=value pairs separated by &apos;;&apos;.</source>
+        <translation>Дополнительные параметры процесса эмулятора в виде пар ИМЯ=значение через &apos;;&apos;.</translation>
     </message>
     <message>
         <source>The folder that holds the game&apos;s files.</source>
@@ -937,6 +977,26 @@
     <message>
         <source>Nearest</source>
         <translation>Ближайший</translation>
+    </message>
+    <message>
+        <source>Stretch to the window</source>
+        <translation>Растянуть по окну</translation>
+    </message>
+    <message>
+        <source>Fit, keep the shape</source>
+        <translation>Вписать, сохранить пропорции</translation>
+    </message>
+    <message>
+        <source>Whole-pixel steps</source>
+        <translation>Целые пиксели</translation>
+    </message>
+    <message>
+        <source>Red</source>
+        <translation>Красный</translation>
+    </message>
+    <message>
+        <source>White</source>
+        <translation>Белый</translation>
     </message>
     <message>
         <source>As the game asks</source>
@@ -1388,6 +1448,18 @@
     <message>
         <source>Vibration must be between 0 and 100</source>
         <translation>Вибрация должна быть от 0 до 100</translation>
+    </message>
+    <message>
+        <source>The controller speaker volume must be between 0 and 100</source>
+        <translation>Громкость динамика контроллера должна быть от 0 до 100</translation>
+    </message>
+    <message>
+        <source>Choose a light bar colour from the list</source>
+        <translation>Выберите цвет световой панели из списка</translation>
+    </message>
+    <message>
+        <source>Environment variables must be NAME=value pairs separated by &apos;;&apos;</source>
+        <translation>Переменные окружения должны быть парами ИМЯ=значение через &apos;;&apos;</translation>
     </message>
     <message>
         <source>Emulator not found. Set its path in Settings.</source>

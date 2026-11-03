@@ -7,7 +7,9 @@ label as owned through one library and unowned through the other.
 
 The inventory is loaded by `kyty_load_addcont(app0_root, packages_root)` after
 `kyty_load_param_json` (the title id comes from `sce_sys/param.json`).
-`scripts/run_guest.lua` passes the guest root and `KYTY_ADDCONT_DIR`.
+`scripts/run_guest.lua` passes the guest root and `KYTY_ADDCONT_DIR`. The
+launcher passes the game folder and the game's "Add-on content folder" field,
+which may be empty.
 
 ## Sources
 
