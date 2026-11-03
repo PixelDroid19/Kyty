@@ -20,9 +20,18 @@ QStringList QueryGpuDeviceNames()
 	}
 	auto*    functions = instance.functions();
 	uint32_t count     = 0;
-	functions->vkEnumeratePhysicalDevices(instance.vkInstance(), &count, nullptr);
+	if (functions->vkEnumeratePhysicalDevices(instance.vkInstance(), &count, nullptr) != VK_SUCCESS)
+	{
+		return names;
+	}
 	QVector<VkPhysicalDevice> devices(count);
-	functions->vkEnumeratePhysicalDevices(instance.vkInstance(), &count, devices.data());
+	// VK_INCOMPLETE still fills the first count handles; the list may shrink between the two calls.
+	const auto result = functions->vkEnumeratePhysicalDevices(instance.vkInstance(), &count, devices.data());
+	if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+	{
+		return names;
+	}
+	devices.resize(count);
 	for (auto* device: devices)
 	{
 		VkPhysicalDeviceProperties properties {};
