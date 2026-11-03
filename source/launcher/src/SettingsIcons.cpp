@@ -284,6 +284,21 @@ void PaintEmulator(QPainter* p, qreal t, const QColor& ink, const QColor& accent
 
 // The guest pad: it rocks gently and now and then buzzes, the left stick circles, the right one flicks, the face
 // buttons light one after another and the light bar breathes.
+void PaintConsole(QPainter* p, qreal t, const QColor& ink, const QColor& accent)
+{
+	const qreal breath = t > 0 ? 0.5 + 0.5 * std::sin(t * 2 * M_PI / 2.4) : 1;
+	p->setPen(Line(ink));
+	p->setBrush(Qt::NoBrush);
+	p->drawRoundedRect(QRectF(0.12, 0.3, 0.76, 0.4), 0.07, 0.07);
+	p->drawLine(QPointF(0.26, 0.7), QPointF(0.26, 0.79));
+	p->drawLine(QPointF(0.74, 0.7), QPointF(0.74, 0.79));
+	p->setPen(Line(WithAlpha(ink, 0.7), STROKE * 0.8));
+	p->drawLine(QPointF(0.26, 0.5), QPointF(0.56, 0.5));
+	p->setPen(Qt::NoPen);
+	p->setBrush(WithAlpha(accent, 0.35 + 0.65 * breath));
+	p->drawEllipse(QPointF(0.74, 0.5), 0.045, 0.045);
+}
+
 void PaintControls(QPainter* p, qreal t, const QColor& ink, const QColor& accent)
 {
 	constexpr qreal WIDTH = 0.9;
@@ -403,6 +418,7 @@ QImage PaintSettingsIcon(SettingsIcon icon, int px, qreal seconds, const QColor&
 	switch (icon)
 	{
 		case SettingsIcon::Graphics: PaintGraphics(&painter, seconds, ink, accent); break;
+		case SettingsIcon::Console: PaintConsole(&painter, seconds, ink, accent); break;
 		case SettingsIcon::Shaders: PaintShaders(&painter, seconds, ink, accent); break;
 		case SettingsIcon::Logs: PaintLogs(&painter, seconds, ink, accent); break;
 		case SettingsIcon::Emulator: PaintEmulator(&painter, seconds, ink, accent); break;

@@ -28,10 +28,6 @@
         <translation>Enter</translation>
     </message>
     <message>
-        <source>Double-click</source>
-        <translation type="vanished">Двойной щелчок</translation>
-    </message>
-    <message>
         <source>Options</source>
         <translation>Options</translation>
     </message>
@@ -496,6 +492,58 @@
         <translation>Шейдеры и проверка</translation>
     </message>
     <message>
+        <source>Graphics card</source>
+        <translation>Видеокарта</translation>
+    </message>
+    <message>
+        <source>Start in full screen</source>
+        <translation>Запуск на весь экран</translation>
+    </message>
+    <message>
+        <source>Frame delivery</source>
+        <translation>Вывод кадров</translation>
+    </message>
+    <message>
+        <source>Frame limit (0 = none)</source>
+        <translation>Предел кадров (0 = нет)</translation>
+    </message>
+    <message>
+        <source>Show performance overlay</source>
+        <translation>Показатели поверх игры</translation>
+    </message>
+    <message>
+        <source>Hide the mouse cursor</source>
+        <translation>Скрывать курсор</translation>
+    </message>
+    <message>
+        <source>System language</source>
+        <translation>Язык системы</translation>
+    </message>
+    <message>
+        <source>Console</source>
+        <translation>Консоль</translation>
+    </message>
+    <message>
+        <source>User name</source>
+        <translation>Имя пользователя</translation>
+    </message>
+    <message>
+        <source>Network connected</source>
+        <translation>Сеть подключена</translation>
+    </message>
+    <message>
+        <source>Skip notice screens</source>
+        <translation>Пропускать уведомления</translation>
+    </message>
+    <message>
+        <source>Vibration strength (0–100)</source>
+        <translation>Вибрация (0–100)</translation>
+    </message>
+    <message>
+        <source>Shader cache</source>
+        <translation>Кэш шейдеров</translation>
+    </message>
+    <message>
         <source>Shader validation</source>
         <translation>Проверка шейдеров</translation>
     </message>
@@ -632,170 +680,6 @@
         <translation>Окно лаунчера</translation>
     </message>
     <message>
-        <source>Profile</source>
-        <translation type="vanished">Профиль</translation>
-    </message>
-    <message>
-        <source>Profile name</source>
-        <translation type="vanished">Название профиля</translation>
-    </message>
-    <message>
-        <source>Controller</source>
-        <translation type="vanished">Геймпад</translation>
-    </message>
-    <message>
-        <source>Left stick</source>
-        <translation type="vanished">Левый стик</translation>
-    </message>
-    <message>
-        <source>Left stick dead zone</source>
-        <translation type="vanished">Мёртвая зона левого стика</translation>
-    </message>
-    <message>
-        <source>Invert left stick across</source>
-        <translation type="vanished">Инверсия X левого стика</translation>
-    </message>
-    <message>
-        <source>Invert left stick up and down</source>
-        <translation type="vanished">Инверсия Y левого стика</translation>
-    </message>
-    <message>
-        <source>Right stick</source>
-        <translation type="vanished">Правый стик</translation>
-    </message>
-    <message>
-        <source>Right stick dead zone</source>
-        <translation type="vanished">Мёртвая зона правого стика</translation>
-    </message>
-    <message>
-        <source>Invert right stick across</source>
-        <translation type="vanished">Инверсия X правого стика</translation>
-    </message>
-    <message>
-        <source>Invert right stick up and down</source>
-        <translation type="vanished">Инверсия Y правого стика</translation>
-    </message>
-    <message>
-        <source>Trigger press point</source>
-        <translation type="vanished">Порог нажатия курков</translation>
-    </message>
-    <message>
-        <source>Look with the mouse</source>
-        <translation type="vanished">Обзор мышью</translation>
-    </message>
-    <message>
-        <source>Mouse</source>
-        <translation type="vanished">Мышь</translation>
-    </message>
-    <message>
-        <source>Mouse sensitivity</source>
-        <translation type="vanished">Чувствительность мыши</translation>
-    </message>
-    <message>
-        <source>Invert mouse up and down</source>
-        <translation type="vanished">Инверсия Y мыши</translation>
-    </message>
-    <message>
-        <source>✕ Cross</source>
-        <translation type="vanished">✕ Крест</translation>
-    </message>
-    <message>
-        <source>Buttons</source>
-        <translation type="vanished">Кнопки</translation>
-    </message>
-    <message>
-        <source>○ Circle</source>
-        <translation type="vanished">○ Круг</translation>
-    </message>
-    <message>
-        <source>□ Square</source>
-        <translation type="vanished">□ Квадрат</translation>
-    </message>
-    <message>
-        <source>△ Triangle</source>
-        <translation type="vanished">△ Треугольник</translation>
-    </message>
-    <message>
-        <source>D-pad up</source>
-        <translation type="vanished">Крестовина вверх</translation>
-    </message>
-    <message>
-        <source>D-pad down</source>
-        <translation type="vanished">Крестовина вниз</translation>
-    </message>
-    <message>
-        <source>D-pad left</source>
-        <translation type="vanished">Крестовина влево</translation>
-    </message>
-    <message>
-        <source>D-pad right</source>
-        <translation type="vanished">Крестовина вправо</translation>
-    </message>
-    <message>
-        <source>L1</source>
-        <translation type="vanished">L1</translation>
-    </message>
-    <message>
-        <source>R1</source>
-        <translation type="vanished">R1</translation>
-    </message>
-    <message>
-        <source>L2</source>
-        <translation type="vanished">L2</translation>
-    </message>
-    <message>
-        <source>R2</source>
-        <translation type="vanished">R2</translation>
-    </message>
-    <message>
-        <source>L3</source>
-        <translation type="vanished">L3</translation>
-    </message>
-    <message>
-        <source>R3</source>
-        <translation type="vanished">R3</translation>
-    </message>
-    <message>
-        <source>Options</source>
-        <translation type="vanished">Options</translation>
-    </message>
-    <message>
-        <source>Touchpad</source>
-        <translation type="vanished">Сенсорная панель</translation>
-    </message>
-    <message>
-        <source>Left stick left</source>
-        <translation type="vanished">Левый стик влево</translation>
-    </message>
-    <message>
-        <source>Left stick right</source>
-        <translation type="vanished">Левый стик вправо</translation>
-    </message>
-    <message>
-        <source>Left stick up</source>
-        <translation type="vanished">Левый стик вверх</translation>
-    </message>
-    <message>
-        <source>Left stick down</source>
-        <translation type="vanished">Левый стик вниз</translation>
-    </message>
-    <message>
-        <source>Right stick left</source>
-        <translation type="vanished">Правый стик влево</translation>
-    </message>
-    <message>
-        <source>Right stick right</source>
-        <translation type="vanished">Правый стик вправо</translation>
-    </message>
-    <message>
-        <source>Right stick up</source>
-        <translation type="vanished">Правый стик вверх</translation>
-    </message>
-    <message>
-        <source>Right stick down</source>
-        <translation type="vanished">Правый стик вниз</translation>
-    </message>
-    <message>
         <source>The folder that holds the game&apos;s files.</source>
         <translation>Папка с файлами игры.</translation>
     </message>
@@ -818,10 +702,6 @@
     <message>
         <source>Render targets also scales the game&apos;s full-screen render textures; not every game supports it.</source>
         <translation>«Цели рендера» также масштабирует полноэкранные текстуры рендеринга игры; поддерживается не всеми играми.</translation>
-    </message>
-    <message>
-        <source>How the finished picture is scaled to the window.</source>
-        <translation>Как готовое изображение масштабируется под окно.</translation>
     </message>
     <message>
         <source>Sharper textures seen at a slant. It does not change the resolution.</source>
@@ -866,34 +746,6 @@
     <message>
         <source>How the launcher opens. Full screen suits a TV.</source>
         <translation>Как открывается лаунчер. Полноэкранный режим подходит для телевизора.</translation>
-    </message>
-    <message>
-        <source>Every game uses the profile chosen here. Default is the emulator&apos;s own layout and can&apos;t be changed; duplicate it to make a profile of your own.</source>
-        <translation type="vanished">Все игры используют выбранный здесь профиль. Default — раскладка самого эмулятора, её нельзя изменить; сделайте копию, чтобы создать свой профиль.</translation>
-    </message>
-    <message>
-        <source>Any controller uses the first one connected. Choosing one keeps the game on it while it is connected.</source>
-        <translation type="vanished">«Любой геймпад» — первый подключённый. Если выбрать конкретный, игра использует его, пока он подключён.</translation>
-    </message>
-    <message>
-        <source>Move the stick: the outer dot is where it is, the filled dot what the game sees after the dead zone. On this page the left stick does not move between settings; the D-pad does.</source>
-        <translation type="vanished">Подвигайте стик: внешняя точка — его положение, закрашенная — то, что видит игра после мёртвой зоны. На этой странице левый стик не переключает настройки; это делает крестовина.</translation>
-    </message>
-    <message>
-        <source>Movements smaller than this are ignored, so a worn stick does not drift.</source>
-        <translation type="vanished">Движения меньше этого значения игнорируются, чтобы изношенный стик не дрейфовал.</translation>
-    </message>
-    <message>
-        <source>How far L2 and R2 must be pulled to count as pressed.</source>
-        <translation type="vanished">Насколько нужно нажать L2 и R2, чтобы нажатие засчиталось.</translation>
-    </message>
-    <message>
-        <source>In the game, F3 captures the mouse; while it is captured, moving it moves the right stick.</source>
-        <translation type="vanished">В игре F3 захватывает мышь; пока она захвачена, её движение двигает правый стик.</translation>
-    </message>
-    <message>
-        <source>Choose a box, then press the key or button to use. Delete or □ clears it.</source>
-        <translation type="vanished">Выберите поле и нажмите нужную клавишу или кнопку. Delete или □ очищает его.</translation>
     </message>
     <message>
         <source>Language</source>
@@ -952,6 +804,54 @@
         <translation>Громкость звуков</translation>
     </message>
     <message>
+        <source>Automatic prefers a dedicated card. Only cards with Vulkan 1.4 are listed.</source>
+        <translation>Автоматически выбирается дискретная карта. В списке только карты с Vulkan 1.4.</translation>
+    </message>
+    <message>
+        <source>Vertical sync never tears but adds delay. If the screen lacks a mode, the next one that works is used.</source>
+        <translation>Вертикальная синхронизация убирает разрывы, но добавляет задержку. Если экран не поддерживает режим, используется следующий подходящий.</translation>
+    </message>
+    <message>
+        <source>The most frames per second shown on screen. 0 leaves them unlimited.</source>
+        <translation>Наибольшее число кадров в секунду на экране. 0 — без ограничения.</translation>
+    </message>
+    <message>
+        <source>Shows frame rate and timings over the game.</source>
+        <translation>Показывает частоту кадров и тайминги поверх игры.</translation>
+    </message>
+    <message>
+        <source>In full screen the cursor already hides when the mouse stops. This also hides it in a window.</source>
+        <translation>На весь экран курсор и так скрывается, когда мышь не двигается. Этот параметр скрывает его и в окне.</translation>
+    </message>
+    <message>
+        <source>The language games read from the console. A game without it uses its own default.</source>
+        <translation>Язык, который игры читают из консоли. Игра без этого языка использует свой по умолчанию.</translation>
+    </message>
+    <message>
+        <source>The name games show for the player. It does not change where saves are kept.</source>
+        <translation>Имя игрока, которое показывают игры. Место хранения сохранений не меняется.</translation>
+    </message>
+    <message>
+        <source>Off tells games the console has no network. On reports a local connection; there is no online play.</source>
+        <translation>Если выключено, игры считают, что сети нет. Если включено, сообщается о локальном подключении; сетевой игры нет.</translation>
+    </message>
+    <message>
+        <source>Tells games that show a notice at the start that it may be skipped. Not every game asks.</source>
+        <translation>Сообщает играм с уведомлением при запуске, что его можно пропустить. Не все игры это проверяют.</translation>
+    </message>
+    <message>
+        <source>How strongly the controller follows the vibration games request. 0 turns it off.</source>
+        <translation>Насколько сильно контроллер выполняет вибрацию, запрошенную игрой. 0 — выключено.</translation>
+    </message>
+    <message>
+        <source>Keeps compiled shaders on disk so games load and run smoothly the next time. Turn it off only to rule out a bad cache.</source>
+        <translation>Хранит скомпилированные шейдеры на диске, чтобы в следующий раз игры загружались и работали плавно. Выключайте только для проверки повреждённого кэша.</translation>
+    </message>
+    <message>
+        <source>How the finished picture is scaled to the window. Fsr3 only works in an emulator built with its SDK.</source>
+        <translation>Как готовое изображение масштабируется под окно. Fsr3 работает только в эмуляторе, собранном с его SDK.</translation>
+    </message>
+    <message>
         <source>Add-on themes are folders with a theme.ini inside the themes folder above, found when the launcher starts. Their colours win over the accent colour.</source>
         <translation>Темы-дополнения — это папки с файлом theme.ini внутри папки тем, указанной выше; они находятся при запуске лаунчера. Их цвета важнее цвета акцента.</translation>
     </message>
@@ -970,6 +870,18 @@
 </context>
 <context>
     <name>FieldRowItem</name>
+    <message>
+        <source>No tearing, lowest delay (Mailbox)</source>
+        <translation>Без разрывов, мин. задержка (Mailbox)</translation>
+    </message>
+    <message>
+        <source>No waiting, may tear (Immediate)</source>
+        <translation>Без ожидания, разрывы (Immediate)</translation>
+    </message>
+    <message>
+        <source>Vertical sync (FIFO)</source>
+        <translation>Вертикальная синхронизация (FIFO)</translation>
+    </message>
     <message>
         <source>Same as the system</source>
         <translation>Как в системе</translation>
@@ -1211,48 +1123,12 @@
         <translation>Обзор…</translation>
     </message>
     <message>
-        <source>Trigger</source>
-        <translation type="vanished">Курок</translation>
-    </message>
-    <message>
-        <source>Not bound</source>
-        <translation type="vanished">Не назначено</translation>
-    </message>
-    <message>
-        <source>%1, keyboard and mouse</source>
-        <translation type="vanished">%1, клавиатура и мышь</translation>
-    </message>
-    <message>
-        <source>%1, controller</source>
-        <translation type="vanished">%1, геймпад</translation>
-    </message>
-    <message>
         <source>No modules found yet. Set the game folder, then rescan.</source>
         <translation>Модули пока не найдены. Укажите папку игры и пересканируйте.</translation>
     </message>
     <message>
         <source>No parameters file selected.</source>
         <translation>Файл параметров не выбран.</translation>
-    </message>
-    <message>
-        <source>Left stick</source>
-        <translation type="vanished">Левый стик</translation>
-    </message>
-    <message>
-        <source>Right stick</source>
-        <translation type="vanished">Правый стик</translation>
-    </message>
-    <message>
-        <source>%1 on the controller</source>
-        <translation type="vanished">%1 на геймпаде</translation>
-    </message>
-    <message>
-        <source>Keyboard and mouse</source>
-        <translation type="vanished">Клавиатура и мышь</translation>
-    </message>
-    <message>
-        <source>Controller</source>
-        <translation type="vanished">Геймпад</translation>
     </message>
     <message>
         <source>The last game played</source>
@@ -1502,6 +1378,18 @@
         <translation>Резкость FSR должна быть от 0 до 100</translation>
     </message>
     <message>
+        <source>The frame limit must be between 0 and 1000</source>
+        <translation>Предел кадров должен быть от 0 до 1000</translation>
+    </message>
+    <message>
+        <source>The user name must have 1 to 16 bytes</source>
+        <translation>Имя пользователя должно занимать от 1 до 16 байт</translation>
+    </message>
+    <message>
+        <source>Vibration must be between 0 and 100</source>
+        <translation>Вибрация должна быть от 0 до 100</translation>
+    </message>
+    <message>
         <source>Emulator not found. Set its path in Settings.</source>
         <translation>Эмулятор не найден. Укажите путь к нему в настройках.</translation>
     </message>
@@ -1573,6 +1461,10 @@
     <message>
         <source>A game is already running.</source>
         <translation>Игра уже запущена.</translation>
+    </message>
+    <message>
+        <source>The GPU %1 is not available. Choose another one in Settings › Graphics.</source>
+        <translation>Видеокарта %1 недоступна. Выберите другую в разделе «Настройки › Графика».</translation>
     </message>
     <message>
         <source>The controls profile %1 can&apos;t be used: %2 Choose another one or repair it in Settings › Controls.</source>
@@ -1685,6 +1577,10 @@
     <message>
         <source>Paddle 4</source>
         <translation>Лепесток 4</translation>
+    </message>
+    <message>
+        <source>Automatic</source>
+        <translation>Автоматически</translation>
     </message>
     <message>
         <source>%1 %</source>
@@ -1869,18 +1765,6 @@
         <translation>Новый раздел…</translation>
     </message>
     <message>
-        <source>Emulator ready</source>
-        <translation type="vanished">Эмулятор готов</translation>
-    </message>
-    <message>
-        <source>Emulator not found</source>
-        <translation type="vanished">Эмулятор не найден</translation>
-    </message>
-    <message>
-        <source>No controller</source>
-        <translation type="vanished">Нет геймпада</translation>
-    </message>
-    <message>
         <source>No games yet. Add a game folder to start your library.</source>
         <translation>Игр пока нет. Добавьте папку игры, чтобы начать библиотеку.</translation>
     </message>
@@ -1925,6 +1809,10 @@
     <message>
         <source>Graphics</source>
         <translation>Графика</translation>
+    </message>
+    <message>
+        <source>Console</source>
+        <translation>Консоль</translation>
     </message>
     <message>
         <source>Shaders</source>
@@ -1999,10 +1887,6 @@
         <translation>Их используют все игры без своих настроек эмулятора. Изменения сохраняются сразу.</translation>
     </message>
     <message>
-        <source>Screen size, render resolution and how the image is filtered.</source>
-        <translation>Размер экрана, разрешение рендера и фильтрация изображения.</translation>
-    </message>
-    <message>
         <source>How shaders are optimized, and the validation that helps find rendering bugs; validation slows games down.</source>
         <translation>Оптимизация шейдеров и проверки, помогающие найти ошибки рендера; проверки замедляют игры.</translation>
     </message>
@@ -2049,6 +1933,14 @@
     <message>
         <source>Controller</source>
         <translation>Геймпад</translation>
+    </message>
+    <message>
+        <source>Graphics card, screen size, render resolution and how the image is filtered.</source>
+        <translation>Видеокарта, размер экрана, разрешение рендеринга и фильтрация изображения.</translation>
+    </message>
+    <message>
+        <source>What games see of the console: its language, your name, the network and the controller&apos;s vibration.</source>
+        <translation>Что игры знают о консоли: её язык, ваше имя, сеть и вибрацию контроллера.</translation>
     </message>
     <message>
         <source>None connected. Keyboard and mouse work everywhere.</source>

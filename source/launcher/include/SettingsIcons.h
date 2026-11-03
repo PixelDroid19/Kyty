@@ -9,6 +9,7 @@
 enum class SettingsIcon
 {
 	Graphics,
+	Console,
 	Shaders,
 	Logs,
 	Emulator,

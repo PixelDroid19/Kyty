@@ -1,6 +1,7 @@
 #include "ConfigurationFields.h"
 
 #include "Configuration.h"
+#include "GpuDevices.h"
 
 #include <QCoreApplication>
 #include <QStringList>
@@ -76,6 +77,20 @@ bool SharpnessValid(const QVariantMap& f)
 	return ok && sharpness >= 0 && sharpness <= 100;
 }
 
+// The guest's name buffers hold 16 bytes and a terminator.
+bool UserNameValid(const QVariantMap& f)
+{
+	const auto size = f.value("user_name").toString().trimmed().toUtf8().size();
+	return size >= 1 && size <= 16;
+}
+
+bool NumberInRange(const QVariantMap& f, const char* key, int low, int high)
+{
+	bool       ok    = false;
+	const auto value = f.value(key).toInt(&ok);
+	return ok && value >= low && value <= high;
+}
+
 bool ResolutionsValid(const QVariantMap& f)
 {
 	return f.value("screen_width").toInt() > 0 && f.value("screen_height").toInt() > 0 && f.value("render_resolution_width").toInt() > 0 &&
@@ -103,6 +118,18 @@ QVariantMap ConfigurationToFields(const Kyty::Configuration& info)
 	f["texture_anisotropy"]           = EnumToText(info.texture_anisotropy);
 	// Presets are not stored, so a loaded configuration always starts as custom.
 	f["graphics_preset"] = EnumToText(Config::GraphicsPreset::Custom);
+	f["gpu_device"]                   = info.gpu_device.isEmpty() ? QString(AUTOMATIC_GPU) : info.gpu_device;
+	f["present_mode"]                 = EnumToText(info.present_mode);
+	f["present_fps_limit"]            = info.present_fps_limit;
+	f["fullscreen_enabled"]           = info.fullscreen_enabled;
+	f["hide_cursor_enabled"]          = info.hide_cursor_enabled;
+	f["perf_overlay_enabled"]         = info.perf_overlay_enabled;
+	f["console_language"]             = QString::number(info.console_language);
+	f["user_name"]                    = info.user_name;
+	f["notice_screen_skip_enabled"]   = info.notice_screen_skip_enabled;
+	f["network_connected"]            = info.network_connected;
+	f["controller_vibration"]         = info.controller_vibration;
+	f["shader_cache_enabled"]         = info.shader_cache_enabled;
 	f["neo"]                          = info.neo;
 	f["vulkan_validation_enabled"]    = info.vulkan_validation_enabled;
 	f["shader_validation_enabled"]    = info.shader_validation_enabled;
@@ -139,8 +166,33 @@ QString ApplyEmulatorFields(const QVariantMap& fields, Kyty::Configuration* info
 		return QCoreApplication::translate("Launcher", "FSR sharpness must be between 0 and 100");
 	}
 
+	if (!NumberInRange(fields, "present_fps_limit", 0, 1000))
+	{
+		return QCoreApplication::translate("Launcher", "The frame limit must be between 0 and 1000");
+	}
+	if (!UserNameValid(fields))
+	{
+		return QCoreApplication::translate("Launcher", "The user name must have 1 to 16 bytes");
+	}
+	if (!NumberInRange(fields, "controller_vibration", 0, 100))
+	{
+		return QCoreApplication::translate("Launcher", "Vibration must be between 0 and 100");
+	}
+
 	const auto text = [&fields](const char* key) { return fields.value(key).toString(); };
 
+	info->gpu_device                  = text("gpu_device") == QLatin1String(AUTOMATIC_GPU) ? QString() : text("gpu_device");
+	info->present_mode                = TextToEnum<Config::PresentMode>(text("present_mode"));
+	info->present_fps_limit           = fields.value("present_fps_limit").toInt();
+	info->fullscreen_enabled          = fields.value("fullscreen_enabled").toBool();
+	info->hide_cursor_enabled         = fields.value("hide_cursor_enabled").toBool();
+	info->perf_overlay_enabled        = fields.value("perf_overlay_enabled").toBool();
+	info->console_language            = text("console_language").toInt();
+	info->user_name                   = text("user_name").trimmed();
+	info->notice_screen_skip_enabled  = fields.value("notice_screen_skip_enabled").toBool();
+	info->network_connected           = fields.value("network_connected").toBool();
+	info->controller_vibration        = fields.value("controller_vibration").toInt();
+	info->shader_cache_enabled        = fields.value("shader_cache_enabled").toBool();
 	info->screen_width                = fields.value("screen_width").toInt();
 	info->screen_height               = fields.value("screen_height").toInt();
 	info->render_resolution_mode      = TextToEnum<Config::RenderResolutionMode>(text("render_resolution_mode"));
@@ -261,9 +313,54 @@ QVariantMap FieldsToRun(const QVariantMap& game, const QVariantMap& global)
 	return fields;
 }
 
+QString ConsoleLanguageName(int language)
+{
+	// In the order of the values games read; each name is written in its own language, with the English name
+	// where the host may lack the script's font.
+	static const char* const NAMES[CONSOLE_LANGUAGE_COUNT] = {"日本語 (Japanese)",
+	                                                          "English (United States)",
+	                                                          "Français (France)",
+	                                                          "Español (España)",
+	                                                          "Deutsch",
+	                                                          "Italiano",
+	                                                          "Nederlands",
+	                                                          "Português (Portugal)",
+	                                                          "Русский",
+	                                                          "한국어 (Korean)",
+	                                                          "繁體中文 (Traditional Chinese)",
+	                                                          "简体中文 (Simplified Chinese)",
+	                                                          "Suomi",
+	                                                          "Svenska",
+	                                                          "Dansk",
+	                                                          "Norsk",
+	                                                          "Polski",
+	                                                          "Português (Brasil)",
+	                                                          "English (United Kingdom)",
+	                                                          "Türkçe",
+	                                                          "Español (Latinoamérica)",
+	                                                          "العربية (Arabic)",
+	                                                          "Français (Canada)",
+	                                                          "Čeština",
+	                                                          "Magyar",
+	                                                          "Ελληνικά",
+	                                                          "Română",
+	                                                          "ไทย (Thai)",
+	                                                          "Tiếng Việt",
+	                                                          "Bahasa Indonesia"};
+	return language >= 0 && language < CONSOLE_LANGUAGE_COUNT ? QString::fromUtf8(NAMES[language]) : QString();
+}
+
 QVariantMap ConfigurationChoices()
 {
 	QVariantMap choices;
+	QStringList languages;
+	for (int language = 0; language < CONSOLE_LANGUAGE_COUNT; language++)
+	{
+		languages << QString::number(language);
+	}
+	choices["console_language"]          = languages;
+	choices["gpu_device"]                = QStringList {AUTOMATIC_GPU} + GpuDeviceNames();
+	choices["present_mode"]              = EnumToList<Config::PresentMode>();
 	choices["render_resolution_mode"]    = EnumToList<Config::RenderResolutionMode>();
 	choices["render_resolution_scope"]   = EnumToList<Config::RenderResolutionScope>();
 	choices["presentation_filter"]       = EnumToList<Config::PresentationFilter>();

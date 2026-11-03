@@ -76,6 +76,7 @@ EditorPageItem::EditorPageItem(QQuickItem* parent): QQuickItem(parent)
 	m_form->AddFields(EditorFields(FieldGroup::Game));
 	// A game shows its emulator settings only while it has custom ones; otherwise the global ones apply.
 	m_form->AddFields(EditorFields(FieldGroup::Display), true);
+	m_form->AddFields(EditorFields(FieldGroup::System), true);
 	m_form->AddFields(EditorFields(FieldGroup::Shaders), true);
 	m_form->AddFields(EditorFields(FieldGroup::Logs), true);
 	m_form->AddFields(EditorFields(FieldGroup::Modules));

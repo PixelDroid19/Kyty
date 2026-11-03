@@ -129,6 +129,14 @@ public:
 	};
 	Q_ENUM(PresentationFilter)
 
+	enum class PresentMode
+	{
+		Mailbox,
+		Immediate,
+		Fifo
+	};
+	Q_ENUM(PresentMode)
+
 	// Guest keeps each sampler's own ratio; a level raises linear-filtered samplers to it.
 	enum class TextureAnisotropy
 	{
@@ -179,8 +187,24 @@ public:
 	int                   presentation_fsr_sharpness = 90;
 	TextureAnisotropy     texture_anisotropy         = TextureAnisotropy::Guest;
 
+	// Host display
+	QString     gpu_device; /* Vulkan device name, empty for the automatic choice */
+	PresentMode present_mode         = PresentMode::Mailbox;
+	int         present_fps_limit    = 0; /* 0 leaves presents unpaced */
+	bool        fullscreen_enabled   = false;
+	bool        hide_cursor_enabled  = false;
+	bool        perf_overlay_enabled = false;
+
+	// What games see of the console
+	int     console_language           = 1; /* SYSTEM_PARAM_ID_LANG value, 1 is English (United States) */
+	QString user_name                  = "Kyty";
+	bool    notice_screen_skip_enabled = false;
+	bool    network_connected          = true;
+	int     controller_vibration       = 100;
+
 	// Platform / validation
 	bool                   neo                         = true;
+	bool                   shader_cache_enabled        = true;
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;
 	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::None;
@@ -221,6 +245,18 @@ public:
 		KYTY_CFG_SET(presentation_filter);
 		s->setValue("presentation_fsr_sharpness", presentation_fsr_sharpness);
 		KYTY_CFG_SET(texture_anisotropy);
+		KYTY_CFG_SET(gpu_device);
+		KYTY_CFG_SET(present_mode);
+		s->setValue("present_fps_limit", present_fps_limit);
+		s->setValue("fullscreen_enabled", fullscreen_enabled);
+		s->setValue("hide_cursor_enabled", hide_cursor_enabled);
+		s->setValue("perf_overlay_enabled", perf_overlay_enabled);
+		s->setValue("console_language", console_language);
+		KYTY_CFG_SET(user_name);
+		s->setValue("notice_screen_skip_enabled", notice_screen_skip_enabled);
+		s->setValue("network_connected", network_connected);
+		s->setValue("controller_vibration", controller_vibration);
+		s->setValue("shader_cache_enabled", shader_cache_enabled);
 		KYTY_CFG_SET(neo);
 		KYTY_CFG_SET(vulkan_validation_enabled);
 		KYTY_CFG_SET(shader_validation_enabled);
@@ -303,6 +339,21 @@ public:
 		{
 			KYTY_CFG_GET(texture_anisotropy);
 		}
+		gpu_device = s->value("gpu_device").toString();
+		if (s->contains("present_mode"))
+		{
+			KYTY_CFG_GET(present_mode);
+		}
+		present_fps_limit          = std::clamp(s->value("present_fps_limit", 0).toInt(), 0, 1000);
+		fullscreen_enabled         = s->value("fullscreen_enabled", false).toBool();
+		hide_cursor_enabled        = s->value("hide_cursor_enabled", false).toBool();
+		perf_overlay_enabled       = s->value("perf_overlay_enabled", false).toBool();
+		console_language           = std::clamp(s->value("console_language", 1).toInt(), 0, 29);
+		user_name                  = s->value("user_name", "Kyty").toString();
+		notice_screen_skip_enabled = s->value("notice_screen_skip_enabled", false).toBool();
+		network_connected          = s->value("network_connected", true).toBool();
+		controller_vibration       = std::clamp(s->value("controller_vibration", 100).toInt(), 0, 100);
+		shader_cache_enabled       = s->value("shader_cache_enabled", true).toBool();
 		KYTY_CFG_GET(neo);
 		KYTY_CFG_GET(vulkan_validation_enabled);
 		KYTY_CFG_GET(shader_validation_enabled);
