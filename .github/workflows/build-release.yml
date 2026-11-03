@@ -106,6 +106,18 @@ jobs:
           if [ -n "$unresolved" ]; then echo "unresolved imports:$unresolved"; exit 1; fi
           test -f dist/launcher.exe && test -f dist/Qt6Quick.dll && test -f dist/platforms/qwindows.dll
 
+      # Debug info is most of each binary's size; it ships in its own archive, which debuggers and addr2line
+      # find through the debug link.
+      - name: Split debug info
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          mkdir debug
+          for binary in fc_script.exe launcher.exe; do
+            objcopy --only-keep-debug "dist/$binary" "debug/$binary.debug"
+            objcopy --strip-debug --add-gnu-debuglink="debug/$binary.debug" "dist/$binary"
+          done
+
       # With only the system directories on PATH, nothing but the package provides the DLLs, so a missing one
       # stops the emulator here.
       - name: Check the emulator starts from the package
@@ -121,6 +133,13 @@ jobs:
         with:
           name: kyty-windows-x64-${{ github.sha }}
           path: dist
+          if-no-files-found: error
+
+      - name: Upload debug info
+        uses: actions/upload-artifact@v7
+        with:
+          name: kyty-debug-windows-x64-${{ github.sha }}
+          path: debug
           if-no-files-found: error
 
   build-linux:
@@ -189,10 +208,12 @@ jobs:
           mkdir release-assets
           win_dir="$(find artifacts -maxdepth 1 -type d -name 'kyty-windows-x64-*' -print -quit)"
           linux_dir="$(find artifacts -maxdepth 1 -type d -name 'kyty-linux-x64-*' -print -quit)"
-          test -n "$win_dir" && test -n "$linux_dir"
+          win_debug_dir="$(find artifacts -maxdepth 1 -type d -name 'kyty-debug-windows-x64-*' -print -quit)"
+          test -n "$win_dir" && test -n "$linux_dir" && test -n "$win_debug_dir"
           (cd "$win_dir" && zip -q -r "../../release-assets/kyty-${GITHUB_REF_NAME}-windows-x64.zip" .)
+          (cd "$win_debug_dir" && zip -q -r "../../release-assets/kyty-${GITHUB_REF_NAME}-windows-x64-debug.zip" .)
           # The Linux job already archived its package, which keeps the executable bits that artifacts drop.
-          cp "$linux_dir/kyty-${GITHUB_REF_NAME}-linux-x64.tar.gz" release-assets/
+          cp "$linux_dir/kyty-${GITHUB_REF_NAME}-linux-x64.tar.gz" "$linux_dir/kyty-${GITHUB_REF_NAME}-linux-x64-debug.tar.gz" release-assets/
 
       - name: Create immutable release
         env:

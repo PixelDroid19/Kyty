@@ -41,6 +41,16 @@ fi
 install -m 755 "${BUILD_DIR}/fc_script" "${PACKAGE_DIR}/"
 install -m 644 "${ROOT}/scripts/run_guest.lua" "${ROOT}/README.md" "${ROOT}/CHANGELOG.md" "${ROOT}/LICENSE" "${PACKAGE_DIR}/"
 
+# Debug info is most of each binary's size; it ships in its own archive, which debuggers and addr2line find
+# through the debug link.
+DEBUG_NAME="${PACKAGE_NAME}-debug"
+mkdir -p "${STAGE}/${DEBUG_NAME}"
+for binary in fc_script launcher; do
+	objcopy --only-keep-debug "${PACKAGE_DIR}/${binary}" "${STAGE}/${DEBUG_NAME}/${binary}.debug"
+	objcopy --strip-debug --add-gnu-debuglink="${STAGE}/${DEBUG_NAME}/${binary}.debug" "${PACKAGE_DIR}/${binary}"
+done
+
 mkdir -p "$(dirname "${ARCHIVE}")"
 tar -czf "${ARCHIVE}" -C "${STAGE}" "${PACKAGE_NAME}"
+tar -czf "$(dirname "${ARCHIVE}")/${DEBUG_NAME}.tar.gz" -C "${STAGE}" "${DEBUG_NAME}"
 echo "${ARCHIVE}"
