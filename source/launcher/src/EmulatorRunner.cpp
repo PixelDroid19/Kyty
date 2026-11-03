@@ -14,7 +14,6 @@
 #include <QTextStream>
 
 #if defined(_WIN32)
-#include <Q_STARTUPINFO>
 #include <windows.h> // IWYU pragma: keep
 #endif
 

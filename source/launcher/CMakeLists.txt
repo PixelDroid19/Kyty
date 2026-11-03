@@ -35,8 +35,8 @@ endif()
 #endif()
 target_include_directories(launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 # KeyNames.cpp reads keys with SDL's own scancode tables; sdl_tables stands in for the private header they include.
-set_source_files_properties(src/KeyNames.cpp PROPERTIES INCLUDE_DIRECTORIES
-	"${CMAKE_CURRENT_SOURCE_DIR}/sdl_tables;${CMAKE_SOURCE_DIR}/3rdparty/sdl3/sdl3/src/events")
+# A per-file include property is not applied by the MinGW build, so the directories are the target's.
+target_include_directories(launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/sdl_tables" "${CMAKE_SOURCE_DIR}/3rdparty/sdl3/sdl3/src/events")
 
 if(MINGW)
 	set_target_properties(launcher PROPERTIES LINK_FLAGS "${KYTY_LD_OPTIONS}")
