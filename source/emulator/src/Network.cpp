@@ -4783,7 +4783,11 @@ int KYTY_SYSV_ABI NpGetState(int user_id, uint32_t* state)
 {
 	PRINT_NAME();
 
-	if (state == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	constexpr int np_error_invalid_argument = static_cast<int>(0x80550003u);
+	if (state == nullptr)
+	{
+		return np_error_invalid_argument;
+	}
 
 	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 

@@ -14,6 +14,10 @@ namespace Kyty::Libs::Trophies {
 // unlocks it changes. The first call loads the title's trophy set from /app0/sce_sys and the user's saved progress.
 void TrophyRecordEvent(const std::string& event, const EventValues& values);
 
+// The title's trophy set and the unlocks recorded so far, this run's included. False when the title has no readable
+// trophy set.
+bool TrophyQuery(TrophyCatalog* catalog, Progress* progress);
+
 } // namespace Kyty::Libs::Trophies
 
 #endif // KYTY_EMU_ENABLED
