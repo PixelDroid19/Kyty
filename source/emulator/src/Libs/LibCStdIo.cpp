@@ -91,16 +91,33 @@ KYTY_SYSV_ABI int c_setvbuf(FILE* stream, char* buffer, int mode, size_t size)
 	return Kernel::FileSystem::SetStreamBuffer(stream, buffer, host_mode, size);
 }
 
-KYTY_SYSV_ABI int c_fseek(FILE* f, long off, int w)
+// The guest's long is 64-bit; a Windows host long is 32-bit, so offsets go through the 64-bit calls there.
+KYTY_SYSV_ABI int c_fseek(FILE* f, int64_t off, int w)
 {
 	const Kernel::FileSystem::StreamOperation operation(f);
-	return operation.IsValid() ? ::fseek(f, off, w) : -1;
+	if (!operation.IsValid())
+	{
+		return -1;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return ::_fseeki64(f, off, w);
+#else
+	return ::fseek(f, off, w);
+#endif
 }
 
-KYTY_SYSV_ABI long c_ftell(FILE* f)
+KYTY_SYSV_ABI int64_t c_ftell(FILE* f)
 {
 	const Kernel::FileSystem::StreamOperation operation(f);
-	return operation.IsValid() ? ::ftell(f) : -1;
+	if (!operation.IsValid())
+	{
+		return -1;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return ::_ftelli64(f);
+#else
+	return ::ftell(f);
+#endif
 }
 
 KYTY_SYSV_ABI int c_feof(FILE* f)

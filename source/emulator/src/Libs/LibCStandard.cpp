@@ -5,6 +5,7 @@
 
 #include "LibCInternal.h"
 
+#include <algorithm>
 #include <climits>
 #include <cmath>
 #include <cstddef>
@@ -161,10 +162,10 @@ KYTY_SYSV_ABI div_t c_div(int numerator, int denominator)
 	return std::div(numerator, denominator);
 }
 
-// ldiv_t is two longs returned together in RAX:RDX, the same as the host ABI.
-KYTY_SYSV_ABI ldiv_t c_ldiv(long numerator, long denominator)
+// The guest's ldiv_t is two 64-bit longs returned together in RAX:RDX; on every host that is lldiv_t.
+KYTY_SYSV_ABI lldiv_t c_ldiv(int64_t numerator, int64_t denominator)
 {
-	return std::ldiv(numerator, denominator);
+	return std::lldiv(numerator, denominator);
 }
 
 KYTY_SYSV_ABI double c_exp2(double x)
@@ -212,14 +213,14 @@ KYTY_SYSV_ABI float c_fmaf(float x, float y, float z)
 	return std::fma(x, y, z);
 }
 
-KYTY_SYSV_ABI long c_lrint(double x)
+KYTY_SYSV_ABI int64_t c_lrint(double x)
 {
-	return std::lrint(x);
+	return std::llrint(x);
 }
 
-KYTY_SYSV_ABI long c_lrintf(float x)
+KYTY_SYSV_ABI int64_t c_lrintf(float x)
 {
-	return std::lrint(x);
+	return std::llrint(x);
 }
 
 KYTY_SYSV_ABI double c_nan(const char* tag)
@@ -232,9 +233,10 @@ KYTY_SYSV_ABI float c_nanf(const char* tag)
 	return std::nanf(tag);
 }
 
-KYTY_SYSV_ABI double c_scalbln(double x, long exponent)
+// Exponents past the int range already overflow or underflow every double, so clamping keeps the result.
+KYTY_SYSV_ABI double c_scalbln(double x, int64_t exponent)
 {
-	return std::scalbln(x, exponent);
+	return std::scalbn(x, static_cast<int>(std::clamp<int64_t>(exponent, INT_MIN, INT_MAX)));
 }
 
 KYTY_SYSV_ABI float c_scalbnf(float x, int exponent)

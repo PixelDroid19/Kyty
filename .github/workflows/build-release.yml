@@ -3,6 +3,9 @@ name: Build and Release
 on:
   push:
     tags: ["v*"]
+  # Pull requests build both packages so a Windows-only break shows before a release.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -32,11 +35,16 @@ jobs:
             make
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-libatomic
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-vulkan-headers
             mingw-w64-x86_64-vulkan-loader
             mingw-w64-x86_64-spirv-headers
             mingw-w64-x86_64-spirv-tools
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-declarative
+            mingw-w64-x86_64-qt6-svg
+            mingw-w64-x86_64-qt6-tools
 
       - name: Configure
         shell: msys2 {0}
@@ -45,29 +53,68 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DKYTY_PROJECT_NAME=Emulator
           -DKYTY_WARNINGS_ARE_ERRORS=OFF
-          -DKYTY_BUILD_LAUNCHER=OFF
+          -DKYTY_BUILD_LAUNCHER=ON
           -DKYTY_BUILD_DEVTOOLS=OFF
           -DKYTY_BUILD_UNIT_TESTS=OFF
           -DKYTY_GENERATE_MAP_CSV=OFF
 
       - name: Build
         shell: msys2 {0}
-        run: cmake --build build --target fc_script --parallel 4
+        run: cmake --build build --target fc_script launcher --parallel 4
+
+      # Installing only the launcher directory runs windeployqt without the vendored libraries' install rules.
+      - name: Stage launcher
+        shell: msys2 {0}
+        run: cmake --install build/launcher --prefix dist
 
       - name: Stage archive
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item build/fc_script.exe dist/
-          Copy-Item source/3rdparty/winpthread/bin/libwinpthread-1.dll dist/
           Copy-Item scripts/run_guest.lua,README.md,CHANGELOG.md,LICENSE dist/
 
-      - name: Stage shader toolchain runtime libraries
+      # windeployqt copies Qt itself; the MinGW runtime, the shader toolchain and Qt's own dependencies
+      # (ICU, HarfBuzz, zstd, ...) come from MSYS2. Import tables are read rather than running ldd, which
+      # starts each binary and missed the emulator's own imports. objdump is a native Windows tool, so its
+      # lines end in CRLF.
+      - name: Stage MSYS2 runtime libraries
         shell: msys2 {0}
         run: |
-          for library in /mingw64/bin/libSPIRV-Tools*.dll; do
-            if [ -f "$library" ]; then cp "$library" dist/; fi
+          set -euo pipefail
+          pending="$(find dist -name '*.exe' -o -name '*.dll')"
+          while [ -n "$pending" ]; do
+            added=""
+            for binary in $pending; do
+              for library in $(objdump -p "$binary" | tr -d '\r' | awk '/DLL Name:/ { print $3 }'); do
+                if [ -f "/mingw64/bin/$library" ] && [ ! -f "dist/$library" ]; then
+                  cp "/mingw64/bin/$library" dist/
+                  echo "bundled $library"
+                  added="$added dist/$library"
+                fi
+              done
+            done
+            pending="$added"
           done
+          # Every import must now be in the package or in System32; API sets have no file of their own.
+          unresolved=""
+          for binary in $(find dist -name '*.exe' -o -name '*.dll'); do
+            for library in $(objdump -p "$binary" | tr -d '\r' | awk '/DLL Name:/ { print $3 }'); do
+              case "$library" in api-ms-win-*|ext-ms-*) continue ;; esac
+              [ -f "dist/$library" ] || [ -f "/c/Windows/System32/$library" ] || unresolved="$unresolved $binary:$library"
+            done
+          done
+          if [ -n "$unresolved" ]; then echo "unresolved imports:$unresolved"; exit 1; fi
+          test -f dist/launcher.exe && test -f dist/Qt6Quick.dll && test -f dist/platforms/qwindows.dll
+
+      # With only the system directories on PATH, nothing but the package provides the DLLs, so a missing one
+      # stops the emulator here.
+      - name: Check the emulator starts from the package
+        shell: pwsh
+        working-directory: dist
+        run: |
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $usage = & ./fc_script.exe | Out-String
+          if ($usage -notmatch 'fc_script <lua_script>') { throw "fc_script.exe did not start (exit code $LASTEXITCODE)" }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

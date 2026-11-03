@@ -114,7 +114,7 @@ int KYTY_SYSV_ABI    KernelMapDirectMemory(void** addr, size_t len, int prot, in
 // Gen5: type arg recorded by titles; mapping uses the same path as MapDirectMemory.
 int KYTY_SYSV_ABI    KernelMapDirectMemory2(void** addr, size_t len, int type, int prot, int flags, int64_t direct_memory_start,
                                             size_t alignment);
-int KYTY_SYSV_ABI    KernelMapNamedDirectMemory(void** addr, size_t len, int prot, int flags, off_t direct_memory_start, size_t alignment,
+int KYTY_SYSV_ABI    KernelMapNamedDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment,
                                                 const char* name);
 // Diagnostic name tag only; does not change mapping rights.
 int KYTY_SYSV_ABI    KernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name);

@@ -35,6 +35,16 @@ if(NOT KYTY_SPIRV_TOOLS_HAS_VULKAN_14)
 endif()
 
 add_library(spirv-tools INTERFACE)
-target_link_libraries(spirv-tools INTERFACE ${KYTY_SPIRV_TOOLS_TARGET})
 add_library(spirv-tools-opt INTERFACE)
-target_link_libraries(spirv-tools-opt INTERFACE SPIRV-Tools-opt spirv-tools)
+if(MINGW)
+    # A Windows DLL keeps its own operator new, so containers SPIRV-Tools fills would reach Kyty's operator delete
+    # without its block header. MSYS2's targets name the DLLs; its static archives sit beside them.
+    find_library(KYTY_SPIRV_TOOLS_ARCHIVE NAMES libSPIRV-Tools.a REQUIRED)
+    find_library(KYTY_SPIRV_TOOLS_OPT_ARCHIVE NAMES libSPIRV-Tools-opt.a REQUIRED)
+    target_include_directories(spirv-tools INTERFACE $<TARGET_PROPERTY:${KYTY_SPIRV_TOOLS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
+    target_link_libraries(spirv-tools INTERFACE ${KYTY_SPIRV_TOOLS_ARCHIVE})
+    target_link_libraries(spirv-tools-opt INTERFACE ${KYTY_SPIRV_TOOLS_OPT_ARCHIVE} spirv-tools)
+else()
+    target_link_libraries(spirv-tools INTERFACE ${KYTY_SPIRV_TOOLS_TARGET})
+    target_link_libraries(spirv-tools-opt INTERFACE SPIRV-Tools-opt spirv-tools)
+endif()
