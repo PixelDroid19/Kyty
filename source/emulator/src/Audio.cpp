@@ -1,6 +1,7 @@
 #include "Emulator/Audio.h"
 #include "Emulator/AudioHost.h"
 #include "Emulator/AudioVideoBackend.h"
+#include "Emulator/Config.h"
 #include "Emulator/Host/Clock.h"
 #include "Emulator/VideoFrameMemory.h"
 
@@ -1310,7 +1311,7 @@ int KYTY_SYSV_ABI AudioInOpen(int user_id, uint32_t type, uint32_t index, uint32
 	{
 		return AUDIO_IN_ERROR_PORT_FULL;
 	}
-	auto id = audio->AudioInOpen(type, len, freq, format);
+	auto id = audio->AudioInOpen(type, len, freq, format, Config::MicrophoneEnabled());
 
 	if (!id.IsValid())
 	{

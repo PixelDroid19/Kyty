@@ -38,6 +38,7 @@ struct Config
 	uint32_t               controller_vibration        = 100;
 	int32_t                controller_light_bar        = -1;
 	uint32_t               controller_speaker_volume   = 0;
+	bool                   microphone_enabled          = false;
 	bool                   neo                         = true;
 	GuestPlatform          guest_platform              = GuestPlatform::Unknown;
 	bool                   vulkan_validation_enabled   = false;
@@ -192,6 +193,7 @@ void Load(const ConfigSource& cfg)
 	LoadBool(g_config->network_connected, cfg, U"NetworkConnected");
 	LoadInt(g_config->controller_vibration, cfg, U"ControllerVibration");
 	LoadInt(g_config->controller_speaker_volume, cfg, U"ControllerSpeakerVolume");
+	LoadBool(g_config->microphone_enabled, cfg, U"MicrophoneEnabled");
 	String light_bar;
 	LoadStr(light_bar, cfg, U"ControllerLightBar");
 	if (!light_bar.IsEmpty())
@@ -336,6 +338,11 @@ int32_t GetControllerLightBar()
 uint32_t GetControllerSpeakerVolume()
 {
 	return g_config->controller_speaker_volume;
+}
+
+bool MicrophoneEnabled()
+{
+	return g_config->microphone_enabled;
 }
 
 bool IsNeo()

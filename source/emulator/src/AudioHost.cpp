@@ -13,7 +13,9 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -50,8 +52,11 @@ public:
 		uint32_t samples_num      = 0;
 		uint32_t freq             = 0;
 		Format   format           = Format::Unknown;
+		uint32_t channels_num     = 0;
 		uint64_t last_input_time  = 0;
 		uint64_t period_remainder = 0;
+		// The host microphone, or null when ports deliver silence.
+		SDL_AudioStream* stream = nullptr;
 	};
 
 	static bool IsValid(const PortOut* ports, Id handle)
@@ -74,6 +79,16 @@ public:
 		*port = PortOut {};
 	}
 
+	static void CloseInputPort(PortIn* port)
+	{
+		EXIT_IF(port == nullptr);
+		if (port->stream != nullptr)
+		{
+			SDL_DestroyAudioStream(port->stream);
+		}
+		*port = PortIn {};
+	}
+
 	Core::Mutex   mutex;
 	Core::CondVar state_changed;
 	bool          host_paused   = false;
@@ -81,6 +96,26 @@ public:
 	PortOut       out_ports[OUT_PORTS_MAX];
 	PortIn        in_ports[IN_PORTS_MAX];
 };
+
+namespace {
+
+// Recorded periods kept for a guest that reads late; older ones are dropped so a port nobody reads stays bounded.
+constexpr int RECORDING_PERIODS_KEPT = 4;
+
+void SDLCALL DropOldRecording(void* userdata, SDL_AudioStream* stream, int /*additional_amount*/, int /*total_amount*/)
+{
+	const int kept = static_cast<int>(reinterpret_cast<intptr_t>(userdata));
+	uint8_t   discarded[4096];
+	for (int excess = SDL_GetAudioStreamAvailable(stream) - kept; excess > 0; excess = SDL_GetAudioStreamAvailable(stream) - kept)
+	{
+		if (SDL_GetAudioStreamData(stream, discarded, std::min(excess, static_cast<int>(sizeof(discarded)))) <= 0)
+		{
+			return;
+		}
+	}
+}
+
+} // namespace
 
 std::shared_ptr<HostAudio> HostAudio::Create(std::string* error)
 {
@@ -116,6 +151,10 @@ void HostAudio::Shutdown()
 		for (auto& port: m_impl->out_ports)
 		{
 			Impl::CloseOutputPort(&port);
+		}
+		for (auto& port: m_impl->in_ports)
+		{
+			Impl::CloseInputPort(&port);
 		}
 	}
 	SDL_QuitSubSystem(SDL_INIT_AUDIO);
@@ -289,6 +328,16 @@ void HostAudio::SetHostPaused(bool paused)
 			port.period_remainder = 0;
 		}
 	}
+	for (auto& port: m_impl->in_ports)
+	{
+		if (port.stream != nullptr && paused)
+		{
+			SDL_PauseAudioStreamDevice(port.stream);
+		} else if (port.stream != nullptr)
+		{
+			SDL_ResumeAudioStreamDevice(port.stream);
+		}
+	}
 	if (!paused)
 	{
 		m_impl->state_changed.SignalAll();
@@ -381,7 +430,7 @@ bool HostAudio::AudioOutQueue(const OutputParam* params, uint32_t num, uint32_t*
 	return all_queues_ok;
 }
 
-HostAudio::Id HostAudio::AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format)
+HostAudio::Id HostAudio::AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format, bool microphone)
 {
 	Core::LockGuard lock(m_impl->mutex);
 	if (m_impl->shutting_down || !Kyty::Emulator::HostClock::IsPeriodicIntervalValid(samples_num, freq))
@@ -398,6 +447,25 @@ HostAudio::Id HostAudio::AudioInOpen(uint32_t type, uint32_t samples_num, uint32
 			port.samples_num = samples_num;
 			port.freq        = freq;
 			port.format      = format;
+			// Other formats keep the guest's buffer untouched: its size is unknown.
+			port.channels_num = format == Format::Signed16bitMono ? 1 : format == Format::Signed16bitStereo ? 2 : 0;
+			if (microphone && port.channels_num != 0)
+			{
+				SDL_AudioSpec spec {};
+				spec.format   = SDL_AUDIO_S16;
+				spec.channels = static_cast<int>(port.channels_num);
+				spec.freq     = static_cast<int>(freq);
+				port.stream   = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, nullptr, nullptr);
+				const auto kept =
+				    static_cast<intptr_t>(RECORDING_PERIODS_KEPT) * samples_num * port.channels_num * static_cast<intptr_t>(sizeof(int16_t));
+				if (port.stream == nullptr || !SDL_SetAudioStreamPutCallback(port.stream, DropOldRecording, reinterpret_cast<void*>(kept)) ||
+				    (!m_impl->host_paused && !SDL_ResumeAudioStreamDevice(port.stream)))
+				{
+					printf("Microphone cannot record: %s\n", SDL_GetError());
+					Impl::CloseInputPort(&port);
+					return Id::Invalid();
+				}
+			}
 			return Id::Create(id);
 		}
 	}
@@ -411,7 +479,7 @@ bool HostAudio::AudioInClose(Id handle)
 	{
 		return false;
 	}
-	m_impl->in_ports[handle.GetId()] = Impl::PortIn {};
+	Impl::CloseInputPort(&m_impl->in_ports[handle.GetId()]);
 	return true;
 }
 
@@ -456,6 +524,18 @@ uint32_t HostAudio::AudioInInput(Id handle, void* dest)
 		Kernel::PthreadInterruptibleScope any_syscall;
 		Kyty::Emulator::HostClock::SleepUntil(deadline);
 	}
+
+	Core::LockGuard lock(m_impl->mutex);
+	if (m_impl->shutting_down || !Impl::IsValid(m_impl->in_ports, handle))
+	{
+		return 0;
+	}
+	const auto& port  = m_impl->in_ports[handle.GetId()];
+	const int   bytes = static_cast<int>(samples * port.channels_num * sizeof(int16_t));
+	int         taken = port.stream != nullptr ? SDL_GetAudioStreamData(port.stream, dest, bytes) : 0;
+	// A microphone that has not recorded a whole period yet fills the rest with silence.
+	taken = std::max(taken, 0);
+	std::memset(static_cast<uint8_t*>(dest) + taken, 0, bytes - taken);
 	return samples;
 }
 

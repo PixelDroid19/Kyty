@@ -2057,6 +2057,32 @@ TEST(EmulatorAudio, AudioInCloseReleasesTheHostInputSlot)
 	subsystem->Destroy(Core::SubsystemsList::Instance());
 }
 
+TEST(EmulatorAudio, AudioInInputDeliversSilenceWithoutAMicrophone)
+{
+	// The guest reads its buffer as recorded sound: without a microphone it must hear silence, not stale memory.
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	EXPECT_EQ(SDL_setenv_unsafe("SDL_AUDIO_DRIVER", "dummy", 0), 0);
+	ASSERT_FALSE(Config::MicrophoneEnabled());
+
+	auto* subsystem = AudioSubsystem::Instance();
+	subsystem->Destroy(Core::SubsystemsList::Instance());
+	subsystem->Init(Core::SubsystemsList::Instance());
+
+	constexpr int samples = 256;
+	const int     handle  = AudioIn::AudioInOpen(255, 1, 0, samples, 48'000, 2);
+	ASSERT_GT(handle, 0);
+	std::vector<int16_t> buffer(samples * 2, static_cast<int16_t>(0x5a5a));
+	EXPECT_EQ(AudioIn::AudioInInput(handle, buffer.data()), samples);
+	EXPECT_TRUE(std::all_of(buffer.begin(), buffer.end(), [](int16_t sample) { return sample == 0; }));
+	EXPECT_EQ(AudioIn::AudioInClose(handle), 0);
+
+	subsystem->Destroy(Core::SubsystemsList::Instance());
+}
+
 TEST(EmulatorAudio, AudioOut2ContextLifecycleAcceptsObservedGen5Profile)
 {
 	if (!Config::IsInitialized())

@@ -85,7 +85,8 @@ public:
 	// thread could need: the wait is a safe point for guest context requests.
 	void WaitWhileHostPaused();
 
-	Id       AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format);
+	// A port records the default host microphone when asked to; otherwise its input is silence.
+	Id       AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format, bool microphone);
 	bool     AudioInClose(Id handle);
 	bool     AudioInValid(Id handle);
 	uint32_t AudioInInput(Id handle, void* dest);

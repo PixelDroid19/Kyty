@@ -141,6 +141,8 @@ uint32_t GetControllerVibration();
 int32_t GetControllerLightBar();
 // Volume of the controller speaker port on the host output; 0 keeps it silent.
 uint32_t GetControllerSpeakerVolume();
+// Audio input ports record the default host microphone; off, they deliver silence.
+bool     MicrophoneEnabled();
 bool     IsNeo();
 bool     IsNextGen();
 bool     VulkanValidationEnabled();

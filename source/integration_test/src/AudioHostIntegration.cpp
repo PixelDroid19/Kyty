@@ -155,7 +155,7 @@ bool FractionalInputPacing()
 		return false;
 	}
 	constexpr uint32_t samples = 256;
-	auto               port    = audio->AudioInOpen(0, samples, 44'100, HostAudio::Format::Signed16bitStereo);
+	auto               port    = audio->AudioInOpen(0, samples, 44'100, HostAudio::Format::Signed16bitStereo, false);
 	if (!Check(port.IsValid(), "could not open the input pacing port") || !Check(audio->AudioInValid(port), "input pacing port is invalid"))
 	{
 		return false;
@@ -181,7 +181,7 @@ bool InputPortLifecycle()
 	}
 	for (int iteration = 0; iteration < HostAudio::IN_PORTS_MAX * 2; ++iteration)
 	{
-		auto port = audio->AudioInOpen(0, 256, 48'000, HostAudio::Format::Signed16bitStereo);
+		auto port = audio->AudioInOpen(0, 256, 48'000, HostAudio::Format::Signed16bitStereo, false);
 		if (!Check(port.IsValid(), "input port slots were exhausted after close") ||
 		    !Check(audio->AudioInClose(port), "could not close the input port") ||
 		    !Check(!audio->AudioInValid(port), "closed input port remained valid"))
@@ -202,9 +202,9 @@ bool RejectsInvalidPacing()
 	constexpr uint32_t extreme     = std::numeric_limits<uint32_t>::max();
 	const auto         start       = std::chrono::steady_clock::now();
 	const auto         zero_output = audio->AudioOutOpen(0, 0, 48'000, HostAudio::Format::Signed16bitStereo);
-	const auto         zero_input  = audio->AudioInOpen(0, 48'000, 0, HostAudio::Format::Signed16bitStereo);
+	const auto         zero_input  = audio->AudioInOpen(0, 48'000, 0, HostAudio::Format::Signed16bitStereo, false);
 	const auto         output      = audio->AudioOutOpen(0, extreme, 1, HostAudio::Format::Signed16bitStereo);
-	const auto         input       = audio->AudioInOpen(0, extreme, 1, HostAudio::Format::Signed16bitStereo);
+	const auto         input       = audio->AudioInOpen(0, extreme, 1, HostAudio::Format::Signed16bitStereo, false);
 	const auto         elapsed     = std::chrono::steady_clock::now() - start;
 	return Check(!zero_output.IsValid(), "zero-sample output pacing port was accepted") &&
 	       Check(!zero_input.IsValid(), "zero-frequency input pacing port was accepted") &&
