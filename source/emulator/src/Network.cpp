@@ -4787,7 +4787,7 @@ int KYTY_SYSV_ABI NpGetState(int user_id, uint32_t* state)
 
 	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 
-	*state = 1; // Signed out
+	*state = (Config::PsnSignedIn() && user_id == 1 ? 2 : 1); // 2 = signed in, 1 = signed out
 
 	return OK;
 }

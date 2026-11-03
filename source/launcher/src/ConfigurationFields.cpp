@@ -144,6 +144,7 @@ QVariantMap ConfigurationToFields(const Kyty::Configuration& info)
 	f["user_name"]                    = info.user_name;
 	f["notice_screen_skip_enabled"]   = info.notice_screen_skip_enabled;
 	f["network_connected"]            = info.network_connected;
+	f["psn_signed_in"]                = info.psn_signed_in;
 	f["controller_vibration"]         = info.controller_vibration;
 	f["controller_light_bar"]         = info.controller_light_bar;
 	f["controller_speaker_volume"]    = info.controller_speaker_volume;
@@ -219,6 +220,7 @@ QString ApplyEmulatorFields(const QVariantMap& fields, Kyty::Configuration* info
 	info->user_name                   = text("user_name").trimmed();
 	info->notice_screen_skip_enabled  = fields.value("notice_screen_skip_enabled").toBool();
 	info->network_connected           = fields.value("network_connected").toBool();
+	info->psn_signed_in               = fields.value("psn_signed_in").toBool();
 	info->controller_vibration        = fields.value("controller_vibration").toInt();
 	info->controller_light_bar        = text("controller_light_bar");
 	info->controller_speaker_volume   = fields.value("controller_speaker_volume").toInt();

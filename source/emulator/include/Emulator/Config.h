@@ -135,6 +135,8 @@ int32_t GetConsoleLanguage();
 String  GetUserName();
 bool    NoticeScreenSkipEnabled();
 bool    NetworkConnected();
+// Whether games see user 1 signed in to an offline PSN account.
+bool    PsnSignedIn();
 // Percentage applied to the vibration games request.
 uint32_t GetControllerVibration();
 // Light bar colour shown instead of the guest's, as 0xRRGGBB; negative leaves it to the guest.

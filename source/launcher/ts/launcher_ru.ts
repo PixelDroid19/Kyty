@@ -548,6 +548,10 @@
             <translation>Сеть подключена</translation>
         </message>
         <message>
+            <source>Signed in to PSN (offline)</source>
+            <translation>Вход в PSN (без сети)</translation>
+        </message>
+        <message>
             <source>Skip notice screens</source>
             <translation>Пропускать уведомления</translation>
         </message>
@@ -710,6 +714,10 @@
         <message>
             <source>Launcher window</source>
             <translation>Окно лаунчера</translation>
+        </message>
+        <message>
+            <source>Tells games the player is signed in to a local PSN account, so games that only unlock trophies while signed in can do so. Online services still fail.</source>
+            <translation>Сообщает играм, что игрок вошёл в локальную учётную запись PSN, чтобы игры, которые выдают трофеи только после входа, могли их выдать. Сетевые службы по-прежнему не работают.</translation>
         </message>
         <message>
             <source>A colour here replaces the one games choose.</source>

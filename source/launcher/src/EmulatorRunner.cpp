@@ -113,6 +113,7 @@ bool CreateLuaScript(const Kyty::Configuration& info, const QString& input_profi
 	s << "\t UserName = " << LuaQuote(info.user_name) << ";\n";
 	s << "\t NoticeScreenSkipEnabled = " << (info.notice_screen_skip_enabled ? "true" : "false") << ";\n";
 	s << "\t NetworkConnected = " << (info.network_connected ? "true" : "false") << ";\n";
+	s << "\t PsnSignedIn = " << (info.psn_signed_in ? "true" : "false") << ";\n";
 	s << "\t ControllerVibration = " << info.controller_vibration << ";\n";
 	s << "\t ControllerLightBar = " << LuaQuote(ControllerLightBarHex(info.controller_light_bar)) << ";\n";
 	s << "\t ControllerSpeakerVolume = " << info.controller_speaker_volume << ";\n";

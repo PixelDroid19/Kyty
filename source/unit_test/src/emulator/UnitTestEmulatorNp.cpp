@@ -1,6 +1,7 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/ConfigSource.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/Np.h"
 #include "Emulator/Loader/SymbolDatabase.h"
@@ -95,6 +96,59 @@ TEST(EmulatorNp, ReportsSignedOutForOfflineAccountLookups)
 	EXPECT_EQ(fn(1, nullptr), static_cast<int>(0x80550003u));
 	EXPECT_EQ(fn(1, &user_id), static_cast<int>(0x80550006u));
 	EXPECT_EQ(user_id, -1);
+}
+
+TEST(EmulatorNp, SignedInLocalAccountMapsBackToUserOne)
+{
+	EnsureLog();
+
+	class SignedInConfig final: public Config::ConfigSource
+	{
+	public:
+		explicit SignedInConfig(bool value): m_value(value) {}
+		bool         Has(const Core::String& key) const override { return key == U"PsnSignedIn"; }
+		int64_t      GetInteger(const Core::String&) const override { return 0; }
+		bool         GetBool(const Core::String&) const override { return m_value; }
+		Core::String GetString(const Core::String&) const override { return {}; }
+
+	private:
+		bool m_value;
+	};
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNpManager_1", &symbols));
+
+	Loader::SymbolResolve query {};
+	query.name                 = U"rbknaUjpqWo";
+	query.library              = U"NpManager";
+	query.library_version      = 1;
+	query.module               = U"NpManager";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	const auto* account_record = symbols.Find(query);
+	query.name                 = U"VgYczPGB5ss";
+	const auto* user_record    = symbols.Find(query);
+	ASSERT_NE(account_record, nullptr);
+	ASSERT_NE(user_record, nullptr);
+
+	using GetAccountId         = KYTY_SYSV_ABI int (*)(int32_t user_id, uint64_t* account_id);
+	using GetUserIdByAccountId = KYTY_SYSV_ABI int (*)(uint64_t account_id, int32_t* user_id);
+	auto* get_account_id       = reinterpret_cast<GetAccountId>(account_record->vaddr);
+	auto* get_user_id          = reinterpret_cast<GetUserIdByAccountId>(user_record->vaddr);
+
+	Config::Load(SignedInConfig(true));
+	uint64_t account_id = 0;
+	int32_t  user_id    = -1;
+	EXPECT_EQ(get_account_id(1, &account_id), 0);
+	EXPECT_NE(account_id, 0u);
+	EXPECT_EQ(get_user_id(account_id, &user_id), 0);
+	EXPECT_EQ(user_id, 1);
+	EXPECT_EQ(get_account_id(2, &account_id), static_cast<int>(0x80550006u));
+
+	Config::Load(SignedInConfig(false));
+	EXPECT_EQ(get_account_id(1, &account_id), static_cast<int>(0x80550006u));
+	EXPECT_EQ(account_id, 0u);
 }
 
 TEST(EmulatorNp, ReportsNoProfileDialogWhenItHasNotBeenOpened)

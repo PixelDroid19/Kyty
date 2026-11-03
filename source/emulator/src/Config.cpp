@@ -35,6 +35,7 @@ struct Config
 	String                 user_name                   = U"Kyty";
 	bool                   notice_screen_skip_enabled  = false;
 	bool                   network_connected           = true;
+	bool                   psn_signed_in               = false;
 	uint32_t               controller_vibration        = 100;
 	int32_t                controller_light_bar        = -1;
 	uint32_t               controller_speaker_volume   = 0;
@@ -191,6 +192,7 @@ void Load(const ConfigSource& cfg)
 	LoadStr(g_config->user_name, cfg, U"UserName");
 	LoadBool(g_config->notice_screen_skip_enabled, cfg, U"NoticeScreenSkipEnabled");
 	LoadBool(g_config->network_connected, cfg, U"NetworkConnected");
+	LoadBool(g_config->psn_signed_in, cfg, U"PsnSignedIn");
 	LoadInt(g_config->controller_vibration, cfg, U"ControllerVibration");
 	LoadInt(g_config->controller_speaker_volume, cfg, U"ControllerSpeakerVolume");
 	LoadBool(g_config->microphone_enabled, cfg, U"MicrophoneEnabled");
@@ -323,6 +325,11 @@ bool NoticeScreenSkipEnabled()
 bool NetworkConnected()
 {
 	return g_config->network_connected;
+}
+
+bool PsnSignedIn()
+{
+	return g_config->psn_signed_in;
 }
 
 uint32_t GetControllerVibration()
