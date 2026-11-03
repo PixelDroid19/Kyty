@@ -6017,7 +6017,8 @@ us/draw). `spirv-opt` performance passes do not shrink `eb48c258`'s compile enou
   Ryzen 5 7600 host, but the same starvation was measured there.
 - **Cause.** A signal that misses a safe point re-armed a fixed 100 us retry, the sleep length of the test's targets. The retry
   then kept landing as the sleep returned (`RCX == RIP`, `RAX == 0`, which proves no interrupted syscall), never inside it. On two
-  host cores: 4 903 to 35 149 deferred signals and 444 to 3 728 ms per test, against 84 deferrals and 52 ms with a 105 us period.
+  host cores: 4 903 to 35 149 deferred signals and 444 to 3 728 ms per test. On all cores a 100 us period took 390 to 1 315 ms,
+  while 105 us took 52 ms with 84 deferrals.
   Every deferral in those runs had that register state, which excludes a lost signal as the cause of the stall.
 - **Change.** Each retry of a thread uses a different delay, 100 to 163 us, so no periodic sleep stays in phase with it. The safe
   point proof is unchanged.
