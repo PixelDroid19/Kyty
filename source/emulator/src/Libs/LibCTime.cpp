@@ -179,7 +179,11 @@ KYTY_SYSV_ABI int c_asctime_s(char* buffer, size_t size, const GuestTm* tmv)
 	}
 	const std::tm host = GuestToHostTm(*tmv);
 	char          formatted[ASCTIME_S_SIZE] = {};
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	if (::asctime_s(formatted, sizeof(formatted), &host) != 0)
+#else
 	if (::asctime_r(&host, formatted) == nullptr)
+#endif
 	{
 		return 22;
 	}
