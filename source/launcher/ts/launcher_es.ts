@@ -546,6 +546,10 @@
             <translation>Red conectada</translation>
         </message>
         <message>
+            <source>Signed in to PSN (offline)</source>
+            <translation>Sesión de PSN iniciada (sin conexión)</translation>
+        </message>
+        <message>
             <source>Skip notice screens</source>
             <translation>Omitir avisos</translation>
         </message>
@@ -708,6 +712,10 @@
         <message>
             <source>Launcher window</source>
             <translation>Ventana del launcher</translation>
+        </message>
+        <message>
+            <source>Tells games the player is signed in to a local PSN account, so games that only unlock trophies while signed in can do so. Online services still fail.</source>
+            <translation>Indica a los juegos que el jugador inició sesión en una cuenta de PSN local, para que los juegos que solo desbloquean trofeos con la sesión iniciada puedan hacerlo. Los servicios en línea siguen sin funcionar.</translation>
         </message>
         <message>
             <source>A colour here replaces the one games choose.</source>

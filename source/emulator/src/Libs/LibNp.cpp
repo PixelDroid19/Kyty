@@ -1,3 +1,4 @@
+#include "Emulator/Config.h"
 #include "Emulator/Dialog.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -774,6 +775,14 @@ LIB_VERSION("NpManager", 1, "NpManager", 1, 1);
 // SCE_NP_ERROR_SIGNED_OUT — an offline runtime has no authenticated NP account.
 static constexpr int kNpErrorSignedOut       = static_cast<int>(0x80550006u);
 static constexpr int kNpErrorInvalidArgument = static_cast<int>(0x80550003u);
+// The local account user 1 signs in with when Config::PsnSignedIn() is on. It
+// is fixed so that an id a game stores in its save names the same account later.
+static constexpr uint64_t kLocalAccountId = 0x4b797479'00000001ull;
+
+static bool LocalAccountSignedIn(int32_t user_id)
+{
+	return Config::PsnSignedIn() && user_id == 1;
+}
 
 // sceNpGetAccountCountryA — NID JT+t00a3TxA. Observed SysV (user_id=1, out*).
 // Country code is a 2-letter lowercase ISO string plus NUL.
@@ -790,8 +799,8 @@ static KYTY_SYSV_ABI int GetAccountCountryA(int32_t /*user_id*/, char* country)
 	return OK;
 }
 
-// sceNpGetAccountIdA — NID rbknaUjpqWo. The runtime is offline, so leave no
-// fabricated account identity behind and report the signed-out state.
+// sceNpGetAccountIdA — NID rbknaUjpqWo. Signed out leaves no account identity
+// behind.
 static KYTY_SYSV_ABI int GetAccountIdA(int32_t user_id, uint64_t* account_id)
 {
 	PRINT_NAME();
@@ -799,6 +808,11 @@ static KYTY_SYSV_ABI int GetAccountIdA(int32_t user_id, uint64_t* account_id)
 	if (account_id == nullptr)
 	{
 		return kNpErrorInvalidArgument;
+	}
+	if (LocalAccountSignedIn(user_id))
+	{
+		*account_id = kLocalAccountId;
+		return OK;
 	}
 	*account_id = 0;
 	return kNpErrorSignedOut;
@@ -810,6 +824,11 @@ static KYTY_SYSV_ABI int GetUserIdByAccountId(uint64_t account_id, int32_t* user
 	if (account_id == 0 || user_id == nullptr)
 	{
 		return kNpErrorInvalidArgument;
+	}
+	if (account_id == kLocalAccountId && LocalAccountSignedIn(1))
+	{
+		*user_id = 1;
+		return OK;
 	}
 	return kNpErrorSignedOut;
 }

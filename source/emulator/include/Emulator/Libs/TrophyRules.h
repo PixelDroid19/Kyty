@@ -29,7 +29,13 @@ struct Progress
 	std::map<int, int64_t> unlocked;
 };
 
-// The files of a PS5 .ucp container (trophy00.ucp, uds00.ucp) by name. False when the container is malformed.
+// Real containers stay far below these: 29 MB for the largest file and 450 KB of JSON for the largest set checked.
+constexpr size_t CONTAINER_MAX_SIZE      = 256u << 20u;
+constexpr size_t CONTAINER_MAX_JSON_SIZE = 16u << 20u;
+
+// The JSON files of a PS5 .ucp container (trophy00.ucp, uds00.ucp) by name; images and other entries are skipped.
+// False when the container is malformed, larger than CONTAINER_MAX_SIZE, or holds more than CONTAINER_MAX_JSON_SIZE
+// of JSON in total.
 bool ReadContainer(const std::vector<uint8_t>& file, std::map<std::string, std::string>* entries);
 
 // A title's trophies and the UDS rules that unlock them: tropconf.json from the trophy container and

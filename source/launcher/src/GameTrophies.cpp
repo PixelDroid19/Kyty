@@ -14,13 +14,16 @@ constexpr quint32 CONTAINER_MAGIC = 0xb228c60au;
 constexpr qint64  HEADER_SIZE     = 0x60;
 constexpr qint64  ENTRY_SIZE      = 0x40;
 constexpr int     ENTRY_NAME_SIZE = 32;
+// The same bounds as the emulator's reader: real containers stay far below them.
+constexpr qint64  MAX_SIZE      = qint64 {256} << 20;
+constexpr quint64 MAX_JSON_SIZE = quint64 {16} << 20;
 
-// The files of a .ucp container by name: a big-endian header with the entry count at 0x10, then 0x40-byte entries of
-// a name and a 64-bit offset and size. Empty when the container is malformed.
+// The JSON files of a .ucp container by name: a big-endian header with the entry count at 0x10, then 0x40-byte entries
+// of a name and a 64-bit offset and size. Empty when the container is malformed or exceeds the bounds above.
 QMap<QString, QByteArray> ReadContainer(const QString& file)
 {
 	QFile in(file);
-	if (!in.open(QIODevice::ReadOnly))
+	if (!in.open(QIODevice::ReadOnly) || in.size() > MAX_SIZE)
 	{
 		return {};
 	}
@@ -37,6 +40,7 @@ QMap<QString, QByteArray> ReadContainer(const QString& file)
 		return {};
 	}
 	QMap<QString, QByteArray> entries;
+	quint64                   json_size = 0;
 	for (qint64 i = 0; i < count; i++)
 	{
 		const auto* entry  = data + HEADER_SIZE + i * ENTRY_SIZE;
@@ -48,7 +52,17 @@ QMap<QString, QByteArray> ReadContainer(const QString& file)
 		}
 		const auto name = QString::fromLatin1(reinterpret_cast<const char*>(entry),
 		                                      static_cast<int>(qstrnlen(reinterpret_cast<const char*>(entry), ENTRY_NAME_SIZE)));
-		entries[name]   = bytes.mid(static_cast<qsizetype>(offset), static_cast<qsizetype>(size));
+		if (!name.endsWith(".json"))
+		{
+			continue;
+		}
+		// Entries may share one payload, so the bound is on what is copied, not on the file.
+		json_size += size;
+		if (json_size > MAX_JSON_SIZE)
+		{
+			return {};
+		}
+		entries[name] = bytes.mid(static_cast<qsizetype>(offset), static_cast<qsizetype>(size));
 	}
 	return entries;
 }

@@ -100,14 +100,15 @@ QVariantList GamePageItem::Hints() const
 
 void GamePageItem::SetGame(const QVariantMap& game, bool latest)
 {
-	if (game == m_game && latest == m_latest)
-	{
-		return;
-	}
-	m_game     = game;
-	m_latest   = latest;
+	const bool same_game = game == m_game && latest == m_latest;
+	m_game               = game;
+	m_latest             = latest;
+	// Read again for the same game too: a run unlocks trophies without changing the game's entry.
 	m_trophies = LauncherBackend::Instance()->Trophies(Row());
-	m_art->SetGame(game.value("icon").toString(), GameName(game));
+	if (!same_game)
+	{
+		m_art->SetGame(game.value("icon").toString(), GameName(game));
+	}
 	Recompose();
 }
 

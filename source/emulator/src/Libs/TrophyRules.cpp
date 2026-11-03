@@ -99,8 +99,8 @@ int64_t SaturatingIncrement(int64_t value)
 
 bool ReadContainer(const std::vector<uint8_t>& file, std::map<std::string, std::string>* entries)
 {
-	if (entries == nullptr || file.size() < CONTAINER_HEADER_SIZE || ReadBigEndian(file, 0, 4) != CONTAINER_MAGIC ||
-	    ReadBigEndian(file, 0x14, 4) != CONTAINER_ENTRY_SIZE)
+	if (entries == nullptr || file.size() < CONTAINER_HEADER_SIZE || file.size() > CONTAINER_MAX_SIZE ||
+	    ReadBigEndian(file, 0, 4) != CONTAINER_MAGIC || ReadBigEndian(file, 0x14, 4) != CONTAINER_ENTRY_SIZE)
 	{
 		return false;
 	}
@@ -110,6 +110,7 @@ bool ReadContainer(const std::vector<uint8_t>& file, std::map<std::string, std::
 		return false;
 	}
 	entries->clear();
+	uint64_t json_size = 0;
 	for (uint64_t i = 0; i < count; i++)
 	{
 		const size_t   entry  = CONTAINER_HEADER_SIZE + i * CONTAINER_ENTRY_SIZE;
@@ -120,8 +121,18 @@ bool ReadContainer(const std::vector<uint8_t>& file, std::map<std::string, std::
 		{
 			return false;
 		}
-		(*entries)[std::string(name, strnlen(name, CONTAINER_NAME_SIZE))] =
-		    std::string(reinterpret_cast<const char*>(file.data() + offset), size);
+		const std::string entry_name(name, strnlen(name, CONTAINER_NAME_SIZE));
+		if (entry_name.size() < 5 || entry_name.compare(entry_name.size() - 5, 5, ".json") != 0)
+		{
+			continue;
+		}
+		// Entries may share one payload, so the bound is on what is copied, not on the file.
+		json_size += size;
+		if (json_size > CONTAINER_MAX_JSON_SIZE)
+		{
+			return false;
+		}
+		(*entries)[entry_name] = std::string(reinterpret_cast<const char*>(file.data() + offset), size);
 	}
 	return true;
 }

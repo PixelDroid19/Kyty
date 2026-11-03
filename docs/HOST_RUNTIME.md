@@ -116,6 +116,7 @@ runtime, and a value out of range ends the start with an error.
 | `UserName` | 1 to 16 UTF-8 bytes (`Kyty`) | The name of the user service and of the online id. It is not part of save paths. |
 | `NoticeScreenSkipEnabled` | boolean (`false`) | The answer guests get when they ask whether a start notice may be skipped. |
 | `NetworkConnected` | boolean (`true`) | Off reports the network state as disconnected and fails network info requests with the not-connected code. |
+| `PsnSignedIn` | boolean (`false`) | On, user `1` is signed in to a local PSN account: `NpGetState` reports signed in, and `GetAccountIdA` returns one fixed account id, which `GetUserIdByAccountId` maps back to user `1`. Reachability, authorization and every online request still fail. It is a per-game comfort setting for titles that post trophy events only while signed in (see [Trophies](#trophies)); runs with it on are not strict runs for compatibility claims. |
 | `ControllerVibration` | `0` to `100` (`100`) | Scales guest vibration requests before they reach the host pad. |
 | `ControllerLightBar` | `#RRGGBB` (empty) | Replaces the light bar colour the guest sets, from the moment the pad connects. Empty forwards the guest's colour. |
 | `ControllerSpeakerVolume` | `0` to `100` (`0`) | Plays the guest's pad speaker port on the default host output at this gain. `0` keeps that port silent. |
@@ -126,8 +127,6 @@ runtime, and a value out of range ends the start with an error.
 
 Each of these was checked against what it would change for the guest:
 
-- **Signed in to PSN.** `NpGetState` reports signed out. Signing in would make
-  titles reach for online services that do not exist offline.
 - **User id.** The guest sees user `1`. The number only names the
   save-memory folder (`user-1`), so another value would hide existing saves
   and change nothing else.
@@ -210,7 +209,10 @@ own rules:
   trophy unlocks when its stat reaches its target.
 - Both containers are plain: a big-endian header with the magic `b228c60a`,
   the entry count at 0x10 and the entry size 0x40 at 0x14, then from 0x60
-  entries of a 32-byte name and a 64-bit offset and size.
+  entries of a 32-byte name and a 64-bit offset and size. Only the JSON
+  entries are read. A container over 256 MiB, or with more than 16 MiB of JSON
+  in total, is rejected. Of the 28 sets checked on 2026-11-03, the largest
+  container is 29 MB and none holds more than 450 KB of JSON.
 
 Only rules that feed a stat a trophy waits for are kept. They match one
 top-level property with `==` or `>` and update a `count`, `max` or `latest`
@@ -219,8 +221,15 @@ another form is skipped and counted in one warning when the set loads, and its
 trophy cannot unlock. Every rule of the 28 sets checked on 2026-11-03 uses the
 kept forms.
 
+Some titles post these events only while user `1` is signed in.
+`PPSA21402 - Balatro` retries its PSN start every second until `NpGetState`
+reports signed in and `GetAccountIdA` succeeds; only then does it post
+`_UnlockTrophy`, and it checks its career trophies when the main menu loads.
+Its trophies therefore unlock only with `PsnSignedIn` on.
+
 Stats and unlock times (Unix seconds) are kept for user `1`, written
-atomically after each change:
+atomically after each change; a write that fails is tried again on the next
+event:
 
 ```text
 <root>/.kyty-trophies/<NORMALIZED_TITLE_ID>/user-1.json
@@ -231,7 +240,7 @@ A progress file that cannot be read turns trophies off for that run, so it is
 never overwritten. The launcher's game page lists the set in the interface
 language when the set has it, with each unlock time and the progress of
 progressive trophies; a locked hidden trophy shows neither its name nor its
-description.
+description. The page reads the progress file again every time it opens.
 
 The game itself still sees nothing unlocked: the `NpTrophy2` query layouts and
 the unlock callback are not sourced, so those calls keep returning empty

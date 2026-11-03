@@ -211,6 +211,7 @@ public:
 	QString user_name                  = "Kyty";
 	bool    notice_screen_skip_enabled = false;
 	bool    network_connected          = true;
+	bool    psn_signed_in              = false;
 	int     controller_vibration       = 100;
 	QString controller_light_bar       = "Guest"; /* A colour name from ControllerLightBarColors(), or Guest */
 	int     controller_speaker_volume  = 0;
@@ -273,6 +274,7 @@ public:
 		KYTY_CFG_SET(user_name);
 		s->setValue("notice_screen_skip_enabled", notice_screen_skip_enabled);
 		s->setValue("network_connected", network_connected);
+		s->setValue("psn_signed_in", psn_signed_in);
 		s->setValue("controller_vibration", controller_vibration);
 		KYTY_CFG_SET(controller_light_bar);
 		s->setValue("controller_speaker_volume", controller_speaker_volume);
@@ -380,6 +382,7 @@ public:
 		user_name                  = s->value("user_name", "Kyty").toString();
 		notice_screen_skip_enabled = s->value("notice_screen_skip_enabled", false).toBool();
 		network_connected          = s->value("network_connected", true).toBool();
+		psn_signed_in              = s->value("psn_signed_in", false).toBool();
 		controller_vibration       = std::clamp(s->value("controller_vibration", 100).toInt(), 0, 100);
 		controller_light_bar       = s->value("controller_light_bar", "Guest").toString();
 		controller_speaker_volume  = std::clamp(s->value("controller_speaker_volume", 0).toInt(), 0, 100);

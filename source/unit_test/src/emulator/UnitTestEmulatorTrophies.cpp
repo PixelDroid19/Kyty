@@ -112,7 +112,7 @@ TEST(EmulatorTrophies, ReadsContainerEntries)
 	const std::map<std::string, std::string> files = {{"tropconf.json", "{}"}, {"icon.png", std::string("\x89PNG\0x", 6)}};
 	std::map<std::string, std::string>       entries;
 	ASSERT_TRUE(Libs::Trophies::ReadContainer(BuildContainer(files), &entries));
-	EXPECT_EQ(entries, files);
+	EXPECT_EQ(entries, (std::map<std::string, std::string> {{"tropconf.json", "{}"}}));
 }
 
 TEST(EmulatorTrophies, RejectsMalformedContainers)
@@ -131,6 +131,20 @@ TEST(EmulatorTrophies, RejectsMalformedContainers)
 	EXPECT_FALSE(Libs::Trophies::ReadContainer(too_many, &entries));
 
 	EXPECT_FALSE(Libs::Trophies::ReadContainer(std::vector<uint8_t>(0x20), &entries));
+
+	// Entries that all point at one payload add up past the JSON bound although the file is small.
+	const std::string payload(Libs::Trophies::CONTAINER_MAX_JSON_SIZE / 4 + 1, ' ');
+	auto              shared = BuildContainer({{"a.json", payload}, {"b.json", "{}"}, {"c.json", "{}"}, {"d.json", "{}"}});
+	const auto        first  = 0x60 + 32;
+	for (size_t entry = 1; entry < 4; entry++)
+	{
+		for (size_t byte = 0; byte < 16; byte++)
+		{
+			shared[first + entry * 0x40 + byte] = shared[first + byte];
+		}
+	}
+	EXPECT_LT(shared.size(), Libs::Trophies::CONTAINER_MAX_JSON_SIZE);
+	EXPECT_FALSE(Libs::Trophies::ReadContainer(shared, &entries));
 }
 
 TEST(EmulatorTrophies, CountsUnreadableRules)
