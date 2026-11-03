@@ -1,6 +1,7 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/ConfigSource.h"
 #include "Emulator/Controller.h"
 #include "Emulator/Log.h"
 #include "Emulator/Ports/ControllerInputPort.h"
@@ -422,6 +423,29 @@ TEST(EmulatorPad, VibrationAndLightBarReachTheFeedbackPort)
 	EXPECT_EQ(g_feedback_seen.vibrations, 1);
 
 	::Kyty::Emulator::Ports::ControllerFeedbackPort::Install({});
+}
+
+TEST(EmulatorPad, ReloadedEmptyLightBarHandsTheColourBack)
+{
+	EnsurePadSubsystems();
+
+	class LightBarConfig final: public Config::ConfigSource
+	{
+	public:
+		explicit LightBarConfig(const char32_t* value): m_value(value) {}
+		bool         Has(const Core::String& key) const override { return key == U"ControllerLightBar"; }
+		int64_t      GetInteger(const Core::String&) const override { return 0; }
+		bool         GetBool(const Core::String&) const override { return false; }
+		Core::String GetString(const Core::String&) const override { return m_value; }
+
+	private:
+		const char32_t* m_value;
+	};
+
+	Config::Load(LightBarConfig(U"#ff0000"));
+	EXPECT_EQ(Config::GetControllerLightBar(), 0xff0000);
+	Config::Load(LightBarConfig(U""));
+	EXPECT_EQ(Config::GetControllerLightBar(), -1);
 }
 
 UT_END();
