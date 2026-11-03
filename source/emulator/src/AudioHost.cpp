@@ -4,7 +4,6 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/AudioPcm.h"
-#include "Emulator/Config.h"
 #include "Emulator/Host/Clock.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
@@ -166,7 +165,7 @@ bool HostAudio::ShuttingDown()
 	return m_impl->shutting_down;
 }
 
-HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format)
+HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format, uint32_t speaker_volume)
 {
 	Core::LockGuard lock(m_impl->mutex);
 	if (m_impl->shutting_down || !Kyty::Emulator::HostClock::IsPeriodicIntervalValid(samples_num, freq))
@@ -201,8 +200,7 @@ HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t f
 		}
 		std::fill_n(port.volume, port.channels_num, 32768);
 
-		// The controller speaker port plays on the host output only at a volume above 0.
-		const bool speaker = type == 4 && Config::GetControllerSpeakerVolume() > 0;
+		const bool speaker = type == 4 && speaker_volume > 0;
 		if (type == 0 || type == 1 || speaker)
 		{
 			port.pcm_format = (format == Format::Signed16bitMono || format == Format::Signed16bitStereo ||
@@ -220,7 +218,7 @@ HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t f
 				Impl::CloseOutputPort(&port);
 				return Id::Invalid();
 			}
-			if (speaker && !SDL_SetAudioStreamGain(port.stream, static_cast<float>(Config::GetControllerSpeakerVolume()) / 100.0f))
+			if (speaker && !SDL_SetAudioStreamGain(port.stream, static_cast<float>(speaker_volume) / 100.0f))
 			{
 				Impl::CloseOutputPort(&port);
 				return Id::Invalid();
@@ -461,7 +459,7 @@ HostAudio::Id HostAudio::AudioInOpen(uint32_t type, uint32_t samples_num, uint32
 				if (port.stream == nullptr || !SDL_SetAudioStreamPutCallback(port.stream, DropOldRecording, reinterpret_cast<void*>(kept)) ||
 				    (!m_impl->host_paused && !SDL_ResumeAudioStreamDevice(port.stream)))
 				{
-					printf("Microphone cannot record: %s\n", SDL_GetError());
+					KYTY_LOG_ERROR("Kyty microphone cannot record: %s\n", SDL_GetError());
 					Impl::CloseInputPort(&port);
 					return Id::Invalid();
 				}
@@ -496,6 +494,7 @@ uint32_t HostAudio::AudioInInput(Id handle, void* dest)
 		return 0;
 	}
 	uint32_t samples  = 0;
+	uint32_t channels = 0;
 	uint32_t freq     = 0;
 	uint64_t deadline = 0;
 	{
@@ -506,6 +505,7 @@ uint32_t HostAudio::AudioInInput(Id handle, void* dest)
 		}
 		auto& port         = m_impl->in_ports[handle.GetId()];
 		samples            = port.samples_num;
+		channels           = port.channels_num;
 		freq               = port.freq;
 		const uint64_t now = Kyty::Emulator::HostClock::NowMicroseconds();
 		const uint64_t next =
@@ -525,16 +525,16 @@ uint32_t HostAudio::AudioInInput(Id handle, void* dest)
 		Kyty::Emulator::HostClock::SleepUntil(deadline);
 	}
 
+	// Sized from the port as the guest opened it: a port reopened during the sleep must not change the buffer size.
+	const int       bytes = static_cast<int>(samples * channels * sizeof(int16_t));
 	Core::LockGuard lock(m_impl->mutex);
 	if (m_impl->shutting_down || !Impl::IsValid(m_impl->in_ports, handle))
 	{
 		return 0;
 	}
-	const auto& port  = m_impl->in_ports[handle.GetId()];
-	const int   bytes = static_cast<int>(samples * port.channels_num * sizeof(int16_t));
-	int         taken = port.stream != nullptr ? SDL_GetAudioStreamData(port.stream, dest, bytes) : 0;
+	auto*     stream = m_impl->in_ports[handle.GetId()].stream;
+	const int taken  = stream != nullptr ? std::max(SDL_GetAudioStreamData(stream, dest, bytes), 0) : 0;
 	// A microphone that has not recorded a whole period yet fills the rest with silence.
-	taken = std::max(taken, 0);
 	std::memset(static_cast<uint8_t*>(dest) + taken, 0, bytes - taken);
 	return samples;
 }

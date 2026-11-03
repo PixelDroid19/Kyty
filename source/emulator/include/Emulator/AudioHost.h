@@ -67,7 +67,8 @@ public:
 
 	KYTY_CLASS_NO_COPY(HostAudio);
 
-	Id   AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format);
+	// A controller speaker port (type 4) plays on the host output at speaker_volume percent; 0 keeps it silent.
+	Id   AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format, uint32_t speaker_volume);
 	bool AudioOutClose(Id handle);
 	bool AudioOutValid(Id handle);
 	bool AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume);

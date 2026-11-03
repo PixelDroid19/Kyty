@@ -5,6 +5,7 @@
 #include "Emulator/AudioHost.h"
 #include "Emulator/Host/Clock.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -27,6 +28,20 @@ bool Check(bool condition, const char* message)
 		std::fprintf(stderr, "audio host integration failed: %s\n", message);
 	}
 	return condition;
+}
+
+// 0x4000 halves are non-zero both as 16-bit samples and, paired, as 32-bit floats, whichever format the device records in.
+bool WriteRecordingInput(const char* path)
+{
+	std::FILE* file = std::fopen(path, "wb");
+	if (file == nullptr)
+	{
+		std::fprintf(stderr, "audio host integration could not write %s\n", path);
+		return false;
+	}
+	const std::vector<int16_t> pattern(48'000, 0x4000);
+	const bool                 written = std::fwrite(pattern.data(), sizeof(int16_t), pattern.size(), file) == pattern.size();
+	return Check(std::fclose(file) == 0 && written, "could not write the recording input file");
 }
 
 std::shared_ptr<HostAudio> CreateAudio()
@@ -92,7 +107,7 @@ bool GrainPacing()
 		return false;
 	}
 	constexpr uint32_t samples = 480;
-	auto               port    = audio->AudioOutOpen(0, samples, 48000, HostAudio::Format::Signed16bitStereo);
+	auto               port    = audio->AudioOutOpen(0, samples, 48000, HostAudio::Format::Signed16bitStereo, 0);
 	if (!Check(port.IsValid(), "could not open the pacing port"))
 	{
 		return false;
@@ -123,7 +138,7 @@ bool FractionalOutputPacing()
 		return false;
 	}
 	constexpr uint32_t samples = 256;
-	auto               port    = audio->AudioOutOpen(0, samples, 44'100, HostAudio::Format::Signed16bitStereo);
+	auto               port    = audio->AudioOutOpen(0, samples, 44'100, HostAudio::Format::Signed16bitStereo, 0);
 	if (!Check(port.IsValid(), "could not open the fractional pacing port"))
 	{
 		return false;
@@ -172,6 +187,39 @@ bool FractionalInputPacing()
 	       Check(elapsed < std::chrono::milliseconds(100), "input grain pacing accumulated excessive delay");
 }
 
+// The disk driver records from SDL_AUDIO_DISK_INPUT_FILE, which holds a non-silent pattern.
+bool MicrophoneRecordsTheHostInput()
+{
+	auto audio = CreateAudio();
+	if (audio == nullptr)
+	{
+		return false;
+	}
+	constexpr uint32_t samples = 256;
+	auto               port    = audio->AudioInOpen(0, samples, 48'000, HostAudio::Format::Signed16bitMono, true);
+	if (!Check(port.IsValid(), "could not open a recording input port"))
+	{
+		return false;
+	}
+	std::vector<int16_t> pcm(samples, 0);
+	bool                 recorded = false;
+	for (int grain = 0; grain < 100 && !recorded; grain++)
+	{
+		if (!Check(audio->AudioInInput(port, pcm.data()) == samples, "recording grain returned the wrong sample count"))
+		{
+			return false;
+		}
+		recorded = std::any_of(pcm.begin(), pcm.end(), [](int16_t sample) { return sample != 0; });
+	}
+	// A guest that stops reading must find the port still paced, not a backlog it has to drain.
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	const auto     start   = std::chrono::steady_clock::now();
+	const uint32_t late    = audio->AudioInInput(port, pcm.data());
+	const auto     elapsed = std::chrono::steady_clock::now() - start;
+	return Check(recorded, "the recording port delivered only silence") && Check(late == samples, "late recording grain failed") &&
+	       Check(elapsed < std::chrono::milliseconds(100), "late recording grain stalled") && Check(audio->AudioInClose(port), "recording port did not close");
+}
+
 bool InputPortLifecycle()
 {
 	auto audio = CreateAudio();
@@ -201,9 +249,9 @@ bool RejectsInvalidPacing()
 	}
 	constexpr uint32_t extreme     = std::numeric_limits<uint32_t>::max();
 	const auto         start       = std::chrono::steady_clock::now();
-	const auto         zero_output = audio->AudioOutOpen(0, 0, 48'000, HostAudio::Format::Signed16bitStereo);
+	const auto         zero_output = audio->AudioOutOpen(0, 0, 48'000, HostAudio::Format::Signed16bitStereo, 0);
 	const auto         zero_input  = audio->AudioInOpen(0, 48'000, 0, HostAudio::Format::Signed16bitStereo, false);
-	const auto         output      = audio->AudioOutOpen(0, extreme, 1, HostAudio::Format::Signed16bitStereo);
+	const auto         output      = audio->AudioOutOpen(0, extreme, 1, HostAudio::Format::Signed16bitStereo, 0);
 	const auto         input       = audio->AudioInOpen(0, extreme, 1, HostAudio::Format::Signed16bitStereo, false);
 	const auto         elapsed     = std::chrono::steady_clock::now() - start;
 	return Check(!zero_output.IsValid(), "zero-sample output pacing port was accepted") &&
@@ -221,7 +269,7 @@ bool CloseWhileProducerSleeps()
 		return false;
 	}
 	constexpr uint32_t samples = 4800;
-	auto               port    = audio->AudioOutOpen(0, samples, 48000, HostAudio::Format::Signed16bitStereo);
+	auto               port    = audio->AudioOutOpen(0, samples, 48000, HostAudio::Format::Signed16bitStereo, 0);
 	if (!Check(port.IsValid(), "could not open the lifecycle port"))
 	{
 		return false;
@@ -254,7 +302,12 @@ bool CloseWhileProducerSleeps()
 int main(int argc, char** argv)
 {
 	constexpr const char* output_path = "/tmp/kyty-audio-host-integration.raw";
+	constexpr const char* input_path  = "/tmp/kyty-audio-host-integration-input.raw";
 	std::remove(output_path);
+	if (!WriteRecordingInput(input_path))
+	{
+		return 125;
+	}
 	auto* subsystems = Kyty::Core::SubsystemsListSingleton::Instance();
 	subsystems->SetArgs(argc, argv);
 	auto* core    = Kyty::Core::CoreSubsystem::Instance();
@@ -267,12 +320,14 @@ int main(int argc, char** argv)
 		return 125;
 	}
 	if (!HostClockContract() || !PeriodicIntervalContract() || !GrainPacing() || !FractionalOutputPacing() || !FractionalInputPacing() ||
-	    !InputPortLifecycle() || !RejectsInvalidPacing() || !CloseWhileProducerSleeps())
+	    !InputPortLifecycle() || !MicrophoneRecordsTheHostInput() || !RejectsInvalidPacing() || !CloseWhileProducerSleeps())
 	{
 		std::remove(output_path);
+		std::remove(input_path);
 		return 1;
 	}
 	std::remove(output_path);
+	std::remove(input_path);
 	std::puts("audio host integration passed");
 	return 0;
 }
