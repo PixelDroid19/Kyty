@@ -6009,3 +6009,17 @@ us/draw). `spirv-opt` performance passes do not shrink `eb48c258`'s compile enou
 - **Open.** Demon's Souls still faults on RADV after this change (same address in two of three runs, another in one). The shader of the last
   report samples through a raw register slot of a load the fix should have covered; that report predates the generalised fix, and the fault after
   it has no report yet. The fix is therefore recorded as correct by contract and not as the cure of this title.
+
+## Context request retries in phase with guest sleeps (2026-11-02)
+
+- **Observed.** `EmulatorKernelProcess.ContextRequestsReachSleepingThreads` failed intermittently in CI with both DevTools
+  configurations: request counts stopped at single digits of 200 and the 5 s waits expired. Not reproduced as a failure on the
+  Ryzen 5 7600 host, but the same starvation was measured there.
+- **Cause.** A signal that misses a safe point re-armed a fixed 100 us retry, the sleep length of the test's targets. The retry
+  then kept landing as the sleep returned (`RCX == RIP`, `RAX == 0`, which proves no interrupted syscall), never inside it. On two
+  host cores: 4 903 to 35 149 deferred signals and 444 to 3 728 ms per test, against 84 deferrals and 52 ms with a 105 us period.
+  Every deferral in those runs had that register state, which excludes a lost signal as the cause of the stall.
+- **Change.** Each retry of a thread uses a different delay, 100 to 163 us, so no periodic sleep stays in phase with it. The safe
+  point proof is unchanged.
+- **Verified.** On two cores, 18 to 26 deferrals and 49 to 51 ms over six runs; guest sleeps from 50 to 500 us stayed at 48 to
+  54 ms. Unit and integration suite 108 of 108 with one skipped. No title was run for this change.
