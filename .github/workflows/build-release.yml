@@ -87,12 +87,22 @@ jobs:
               for library in $(objdump -p "$binary" | tr -d '\r' | awk '/DLL Name:/ { print $3 }'); do
                 if [ -f "/mingw64/bin/$library" ] && [ ! -f "dist/$library" ]; then
                   cp "/mingw64/bin/$library" dist/
+                  echo "bundled $library"
                   added="$added dist/$library"
                 fi
               done
             done
             pending="$added"
           done
+          # Every import must now be in the package or in System32; API sets have no file of their own.
+          unresolved=""
+          for binary in $(find dist -name '*.exe' -o -name '*.dll'); do
+            for library in $(objdump -p "$binary" | tr -d '\r' | awk '/DLL Name:/ { print $3 }'); do
+              case "$library" in api-ms-win-*|ext-ms-*) continue ;; esac
+              [ -f "dist/$library" ] || [ -f "/c/Windows/System32/$library" ] || unresolved="$unresolved $binary:$library"
+            done
+          done
+          if [ -n "$unresolved" ]; then echo "unresolved imports:$unresolved"; exit 1; fi
           test -f dist/launcher.exe && test -f dist/Qt6Quick.dll && test -f dist/platforms/qwindows.dll
 
       # With only the system directories on PATH, nothing but the package provides the DLLs, so a missing one
