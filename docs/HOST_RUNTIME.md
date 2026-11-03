@@ -139,8 +139,23 @@ Each of these was checked against what it would change for the guest:
 - **Guest refresh rate.** Vblank events follow the host present loop
   (`game_show_window`), not a fixed clock. A rate setting needs that clock
   first.
-- **Turning off occlusion queries, tessellation or image readback.** Each one
-  skips work the guest asked for.
+- **Turning off occlusion queries, tessellation or image readback.** There is
+  no such work to turn off. Tessellation is not implemented (no tessellation
+  state in `GraphicsRenderPipeline.cpp`), occlusion queries already report a
+  synthetic always-visible result (`CommandProcessor::TriggerEvent`), and on
+  PS5 render targets are never written back to guest memory
+  (`write_back = false` in `GraphicsRenderAttachments.cpp`). Only storage
+  buffers are written back, and they carry the labels the guest waits on.
+  A memory wait already proceeds at once when the value in memory meets its
+  condition (`CommandProcessor::WaitRegMem32`).
+- **Keeping textures as first uploaded.** Measured on 2026-11-03 with a
+  per-game switch that skipped the re-hash and upload of textures (Linux,
+  60 fps limit, 80 s runs). `PPSA03706 - My Friend Peppa Pig` re-hashed
+  textures 5169 times, 5147 of them with new content, for 265 ms in the first
+  minute and none in the next 20 s. `PPSA21402 - Balatro` re-hashed 19 times
+  for 3 ms, and when they were skipped the textures it fills after creating
+  them stayed blank. The work is real content, paid while loading, so skipping it
+  only shows wrong images. The switch was not kept.
 
 A game's "Environment variables" field in the launcher holds `NAME=value`
 pairs separated by `;`, so a value cannot contain `;`. The launcher adds them
