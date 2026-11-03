@@ -43,15 +43,30 @@ jobs:
             mingw-w64-x86_64-spirv-tools
 
       # The official MinGW Qt uses the same msvcrt runtime as MSYS2's MINGW64 toolchain and, unlike MSYS2's Qt,
-      # needs neither ICU nor GLib, which were a third of the package.
+      # needs neither ICU nor GLib, which were a third of the package. aqtinstall cannot read Qt 6.11's
+      # per-toolchain Windows repository, so the archives are fetched directly and checked against pinned hashes.
       - name: Install Qt
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: 6.11.2
-          host: windows
-          target: desktop
-          arch: win64_mingw
-          cache: true
+        shell: bash
+        env:
+          QT_REPO: https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qt6_6112/qt6_6112_mingw/qt.qt6.6112.win64_mingw
+          QT_ARCHIVE_PREFIX: 6.11.2-0-202608131017
+          QT_ARCHIVE_SUFFIX: -Windows-Windows_11_24H2-Mingw-Windows-Windows_11_24H2-X86_64.7z
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/qt" && cd "$RUNNER_TEMP/qt"
+          while read -r module sha256; do
+            archive="${QT_ARCHIVE_PREFIX}${module}${QT_ARCHIVE_SUFFIX}"
+            curl -fsSL --retry 3 -o "$module.7z" "$QT_REPO/$archive"
+            echo "$sha256  $module.7z" | sha256sum -c -
+            7z x -y "$module.7z" > /dev/null
+            rm "$module.7z"
+          done <<'EOF_QT'
+          qtbase 8bbd42aa6b7dbb3ac9c88762bbf6f974e29348054186ef5cb920b105c786d81d
+          qtdeclarative 4dbcc61542dabaa4c391d05e0a641feb33ca0678ceeb809541942466f7e8b881
+          qtsvg ef549555ca64d160a32ea2f794ceb7d05d323a70896e7c55410c0aed24b7ba05
+          qttools a3313f75d62c1fbbdaa6bf65c5ba36bd3b7c7c3bc1b24d6d2d7054c40b3e1dd3
+          EOF_QT
+          echo "QT_ROOT_DIR=$(cygpath -w "$PWD")" >> "$GITHUB_ENV"
 
       - name: Configure
         shell: msys2 {0}
