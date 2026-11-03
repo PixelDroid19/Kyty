@@ -41,15 +41,23 @@ jobs:
             mingw-w64-x86_64-vulkan-loader
             mingw-w64-x86_64-spirv-headers
             mingw-w64-x86_64-spirv-tools
-            mingw-w64-x86_64-qt6-base
-            mingw-w64-x86_64-qt6-declarative
-            mingw-w64-x86_64-qt6-svg
-            mingw-w64-x86_64-qt6-tools
+
+      # The official MinGW Qt uses the same msvcrt runtime as MSYS2's MINGW64 toolchain and, unlike MSYS2's Qt,
+      # needs neither ICU nor GLib, which were a third of the package.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.11.2
+          host: windows
+          target: desktop
+          arch: win64_mingw
+          cache: true
 
       - name: Configure
         shell: msys2 {0}
         run: >-
           cmake -S source -B build -G Ninja
+          -DCMAKE_PREFIX_PATH="$(cygpath -m "$QT_ROOT_DIR")"
           -DCMAKE_BUILD_TYPE=Release
           -DKYTY_PROJECT_NAME=Emulator
           -DKYTY_WARNINGS_ARE_ERRORS=OFF
@@ -73,14 +81,16 @@ jobs:
           Copy-Item build/fc_script.exe dist/
           Copy-Item scripts/run_guest.lua,README.md,CHANGELOG.md,LICENSE dist/
 
-      # windeployqt copies Qt itself; the MinGW runtime, the shader toolchain and Qt's own dependencies
-      # (ICU, HarfBuzz, zstd, ...) come from MSYS2. Import tables are read rather than running ldd, which
-      # starts each binary and missed the emulator's own imports. objdump is a native Windows tool, so its
-      # lines end in CRLF.
+      # windeployqt copies Qt itself; the MinGW runtime and the shader toolchain come from MSYS2. Import tables
+      # are read rather than running ldd, which starts each binary and missed the emulator's own imports.
+      # objdump is a native Windows tool, so its lines end in CRLF.
       - name: Stage MSYS2 runtime libraries
         shell: msys2 {0}
         run: |
           set -euo pipefail
+          # windeployqt copies the runtime of Qt's older MinGW; the binaries built here need MSYS2's
+          # (winpthread's clock_gettime64), which still serves Qt.
+          cp /mingw64/bin/libgcc_s_seh-1.dll /mingw64/bin/libstdc++-6.dll /mingw64/bin/libwinpthread-1.dll dist/
           pending="$(find dist -name '*.exe' -o -name '*.dll')"
           while [ -n "$pending" ]; do
             added=""
