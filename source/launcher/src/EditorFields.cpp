@@ -53,6 +53,7 @@ const QVector<EditorField> SYSTEM_FIELDS = {
     {"controller_vibration", QT_TRANSLATE_NOOP("EditorPageItem", "Vibration strength (0–100)"), FieldType::Number},
     {"controller_light_bar", QT_TRANSLATE_NOOP("EditorPageItem", "Light bar colour"), FieldType::Choice, "controller_light_bar"},
     {"controller_speaker_volume", QT_TRANSLATE_NOOP("EditorPageItem", "Controller speaker volume (0–100)"), FieldType::Number},
+    {"microphone_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Microphone"), FieldType::Toggle},
 };
 
 const QVector<EditorField> SHADER_FIELDS = {
@@ -61,6 +62,7 @@ const QVector<EditorField> SHADER_FIELDS = {
     {"shader_optimization_type", QT_TRANSLATE_NOOP("EditorPageItem", "Optimization"), FieldType::Choice, "shader_optimization_type"},
     {"shader_validation_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Shader validation"), FieldType::Toggle},
     {"vulkan_validation_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Vulkan validation"), FieldType::Toggle},
+    {"renderdoc_capture_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "RenderDoc capture"), FieldType::Toggle},
     {"spirv_debug_printf_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "SPIR-V debug printf"), FieldType::Toggle},
 };
 
@@ -141,6 +143,7 @@ const Help HELP[] = {
     {"controller_vibration", QT_TRANSLATE_NOOP("EditorPageItem", "How strongly the controller follows the vibration games request. 0 turns it off.")},
     {"controller_light_bar", QT_TRANSLATE_NOOP("EditorPageItem", "A colour here replaces the one games choose.")},
     {"controller_speaker_volume", QT_TRANSLATE_NOOP("EditorPageItem", "Sounds games send to the controller's speaker play on the computer at this volume. 0 keeps them silent.")},
+    {"microphone_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Games that listen to a microphone hear the computer's default recording device. Off, they hear silence.")},
     {"presentation_scaling", QT_TRANSLATE_NOOP("EditorPageItem", "Stretch fills the window. Fit keeps the game's shape with black bars. Whole-pixel steps also keeps every pixel the same size while the picture fits the window.")},
     {"addcont_folder", QT_TRANSLATE_NOOP("EditorPageItem", "A folder with one folder per game ID, each holding that game's installed add-ons. Add-ons listed in the game's own dlc_emu.ini are found without it.")},
     {"environment", QT_TRANSLATE_NOOP("EditorPageItem", "Extra settings for the emulator process, as NAME=value pairs separated by ';'.")},
@@ -159,6 +162,8 @@ const Help HELP[] = {
     {"texture_anisotropy", QT_TRANSLATE_NOOP("EditorPageItem", "Sharper textures seen at a slant. It does not change the resolution.")},
     {"vulkan_validation_enabled",
 	 QT_TRANSLATE_NOOP("EditorPageItem", "Checks every graphics call for mistakes. For debugging; games run much slower.")},
+    {"renderdoc_capture_enabled",
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Loads an installed RenderDoc so it can capture frames. The window opens through X11, which RenderDoc needs.")},
     {"printf_direction", QT_TRANSLATE_NOOP("EditorPageItem", "Where the emulator writes what it reports while the game runs.")},
     {"command_buffer_dump_enabled",
 	 QT_TRANSLATE_NOOP("EditorPageItem", "Writes the game's GPU commands to disk, for debugging. Uses a lot of space.")},

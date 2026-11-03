@@ -214,11 +214,13 @@ public:
 	int     controller_vibration       = 100;
 	QString controller_light_bar       = "Guest"; /* A colour name from ControllerLightBarColors(), or Guest */
 	int     controller_speaker_volume  = 0;
+	bool    microphone_enabled         = false;
 
 	// Platform / validation
 	bool                   neo                         = true;
 	bool                   shader_cache_enabled        = true;
 	bool                   vulkan_validation_enabled   = false;
+	bool                   renderdoc_capture_enabled   = false;
 	bool                   shader_validation_enabled   = false;
 	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::None;
 	ShaderLogDirection     shader_log_direction        = ShaderLogDirection::Silent;
@@ -274,9 +276,11 @@ public:
 		s->setValue("controller_vibration", controller_vibration);
 		KYTY_CFG_SET(controller_light_bar);
 		s->setValue("controller_speaker_volume", controller_speaker_volume);
+		s->setValue("microphone_enabled", microphone_enabled);
 		s->setValue("shader_cache_enabled", shader_cache_enabled);
 		KYTY_CFG_SET(neo);
 		KYTY_CFG_SET(vulkan_validation_enabled);
+		KYTY_CFG_SET(renderdoc_capture_enabled);
 		KYTY_CFG_SET(shader_validation_enabled);
 		KYTY_CFG_SET(shader_optimization_type);
 		KYTY_CFG_SET(shader_log_direction);
@@ -379,9 +383,11 @@ public:
 		controller_vibration       = std::clamp(s->value("controller_vibration", 100).toInt(), 0, 100);
 		controller_light_bar       = s->value("controller_light_bar", "Guest").toString();
 		controller_speaker_volume  = std::clamp(s->value("controller_speaker_volume", 0).toInt(), 0, 100);
+		microphone_enabled         = s->value("microphone_enabled", false).toBool();
 		shader_cache_enabled       = s->value("shader_cache_enabled", true).toBool();
 		KYTY_CFG_GET(neo);
 		KYTY_CFG_GET(vulkan_validation_enabled);
+		KYTY_CFG_GET(renderdoc_capture_enabled);
 		KYTY_CFG_GET(shader_validation_enabled);
 		KYTY_CFG_GET(shader_optimization_type);
 		KYTY_CFG_GET(shader_log_direction);

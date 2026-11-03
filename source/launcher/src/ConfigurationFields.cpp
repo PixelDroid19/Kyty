@@ -147,9 +147,11 @@ QVariantMap ConfigurationToFields(const Kyty::Configuration& info)
 	f["controller_vibration"]         = info.controller_vibration;
 	f["controller_light_bar"]         = info.controller_light_bar;
 	f["controller_speaker_volume"]    = info.controller_speaker_volume;
+	f["microphone_enabled"]           = info.microphone_enabled;
 	f["shader_cache_enabled"]         = info.shader_cache_enabled;
 	f["neo"]                          = info.neo;
 	f["vulkan_validation_enabled"]    = info.vulkan_validation_enabled;
+	f["renderdoc_capture_enabled"]    = info.renderdoc_capture_enabled;
 	f["shader_validation_enabled"]    = info.shader_validation_enabled;
 	f["shader_optimization_type"]     = EnumToText(info.shader_optimization_type);
 	f["shader_log_direction"]         = EnumToText(info.shader_log_direction);
@@ -220,6 +222,7 @@ QString ApplyEmulatorFields(const QVariantMap& fields, Kyty::Configuration* info
 	info->controller_vibration        = fields.value("controller_vibration").toInt();
 	info->controller_light_bar        = text("controller_light_bar");
 	info->controller_speaker_volume   = fields.value("controller_speaker_volume").toInt();
+	info->microphone_enabled          = fields.value("microphone_enabled").toBool();
 	info->shader_cache_enabled        = fields.value("shader_cache_enabled").toBool();
 	info->screen_width                = fields.value("screen_width").toInt();
 	info->screen_height               = fields.value("screen_height").toInt();
@@ -233,6 +236,7 @@ QString ApplyEmulatorFields(const QVariantMap& fields, Kyty::Configuration* info
 	info->texture_anisotropy          = TextToEnum<Config::TextureAnisotropy>(text("texture_anisotropy"));
 	info->neo                         = fields.value("neo").toBool();
 	info->vulkan_validation_enabled   = fields.value("vulkan_validation_enabled").toBool();
+	info->renderdoc_capture_enabled   = fields.value("renderdoc_capture_enabled").toBool();
 	info->shader_validation_enabled   = fields.value("shader_validation_enabled").toBool();
 	info->shader_optimization_type    = TextToEnum<Config::ShaderOptimizationType>(text("shader_optimization_type"));
 	info->shader_log_direction        = TextToEnum<Config::ShaderLogDirection>(text("shader_log_direction"));

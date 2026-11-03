@@ -186,6 +186,9 @@ extra variables:
 ENABLE_VULKAN_RENDERDOC_CAPTURE=1 SDL_VIDEODRIVER=x11 RENDERDOC_CAPFILE=<evidence>/frame
 ```
 
+The launcher's "RenderDoc capture" switch sets the first two; a game's
+environment variables field can add `RENDERDOC_CAPFILE`.
+
 The layer hides `VK_KHR_wayland_surface`, so the window must use X11
 (XWayland on Wayland desktops). It also hides `VK_EXT_external_memory_host`;
 guest device addressing then imports direct memory as a dma-buf and keeps

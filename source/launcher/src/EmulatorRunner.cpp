@@ -116,6 +116,7 @@ bool CreateLuaScript(const Kyty::Configuration& info, const QString& input_profi
 	s << "\t ControllerVibration = " << info.controller_vibration << ";\n";
 	s << "\t ControllerLightBar = " << LuaQuote(ControllerLightBarHex(info.controller_light_bar)) << ";\n";
 	s << "\t ControllerSpeakerVolume = " << info.controller_speaker_volume << ";\n";
+	s << "\t MicrophoneEnabled = " << (info.microphone_enabled ? "true" : "false") << ";\n";
 	s << "\t ShaderCacheEnabled = " << (info.shader_cache_enabled ? "true" : "false") << ";\n";
 	s << "\t Neo = " << (info.neo ? "true" : "false") << ";\n";
 	s << "\t VulkanValidationEnabled = " << (info.vulkan_validation_enabled ? "true" : "false") << ";\n";
@@ -325,8 +326,14 @@ QString EmulatorRunner::Start(const Kyty::Configuration& info, const QString& mo
 	{
 		return QCoreApplication::translate("Launcher", "Environment variables must be NAME=value pairs separated by ';'");
 	}
-	// The game's own variables on top of the launcher's environment.
 	auto environment = QProcessEnvironment::systemEnvironment();
+	if (info.renderdoc_capture_enabled)
+	{
+		// The capture layer's own switch; the layer does not hook Wayland surfaces.
+		environment.insert("ENABLE_VULKAN_RENDERDOC_CAPTURE", "1");
+		environment.insert("SDL_VIDEODRIVER", "x11");
+	}
+	// The game's own variables on top of the launcher's environment.
 	for (const auto& [name, value]: variables)
 	{
 		environment.insert(name, value);
