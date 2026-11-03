@@ -111,7 +111,7 @@ runtime, and a value out of range ends the start with an error.
 | `FullscreenEnabled` | boolean (`false`) | Enters full screen when the window opens. |
 | `HideCursorEnabled` | boolean (`false`) | Hides the cursor in windowed mode too. |
 | `PerfOverlayEnabled` | boolean (`false`) | Shows the performance overlay from the first frame. |
-| `ShaderCacheEnabled` | boolean (`true`) | Off neither reads nor writes the SPIR-V and pipeline caches on disk. |
+| `ShaderCacheEnabled` | boolean (`true`) | Off neither reads nor writes the SPIR-V, pipeline and compute pipeline recipe caches on disk. |
 | `ConsoleLanguage` | `0` to `29` (`1`) | The value of the system language parameter guests read. |
 | `UserName` | 1 to 16 UTF-8 bytes (`Kyty`) | The name of the user service and of the online id. It is not part of save paths. |
 | `NoticeScreenSkipEnabled` | boolean (`false`) | The answer guests get when they ask whether a start notice may be skipped. |

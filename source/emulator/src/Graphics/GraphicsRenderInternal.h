@@ -769,7 +769,8 @@ public:
 	RenderContext()
 	    : m_pipeline_cache(new PipelineCache), m_descriptor_cache(new DescriptorCache), m_framebuffer_cache(new FramebufferCache),
 	      m_sampler_cache(new SamplerCache),
-	      m_shader_translation_cache(new ShaderTranslationCache(16384, &SpirvBinaryCacheDefaultStore(), Config::ShaderValidationEnabled())),
+	      m_shader_translation_cache(new ShaderTranslationCache(16384, Config::ShaderCacheEnabled() ? &SpirvBinaryCacheDefaultStore() : nullptr,
+	                                                                  Config::ShaderValidationEnabled())),
 	      m_gds_buffer(new GdsBuffer), m_vertex_clip_probe_renderer(new VertexClipProbeRenderer)
 	{
 		if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); }
