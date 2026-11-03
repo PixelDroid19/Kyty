@@ -4,6 +4,7 @@
 #include "Configuration.h"
 #include "ConfigurationFields.h"
 #include "GamepadInput.h"
+#include "GamePatchMods.h"
 #include "GpuDevices.h"
 #include "Psf.h"
 #include "Theme.h"
@@ -991,6 +992,15 @@ QVariantMap LauncherBackend::SaveGame(int row, const QVariantMap& fields)
 	{
 		result["error"] = tr("A game is running. Changes can be saved after it closes.");
 		return result;
+	}
+	// The mods go first: a form error leaves them saved, which saving again repeats harmlessly.
+	if (const auto mods = fields.value("game_mods").toList(); !mods.isEmpty())
+	{
+		if (const auto error = WritePatchMods(fields.value("game_patch_file").toString().trimmed(), mods); !error.isEmpty())
+		{
+			result["error"] = error;
+			return result;
+		}
 	}
 
 	if (row < 0)

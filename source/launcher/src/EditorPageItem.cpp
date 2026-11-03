@@ -3,6 +3,7 @@
 #include "EditorFields.h"
 #include "FieldFormItem.h"
 #include "FocusButtonItem.h"
+#include "GamePatchMods.h"
 #include "LauncherBackend.h"
 #include "SceneNodes.h"
 #include "TextPadItem.h"
@@ -99,6 +100,7 @@ void EditorPageItem::OpenGame(int row, const QVariantMap& fields)
 	{
 		values["elfs"] = LauncherBackend::Instance()->ScanElfs(values.value("basedir").toString(), values.value("elfs").toList());
 	}
+	values["game_mods"] = ReadPatchMods(values.value("game_patch_file").toString());
 	m_row = row;
 	m_error.clear();
 	m_status.clear();

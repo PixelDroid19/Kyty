@@ -492,6 +492,10 @@
             <translation>Шейдеры и проверка</translation>
         </message>
         <message>
+            <source>Mods</source>
+            <translation>Моды</translation>
+        </message>
+        <message>
             <source>Add-on content folder</source>
             <translation>Папка дополнений</translation>
         </message>
@@ -722,6 +726,10 @@
         <message>
             <source>Stretch fills the window. Fit keeps the game's shape with black bars. Whole-pixel steps also keeps every pixel the same size while the picture fits the window.</source>
             <translation>«Растянуть» заполняет окно. «Вписать» сохраняет пропорции игры с чёрными полосами. «Целые пиксели» также сохраняет одинаковый размер пикселей, пока изображение помещается в окно.</translation>
+        </message>
+        <message>
+            <source>The mods of the game patch file. Saving the game writes these switches to the file; a test run uses the file as saved.</source>
+            <translation>Моды файла патчей игры. При сохранении игры эти переключатели записываются в файл; тестовый запуск использует файл в сохранённом виде.</translation>
         </message>
         <message>
             <source>A folder with one folder per game ID, each holding that game's installed add-ons. Add-ons listed in the game's own dlc_emu.ini are found without it.</source>
@@ -1195,8 +1203,16 @@
             <translation>Пересканировать</translation>
         </message>
         <message>
+            <source>Reload mods</source>
+            <translation>Перезагрузить моды</translation>
+        </message>
+        <message>
             <source>Browse…</source>
             <translation>Обзор…</translation>
+        </message>
+        <message>
+            <source>The game patch file has no mods, or it cannot be read.</source>
+            <translation>В файле патчей игры нет модов, или его не удаётся прочитать.</translation>
         </message>
         <message>
             <source>No modules found yet. Set the game folder, then rescan.</source>
@@ -1319,6 +1335,25 @@
         <message>
             <source>Open game folder</source>
             <translation>Открыть папку игры</translation>
+        </message>
+    </context>
+    <context>
+        <name>GamePatchMods</name>
+        <message>
+            <source>The game patch file cannot be read.</source>
+            <translation>Не удаётся прочитать файл патчей игры.</translation>
+        </message>
+        <message>
+            <source>The game patch file is not a patch file.</source>
+            <translation>Файл патчей игры не является файлом патчей.</translation>
+        </message>
+        <message>
+            <source>The game patch file changed after its mods were shown. Reload the mods and save again.</source>
+            <translation>Файл патчей игры изменился после показа его модов. Перезагрузите моды и сохраните снова.</translation>
+        </message>
+        <message>
+            <source>The game patch file cannot be written.</source>
+            <translation>Не удаётся записать файл патчей игры.</translation>
         </message>
     </context>
     <context>

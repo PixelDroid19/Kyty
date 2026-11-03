@@ -490,6 +490,10 @@
             <translation>Shaders y validación</translation>
         </message>
         <message>
+            <source>Mods</source>
+            <translation>Mods</translation>
+        </message>
+        <message>
             <source>Add-on content folder</source>
             <translation>Carpeta de contenido adicional</translation>
         </message>
@@ -720,6 +724,10 @@
         <message>
             <source>Stretch fills the window. Fit keeps the game's shape with black bars. Whole-pixel steps also keeps every pixel the same size while the picture fits the window.</source>
             <translation>Estirar llena la ventana. Ajustar mantiene la forma del juego con franjas negras. Píxeles enteros además mantiene todos los píxeles del mismo tamaño mientras la imagen quepa en la ventana.</translation>
+        </message>
+        <message>
+            <source>The mods of the game patch file. Saving the game writes these switches to the file; a test run uses the file as saved.</source>
+            <translation>Los mods del archivo de parches del juego. Al guardar el juego se escriben estos interruptores en el archivo; una prueba usa el archivo tal como está guardado.</translation>
         </message>
         <message>
             <source>A folder with one folder per game ID, each holding that game's installed add-ons. Add-ons listed in the game's own dlc_emu.ini are found without it.</source>
@@ -1193,8 +1201,16 @@
             <translation>Volver a buscar</translation>
         </message>
         <message>
+            <source>Reload mods</source>
+            <translation>Recargar mods</translation>
+        </message>
+        <message>
             <source>Browse…</source>
             <translation>Examinar…</translation>
+        </message>
+        <message>
+            <source>The game patch file has no mods, or it cannot be read.</source>
+            <translation>El archivo de parches del juego no tiene mods o no se puede leer.</translation>
         </message>
         <message>
             <source>No modules found yet. Set the game folder, then rescan.</source>
@@ -1317,6 +1333,25 @@
         <message>
             <source>Open game folder</source>
             <translation>Abrir la carpeta del juego</translation>
+        </message>
+    </context>
+    <context>
+        <name>GamePatchMods</name>
+        <message>
+            <source>The game patch file cannot be read.</source>
+            <translation>No se puede leer el archivo de parches del juego.</translation>
+        </message>
+        <message>
+            <source>The game patch file is not a patch file.</source>
+            <translation>El archivo de parches del juego no es un archivo de parches.</translation>
+        </message>
+        <message>
+            <source>The game patch file changed after its mods were shown. Reload the mods and save again.</source>
+            <translation>El archivo de parches del juego cambió después de mostrar sus mods. Recarga los mods y guarda de nuevo.</translation>
+        </message>
+        <message>
+            <source>The game patch file cannot be written.</source>
+            <translation>No se puede escribir el archivo de parches del juego.</translation>
         </message>
     </context>
     <context>

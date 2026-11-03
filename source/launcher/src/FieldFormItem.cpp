@@ -2,6 +2,7 @@
 
 #include "ChoiceListItem.h"
 #include "FieldRowItem.h"
+#include "GamePatchMods.h"
 #include "LauncherBackend.h"
 #include "TextFieldItem.h"
 #include "TextPadItem.h"
@@ -134,6 +135,10 @@ void FieldFormItem::SetField(const QString& key, const QVariant& value)
 	if (key == QLatin1String("basedir"))
 	{
 		values["elfs"] = backend->ScanElfs(value.toString(), values.value("elfs").toList());
+	}
+	if (key == QLatin1String("game_patch_file"))
+	{
+		values["game_mods"] = ReadPatchMods(value.toString());
 	}
 	SetValues(values);
 	emit Edited(key);

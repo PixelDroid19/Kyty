@@ -31,6 +31,8 @@ enum class FieldType
 	Choice,
 	Path,
 	Modules,
+	// The mods of the game patch file, switched on and off like modules.
+	Mods,
 	Params,
 };
 
@@ -104,6 +106,7 @@ private:
 	bool             m_shown = true;
 	QVariant         m_value;
 	QString          m_basedir;
+	QString          m_patch_file;
 	QStringList      m_choices;
 	QString          m_params_file;
 	QVariantList     m_params;
@@ -112,7 +115,7 @@ private:
 	ChoiceItem*      m_choice = nullptr;
 	FocusButtonItem* m_minus  = nullptr;
 	FocusButtonItem* m_plus   = nullptr;
-	// Browse on a path field, Rescan on the modules.
+	// Browse on a path field, Rescan on the modules, Reload on the mods.
 	FocusButtonItem*          m_button = nullptr;
 	QVector<ModuleRowItem*>   m_modules;
 	QVector<PageLayout::Text> m_texts;
