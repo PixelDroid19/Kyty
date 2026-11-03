@@ -74,7 +74,8 @@ jobs:
 
       # windeployqt copies Qt itself; the MinGW runtime, the shader toolchain and Qt's own dependencies
       # (ICU, HarfBuzz, zstd, ...) come from MSYS2. Import tables are read rather than running ldd, which
-      # starts each binary and missed the emulator's own imports.
+      # starts each binary and missed the emulator's own imports. objdump is a native Windows tool, so its
+      # lines end in CRLF.
       - name: Stage MSYS2 runtime libraries
         shell: msys2 {0}
         run: |
@@ -83,7 +84,7 @@ jobs:
           while [ -n "$pending" ]; do
             added=""
             for binary in $pending; do
-              for library in $(objdump -p "$binary" | awk '/DLL Name:/ { print $3 }'); do
+              for library in $(objdump -p "$binary" | tr -d '\r' | awk '/DLL Name:/ { print $3 }'); do
                 if [ -f "/mingw64/bin/$library" ] && [ ! -f "dist/$library" ]; then
                   cp "/mingw64/bin/$library" dist/
                   added="$added dist/$library"
