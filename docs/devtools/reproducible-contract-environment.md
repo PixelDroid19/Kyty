@@ -72,6 +72,13 @@ emulator after extracting without a configured path. Its `RPATH` points at
 `lib/`, so `fc_script`, which it starts, does not inherit the bundled Qt
 libraries.
 
+Both binaries ship without debug info. It goes to a second archive,
+`kyty-<version>-linux-x64-debug.tar.gz`, with `fc_script.debug` and
+`launcher.debug`; each binary carries a debug link to its file. To resolve a
+crash address, run `addr2line -e fc_script.debug -f -C <address>`, or put the
+`.debug` files next to the binaries and start `gdb`. The Windows release does
+the same in `kyty-<version>-windows-x64-debug.zip`.
+
 ```bash
 CMAKE_PREFIX_PATH=/path/to/Qt/6.11.2/gcc_64 scripts/package_linux.sh _build_linux_package dist/kyty-local-linux-x64.tar.gz
 ```
