@@ -70,6 +70,15 @@ enum class PresentationFilter
 	Fsr3
 };
 
+// How the frame fills the window. Fit keeps its shape with black bars;
+// Integer also keeps whole-pixel multiples while the frame fits the window.
+enum class PresentationScaling
+{
+	Stretch,
+	Fit,
+	Integer
+};
+
 // How finished frames reach the screen. Mailbox falls back to Immediate and
 // Immediate to Fifo, the one mode every Vulkan surface has.
 enum class PresentMode
@@ -110,6 +119,7 @@ RenderResolutionScope GetRenderResolutionScope();
 uint32_t GetRenderResolutionWidth();
 uint32_t GetRenderResolutionHeight();
 PresentationFilter GetPresentationFilter();
+PresentationScaling GetPresentationScaling();
 uint32_t GetPresentationFsrSharpness();
 uint32_t GetPresentFpsLimit();
 TextureAnisotropy GetTextureAnisotropy();
@@ -127,6 +137,10 @@ bool    NoticeScreenSkipEnabled();
 bool    NetworkConnected();
 // Percentage applied to the vibration games request.
 uint32_t GetControllerVibration();
+// Light bar colour shown instead of the guest's, as 0xRRGGBB; negative leaves it to the guest.
+int32_t GetControllerLightBar();
+// Volume of the controller speaker port on the host output; 0 keeps it silent.
+uint32_t GetControllerSpeakerVolume();
 bool     IsNeo();
 bool     IsNextGen();
 bool     VulkanValidationEnabled();

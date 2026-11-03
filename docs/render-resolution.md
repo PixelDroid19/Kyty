@@ -15,6 +15,8 @@ The active render-resolution keys are:
 - `RenderResolutionWidth`: fixed render target width. The default is `1280`.
 - `RenderResolutionHeight`: fixed render target height. The default is `720`.
 - `PresentationFilter`: `Linear`, `Nearest`, `Fsr` or `Fsr3`.
+- `PresentationScaling`: `Stretch` (default), `Fit` or `Integer`. See
+  [Presentation](#presentation).
 - `PresentationFsrSharpness`: RCAS sharpness for `Fsr` and `Fsr3`, `0` to `100`. The
   default is `90`.
 - `TextureAnisotropy`: `Guest` (default), `X2`, `X4`, `X8` or `X16`. `Guest`
@@ -165,8 +167,23 @@ receive an explicit reduced host-to-guest fraction in shader identity.
 
 Presentation scaling is intentionally separate from render planning. The
 presentation stage consumes one final image and scales it into the swapchain
-using the configured filter after validating Vulkan support. It preserves the
-current framing and aspect-ratio policy.
+using the configured filter after validating Vulkan support.
+
+`PresentationScaling` decides the part of the window the image covers:
+
+- `Stretch` fills the whole window, whatever its shape.
+- `Fit` keeps the image's shape: the largest centred rectangle of that shape,
+  with black bars on the two remaining sides.
+- `Integer` scales by the largest whole factor that fits, centred, so every
+  source pixel covers the same number of window pixels. An image larger than
+  the window falls back to `Fit`.
+
+When the view is smaller than the window, the filter path writes a stage image
+of the view's extent in the swapchain format. The swapchain image is cleared
+black and the stage is copied into its centre. The filters, FSR included, then
+scale to the view's extent instead of the window's. Verified on Intel with a
+16:9 final image in a 1280x800 window under `Fit`: window rows 0 to 39
+and 760 to 799 are black and the image fills 1280x720 between them.
 
 `Fsr` upscales the final image with AMD FidelityFX Super Resolution 1.0 (MIT,
 `source/3rdparty/fidelityfx_fsr1`):

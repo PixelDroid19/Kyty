@@ -4,6 +4,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/AudioPcm.h"
+#include "Emulator/Config.h"
 #include "Emulator/Host/Clock.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
@@ -161,7 +162,9 @@ HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t f
 		}
 		std::fill_n(port.volume, port.channels_num, 32768);
 
-		if (type == 0 || type == 1)
+		// The controller speaker port plays on the host output only at a volume above 0.
+		const bool speaker = type == 4 && Config::GetControllerSpeakerVolume() > 0;
+		if (type == 0 || type == 1 || speaker)
 		{
 			port.pcm_format = (format == Format::Signed16bitMono || format == Format::Signed16bitStereo ||
 			                   format == Format::Signed16bit8Ch || format == Format::Signed16bit8ChStd)
@@ -174,6 +177,11 @@ HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t f
 			SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, std::to_string(samples_num).c_str());
 			port.stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
 			if (port.stream == nullptr)
+			{
+				Impl::CloseOutputPort(&port);
+				return Id::Invalid();
+			}
+			if (speaker && !SDL_SetAudioStreamGain(port.stream, static_cast<float>(Config::GetControllerSpeakerVolume()) / 100.0f))
 			{
 				Impl::CloseOutputPort(&port);
 				return Id::Invalid();

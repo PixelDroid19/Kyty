@@ -117,6 +117,9 @@ runtime, and a value out of range ends the start with an error.
 | `NoticeScreenSkipEnabled` | boolean (`false`) | The answer guests get when they ask whether a start notice may be skipped. |
 | `NetworkConnected` | boolean (`true`) | Off reports the network state as disconnected and fails network info requests with the not-connected code. |
 | `ControllerVibration` | `0` to `100` (`100`) | Scales guest vibration requests before they reach the host pad. |
+| `ControllerLightBar` | `#RRGGBB` (empty) | Replaces the light bar colour the guest sets, from the moment the pad connects. Empty forwards the guest's colour. |
+| `ControllerSpeakerVolume` | `0` to `100` (`0`) | Plays the guest's pad speaker port on the default host output at this gain. `0` keeps that port silent. |
+| `PresentationScaling` | `Stretch`, `Fit`, `Integer` (`Stretch`) | How the final image fills the window; see [render-resolution.md](render-resolution.md#presentation). |
 
 ## Audio pause and queueing
 
