@@ -5,10 +5,12 @@
 #include "Configuration.h"
 #include "EmulatorRunner.h"
 #include "GameLibrary.h"
+#include "GameTrophies.h"
 #include "InputProfiles.h"
 #include "ThemePack.h"
 
 #include <QFont>
+#include <QLocale>
 #include <QObject>
 #include <QRect>
 #include <QString>
@@ -116,6 +118,8 @@ public:
 	// Finds the games below folder in the background and adds the ones not listed yet; reports FolderImported().
 	QString      ImportFolder(const QString& folder);
 	QVariantList ScanElfs(const QString& basedir, const QVariantList& current) const;
+	// The game's trophies with what the emulator recorded of them, named in the interface language when the set has it.
+	[[nodiscard]] QVector<GameTrophy> Trophies(int row) const;
 	QVariantList ParamEntries(const QString& param_file) const;
 	void         SetEmulatorPath(const QString& path);
 	// Applies and remembers one of LauncherFields().
@@ -152,6 +156,7 @@ private:
 	void                                        AddImported(const QList<QVariantMap>& games, int found);
 	void                                        ApplyColorScheme();
 	void                                        ApplyLanguage();
+	[[nodiscard]] QLocale                       InterfaceLocale() const;
 	void                                        ReadAddOns();
 	void                                        ApplyLook();
 	void                                        ApplyTheme();

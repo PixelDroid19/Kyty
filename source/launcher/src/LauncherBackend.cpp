@@ -977,12 +977,43 @@ void LauncherBackend::ReadAddOns()
 void LauncherBackend::ApplyLanguage()
 {
 	QCoreApplication::removeTranslator(&m_translator);
-	const QLocale locale = m_language == QLatin1String(SYSTEM_CHOICE) ? QLocale::system() : QLocale(m_language);
+	const QLocale locale = InterfaceLocale();
 	// English needs no translation; any other language without one stays in English too.
 	if (m_translator.load(locale, "launcher", "_", ":/i18n"))
 	{
 		QCoreApplication::installTranslator(&m_translator);
 	}
+}
+
+QLocale LauncherBackend::InterfaceLocale() const
+{
+	return m_language == QLatin1String(SYSTEM_CHOICE) ? QLocale::system() : QLocale(m_language);
+}
+
+QVector<GameTrophy> LauncherBackend::Trophies(int row) const
+{
+	if (row < 0 || row >= m_library.Count())
+	{
+		return {};
+	}
+	const auto& game = m_library.At(row);
+	const auto& info = *game.config;
+	// The save-data root the emulator uses: KYTY_SAVEDATA_DIR from the game's variables over the launcher's own, else
+	// user/savedata beside the emulator.
+	auto                           save_root = qEnvironmentVariable("KYTY_SAVEDATA_DIR");
+	QList<QPair<QString, QString>> variables;
+	if (ParseEnvironment(info.environment, &variables))
+	{
+		for (const auto& [name, value]: variables)
+		{
+			save_root = name == QLatin1String("KYTY_SAVEDATA_DIR") ? value : save_root;
+		}
+	}
+	if (save_root.isEmpty() && !EmulatorPath().isEmpty())
+	{
+		save_root = QFileInfo(QFileInfo(EmulatorPath()).canonicalFilePath()).absoluteDir().filePath("user/savedata");
+	}
+	return ReadGameTrophies(info.basedir, TrophyProgressFile(save_root, game.param.serial), InterfaceLocale());
 }
 
 QVariantMap LauncherBackend::SaveGame(int row, const QVariantMap& fields)

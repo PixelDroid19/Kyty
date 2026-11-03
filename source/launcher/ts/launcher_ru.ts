@@ -1273,6 +1273,34 @@
             <translation>%1 ч %2 мин</translation>
         </message>
         <message>
+            <source>Platinum</source>
+            <translation>Платиновый</translation>
+        </message>
+        <message>
+            <source>Gold</source>
+            <translation>Золотой</translation>
+        </message>
+        <message>
+            <source>Silver</source>
+            <translation>Серебряный</translation>
+        </message>
+        <message>
+            <source>Bronze</source>
+            <translation>Бронзовый</translation>
+        </message>
+        <message>
+            <source>Unlocked %1</source>
+            <translation>Получен %1</translation>
+        </message>
+        <message>
+            <source>Progress %1 of %2</source>
+            <translation>Прогресс: %1 из %2</translation>
+        </message>
+        <message>
+            <source>Locked</source>
+            <translation>Не получен</translation>
+        </message>
+        <message>
             <source>Select</source>
             <translation>Выбрать</translation>
         </message>
@@ -1319,6 +1347,14 @@
         <message>
             <source>In no section</source>
             <translation>Ни в одном разделе</translation>
+        </message>
+        <message>
+            <source>Trophies  ·  %1 of %2 unlocked</source>
+            <translation>Трофеи  ·  получено %1 из %2</translation>
+        </message>
+        <message>
+            <source>Hidden trophy</source>
+            <translation>Скрытый трофей</translation>
         </message>
         <message>
             <source>Stop game</source>
