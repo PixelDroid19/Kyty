@@ -6,6 +6,8 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+Later records: pipeline stalls and free-list corruption in `docs/bringup/cross-title.md` (2026-11-01).
+
 ## Mechanical-fist platformer startup frontier (2026-10-08, not gameplay)
 
 These runs used the full local candidate, including changes held from publication. They used Silent logging,
@@ -218,3 +220,30 @@ localization are verified; the startup race, buffer materialization and gameplay
 Also observed in the regression sweep: the isometric roguelike faulted twice (9-11 s, of six runs) in a host `memcpy`
 called by the guest at eboot+0x308054, a row copy into a staging buffer whose base pointer, returned through the
 out-parameter of eboot+0x31a8e0, is null. It advanced in the other runs, including the full 163-second route.
+
+## Boot chain past the first scene (2026-10-31)
+
+`PPSA03969 - F.I.S.T.: Forged In Shadow Torch` on the Intel Arc A770 (ANV 26.2.5, xe). Each stop below was refused by a
+strict run and resolved in its own commit.
+
+- **Extended user data read outside the static table:** `SLoadDwordx4 s[32:35], s[28:29], 896` at `pc=4` of a stage 2
+  program. Such a range is now read through the guest address.
+- **Exec-or-zero select in the NGG uniformity proof:** `S_CSELECT_B64` between EXEC and zero.
+- **Constant sampler assembled from 64-bit writes:** a pixel program reuses `s[16:19]` first as a V# and then builds an S#
+  with `S_MOV_B64` and `S_BFM_B64`. The constant scalar flow now tracks both.
+- **DPP on `v_cvt_u32_f32`:** words `0x7e080efa 0xff08f504`, quad permutation `0xf5`.
+- **Volume T# read with a flat DIM:** a type 10 T# of depth 64 with a 2D instruction shape stopped first on a volume to
+  array copy and then on an array alias view. The T# type now keeps its shape. Confirmed separate from the next item:
+  with only that item, the copy stop returned twice.
+- **Stale z export format:** program `crc 82ba8816` was bound with `tm=0`, `mrt=0`, no kill and no z export in
+  `DB_SHADER_CONTROL`, and only `SPI_SHADER_Z_FORMAT=1` made the stage required. Its table held eight T#s where the program
+  expects samplers, so its S#s were T# halves (`conflicting sampler gamma`). The program and the format were left by an
+  earlier draw. The format no longer requires the stage.
+
+**Verified:** 150 s strict run past the intro load, with 506 flips at 17 ms in one 22 s window and no stop. `PPSA21567 -
+Astro Bot` kept its route at 17.9 fps (spread 2.5 fps), `PPSA09076 - DREDGE` kept 36.9 fps. Unit suites 107 of 108 pass, one
+skipped by its own guard.
+
+**Open:** the last capture shows a dark fade with thin blue vertical streaks, not yet confirmed as correct or as gameplay.
+Frames reach 100-180 ms while pipelines compile cold on the graphics thread (8 of 10 stack samples in pipeline creation,
+660 pipeline misses in one 25 s window). These windows looked like a hang until they were sampled.

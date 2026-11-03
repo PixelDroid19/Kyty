@@ -50,6 +50,8 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 
 	inst.src[0].swizzle  = static_cast<uint8_t>(src0_sel);
 	inst.src[1].swizzle  = static_cast<uint8_t>(src1_sel);
+	inst.src[0].sdwa_sext = sdwa && ((buffer[1] >> 19u) & 1u) != 0u;
+	inst.src[1].sdwa_sext = sdwa && ((buffer[1] >> 27u) & 1u) != 0u;
 	inst.src[0].absolute = (src0_abs != 0);
 	inst.src[1].absolute = (src1_abs != 0);
 	inst.src[0].negate   = (src0_neg != 0);

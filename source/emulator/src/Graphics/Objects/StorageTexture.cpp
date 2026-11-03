@@ -69,7 +69,7 @@ static bool IsR32SingleComponentStorageFormat(uint32_t fmt)
 // identity mapping, whatever their guest selector.
 static bool IsIdentityViewStorageFormat(uint32_t fmt)
 {
-	return fmt == 5u || fmt == 7u || fmt == 11u || fmt == 13u || fmt == 14u || fmt == 62u;
+	return fmt == 5u || fmt == 7u || fmt == 11u || fmt == 13u || fmt == 14u || fmt == 18u || fmt == 23u || fmt == 62u;
 }
 
 // `format` is the packed PARAM_FORMAT (fmt << 16 | dfmt << 8 | nfmt).
@@ -328,10 +328,11 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	}
 
 	TileSizeOffset level_sizes[16];
+	TilePaddedSize padded_sizes[16];
 
 	if (fmt != 0)
 	{
-		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, nullptr);
+		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, padded_sizes);
 	} else
 	{
 		TileGetTextureSize(dfmt, nfmt, width, height, pitch, levels, tile, neo, nullptr, level_sizes, nullptr);
@@ -342,6 +343,11 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	uint32_t mip_width  = width;
 	uint32_t mip_height = height;
 	uint32_t mip_pitch  = pitch;
+	// A GFX10 linear mip chain stores every level with its row pitch aligned to
+	// 256 bytes. The halved pitch of the other layouts would read the rows of
+	// such a level from the wrong offsets.
+	const uint32_t format_bpp = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
+	const bool     linear_chain = tile == 0 && levels > 1u && format_bpp != 0u && 256u % format_bpp == 0u;
 
 	// A mip backing has real levels and nothing is packed into an atlas. Linear guest memory holds
 	// every level; the tiled layouts have no level layout here, so guest memory seeds level 0 only and
@@ -360,7 +366,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		regions[i].offset    = level_sizes[i].offset;
 		regions[i].width     = mip_width;
 		regions[i].height    = mip_height;
-		regions[i].pitch     = mip_pitch;
+		regions[i].pitch     = linear_chain ? padded_sizes[i].width : mip_pitch;
 		regions[i].dst_level = mip_backing ? i : 0;
 		regions[i].dst_x     = mipmap_offset.first;
 		regions[i].dst_y     = mipmap_offset.second;
@@ -429,16 +435,20 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		}
 		auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
 		std::memset(temp_buf, 0, static_cast<size_t>(linear_bytes));
-		const auto* src = reinterpret_cast<const uint8_t*>(*vaddr);
-		for (uint32_t y = 0; y < static_cast<uint32_t>(height); y++)
+		TileDetileRequest detile {};
+		detile.dst               = temp_buf;
+		detile.src               = reinterpret_cast<const void*>(*vaddr);
+		detile.width             = static_cast<uint32_t>(width);
+		detile.height            = static_cast<uint32_t>(height);
+		detile.pitch_elems       = pitch_elems;
+		detile.dst_pitch_elems   = pitch_elems;
+		detile.bytes_per_element = bytes_per_element;
+		detile.layout            = (tile == 9) ? TileDetileLayout::Standard64KB : TileDetileLayout::Sw64kRx;
+		detile.src_bytes         = *size;
+		if (!TileDetile(detile))
 		{
-			for (uint32_t x = 0; x < static_cast<uint32_t>(width); x++)
-			{
-				const uint64_t tiled  = (tile == 9) ? TileGetStandard64KBOffset(x, y, pitch_elems, bytes_per_element)
-				                                    : TileGetSw64kRxOffset(x, y, pitch_elems, bytes_per_element);
-				const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * bytes_per_element;
-				std::memcpy(temp_buf + linear, src + tiled, bytes_per_element);
-			}
+			delete[] temp_buf;
+			EXIT("Gen5 storage detile failed for tile=%u bpe=%u\n", static_cast<unsigned>(tile), bytes_per_element);
 		}
 		regions[0].offset = 0;
 		regions[0].pitch  = pitch_elems;
@@ -764,6 +774,7 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 		}
 	}
 
+	UtilAwaitImageFill(vk_obj);
 	vkDestroyImage(ctx->device, vk_obj->image, nullptr);
 
 	VulkanFree(ctx, mem);
@@ -793,6 +804,11 @@ bool StorageTextureObject::Equal(const uint64_t* other) const
 	            NormalizeStorageTextureSwizzle(other[PARAM_FORMAT], other[PARAM_SWIZZLE]) &&
 	        params[PARAM_RESOURCE_TYPE] == other[PARAM_RESOURCE_TYPE] && params[PARAM_DEPTH] == other[PARAM_DEPTH] &&
 	        same_layer && params[PARAM_SKIP_SEED] == other[PARAM_SKIP_SEED]);
+}
+
+bool StorageTextureGuestIsGen5()
+{
+	return GuestIsGen5();
 }
 
 bool StorageTextureUsesMipBacking(const uint64_t* params, bool gen5)
@@ -847,21 +863,53 @@ uint32_t StorageTextureMipBackingLevels(const uint64_t* params, bool gen5)
 	return std::min(full, static_cast<uint32_t>(VulkanImage::VIEW_STORAGE_MIP_COUNT));
 }
 
-bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming, bool exact_range)
+bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming, bool compare_layout)
 {
 	return existing[StorageTextureObject::PARAM_FORMAT] != incoming[StorageTextureObject::PARAM_FORMAT] ||
-	       (exact_range && existing[StorageTextureObject::PARAM_WIDTH_HEIGHT] != incoming[StorageTextureObject::PARAM_WIDTH_HEIGHT]);
+	       existing[StorageTextureObject::PARAM_TILE] != incoming[StorageTextureObject::PARAM_TILE] ||
+	       (compare_layout && (existing[StorageTextureObject::PARAM_WIDTH_HEIGHT] != incoming[StorageTextureObject::PARAM_WIDTH_HEIGHT] ||
+	                           existing[StorageTextureObject::PARAM_PITCH] != incoming[StorageTextureObject::PARAM_PITCH]));
 }
 
-bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool exact_range)
+bool StorageTextureViewsMipTail(const uint64_t* chain, uint64_t chain_address, const uint64_t* view, uint64_t view_address,
+                                uint64_t view_size)
+{
+	const auto chain_levels = static_cast<uint32_t>(chain[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu);
+	if (chain[StorageTextureObject::PARAM_TILE] != 9u || view[StorageTextureObject::PARAM_TILE] != 9u ||
+	    chain[StorageTextureObject::PARAM_FORMAT] != view[StorageTextureObject::PARAM_FORMAT] ||
+	    (view[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu) != 1u || view[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u ||
+	    view[StorageTextureObject::PARAM_DEPTH] != 1u || !StorageTextureUsesMipBacking(chain, true))
+	{
+		return false;
+	}
+	Gen5TextureMipLayout layout {};
+	const auto           fmt = static_cast<uint32_t>(chain[StorageTextureObject::PARAM_FORMAT] >> 16u);
+	if (!Gen5GetStandard64KBTextureMipLayout(fmt, static_cast<uint32_t>(chain[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u),
+	                                         static_cast<uint32_t>(chain[StorageTextureObject::PARAM_WIDTH_HEIGHT]),
+	                                         static_cast<uint32_t>(chain[StorageTextureObject::PARAM_PITCH]), chain_levels, &layout) ||
+	    layout.first_tail_level >= layout.levels)
+	{
+		return false;
+	}
+	const auto& tail = layout.level[layout.first_tail_level];
+	return view_address == chain_address + tail.tiled_offset && view_size == tail.tiled_size;
+}
+
+bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool compare_layout)
 {
 	const auto render_format = static_cast<VkFormat>(
 	    VulkanResolveRenderTextureFormat(static_cast<RenderTextureFormat>(render[RenderTextureObject::PARAM_FORMAT])));
 	const uint32_t storage_bytes =
 	    ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(storage[StorageTextureObject::PARAM_FORMAT] >> 16u));
-	return VulkanColorTexelBytes(render_format) != storage_bytes ||
-	       (exact_range && (render[RenderTextureObject::PARAM_WIDTH] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u) ||
-	                        render[RenderTextureObject::PARAM_HEIGHT] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu)));
+	const bool render_tiled  = render[RenderTextureObject::PARAM_TILED] != 0u;
+	const bool storage_tiled = storage[StorageTextureObject::PARAM_TILE] != 0u;
+	// Gen5 colour targets bind only the 64 KiB R_X swizzle when tiled, so a storage view in
+	// any other swizzle (a depth-layout view, say) addresses the bytes differently.
+	const bool swizzle_differs = Config::IsNextGen() && render_tiled && storage[StorageTextureObject::PARAM_TILE] != 27u;
+	return VulkanColorTexelBytes(render_format) != storage_bytes || render_tiled != storage_tiled || swizzle_differs ||
+	       (compare_layout && (render[RenderTextureObject::PARAM_WIDTH] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u) ||
+	                           render[RenderTextureObject::PARAM_HEIGHT] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu) ||
+	                           render[RenderTextureObject::PARAM_PITCH] != storage[StorageTextureObject::PARAM_PITCH]));
 }
 
 bool StorageTextureRedescribesDepthTarget(const uint64_t* storage, bool next_gen)
@@ -991,18 +1039,13 @@ int StorageTextureResolveArrayStorageView(VkDevice device, StorageTextureVulkanI
 	return VulkanGetOrCreateCachedImageView(device, image, descriptor, create);
 }
 
-// A render-target alias copies texel bytes unchanged. Equal formats alias, and so
-// do the 8-bit four-channel formats, whose texels store the guest bytes in order
-// whatever their channel order or sRGB encoding.
+// A render-target alias copies texel bytes unchanged, so any two color formats of one
+// texel size alias: the guest reinterprets the same bytes, and Vulkan copies between them as is.
 static bool RenderAliasFormatsMatch(VkFormat render_format, VkFormat storage_format)
 {
-	const auto rgba8 = [](VkFormat format)
-	{
-		return format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_UNORM ||
-		       format == VK_FORMAT_B8G8R8A8_SRGB;
-	};
+	const uint32_t texel_bytes = VulkanColorTexelBytes(render_format);
 	return render_format != VK_FORMAT_UNDEFINED &&
-	       (render_format == storage_format || (rgba8(render_format) && rgba8(storage_format)));
+	       (render_format == storage_format || (texel_bytes != 0u && texel_bytes == VulkanColorTexelBytes(storage_format)));
 }
 
 static uint32_t RenderAliasBytesPerElement(const uint64_t* render_params, const uint64_t* storage_params)
@@ -1357,22 +1400,168 @@ bool StorageTextureRawRenderSourceCovers(const StorageTextureRawRenderSource& so
 	return true;
 }
 
+// A linear single-level view is a raw byte window over the guest range: the
+// copy reproduces the writer's bytes at the same addresses, and the image
+// reads them row by row. The view names the row stride (its pitch must be the
+// width), the texel size and the identity swizzle; the range may start inside
+// a block and may extend past the image.
 bool StorageTextureCanCompositeRawRenderDestination(const uint64_t* params, uint64_t address, uint64_t size)
 {
-	if (params == nullptr || address % 65536u != 0u || size == 0u || size > INT32_MAX ||
+	if (params == nullptr || size == 0u || size > INT32_MAX ||
 	    params[StorageTextureObject::PARAM_TILE] != 0u || params[StorageTextureObject::PARAM_LEVELS] != 1u ||
 	    params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u || params[StorageTextureObject::PARAM_DEPTH] != 1u ||
-	    params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u || params[StorageTextureObject::PARAM_SKIP_SEED] != 0u ||
-	    (params[StorageTextureObject::PARAM_FORMAT] >> 16u) != 65u)
+	    params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u || params[StorageTextureObject::PARAM_SKIP_SEED] != 0u)
 	{
 		return false;
 	}
 	const uint64_t width  = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
 	const uint64_t height = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
-	return width != 0u && height != 0u && width <= UINT32_MAX / 8u && height <= UINT32_MAX / (width * 8u) &&
-	       params[StorageTextureObject::PARAM_PITCH] == width && size == width * height * 8u &&
-	       NormalizeStorageTextureSwizzle(params[StorageTextureObject::PARAM_FORMAT], params[StorageTextureObject::PARAM_SWIZZLE]) ==
-	           DstSel(4, 5, 6, 7);
+	const uint32_t bpp    = ShaderGen5TextureBytesPerElement(
+        static_cast<uint32_t>((params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu));
+	if (width == 0u || height == 0u || bpp == 0u || bpp > 8u || width > UINT32_MAX / bpp ||
+	    height > UINT32_MAX / (width * bpp) || params[StorageTextureObject::PARAM_PITCH] != width ||
+	    size < width * height * bpp ||
+	    NormalizeStorageTextureSwizzle(params[StorageTextureObject::PARAM_FORMAT], params[StorageTextureObject::PARAM_SWIZZLE]) !=
+	        DstSel(4, 5, 6, 7))
+	{
+		return false;
+	}
+	return true;
+}
+
+bool StorageTexturePlanLinearMipUpload(const uint64_t* params, uint64_t size, bool mip_backing,
+                                       Vector<BufferImageCopy>* regions, uint32_t* image_width,
+                                       uint32_t* image_height, uint32_t* bytes_per_element)
+{
+	if (params == nullptr || regions == nullptr || image_width == nullptr || image_height == nullptr ||
+	    bytes_per_element == nullptr)
+	{
+		return false;
+	}
+	regions->Clear();
+	*image_width       = 0;
+	*image_height      = 0;
+	*bytes_per_element = 0;
+	const uint64_t fmt    = (params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
+	const uint64_t width  = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
+	const uint64_t height = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
+	const uint64_t levels = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
+	const uint64_t pitch  = params[StorageTextureObject::PARAM_PITCH];
+	// The linear mip chain contract only covers explicit Gen5 formats with a
+	// byte pitch that aligns a level row, and a view whose rows are exactly as
+	// wide as the descriptor.
+	if (fmt == 0u || ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt)) || width == 0u || height == 0u ||
+	    width > UINT32_MAX || height > UINT32_MAX || levels < 2u || levels > 16u || pitch != width)
+	{
+		return false;
+	}
+	const uint32_t bpp = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
+	if (bpp == 0u || 256u % bpp != 0u || size == 0u || size > INT32_MAX)
+	{
+		return false;
+	}
+	// GFX10 linear mip chains (addrlib HwlComputeSurfaceInfoLinear): each
+	// level's element pitch is aligned to 256 bytes and the levels are stored
+	// from the smallest to level 0. TileGetTextureSize2 must report exactly
+	// that chain; anything else (a table entry or another layout) is not this
+	// destination shape.
+	TileSizeOffset chain_sizes[16] {};
+	TileSizeAlign  reported {};
+	TileGetTextureSize2(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+	                    static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), 0u, &reported, chain_sizes, nullptr);
+	const uint64_t pitch_align = 256u / bpp;
+	uint64_t       chain_total = 0;
+	uint64_t       offsets[16] {};
+	uint64_t       row_pitches[16] {};
+	uint64_t       level_sizes[16] {};
+	for (uint32_t level = levels; level-- > 0u;)
+	{
+		const uint64_t mip_width  = std::max<uint64_t>(width >> level, 1u);
+		const uint64_t mip_height = std::max<uint64_t>(height >> level, 1u);
+		const uint64_t row_pitch  = (mip_width + pitch_align - 1u) & ~(pitch_align - 1u);
+		const uint64_t level_size = row_pitch * mip_height * bpp;
+		offsets[level]     = chain_total;
+		row_pitches[level] = row_pitch;
+		level_sizes[level] = level_size;
+		chain_total += level_size;
+	}
+	if (reported.size == 0u || reported.size != ((chain_total + 255u) & ~uint64_t {255}) || reported.size > size)
+	{
+		return false;
+	}
+	for (uint32_t level = 0u; level < levels; level++)
+	{
+		if (chain_sizes[level].offset != offsets[level] || chain_sizes[level].size != level_sizes[level] ||
+		    offsets[level] % 4u != 0u)
+		{
+			return false;
+		}
+	}
+	// A mip backing keeps every level in its own image mip; the stacked atlas
+	// packs them into one image at per-level offsets.
+	const uint64_t real_height = mip_backing ? height : height + height / 2u;
+	if (real_height > UINT32_MAX)
+	{
+		return false;
+	}
+	Vector<BufferImageCopy> planned;
+	for (uint32_t level = 0u; level < levels; level++)
+	{
+		const uint64_t mip_width  = std::max<uint64_t>(width >> level, 1u);
+		const uint64_t mip_height = std::max<uint64_t>(height >> level, 1u);
+		const uint64_t row_bytes  = row_pitches[level] * bpp;
+		if (offsets[level] > size || mip_height > (size - offsets[level]) / row_bytes ||
+		    mip_width * bpp > size - offsets[level] - (mip_height - 1u) * row_bytes)
+		{
+			return false;
+		}
+		BufferImageCopy region {};
+		region.offset    = static_cast<uint32_t>(offsets[level]);
+		region.pitch     = static_cast<uint32_t>(row_pitches[level]);
+		region.width     = static_cast<uint32_t>(mip_width);
+		region.height    = static_cast<uint32_t>(mip_height);
+		if (mip_backing)
+		{
+			region.dst_level = level;
+		} else
+		{
+			const auto atlas = UtilCalcMipmapOffset(level, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+			if (atlas.first < 0 || atlas.second < 0 || static_cast<uint64_t>(atlas.first) + mip_width > width ||
+			    static_cast<uint64_t>(atlas.second) + mip_height > real_height)
+			{
+				return false;
+			}
+			region.dst_level = 0u;
+			region.dst_x     = atlas.first;
+			region.dst_y     = atlas.second;
+		}
+		planned.Add(region);
+	}
+	for (const auto& region: planned)
+	{
+		regions->Add(region);
+	}
+	*image_width       = static_cast<uint32_t>(width);
+	*image_height      = static_cast<uint32_t>(real_height);
+	*bytes_per_element = bpp;
+	return true;
+}
+
+bool StorageTextureCanCompositeLinearMipRawRenderDestination(const uint64_t* params, uint64_t address, uint64_t size)
+{
+	if (params == nullptr || address % 65536u != 0u || size == 0u || size > INT32_MAX ||
+	    params[StorageTextureObject::PARAM_TILE] != 0u || params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u ||
+	    params[StorageTextureObject::PARAM_DEPTH] != 1u || params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u ||
+	    params[StorageTextureObject::PARAM_SKIP_SEED] != 0u)
+	{
+		return false;
+	}
+	Vector<BufferImageCopy> regions;
+	uint32_t                image_width       = 0;
+	uint32_t                image_height      = 0;
+	uint32_t                bytes_per_element = 0;
+	return StorageTexturePlanLinearMipUpload(params, size, StorageTextureUsesMipBacking(params, GuestIsGen5()), &regions,
+	                                          &image_width, &image_height, &bytes_per_element);
 }
 
 void StorageTextureCopyRenderAlias(CommandBuffer* buffer, VulkanImage* source, VulkanImage* destination,

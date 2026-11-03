@@ -14,8 +14,8 @@ The active render-resolution keys are:
   [Render-target scope](#render-target-scope).
 - `RenderResolutionWidth`: fixed render target width. The default is `1280`.
 - `RenderResolutionHeight`: fixed render target height. The default is `720`.
-- `PresentationFilter`: `Linear`, `Nearest` or `Fsr`.
-- `PresentationFsrSharpness`: RCAS sharpness for `Fsr`, `0` to `100`. The
+- `PresentationFilter`: `Linear`, `Nearest`, `Fsr` or `Fsr3`.
+- `PresentationFsrSharpness`: RCAS sharpness for `Fsr` and `Fsr3`, `0` to `100`. The
   default is `90`.
 - `TextureAnisotropy`: `Guest` (default), `X2`, `X4`, `X8` or `X16`. `Guest`
   keeps each sampler's own anisotropy. A level raises every sampler with linear
@@ -48,8 +48,12 @@ anisotropy. `Quality`, `Balanced` and `Performance` select `Fixed` with
 `Fsr` and `Fsr` presentation and `X16`, `X8` and guest anisotropy. A fixed
 resolution raises frame rate only when a title is bound by GPU pixel work.
 
-`ScreenWidth` and `ScreenHeight` configure only the host window and swapchain.
-They do not select the guest render resolution.
+`ScreenWidth` and `ScreenHeight` configure the host window and swapchain. They
+do not select the guest render resolution, but they are the display size the
+guest sees: `VideoOutGetResolutionStatus` reports them as the full and pane
+extent, and `VideoOutGetOutputStatus` reports a 4K output only when they reach
+3840x2160 (`VideoOut.cpp`). A title that sizes its buffers from those queries
+therefore follows these keys.
 
 Invalid enum values or zero render extents stop startup during configuration
 loading with a direct diagnostic. The fixed extent is a maximum bound: Kyty
@@ -210,6 +214,28 @@ current framing and aspect-ratio policy.
   - ML frame generation needs "Windows 11, DirectX 12 Agility SDK 1.4.9 and
     an AMD 9000 series GPU or later".
   - Its known-issues table states "Vulkan is currently not supported in SDK".
+
+`Fsr3` reconstructs the final image with the FidelityFX Super Resolution 3.1
+upscaler. It needs a build configured with `-DKYTY_FFX_SDK_DIR=<sdk>`, a
+FidelityFX SDK built with the Vulkan backend and the upscaler (MIT; a binary
+that ships it carries the SDK licence). Without the SDK, selecting the filter
+stops at the first present with `unsupported_filter`.
+
+- Guides come from a general rule, not from a title list: per frame, the
+  single-sample pass with a D32 depth and the most colour targets, at least
+  three, whose last RG16F or RGBA16F target shares the depth's extent. That
+  target is the motion guide.
+- The upscaler runs when that guide grid fits inside the swapchain and is smaller
+  on at least one axis. The presented image is resampled to the grid, so a guest
+  that upsamples its own frame before presenting it still qualifies. A frame
+  without guides resets the history and takes the `Fsr` path or the blit path.
+- Limits: jitter is reported as zero because the guest has already resolved it,
+  near, far and field of view are assumed, there is no reactive mask, and the HUD
+  in the presented image is resampled with the frame. There is no frame
+  generation. The rule has been checked on one title only.
+- `Fsr3` does not change what the guest renders. A frame-rate gain needs a smaller
+  guest grid. On `PPSA21567 - Astro Bot` that comes from a game patch
+  ([game-patches.md](game-patches.md)), which is not a strict run.
 
 ## Diagnostics
 

@@ -728,6 +728,51 @@ TEST(EmulatorFragmentMaskFlow, AdmitsTheWqmBracketedUniformSelectAsLaneLocal)
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorFragmentMaskFlow, ExecIsFullOnlyWhenARestoreBringsBackAFullMask)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto copies = [](const ShaderCode& code)
+		{
+			std::vector<uint32_t> indices;
+			for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+			{
+				if (code.GetInstructions().At(index).type == ShaderInstructionType::SMovB64) { indices.push_back(index); }
+			}
+			return indices;
+		};
+		Words save_full;
+		Words restore_full;
+		Words narrow;
+		Sop1(save_full, 4, 14, kExecLo);          // s_mov_b64 s[14:15], exec
+		Sop1(restore_full, 4, kExecLo, 14);       // s_mov_b64 exec, s[14:15]
+		Sop2(narrow, 15, kExecLo, kExecLo, kVccLo); // s_and_b64 exec, exec, vcc
+
+		auto wrapper = Baseline();
+		wrapper[kCopy].insert(wrapper[kCopy].begin(), narrow.begin(), narrow.end());
+		wrapper[kCopy].insert(wrapper[kCopy].begin(), save_full.begin(), save_full.end());
+		wrapper[kRestore].insert(wrapper[kRestore].begin(), restore_full.begin(), restore_full.end());
+		const auto wrapped = ParsePixel(wrapper);
+		const auto flow    = ShaderAnalyzeFragmentMaskFlow(wrapped, 64u);
+		const auto moves   = copies(wrapped);
+		Check(moves.size() == 4u, "entry save, full save, full restore and entry restore");
+		Check(flow.exec_full[Find(wrapped, ShaderInstructionType::SWqmB64) + 1u], "S_WQM of the entry mask is full");
+		Check(!flow.exec_full[Find(wrapped, ShaderInstructionType::SAndB64) + 1u], "the narrowed mask is not full");
+		Check(flow.exec_full[moves[2] + 1u], "restoring the full save is full");
+		Check(!flow.exec_full[moves[3] + 1u], "restoring the entry save is not full");
+
+		auto narrowed = Baseline();
+		narrowed[kCopy].insert(narrowed[kCopy].begin(), narrow.begin(), narrow.end());
+		narrowed[kCopy].insert(narrowed[kCopy].begin(), save_full.begin(), save_full.end());
+		narrowed[kCopy].insert(narrowed[kCopy].begin(), narrow.begin(), narrow.end());
+		narrowed[kRestore].insert(narrowed[kRestore].begin(), restore_full.begin(), restore_full.end());
+		const auto narrow_code = ParsePixel(narrowed);
+		const auto narrow_flow = ShaderAnalyzeFragmentMaskFlow(narrow_code, 64u);
+		Check(!narrow_flow.exec_full[copies(narrow_code)[2] + 1u], "restoring a save of a narrowed mask is not full");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorFragmentMaskFlow, ANumericObservationOfTheMaskIsRefused)
 {
 	ASSERT_EXIT(([] {

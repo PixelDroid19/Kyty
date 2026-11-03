@@ -61,6 +61,7 @@
 #include <list>
 #include <map>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -178,6 +179,34 @@ struct PipelineDynamicParameters
 };
 #pragma pack(pop)
 
+struct FragmentTransportPasses;
+
+// What a graphics pipeline takes from the framebuffer it is created for. Render
+// passes whose attachments match in format and sample count are compatible, so
+// one pipeline serves every framebuffer with the same description, whichever
+// framebuffer created it.
+struct RenderPassCompatibility
+{
+	static constexpr uint32_t TARGETS_MAX = 8;
+	uint32_t                  color_count = 0;
+	VkFormat                  color_format[TARGETS_MAX]  = {}; // VK_FORMAT_UNDEFINED: unused slot
+	VkSampleCountFlagBits     color_samples[TARGETS_MAX] = {};
+	VkFormat                  depth_format               = VK_FORMAT_UNDEFINED; // VK_FORMAT_UNDEFINED: no depth
+	VkSampleCountFlagBits     depth_samples              = {};
+	uint32_t                  width                      = 0;
+	uint32_t                  height                     = 0;
+	// No attachment loads with a clear, so fragment transport can begin the pass again.
+	bool begins_without_clear = false;
+
+	bool operator==(const RenderPassCompatibility& other) const
+	{
+		return color_count == other.color_count && depth_format == other.depth_format && depth_samples == other.depth_samples &&
+		       width == other.width && height == other.height && begins_without_clear == other.begins_without_clear &&
+		       std::equal(color_format, color_format + TARGETS_MAX, other.color_format) &&
+		       std::equal(color_samples, color_samples + TARGETS_MAX, other.color_samples);
+	}
+};
+
 struct VulkanPipeline
 {
 	VkPipelineLayout                pipeline_layout = nullptr;
@@ -185,6 +214,11 @@ struct VulkanPipeline
 	const PipelineStaticParameters* static_params   = nullptr;
 	PipelineDynamicParameters*      dynamic_params  = nullptr;
 	VkExtent2D                      framebuffer_extent {};
+	// Set when the draw runs through the fragment wave transport. The record
+	// path then uses capture/shade/resolve passes instead of this pipeline.
+	FragmentTransportPasses* transport = nullptr;
+	// Entry of the pipeline cache that owns this pipeline; lease release runs per recorded pipeline.
+	uint32_t cache_slot = 0;
 };
 
 // A cache entry remains alive while a recorded executable command buffer can
@@ -228,26 +262,20 @@ private:
 	bool     m_retirement_requested = false;
 };
 
-template <typename IsEvictable>
-[[nodiscard]] inline uint32_t PipelineCacheNextEvictableIndex(uint32_t size, uint32_t* cursor, IsEvictable is_evictable)
+// A title's working set can exceed the cache: evicting by age would throw away
+// the pipelines it draws with every frame and recompile them on the render thread.
+template <typename IsEvictable, typename LastUse>
+[[nodiscard]] inline uint32_t PipelineCacheLeastRecentlyUsedIndex(uint32_t size, IsEvictable is_evictable, LastUse last_use)
 {
-	if (size == 0 || cursor == nullptr)
+	uint32_t oldest = UINT32_MAX;
+	for (uint32_t index = 0; index < size; index++)
 	{
-		return UINT32_MAX;
-	}
-
-	const uint32_t first = *cursor % size;
-	for (uint32_t offset = 0; offset < size; offset++)
-	{
-		const uint32_t index = (first + offset) % size;
-		if (is_evictable(index))
+		if (is_evictable(index) && (oldest == UINT32_MAX || last_use(index) < last_use(oldest)))
 		{
-			*cursor = (index + 1u) % size;
-			return index;
+			oldest = index;
 		}
 	}
-
-	return UINT32_MAX;
+	return oldest;
 }
 
 class PipelineCache
@@ -270,7 +298,6 @@ public:
 	                                       const ShaderGeometryComputeInfo& geometry, const HW::VertexShaderInfo* vs_regs,
 	                                       const HW::ShaderRegisters* sh_regs);
 	void            DeletePipeline(VulkanPipeline* pipeline);
-	void            DeletePipelines(VulkanFramebuffer* framebuffer);
 	void            DeleteAllPipelines();
 	void            ReleasePipelineLease(VulkanPipeline* pipeline);
 	[[nodiscard]] static constexpr uint32_t MaxPipelineCount() { return MAX_PIPELINES; }
@@ -278,21 +305,25 @@ public:
 private:
 	friend class PipelineLifetimeTestAccess;
 
-	static constexpr uint32_t MAX_PIPELINES = 512;
+	static constexpr uint32_t MAX_PIPELINES = 4096;
 
 	struct Pipeline
 	{
-		uint64_t                   render_pass_id = 0;
+		RenderPassCompatibility    render_pass;
 		ShaderId                   vs_shader_id;
 		ShaderId                   ps_shader_id;
 		ShaderId                   cs_shader_id;
 		VulkanPipeline*            pipeline       = nullptr;
+		FragmentTransportPasses*   transport      = nullptr;
 		PipelineStaticParameters*  static_params  = nullptr;
 		PipelineDynamicParameters* dynamic_params = nullptr;
 		PipelineLifetimeState      lifetime;
+		uint64_t                   last_use       = 0;
 	};
 
-	[[nodiscard]] Pipeline* Find(const Pipeline& p);
+	[[nodiscard]] static uint64_t PipelineIndexKey(const Pipeline& p);
+	[[nodiscard]] Pipeline*       Find(const Pipeline& p);
+	void                          StorePipeline(uint32_t slot, const Pipeline& p);
 	[[nodiscard]] uint32_t  FindAvailableSlot();
 	void                    AttachPipelineLease(CommandBuffer* recording_buffer, Pipeline& pipeline);
 
@@ -303,7 +334,8 @@ private:
 	void DumpPipeline(const char* action, uint32_t id);
 
 	Vector<Pipeline>                      m_pipelines;
-	uint32_t                              m_evict_cursor = 0;
+	std::unordered_multimap<uint64_t, uint32_t> m_pipeline_index;
+	uint64_t                              m_use_clock = 0;
 	Core::Mutex                           m_mutex;
 	std::chrono::steady_clock::time_point m_last_driver_cache_attempt {};
 	bool                                  m_driver_cache_attempted_once         = false;
@@ -379,6 +411,17 @@ private:
 		int      set  = -1;
 		uint32_t slot = 0;
 	};
+	struct ImageSlot
+	{
+		uint64_t unique_id = 0;
+		uint8_t  view      = 0;
+
+		[[nodiscard]] bool operator==(const ImageSlot& other) const { return unique_id == other.unique_id && view == other.view; }
+	};
+	// Holds only the bound resources: a live set costs its bindings, not the
+	// largest layout. The image counts split `images` into banks in this order:
+	// sampled, depth, array, 3D, unsigned sampled, unsigned array, unsigned 3D,
+	// storage.
 	struct Set
 	{
 		VulkanDescriptorSet* set                                           = nullptr;
@@ -386,34 +429,17 @@ private:
 		uint32_t             hash                                          = 0;
 		Stage                stage                                         = Stage::Unknown;
 		ShaderDescriptorLayoutPlan::Key layout_key = {};
-		int                  storage_buffers_num                           = 0;
-		VulkanBufferDescriptorKey storage_buffers[BUFFERS_MAX]             = {};
-		int                  textures2d_sampled_num                        = 0;
-		uint64_t             textures2d_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures2d_sampled_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures2d_sampled_depth_num                        = 0;
-		uint64_t             textures2d_sampled_depth_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures2d_sampled_depth_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures2d_array_sampled_num                        = 0;
-		uint64_t             textures2d_array_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures2d_array_sampled_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures3d_sampled_num                        = 0;
-		uint64_t             textures3d_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures3d_sampled_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures2d_sampled_uint_num                        = 0;
-		uint64_t             textures2d_sampled_uint_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures2d_sampled_uint_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures2d_array_sampled_uint_num                        = 0;
-		uint64_t             textures2d_array_sampled_uint_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures2d_array_sampled_uint_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures3d_sampled_uint_num                        = 0;
-		uint64_t             textures3d_sampled_uint_id[TEXTURES_SAMPLED_MAX]   = {};
-		uint8_t              textures3d_sampled_uint_view[TEXTURES_SAMPLED_MAX] = {};
-		int                  textures2d_storage_num                        = 0;
-		uint64_t             textures2d_storage_id[TEXTURES_STORAGE_MAX]   = {};
-		uint8_t              textures2d_storage_view[TEXTURES_STORAGE_MAX] = {};
-		int                  samplers_num                                  = 0;
-		uint64_t             samplers_id[SAMPLERS_MAX]                     = {};
+		std::vector<VulkanBufferDescriptorKey> storage_buffers;
+		int                    textures2d_sampled_num                         = 0;
+		int                    textures2d_sampled_depth_num                   = 0;
+		int                    textures2d_array_sampled_num                   = 0;
+		int                    textures3d_sampled_num                         = 0;
+		int                    textures2d_sampled_uint_num                    = 0;
+		int                    textures2d_array_sampled_uint_num              = 0;
+		int                    textures3d_sampled_uint_num                    = 0;
+		int                    textures2d_storage_num                         = 0;
+		std::vector<ImageSlot> images;
+		std::vector<uint64_t>  samplers_id;
 		int                  gds_buffers_num                               = 0;
 		uint64_t             gds_buffers_id[GDS_BUFFER_MAX]                = {};
 		bool                 vsharp_uniform_buffer                         = false;
@@ -441,18 +467,23 @@ private:
 	const VulkanBuffer*   WriteMaskSink(GraphicContext* gctx);
 
 	static uint32_t CalcHash(const Set& s);
+	static bool     SameBindings(const Set& a, const Set& b);
 	static void     CollectResourceIds(const Set& s, std::vector<uint64_t>* ids);
 
 	// Live sets are bounded: past the limit, the least recently used tracked
-	// sets leave the cache and are freed once their submissions complete.
-	static constexpr uint32_t LIVE_SETS_MAX = 65536;
-	static constexpr uint32_t TRIM_SETS     = 8192;
+	// sets leave the cache and are freed once their submissions complete. Nearly
+	// every miss rebinds rotating storage buffers in a combination that seldom
+	// recurs, so a set unused for this many newer sets is rarely hit again, while
+	// each live set holds driver pool memory that pools never return.
+	static constexpr uint32_t LIVE_SETS_MAX = 16384;
+	static constexpr uint32_t TRIM_SETS     = 2048;
 	// Released sets wait for reuse by the next set of their layout, up to this
 	// many in all; past it the oldest returns to its pool. Pools never give memory
 	// back to the system, so a held set only reserves pool space, while a driver
-	// free and reallocation walks the pool's free list. The limit holds several
-	// trim batches so a trim does not overflow it.
-	static constexpr uint32_t RECYCLED_SETS_MAX = TRIM_SETS * 4;
+	// free and reallocation walks the pool's free list: past a few thousand frees
+	// an allocation costs about thirty times more. The limit holds many trim
+	// batches so scene changes reuse sets instead of freeing them.
+	static constexpr uint32_t RECYCLED_SETS_MAX = TRIM_SETS * 32;
 
 	int                  FindSet(const Set& s);
 	void                 IndexSet(int index);
@@ -480,6 +511,8 @@ private:
 	std::unordered_map<uint64_t, std::vector<SetReference>> m_sets_by_resource;
 	// IndexSet scratch, kept to avoid an allocation per created set.
 	std::vector<uint64_t>                                   m_resource_ids;
+	// GetDescriptor's lookup key, kept so a cache hit allocates nothing.
+	Set                                                     m_probe;
 
 	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
 	// Released sets, oldest first, and per layout the positions of its sets in
@@ -501,7 +534,7 @@ public:
 
 	VkSampler GetSampler(uint64_t id);
 	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized,
-	                       bool uses_r_coordinate);
+	                       bool uses_r_coordinate, bool integer_border);
 	void      DeleteAllForTesting(GraphicContext* ctx);
 
 private:
@@ -511,6 +544,7 @@ private:
 		State::ImageSampleOperation operation {};
 		bool                  allow_unnormalized = true;
 		bool                  uses_r_coordinate  = true;
+		bool                  integer_border     = false;
 		VkSampler             vk = nullptr;
 	};
 
@@ -523,6 +557,7 @@ struct VulkanFramebuffer
 	static constexpr uint32_t TARGETS_MAX                       = 8;
 	VkRenderPass              render_pass                       = nullptr;
 	uint64_t                  render_pass_id                    = 0;
+	RenderPassCompatibility   compatibility;
 	VkFramebuffer             framebuffer                       = nullptr;
 	uint32_t                  color_count                       = 0;
 	uint32_t                  attachment_count                  = 0;
@@ -556,8 +591,11 @@ public:
 	virtual ~FramebufferCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(FramebufferCache);
 
+	// attachmentless_extent sizes the pass of a draw with neither color nor depth
+	// attachments, whose pixel shader runs only for its memory effects.
 	VulkanFramebuffer* CreateFramebuffer(RenderColorInfo* color, RenderDepthInfo* depth,
-	                                     DepthStencilAttachmentAccess depth_stencil_access = DepthStencilAttachmentAccess::Writable);
+	                                     DepthStencilAttachmentAccess depth_stencil_access = DepthStencilAttachmentAccess::Writable,
+	                                     VkExtent2D                   attachmentless_extent = {});
 	void               FreeFramebufferByColor(VulkanImage* image);
 	void               FreeFramebufferByDepth(DepthStencilVulkanImage* image);
 
@@ -628,7 +666,6 @@ private:
 
 	Core::Mutex   m_mutex;
 	VulkanBuffer* m_buffer          = nullptr;
-	uint32_t      m_queue_family    = VK_QUEUE_FAMILY_IGNORED;
 	uint64_t      m_staging_records = 0;
 	uint64_t      m_staging_bytes   = 0;
 };
@@ -1699,19 +1736,29 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* image);
 void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, VulkanImage* image);
 void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image);
-// The array that a sampled view of depth layers [0, layers) starting at `first` (guest address addr) reads: each layer
-// holds the depth of the slice image at addr + layer * slice_size, copied when that slice changed since its last copy,
-// or, when no slice image is there, the guest bytes of that layer (texture format fmt, pitch in elements), which only
-// a plain_guest_depth view (64 KiB tiled, one level, no MSAA, no metadata) may read.
+// The width x height array that a sampled view of depth layers [0, layers) at guest address addr reads, owned by
+// `first`, the depth image whose plane starts at addr: each layer holds the depth of the slice image at
+// addr + layer * slice_size, copied when that slice changed since its last copy. Without a slice image there, a
+// plain_guest_depth view (64 KiB tiled, one level, no MSAA, no metadata; texture format fmt, pitch in elements)
+// reads the 64 KiB blocks the depth images over the layer wrote, or, when none lies over it, its guest bytes.
 VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVulkanImage* first, uint64_t addr, uint64_t slice_size,
-                                           uint32_t layers, uint32_t fmt, uint32_t pitch, bool plain_guest_depth);
+                                           uint32_t width, uint32_t height, uint32_t layers, uint32_t fmt, uint32_t pitch,
+                                           bool plain_guest_depth);
 
 // --- Core (color / dump) ---
 
 void FormatTextureList(const ShaderTextureResources& textures, char* buffer, size_t buffer_size);
+// Smallest and largest of `count` indexes of `element_size` (2 or 4) bytes.
+[[nodiscard]] std::pair<uint32_t, uint32_t> GraphicsRenderIndexValueRange(const void* indexes, uint32_t count, uint32_t element_size);
 // Bytes before read_begin are never read through the returned buffer and are not captured.
 VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
                                                VkBufferUsageFlags usage, uint64_t read_begin = 0, bool zero_tail = true);
+// Records a conversion of the 12-byte DISPATCH_INDIRECT record at `offset` of `source` into host
+// dispatch arguments, in queue order; counts above `max_group_count` dispatch nothing and fail the
+// recording at completion. Returns the argument buffer, or nullptr when the conversion is unavailable.
+VulkanBuffer* GraphicsRenderRecordDispatchIndirectArgs(CommandBuffer* buffer, const VulkanBuffer* source, uint64_t offset,
+                                                       const uint32_t* max_group_count);
+void          GraphicsRenderCheckDispatchIndirectLimits();
 
 bool                            RenderColorSlotConfigured(const RenderColorInfo& color, uint32_t slot);
 bool                            RenderColorSlotActive(const RenderColorInfo& color, uint32_t slot);
@@ -1822,6 +1869,24 @@ void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision
 // The draw fetches only records [first_record, required_records); zero required_records means every declared record.
 // records_exact says the GPU reads the same draw range the host resolved, so fetches cannot pass it.
 // Per-instance streams fetch records [0, first_instance + instance_count) instead.
+struct VertexStreamDrawRange
+{
+	uint32_t first_record;
+	uint32_t required_records;
+	bool     records_exact;
+	uint32_t first_instance;
+	uint32_t instance_count;
+};
+// The stream bytes [address, address + size) a draw binds, of which it fetches from
+// read_begin on. With tail_fetched it can also fetch past them.
+struct VertexStreamRead
+{
+	uint64_t address;
+	uint64_t size;
+	uint64_t read_begin;
+	bool     tail_fetched;
+};
+VertexStreamRead ResolveVertexStreamRead(const ShaderVertexInputInfo& input, int stream, const VertexStreamDrawRange& range);
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
 	                   uint32_t first_record, uint32_t required_records, bool records_exact, uint32_t first_instance,
 	                   uint32_t instance_count);

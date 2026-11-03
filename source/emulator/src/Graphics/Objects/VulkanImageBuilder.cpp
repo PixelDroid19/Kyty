@@ -56,6 +56,14 @@ bool VulkanCreateDeviceImageView(VkDevice device, const VulkanImageViewDescripto
 		usage_info.usage = descriptor.usage;
 		view_info.pNext  = &usage_info;
 	}
+	VkImageViewMinLodCreateInfoEXT min_lod_info {};
+	if (descriptor.min_lod != 0u)
+	{
+		min_lod_info.sType  = VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT;
+		min_lod_info.pNext  = view_info.pNext;
+		min_lod_info.minLod = static_cast<float>(descriptor.min_lod) / 256.0f;
+		view_info.pNext     = &min_lod_info;
+	}
 	return vkCreateImageView(device, &view_info, nullptr, view) == VK_SUCCESS && *view != nullptr;
 }
 
@@ -106,7 +114,7 @@ bool VulkanImageViewDescriptorsEqual(const VulkanImageViewDescriptor& a, const V
 	return a.image == b.image && a.view_type == b.view_type && a.format == b.format && a.usage == b.usage && a.aspect_mask == b.aspect_mask &&
 	       a.components.r == b.components.r && a.components.g == b.components.g && a.components.b == b.components.b &&
 	       a.components.a == b.components.a && a.base_mip_level == b.base_mip_level && a.level_count == b.level_count &&
-	       a.base_array_layer == b.base_array_layer && a.layer_count == b.layer_count;
+	       a.base_array_layer == b.base_array_layer && a.layer_count == b.layer_count && a.min_lod == b.min_lod;
 }
 
 int VulkanGetOrCreateCachedImageView(VkDevice device, VulkanImage* image, const VulkanImageViewDescriptor& descriptor,

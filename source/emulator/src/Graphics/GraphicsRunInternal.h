@@ -283,6 +283,12 @@ public:
 	[[nodiscard]] bool OldestSubmittedTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value);
 	void               SubmitAndWait();
 	void               WaitSubmission(SubmissionId submission);
+	// Submits the submission if it is still being recorded and returns the timeline value its
+	// completion signals; false once it completed.
+	[[nodiscard]] bool SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value);
+	// Orders the recording after another queue's submission on the device; false when the
+	// dependency is this queue's, already awaited, or complete, so it is waited for on the host.
+	[[nodiscard]] bool AwaitOnDevice(SubmissionId submission);
 	[[nodiscard]] bool OwnsSubmissionQueue(SubmissionId submission) const
 	{
 		return submission.queue == GpuQueueId(static_cast<uint32_t>(m_queue));
@@ -322,13 +328,16 @@ public:
 	void FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr, uint32_t value);
 	void QueueQueuedGraphicsInterrupt();
 	void WriteBack();
-	void WaitDeviceAddressWriteBacks();
 	// Copies guest bytes the processor reads at record time once no GPU writer owns newer content.
 	[[nodiscard]] bool ReadCurrentGuestBytes(uint64_t vaddr, void* dst, uint64_t size);
 	void MemoryBarrier();
 	void RenderTextureBarrier(uint64_t vaddr, uint64_t size);
 	void DepthStencilBarrier(uint64_t vaddr, uint64_t size);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
+	// Records one dispatch; a nonzero indirect_args_address takes the group counts from that
+	// record on the device. False when those arguments have to be read on the host instead.
+	[[nodiscard]] bool RecordDispatch(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
+	                                  uint64_t indirect_args_address);
 	void DispatchIndirect(uint32_t data_offset, uint32_t mode);
 	void DispatchIndirectAbsolute(uint64_t address, uint32_t mode);
 	void WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index);
@@ -380,6 +389,8 @@ public:
 	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom, bool matching_wait_mem64);
 	[[nodiscard]] bool HasPendingDeferredWrite(const uint32_t* dst, uint32_t size_bytes) const;
 	void DeferWriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num);
+	void RetireBeforeStore(uint64_t dst, uint32_t size_bytes);
+	[[nodiscard]] bool DeferImmediateStore(uint64_t dst, uint32_t value);
 
 	void Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data);
 	[[nodiscard]] bool TakeSuspendedRun(SuspendedRun* run);
@@ -417,6 +428,7 @@ private:
 	void                 PublishCompletedSubmissions();
 	void                 WaitUntilPublishedUnlessReentrant(SubmissionId submission);
 	SubmissionId         BufferFlushForGpuWait();
+	void                 WaitProducer(SubmissionId producer);
 	void                 SubmitRecordedWorkIfGpuIdle();
 	void                 SubmitRecordedDispatchesBeforeDraw();
 
@@ -468,6 +480,7 @@ private:
 	// Which completion callbacks the batch recorded (GraphicsBatchCanDeferSubmissionCompletion bits).
 	uint8_t  m_completion_callback_sources = 0u;
 	bool     m_consolidated_plain_wait     = false;
+	SubmissionId m_consolidated_producer;
 	// Draws and dispatches recorded since this processor's last submission.
 	uint32_t        m_operations_since_submit     = 0;
 	// When this processor last submitted a command buffer.
@@ -611,8 +624,11 @@ private:
 	static CmdBuffer SnapshotCommandBuffer(uint32_t* data, uint32_t num_dw);
 
 	CmdBatch GetCmdBatch();
+	void     SetDecodeReleased(const CmdBatch* current, bool released);
 
 	Core::Mutex          m_mutex;
+	// Set while decode waits on a value no submitted GPU work produces.
+	bool                 m_decode_released = false;
 	// Only the ring thread touches it: a deferred completion it still pumps while idle.
 	bool                 m_async_completion_pending = false;
 	Core::CondVar        m_cond_var;
@@ -705,6 +721,7 @@ public:
 	void     Done();
 	void     Wait();
 	void     WaitSubmission(SubmissionId submission);
+	bool     SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value);
 	bool     RunQuiesced(GraphicsRunQuiescedAction action, void* data);
 	int      GetFrameNum();
 	bool     AreSubmitsAllowed();

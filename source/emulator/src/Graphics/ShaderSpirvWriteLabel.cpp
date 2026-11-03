@@ -134,6 +134,7 @@ void Spirv::WriteLabel(int index)
 	// Partition guest labels at this PC.
 	Vector<ShaderLabel*> loop_merges;
 	Vector<ShaderLabel*> guest_labels;
+	Vector<ShaderLabel*> back_edges;
 	for (uint32_t i = labels.Size(); i > 0; i--)
 	{
 		auto& label = labels[i - 1];
@@ -144,10 +145,21 @@ void Spirv::WriteLabel(int index)
 		if (ScJoinIsLoopMergeLabel(m_code, label))
 		{
 			loop_merges.Add(&label);
+		} else if (label.GetSrc() > label.GetDst())
+		{
+			back_edges.Add(&label);
 		} else
 		{
 			guest_labels.Add(&label);
 		}
+	}
+	// The back edge targets the loop header, which must be the last block opened
+	// at this PC: it hosts the guest body and OpLoopMerge, and forward entries
+	// fall through into it. A header opened earlier is reachable only from its
+	// own back edge, which leaves the loop without a dominating entry.
+	for (uint32_t i = 0; i < back_edges.Size(); i++)
+	{
+		guest_labels.Add(back_edges[i]);
 	}
 
 	Vector<uint32_t> sc_join_srcs;
@@ -191,6 +203,25 @@ void Spirv::WriteLabel(int index)
 	bool pending_branch      = !previous_is_terminator(prev);
 	bool skip_branch_to_next = false;
 	int  labels_num          = 0;
+
+	// Join skips: the skipping arm reconverges before the join; the head they
+	// skip ends at the guard merge, which clears the flag for the next pass.
+	for (const auto& skip: ScJoinSkips(m_code))
+	{
+		if (skip.join == inst.pc)
+		{
+			m_source += String8::FromPrintf("               OpBranch %%join_skip_arm_%04" PRIx32 "\n"
+			                                "       %%join_skip_arm_%04" PRIx32 " = OpLabel\n",
+			                                skip.branch, skip.branch);
+		}
+		if (skip.target == inst.pc)
+		{
+			m_source += String8::FromPrintf("               OpBranch %%join_skip_guard_%04" PRIx32 "\n"
+			                                "       %%join_skip_guard_%04" PRIx32 " = OpLabel\n"
+			                                "               OpStore %%join_skip_%04" PRIx32 " %%false\n",
+			                                skip.branch, skip.branch, skip.branch);
+		}
+	}
 
 	// ----- Phase 1: loop-merge guest labels --------------------------------
 	// Must precede sc_joins so OpLoopMerge targets stay inside the outer selection.
@@ -345,6 +376,20 @@ void Spirv::WriteLabel(int index)
 		{
 			label.Disable();
 			break;
+		}
+	}
+
+	for (const auto& skip: ScJoinSkips(m_code))
+	{
+		if (skip.join == inst.pc)
+		{
+			m_source += String8::FromPrintf("%%join_skip_v_%04" PRIx32 " = OpLoad %%bool %%join_skip_%04" PRIx32 "\n"
+			                                "               OpSelectionMerge %%join_skip_guard_%04" PRIx32 " None\n"
+			                                "               OpBranchConditional %%join_skip_v_%04" PRIx32
+			                                " %%join_skip_guard_%04" PRIx32 " %%join_skip_head_%04" PRIx32 "\n"
+			                                "       %%join_skip_head_%04" PRIx32 " = OpLabel\n",
+			                                skip.branch, skip.branch, skip.branch, skip.branch, skip.branch, skip.branch,
+			                                skip.branch);
 		}
 	}
 

@@ -15,6 +15,10 @@ namespace Kyty::Libs {
 // partially written cache or save.
 [[nodiscard]] bool AtomicFileWrite(const std::filesystem::path& destination, const void* data, size_t size);
 
+// Removes the temporary siblings in `directory` whose writer process has
+// exited: a writer killed before its replace leaves one behind for good.
+void AtomicFileRemoveOrphans(const std::filesystem::path& directory);
+
 } // namespace Kyty::Libs
 
 #endif // KYTY_EMU_ENABLED

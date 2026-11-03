@@ -76,6 +76,9 @@ LIB_DEFINE(InitVideoOut_1)
 	LIB_FUNC("Nv8c-Kb+DUM", VideoOut::VideoOutIsOutputSupported);
 	LIB_FUNC("N5KDtkIjjJ4", VideoOut::VideoOutUnregisterBuffers);
 	LIB_FUNC("-Ozn0F1AFRg", VideoOut::VideoOutDeleteFlipEvent);
+	LIB_FUNC("w7Ipp9Xl7hg", VideoOut::VideoOutAllowOutputResolutionWqhdDetection);
+	LIB_FUNC("eb-gvTYQcoY", VideoOut::VideoOutLatencyControlWaitBeforeInput);
+	LIB_FUNC("MCJ8SkzsQxY", VideoOut::VideoOutLatencyMeasureSetStartPoint);
 	InitVideoOutCommon(s, 1, 1);
 }
 

@@ -32,6 +32,7 @@ public:
 		entry.pipeline->pipeline_layout = layout;
 		entry.pipeline->static_params   = entry.static_params;
 		entry.pipeline->dynamic_params  = entry.dynamic_params;
+		entry.pipeline->cache_slot      = cache.m_pipelines.Size();
 		cache.m_pipelines.Add(entry);
 		return entry.pipeline;
 	}
@@ -538,22 +539,22 @@ TEST(EmulatorPipelineLifetime, RetirementWaitsForEveryRecordingLease)
 	EXPECT_EQ(lifetime.ReferenceCount(), 0u);
 }
 
-TEST(EmulatorPipelineLifetime, EvictionSkipsPinnedEntriesAndReportsExhaustion)
+TEST(EmulatorPipelineLifetime, EvictionPicksLeastRecentlyUsedUnpinnedEntryAndReportsExhaustion)
 {
 	PipelineLifetimeState lifetimes[3];
-	ASSERT_TRUE(lifetimes[0].Acquire());
-	ASSERT_TRUE(lifetimes[1].Acquire());
-	uint32_t cursor = 0;
+	const uint64_t        last_use[3] = {1, 3, 2};
+	const auto            evictable   = [&lifetimes](uint32_t index) { return lifetimes[index].CanEvict(); };
+	const auto            used        = [&last_use](uint32_t index) { return last_use[index]; };
 
-	EXPECT_EQ(PipelineCacheNextEvictableIndex(3, &cursor, [&lifetimes](uint32_t index) { return lifetimes[index].CanEvict(); }), 2u);
-	EXPECT_EQ(cursor, 0u);
+	EXPECT_EQ(PipelineCacheLeastRecentlyUsedIndex(3, evictable, used), 0u);
+	ASSERT_TRUE(lifetimes[0].Acquire());
+	EXPECT_EQ(PipelineCacheLeastRecentlyUsedIndex(3, evictable, used), 2u);
+	ASSERT_TRUE(lifetimes[1].Acquire());
 	ASSERT_TRUE(lifetimes[2].Acquire());
-	EXPECT_EQ(PipelineCacheNextEvictableIndex(3, &cursor, [&lifetimes](uint32_t index) { return lifetimes[index].CanEvict(); }),
-	          UINT32_MAX);
-	EXPECT_EQ(cursor, 0u);
+	EXPECT_EQ(PipelineCacheLeastRecentlyUsedIndex(3, evictable, used), UINT32_MAX);
 
 	EXPECT_FALSE(lifetimes[1].Release());
-	EXPECT_EQ(PipelineCacheNextEvictableIndex(3, &cursor, [&lifetimes](uint32_t index) { return lifetimes[index].CanEvict(); }), 1u);
+	EXPECT_EQ(PipelineCacheLeastRecentlyUsedIndex(3, evictable, used), 1u);
 }
 
 TEST(EmulatorPipelineLifetime, CacheInvalidationKeepsBoundPipelineAliveUntilPendingBufferReset)

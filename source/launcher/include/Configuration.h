@@ -124,7 +124,8 @@ public:
 	{
 		Linear,
 		Nearest,
-		Fsr
+		Fsr,
+		Fsr3
 	};
 	Q_ENUM(PresentationFilter)
 
@@ -156,6 +157,7 @@ public:
 	QStringList sections;   /* Library sections the game is shown in */
 	QString basedir;    /* Game base directory */
 	QString param_file; /* Path to param.sfo / param.json */
+	QString game_patch_file; /* Path to a mods file applied at boot, empty for none */
 	qint64  last_run = 0; /* Milliseconds since epoch of the last run, 0 when never run */
 	qint64  play_time       = 0; /* Seconds the game has run when started from the library */
 	bool    favorite        = false;
@@ -205,6 +207,7 @@ public:
 		KYTY_CFG_SETL(sections);
 		KYTY_CFG_SET(basedir);
 		KYTY_CFG_SET(param_file);
+		KYTY_CFG_SET(game_patch_file);
 		s->setValue("last_run", last_run);
 		s->setValue("play_time", play_time);
 		s->setValue("favorite", favorite);
@@ -249,6 +252,7 @@ public:
 		custom_settings = s->value("custom_settings", false).toBool();
 		KYTY_CFG_GET(basedir);
 		KYTY_CFG_GET(param_file);
+		KYTY_CFG_GET(game_patch_file);
 		if (s->contains("screen_width"))
 		{
 			screen_width = s->value("screen_width").toInt();

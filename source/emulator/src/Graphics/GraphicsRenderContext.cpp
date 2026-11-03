@@ -89,6 +89,7 @@ bool GraphicsRenderUnbindContextForTesting(GraphicContext* ctx)
 	{
 		return false;
 	}
+	UtilCompleteImageFills();
 	// The fixture waits for submitted work and releases its current recording first,
 	// so cache-owned objects and descriptor references can now be destroyed safely.
 	g_command_pool.DeleteAllForTesting();
@@ -302,17 +303,8 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal, uint32_t in
 void GdsBuffer::Init(GraphicContext* ctx, CommandBuffer* buffer)
 {
 	EXIT_IF(ctx == nullptr || buffer == nullptr);
-	const int queue_index = buffer->GetQueueIndex();
-	EXIT_IF(queue_index < 0 || queue_index >= GraphicContext::QUEUES_NUM);
-	const uint32_t family = ctx->queues[queue_index].family;
-	if (m_queue_family == VK_QUEUE_FAMILY_IGNORED)
-	{
-		m_queue_family = family;
-	}
-	if (m_queue_family != family)
-	{
-		EXIT("GDS queue-family migration is unsupported: owner=%u requested=%u\n", m_queue_family, family);
-	}
+	// The buffer is created with concurrent sharing across every used family,
+	// so the first queue that needs it does not own it exclusively.
 	if (m_buffer == nullptr)
 	{
 		m_buffer = new VulkanBuffer;
@@ -450,6 +442,7 @@ bool GdsBuffer::RecordCopyFromBuffer(CommandBuffer* buffer, GraphicContext* ctx,
 
 	const VkCommandBuffer cmd  = GdsCommandBuffer(buffer);
 	const uint64_t        size = dw_count * 4u;
+	src_offset += src->guest_offset;
 	VkBufferCopy          region {};
 	region.srcOffset = src_offset;
 	region.dstOffset = dw_offset * 4u;
@@ -581,7 +574,6 @@ void GdsBuffer::ReleaseForTesting(GraphicContext* ctx)
 		delete m_buffer;
 		m_buffer = nullptr;
 	}
-	m_queue_family = VK_QUEUE_FAMILY_IGNORED;
 }
 
 void CommandPool::Create(int id)
@@ -681,6 +673,20 @@ void CommandPool::DeleteAll()
 			vkDestroyCommandPool(ctx->device, pool->pool, nullptr);
 
 			TransientSnapshotPoolDestroy(ctx, pool);
+			if (pool->transport_storage != nullptr)
+			{
+				VulkanDeleteBuffer(ctx, pool->transport_storage);
+				delete pool->transport_storage;
+			}
+			pool->retired_geometry_outputs.push_back(pool->geometry_output);
+			for (auto* output: pool->retired_geometry_outputs)
+			{
+				if (output != nullptr)
+				{
+					VulkanDeleteBuffer(ctx, output);
+					delete output;
+				}
+			}
 
 			delete[] pool->semaphores;
 			delete[] pool->fences;

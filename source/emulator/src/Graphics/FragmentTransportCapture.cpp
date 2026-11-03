@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/ShaderSpirv.h"
 
 #include <array>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -38,12 +39,24 @@ uint32_t InterpolationField(const ShaderPixelInputInfo& pixel, uint32_t reg)
 }
 
 bool InputsAvailable(const ShaderCode& code, const ShaderPixelInputInfo& pixel, const ShaderFragmentComputeInfo& transport,
-                     InterpolationFields* fields)
+                     InterpolationFields* fields, const char** refusal)
 {
 	constexpr uint32_t supported = 0x1f66u;
-	if (!pixel.custom_interpolation.Enabled() || pixel.input_num > 32u || (pixel.system_input_enable & ~supported) != 0u ||
-	    (pixel.system_input_enable & ~pixel.system_input_address) != 0u)
+	// The capture interpolates at the locations the native pixel pipeline uses:
+	// custom locations when that path is selected, else the per-program setting.
+	if (pixel.input_num > 32u)
 	{
+		*refusal = "input_count";
+		return false;
+	}
+	if ((pixel.system_input_enable & ~supported) != 0u)
+	{
+		*refusal = "system_input_fields";
+		return false;
+	}
+	if ((pixel.system_input_enable & ~pixel.system_input_address) != 0u)
+	{
+		*refusal = "system_input_address";
 		return false;
 	}
 	for (uint32_t attribute = 0; attribute < pixel.input_num; ++attribute)
@@ -51,6 +64,7 @@ bool InputsAvailable(const ShaderCode& code, const ShaderPixelInputInfo& pixel, 
 		ShaderPixelInterpolator decoded {};
 		if (ShaderPixelInputActive(pixel, attribute) && !ShaderDecodePixelInterpolator(pixel.interpolator_settings[attribute], &decoded))
 		{
+			*refusal = "interpolator_decode";
 			return false;
 		}
 	}
@@ -60,6 +74,7 @@ bool InputsAvailable(const ShaderCode& code, const ShaderPixelInputInfo& pixel, 
 		if ((pixel.system_input_enable & (1u << field)) != 0u &&
 		    ShaderPixelSystemInputRegister(pixel, field) + width > transport.initial_vgpr_count)
 		{
+			*refusal = "system_input_register";
 			return false;
 		}
 	}
@@ -79,10 +94,7 @@ bool InputsAvailable(const ShaderCode& code, const ShaderPixelInputInfo& pixel, 
 		if (attribute >= pixel.input_num || !ShaderPixelInputActive(pixel, attribute) ||
 		    !ShaderDecodePixelInterpolator(pixel.interpolator_settings[attribute], &decoded))
 		{
-			return false;
-		}
-		if (move && decoded.source == ShaderPixelInterpolatorSource::Parameter)
-		{
+			*refusal = "interp_attribute";
 			return false;
 		}
 		if (!pair)
@@ -91,6 +103,7 @@ bool InputsAvailable(const ShaderCode& code, const ShaderPixelInputInfo& pixel, 
 		}
 		if (decoded.source == ShaderPixelInterpolatorSource::PerVertex || !ShaderFragmentInterpolationPairSupported(code, index, pixel))
 		{
+			*refusal = "interp_pair_form";
 			return false;
 		}
 		if (instruction.type != ShaderInstructionType::VInterpP1F32 || decoded.flat)
@@ -99,11 +112,17 @@ bool InputsAvailable(const ShaderCode& code, const ShaderPixelInputInfo& pixel, 
 		}
 		const uint32_t field     = InterpolationField(pixel, static_cast<uint32_t>(instruction.src[0].register_id));
 		const uint32_t canonical = ShaderPixelCanonicalInterpolator(pixel, attribute);
-		if (field == UINT32_MAX || ((*fields)[canonical] != UINT32_MAX && (*fields)[canonical] != field))
+		// No enabled barycentric field means the draw uses the perspective-center
+		// default, which needs no decoration.
+		if (field != UINT32_MAX && (*fields)[canonical] != UINT32_MAX && (*fields)[canonical] != field)
 		{
+			*refusal = "interp_field";
 			return false;
 		}
-		(*fields)[canonical] = field;
+		if (field != UINT32_MAX)
+		{
+			(*fields)[canonical] = field;
+		}
 	}
 	return true;
 }
@@ -127,10 +146,10 @@ void DeclareInputs(const ShaderPixelInputInfo& pixel, const InterpolationFields&
 		{
 			continue;
 		}
-		const bool raw = decoded.source == ShaderPixelInterpolatorSource::PerVertex;
+		const bool     raw      = decoded.source == ShaderPixelInterpolatorSource::PerVertex;
+		const uint32_t location = pixel.custom_interpolation.Enabled() ? pixel.custom_interpolation.locations[attribute] : decoded.location;
 		source->interface += String8::FromPrintf(" %%capture_attr%u", attribute);
-		source->annotations +=
-		    String8::FromPrintf("OpDecorate %%capture_attr%u Location %u\n", attribute, pixel.custom_interpolation.locations[attribute]);
+		source->annotations += String8::FromPrintf("OpDecorate %%capture_attr%u Location %u\n", attribute, location);
 		if (raw || decoded.flat)
 		{
 			source->annotations += String8::FromPrintf("OpDecorate %%capture_attr%u Flat\n", attribute);
@@ -245,9 +264,29 @@ String8 AttributeWord(const ShaderPixelInputInfo& pixel, uint32_t attribute, uin
 	return String8::FromPrintf("%%capture_value%u = OpCopyObject %%uint %%capture_constant0\n", word);
 }
 
-String8 ReaderBody(const ShaderPixelInputInfo& pixel, const ShaderFragmentComputeInfo& transport, CaptureSource* source)
+String8 ReaderBody(const ShaderPixelInputInfo& pixel, const ShaderFragmentComputeInfo& transport, const LanePacking& packing,
+                   CaptureSource* source)
 {
-	const uint32_t words = 1u + transport.initial_vgpr_count + pixel.input_num * 16u;
+	const uint32_t words = 1u + transport.initial_vgpr_count + packing.words;
+	std::vector<int32_t> word_map(packing.words, -1);
+	for (uint32_t attribute = 0; attribute < 32u; ++attribute)
+	{
+		const auto& lane = packing.attributes[attribute];
+		if (lane.parameter_offset != UINT32_MAX)
+		{
+			for (uint32_t component = 0; component < 4u; ++component)
+			{
+				word_map[lane.parameter_offset + component] = static_cast<int32_t>(attribute * 16u + component);
+			}
+		}
+		if (lane.raw_offset != UINT32_MAX)
+		{
+			for (uint32_t word = 0; word < 12u; ++word)
+			{
+				word_map[lane.raw_offset + word] = static_cast<int32_t>(attribute * 16u + 4u + word);
+			}
+		}
+	}
 	for (uint32_t value = 0; value < 4u; ++value)
 	{
 		source->constants += String8::FromPrintf("%%capture_constant%u = OpConstant %%uint %u\n", value, value);
@@ -268,8 +307,9 @@ String8 ReaderBody(const ShaderPixelInputInfo& pixel, const ShaderFragmentComput
 			load = SystemWord(pixel, word - 1u, word);
 		} else
 		{
-			const uint32_t offset = word - 1u - transport.initial_vgpr_count;
-			load                  = AttributeWord(pixel, offset / 16u, offset % 16u, word);
+			const int32_t encoded = word_map[word - 1u - transport.initial_vgpr_count];
+			load                  = encoded < 0 ? String8::FromPrintf("%%capture_value%u = OpCopyObject %%uint %%capture_constant0\n", word)
+			                                   : AttributeWord(pixel, static_cast<uint32_t>(encoded) / 16u, static_cast<uint32_t>(encoded) % 16u, word);
 		}
 		source->blocks += load + String8::FromPrintf("OpReturnValue %%capture_value%u\n", word);
 	}
@@ -284,13 +324,78 @@ String8 ReaderBody(const ShaderPixelInputInfo& pixel, const ShaderFragmentComput
 
 } // namespace
 
+LanePacking BuildLanePacking(const ShaderCode& code, const ShaderPixelInputInfo& pixel)
+{
+	LanePacking         packing;
+	std::array<bool, 32> parameter {};
+	std::array<bool, 32> raw {};
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		const auto& instruction = code.GetInstructions().At(index);
+		const bool  move        = instruction.type == ShaderInstructionType::VInterpMovF32;
+		const bool  pair = instruction.type == ShaderInstructionType::VInterpP1F32 || instruction.type == ShaderInstructionType::VInterpP2F32;
+		if (!move && !pair)
+		{
+			continue;
+		}
+		const auto attribute = instruction.src[1].constant.u;
+		if (attribute >= 32u)
+		{
+			continue;
+		}
+		// v_interp_mov names three vertex values only when the draw marks the
+		// input per-vertex; otherwise the native lowering reads the interpolated
+		// parameter, the same slot the P1/P2 pair uses.
+		const bool per_vertex = move && pixel.custom_interpolation.Enabled() &&
+		                        (pixel.custom_interpolation.per_vertex_inputs & (1u << attribute)) != 0u;
+		if (pair || (move && !per_vertex))
+		{
+			parameter[attribute] = true;
+		}
+		if (per_vertex)
+		{
+			raw[attribute] = true;
+		}
+	}
+	// A MOV instruction names a vertex operand; an interpolated parameter has
+	// its own component quad. Both stay contiguous per attribute.
+	for (uint32_t attribute = 0; attribute < 32u; ++attribute)
+	{
+		if (parameter[attribute])
+		{
+			packing.attributes[attribute].parameter_offset = packing.words;
+			packing.words += 4u;
+		}
+		if (raw[attribute])
+		{
+			packing.attributes[attribute].raw_offset = packing.words;
+			packing.words += 12u;
+		}
+	}
+	return packing;
+}
+
 String8 GenerateCaptureSource(const ShaderCode& code, const ShaderPixelInputInfo& pixel, const ShaderFragmentComputeInfo& transport)
 {
 	InterpolationFields fields;
-	if (code.GetType() != ShaderType::Pixel || !InputsAvailable(code, pixel, transport, &fields) || transport.initial_vgpr_count > 256u ||
-	    !pixel.host_to_guest_scale.IsIdentity())
+	if (code.GetType() != ShaderType::Pixel)
 	{
-		return "OpKytyFragmentCaptureInputsRejected\n";
+		return "OpKytyFragmentCaptureInputsRejected(stage)\n";
+	}
+	if (transport.initial_vgpr_count > 256u)
+	{
+		return "OpKytyFragmentCaptureInputsRejected(initial_vgprs)\n";
+	}
+	const char* refusal = "unknown";
+	if (!InputsAvailable(code, pixel, transport, &fields, &refusal))
+	{
+		return String8::FromPrintf("OpKytyFragmentCaptureInputsRejected(%s)\n", refusal);
+	}
+	// The scale rewrites gl_FragCoord; a program that reads no system input
+	// captures the same lane record at any host resolution.
+	if (!pixel.host_to_guest_scale.IsIdentity() && transport.initial_vgpr_count > 0u)
+	{
+		return "OpKytyFragmentCaptureInputsRejected(scale)\n";
 	}
 	CaptureSource generated;
 	DeclareInputs(pixel, fields, &generated);
@@ -302,7 +407,8 @@ String8 GenerateCaptureSource(const ShaderCode& code, const ShaderPixelInputInfo
 	}
 	generated.constants += String8::FromPrintf("%%capture_front_bits = OpConstant %%uint %u\n%%capture_back_bits = OpConstant %%uint %u\n",
 	                                           pixel.front_face_all_bits ? 1u : 0x3f800000u, pixel.front_face_all_bits ? 0u : 0xbf800000u);
-	const auto reader = ReaderBody(pixel, transport, &generated);
+	const auto packing = BuildLanePacking(code, pixel);
+	const auto reader = ReaderBody(pixel, transport, packing, &generated);
 	String8    source(kFragmentCaptureCore);
 	source = source.ReplaceStr("<capture_interface>", generated.interface);
 	source = source.ReplaceStr("<capture_annotations>", generated.annotations);

@@ -602,6 +602,7 @@ int KYTY_SYSV_ABI SaveDataUmount(const SaveDataMountPoint* mount_point)
 
 constexpr uint32_t SAVE_DATA_UMOUNT_MODE_BACKUP_ASYNC = 1u << 16u;
 constexpr uint32_t SAVE_DATA_EVENT_TYPE_UMOUNT_BACKUP_END = 1u;
+constexpr uint32_t SAVE_DATA_EVENT_TYPE_BACKUP_END = 2u;
 constexpr uint32_t SAVE_DATA_EVENT_TYPE_COMMIT_BACKUP_END = 4u;
 
 static void EnqueueSaveDataEvent(uint32_t type, int32_t user_id, const char* dir_name, int32_t error_code);
@@ -932,6 +933,37 @@ int KYTY_SYSV_ABI SaveDataCommit(const SaveDataCommitParam* commit_param)
 	{
 		EnqueueSaveDataEvent(SAVE_DATA_EVENT_TYPE_COMMIT_BACKUP_END, 0);
 	}
+	return OK;
+}
+
+// sceSaveDataBackup — NID z1JA8-iJt3k. The shipped body validates the request
+// and queues backup op 0x29 on the service context; completion is reported as
+// an async BACKUP_END event. There is no remote backup store, so it completes
+// as soon as the request has been accepted.
+struct SaveDataBackupRequest
+{
+	int32_t                user_id;
+	uint32_t               reserved0;
+	const SaveDataTitleId* title_id;
+	const SaveDataDirName* dir_name;
+	const void*            fingerprint;
+	uint8_t                reserved[32];
+};
+static_assert(sizeof(SaveDataBackupRequest) == 0x40);
+static_assert(offsetof(SaveDataBackupRequest, dir_name) == 0x10);
+
+int KYTY_SYSV_ABI SaveDataBackup(const SaveDataBackupRequest* backup)
+{
+	PRINT_NAME();
+
+	if (backup == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+
+	KYTY_LOG_DEBUG("\t user_id = %d\n", backup->user_id);
+	const char* dir_name = SaveDataDirNameTerminated(backup->dir_name) ? backup->dir_name->data : "";
+	EnqueueSaveDataEvent(SAVE_DATA_EVENT_TYPE_BACKUP_END, backup->user_id, dir_name);
 	return OK;
 }
 
@@ -1272,6 +1304,7 @@ void RegisterSaveDataFunctions(::Kyty::Hle::HleSymbolRegistry* symbols, const Li
 	RegisterLibraryFunction(symbols, identity, "dyIhnXq-0SM", SaveDataDirNameSearch, U"SaveData::SaveDataDirNameSearch");
 	RegisterLibraryFunction(symbols, identity, "j8xKtiFj0SY", SaveDataGetEventResult, U"SaveData::SaveDataGetEventResult");
 	RegisterLibraryFunction(symbols, identity, "ie7qhZ4X0Cc", SaveDataCommit, U"SaveData::SaveDataCommit");
+	RegisterLibraryFunction(symbols, identity, "z1JA8-iJt3k", SaveDataBackup, U"SaveData::SaveDataBackup");
 	RegisterLibraryFunction(symbols, identity, "c88Yy54Mx0w", SaveDataSaveIcon, U"SaveData::SaveDataSaveIcon");
 	RegisterLibraryFunction(symbols, identity, "Z7z6HXWORJY", SaveDataSaveIconByPath, U"SaveData::SaveDataSaveIconByPath");
 	RegisterLibraryFunction(symbols, identity, "cGjO3wM3V28", SaveDataLoadIcon, U"SaveData::SaveDataLoadIcon");

@@ -43,7 +43,12 @@ TEST(EmulatorFragmentParameterState, RemovesOnlyTheUnobservableInitialParameterH
 	Append(&code, Move(ShaderOperandType::Sgpr, 30, ShaderOperandType::LiteralConstant, 0));
 	Append(&code, Move(ShaderOperandType::Sgpr, 1, ShaderOperandType::Sgpr, 30));
 	EXPECT_TRUE(ShaderAnalyzeFragmentVirtualParameterState(code, 30).supported);
-	ShaderFragmentComputeInfo transport {1, 0, 1, 4, 30};
+	ShaderFragmentComputeInfo transport {};
+	transport.descriptor_set     = 1;
+	transport.input_binding      = 0;
+	transport.output_binding     = 1;
+	transport.initial_vgpr_count = 4;
+	transport.user_sgpr_count    = 30;
 	EXPECT_EQ(transport.HeaderWords(), 1u);
 	transport.parameter_state = ShaderFragmentParameterState::Virtualized;
 	EXPECT_EQ(transport.HeaderWords(), 0u);

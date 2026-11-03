@@ -91,18 +91,33 @@ enum class ShaderInstructionType : uint32_t
 	DsSubU32,
 	DsXorB32,
 	DsReadB32,
+	DsBpermuteB32,
+	// ds_swizzle_b32: a lane permute fixed by the offset; it does not access LDS.
+	DsSwizzleB32,
 	DsRead2B32,
 	DsRead2St64B32,
 	DsWriteB32,
 	// ds_write2[st64]_b32: two dwords at ADDR + OFFSET0 * 4 and ADDR + OFFSET1 * 4 (times 64 for st64).
 	DsWrite2B32,
 	DsWrite2St64B32,
+	// ds_write2[st64]_b64: two qwords at ADDR + OFFSET0 * 8 and ADDR + OFFSET1 * 8
+	// (times 64 for st64); DATA0 and DATA1 each name a two-dword register pair.
+	DsWrite2B64,
+	DsWrite2St64B64,
+	// ds_read2[st64]_b64: two qwords from the same addresses into four VGPRs.
+	DsRead2B64,
+	DsRead2St64B64,
 	// ds_write_addtid_b32 / ds_read_addtid_b32: per-lane LDS slot at
 	// M0[15:0] + offset + TID*4 (RDNA2 ISA 10.4). In graphics stages the
 	// slot is private to the invocation (compiler spill/reload idiom).
 	DsWriteAddtidB32,
 	DsReadAddtidB32,
 	DsWrxchgRtnB32,
+	// ds_cmpst_b32 / ds_cmpst_rtn_b32: MEM = (MEM == DATA) ? DATA2 : MEM. The
+	// comparand is DATA (src[1]) and the replacement is DATA2 (src[2]), the
+	// reverse of BUFFER_ATOMIC_CMPSWAP (ISA 12.13).
+	DsCmpstB32,
+	DsCmpstRtnB32,
 	SBitcmp0B32,
 	SBitcmp1B32,
 	SBitcmp0B64,
@@ -113,6 +128,8 @@ enum class ShaderInstructionType : uint32_t
 	SBcnt1I32B64,
 	SFf1I32B32,
 	SFf1I32B64,
+	SFlbitI32B32,
+	SFlbitI32B64,
 	STrap,
 	VCmpLtU64,
 	VCmpEqU64,
@@ -128,6 +145,8 @@ enum class ShaderInstructionType : uint32_t
 	GlobalLoadDwordx2,
 	GlobalLoadDwordx3,
 	GlobalLoadDwordx4,
+	GlobalLoadUbyteD16Hi,
+	GlobalLoadSbyteD16Hi,
 	ImageGetResinfo,
 	ImageGather4,
 	ImageLoad,
@@ -448,6 +467,14 @@ enum class ShaderInstructionType : uint32_t
 	VFmaF16,
 	// VOP3P fused multiply-add with independently selected input precision.
 	VFmaMixF32,
+	VFmaMixLoF16,
+	VFmaMixHiF16,
+	// VOP3P packed half arithmetic: two independent operations in one VGPR.
+	VPkFmaF16,
+	VPkAddF16,
+	VPkMulF16,
+	VPkMinF16,
+	VPkMaxF16,
 	// RDNA2 dot-product with accumulation in destination register
 	VDot2cF32F16,
 	VDot4cI32I8,
@@ -528,6 +555,7 @@ enum class ShaderInstructionType : uint32_t
 	VMulU16,
 	VMulHiI32,
 	VMulHiU32,
+	VMulI32I24,
 	VMulLoI32,
 	VMulLoU32,
 	VMulU32U24,
@@ -600,6 +628,35 @@ enum class ShaderInstructionType : uint32_t
 	SPackLhB32B16,
 	SPackHhB32B16,
 	SAbsdiffI32,
+	SBitset0B32,
+	ImageGather4C,
+	VFfblB32,
+	VFfbhU32,
+	VFfbhI32,
+	ImageAtomicSub,
+	ImageAtomicSMin,
+	ImageAtomicUMin,
+	ImageAtomicSMax,
+	ImageAtomicUMax,
+	ImageAtomicAnd,
+	ImageAtomicOr,
+	ImageAtomicXor,
+	VLshrrevB16,
+	VAshrrevI16,
+	VLshlrevB16,
+	VPackB32F16,
+	VPkMulLoU16,
+	VPkAddI16,
+	VPkSubI16,
+	VPkLshlrevB16,
+	VPkLshrrevB16,
+	VPkAshrrevI16,
+	VPkMaxI16,
+	VPkMinI16,
+	VPkAddU16,
+	VPkSubU16,
+	VPkMaxU16,
+	VPkMinU16,
 
 	ZMax
 };
@@ -898,6 +955,11 @@ enum Format : uint64_t
 	Vdst2VaddrOffset01            = FormatDefine({DA2, S0}),
 	// ds_write2_b32: S0 = ADDR, S1 = DATA0, S2 = DATA1; offsets live in ds_offset.
 	VaddrVdata2Offset01           = FormatDefine({S0, S1, S2}),
+	// ds_cmpst: one address, DATA (S1) and DATA2 (S2), and a single byte offset in
+	// ds_offset. The DsOff token keeps these values distinct from the VOP3 and
+	// write2 formats, which are matched by value in several places.
+	VaddrVdata2Offset             = FormatDefine({S0, S1, S2, DsOff}),
+	VdstVaddrVdata2Offset         = FormatDefine({D, S0, S1, S2, DsOff}),
 	VdstSdst2Vsrc0Vsrc1           = FormatDefine({D, D2A2, S0, S1}),
 	VdstSdst2Vsrc0Vsrc1Ssrc2A2    = FormatDefine({D, D2A2, S0, S1, S2A2}),
 	Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair = FormatDefine({DA2, D2A2, S0, S1, S2A2}),
@@ -952,8 +1014,10 @@ struct ShaderOperand
 	bool              negate      = false;
 	bool              clamp       = false;
 	// SDWA channel select (GCN/RDNA): 0-3 = BYTE_n, 4-5 = WORD_n, 6 = DWORD.
-	// Applied as zero-extend extract when loading the operand for recompile.
-	uint8_t swizzle = 6;
+	// Applied as an extract when loading the operand for recompile: zero-extend,
+	// or sign-extend when the SDWA SEXT bit of the source is set.
+	uint8_t swizzle   = 6;
+	bool    sdwa_sext = false;
 	// DPP (data-parallel primitive) sources read a VGPR from another wave lane.
 	// Keep its routing controls in the IR; they cannot be folded into a register.
 	bool     dpp                = false;
@@ -968,7 +1032,7 @@ struct ShaderOperand
 	bool operator==(const ShaderOperand& other) const
 	{
 		return type == other.type && constant.u == other.constant.u && register_id == other.register_id && size == other.size &&
-		       swizzle == other.swizzle && dpp == other.dpp && dpp_ctrl == other.dpp_ctrl && dpp_row_mask == other.dpp_row_mask &&
+		       swizzle == other.swizzle && sdwa_sext == other.sdwa_sext && dpp == other.dpp && dpp_ctrl == other.dpp_ctrl && dpp_row_mask == other.dpp_row_mask &&
 		       dpp_bank_mask == other.dpp_bank_mask && dpp_fetch_inactive == other.dpp_fetch_inactive &&
 		       dpp_bound_ctrl == other.dpp_bound_ctrl && dpp_unmodeled_bits == other.dpp_unmodeled_bits;
 	}
@@ -1008,6 +1072,8 @@ struct ShaderInstruction
 	// MIMG component mask. For image_get_resinfo it maps result components to
 	// consecutive destination VGPRs.
 	uint8_t mimg_dmask = 0;
+	// MIMG D16: each data VGPR packs two 16-bit components, low half first.
+	bool mimg_d16 = false;
 	// MIMG DIM field. It defines the instruction's coordinate contract and is
 	// independent from the set of descriptors bound by the pipeline.
 	uint8_t mimg_dimension = 0;
@@ -1048,6 +1114,8 @@ struct ShaderInstruction
 	// - DsReadB32: byte offset added to the byte address in src[0].
 	// - DsRead2B32: packed as (offset1 << 8) | offset0; each offset is dword-scaled
 	//   while src[0] remains a byte address (addr_i = vaddr + offset_i * 4).
+	// - DsWrite2B64: the same packing, each offset qword-scaled (addr_i = vaddr + offset_i * 8).
+	// - DsRead2B64: the same packing and qword scaling, into four destination dwords.
 	uint16_t ds_offset = 0;
 	// Retain exact DS encoding for admission: legacy aliases and ignored
 	// controls must not become evidence that a different operation is supported.
@@ -1339,13 +1407,13 @@ constexpr ShaderGen5SampledTextureShape ShaderGen5SampledTextureShapeForType(uin
 
 // MIMG DIM selects the address layout the instruction supplies; the T# type selects the
 // addressing the texture unit performs. A volume DIM therefore cannot turn a resource
-// whose type is not 3D into a volume: a 2D or array resource ignores the extra
-// coordinate, so the descriptor keeps the shape of its own type. (The other
+// whose type is not 3D into a volume, and no other DIM can turn a volume into a flat
+// resource: the descriptor keeps the shape of its own type. (The other
 // instruction-derived shapes stay: an array resource read as a plain 2D slice, for
 // example, is a usage the renderer resolves per instruction.)
 constexpr bool ShaderGen5InstructionShapeAppliesToType(uint8_t type, ShaderGen5SampledTextureShape shape)
 {
-	return shape != ShaderGen5SampledTextureShape::ThreeDimensional || type == 10u;
+	return (shape == ShaderGen5SampledTextureShape::ThreeDimensional) == (type == 10u);
 }
 
 constexpr uint8_t ShaderGen5HostSampledTextureType(uint8_t guest_type, ShaderGen5SampledTextureShape shape)
@@ -1827,6 +1895,14 @@ struct ShaderCopiedImageDescriptor
 	int      sampler_index = -1;
 };
 
+// An S# the shader assembles from constants (an inline sampler): the image
+// read at consumer_pc samples through sampler resource sampler_index.
+struct ShaderConstantSampler
+{
+	uint32_t consumer_pc   = 0;
+	int      sampler_index = -1;
+};
+
 enum class ShaderTextureUsage
 {
 	Unknown,
@@ -2009,7 +2085,8 @@ struct ShaderStorageImageTileCoverage
                                                                                    bool group_xy_enabled = false,
                                                                                    bool paired_xy_thread_ids = false);
 [[nodiscard]] State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register);
-void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
+void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources,
+                                                                       ShaderDynamicSLoadMappings* dynamic_sloads = nullptr);
 
 struct ShaderTextureDescriptor
 {
@@ -2135,6 +2212,7 @@ struct ShaderExtendedResources
 	int                    eud_user_sgpr_num = 0;
 	uint16_t               eud_size_dw       = 0;
 	int                    eud_offset_base    = 0;
+	bool                   read_at_runtime    = false;
 	ShaderExtendedResource data;
 };
 
@@ -2182,6 +2260,7 @@ struct ShaderBindResources
 	// s_getpc): they read through the runtime V#, never the descriptor slot.
 	Vector<uint32_t> redefined_descriptor_consumers;
 	Vector<ShaderCopiedImageDescriptor> copied_image_descriptors;
+	Vector<ShaderConstantSampler>       constant_samplers;
 };
 
 [[nodiscard]] int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
@@ -2190,6 +2269,7 @@ struct ShaderBindResources
                                                          int user_data_register_base);
 // IMAGE_ATOMIC_ADD and IMAGE_ATOMIC_SWAP: 32-bit read-modify-writes of one storage image texel.
 [[nodiscard]] bool ShaderIsImageAtomic(ShaderInstructionType type);
+[[nodiscard]] bool ShaderHasImageAtomic(const ShaderCode& code);
 [[nodiscard]] bool ShaderImageAtomicSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderImageAtomicResourceSupported(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind);
 [[nodiscard]] bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction);
@@ -2238,7 +2318,7 @@ enum class ShaderNativeWaveProof : uint32_t
 	QuadLocal,
 	ExactSubgroup,
 	FragmentNeutral32,
-	// A Wave64 or Wave32 pixel program whose only whole-wave observations are proven OR reductions and reads that
+	// A Wave64 or Wave32 pixel program whose only whole-wave observations are proven idempotent reductions and reads that
 	// stay inside launched quads, run as a partially populated guest wave on a host subgroup of any width.
 	FragmentPartialWave,
 };
@@ -2255,6 +2335,12 @@ struct GraphicsGeRawRegister;
 [[nodiscard]] uint32_t ShaderVertexGuestWaveSize(const GraphicsGeRawRegister& stages, bool next_gen, bool gs_front);
 [[nodiscard]] bool ShaderUsesNativeWaveState(const ShaderCode& code);
 [[nodiscard]] ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t guest_wave_size);
+// True for the fragment participation refusals: they name a source lane that a
+// narrower or varying host subgroup cannot represent. An exact guest-width
+// subgroup executes every guest lane, so those refusals do not apply there.
+// Semantic refusals (a mask used as a number, an invalid operand form) are not
+// participation refusals and stay fatal at every width.
+[[nodiscard]] bool ShaderNativeWaveParticipationRefusal(const char* reason);
 
 // ShaderAnalyzeNativeWave once per immutable program and guest width. The analysis walks the
 // whole program (mask flow to a fixpoint, 0.1-3 ms) and must not run per draw.
@@ -2348,8 +2434,9 @@ struct ShaderVertexStreamAccessScan
 	// A MUBUF/MTBUF instruction that is never a fetch candidate always reads its stream.
 	bool                             unconditional_reader = false;
 	Vector<std::pair<uint32_t, int>> fetch_candidates;
-	// Attribute-table dwords (bit i = dword i) the program loads from fetch_attrib_reg.
-	uint32_t attrib_dwords_read = 0;
+	// Per attribute-table dword, the bits the program can observe through loads of fetch_attrib_reg.
+	uint32_t         attrib_demanded_bits[ShaderVertexInputInfo::RES_MAX] = {};
+	Vector<uint32_t> attrib_load_pcs;
 };
 [[nodiscard]] ShaderVertexStreamAccessScan ShaderScanVertexStreamAccesses(const ShaderCode& code, int fetch_attrib_reg,
                                                                           int fetch_buffer_reg);
@@ -2473,6 +2560,9 @@ struct ShaderComputeInputInfo
 	// See ShaderComputeWaveDispatchPlan::native_equivalent_layout.
 	bool                    native_equivalent_valid = false;
 	ShaderComputeWaveLayout native_equivalent_layout;
+	// See ShaderComputeWaveDispatchPlan::wave32_split_layout.
+	bool                    wave32_split_valid = false;
+	ShaderComputeWaveLayout wave32_split_layout;
 	bool                    native_equivalence_required = false;
 	bool                    thread_limits_used          = false;
 	uint32_t                thread_limits[3]            = {0, 0, 0};
@@ -2532,14 +2622,23 @@ struct ShaderPixelColorExports
 	uint8_t partial_targets = 0;  // bit per target with any color export whose EN is not 0xF
 };
 
+// Attribute inputs read by V_INTERP_* in a parsed pixel program.
+struct ShaderPixelInterpolationUse
+{
+	uint32_t inputs             = 0; // bit per attribute read by any V_INTERP_*
+	uint32_t barycentric_inputs = 0; // bit per attribute read by V_INTERP_P1/P2
+};
+
+[[nodiscard]] ShaderPixelInterpolationUse ShaderSummarizePixelInterpolation(const ShaderCode& code);
+
 // Values derived only from a parsed pixel program. Descriptor and user-data
 // predicates remain per draw because their inputs can change between draws.
 struct ShaderImmutablePixelAnalysis
 {
 	bool has_only_null_exports = false;
 	ShaderPixelColorExports color_exports;
+	ShaderPixelInterpolationUse interpolation;
 	bool uses_native_wave_state = false;
-	bool prevents_noop_pixel_elision = false;
 	bool has_getpc = false;
 	bool has_global_memory_load = false;
 	// Buffer, typed buffer and scalar loads, in instruction order: the only
@@ -2629,8 +2728,8 @@ struct ShaderPixelInterpolator
 [[nodiscard]] float ShaderPixelInterpolatorDefaultComponent(const ShaderPixelInterpolator& interpolator, uint32_t component);
 [[nodiscard]] bool ShaderPixelInputActive(const ShaderPixelInputInfo& info, uint32_t index);
 [[nodiscard]] uint32_t ShaderPixelSystemInputRegister(const ShaderPixelInputInfo& info, uint32_t field);
-void ShaderResolveCustomInterpolation(const ShaderCode& code, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info);
-[[nodiscard]] Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& info);
+void ShaderResolveCustomInterpolation(const ShaderPixelInterpolationUse& use, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info);
+[[nodiscard]] Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& info, bool forward_primitive_id);
 
 struct ShaderSharp
 {

@@ -42,6 +42,8 @@ struct ShaderComputeWavePreflightRequest
 	uint32_t             lds_dwords = 0;
 	ShaderGuestLaneOrder lane_order = ShaderGuestLaneOrder::Unverified;
 	bool                 tg_size_en = false;
+	// COMPUTE_PGM_RSRC1.VGPRS: allocated VGPRs in granules, minus one.
+	uint32_t vgpr_granules = 0;
 };
 
 struct ShaderComputeWaveDispatchPlan
@@ -54,6 +56,9 @@ struct ShaderComputeWaveDispatchPlan
 	// layout only after the program itself is proven wave-width independent.
 	bool                    native_equivalent_valid = false;
 	ShaderComputeWaveLayout native_equivalent_layout {};
+	// A wave-sensitive wave32 program whose registers spill at width 32 runs in this layout.
+	bool                    wave32_split_valid = false;
+	ShaderComputeWaveLayout wave32_split_layout {};
 	// No split layout exists; wave_layout is the per-lane route and
 	// admission must prove the program before it runs.
 	bool native_equivalence_required = false;

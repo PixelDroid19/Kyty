@@ -529,11 +529,13 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 		{
 			return false;
 		}
-		// Partial destination updates and sign extension are not represented by
-		// the ordinary operand path. The explicit signed-convert emitter is the
-		// sole currently implemented SEXT exception.
-		if ((!compare && ((control >> 8u) & 7u) != 6u) ||
-		    ((control & ((1u << 19u) | (1u << 27u))) != 0u && !ShaderComputeWaveSdwaSignedConvertSupported(instruction)))
+		// Partial destination updates are not represented by the ordinary operand
+		// path. Source SEXT is applied by the operand extract of every loader; it
+		// is admitted for the consumers that read their sources as integers.
+		const auto name             = ShaderInstructionTypeName(instruction.type);
+		const auto suffix           = name.size() >= 3u ? name.substr(name.size() - 3u) : name;
+		const bool integer_consumer = suffix == "I32" || suffix == "U32" || suffix == "B32";
+		if ((!compare && ((control >> 8u) & 7u) != 6u) || ((control & ((1u << 19u) | (1u << 27u))) != 0u && !integer_consumer))
 		{
 			return false;
 		}
@@ -548,14 +550,14 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 		case ShaderInstructionType::VOrB32:
 		case ShaderInstructionType::VXorB32:
 		case ShaderInstructionType::VAddI32:
-		case ShaderInstructionType::VSubI32: integer_sources = 2; break;
+		case ShaderInstructionType::VSubI32:
+		case ShaderInstructionType::VSubrevI32: integer_sources = 2; break;
 		case ShaderInstructionType::VAdd3U32: integer_sources = 3; break;
 		default: break;
 	}
 	if (integer_sources != 0)
 	{
-		const bool carry = (instruction.type == ShaderInstructionType::VAddI32 || instruction.type == ShaderInstructionType::VSubI32) &&
-		                   instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
+		const bool carry = instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
 		// Legacy VOP2/VOP3 add/sub have a real native carry/borrow emitter.
 		// This is a VALU mask destination, so odd SGPR pairs remain legal.
 		const bool destination_valid = carry ? IsMaskDestination(instruction.dst2) : IsUnusedDestination(instruction.dst2);
@@ -850,12 +852,16 @@ bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction)
 	// VOPC SDWA has scalar destination fields, not the VOP2 destination-select
 	// fields. Admit DWORD sources without sign extension or reserved controls.
 	constexpr uint32_t unsupported_sdwa = (1u << 19u) | (1u << 22u) | (1u << 27u) | (1u << 30u);
+	// abs and neg on the classified float only move its sign bit.
+	ShaderOperand value = instruction.src[0];
+	value.absolute      = false;
+	value.negate        = false;
 	return instruction.type == ShaderInstructionType::VCmpClassF32 &&
 	       instruction.format == ShaderInstructionFormat::SmaskVsrc0Vsrc1 && instruction.src_num == 2 &&
 	       instruction.vop3_op_sel == 0u && instruction.vop3_omod == 0u &&
 	       (!instruction.vop_sdwa || (instruction.vop_sdwa_ctrl & unsupported_sdwa) == 0u) &&
 	       IsUnusedDestination(instruction.dst2) && IsScalarPairVariable(dst) && dst.type != ShaderOperandType::ExecLo &&
-	       IsTask3MaskSource(instruction.src[0]) && IsTask3MaskSource(instruction.src[1]);
+	       IsTask3MaskSource(value) && IsTask3MaskSource(instruction.src[1]);
 }
 
 bool ShaderComputeWaveGenericCompareSupported(const ShaderInstruction& instruction)
@@ -978,8 +984,7 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 {
 	if (!ShaderInstructionLoweringPreconditions(instruction)) { return false; }
 	// The native legacy carry emitter does not implement paired mask packing.
-	if ((instruction.type == ShaderInstructionType::VAddI32 || instruction.type == ShaderInstructionType::VSubI32) &&
-	    instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1) { return false; }
+	if (instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1) { return false; }
 	if (ShaderComputeWaveSdwaSignedConvertSupported(instruction)) { return true; }
 	if (ShaderIsImageAtomic(instruction.type)) { return ShaderImageAtomicSupported(instruction); }
 	const auto name   = ShaderInstructionTypeName(instruction.type);

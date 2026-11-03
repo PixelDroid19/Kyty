@@ -261,6 +261,12 @@ public:
 				else if (ext == "FClamp") { r = Bits(std::min(std::max(fp(6), fp(7)), fp(8))); }
 				else if (ext == "FMin") { r = Bits(std::fmin(fp(6), fp(7))); }
 				else if (ext == "FMax") { r = Bits(std::fmax(fp(6), fp(7))); }
+				else if (ext == "NMin" || ext == "NMax")
+				{
+					// One NaN operand yields the other; the C library quiets a signaling one instead.
+					const float number = ext == "NMin" ? std::fmin(fp(6), fp(7)) : std::fmax(fp(6), fp(7));
+					r = std::isnan(fp(6)) ? arg(7) : std::isnan(fp(7)) ? arg(6) : Bits(number);
+				}
 				else if (ext == "Trunc") { r = Bits(std::trunc(fp(6))); }
 				else if (ext == "Floor") { r = Bits(std::floor(fp(6))); }
 				else if (ext == "Ceil") { r = Bits(std::ceil(fp(6))); }

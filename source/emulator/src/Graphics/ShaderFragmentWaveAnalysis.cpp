@@ -161,16 +161,24 @@ bool ShaderFragmentInterpolationPairSupported(const ShaderCode& code, uint32_t i
 	{
 		return false;
 	}
-	bool native_coordinates = false;
-	for (uint32_t field: {1u, 2u, 5u, 6u})
+	// A draw that enables neither a barycentric field nor custom interpolation
+	// uses the perspective-center default for every attribute; the capture and
+	// the shade read pre-interpolated lane values, so the pair needs no wiring.
+	const uint32_t barycentric = pixel.system_input_enable & pixel.system_input_address &
+	                             ((1u << 1u) | (1u << 2u) | (1u << 5u) | (1u << 6u));
+	if (barycentric != 0u || pixel.custom_interpolation.Enabled())
 	{
-		const int reg = static_cast<int>(ShaderPixelSystemInputRegister(pixel, field));
-		native_coordinates |= (pixel.system_input_enable & pixel.system_input_address & (1u << field)) != 0u &&
-		                      p1.src[0].register_id == reg && p2.src[0].register_id == reg + 1;
-	}
-	if (!native_coordinates)
-	{
-		return false;
+		bool native_coordinates = false;
+		for (uint32_t field: {1u, 2u, 5u, 6u})
+		{
+			const int reg = static_cast<int>(ShaderPixelSystemInputRegister(pixel, field));
+			native_coordinates |= (pixel.system_input_enable & pixel.system_input_address & (1u << field)) != 0u &&
+			                      p1.src[0].register_id == reg && p2.src[0].register_id == reg + 1;
+		}
+		if (!native_coordinates)
+		{
+			return false;
+		}
 	}
 	for (uint32_t prior = 0; prior < second; ++prior)
 	{

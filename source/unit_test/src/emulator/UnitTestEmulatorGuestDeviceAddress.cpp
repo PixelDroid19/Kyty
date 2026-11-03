@@ -110,6 +110,7 @@ struct Device
 			if (vkCreateDevice(physical, &device_info, nullptr, &context.device) != VK_SUCCESS) { continue; }
 			context.physical_device = physical;
 			context.guest_device_address_supported = true;
+			context.guest_host_pointer_import_supported = true;
 			context.guest_dma_buf_import_supported = dma_buf;
 			timeline_semaphore_supported = supports_timeline_semaphore;
 			vkGetDeviceQueue(context.device, family, 0, &queue);
@@ -303,7 +304,7 @@ int PageBoundaryLoadProbe()
 		return 10;
 	}
 	Buffer first, second, table, output;
-	if (!first.Init(device, 4096) || !second.Init(device, 4096) || !table.Init(device, 320) || !output.Init(device, 128)) { return 11; }
+	if (!first.Init(device, 4096) || !second.Init(device, 4096) || !table.Init(device, 336) || !output.Init(device, 128)) { return 11; }
 	for (unsigned word = 0; word < 1024; ++word) { first.words[word] = 1000 + word; second.words[word] = 3000 + word; }
 	const uint64_t entries[] = {0x100000, 4096, first.address, 4096, 0x101000, 4096, second.address, 4096};
 	std::memcpy(table.words + 64, entries, sizeof(entries));
@@ -343,7 +344,14 @@ int PageBoundaryLoadProbe()
 	for (unsigned test = 0; test < 3; ++test)
 	{
 		const uint64_t guest = test == 2 ? 0x100f80 : 0x100fc0;
-		const uint32_t push[] = {static_cast<uint32_t>(table.address), static_cast<uint32_t>(table.address >> 32), test == 1 ? 1u : 2u, 0,
+		const uint32_t count = test == 1 ? 1u : 2u;
+		const uint64_t bases[] = {entries[0], entries[4]};
+		const auto     directory = GuestDeviceAddressBuildDirectory(bases, count);
+		const uint32_t header[]  = {static_cast<uint32_t>(directory.base), static_cast<uint32_t>(directory.base >> 32u), directory.shift,
+		                            static_cast<uint32_t>(directory.words.size() - 2u)};
+		std::memcpy(table.words + kGuestDeviceAddressDirectoryHeaderOffset / 4u, header, sizeof(header));
+		std::memcpy(table.words + 64 + count * kGuestDeviceAddressEntryDwords, directory.words.data(), directory.words.size() * sizeof(uint32_t));
+		const uint32_t push[] = {static_cast<uint32_t>(table.address), static_cast<uint32_t>(table.address >> 32), count, 0,
 		                         static_cast<uint32_t>(guest), 0, static_cast<uint32_t>(output.address), static_cast<uint32_t>(output.address >> 32)};
 		std::fill(output.words, output.words + 32, 0xdeadbeefu);
 		VkCommandBufferBeginInfo begin {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -719,7 +727,7 @@ int ExpectOwnerReleased(LifecycleBridge* bridge, uint64_t base)
 // GPU from reading that copy and keep following every later CPU write there,
 // while the read-only neighbour on the adjacent resident page keeps its own
 // contents and preparation stays stable, until the whole owner becomes writable.
-int WritableTransitionProbe()
+int WritableTransitionFlow(bool host_pointer_import)
 {
 	static LifecycleBridge bridge;
 	GuestLoad              load;
@@ -728,6 +736,7 @@ int WritableTransitionProbe()
 	if (base == 0) { return 40; }
 	auto* const    owner     = reinterpret_cast<void*>(base);
 	auto* const    ctx       = &bridge.device.context;
+	ctx->guest_host_pointer_import_supported = host_pointer_import;
 	const uint64_t writable  = base + kWritableOffset;
 	const uint64_t neighbour = base + kNeighbourOffset;
 	uint64_t       table     = 0;
@@ -777,6 +786,11 @@ int WritableTransitionProbe()
 	}
 	return ExpectOwnerReleased(&bridge, base);
 }
+
+int WritableTransitionProbe() { return WritableTransitionFlow(true); }
+
+// A device that does not import host pointers keeps snapshots in mapped device memory.
+int MappedSnapshotTransitionProbe() { return WritableTransitionFlow(false); }
 
 // CPU-only protection keeps the owner's GPU cleanup obligation and lets the CPU
 // write it; once GPU read access returns, the GPU reads those writes.
@@ -1469,7 +1483,7 @@ int PhysicalReleaseRetiresDeviceAddressRangeProbe()
 	return status;
 }
 
-// Physical pages written one at a time are imported as their whole 2 MiB block:
+// Physical pages written one at a time are imported as their whole 64 MiB chunk:
 // two separate writes give one entry, repeated preparation imports nothing new
 // and leaves the untouched block unpopulated, and a write there adds its block.
 int PhysicalImportCoversResidentBlockProbe()
@@ -1478,7 +1492,7 @@ int PhysicalImportCoversResidentBlockProbe()
 	GuestLoad              load;
 	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
 
-	constexpr uint64_t kBlockBytes = 0x200000;
+	constexpr uint64_t kBlockBytes = 0x4000000;
 	constexpr uint64_t kBytes      = 2u * kBlockBytes;
 	constexpr uint64_t kBlockPages = kBlockBytes / kGuestDeviceAddressPageBytes;
 	int64_t            physical    = 0;
@@ -1721,10 +1735,43 @@ void RunIsolated(int (*probe)())
 
 } // namespace
 
+// The device lookup searches [words[r], words[r + 1]) for region r =
+// min((address - base) >> shift, last region), with unsigned wrap below base.
+TEST(EmulatorGuestDeviceAddress, DirectoryRegionHoldsTheEntryOfEveryAddress)
+{
+	std::vector<uint64_t> bases = {0x10000, 0x11000, 0x2000000};
+	for (uint64_t i = 0; i < 5000; ++i)
+	{
+		bases.push_back(0x800000000ull + i * 0x3000u);
+	}
+	bases.push_back(0x7f00000000ull);
+	const auto directory = GuestDeviceAddressBuildDirectory(bases.data(), static_cast<uint32_t>(bases.size()));
+	ASSERT_GE(directory.words.size(), 2u);
+	ASSERT_LE(directory.words.size(), 16385u);
+	EXPECT_EQ(directory.words.back(), bases.size());
+	const uint64_t last = directory.words.size() - 2u;
+	for (uint32_t index = 0; index < bases.size(); ++index)
+	{
+		for (const uint64_t address: {bases[index], bases[index] + 0xfffu})
+		{
+			const uint64_t region = std::min((address - directory.base) >> directory.shift, last);
+			// The search result for an address inside entry `index` is index + 1.
+			EXPECT_LE(directory.words[region], index + 1u) << std::hex << address;
+			EXPECT_GE(directory.words[region + 1u], index + 1u) << std::hex << address;
+		}
+	}
+	// The search for the isolated far entry has at most one candidate.
+	const uint64_t far = std::min((bases.back() - directory.base) >> directory.shift, last);
+	EXPECT_LE(directory.words[far + 1u] - directory.words[far], 1u);
+	const auto empty = GuestDeviceAddressBuildDirectory(nullptr, 0);
+	EXPECT_EQ(empty.words, (std::vector<uint32_t> {0u, 0u}));
+}
+
 TEST(EmulatorGuestDeviceAddress, RepeatedPrepareDoesNotImportUntouchedNeighbours) { RunIsolated(StableResidencyProbe); }
 TEST(EmulatorGuestDeviceAddress, VulkanLoadPreservesWordsAcrossImportedPageBoundary) { RunIsolated(PageBoundaryLoadProbe); }
 TEST(EmulatorGuestDeviceAddress, AnAnonymousRangeImportsATouchedPageOnTheNextPreparation) { RunIsolated(AnonymousResidencyProbe); }
 TEST(EmulatorGuestDeviceAddress, AWritableGpuProtectionStopsReadingTheReadOnlyCopy) { RunIsolated(WritableTransitionProbe); }
+TEST(EmulatorGuestDeviceAddress, MappedSnapshotsFollowTheSameProtectionTransitions) { RunIsolated(MappedSnapshotTransitionProbe); }
 TEST(EmulatorGuestDeviceAddress, RestoredGpuReadAfterCpuOnlyProtectionSeesCpuWrites) { RunIsolated(CpuOnlyTransitionProbe); }
 TEST(EmulatorGuestDeviceAddress, RecordedGuestDeviceAddressReadRetainsSnapshot) { RunIsolated(RecordedGuestDeviceAddressReadRetainsSnapshotProbe); }
 TEST(EmulatorGuestDeviceAddress, PendingGuestDeviceAddressReaderDefersRefresh) { RunIsolated(PendingGuestDeviceAddressReaderDefersRefreshProbe); }

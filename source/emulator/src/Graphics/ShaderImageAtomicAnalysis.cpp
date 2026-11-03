@@ -17,16 +17,43 @@ bool PlainRegister(const ShaderOperand& operand, ShaderOperandType type, int cou
 
 bool ShaderIsImageAtomic(ShaderInstructionType type)
 {
-	return type == ShaderInstructionType::ImageAtomicAdd || type == ShaderInstructionType::ImageAtomicSwap;
+	switch (type)
+	{
+		case ShaderInstructionType::ImageAtomicAdd:
+		case ShaderInstructionType::ImageAtomicSwap:
+		case ShaderInstructionType::ImageAtomicSub:
+		case ShaderInstructionType::ImageAtomicSMin:
+		case ShaderInstructionType::ImageAtomicUMin:
+		case ShaderInstructionType::ImageAtomicSMax:
+		case ShaderInstructionType::ImageAtomicUMax:
+		case ShaderInstructionType::ImageAtomicAnd:
+		case ShaderInstructionType::ImageAtomicOr:
+		case ShaderInstructionType::ImageAtomicXor:
+			return true;
+		default: return false;
+	}
+}
+
+bool ShaderHasImageAtomic(const ShaderCode& code)
+{
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (ShaderIsImageAtomic(inst.type)) { return true; }
+	}
+	return false;
 }
 
 bool ShaderImageAtomicSupported(const ShaderInstruction& instruction)
 {
 	return ShaderIsImageAtomic(instruction.type) &&
 	       instruction.format == ShaderInstructionFormat::Vdata1Vaddr2StVsrc2Dmask1 && instruction.src_num == 3 &&
-	       instruction.mimg_dimension == 1u && instruction.mimg_dmask == 1u && instruction.mimg_address_num == 0 &&
-	       !instruction.mimg_explicit_lod && PlainRegister(instruction.dst, ShaderOperandType::Vgpr, 1, 256) &&
-	       PlainRegister(instruction.src[0], ShaderOperandType::Vgpr, 2, 256) &&
+	       instruction.mimg_dimension == 1u && instruction.mimg_dmask == 1u && !instruction.mimg_explicit_lod &&
+	       PlainRegister(instruction.dst, ShaderOperandType::Vgpr, 1, 256) &&
+	       (instruction.mimg_address_num == 0
+	            ? PlainRegister(instruction.src[0], ShaderOperandType::Vgpr, 2, 256)
+	            : instruction.mimg_address_num == 2 && PlainRegister(instruction.src[0], ShaderOperandType::Vgpr, 1, 256) &&
+	                  PlainRegister(instruction.mimg_address[0], ShaderOperandType::Vgpr, 1, 256) &&
+	                  PlainRegister(instruction.mimg_address[1], ShaderOperandType::Vgpr, 1, 256)) &&
 	       PlainRegister(instruction.src[1], ShaderOperandType::Sgpr, 8, 104) && instruction.src[1].register_id % 4 == 0 &&
 	       PlainRegister(instruction.src[2], ShaderOperandType::Vgpr, 1, 256) &&
 	       instruction.src[2].register_id == instruction.dst.register_id &&

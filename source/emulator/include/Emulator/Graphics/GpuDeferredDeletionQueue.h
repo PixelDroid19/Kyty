@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <vector>
@@ -48,6 +49,8 @@ public:
 	GpuDeferredDeletionResult CompleteSubmission(SubmissionId submission);
 
 	[[nodiscard]] size_t PendingCount() const;
+	// Changes after every completion becomes visible to the dependency queries.
+	[[nodiscard]] uint64_t CompletionCount() const { return m_completions.load(std::memory_order_acquire); }
 	[[nodiscard]] bool   AreDependenciesComplete(const std::vector<SubmissionId>& dependencies) const;
 	// Publication runs after this exact fence has completed but before its
 	// callbacks and deferred destruction have been fully published.
@@ -73,6 +76,7 @@ private:
 
 	mutable std::mutex          m_mutex;
 	std::vector<CompletedQueue> m_completed;
+	std::atomic<uint64_t>       m_completions {0};
 	std::deque<Entry>           m_entries;
 	bool                        m_draining = false;
 };

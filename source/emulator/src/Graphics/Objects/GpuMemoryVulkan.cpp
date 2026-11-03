@@ -286,11 +286,16 @@ void VulkanMemoryPoolRelease(GraphicContext* ctx)
 	}
 }
 
+static std::atomic_uint64_t g_memory_unique_id = 0;
+
+void VulkanAssignMemoryUniqueId(VulkanMemory* mem)
+{
+	mem->unique_id = ++g_memory_unique_id;
+}
+
 bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource resource)
 {
 	KYTY_PROFILER_FUNCTION();
-
-	static std::atomic_uint64_t seq = 0;
 
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(mem == nullptr);
@@ -326,7 +331,7 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource
 
 	if (PoolAllocate(ctx, mem, index, memory_properties.memoryTypes[index].propertyFlags, resource))
 	{
-		mem->unique_id = ++seq;
+		VulkanAssignMemoryUniqueId(mem);
 		g_mem_stat->allocated[index] += mem->requirements.size;
 		g_mem_stat->count[index]++;
 		return true;
@@ -341,7 +346,7 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource
 	alloc_info.allocationSize  = mem->requirements.size;
 	alloc_info.memoryTypeIndex = index;
 
-	mem->unique_id = ++seq;
+	VulkanAssignMemoryUniqueId(mem);
 
 	const auto allocate_start = DebugStatsClock::now();
 	auto       result         = vkAllocateMemory(ctx->device, &alloc_info, nullptr, &mem->memory);

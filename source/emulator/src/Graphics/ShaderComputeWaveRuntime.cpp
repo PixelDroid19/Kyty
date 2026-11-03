@@ -139,6 +139,8 @@ constexpr uint32_t kGen5AllowedNativeBits = kComputeShaderEnable | kOrderMode | 
 	layout_request.dispatch_mode = request.dispatch_mode;
 	layout_request.lds_dwords    = request.lds_dwords;
 	layout_request.lane_order    = request.lane_order;
+	// Wave64 allocates VGPRs in granules of 4.
+	layout_request.vgprs = (request.vgpr_granules + 1u) * 4u;
 
 	ShaderComputeWaveLayout split {};
 	auto                    result = LayoutResult(ShaderBuildSplitComputeWaveLayout(layout_request, capabilities, &split));
@@ -279,6 +281,25 @@ ShaderComputeWavePreflightResult ShaderBuildComputeWaveDispatchPlan(const Shader
 		{
 			return Rejected(ShaderComputeWavePreflightReason::HostLimitExceeded);
 		}
+	}
+
+	if (request.is_next_gen && !request.tg_size_en)
+	{
+		ShaderComputeWaveRequest split_request {};
+		for (uint32_t axis = 0; axis < 3u; ++axis)
+		{
+			split_request.local[axis]  = request.local_size[axis];
+			split_request.groups[axis] = candidate.group_count[axis];
+		}
+		split_request.dispatch_mode = request.dispatch_mode;
+		split_request.lds_dwords    = request.lds_dwords;
+		// The parts rebuild the guest lanes in the order the native wave32 prolog uses.
+		split_request.lane_order = ShaderGuestLaneOrder::LinearXFirst;
+		// Wave32 allocates VGPRs in granules of 8.
+		split_request.vgprs = (request.vgpr_granules + 1u) * 8u;
+		candidate.wave32_split_valid =
+		    ShaderBuildSplitComputeWaveLayout(split_request, capabilities, &candidate.wave32_split_layout) ==
+		    ShaderComputeWaveLayoutStatus::Supported;
 	}
 
 	*plan = candidate;

@@ -12,16 +12,20 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpClassF32)
 	const auto dst0 = operand_variable_to_str(instruction.dst, 0);
 	const auto dst1 = operand_variable_to_str(instruction.dst, 1);
 	const auto i = String8::FromPrintf("%u", index);
+	ShaderOperand source = instruction.src[0];
+	source.absolute      = false;
+	source.negate        = false;
 	String8 value;
 	String8 mask;
 	if (dst0.type != SpirvType::Uint || dst1.type != SpirvType::Uint ||
-	    !operand_load_uint(spirv, instruction.src[0], "class_value_<index>", i, &value) ||
+	    !operand_load_uint(spirv, source, "class_raw_<index>", i, &value) ||
 	    !operand_load_uint(spirv, instruction.src[1], "class_mask_<index>", i, &mask)) { return false; }
 	// Integer classification preserves NaN payloads and subnormals regardless
 	// of the host's floating-point flushing and NaN canonicalization modes.
 	static const char* text = R"(
 <value>
 <mask>
+%class_value_<index> = <modifier>
 %class_exponent_<index> = OpBitwiseAnd %uint %class_value_<index> %<exponent_mask>
 %class_fraction_<index> = OpBitwiseAnd %uint %class_value_<index> %<fraction_mask>
 %class_sign_<index> = OpBitwiseAnd %uint %class_value_<index> %<sign_mask>
@@ -50,12 +54,19 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpClassF32)
 OpStore %<dst0> %class_result_<index>
 OpStore %<dst1> %uint_0
 )";
-	*dst_source += String8(text).ReplaceStr("<value>", value).ReplaceStr("<mask>", mask)
+	// Input modifiers only rewrite the sign bit; NaN payloads are kept.
+	const auto& src0     = instruction.src[0];
+	String8     modifier = "OpCopyObject %uint %class_raw_<index>";
+	if (src0.absolute && src0.negate) { modifier = "OpBitwiseOr %uint %class_raw_<index> %<sign_mask>"; }
+	else if (src0.absolute) { modifier = "OpBitwiseAnd %uint %class_raw_<index> %<magnitude_mask>"; }
+	else if (src0.negate) { modifier = "OpBitwiseXor %uint %class_raw_<index> %<sign_mask>"; }
+	*dst_source += String8(text).ReplaceStr("<modifier>", modifier).ReplaceStr("<value>", value).ReplaceStr("<mask>", mask)
 	                           .ReplaceStr("<index>", i)
 	                           .ReplaceStr("<exponent_mask>", spirv->GetConstantUint(0x7f800000u))
 	                           .ReplaceStr("<fraction_mask>", spirv->GetConstantUint(0x007fffffu))
 	                           .ReplaceStr("<quiet_mask>", spirv->GetConstantUint(0x00400000u))
 	                           .ReplaceStr("<sign_mask>", spirv->GetConstantUint(0x80000000u))
+	                           .ReplaceStr("<magnitude_mask>", spirv->GetConstantUint(0x7fffffffu))
 	                           .ReplaceStr("<dst0>", dst0.value).ReplaceStr("<dst1>", dst1.value);
 	return true;
 }

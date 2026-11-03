@@ -6,6 +6,21 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## First-person puzzle title: empty vertex descriptors and empty indexed draws (2026-10-31)
+
+Implements the direction of the record below, and closes a second stop found on the same title.
+
+- **Zero-record V#.** The range-checking section of the RDNA2 ISA states that reads out of range return zero. An
+  attribute with an empty V# now stays in the Vulkan layout on one binding past the declared buffers, stride 0, bound
+  to a zero-filled buffer. A resource with records and no buffer is still refused.
+- **Empty indexed draw.** PPSA06084 - Superliminal also stopped at `src_buffer == nullptr` in `UtilCopyBuffer`, right
+  after an invalid staging lease in the index buffer update. The indirect path already returned on zero indices, the
+  direct ones did not. A zero size is the only one that survives the `memcpy` before that check. `GraphicsRenderDrawIndex`
+  now returns on zero indices for all of its callers.
+- **Verified.** Unit test for the layout. A 170 s run on Intel Arc A770 (ANV) reached the first room at 59.2 fps with no
+  stop. **Not proved in play:** both stops are intermittent (each appeared once in four runs), the run after the change
+  logged neither path, and the zero-count draw was inferred from the code, not observed.
+
 ## First-person puzzle title: zero-record vertex buffers stop the menu (2026-10-26, open)
 
 - **Observation.** `main` at ad9cdac6, Intel Arc A770, Linux 7.2.11, strict,

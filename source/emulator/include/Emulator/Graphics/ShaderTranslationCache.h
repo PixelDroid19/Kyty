@@ -10,13 +10,26 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
 
-inline constexpr uint32_t kShaderTranslatorVersion         = 152;
-inline constexpr uint32_t kShaderGeometryTranslatorVersion = 92;
+inline constexpr uint32_t kShaderTranslatorVersion         = 203;
+inline constexpr uint32_t kShaderGeometryTranslatorVersion = 98;
+
+// Names the on-disk stores that hold translator output, so each translator
+// version keeps its own.
+[[nodiscard]] inline std::string ShaderTranslatorStoreSuffix()
+{
+	return "-t" + std::to_string(kShaderTranslatorVersion) + "-g" + std::to_string(kShaderGeometryTranslatorVersion);
+}
+
+// Whether the device's float controls make binary16 conversions exact, so that translated
+// half arithmetic can use them. Set once when the device is created, before any translation.
+void ShaderSetNativeHalfConversion(bool supported);
+[[nodiscard]] bool ShaderNativeHalfConversion();
 
 class SpirvBinaryCacheStore;
 
@@ -25,7 +38,8 @@ enum class ShaderModuleStage : uint8_t
 	Vertex,
 	Pixel,
 	Compute,
-	Geometry
+	Geometry,
+	GeometryForwardingPrimitiveId
 };
 
 struct ShaderModuleKey

@@ -731,6 +731,43 @@ TEST(EmulatorLibcCxxLocale, VswprintfFormatsGuestUtf16SignedInteger)
 	EXPECT_EQ(std::char_traits<char16_t>::compare(reinterpret_cast<const char16_t*>(output), expected, std::size(expected)), 0);
 }
 
+// Guests format one va_list in successive calls; each call continues after the
+// arguments the previous one consumed.
+TEST(EmulatorLibcCxxLocale, VswprintfConsumesTheCallersArguments)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"u0XOsuOmOzc");
+	ASSERT_NE(rec, nullptr);
+	ASSERT_NE(rec->vaddr, 0u);
+
+	using Vswprintf = KYTY_SYSV_ABI int (*)(uint16_t* output, size_t output_count, const uint16_t* format, Libs::VaList* arguments);
+	auto* vswprintf = reinterpret_cast<Vswprintf>(rec->vaddr);
+
+	Libs::VaRegSave registers {};
+	Libs::VaList    arguments {};
+	registers.gp[0]         = 1;
+	registers.gp[1]         = 2;
+	registers.gp[2]         = 3840;
+	registers.gp[3]         = 2160;
+	arguments.gp_offset     = 0;
+	arguments.fp_offset     = offsetof(Libs::VaRegSave, fp);
+	arguments.reg_save_area = &registers;
+
+	uint16_t       first[16]  = {};
+	uint16_t       second[16] = {};
+	const char16_t prefix[]   = u"%d.%d ";
+	const char16_t extent[]   = u"%dx%d";
+	ASSERT_EQ(vswprintf(first, std::size(first), reinterpret_cast<const uint16_t*>(prefix), &arguments), 4);
+	ASSERT_EQ(vswprintf(second, std::size(second), reinterpret_cast<const uint16_t*>(extent), &arguments), 9);
+
+	const char16_t expected[] = u"3840x2160";
+	EXPECT_EQ(std::char_traits<char16_t>::compare(reinterpret_cast<const char16_t*>(second), expected, std::size(expected)), 0);
+}
+
 TEST(EmulatorLibcCxxLocale, ClassicLocimpFacetLookupMatchesGuestUseFacetLayout)
 {
 	void* facets[kCxxLocimpFacetCount] = {nullptr, reinterpret_cast<void*>(0x1)};
@@ -885,6 +922,50 @@ TEST(EmulatorLibcCxxLocale, Fl3WideCopyMatchesGuestSixteenBitCodeUnits)
 
 	EXPECT_EQ(fn(dst, src, 6), dst);
 	EXPECT_EQ(std::memcmp(dst, src, sizeof(src) - sizeof(src[0])), 0);
+}
+
+// Each NID below hashes to the public name in its comment; the old bindings used byte semantics.
+TEST(EmulatorLibcCxxLocale, StringNidsMatchTheirExportedNames)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto find = [&symbols](const char32_t* nid) -> uint64_t
+	{
+		Loader::SymbolResolve query {};
+		query.name                 = nid;
+		query.library              = U"libc";
+		query.library_version      = 1;
+		query.module               = U"libc";
+		query.module_version_major = 1;
+		query.module_version_minor = 1;
+		query.type                 = Loader::SymbolType::Func;
+		const auto* rec            = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+		return rec != nullptr ? rec->vaddr : 0;
+	};
+
+	using Wmemmove = KYTY_SYSV_ABI char16_t* (*)(char16_t* dst, const char16_t* src, size_t count);
+	auto* wmemmove = reinterpret_cast<Wmemmove>(find(U"Noj9PsJrsa8"));
+	ASSERT_NE(wmemmove, nullptr);
+	char16_t text[] = u"abcde__";
+	EXPECT_EQ(wmemmove(text + 2, text, 5), text + 2);
+	EXPECT_EQ(std::memcmp(text, u"ababcde", 7 * sizeof(char16_t)), 0);
+
+	using Wmemchr = KYTY_SYSV_ABI char16_t* (*)(const char16_t* src, char16_t value, size_t count);
+	auto* wmemchr = reinterpret_cast<Wmemchr>(find(U"fnUEjBCNRVU"));
+	ASSERT_NE(wmemchr, nullptr);
+	const char16_t wide[] = u"game";
+	EXPECT_EQ(wmemchr(wide, u'm', 4), wide + 2);
+	EXPECT_EQ(wmemchr(wide, u'm', 2), nullptr);
+
+	using Strlcpy = KYTY_SYSV_ABI size_t (*)(char* dst, const char* src, size_t count);
+	auto* strlcpy = reinterpret_cast<Strlcpy>(find(U"SfQIZcqvvms"));
+	ASSERT_NE(strlcpy, nullptr);
+	char small[4] = {'x', 'x', 'x', 'x'};
+	EXPECT_EQ(strlcpy(small, "planet", sizeof(small)), 6u);
+	EXPECT_STREQ(small, "pla");
 }
 
 TEST(EmulatorLibcCxxLocale, NineRMmReturnsClassicLocimp)

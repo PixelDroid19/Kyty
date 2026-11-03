@@ -1,3 +1,4 @@
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/Window.h"
 
 #include "Kyty/Core/Common.h"
@@ -1854,6 +1855,30 @@ struct VulkanQueues
 	Vector<QueueInfo> present;
 };
 
+
+// Depth planes are copied through buffers around compute dispatches, which a compute-only family may do only
+// when the host declares it for every depth format it can render to.
+static bool VulkanCopiesDepthOnComputeQueue(VkPhysicalDevice device)
+{
+	VkPhysicalDeviceMaintenance10FeaturesKHR maintenance10 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_10_FEATURES_KHR};
+	VkPhysicalDeviceFeatures2 features {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &maintenance10};
+	vkGetPhysicalDeviceFeatures2(device, &features);
+	if (maintenance10.maintenance10 != VK_TRUE) { return false; }
+	for (VkFormat format: {VK_FORMAT_D16_UNORM, VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT})
+	{
+		VkFormatProperties3 features3 {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3};
+		VkFormatProperties2 properties {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &features3};
+		vkGetPhysicalDeviceFormatProperties2(device, format, &properties);
+		const auto tiling = features3.optimalTilingFeatures;
+		if ((tiling & VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT) != 0u &&
+		    (tiling & VK_FORMAT_FEATURE_2_DEPTH_COPY_ON_COMPUTE_QUEUE_BIT_KHR) == 0u)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, VulkanQueues* out)
 {
 	EXIT_IF(device == nullptr);
@@ -1922,7 +1947,7 @@ static bool VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, Vulk
 	// A single common queue would run every compute submission behind queued
 	// graphics work, so compute moves to a compute-only family that runs beside it.
 	uint32_t compute_family = UINT32_MAX;
-	if (selected.queue_count == 1 &&
+	if (selected.queue_count == 1 && VulkanCopiesDepthOnComputeQueue(device) &&
 	    VulkanSelectComputeOnlyFamily(capabilities.GetData(), capabilities.Size(), &compute_family) == VulkanQueueSelectionResult::Success)
 	{
 		const auto&    compute = capabilities[compute_family];
@@ -2229,13 +2254,35 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 	*out_queues = std::move(best_queues);
 }
 
+// The translator converts binary16 natively only where the host states that the conversion
+// rounds to nearest, keeps denormals and keeps the sign of zero, infinity and NaN.
+static bool DeviceHasExactHalfConversion(VkPhysicalDevice device)
+{
+	VkPhysicalDeviceVulkan12Features features_12 {};
+	features_12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	VkPhysicalDeviceFeatures2 features {};
+	features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	features.pNext = &features_12;
+	vkGetPhysicalDeviceFeatures2(device, &features);
+	VkPhysicalDeviceVulkan12Properties properties_12 {};
+	properties_12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+	VkPhysicalDeviceProperties2 properties {};
+	properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+	properties.pNext = &properties_12;
+	vkGetPhysicalDeviceProperties2(device, &properties);
+	return features_12.shaderFloat16 == VK_TRUE && features.features.shaderInt16 == VK_TRUE &&
+	       properties_12.shaderRoundingModeRTEFloat16 == VK_TRUE && properties_12.shaderRoundingModeRTEFloat32 == VK_TRUE &&
+	       properties_12.shaderDenormPreserveFloat16 == VK_TRUE && properties_12.shaderSignedZeroInfNanPreserveFloat16 == VK_TRUE &&
+	       properties_12.denormBehaviorIndependence != VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
+}
+
 static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VulkanExtensions* r,
                                    const VulkanQueues& queues, const Vector<const char*>& device_extensions,
                                    bool color_write_enable_supported, bool depth_clip_enable_supported,
                                    bool depth_clip_control_supported,
                                    ShaderComputeWaveVulkanState* compute_wave_state, bool guest_device_address,
                                    bool compute_derivative_group_linear, bool maximal_reconvergence_supported,
-                                   VulkanBlendFeatures* enabled_blend_features, VulkanSamplerFeatures* enabled_sampler_features)
+                                   bool image_view_min_lod_supported, VulkanBlendFeatures* enabled_blend_features, VulkanSamplerFeatures* enabled_sampler_features)
 {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(r == nullptr);
@@ -2289,6 +2336,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features.geometryShader = supported_features.geometryShader;
 	device_features.depthClamp = supported_features.depthClamp;
 	device_features.shaderClipDistance = supported_features.shaderClipDistance;
+	device_features.shaderCullDistance = supported_features.shaderCullDistance;
+	device_features.shaderTessellationAndGeometryPointSize = supported_features.shaderTessellationAndGeometryPointSize;
 	const auto blend_features = VulkanPlanBlendFeatures(supported_features, true, true);
 	device_features.independentBlend = blend_features.independent_blend;
 	device_features.dualSrcBlend = blend_features.dual_source_blend;
@@ -2329,6 +2378,9 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features_12.bufferDeviceAddress = guest_device_address ? VK_TRUE : VK_FALSE;
 	// Vertex stages export the render-target layer (ShaderLayer).
 	device_features_12.shaderOutputLayer = supported_12.shaderOutputLayer;
+	// Translated programs declare Float16 and Int16 for packed 16-bit arithmetic.
+	device_features_12.shaderFloat16 = supported_12.shaderFloat16;
+	device_features.shaderInt16      = supported_features.shaderInt16;
 	// Core since Vulkan 1.2 and mandatory there.
 	EXIT_IF(supported_12.timelineSemaphore == VK_FALSE);
 	device_features_12.timelineSemaphore = VK_TRUE;
@@ -2350,6 +2402,14 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 		maximal_reconvergence.pNext = device_feature_chain;
 		device_feature_chain        = &maximal_reconvergence;
 	}
+	VkPhysicalDeviceImageViewMinLodFeaturesEXT image_view_min_lod {};
+	image_view_min_lod.sType  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT;
+	image_view_min_lod.minLod = VK_TRUE;
+	if (image_view_min_lod_supported)
+	{
+		image_view_min_lod.pNext = device_feature_chain;
+		device_feature_chain     = &image_view_min_lod;
+	}
 	device_features_12.pNext = device_feature_chain;
 	device_feature_chain = &device_features_12;
 	device_features_13.pNext = device_feature_chain;
@@ -2368,6 +2428,13 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	{
 		color_write_ext.pNext = device_feature_chain;
 		device_feature_chain  = &color_write_ext;
+	}
+	VkPhysicalDeviceMaintenance10FeaturesKHR maintenance10 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_10_FEATURES_KHR};
+	maintenance10.maintenance10 = VK_TRUE;
+	if (queues.compute.At(0).family != queues.graphics.At(0).family)
+	{
+		maintenance10.pNext  = device_feature_chain;
+		device_feature_chain = &maintenance10;
 	}
 
 	VkDeviceCreateInfo create_info {};
@@ -2530,7 +2597,10 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugMessengerCallback(VkDebugUtilsM
 			break;
 		case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT:
 			if ((message_types & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) != 0 && Config::SpirvDebugPrintfEnabled() &&
-			    strcmp(callback_data->pMessageIdName, "UNASSIGNED-DEBUG-PRINTF") == 0)
+			    callback_data->pMessageIdName != nullptr &&
+			    // The 1.4 validation layer tags printf output with either id; 1.4.363 sends WARNING-DEBUG-PRINTF.
+			    (strcmp(callback_data->pMessageIdName, "UNASSIGNED-DEBUG-PRINTF") == 0 ||
+			     strcmp(callback_data->pMessageIdName, "WARNING-DEBUG-PRINTF") == 0))
 			{
 				debug_printf   = true;
 				severity_color = FG_BRIGHT_YELLOW;
@@ -3068,6 +3138,8 @@ static void VulkanCreate(WindowContext* ctx)
 		EXIT("Could not find a suitable Vulkan 1.4 device");
 	}
 
+	if (queues.compute.At(0).family != queues.graphics.At(0).family) { device_extensions.Add(VK_KHR_MAINTENANCE_10_EXTENSION_NAME); }
+
 	// Detect VK_EXT_color_write_enable support; drop it from the enabled extension
 	// list when absent (MoltenVK) so device creation still succeeds.
 	{
@@ -3110,6 +3182,8 @@ static void VulkanCreate(WindowContext* ctx)
 		derivatives.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
 		VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR maximal_reconvergence {};
 		maximal_reconvergence.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR;
+		VkPhysicalDeviceImageViewMinLodFeaturesEXT image_view_min_lod {};
+		image_view_min_lod.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT;
 
 		void* query_chain = &features_13;
 		if (has_ext(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME))
@@ -3137,6 +3211,11 @@ static void VulkanCreate(WindowContext* ctx)
 			maximal_reconvergence.pNext = query_chain;
 			query_chain                 = &maximal_reconvergence;
 		}
+		if (has_ext(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME))
+		{
+			image_view_min_lod.pNext = query_chain;
+			query_chain              = &image_view_min_lod;
+		}
 		VkPhysicalDeviceFeatures2 available_features {};
 		available_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 		available_features.pNext = query_chain;
@@ -3156,6 +3235,12 @@ static void VulkanCreate(WindowContext* ctx)
 		                                [](auto s, auto l) { return strcmp(s, l) == 0; }))
 		{
 			device_extensions.Add(VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME);
+		}
+		ctx->graphic_ctx.image_view_min_lod_supported =
+		    has_ext(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME) && image_view_min_lod.minLod == VK_TRUE;
+		if (ctx->graphic_ctx.image_view_min_lod_supported)
+		{
+			device_extensions.Add(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
 		}
 
 		ctx->graphic_ctx.color_write_enable_supported =
@@ -3236,12 +3321,13 @@ static void VulkanCreate(WindowContext* ctx)
 				host_buffer_features = external_buffer_properties.externalMemoryProperties.externalMemoryFeatures;
 				host_buffer_compatible_types = external_buffer_properties.externalMemoryProperties.compatibleHandleTypes;
 			}
-			ctx->graphic_ctx.guest_device_address_supported =
-			    host_memory_extension && (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
-			    (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0 &&
-			    (host_buffer_compatible_types & VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT) != 0 &&
+			const bool device_addressing =
 			    address_features.bufferDeviceAddress == VK_TRUE && features2.features.shaderInt64 == VK_TRUE;
-			if (ctx->graphic_ctx.guest_device_address_supported &&
+			ctx->graphic_ctx.guest_host_pointer_import_supported =
+			    device_addressing && host_memory_extension && (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
+			    (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0 &&
+			    (host_buffer_compatible_types & VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT) != 0;
+			if (ctx->graphic_ctx.guest_host_pointer_import_supported &&
 			    !device_extensions.Contains(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, [](auto s, auto l) { return strcmp(s, l) == 0; }))
 			{
 				device_extensions.Add(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
@@ -3249,7 +3335,7 @@ static void VulkanCreate(WindowContext* ctx)
 			// Some drivers import only private anonymous host pointers; guest
 			// physical memory is shared, so it is imported as a dma-buf there.
 			VkExternalMemoryFeatureFlags dma_buf_features = 0;
-			if (ctx->graphic_ctx.guest_device_address_supported && has_ext(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+			if (device_addressing && has_ext(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
 			    has_ext(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME))
 			{
 				VkPhysicalDeviceExternalBufferInfo external_buffer_info {};
@@ -3266,6 +3352,9 @@ static void VulkanCreate(WindowContext* ctx)
 			ctx->graphic_ctx.guest_dma_buf_import_supported =
 			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
 			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0;
+			// Flexible memory is snapshotted either way; direct memory needs one of the imports.
+			ctx->graphic_ctx.guest_device_address_supported =
+			    ctx->graphic_ctx.guest_host_pointer_import_supported || ctx->graphic_ctx.guest_dma_buf_import_supported;
 			for (const char* extension: {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME})
 			{
 				if (ctx->graphic_ctx.guest_dma_buf_import_supported &&
@@ -3325,6 +3414,8 @@ static void VulkanCreate(WindowContext* ctx)
 	physical_device_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
 	physical_device_properties.pNext = &subgroup_properties;
 	vkGetPhysicalDeviceProperties2(ctx->graphic_ctx.physical_device, &physical_device_properties);
+	ShaderSetNativeHalfConversion(DeviceHasExactHalfConversion(ctx->graphic_ctx.physical_device));
+	ctx->graphic_ctx.min_storage_buffer_offset_alignment = physical_device_properties.properties.limits.minStorageBufferOffsetAlignment;
 	ctx->graphic_ctx.subgroup_size       = subgroup_properties.subgroupSize;
 	ctx->graphic_ctx.subgroup_stages     = subgroup_properties.supportedStages;
 	ctx->graphic_ctx.subgroup_operations = subgroup_properties.supportedOperations;
@@ -3373,6 +3464,7 @@ static void VulkanCreate(WindowContext* ctx)
 	                       &ctx->graphic_ctx.compute_wave_vulkan_state, ctx->graphic_ctx.guest_device_address_supported,
 	                       ctx->graphic_ctx.compute_derivative_group_linear_supported,
 	                       ctx->graphic_ctx.shader_maximal_reconvergence_supported,
+	                       ctx->graphic_ctx.image_view_min_lod_supported,
 	                       &ctx->graphic_ctx.blend_capabilities.enabled, &ctx->graphic_ctx.enabled_sampler_features);
 	if (ctx->graphic_ctx.device == nullptr)
 	{

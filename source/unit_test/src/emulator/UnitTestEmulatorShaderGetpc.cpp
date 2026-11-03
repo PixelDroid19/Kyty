@@ -414,6 +414,53 @@ TEST(EmulatorShaderGetpc, OnlyAttributeTableFormatLoadsAreVertexFetches)
 	EXPECT_TRUE(scan.unconditional_reader);
 }
 
+TEST(EmulatorShaderGetpc, AttributeScanDemandsOnlyTheBitsTheProgramCanObserve)
+{
+	const auto sgpr     = [](int reg, int size) { return ShaderOperand {.type = ShaderOperandType::Sgpr, .register_id = reg, .size = size}; };
+	const auto constant = [](uint32_t value)
+	{
+		ShaderOperand op {};
+		op.type       = ShaderOperandType::LiteralConstant;
+		op.constant.u = value;
+		return op;
+	};
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	const auto add = [&](ShaderInstructionType type, ShaderOperand dst, std::initializer_list<ShaderOperand> src)
+	{
+		ShaderInstruction inst {};
+		inst.pc      = static_cast<uint32_t>(code.GetInstructions().Size()) * 8u;
+		inst.type    = type;
+		inst.dst     = dst;
+		inst.src_num = static_cast<int>(src.size());
+		int i        = 0;
+		for (const auto& op: src)
+		{
+			inst.src[i++] = op;
+		}
+		code.GetInstructions().Add(inst);
+	};
+	const auto scc = ShaderOperand {.type = ShaderOperandType::Scc};
+	// Dwords 0-3 of the table at user data 22 (s30); dword 5 is a hole.
+	add(ShaderInstructionType::SLoadDwordx4, sgpr(48, 4), {sgpr(30, 2), constant(0)});
+	add(ShaderInstructionType::SBfeU32, sgpr(52, 1), {sgpr(48, 1), constant((12u << 16u) | 14u)});
+	add(ShaderInstructionType::SLshlB32, sgpr(53, 1), {sgpr(49, 1), constant(4u)});
+	add(ShaderInstructionType::SAndB32, sgpr(54, 1), {sgpr(53, 1), constant(0x1f0u)});
+	add(ShaderInstructionType::SLshlB32, sgpr(55, 1), {sgpr(50, 1), constant(4u)});
+	add(ShaderInstructionType::SCselectB32, sgpr(56, 1), {sgpr(55, 1), scc});
+	add(ShaderInstructionType::SMovB32, sgpr(57, 1), {sgpr(51, 1)});
+	add(ShaderInstructionType::VCndmaskB32, ShaderOperand {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1}, {sgpr(57, 1)});
+	add(ShaderInstructionType::SEndpgm, {}, {});
+
+	const auto scan = ShaderScanVertexStreamAccesses(code, 22, 20);
+	EXPECT_EQ(scan.attrib_demanded_bits[0], 0x03ffc000u);
+	EXPECT_EQ(scan.attrib_demanded_bits[1], 0x0000001fu);
+	// SCC of the shift reaches a select, and it depends on every surviving bit.
+	EXPECT_EQ(scan.attrib_demanded_bits[2], ~0u);
+	EXPECT_EQ(scan.attrib_demanded_bits[3], ~0u);
+	EXPECT_EQ(scan.attrib_demanded_bits[5], 0u);
+}
+
 TEST(EmulatorShaderGetpc, BufferNamespaceClassificationMatchesLoweringAndIgnoresStreamSentinels)
 {
 	ShaderBindResources bind {};

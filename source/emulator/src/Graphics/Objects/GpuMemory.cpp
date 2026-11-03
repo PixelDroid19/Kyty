@@ -334,6 +334,41 @@ void GpuMemory::ForgetHeapStorageObjects(int removed_heap_id)
 	m_storage_objects    = shift(m_storage_objects);
 	m_writable_storage   = shift(m_writable_storage);
 	m_pending_write_back = shift(m_pending_write_back);
+	m_storage_scan_changes.clear();
+	GpuMemoryInvalidateStorageScans();
+}
+
+std::atomic<uint64_t> g_storage_scan_generation {1};
+
+GpuMemory::StorageScanMemo& GpuMemory::StorageScanMemoFor(GpuQueueId consumer)
+{
+	for (auto& memo: m_storage_scan_memos)
+	{
+		if (memo.queue == consumer.Value())
+		{
+			return memo;
+		}
+	}
+	m_storage_scan_memos.push_back({consumer.Value()});
+	return m_storage_scan_memos.back();
+}
+
+void GpuMemory::RecordStorageScanChange(int heap_id, int object_id)
+{
+	static constexpr size_t MAX_CHANGES = 4096;
+	const auto*             storage     = static_cast<const VulkanBuffer*>(m_heaps[heap_id].objects[object_id].info.object.obj);
+	if (!storage->guest_in_place || m_storage_scan_changes.size() >= MAX_CHANGES)
+	{
+		m_storage_scan_changes.clear();
+		GpuMemoryInvalidateStorageScans();
+		return;
+	}
+	m_storage_scan_changes.emplace_back(heap_id, object_id);
+}
+
+void GpuMemoryInvalidateStorageScans()
+{
+	g_storage_scan_generation.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void GpuMemory::SyncWriteBackIndexes(int heap_id, int object_id)
@@ -352,6 +387,7 @@ void GpuMemory::SyncWriteBackIndexes(int heap_id, int object_id)
 	if (pending && object.info.object.obj != nullptr && m_storage_objects.count(key) != 0u)
 	{
 		m_writable_storage.insert(key);
+		RecordStorageScanChange(heap_id, object_id);
 	} else
 	{
 		m_writable_storage.erase(key);
@@ -806,6 +842,13 @@ Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64
 	return g_gpu_memory->FindObjects(vaddr, size, vaddr_num, type, exact, only_first);
 }
 
+uint64_t GpuMemoryObjectGraphGeneration()
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+
+	return g_gpu_memory->ObjectGraphGeneration();
+}
+
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,
                                                           bool exact, bool only_first)
 {
@@ -984,11 +1027,26 @@ void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQue
 	g_gpu_memory->WriteBackStorageRanges(ctx, ranges, consumer);
 }
 
-bool GpuMemoryPendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
+bool GpuMemoryPendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer, const std::vector<SubmissionId>& device_awaited,
                                       std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
-	return g_gpu_memory->PendingStorageWriteBack(ranges, consumer, publishable, dependency);
+	return g_gpu_memory->PendingStorageWriteBack(ranges, consumer, device_awaited, publishable, dependency);
+}
+
+bool GpuMemoryWriteBackStorageForGuestSeed(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuQueueId consumer,
+                                           SubmissionId* dependency)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	EXIT_IF(ctx == nullptr);
+	return g_gpu_memory->WriteBackStorageForGuestSeed(ctx, vaddr, size, consumer, dependency);
+}
+
+void GpuMemoryCollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, SubmissionId reader,
+                                         std::vector<GpuMemoryStorageSeedSource>* sources)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	g_gpu_memory->CollectStorageForGuestSeed(vaddr, size, reader, sources);
 }
 
 bool GpuMemoryPendingStorageHasAliases()
@@ -997,9 +1055,26 @@ bool GpuMemoryPendingStorageHasAliases()
 	return g_gpu_memory->PendingStorageHasAliases();
 }
 
+bool GpuMemoryPendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	return g_gpu_memory->PendingWriteBackOutsideStorage(ranges);
+}
+
 bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity)
 {
 	return g_gpu_memory != nullptr && identity != nullptr && g_gpu_memory->FindExactWritableStorage(vaddr, size, identity);
+}
+
+bool GpuMemoryFindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size)
+{
+	return g_gpu_memory != nullptr && g_gpu_memory->FindStorageContaining(vaddr, size, object_vaddr, object_size);
+}
+
+void GpuMemoryMarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId consumer)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	g_gpu_memory->MarkInPlaceStorageOrdered(identity, consumer);
 }
 
 bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,

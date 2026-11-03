@@ -85,6 +85,13 @@ bool Spirv::EmitNativeMaskBit(const ShaderOperand& mask, const String8& result, 
 	return true;
 }
 
+// The host compiler cannot see through the lane shift of a full mask, and every
+// guarded write of the region that follows then stays a per-lane selection.
+String8 Spirv::NativeExecAllLanes()
+{
+	return "OpStore %exec_lane_lo %uint_1\nOpStore %exec_lane_hi %uint_0\nOpStore %execz %uint_0\n";
+}
+
 String8 Spirv::NativeExecRefresh(const String8& tag) const
 {
 	ShaderOperand exec {};
@@ -106,6 +113,12 @@ OpStore %execz %mask_exec_z_<tag>
 String8 Spirv::NativeQuadUniform(const String8& value, const String8& type, const String8& result) const
 {
 	EXIT_IF(m_code.GetType() != ShaderType::Pixel);
+	if (UsesFragmentCompute())
+	{
+		// Every transport lane is an active invocation, so the collective
+		// already produced the guest result for all of them.
+		return "%" + result + " = OpCopyObject %" + type + " %" + value + "\n";
+	}
 	// Non-quad collectives can return undefined values in Vulkan helpers.
 	// Transfer the real members' uniform result back to every lane of the quad.
 	// Constant broadcast indices remain valid with pre-SPIR-V-1.5 toolchains.
@@ -138,7 +151,7 @@ String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result)
 	// General subgroup operations may exclude Vulkan helpers. Gather their
 	// bits inside the quad first, so every participating real fragment carries
 	// its quad's complete guest mask into the wave reduction.
-	return String8(R"(
+	const auto gather = String8(R"(
 %<r>_lane = OpLoad %uint %gl_SubgroupInvocationID
 %<r>_shift = OpBitwiseAnd %uint %<r>_lane %uint_31
 %<r>_bit = OpShiftLeftLogical %uint %uint_1 %<r>_shift
@@ -153,15 +166,55 @@ String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result)
 %<r>_upper = OpUGreaterThanEqual %bool %<r>_lane %uint_32
 %<r>_low_part = OpSelect %uint %<r>_upper %uint_0 %<r>_quad
 %<r>_high_part = OpSelect %uint %<r>_upper %<r>_quad %uint_0
+<wave>
+)").ReplaceStr("<p>", predicate).ReplaceStr("<r>", result);
+	// A lane-local program observes a mask only as its own bit or as "any lane" of a branch: the proof
+	// accepts a lane that skips, so one quad's lanes are the whole answer and the wave reduction is not needed.
+	const auto proof = m_ps_input_info != nullptr ? m_ps_input_info->native_wave.proof : ShaderNativeWaveProof::Unclassified;
+	if (!UsesFragmentCompute() && (proof == ShaderNativeWaveProof::LaneLocal || proof == ShaderNativeWaveProof::QuadLocal))
+	{
+		return gather.ReplaceStr("<wave>", "%" + result + " = OpCompositeConstruct %v4uint %" + result + "_low_part %" + result +
+		                                       "_high_part %uint_0 %uint_0");
+	}
+	return gather.ReplaceStr("<wave>", String8(R"(
 %<r>_low = OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %<r>_low_part
 %<r>_high = OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %<r>_high_part
 %<r>_raw = OpCompositeConstruct %v4uint %<r>_low %<r>_high %uint_0 %uint_0
-)").ReplaceStr("<p>", predicate).ReplaceStr("<r>", result) + NativeQuadUniform(result + "_raw", "v4uint", result);
+)").ReplaceStr("<r>", result)) + NativeQuadUniform(result + "_raw", "v4uint", result);
+}
+
+String8 Spirv::NativeOwnBitMask(const String8& predicate, const String8& result) const
+{
+	if (UsesSplitComputeWave())
+	{
+		return "%" + result + " = OpFunctionCall %v4uint %split_part_ballot %" + predicate + "\n";
+	}
+	return String8(R"(
+%<r>_lane = OpLoad %uint %gl_SubgroupInvocationID
+%<r>_shift = OpBitwiseAnd %uint %<r>_lane %uint_31
+%<r>_bit = OpShiftLeftLogical %uint %uint_1 %<r>_shift
+%<r>_local = OpSelect %uint %<p> %<r>_bit %uint_0
+%<r>_upper = OpUGreaterThanEqual %bool %<r>_lane %uint_32
+%<r>_low = OpSelect %uint %<r>_upper %uint_0 %<r>_local
+%<r>_high = OpSelect %uint %<r>_upper %<r>_local %uint_0
+%<r> = OpCompositeConstruct %v4uint %<r>_low %<r>_high %uint_0 %uint_0
+)").ReplaceStr("<p>", predicate).ReplaceStr("<r>", result);
 }
 
 String8 Spirv::NativeValidPixelBallot(const String8& result) const
 {
 	EXIT_IF(m_code.GetType() != ShaderType::Pixel);
+	if (UsesFragmentCompute())
+	{
+		// A transported lane is a valid pixel when the captured wave executes
+		// it and the capture covered it; helpers never become invocations.
+		return String8(R"(
+%<r>_live = OpINotEqual %bool %exec_lane_lo %uint_0
+%<r>_covered = OpLoad %bool %fragment_covered
+%<r>_valid = OpLogicalAnd %bool %<r>_live %<r>_covered
+%<r> = OpFunctionCall %v4uint %split_ballot %<r>_valid
+)").ReplaceStr("<r>", result);
+	}
 	// A helper is no valid pixel; with maximal reconvergence it is active and votes false.
 	return String8(R"(
 %<r>_exec = OpLoad %uint %exec_lane_lo
@@ -171,6 +224,15 @@ String8 Spirv::NativeValidPixelBallot(const String8& result) const
 %<r>_valid = OpLogicalAnd %bool %<r>_live %<r>_real
 %<r> = OpGroupNonUniformBallot %v4uint %uint_3 %<r>_valid
 )").ReplaceStr("<r>", result);
+}
+
+static bool WritesFullExec(const ShaderInstruction& inst, bool wave32)
+{
+	const bool whole_mask = inst.type == ShaderInstructionType::SMovB64 || (inst.type == ShaderInstructionType::SMovB32 && wave32);
+	const auto& source = inst.src[0];
+	return whole_mask && inst.dst.type == ShaderOperandType::ExecLo &&
+	       ((source.type == ShaderOperandType::IntegerInlineConstant && source.constant.i == -1) ||
+	        (source.type == ShaderOperandType::LiteralConstant && source.constant.u == 0xffffffffu));
 }
 
 String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index, const String8& source) const
@@ -237,7 +299,8 @@ String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index
 OpStore %<lo> %mask_out_lo_<tag>
 <store_hi>
 )")
-			        .ReplaceStr("<ballot>", NativeMaskBallot("mask_out_active_" + tag, "mask_out_ballot_" + tag))
+			        .ReplaceStr("<ballot>", IsLaneLocalMaskResult(index) ? NativeOwnBitMask("mask_out_active_" + tag, "mask_out_ballot_" + tag)
+			                                                             : NativeMaskBallot("mask_out_active_" + tag, "mask_out_ballot_" + tag))
 			        .ReplaceStr("<store_hi>", !hi.value.IsEmpty() && !NativeWave32() ? "OpStore %<hi> %mask_out_hi_<tag>" : "")
 			        .ReplaceStr("<lo>", lo.value)
 			        .ReplaceStr("<hi>", hi.value)
@@ -276,7 +339,7 @@ OpStore %<lo> %mask_out_lo_<tag>
 	}
 	if (cmpx || result.ContainsStr("OpStore %exec_lo ") || result.ContainsStr("OpStore %exec_hi "))
 	{
-		result += NativeExecRefresh(tag);
+		result += WritesFullExec(inst, NativeWave32()) || ExecFullAfter(index) ? NativeExecAllLanes() : NativeExecRefresh(tag);
 	}
 	return result.ReplaceStr("%packed_exec_", "%exec_");
 }
@@ -621,9 +684,10 @@ bool operand_is_exec(ShaderOperand op)
 	return false;
 }
 
-// SDWA SEL (GCN/RDNA): zero-extend BYTE_n / WORD_n from a uint register value.
+// SDWA SEL (GCN/RDNA): zero- or sign-extend BYTE_n / WORD_n from a uint register value.
 // sel 6 (DWORD) is a no-op. Returns SPIR-V that writes <result_id> from <input_id>.
-static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_id, const String8& index, uint8_t sel)
+static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_id, const String8& index, uint8_t sel,
+                                 bool sign_extend)
 {
 	if (sel == 6u)
 	{
@@ -663,7 +727,8 @@ static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_
 		default: break;
 	}
 
-	return String8("%<result_id> = OpBitFieldUExtract %uint %<input_id> %uint_<off> %uint_<cnt>\n")
+	return String8("%<result_id> = <extract> %uint %<input_id> %uint_<off> %uint_<cnt>\n")
+	    .ReplaceStr("<extract>", sign_extend ? "OpBitFieldSExtract" : "OpBitFieldUExtract")
 	    .ReplaceStr("<result_id>", result_id)
 	    .ReplaceStr("<input_id>", input_id)
 	    .ReplaceStr("<off>", String8::FromPrintf("%u", offset))
@@ -691,23 +756,42 @@ static bool operand_dpp_supported(const ShaderOperand& op)
 // value, while bound_ctrl=0 must leave the destination untouched. The lowering
 // substitutes zero for out-of-range sources, which preserves the destination
 // only through a zero-identity op whose other operand is the destination.
-static bool fragment_row_dpp_wave32_keeps_dst(const ShaderCode& code, uint32_t index, const ShaderOperand& dpp_source)
+// The value an out-of-row lane reads. With bound_ctrl=1 the hardware reads
+// zero. With bound_ctrl=0 the lane keeps the destination: either the
+// instruction does not write that lane, or the source reads its own
+// unmodified value and the operation returns it. The lowering picks the
+// substitution that reproduces the reading the operation admits.
+enum class RowDppMode
 {
-	if (dpp_source.dpp_bound_ctrl)
-	{
-		return true;
-	}
+	Unsupported,
+	Zero,
+	// x + -0.0 == x for every float x, so a float add keeps the destination.
+	NegativeZero,
+	Input,
+};
+
+// The destination-source shape: the permuted source and the other source are
+// the destination register and the operation is idempotent. A lane that reads
+// outside the row then keeps the destination under both readings of the
+// hardware contract, so the operation may run with the lane's own source
+// value substituted for the missing one.
+static bool fragment_row_dpp_destination_source(const ShaderCode& code, uint32_t index, const ShaderOperand& dpp_source)
+{
 	if (index >= code.GetInstructions().Size())
 	{
 		return false;
 	}
 	const auto& inst = code.GetInstructions().At(index);
-	if (inst.type != ShaderInstructionType::VOrB32 && inst.type != ShaderInstructionType::VXorB32 &&
-	    inst.type != ShaderInstructionType::VAddI32)
+	if (inst.dst.type != ShaderOperandType::Vgpr || inst.src_num < 2)
 	{
 		return false;
 	}
-	if (inst.dst.type != ShaderOperandType::Vgpr || inst.src_num != 2)
+	const bool idempotent = inst.type == ShaderInstructionType::VMaxF32 || inst.type == ShaderInstructionType::VMinF32 ||
+	                        inst.type == ShaderInstructionType::VMaxI32 || inst.type == ShaderInstructionType::VMaxU32 ||
+	                        inst.type == ShaderInstructionType::VMinI32 || inst.type == ShaderInstructionType::VMinU32 ||
+	                        inst.type == ShaderInstructionType::VOrB32 || inst.type == ShaderInstructionType::VXorB32 ||
+	                        inst.type == ShaderInstructionType::VAndB32;
+	if (!idempotent || dpp_source.register_id != inst.dst.register_id)
 	{
 		return false;
 	}
@@ -726,37 +810,102 @@ static bool fragment_row_dpp_wave32_keeps_dst(const ShaderCode& code, uint32_t i
 	return false;
 }
 
-static bool row_dpp_supported(const Spirv& spirv, const ShaderOperand& op, const String8& index)
+static bool fragment_row_dpp_wave32_keeps_dst(const ShaderCode& code, uint32_t index, const ShaderOperand& dpp_source)
 {
-	if (op.type != ShaderOperandType::Vgpr || op.dpp_row_mask != 0xfu || op.dpp_bank_mask != 0xfu || op.swizzle != 6u)
+	if (dpp_source.dpp_bound_ctrl)
+	{
+		return true;
+	}
+	if (index >= code.GetInstructions().Size())
 	{
 		return false;
 	}
-	const uint32_t control = op.dpp_ctrl;
-	const bool     row     = (control >= 0x101u && control <= 0x10fu) || (control >= 0x111u && control <= 0x11fu) ||
-	                         (control >= 0x121u && control <= 0x12fu) || control == 0x140u || control == 0x141u;
-	if (!row)
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.type != ShaderInstructionType::VOrB32 && inst.type != ShaderInstructionType::VXorB32 &&
+	    inst.type != ShaderInstructionType::VAddI32 && inst.type != ShaderInstructionType::VAddF32)
 	{
 		return false;
+	}
+	if (inst.dst.type != ShaderOperandType::Vgpr || inst.src_num != 2)
+	{
+		return false;
+	}
+	// A float add returns the destination only without input or output modifiers.
+	const auto unmodified = [](const ShaderOperand& operand)
+	{ return !operand.absolute && !operand.negate && !operand.clamp && operand.multiplier == 1.0f; };
+	if (inst.type == ShaderInstructionType::VAddF32 && !(unmodified(inst.dst) && unmodified(inst.src[0]) && unmodified(inst.src[1])))
+	{
+		return false;
+	}
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		const auto& src = inst.src[source];
+		if (src.dpp)
+		{
+			continue;
+		}
+		if (src.type == ShaderOperandType::Vgpr && src.register_id == inst.dst.register_id)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+
+static RowDppMode row_dpp_mode(const Spirv& spirv, const ShaderOperand& op, const String8& index)
+{
+	if (op.type != ShaderOperandType::Vgpr || op.dpp_row_mask != 0xfu || op.dpp_bank_mask != 0xfu || op.swizzle != 6u)
+	{
+		return RowDppMode::Unsupported;
+	}
+	const uint32_t control = op.dpp_ctrl;
+	const bool     row     = (control >= 0x101u && control <= 0x10fu) || (control >= 0x111u && control <= 0x11fu) ||
+	                         (control >= 0x121u && control <= 0x12fu) || control == 0x140u || control == 0x141u ||
+	                         (control >= 0x160u && control <= 0x16fu);
+	if (!row)
+	{
+		return RowDppMode::Unsupported;
 	}
 	for (const char* c = index.c_str(); *c != '\0'; ++c)
 	{
 		if (*c < '0' || *c > '9')
 		{
-			return false;
+			return RowDppMode::Unsupported;
 		}
 	}
 	const uint32_t inst_index = index.ToUint32();
 	const bool     pixel      = spirv.GetCode().GetType() == ShaderType::Pixel;
-	if (pixel && ShaderFragmentWaveInsideRegion(spirv.GetCode(), inst_index))
+	const bool     fragment_compute = spirv.UsesFragmentCompute();
+	if (pixel && !fragment_compute && ShaderFragmentWaveInsideRegion(spirv.GetCode(), inst_index))
 	{
-		return !op.dpp_bound_ctrl || control >= 0x121u;
+		const bool admitted = !op.dpp_bound_ctrl || control >= 0x121u;
+		if (!admitted)
+		{
+		}
+		return admitted ? RowDppMode::Zero : RowDppMode::Unsupported;
 	}
 	// Each host subgroup must hold whole guest rows and no ghost lanes: a wave32
-	// fragment, a native wave32 compute wave, or one 32-lane half of a split wave64.
-	const bool whole_rows = pixel ? spirv.GetPsInputInfo() != nullptr && spirv.GetPsInputInfo()->required_subgroup_size == 32u
-	                              : spirv.UsesNativeComputeWave();
-	return whole_rows && fragment_row_dpp_wave32_keeps_dst(spirv.GetCode(), inst_index, op);
+	// fragment, a native wave32 compute wave, or one 32-lane half of a split
+	// wave64. A fragment compute module is the latter even though its guest
+	// stage is Pixel.
+	const bool whole_rows = pixel && !fragment_compute
+	                            ? spirv.GetPsInputInfo() != nullptr && spirv.GetPsInputInfo()->required_subgroup_size == 32u
+	                            : spirv.UsesNativeComputeWave();
+	if (!whole_rows)
+	{
+		return RowDppMode::Unsupported;
+	}
+	if (fragment_row_dpp_destination_source(spirv.GetCode(), inst_index, op))
+	{
+		return RowDppMode::Input;
+	}
+	if (!fragment_row_dpp_wave32_keeps_dst(spirv.GetCode(), inst_index, op))
+	{
+		return RowDppMode::Unsupported;
+	}
+	const bool float_add = spirv.GetCode().GetInstructions().At(inst_index).type == ShaderInstructionType::VAddF32;
+	return float_add && !op.dpp_bound_ctrl ? RowDppMode::NegativeZero : RowDppMode::Zero;
 }
 
 // Emits the row-class lane permutation for an already-loaded operand inside a
@@ -767,11 +916,11 @@ static bool row_dpp_supported(const Spirv& spirv, const ShaderOperand& op, const
 // partial) FI=0 also zeroes sources fetched from EXEC-inactive lanes.
 static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, const String8& result_id,
                                          const String8& input_id, bool input_is_uint, bool exec_guard,
-                                         String8* text)
+                                         RowDppMode mode, String8* text)
 {
 	String8 head = input_is_uint ? String8("\n        %dpp_bits_<result> = OpCopyObject %uint %<in>\n")
 	                             : String8("\n        %dpp_bits_<result> = OpBitcast %uint %<in>\n");
-	static const char* permutation = R"(      %dpp_lane_<result> = OpLoad %uint %<host_lane>
+	const char* permutation = R"(      %dpp_lane_<result> = OpLoad %uint %<host_lane>
       %dpp_ssize_<result> = OpLoad %uint %gl_SubgroupSize
       %dpp_last_<result> = OpISub %uint %dpp_ssize_<result> %uint_1
      %dpp_local_<result> = OpBitwiseAnd %uint %dpp_lane_<result> %<lane_15>
@@ -780,20 +929,26 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
        %dpp_ok_<result> = OpLogicalAnd %bool %dpp_bounds_<result> %dpp_oob_<result>
   %dpp_clamped_<result> = OpExtInst %uint %GLSL_std_450 UMin %dpp_target_<result> %dpp_last_<result>
 <exec_guard>    %dpp_fetch_<result> = OpGroupNonUniformShuffle %uint %uint_3 %dpp_bits_<result> %dpp_clamped_<result>
-    %dpp_value_<result> = OpSelect %uint <ok> %dpp_fetch_<result> %<zero>
+    %dpp_value_<result> = OpSelect %uint <ok> %dpp_fetch_<result> %<fallback>
 )";
 	// FI=0 substitutes zero when the fetched source lane is EXEC-inactive.
-	// %exec_lo holds this lane's bit; shuffling it by the source lane index
-	// yields the source lane's bit.
-	static const char* exec_guard_text =
-	    R"( %dpp_exlo_<result> = OpLoad %uint %exec_lo
+	// %exec_lane_lo holds this lane's bit (exec_lo is a mask word in compute and
+	// split waves); shuffling the bit by the source lane index yields the source
+	// lane's bit.
+	const char* exec_guard_text =
+	    R"( %dpp_exlo_<result> = OpLoad %uint %exec_lane_lo
  %dpp_srclive_<result> = OpGroupNonUniformShuffle %uint %uint_3 %dpp_exlo_<result> %dpp_clamped_<result>
     %dpp_srcon_<result> = OpINotEqual %bool %dpp_srclive_<result> %<zero>
       %dpp_okg_<result> = OpLogicalAnd %bool %dpp_ok_<result> %dpp_srcon_<result>
 )";
 	const uint32_t control = op.dpp_ctrl;
 	String8          target;
-	if (control == 0x140u || control == 0x141u)
+	if (control >= 0x160u)
+	{
+		// row_xmask: XOR the lane within its row; the source never leaves the row.
+		target = String8("    %dpp_target_<result> = OpBitwiseXor %uint %dpp_lane_<result> %<step>\n"
+		                 "    %dpp_bounds_<result> = OpCopyObject %bool %true\n");
+	} else if (control == 0x140u || control == 0x141u)
 	{
 		target = String8("    %dpp_target_<result> = OpBitwiseXor %uint %dpp_lane_<result> %<mirror>\n"
 		                 "    %dpp_bounds_<result> = OpCopyObject %bool %true\n")
@@ -812,6 +967,24 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 		          : left     ? "    %dpp_bounds_<result> = OpULessThan %bool %dpp_offset_<result> %<lane_16>\n"
 		                     : "    %dpp_bounds_<result> = OpUGreaterThanEqual %bool %dpp_local_<result> %<step>\n";
 	}
+	// Parts narrower than a 16-lane row read the row's lanes in guest lane
+	// space through %split_lane_read; every target stays inside the wave.
+	if (spirv->UsesSplitComputeWave() && spirv->SplitWavePartLanes() < 16u)
+	{
+		permutation = R"(      %dpp_lane_<result> = OpLoad %uint %gl_SubgroupInvocationID
+     %dpp_local_<result> = OpBitwiseAnd %uint %dpp_lane_<result> %<lane_15>
+<target>
+       %dpp_ok_<result> = OpCopyObject %bool %dpp_bounds_<result>
+  %dpp_clamped_<result> = OpCopyObject %uint %dpp_target_<result>
+<exec_guard>    %dpp_fetch_<result> = OpFunctionCall %uint %split_lane_read %dpp_bits_<result> %dpp_clamped_<result>
+    %dpp_value_<result> = OpSelect %uint <ok> %dpp_fetch_<result> %<fallback>
+)";
+		exec_guard_text = R"( %dpp_exlo_<result> = OpLoad %uint %exec_lane_lo
+ %dpp_srclive_<result> = OpFunctionCall %uint %split_lane_read %dpp_exlo_<result> %dpp_clamped_<result>
+    %dpp_srcon_<result> = OpINotEqual %bool %dpp_srclive_<result> %<zero>
+      %dpp_okg_<result> = OpLogicalAnd %bool %dpp_ok_<result> %dpp_srcon_<result>
+)";
+	}
 	*text = (head + String8(permutation))
 	            .ReplaceStr("<host_lane>", spirv->HostLaneVariable())
 	            .ReplaceStr("<target>", target)
@@ -823,7 +996,10 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 	            .ReplaceStr("<lane_15>", spirv->GetConstantUint(15u))
 	            .ReplaceStr("<lane_16>", spirv->GetConstantUint(16u))
 	            .ReplaceStr("<step>", spirv->GetConstantUint(control & 15u))
-	            .ReplaceStr("<zero>", spirv->GetConstantUint(0u));
+	            .ReplaceStr("<zero>", spirv->GetConstantUint(0u))
+	            .ReplaceStr("<fallback>", mode == RowDppMode::Input          ? String8("dpp_bits_") + result_id
+	                                      : mode == RowDppMode::NegativeZero ? spirv->GetConstantUint(0x80000000u)
+	                                                                         : spirv->GetConstantUint(0u));
 	return true;
 }
 
@@ -834,7 +1010,8 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
 {
 	if (!operand_dpp_supported(op))
 	{
-		if (!row_dpp_supported(*spirv, op, index))
+		const RowDppMode mode = row_dpp_mode(*spirv, op, index);
+		if (mode == RowDppMode::Unsupported)
 		{
 			return false;
 		}
@@ -843,7 +1020,7 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
 		// EXEC is full and the extra shuffle would be a no-op.
 		const bool exec_guard = !op.dpp_fetch_inactive && !(spirv->GetCode().GetType() == ShaderType::Pixel &&
 		                                                    ShaderFragmentWaveInsideRegion(spirv->GetCode(), index.ToUint32()));
-		return operand_dpp_row_permute_uint(spirv, op, result_id, input_id, input_is_uint, exec_guard, text);
+		return operand_dpp_row_permute_uint(spirv, op, result_id, input_id, input_is_uint, exec_guard, mode, text);
 	}
 	const auto control = op.dpp_ctrl;
 	const auto ctrl    = spirv->GetConstantUint(control);
@@ -924,7 +1101,7 @@ bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, 
 
 	if (op.dpp)
 	{
-		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && row_dpp_mode(*spirv, op, index) == RowDppMode::Unsupported)
 		{
 			return false;
 		}
@@ -943,6 +1120,18 @@ bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, 
 	}
 
 	if (op.negate || op.absolute) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op.negate || op.absolute condition ignored (continuing)\n"); }
+
+	// SDWA BYTE/WORD selects (and SEXT) operate on the raw 32-bit register image.
+	if (op.swizzle != 6u)
+	{
+		String8 uint_load;
+		if (!operand_load_uint(spirv, op, "si_" + result_id, index, &uint_load))
+		{
+			return false;
+		}
+		*load = uint_load + String8(' ', 10) + String8("%<result_id> = OpBitcast %int %si_<result_id>").ReplaceStr("<result_id>", result_id);
+		return true;
+	}
 
 	if (operand_is_constant(op))
 	{
@@ -983,7 +1172,7 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 	EXIT_IF(load == nullptr);
 	if (op.dpp)
 	{
-		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && row_dpp_mode(*spirv, op, index) == RowDppMode::Unsupported)
 		{
 			return false;
 		}
@@ -1076,7 +1265,7 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 			            .ReplaceStr("<result_id>", raw_id);
 		} else if (value.type == SpirvType::Uint)
 		{
-			*load = (String8("%<result_id> = OpLoad %uint %<id>"))
+			*load = (String8("%<result_id> = OpLoad %uint %<id>\n"))
 			            .ReplaceStr("<index>", index)
 			            .ReplaceStr("<id>", value.value)
 			            .ReplaceStr("<result_id>", raw_id);
@@ -1091,7 +1280,7 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 
 	if (need_swizzle)
 	{
-		*load += String8(' ', 10) + sdwa_swizzle_uint(raw_id, result_id, index, op.swizzle);
+		*load += String8(' ', 10) + sdwa_swizzle_uint(raw_id, result_id, index, op.swizzle, op.sdwa_sext);
 	}
 	return true;
 }
@@ -1103,7 +1292,7 @@ bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id
 	{
 		// DPP transforms source zero before the ALU operation, not only V_MOV.
 		// Keep the full-mask quad-permutation subset shared by all consumers.
-		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && row_dpp_mode(*spirv, op, index) == RowDppMode::Unsupported)
 		{
 			return false;
 		}

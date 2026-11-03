@@ -223,7 +223,7 @@ protected:
 	{
 		const std::string path = guest_mount + name;
 		const char* paths[] = {path.c_str()};
-		return Kernel::FileSystem::KernelAprResolveFilepathsToIds(paths, 1, id);
+		return Kernel::FileSystem::KernelAprResolveFilepathsToIds(paths, 1, id, nullptr);
 	}
 
 	bool MakeNativeReadFail(const char* name)

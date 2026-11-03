@@ -55,8 +55,12 @@ static constexpr uint32_t SPIRV_SCOPE_WORKGROUP          = 2;
 static constexpr uint32_t SPIRV_ACQUIRE_RELEASE          = 0x8;
 static constexpr uint32_t SPIRV_UNIFORM_MEMORY           = 0x40;
 static constexpr uint32_t SPIRV_WORKGROUP_MEMORY         = 0x100;
+static constexpr uint32_t SPIRV_IMAGE_MEMORY             = 0x800;
 const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL    = SPIRV_ACQUIRE_RELEASE | SPIRV_UNIFORM_MEMORY;
 const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL = SPIRV_ACQUIRE_RELEASE | SPIRV_WORKGROUP_MEMORY;
+// Workgroup barrier that also orders the storage buffer and image writes the workgroup shares.
+const uint32_t SPIRV_WORKGROUP_STORE_BARRIER_MEMORY =
+    SPIRV_ACQUIRE_RELEASE | SPIRV_UNIFORM_MEMORY | SPIRV_WORKGROUP_MEMORY | SPIRV_IMAGE_MEMORY;
 
 struct BufferAddressSetup
 {
@@ -734,25 +738,23 @@ OpBranch %<t>_merge
 	return true;
 }
 
-// GLOBAL load: each lane reads at its own 64-bit address, a VGPR pair or a
+// GLOBAL address: each lane reads at its own 64-bit address, a VGPR pair or a
 // 64-bit SGPR base plus a 32-bit VGPR offset, plus the signed immediate, through
-// guest device addressing.
-static bool emit_global_load(Spirv* spirv, const ShaderInstruction& inst, uint32_t instruction_index, String8* dst_source)
+// guest device addressing. The address is left in %<tag>_lo and %<tag>_hi for
+// the guest load that the caller emits (dword or D16_HI).
+bool EmitGlobalLoadAddress(Spirv* spirv, const ShaderInstruction& inst, const String8& tag, String8* source)
 {
-	const int dwords = inst.dst.size;
-	if (!spirv->UsesGuestDeviceAddress() || dwords < 1 || dwords > 4 || inst.src_num < 1 || inst.src_num > 2)
+	if (!spirv->UsesGuestDeviceAddress() || inst.src_num < 1 || inst.src_num > 2)
 	{
 		return false;
 	}
-	const auto tag         = String8::FromPrintf("glb_%u", instruction_index);
 	const bool scalar_base = inst.src_num == 2;
-	String8    source;
 	String8    part;
 	if (!operand_load_uint(spirv, inst.src[0], tag + "_v0", tag, &part, scalar_base ? -1 : 0))
 	{
 		return false;
 	}
-	source += part + "\n";
+	*source += part + "\n";
 	const ShaderOperand& high_source = scalar_base ? inst.src[1] : inst.src[0];
 	if (scalar_base)
 	{
@@ -761,14 +763,14 @@ static bool emit_global_load(Spirv* spirv, const ShaderInstruction& inst, uint32
 		{
 			return false;
 		}
-		source += part + "\n";
+		*source += part + "\n";
 	}
 	part = String8();
 	if (!operand_load_uint(spirv, high_source, tag + "_b1", tag, &part, 1))
 	{
 		return false;
 	}
-	source += part + "\n";
+	*source += part + "\n";
 
 	const auto imm    = static_cast<int32_t>(inst.flat_offset);
 	const auto imm_lo = static_cast<uint32_t>(imm);
@@ -783,17 +785,31 @@ static bool emit_global_load(Spirv* spirv, const ShaderInstruction& inst, uint32
 	                                    : R"(%<t>_a_lo = OpCopyObject %uint %<t>_v0
 %<t>_a_hi = OpCopyObject %uint %<t>_b1
 )";
-	source += String8(base_text).ReplaceStr("<t>", tag);
-	source += String8(R"(%<t>_lo = OpIAdd %uint %<t>_a_lo %<imm_lo>
+	*source += String8(base_text).ReplaceStr("<t>", tag);
+	*source += String8(R"(%<t>_lo = OpIAdd %uint %<t>_a_lo %<imm_lo>
 %<t>_i_c = OpULessThan %bool %<t>_lo %<t>_a_lo
 %<t>_i_ci = OpSelect %uint %<t>_i_c %uint_1 %uint_0
 %<t>_hi_s = OpIAdd %uint %<t>_a_hi %<imm_hi>
 %<t>_hi = OpIAdd %uint %<t>_hi_s %<t>_i_ci
 )")
-	              .ReplaceStr("<imm_lo>", spirv->GetConstantUint(imm_lo))
-	              .ReplaceStr("<imm_hi>", spirv->GetConstantUint(imm_hi))
-	              .ReplaceStr("<t>", tag);
-	if (!spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", dwords, tag + "_g", &source))
+	               .ReplaceStr("<imm_lo>", spirv->GetConstantUint(imm_lo))
+	               .ReplaceStr("<imm_hi>", spirv->GetConstantUint(imm_hi))
+	               .ReplaceStr("<t>", tag);
+	return true;
+}
+
+// GLOBAL dword load: each loaded dword is bit-cast into the destination VGPR.
+static bool emit_global_load(Spirv* spirv, const ShaderInstruction& inst, uint32_t instruction_index, String8* dst_source)
+{
+	const int dwords = inst.dst.size;
+	if (dwords < 1 || dwords > 4)
+	{
+		return false;
+	}
+	const auto tag = String8::FromPrintf("glb_%u", instruction_index);
+	String8    source;
+	if (!EmitGlobalLoadAddress(spirv, inst, tag, &source) ||
+	    !spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", dwords, tag + "_g", &source))
 	{
 		return false;
 	}
@@ -2503,8 +2519,10 @@ static bool EmitGdsAppend(const ShaderCode& code, uint32_t index, Spirv* spirv, 
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
 	if (bind_info == nullptr || bind_info->gds_pointers.pointers_num <= 0) { return false; }
-	return code.GetType() == ShaderType::Pixel ? EmitFragmentGdsAppend(code, inst, index, spirv, dst_source)
-	                                           : EmitOrdinaryNativeGdsAppend(inst, index, spirv, dst_source);
+	// The fragment transport runs the pixel program as a split guest wave with an architectural EXEC.
+	return code.GetType() == ShaderType::Pixel && !spirv->UsesFragmentCompute()
+	           ? EmitFragmentGdsAppend(code, inst, index, spirv, dst_source)
+	           : EmitOrdinaryNativeGdsAppend(inst, index, spirv, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
@@ -2660,6 +2678,247 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffset)
 	return true;
 }
 
+// ds_bpermute_b32: the backward lane permute of the gfx10 ISA. Every lane
+// gathers the value of the lane its index names, so the result is one
+// subgroup shuffle with a per-lane source lane. The index is a byte address
+// with the instruction offset added to it and only its bits [6:2] select a
+// lane of the same half wave. A source lane that is disabled reads zero.
+KYTY_RECOMPILER_FUNC(Recompile_DsBpermuteB32_VdstVsrc0Vsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.src_num != 2 || inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 ||
+	    inst.src[0].type != ShaderOperandType::Vgpr || inst.src[1].type != ShaderOperandType::Vgpr ||
+	    inst.src[0].dpp || inst.src[1].dpp)
+	{
+		return false;
+	}
+	const auto destination = operand_variable_to_str(inst.dst);
+	if (destination.type != SpirvType::Float || destination.value.IsEmpty())
+	{
+		return false;
+	}
+	const auto index_str = String8::FromPrintf("%u", index);
+	const auto tag       = String8("bpermute_") + index_str;
+	String8             source;
+	if (!operand_load_uint(spirv, inst.src[0], tag + "_index", index_str, &source))
+	{
+		return false;
+	}
+	String8 value;
+	if (!operand_load_uint(spirv, inst.src[1], tag + "_value", index_str, &value))
+	{
+		return false;
+	}
+	// Split compute spreads one guest wave over several host subgroups, so only
+	// %split_lane_read reaches another lane per invocation. In wave64 the permute addresses
+	// 32 lanes of the current half (ISA 10.4.4), so the guest lane supplies the
+	// half and the index only its five low lane bits.
+	const bool split = spirv->UsesSplitComputeWave();
+	String8     lane;
+	if (split)
+	{
+		lane = String8(R"(
+%<t>_lane_bits = OpBitwiseAnd %uint %<t>_shift %uint_31
+%<t>_guest = OpLoad %uint %gl_SubgroupInvocationID
+%<t>_half = OpBitwiseAnd %uint %<t>_guest %uint_32
+%<t>_lane = OpBitwiseOr %uint %<t>_half %<t>_lane_bits
+)").ReplaceStr("<t>", tag);
+	} else
+	{
+		lane = String8("%<t>_lane = OpBitwiseAnd %uint %<t>_shift %uint_31\n").ReplaceStr("<t>", tag);
+	}
+	const auto exchange =
+	    split ? String8(R"(
+%<t>_own = OpLoad %uint %exec_lane_lo
+%<t>_active = OpINotEqual %bool %<t>_own %uint_0
+%<t>_published = OpSelect %uint %<t>_active %<t>_value %uint_0
+%<t>_result = OpFunctionCall %uint %split_lane_read %<t>_published %<t>_lane
+)").ReplaceStr("<t>", tag)
+	          : String8(R"(
+%<t>_own = OpLoad %uint %exec_lane_lo
+%<t>_active = OpINotEqual %bool %<t>_own %uint_0
+%<t>_fetch = OpGroupNonUniformShuffle %uint %uint_3 %<t>_value %<t>_lane
+%<t>_live = OpGroupNonUniformShuffle %uint %uint_3 %<t>_own %<t>_lane
+%<t>_live_bit = OpINotEqual %bool %<t>_live %uint_0
+%<t>_result = OpSelect %uint %<t>_live_bit %<t>_fetch %uint_0
+)").ReplaceStr("<t>", tag);
+	const auto text = String8(R"(
+%<t>_offset = OpIAdd %uint %<t>_index %<offset>
+%<t>_shift = OpShiftRightLogical %uint %<t>_offset %uint_2
+<lane>
+<exchange>
+%<t>_old_typed = OpLoad %float %<dst>
+%<t>_old = OpBitcast %uint %<t>_old_typed
+%<t>_stored = OpSelect %uint %<t>_active %<t>_result %<t>_old
+%<t>_stored_typed = OpBitcast %float %<t>_stored
+OpStore %<dst> %<t>_stored_typed
+)")
+	                 .ReplaceStr("<t>", tag)
+	                 .ReplaceStr("<offset>", spirv->GetConstantUint(inst.ds_offset))
+	                 .ReplaceStr("<lane>", lane)
+	                 .ReplaceStr("<exchange>", exchange)
+	                 .ReplaceStr("<dst>", destination.value);
+	*dst_source += source + value + text;
+	return true;
+}
+
+namespace {
+
+// The source-lane formula of ds_swizzle_b32 (ISA 12.13.1), applied to each half wave. The
+// rotate mode wraps inside the 32 lanes, as the ISA's examples show.
+enum class DsSwizzleMode
+{
+	Fft,
+	Rotate,
+	Quad,
+	Bitmask,
+};
+
+DsSwizzleMode DsSwizzleModeOf(uint16_t offset)
+{
+	if (offset >= 0xe000u)
+	{
+		return DsSwizzleMode::Fft;
+	}
+	if (offset >= 0xc000u)
+	{
+		return DsSwizzleMode::Rotate;
+	}
+	return (offset & 0x8000u) != 0u ? DsSwizzleMode::Quad : DsSwizzleMode::Bitmask;
+}
+
+uint32_t DsSwizzleRotation(uint16_t offset)
+{
+	const uint32_t rotate = (offset >> 5u) & 31u;
+	return (offset & 0x400u) != 0u ? (32u - rotate) & 31u : rotate;
+}
+
+} // namespace
+
+std::array<uint32_t, 8> ShaderDsSwizzleConstants(uint16_t offset)
+{
+	const uint32_t mask = offset & 31u;
+	switch (DsSwizzleModeOf(offset))
+	{
+		case DsSwizzleMode::Fft:
+			return {27u, static_cast<uint32_t>(__builtin_popcount(mask)), mask, 31u, 32u, 32u, 32u, 32u};
+		case DsSwizzleMode::Rotate: return {mask, ~mask, DsSwizzleRotation(offset), 31u, 32u, 32u, 32u, 32u};
+		case DsSwizzleMode::Quad: return {0xfffffffcu, 3u, 1u, offset & 0xffu, 32u, 32u, 32u, 32u};
+		case DsSwizzleMode::Bitmask: return {mask, (offset >> 5u) & 31u, (offset >> 10u) & 31u, 31u, 32u, 32u, 32u, 32u};
+	}
+	return {};
+}
+
+static String8 DsSwizzleSourceLane(const Spirv* spirv, uint16_t offset)
+{
+	const auto c    = ShaderDsSwizzleConstants(offset);
+	const auto name = [spirv, &c](int slot) { return spirv->GetConstantUint(c[slot]); };
+	String8    text;
+	switch (DsSwizzleModeOf(offset))
+	{
+		case DsSwizzleMode::Fft:
+			text = R"(
+%<t>_reversed = OpBitReverse %uint %<t>_guest
+%<t>_reversed5 = OpShiftRightLogical %uint %<t>_reversed %<c0>
+%<t>_spread = OpShiftRightLogical %uint %<t>_reversed5 %<c1>
+%<t>_kept = OpBitwiseAnd %uint %<t>_guest %<c2>
+%<t>_low = OpBitwiseOr %uint %<t>_spread %<t>_kept
+)";
+			break;
+		case DsSwizzleMode::Rotate:
+			text = R"(
+%<t>_kept = OpBitwiseAnd %uint %<t>_guest %<c0>
+%<t>_moved = OpIAdd %uint %<t>_guest %<c2>
+%<t>_moved_bits = OpBitwiseAnd %uint %<t>_moved %<c1>
+%<t>_joined = OpBitwiseOr %uint %<t>_kept %<t>_moved_bits
+%<t>_low = OpBitwiseAnd %uint %<t>_joined %<c3>
+)";
+			break;
+		case DsSwizzleMode::Quad:
+			text = R"(
+%<t>_quad = OpBitwiseAnd %uint %<t>_guest %<c0>
+%<t>_member = OpBitwiseAnd %uint %<t>_guest %<c1>
+%<t>_select_shift = OpShiftLeftLogical %uint %<t>_member %<c2>
+%<t>_selects = OpShiftRightLogical %uint %<c3> %<t>_select_shift
+%<t>_select = OpBitwiseAnd %uint %<t>_selects %<c1>
+%<t>_lane = OpBitwiseOr %uint %<t>_quad %<t>_select
+)";
+			break;
+		case DsSwizzleMode::Bitmask:
+			text = R"(
+%<t>_kept = OpBitwiseAnd %uint %<t>_guest %<c0>
+%<t>_set = OpBitwiseOr %uint %<t>_kept %<c1>
+%<t>_low = OpBitwiseXor %uint %<t>_set %<c2>
+)";
+			break;
+	}
+	if (DsSwizzleModeOf(offset) != DsSwizzleMode::Quad)
+	{
+		text += R"(%<t>_half = OpBitwiseAnd %uint %<t>_guest %<c4>
+%<t>_lane = OpBitwiseOr %uint %<t>_half %<t>_low
+)";
+	}
+	return text.ReplaceStr("<c0>", name(0))
+	    .ReplaceStr("<c1>", name(1))
+	    .ReplaceStr("<c2>", name(2))
+	    .ReplaceStr("<c3>", name(3))
+	    .ReplaceStr("<c4>", name(4));
+}
+
+// ds_swizzle_b32 gathers ADDR from the lane its offset selects, as ds_bpermute_b32 does from a
+// lane a register names, so it lowers to the same subgroup shuffle or split-wave read.
+KYTY_RECOMPILER_FUNC(Recompile_DsSwizzleB32_VdstVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.src_num != 1 || inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 ||
+	    inst.src[0].type != ShaderOperandType::Vgpr || inst.src[0].dpp)
+	{
+		return false;
+	}
+	const auto destination = operand_variable_to_str(inst.dst);
+	if (destination.type != SpirvType::Float || destination.value.IsEmpty())
+	{
+		return false;
+	}
+	const auto index_str = String8::FromPrintf("%u", index);
+	const auto tag       = String8("swizzle_") + index_str;
+	String8    value;
+	if (!operand_load_uint(spirv, inst.src[0], tag + "_value", index_str, &value))
+	{
+		return false;
+	}
+	const auto exchange = spirv->UsesSplitComputeWave() ? String8(R"(
+%<t>_own = OpLoad %uint %exec_lane_lo
+%<t>_active = OpINotEqual %bool %<t>_own %uint_0
+%<t>_published = OpSelect %uint %<t>_active %<t>_value %uint_0
+%<t>_result = OpFunctionCall %uint %split_lane_read %<t>_published %<t>_lane
+)")
+	                                                    : String8(R"(
+%<t>_own = OpLoad %uint %exec_lane_lo
+%<t>_active = OpINotEqual %bool %<t>_own %uint_0
+%<t>_fetch = OpGroupNonUniformShuffle %uint %uint_3 %<t>_value %<t>_lane
+%<t>_live = OpGroupNonUniformShuffle %uint %uint_3 %<t>_own %<t>_lane
+%<t>_live_bit = OpINotEqual %bool %<t>_live %uint_0
+%<t>_result = OpSelect %uint %<t>_live_bit %<t>_fetch %uint_0
+)");
+	const auto text = String8(R"(
+%<t>_guest = OpLoad %uint %gl_SubgroupInvocationID
+<lane>
+<exchange>
+%<t>_old_typed = OpLoad %float %<dst>
+%<t>_old = OpBitcast %uint %<t>_old_typed
+%<t>_stored = OpSelect %uint %<t>_active %<t>_result %<t>_old
+%<t>_stored_typed = OpBitcast %float %<t>_stored
+OpStore %<dst> %<t>_stored_typed
+)")
+	                      .ReplaceStr("<lane>", DsSwizzleSourceLane(spirv, inst.ds_offset))
+	                      .ReplaceStr("<exchange>", exchange)
+	                      .ReplaceStr("<t>", tag)
+	                      .ReplaceStr("<dst>", destination.value);
+	*dst_source += value + text;
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_DsAddU32_VaddrVdataOffset)
 {
 	const auto& inst       = code.GetInstructions().At(index);
@@ -2759,6 +3018,15 @@ static uint32_t Ds2OffsetBytes(const ShaderInstruction& inst, uint32_t word, con
 	return ((inst.ds_offset >> (word * 8u)) & 0xffu) * 4u * stride;
 }
 
+// ds_write2[st64]_b64 carries two independent qword offsets, each scaled by
+// 8 bytes (times 64 for the st64 forms), and word selects the dword inside
+// the qword.
+static uint32_t Ds2OffsetBytes64(const ShaderInstruction& inst, uint32_t operand, uint32_t word, const char* const* param)
+{
+	const uint32_t stride = (param != nullptr && param[0] != nullptr && param[0][0] == '6') ? 64u : 1u;
+	return ((inst.ds_offset >> (operand * 8u)) & 0xffu) * 8u * stride + word * 4u;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_DsRead2B32_Vdst2VaddrOffset01)
 {
 	const auto& inst       = code.GetInstructions().At(index);
@@ -2808,6 +3076,65 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWrite2B32_VaddrVdata2Offset01)
 		                             tag.c_str(), data.value.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
 		body += EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str, Ds2OffsetBytes(inst, static_cast<uint32_t>(word), param), 1, tag);
 		body += GateLdsByBounds(store, tag);
+	}
+	*dst_source += GateLdsByExec(body, index_str);
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_DsWrite2B64_VaddrVdata2Offset01)
+{
+	const auto& inst       = code.GetInstructions().At(index);
+	const auto* input_info = spirv->GetCsInputInfo();
+
+	if (input_info == nullptr || input_info->lds_dwords == 0 || !ShaderLdsMemoryInstructionSupported(inst))
+	{
+		return false;
+	}
+
+	const auto address   = operand_variable_to_str(inst.src[0]);
+	const auto index_str = String8::FromPrintf("%u", index);
+	String8    body      = LdsAddressSnapshot(address.value, index_str);
+	// DATA0 and DATA1 each contribute two dwords; the stores target independent
+	// qword addresses.
+	for (int operand = 0; operand < 2; ++operand)
+	{
+		for (int word = 0; word < 2; ++word)
+		{
+			const auto tag  = String8::FromPrintf("%u_write2b64_%d_%d", index, operand, word);
+			const auto data = operand_variable_to_str(inst.src[1 + operand], word);
+			String8    store = EmitLdsWordPointer(spirv, 0, tag);
+			store += String8::FromPrintf("        %%lds_data_f_%s = OpLoad %%float %%%s\n"
+			                             "        %%lds_data_u_%s = OpBitcast %%uint %%lds_data_f_%s\n"
+			                             "               OpStore %%lds_ptr_%s_0 %%lds_data_u_%s\n",
+			                             tag.c_str(), data.value.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
+			body += EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str,
+			                            Ds2OffsetBytes64(inst, static_cast<uint32_t>(operand), static_cast<uint32_t>(word), param), 1, tag);
+			body += GateLdsByBounds(store, tag);
+		}
+	}
+	*dst_source += GateLdsByExec(body, index_str);
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_DsRead2B64_Vdst2VaddrOffset01)
+{
+	const auto& inst       = code.GetInstructions().At(index);
+	const auto* input_info = spirv->GetCsInputInfo();
+
+	if (input_info == nullptr || input_info->lds_dwords == 0 || !ShaderLdsMemoryInstructionSupported(inst))
+	{
+		return false;
+	}
+
+	const auto address   = operand_variable_to_str(inst.src[0]);
+	const auto index_str = String8::FromPrintf("%u", index);
+	String8    body      = LdsAddressSnapshot(address.value, index_str);
+	for (uint32_t operand = 0; operand < 2u; ++operand)
+	{
+		// Each qword is an independent address and lands in two destination dwords.
+		const auto tag = String8::FromPrintf("%u_read2b64_%u", index, operand);
+		body += EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str, Ds2OffsetBytes64(inst, operand, 0, param), 2, tag);
+		body += LdsReadSpan(spirv, inst.dst, static_cast<int>(operand * 2u), 2, tag);
 	}
 	*dst_source += GateLdsByExec(body, index_str);
 	return true;
@@ -3031,16 +3358,38 @@ KYTY_RECOMPILER_FUNC(Recompile_DsReadAddtidB32_VdstOffset)
 	return EmitDsAddtidLoad(dst, active, index_str, bound, String8(), spirv, inst, dst_source);
 }
 
+// S_BARRIER only makes waves wait for each other (RDNA2 ISA 4.3), and stores from one wave are
+// not kept in order (ISA 4.4). A workgroup that writes storage therefore needs the barrier to
+// order UniformMemory and ImageMemory as well as workgroup (LDS) memory.
+bool ShaderCodeWritesStorage(const ShaderCode& code)
+{
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (ShaderInstructionWritesStorage(inst.type))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty)
 {
 	if (spirv->GetCsInputInfo() == nullptr)
 	{
-		return false;
+		// A fused NGG front made lane local from exact wave state passed the front proof, which
+		// models one guest wave per host subgroup and admits a barrier only outside any memory
+		// access (ShaderNggPassthroughProof.cpp): the barrier has nothing to wait for or order.
+		const auto* vs = spirv->GetVsInputInfo();
+		return vs != nullptr && vs->gs_prolog && vs->native_wave.proof == ShaderNativeWaveProof::LaneLocal &&
+		       ShaderUsesNativeWaveState(spirv->GetCode());
 	}
 
 	const auto execution_scope = spirv->GetConstantUint(SPIRV_SCOPE_WORKGROUP);
 	const auto memory_scope    = spirv->GetConstantUint(SPIRV_SCOPE_WORKGROUP);
-	const auto semantics       = spirv->GetConstantUint(SPIRV_WORKGROUP_MEMORY_ACQ_REL);
+	const auto barrier_memory  = ShaderCodeWritesStorage(spirv->GetCode()) ? SPIRV_WORKGROUP_STORE_BARRIER_MEMORY
+	                                                                       : SPIRV_WORKGROUP_MEMORY_ACQ_REL;
+	const auto semantics       = spirv->GetConstantUint(barrier_memory);
 
 	*dst_source += String8::FromPrintf("               OpControlBarrier %%%s %%%s %%%s\n", execution_scope.c_str(),
 	                                  memory_scope.c_str(), semantics.c_str());
@@ -3140,13 +3489,15 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
 	return true;
 }
 
-// Pixel programs and the geometry pass read runtime V#s at guest device addresses.
+// Pixel, compute and geometry-pass programs read runtime V#s at guest device addresses.
 static bool ScalarBufferUsesGuestAddress(const Spirv* spirv, const ShaderInstruction& inst)
 {
 	const auto* bind           = spirv->GetBindInfo();
 	const auto* vertex         = spirv->GetVsInputInfo();
 	const int   user_data_base = vertex != nullptr && vertex->gs_prolog ? 8 : 0;
-	return Config::IsNextGen() && (spirv->GetPsInputInfo() != nullptr || spirv->UsesGeometryCompute()) && bind != nullptr &&
+	const bool  stage          = spirv->GetPsInputInfo() != nullptr || spirv->UsesGeometryCompute() ||
+	                    spirv->GetCode().GetType() == ShaderType::Compute;
+	return Config::IsNextGen() && stage && bind != nullptr &&
 	       ShaderScalarBufferUsesRuntimeDescriptor(*bind, inst, user_data_base);
 }
 
@@ -3773,6 +4124,22 @@ String8 Spirv::MaterializeAssembledDescriptors(const ShaderInstruction& inst) co
 			source += String8::FromPrintf("OpStore %%%s %%%s\n", variable.value.c_str(), id.c_str());
 		}
 	}
+	// A constant S# takes its sampler's metadata the same way.
+	for (const auto& constant: m_bind->constant_samplers)
+	{
+		if (constant.consumer_pc != inst.pc)
+		{
+			continue;
+		}
+		const int row = m_bind->storage_buffers.buffers_num + m_bind->textures2D.textures_num * 2 + constant.sampler_index;
+		for (int field = 0; field < 4; ++field)
+		{
+			const auto variable = operand_variable_to_str(inst.src[2], field);
+			const auto id       = String8::FromPrintf("constant_ssharp_%u_%d", inst.pc, field);
+			source += EmitMetadataLoad(row, field, id);
+			source += String8::FromPrintf("OpStore %%%s %%%s\n", variable.value.c_str(), id.c_str());
+		}
+	}
 	return source;
 }
 
@@ -3800,7 +4167,7 @@ static bool recompile_sload_guest(uint32_t index, const ShaderInstruction& inst,
 	const bool pair_base = inst.src[0].type == ShaderOperandType::Sgpr || inst.src[0].type == ShaderOperandType::VccLo;
 	if (!spirv->UsesGuestDeviceAddress() || bind == nullptr || !pair_base ||
 	    (bind->extended.used && inst.src[0].type == ShaderOperandType::Sgpr &&
-	     inst.src[0].register_id == bind->extended.start_register) ||
+	     inst.src[0].register_id == bind->extended.start_register && !ShaderEudDescriptorLoadIsUnmapped(*bind, inst)) ||
 	    spirv->GetDynamicSLoadOffset(inst.pc, &mapped_offset))
 	{
 		return false;
@@ -3846,6 +4213,25 @@ static bool recompile_sload_guest(uint32_t index, const ShaderInstruction& inst,
 	{
 		const auto dst = dword_count == 1 ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, word);
 		source += String8::FromPrintf("               OpStore %%%s %%%s_d%d\n", dst.value.c_str(), i.c_str(), word);
+	}
+	// A descriptor bound from this load is consumed through its binding, whose base dword is
+	// the descriptor slot; the raw guest base would index the descriptor array out of range.
+	for (const auto& record: bind->dynamic_sloads.records)
+	{
+		if (record.instruction_pc != inst.pc || !record.guest_load)
+		{
+			continue;
+		}
+		for (int word = 0; word < record.dword_count; word++)
+		{
+			int row   = 0;
+			int field = 0;
+			spirv->GetDynamicSLoadRecordField(record, word, &row, &field);
+			const auto dst = operand_variable_to_str(inst.dst, record.destination_register - inst.dst.register_id + word);
+			const auto id  = String8::FromPrintf("%s_bound_%d_%d", i.c_str(), record.destination_register, word);
+			source += spirv->EmitMetadataLoad(row, field, id);
+			source += String8::FromPrintf("               OpStore %%%s %%%s\n", dst.value.c_str(), id.c_str());
+		}
 	}
 	*dst_source += source;
 	return true;

@@ -289,12 +289,13 @@ RenderShaderCoordinateUsage AnalyzeResolutionShaderUsage(const ShaderCode& code)
 	RenderShaderCoordinateUsage usage;
 	usage.integer_image_coordinates =
 	    code.HasAnyOf({ShaderInstructionType::ImageGetResinfo, ShaderInstructionType::ImageLoad,
-	                   ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
-	                   ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
+	                   ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip}) ||
+	    ShaderHasImageAtomic(code);
 	usage.texel_offset_sampling = code.HasAnyOf({ShaderInstructionType::ImageSampleO, ShaderInstructionType::ImageSampleLzO});
 	for (const auto& inst: code.GetInstructions())
 	{
-		usage.texel_offset_sampling = usage.texel_offset_sampling || (inst.type == ShaderInstructionType::ImageGather4 && inst.mimg_offset);
+		const bool gather = inst.type == ShaderInstructionType::ImageGather4 || inst.type == ShaderInstructionType::ImageGather4C;
+		usage.texel_offset_sampling = usage.texel_offset_sampling || (gather && inst.mimg_offset);
 	}
 	return usage;
 }

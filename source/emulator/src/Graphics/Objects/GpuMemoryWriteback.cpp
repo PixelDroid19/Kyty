@@ -323,7 +323,11 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 		{
 			o2.hash[vi] = 0;
 		}
-		if (GpuMemoryWriteBackParentActionFor(other.relation) == GpuMemoryWriteBackParentAction::PropagateEquals)
+		// A writable parent with pending uses takes the invalidated bytes at its next use:
+		// versioning it would drop those uses' writes.
+		const bool parent_update_conflicts = o2.write_back_func != nullptr && !o2.read_only &&
+		                                     !m_deferred_deletions.AreDependenciesComplete(o2.submission_uses.Dependencies());
+		if (GpuMemoryWriteBackParentActionFor(other.relation) == GpuMemoryWriteBackParentAction::PropagateEquals && !parent_update_conflicts)
 		{
 			Update(o.submit_id, ctx, heap_id, other.object_id, destructors);
 		}
@@ -462,47 +466,62 @@ void GpuMemory::Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
 }
 
+bool GpuMemory::StorageScanCandidate(int heap_id, int object_id, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const
+{
+	const auto& object = m_heaps[heap_id].objects[object_id];
+	EXIT_IF(object.free);
+	const auto& info = object.info;
+	if (!info.in_use || info.read_only || info.object.obj == nullptr)
+	{
+		return false;
+	}
+	if (info.guest_published_write_uses != 0u && info.guest_published_write_uses == info.write_uses &&
+	    info.guest_published_queue == consumer.Value())
+	{
+		return false;
+	}
+	for (int block = 0; block < object.block.vaddr_num; block++)
+	{
+		if (object.block.size[block] != 0 && ranges(object.block.vaddr[block], object.block.size[block]))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const
 {
 	std::vector<std::pair<int, int>> found;
-	const auto&                      heaps = m_heaps;
 	for (const auto& [heap_id, object_id]: m_writable_storage)
 	{
-		const auto& object = heaps[heap_id].objects[object_id];
-		EXIT_IF(object.free);
-		const auto& info = object.info;
-		if (!info.in_use || info.read_only || info.object.obj == nullptr)
+		if (StorageScanCandidate(heap_id, object_id, ranges, consumer))
 		{
-			continue;
-		}
-		if (info.guest_published_write_uses != 0u && info.guest_published_write_uses == info.write_uses &&
-		    info.guest_published_queue == consumer.Value())
-		{
-			continue;
-		}
-		for (int block = 0; block < object.block.vaddr_num; block++)
-		{
-			if (object.block.size[block] != 0 && ranges(object.block.vaddr[block], object.block.size[block]))
-			{
-				found.emplace_back(heap_id, object_id);
-				break;
-			}
+			found.emplace_back(heap_id, object_id);
 		}
 	}
 	return found;
 }
 
-// The whole object is the guest content of its range when no other object shares
-// its bytes, no label fence or depth metadata lies in it (their write-backs keep
-// byte-level exclusions and side effects), and the guest has not written the
-// range since the object was last synchronized with it.
-bool GpuMemory::StorageIsWholeGuestContent(const Object& object)
+// The whole object is the guest content of its range when every other object
+// sharing its bytes is one its write-back leaves alone, no label fence or depth
+// metadata lies in it (their write-backs keep byte-level exclusions and side
+// effects), and the guest has not written the range since the object was last
+// synchronized with it.
+bool GpuMemory::StorageIsWholeGuestContent(int heap_id, const Object& object) const
 {
 	const auto& info = object.info;
-	if (object.block.vaddr_num != 1 || !object.others.IsEmpty() || info.depth_meta_bound || !info.check_hash ||
-	    !info.dirty_registered)
+	if (object.block.vaddr_num != 1 || info.depth_meta_bound || !info.check_hash || !info.dirty_registered)
 	{
 		return false;
+	}
+	for (const auto& other: object.others)
+	{
+		const auto& alias = m_heaps[heap_id].objects[other.object_id].info;
+		if (!GpuMemorySkipWriteBackParentInvalidate(alias.object.type, alias.params))
+		{
+			return false;
+		}
 	}
 	const uint64_t vaddr   = object.block.vaddr[0];
 	const uint64_t size    = object.block.size[0];
@@ -512,27 +531,68 @@ bool GpuMemory::StorageIsWholeGuestContent(const Object& object)
 }
 
 bool GpuMemory::PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
+                                        const std::vector<SubmissionId>&          device_awaited,
                                         std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency)
 {
 	EXIT_IF(dependency == nullptr);
+	const auto awaited = [&](const SubmissionId& use)
+	{
+		return std::any_of(device_awaited.begin(), device_awaited.end(), [&](const SubmissionId& submission)
+		                   { return submission.queue == use.queue && submission.sequence >= use.sequence; });
+	};
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
-	const auto&     heaps = m_heaps;
-	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges, consumer))
+	auto&           memo       = StorageScanMemoFor(consumer);
+	const uint64_t  generation = g_storage_scan_generation.load(std::memory_order_acquire);
+	const size_t    changes    = m_storage_scan_changes.size();
+	std::vector<std::pair<int, int>> candidates;
+	if (memo.pending_generation != generation)
+	{
+		candidates = CollectWritableStorage(ranges, consumer);
+	} else
+	{
+		for (size_t i = memo.pending_changes_seen; i < changes; i++)
+		{
+			const auto& [heap_id, object_id] = m_storage_scan_changes[i];
+			if (m_writable_storage.count({heap_id, object_id}) != 0u && StorageScanCandidate(heap_id, object_id, ranges, consumer))
+			{
+				candidates.emplace_back(heap_id, object_id);
+			}
+		}
+		std::sort(candidates.begin(), candidates.end());
+		candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+	}
+	const auto& heaps = m_heaps;
+	for (const auto& [heap_id, object_id]: candidates)
 	{
 		const auto&  object = heaps[heap_id].objects[object_id];
 		SubmissionId pending;
-		bool         consumer_queue_only = true;
+		SubmissionId unawaited;
+		bool         consumer_ordered = true;
 		for (const auto& use: object.info.submission_uses.Dependencies())
 		{
 			if (m_deferred_deletions.AreDependenciesComplete({use})) { continue; }
-			pending             = pending.sequence == 0 ? use : pending;
-			consumer_queue_only = consumer_queue_only && use.queue == consumer;
+			pending = pending.sequence == 0 ? use : pending;
+			if (use.queue == consumer || awaited(use)) { continue; }
+			consumer_ordered = false;
+			// One device wait on a queue's latest use covers its earlier ones.
+			if (unawaited.sequence == 0 || (use.queue == unawaited.queue && use.sequence > unawaited.sequence))
+			{
+				unawaited = use;
+			}
 		}
 		if (pending.sequence == 0) { continue; }
-		if (publishable == nullptr || !consumer_queue_only || !StorageIsWholeGuestContent(object))
+		// An in-place object's bytes are in guest memory, and the guest orders its
+		// queues; readers on this queue need only a barrier after each new write.
+		const bool in_place = static_cast<const VulkanBuffer*>(object.info.object.obj)->guest_in_place;
+		if (in_place && object.info.in_place_ordered_write_uses == object.info.write_uses &&
+		    object.info.in_place_ordered_queue == consumer.Value())
 		{
-			*dependency = pending;
+			continue;
+		}
+		if (publishable == nullptr || (!in_place && (!consumer_ordered || !StorageIsWholeGuestContent(heap_id, object))))
+		{
+			*dependency = unawaited.sequence != 0 ? unawaited : pending;
 			return true;
 		}
 		GpuMemoryStoragePublication publication;
@@ -543,7 +603,94 @@ bool GpuMemory::PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueu
 		publication.dependency = pending;
 		publishable->push_back(publication);
 	}
+	if (publishable == nullptr || publishable->empty())
+	{
+		memo.pending_generation   = generation;
+		memo.pending_changes_seen = changes;
+	}
 	return false;
+}
+
+std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorageIn(uint64_t vaddr, uint64_t size)
+{
+	std::vector<std::pair<int, int>> found;
+	const int                        heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
+	{
+		return found;
+	}
+	for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1))
+	{
+		const auto& object = m_heaps[heap_id].objects[block.object_id];
+		const auto& info   = object.info;
+		if (!object.free && info.object.type == GpuMemoryObjectType::StorageBuffer && info.in_use && !info.read_only &&
+		    info.object.obj != nullptr)
+		{
+			found.emplace_back(heap_id, block.object_id);
+		}
+	}
+	return found;
+}
+
+bool GpuMemory::WriteBackStorageForGuestSeed(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuQueueId consumer,
+                                             SubmissionId* dependency)
+{
+	EXIT_IF(ctx == nullptr || dependency == nullptr);
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	// Write-back changes the index; collect the candidates first.
+	std::vector<std::pair<int, int>> completed;
+	for (const auto& [heap_id, object_id]: CollectWritableStorageIn(vaddr, size))
+	{
+		const auto&  object = m_heaps[heap_id].objects[object_id];
+		SubmissionId pending;
+		bool         consumer_queue_only = true;
+		for (const auto& use: object.info.submission_uses.Dependencies())
+		{
+			if (m_deferred_deletions.AreDependenciesComplete({use})) { continue; }
+			pending             = pending.sequence == 0 ? use : pending;
+			consumer_queue_only = consumer_queue_only && use.queue == consumer;
+		}
+		if (pending.sequence == 0)
+		{
+			completed.emplace_back(heap_id, object_id);
+			continue;
+		}
+		if (!consumer_queue_only || object.block.vaddr_num != 1)
+		{
+			*dependency = pending;
+			return true;
+		}
+	}
+	Vector<Destructor> destructors;
+	for (const auto& [heap_id, object_id]: completed)
+	{
+		WriteBackObjectLocked(ctx, heap_id, object_id, &destructors);
+	}
+	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
+	return false;
+}
+
+void GpuMemory::CollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, SubmissionId reader,
+                                           std::vector<GpuMemoryStorageSeedSource>* sources)
+{
+	EXIT_IF(sources == nullptr);
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	auto found = CollectWritableStorageIn(vaddr, size);
+	std::sort(found.begin(), found.end(),
+	          [this](const auto& a, const auto& b)
+	          { return m_heaps[a.first].objects[a.second].info.device_write_time < m_heaps[b.first].objects[b.second].info.device_write_time; });
+	for (const auto& [heap_id, object_id]: found)
+	{
+		auto& object = m_heaps[heap_id].objects[object_id];
+		// GpuMemoryWriteBackStorageForGuestSeed made a multi-block result a dependency.
+		EXIT_IF(object.block.vaddr_num != 1);
+		const uint64_t begin = std::max(vaddr, object.block.vaddr[0]);
+		const uint64_t end   = std::min(vaddr + size, object.block.vaddr[0] + object.block.size[0]);
+		RecordUse(&object.info, reader);
+		sources->push_back({static_cast<const VulkanBuffer*>(object.info.object.obj), begin - object.block.vaddr[0], begin, end - begin});
+	}
 }
 
 bool GpuMemory::PendingStorageHasAliases()
@@ -558,9 +705,37 @@ bool GpuMemory::PendingStorageHasAliases()
 		{
 			continue;
 		}
-		if (!m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()))
+		const bool refreshes_alias = std::any_of(object.others.begin(), object.others.end(),
+		                                         [&](const auto& other)
+		                                         {
+			                                         const auto& parent = m_heaps[heap_id].objects[other.object_id].info;
+			                                         return GpuMemoryWriteBackRefreshReadsGuestBytes(parent.object.type, parent.params);
+		                                         });
+		if (refreshes_alias && !m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()))
 		{
 			return true;
+		}
+	}
+	return false;
+}
+
+bool GpuMemory::PendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges)
+{
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	for (const auto& key: m_pending_write_back)
+	{
+		if (m_writable_storage.count(key) != 0u)
+		{
+			continue;
+		}
+		const auto& block = m_heaps[key.first].objects[key.second].block;
+		for (int vi = 0; vi < block.vaddr_num; vi++)
+		{
+			if (block.size[vi] != 0 && ranges(block.vaddr[vi], block.size[vi]))
+			{
+				return true;
+			}
 		}
 	}
 	return false;
@@ -571,10 +746,31 @@ void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQ
 	EXIT_IF(ctx == nullptr);
 	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard    lock(m_mutex);
+	auto&          memo        = StorageScanMemoFor(consumer);
+	const uint64_t generation  = g_storage_scan_generation.load(std::memory_order_acquire);
+	const uint64_t completions = m_deferred_deletions.CompletionCount();
+	if (memo.write_back_generation == generation && memo.write_back_completions == completions)
+	{
+		return;
+	}
 	Vector<Destructor> destructors;
+	bool               nothing_written = true;
 	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges, consumer))
 	{
+		// Consumers do not wait for an in-place object; its completion writes it back.
+		const auto& info = m_heaps[heap_id].objects[object_id].info;
+		if (static_cast<const VulkanBuffer*>(info.object.obj)->guest_in_place &&
+		    !m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()))
+		{
+			continue;
+		}
+		nothing_written = false;
 		WriteBackObjectLocked(ctx, heap_id, object_id, &destructors);
+	}
+	if (nothing_written)
+	{
+		memo.write_back_generation  = generation;
+		memo.write_back_completions = completions;
 	}
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
 }
@@ -603,6 +799,56 @@ bool GpuMemory::FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemor
 	return false;
 }
 
+bool GpuMemory::FindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size)
+{
+	EXIT_IF(object_vaddr == nullptr || object_size == nullptr);
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	const int       heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
+	{
+		return false;
+	}
+	int found = -1;
+	for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1))
+	{
+		const auto& object = m_heaps[heap_id].objects[block.object_id];
+		if (object.free || object.info.object.type != GpuMemoryObjectType::StorageBuffer || !object.info.in_use ||
+		    object.info.object.obj == nullptr)
+		{
+			continue;
+		}
+		if (found >= 0 && found != block.object_id)
+		{
+			return false;
+		}
+		found = block.object_id;
+	}
+	if (found < 0)
+	{
+		return false;
+	}
+	const auto& block = m_heaps[heap_id].objects[found].block;
+	if (block.vaddr_num != 1 || vaddr < block.vaddr[0] || vaddr + size > block.vaddr[0] + block.size[0])
+	{
+		return false;
+	}
+	*object_vaddr = block.vaddr[0];
+	*object_size  = block.size[0];
+	return true;
+}
+
+void GpuMemory::MarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId consumer)
+{
+	Core::LockGuard lock(m_mutex);
+	auto&           object = m_heaps[identity.heap_id].objects[identity.object_id];
+	if (!object.free && object.info.logical_generation == identity.logical_generation && object.info.object.obj == identity.buffer)
+	{
+		object.info.in_place_ordered_write_uses = identity.write_uses;
+		object.info.in_place_ordered_queue      = consumer.Value();
+	}
+}
+
 bool GpuMemory::MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
                                           const GpuWritebackPageCache::UniformWords* uniform_words)
 {
@@ -626,13 +872,19 @@ bool GpuMemory::MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& i
 	// object must be an exact color image, or a depth image whose depth or
 	// stencil plane is exactly this object, that the device wrote after this
 	// object's last write (the fill's propagated clear or later rendering).
-	// HTILE, buffer and partial aliases keep the in-order write-back.
+	// HTILE, buffer and partial aliases keep the in-order write-back; objects
+	// that write-back leaves alone (storage textures, GPU-owned render
+	// textures) do not need it.
 	const uint64_t vaddr = object.block.vaddr[0];
 	const uint64_t size  = object.block.size[0];
 	for (const auto& other: object.others)
 	{
 		const auto& alias = m_heaps[identity.heap_id].objects[other.object_id];
 		const auto  type  = alias.info.object.type;
+		if (GpuMemorySkipWriteBackParentInvalidate(type, alias.info.params))
+		{
+			continue;
+		}
 		const bool  depth_plane =
 		    type == GpuMemoryObjectType::DepthStencilBuffer && alias.info.params[DepthStencilBufferObject::PARAM_HTILE_ADDR] != vaddr &&
 		    GpuMemoryBlockSetHasRange(alias.block.vaddr, alias.block.size, alias.block.vaddr_num, vaddr, size);

@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <sstream>
 #include <string>
+#include <vector>
 
 UT_BEGIN(EmulatorShaderWaterfall);
 
@@ -156,6 +157,7 @@ static void AppendWaterfallBody(WaterfallFixture* fixture, uint32_t back_edge_ta
 	const auto branch  = BranchTo(fixture->branch_pc, back_edge_target == UINT32_MAX ? head : back_edge_target, ShaderInstructionType::SCbranchScc1);
 	code.GetInstructions().Add(branch);
 	code.GetLabels().Add(ShaderLabel(branch));
+	code.GetIndirectLabels().Add(ShaderLabel(fixture->branch_pc + 4u, fixture->branch_pc));
 
 	code.GetInstructions().Add(EndProgram(fixture->branch_pc + 4u));
 	fixture->original_instruction_count = code.GetInstructions().Size();
@@ -422,6 +424,135 @@ static void PrintWaterfallSourceFailureContext(const String8& source)
 	std::_Exit(0);
 }
 
+// V_MOVRELD stores through the lane's own index: lane index 1 with M0 0 writes VGPR 31, not VGPR 30.
+[[noreturn]] static void RunGeneratedLaneIndexStoreContract()
+{
+	InitializeWaterfallEmitterTest();
+
+	auto waterfall = ValidWaterfall();
+	auto* original = AtPc(waterfall.code, waterfall.move_pc);
+	original->type = ShaderInstructionType::VMovreldB32;
+	ShaderLowerWaterfallMoves(&waterfall.code);
+	const auto* lowered_move = AtPc(waterfall.code, waterfall.move_pc);
+	if (lowered_move == nullptr || lowered_move->src_num != 2 || lowered_move->format != ShaderInstructionFormat::SVdstSVsrc0SVsrc1)
+	{
+		std::_Exit(2);
+	}
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderInstruction candidate {};
+	candidate.pc        = 4u;
+	candidate.type      = ShaderInstructionType::VMovB32;
+	candidate.format    = ShaderInstructionFormat::SVdstSVsrc0;
+	candidate.dst       = Vgpr(5u);
+	candidate.src[0]    = Vgpr(31u);
+	candidate.src_num   = 1;
+	auto move  = *lowered_move;
+	move.pc    = 0u;
+	code.GetInstructions().Add(move);
+	code.GetInstructions().Add(candidate);
+	code.GetInstructions().Add(M0Write(8u));
+	code.GetInstructions().Add(EndProgram(12u));
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 32u;
+	input.threads_num[1] = input.threads_num[2] = 1u;
+	input.float_mode = 0xc0u;
+	input.fp_mode_known = true;
+	input.wave_layout = {ShaderComputeWaveStrategy::Native, {32, 1, 1}, {32, 1, 1}, 32, 32, 1, 1, 0};
+	const auto       source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	Vector<uint32_t> binary;
+	String8          error;
+	if (source.IsEmpty() || !ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+	{
+		std::fprintf(stderr, "waterfall lane-index store fixture: generation failed: %s\n", error.c_str());
+		PrintWaterfallSourceFailureContext(source);
+		std::fflush(stderr);
+		std::_Exit(3);
+	}
+
+	const ShaderArithmeticTest::Program program(source.c_str());
+	const auto result = program.Run({{"%v5", 0u},
+	                                 {"%v7", 1u},
+	                                 {"%v30", 0xdeadbeefu}, // stale M0=0 would store here
+	                                 {"%v31", 0xdeadbeefu},
+	                                 {"%v40", 0x3f800000u},
+	                                 {"%m0", 0u},
+	                                 {"%exec_lo", UINT32_MAX},
+	                                 {"%exec_hi", 0u},
+	                                 {"%exec_lane_lo", 1u},
+	                                 {"%exec_lane_hi", 0u},
+	                                 {"%scc", 0u}},
+	                                "%v31");
+	if (result != 0x3f800000u)
+	{
+		std::fprintf(stderr, "waterfall lane-index store fixture: VGPR 31 holds 0x%08x; expected 0x3f800000\n", result);
+		std::fflush(stderr);
+		std::_Exit(4);
+	}
+	std::_Exit(0);
+}
+
+// Adds a second relative move after the first one, shifting the mask updates, back edge and end by one dword.
+static void AppendSecondMove(WaterfallFixture* fixture, ShaderInstructionType type)
+{
+	std::vector<ShaderInstruction> instructions;
+	for (const auto& inst: fixture->code.GetInstructions()) { instructions.push_back(inst); }
+	auto second = *AtPc(fixture->code, fixture->move_pc);
+	second.type = type;
+	second.pc   = fixture->move_pc + 4u;
+	second.dst  = Vgpr(50u);
+	for (auto& inst: instructions)
+	{
+		if (inst.pc <= fixture->move_pc) { continue; }
+		inst.pc += 4u;
+		if (inst.type == ShaderInstructionType::SCbranchScc1) { inst.src[0].constant.i -= 4; }
+	}
+	fixture->andn2_pc += 4u;
+	fixture->exec_pc += 4u;
+	fixture->branch_pc += 4u;
+	fixture->code.GetInstructions().Clear();
+	fixture->code.GetLabels().Clear();
+	fixture->code.GetIndirectLabels().Clear();
+	for (const auto& inst: instructions)
+	{
+		fixture->code.GetInstructions().Add(inst);
+		if (inst.pc == fixture->move_pc) { fixture->code.GetInstructions().Add(second); }
+		if (inst.type == ShaderInstructionType::SCbranchScc1)
+		{
+			fixture->code.GetLabels().Add(ShaderLabel(inst));
+			fixture->code.GetIndirectLabels().Add(ShaderLabel(inst.pc + 4u, inst.pc));
+		}
+	}
+}
+
+// An outer loop around the waterfall: `first` runs before REST is set, and a back edge after the waterfall returns to it.
+static WaterfallFixture WaterfallInsideOuterLoop(const ShaderOperand& first_source)
+{
+	WaterfallFixture  fixture {};
+	ShaderInstruction first {};
+	first.pc      = 0u;
+	first.type    = ShaderInstructionType::VMovB32;
+	first.format  = ShaderInstructionFormat::SVdstSVsrc0;
+	first.dst     = Vgpr(5u);
+	first.src[0]  = first_source;
+	first.src_num = 1;
+	fixture.code.GetInstructions().Add(first);
+	fixture.code.GetInstructions().Add(RestFromExec(4u, fixture.rest_register));
+	fixture.head_pc = 8u;
+	AppendWaterfallBody(&fixture);
+	auto& instructions = fixture.code.GetInstructions();
+	instructions.RemoveAt(instructions.Size() - 1u);
+	const auto outer = BranchTo(fixture.branch_pc + 4u, 0u, ShaderInstructionType::SCbranchScc0);
+	instructions.Add(outer);
+	fixture.code.GetLabels().Add(ShaderLabel(outer));
+	fixture.code.GetIndirectLabels().Add(ShaderLabel(outer.pc + 4u, outer.pc));
+	instructions.Add(EndProgram(outer.pc + 4u));
+	fixture.original_instruction_count = instructions.Size();
+	return fixture;
+}
+
 } // namespace
 
 TEST(EmulatorShaderWaterfall, RewritesLaneIndicesAndKeepsMaskUpdates)
@@ -458,6 +589,7 @@ TEST(EmulatorShaderWaterfall, RewritesLaneIndicesAndKeepsMaskUpdates)
 	EXPECT_FALSE(HasType(fixture.code, ShaderInstructionType::VCmpxEqU32));
 	EXPECT_FALSE(HasType(fixture.code, ShaderInstructionType::SCbranchScc1));
 	EXPECT_TRUE(fixture.code.GetLabels().At(0).IsDisabled());
+	EXPECT_TRUE(fixture.code.GetIndirectLabels().At(0).IsDisabled());
 }
 
 TEST(EmulatorShaderWaterfall, RefusesLiveScalarAndImplicitM0AlongForwardBranchPaths)
@@ -513,17 +645,6 @@ TEST(EmulatorShaderWaterfall, LowersLoopsEnteredThroughWaitsAndCopiedExecPairsBe
 	auto overwritten = WaterfallEnteredThroughCopiedExec(true);
 	ShaderLowerWaterfallMoves(&overwritten.code);
 	EXPECT_TRUE(HasType(overwritten.code, ShaderInstructionType::VReadfirstlaneB32)) << "REST no longer equals EXEC";
-
-	// A back edge to before the loop carries the scalar to code the pass never saw it reach.
-	auto enclosed = ValidWaterfall();
-	enclosed.code.GetInstructions().RemoveAt(enclosed.code.GetInstructions().Size() - 1u);
-	const auto outer = BranchTo(enclosed.branch_pc + 4u, 0u, ShaderInstructionType::SCbranchScc0);
-	enclosed.code.GetInstructions().Add(outer);
-	enclosed.code.GetLabels().Add(ShaderLabel(outer));
-	enclosed.code.GetInstructions().Add(EndProgram(enclosed.branch_pc + 8u));
-	enclosed.original_instruction_count = enclosed.code.GetInstructions().Size();
-	ShaderLowerWaterfallMoves(&enclosed.code);
-	ExpectWaterfallRetained(enclosed);
 }
 
 TEST(EmulatorShaderWaterfall, RefusesAnExternalEntryIntoTheLoopBody)
@@ -648,6 +769,63 @@ TEST(EmulatorShaderWaterfall, RefusesRelativeMoveOperandModifiers)
 	ShaderLowerWaterfallMoves(&destination_modifier.code);
 	ExpectWaterfallRetained(destination_modifier);
 	EXPECT_TRUE(AtPc(destination_modifier.code, destination_modifier.move_pc)->dst.clamp);
+}
+
+TEST(EmulatorShaderWaterfall, LowersDestinationRelativeMovesAtEachLaneIndex)
+{
+	auto fixture = ValidWaterfall();
+	AtPc(fixture.code, fixture.move_pc)->type = ShaderInstructionType::VMovreldB32;
+	ShaderLowerWaterfallMoves(&fixture.code);
+	const auto* move = AtPc(fixture.code, fixture.move_pc);
+	ASSERT_NE(move, nullptr);
+	EXPECT_EQ(move->type, ShaderInstructionType::VMovreldB32);
+	EXPECT_EQ(move->src_num, 2);
+	EXPECT_EQ(move->src[1].register_id, static_cast<int>(fixture.index_register));
+	EXPECT_FALSE(HasType(fixture.code, ShaderInstructionType::VReadfirstlaneB32));
+
+	// The last move may overwrite the index: every lane already read it.
+	auto reaching = ValidWaterfall();
+	auto* last    = AtPc(reaching.code, reaching.move_pc);
+	last->type    = ShaderInstructionType::VMovreldB32;
+	last->dst     = Vgpr(reaching.index_register - 1u);
+	ShaderLowerWaterfallMoves(&reaching.code);
+	EXPECT_FALSE(HasType(reaching.code, ShaderInstructionType::VReadfirstlaneB32));
+}
+
+TEST(EmulatorShaderWaterfall, RefusesMovesAfterOneThatCanWriteTheIndex)
+{
+	auto unreachable = ValidWaterfall();
+	AtPc(unreachable.code, unreachable.move_pc)->type = ShaderInstructionType::VMovreldB32;
+	AppendSecondMove(&unreachable, ShaderInstructionType::VMovrelsB32);
+	ShaderLowerWaterfallMoves(&unreachable.code);
+	EXPECT_FALSE(HasType(unreachable.code, ShaderInstructionType::VReadfirstlaneB32));
+
+	auto reaching = ValidWaterfall();
+	auto* first   = AtPc(reaching.code, reaching.move_pc);
+	first->type   = ShaderInstructionType::VMovreldB32;
+	first->dst    = Vgpr(reaching.index_register - 1u);
+	AppendSecondMove(&reaching, ShaderInstructionType::VMovrelsB32);
+	const auto count = reaching.code.GetInstructions().Size();
+	ShaderLowerWaterfallMoves(&reaching.code);
+	EXPECT_EQ(reaching.code.GetInstructions().Size(), count);
+	EXPECT_TRUE(HasType(reaching.code, ShaderInstructionType::VReadfirstlaneB32));
+}
+
+TEST(EmulatorShaderWaterfall, GeneratedStoreUsesLaneIndexInsteadOfStaleM0)
+{
+	ASSERT_EXIT(RunGeneratedLaneIndexStoreContract(), ::testing::ExitedWithCode(0), "");
+}
+
+// A back edge to before the loop carries S and M0 there: the loop is lowered only when that path writes them first.
+TEST(EmulatorShaderWaterfall, FollowsOuterBackEdgesBeforeTheLoop)
+{
+	auto unread = WaterfallInsideOuterLoop(Vgpr(6u));
+	ShaderLowerWaterfallMoves(&unread.code);
+	EXPECT_FALSE(HasType(unread.code, ShaderInstructionType::VReadfirstlaneB32));
+
+	auto read = WaterfallInsideOuterLoop(Sgpr(kScalarRegister));
+	ShaderLowerWaterfallMoves(&read.code);
+	ExpectWaterfallRetained(read);
 }
 
 UT_END();

@@ -120,6 +120,15 @@ private:
 [[nodiscard]] String PreferHostOdCompanionAsset(const String& guest_path, const String& requested_host_path,
                                                 const String& last_od_host_path = {});
 
+// One entry of a guest struct iovec: a buffer pointer followed by its length.
+// Pointer and length sizes match the x86-64 guest layout, 16 bytes per entry.
+struct KernelIovec
+{
+	const void* base;
+	uint64_t    size;
+};
+static_assert(sizeof(KernelIovec) == 16);
+
 int KYTY_SYSV_ABI     KernelOpen(const char* path, int flags, uint16_t mode);
 int KYTY_SYSV_ABI     KernelClose(int d);
 [[nodiscard]] bool   KernelIsStandardDescriptorOpen(int d);
@@ -127,11 +136,17 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes);
 int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offset);
 int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes);
 int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset);
+// sceKernelWritev: iov points to count guest KernelIovec entries, validated before any byte is written.
+int64_t KYTY_SYSV_ABI KernelWritev(int d, const KernelIovec* iov, int count);
 int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence);
 int KYTY_SYSV_ABI     KernelStat(const char* path, FileStat* sb);
 int KYTY_SYSV_ABI     KernelFstat(int d, FileStat* sb);
 int KYTY_SYSV_ABI     KernelFcntl(int d, int command, int64_t argument);
 int KYTY_SYSV_ABI     KernelFtruncate(int d, int64_t length);
+// sceKernelFsync / POSIX fsync: flushes attached stdio streams, then syncs the host file or directory.
+int KYTY_SYSV_ABI     KernelFsync(int d);
+// sceKernelTruncate: path-based truncate. Like POSIX truncate, open stdio streams are not flushed first.
+int KYTY_SYSV_ABI     KernelTruncate(const char* path, int64_t length);
 int KYTY_SYSV_ABI     KernelRename(const char* from, const char* to);
 int KYTY_SYSV_ABI     KernelUnlink(const char* path);
 int KYTY_SYSV_ABI     KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep);
@@ -145,15 +160,17 @@ int KYTY_SYSV_ABI     KernelGetReadAvailability(int fd, uint64_t* available);
 int KYTY_SYSV_ABI     KernelGetWriteAvailability(int fd, bool* available);
 // sceKernelAprResolveFilepathsToIdsAndFileSizes: paths[count] → ids[count] (u32, optional)
 // and sizes[count] (u64, optional). File ids are stable host-side hashes of the guest path.
+// On failure error_index (optional) receives the index of the path that failed.
 int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* paths, uint64_t count, uint32_t* ids,
-                                                             uint64_t* sizes);
+                                                             uint64_t* sizes, uint32_t* error_index);
 // sceKernelAprResolveFilepathsToIds — same as above without sizes (NID WT-5NKy42fw).
-int KYTY_SYSV_ABI KernelAprResolveFilepathsToIds(const char* const* paths, uint64_t count, uint32_t* ids);
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIds(const char* const* paths, uint64_t count, uint32_t* ids, uint32_t* error_index);
 // Prefix + path resolve (Gen5). empty/null prefix is plain resolve.
 int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIds(const char* prefix, const char* const* paths, uint64_t count,
-                                                           uint32_t* ids);
+                                                           uint32_t* ids, uint32_t* error_index);
 int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(const char* prefix, const char* const* paths,
-                                                                       uint64_t count, uint32_t* ids, uint64_t* sizes);
+                                                                       uint64_t count, uint32_t* ids, uint64_t* sizes,
+                                                                       uint32_t* error_index);
 // ForEach variants: fill optional per-path results[]; return OK or first error when results is null.
 // When results is non-null, return success count (non-negative).
 int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsForEach(const char* const* paths, uint64_t count, uint32_t* ids,
@@ -179,12 +196,14 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetId(void* cmd, uint64_t arg1,
 int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetResult(void* cmd, uint64_t arg1, void* result, uint32_t* out_submission_id);
 int KYTY_SYSV_ABI KernelAprWaitCommandBuffer(uint32_t submission_id);
 
-int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* paths, uint64_t count, uint32_t* ids, uint64_t* sizes);
-int KYTY_SYSV_ABI KernelAprResolveFilepathsToIds(const char* const* paths, uint64_t count, uint32_t* ids);
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* paths, uint64_t count, uint32_t* ids, uint64_t* sizes,
+                                                             uint32_t* error_index);
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIds(const char* const* paths, uint64_t count, uint32_t* ids, uint32_t* error_index);
 int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIds(const char* prefix, const char* const* paths, uint64_t count,
-                                                           uint32_t* ids);
+                                                           uint32_t* ids, uint32_t* error_index);
 int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(const char* prefix, const char* const* paths,
-                                                                       uint64_t count, uint32_t* ids, uint64_t* sizes);
+                                                                       uint64_t count, uint32_t* ids, uint64_t* sizes,
+                                                                       uint32_t* error_index);
 int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsForEach(const char* const* paths, uint64_t count, uint32_t* ids,
                                                         int32_t* results);
 int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizesForEach(const char* const* paths, uint64_t count, uint32_t* ids,

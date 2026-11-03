@@ -12,6 +12,25 @@ static int MimgDmaskComponents(uint32_t dmask)
 	return count;
 }
 
+// RDNA2 MIMG atomic opcodes with a direct SPIR-V integer atomic.
+static ShaderInstructionType MimgImageAtomicType(uint32_t opcode)
+{
+	switch (opcode)
+	{
+		case 0x0f: return ShaderInstructionType::ImageAtomicSwap;
+		case 0x11: return ShaderInstructionType::ImageAtomicAdd;
+		case 0x12: return ShaderInstructionType::ImageAtomicSub;
+		case 0x14: return ShaderInstructionType::ImageAtomicSMin;
+		case 0x15: return ShaderInstructionType::ImageAtomicUMin;
+		case 0x16: return ShaderInstructionType::ImageAtomicSMax;
+		case 0x17: return ShaderInstructionType::ImageAtomicUMax;
+		case 0x18: return ShaderInstructionType::ImageAtomicAnd;
+		case 0x19: return ShaderInstructionType::ImageAtomicOr;
+		case 0x1A: return ShaderInstructionType::ImageAtomicXor;
+		default: return ShaderInstructionType::Unknown;
+	}
+}
+
 KYTY_SHADER_PARSER(shader_parse_mimg)
 {
 	EXIT_IF(dst == nullptr);
@@ -37,6 +56,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	uint32_t srsrc = (buffer[1] >> 16u) & 0x1fu; // T#
 	uint32_t vdata = (buffer[1] >> 8u) & 0xffu;
 	uint32_t vaddr = (buffer[1] >> 0u) & 0xffu;
+	uint32_t d16   = next_gen ? (buffer[1] >> 31u) & 0x1u : 0u;
 
 	// BVH has a separate address tuple and a 128-bit resource, not a texture.
 	if (next_gen && opcode == 0xe6u) { return shader_parse_bvh(pc, src, buffer, dst, next_gen); }
@@ -46,18 +66,26 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	EXIT_NOT_IMPLEMENTED(r128 == 1);
 	EXIT_NOT_IMPLEMENTED(tff == 1);
 	EXIT_NOT_IMPLEMENTED(lwe == 1);
+	const auto image_atomic = MimgImageAtomicType(opcode);
 	// GLC on an atomic selects the pre-op return (RDNA2 8.1.10); load and store cache policy is not admitted.
-	EXIT_NOT_IMPLEMENTED(glc == 1 && !(next_gen && (opcode == 0x0fu || opcode == 0x11u)));
+	EXIT_NOT_IMPLEMENTED(glc == 1 && !(next_gen && image_atomic != ShaderInstructionType::Unknown));
 	EXIT_NOT_IMPLEMENTED(slc == 1);
 	EXIT_NOT_IMPLEMENTED(unrm == 1);
 	// EXIT_NOT_IMPLEMENTED(dmask != 0xf && dmask != 0x7);
+	// Stores, loads and the plain samples have a packed layout; another D16 operation must not silently take the dword one.
+	const bool d16_admitted = opcode == 0x00u || opcode == 0x01u || opcode == 0x08u || opcode == 0x20u || opcode == 0x24u ||
+	                          opcode == 0x25u || opcode == 0x27u;
+	if (d16 == 1 && !d16_admitted)
+	{
+		EXIT("unsupported D16 MIMG: opcode=0x%02" PRIx32 " pc=0x%08" PRIx32 "\n", opcode, pc);
+	}
 
 	// RDNA2 8.2.3/Table 42 and 12.16: these admitted image operations have
 	// no sampler. The manual does not establish that nonzero SSAMP is ignored
 	// for them (its explicit SSAMP=0 restriction is for BVH). Admit the zero
 	// encoding only, without inventing a sampler read or erasing unknown bits.
 	const bool samplerless = opcode == 0x00u || opcode == 0x01u || opcode == 0x08u || opcode == 0x09u || opcode == 0x0eu ||
-	                         opcode == 0x0fu || opcode == 0x11u;
+	                         image_atomic != ShaderInstructionType::Unknown;
 	if (samplerless && ssamp != 0u)
 	{
 		EXIT("unsupported samplerless MIMG SSAMP: opcode=0x%02" PRIx32 " ssamp=0x%02" PRIx32 " pc=0x%08" PRIx32
@@ -127,10 +155,15 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			inst.src_num     = 2;
 			inst.format      = ShaderInstructionFormat::VdataVaddr3StDmask;
 			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
+			inst.mimg_d16    = d16 != 0u;
 			inst.dst.size    = 0;
 			for (uint32_t component = 0; component < 4; component++)
 			{
 				inst.dst.size += static_cast<int>((dmask >> component) & 1u);
+			}
+			if (inst.mimg_d16)
+			{
+				inst.dst.size = (inst.dst.size + 1) / 2;
 			}
 			break;
 		case 0x09:
@@ -164,28 +197,29 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		}
 		case 0x0f:
 		case 0x11:
-			EXIT_NOT_IMPLEMENTED(!next_gen || dim != 1u || dmask != 1u || nsa != 0u || (buffer[1] & 0x80000000u) != 0);
-			inst.type                  = opcode == 0x0fu ? ShaderInstructionType::ImageAtomicSwap : ShaderInstructionType::ImageAtomicAdd;
+		case 0x12:
+		case 0x14:
+		case 0x15:
+		case 0x16:
+		case 0x17:
+		case 0x18:
+		case 0x19:
+		case 0x1A:
+			EXIT_NOT_IMPLEMENTED(!next_gen || dim != 1u || dmask != 1u || nsa > 1u || (buffer[1] & 0x80000000u) != 0);
+			inst.type                  = image_atomic;
 			inst.format                = ShaderInstructionFormat::Vdata1Vaddr2StVsrc2Dmask1;
 			inst.dst.size              = 1;
-			inst.src[0].size           = 2;
+			inst.src[0].size           = nsa != 0u ? 1 : 2;
 			inst.src[1].size           = 8;
 			inst.src[2]                = inst.dst;
 			inst.src_num               = 3;
 			inst.mimg_dmask            = 1;
+			if (nsa != 0u) { inst.mimg_address_num = 2; }
 			inst.mimg_return_old_value = glc != 0;
 			EXIT_NOT_IMPLEMENTED(!ShaderImageAtomicSupported(inst));
 			break;
 		case 0x10: KYTY_NI("image_atomic_cmpswap"); break;
-		case 0x12: KYTY_NI("image_atomic_sub"); break;
 		case 0x13: KYTY_NI("image_atomic_rsub"); break;
-		case 0x14: KYTY_NI("image_atomic_smin"); break;
-		case 0x15: KYTY_NI("image_atomic_umin"); break;
-		case 0x16: KYTY_NI("image_atomic_smax"); break;
-		case 0x17: KYTY_NI("image_atomic_umax"); break;
-		case 0x18: KYTY_NI("image_atomic_and"); break;
-		case 0x19: KYTY_NI("image_atomic_or"); break;
-		case 0x1A: KYTY_NI("image_atomic_xor"); break;
 		case 0x1B: KYTY_NI("image_atomic_inc"); break;
 		case 0x1C: KYTY_NI("image_atomic_dec"); break;
 		case 0x1D: KYTY_NI("image_atomic_fcmpswap"); break;
@@ -522,7 +556,21 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x4C: KYTY_NI("image_gather4_c_l"); break;
 		case 0x4D: KYTY_NI("image_gather4_c_b"); break;
 		case 0x4E: KYTY_NI("image_gather4_c_b_cl"); break;
-		case 0x4F: KYTY_NI("image_gather4_c_lz"); break;
+		case 0x4F:
+		case 0x5F:
+			// image_gather4_c_lz and image_gather4_c_lz_o: the depth reference follows the offset.
+			EXIT_NOT_IMPLEMENTED(dmask == 0);
+			inst.type        = ShaderInstructionType::ImageGather4C;
+			inst.mimg_offset = opcode == 0x5Fu;
+			inst.src[0].size = nsa != 0u ? 1 : (inst.mimg_offset ? 6 : 4);
+			inst.src[1].size = 8;
+			inst.src[2].size = 4;
+			inst.src_num     = 3;
+			inst.dst.size    = 4;
+			inst.format      = nsa != 0u || inst.mimg_offset ? ShaderInstructionFormat::VdataVaddr6StSsMimgDmask
+			                                                 : ShaderInstructionFormat::VdataVaddr4StSsMimgDmask;
+			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
+			break;
 		case 0x50: KYTY_NI("image_gather4_o"); break;
 		case 0x51: KYTY_NI("image_gather4_cl_o"); break;
 		case 0x54: KYTY_NI("image_gather4_l_o"); break;
@@ -533,7 +581,6 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x5C: KYTY_NI("image_gather4_c_l_o"); break;
 		case 0x5D: KYTY_NI("image_gather4_c_b_o"); break;
 		case 0x5E: KYTY_NI("image_gather4_c_b_cl_o"); break;
-		case 0x5F: KYTY_NI("image_gather4_c_lz_o"); break;
 		case 0x60: KYTY_NI("image_get_lod"); break;
 		case 0x22:
 		case 0x68:
@@ -602,6 +649,13 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		     pc, dmask, dim);
 	}
 
+	inst.mimg_d16 = d16 != 0u;
+	if (inst.mimg_d16 && opcode != 0x08u)
+	{
+		// The written registers: analyses must see the ones above them keep their values.
+		inst.mimg_dmask = static_cast<uint8_t>(dmask);
+		inst.dst.size   = (MimgDmaskComponents(dmask) + 1) / 2;
+	}
 	dst->GetInstructions().Add(inst);
 
 	return size;

@@ -215,7 +215,8 @@ bool UsesNativeLaneExchange(const ShaderCode& code)
 		switch (inst.type)
 		{
 			case ShaderInstructionType::VPermlane16B32:
-			case ShaderInstructionType::VPermlanex16B32: return true;
+			case ShaderInstructionType::VPermlanex16B32:
+			case ShaderInstructionType::DsSwizzleB32: return true;
 			case ShaderInstructionType::VReadfirstlaneB32:
 				if (!ShaderReadfirstlaneCanUseUniformCopy(code, index))
 				{

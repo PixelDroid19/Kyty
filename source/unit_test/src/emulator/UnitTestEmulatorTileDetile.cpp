@@ -161,6 +161,7 @@ public:
 				(void)TileGpuDetileReleaseContext(&context);
 			}
 			(void)vkDeviceWaitIdle(context.device);
+			vkDestroySemaphore(context.device, context.queues[GraphicContext::QUEUE_UTIL].timeline, nullptr);
 			VulkanMemoryPoolRelease(&context);
 			vkDestroyDevice(context.device, nullptr);
 		}
@@ -270,8 +271,12 @@ public:
 				queue_info.queueFamilyIndex = family;
 				queue_info.queueCount       = 1;
 				queue_info.pQueuePriorities = &priority;
+				VkPhysicalDeviceTimelineSemaphoreFeatures timeline_enabled {};
+				timeline_enabled.sType             = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+				timeline_enabled.timelineSemaphore = VK_TRUE;
 				VkDeviceCreateInfo device_info {};
 				device_info.sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+				device_info.pNext                = &timeline_enabled;
 				device_info.queueCreateInfoCount = 1;
 				device_info.pQueueCreateInfos    = &queue_info;
 				VkDevice device                  = VK_NULL_HANDLE;
@@ -300,7 +305,13 @@ public:
 					context.queues[GraphicContext::QUEUE_UTIL].index    = 0;
 					context.queues[GraphicContext::QUEUE_UTIL].mutex    = &context.queue_mutexes[0];
 					context.queue_mutex_count                           = 1;
-					return true;
+					VkSemaphoreTypeCreateInfo timeline_type {};
+					timeline_type.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+					timeline_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+					VkSemaphoreCreateInfo timeline_info {};
+					timeline_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+					timeline_info.pNext = &timeline_type;
+					return vkCreateSemaphore(device, &timeline_info, nullptr, &context.queues[GraphicContext::QUEUE_UTIL].timeline) == VK_SUCCESS;
 				}
 		}
 		return false;
@@ -603,6 +614,36 @@ TEST(EmulatorTileDetile, Sw64kRx8bppProductionMatchesReference)
 
 // One-byte SW_64K_R_X, 16 pipes: x0 x1 x2 y1 y0 y2 x3 y4 | x3^y3 x4^y4 x6^y5 x5^y6 | y6 x6 y7 x7 in a
 // 256x256 block, with slice bits Z0..Z3 XORed into offset bits 11..8.
+// A clipped surface with an all-zero block, at every element size and on a later slice.
+TEST(EmulatorTileDetile, Sw64kRxBlocksMatchReferenceAcrossClippingZeroBlocksAndSlices)
+{
+	for (const uint32_t bpp: {1u, 2u, 4u, 8u, 16u})
+	{
+		const uint32_t       block_w = TileGet64KBBlockWidth(bpp);
+		const uint32_t       block_h = 65536u / (block_w * bpp);
+		const uint32_t       width   = block_w * 2u + 3u;
+		const uint32_t       height  = block_h + 5u;
+		const uint64_t       bytes   = 3u * 2u * 65536u;
+		std::vector<uint8_t> tiled(bytes);
+		for (size_t i = 65536u; i < tiled.size(); ++i)
+		{
+			tiled[i] = static_cast<uint8_t>((i * 17u + 31u) | 1u);
+		}
+		const uint64_t       linear_bytes = static_cast<uint64_t>(width) * height * bpp;
+		std::vector<uint8_t> ref(linear_bytes, 0xAAu);
+		std::vector<uint8_t> prod(linear_bytes, 0xBBu);
+		for (const uint32_t slice: {0u, 5u})
+		{
+			auto ref_req  = MakeRequest(ref.data(), tiled.data(), width, height, width, width, bpp, TileDetileLayout::Sw64kRx, bytes);
+			auto prod_req = MakeRequest(prod.data(), tiled.data(), width, height, width, width, bpp, TileDetileLayout::Sw64kRx, bytes);
+			ref_req.slice = prod_req.slice = slice;
+			ASSERT_TRUE(TileDetileReference(ref_req));
+			ASSERT_TRUE(TileDetile(prod_req));
+			EXPECT_EQ(prod, ref) << "bpp=" << bpp << " slice=" << slice;
+		}
+	}
+}
+
 TEST(EmulatorTileDetile, Sw64kRx1bppFollowsPublishedPatternAndSlice)
 {
 	EXPECT_EQ(TileGetSw64kRxOffset(5u, 0u, 256u, 1u), 0x005u);
@@ -907,6 +948,34 @@ TEST(EmulatorTileDetile, Depth64KBArraySlicesApplyTheMatchedGfx10ZEquation)
 	EXPECT_FALSE(TileDetileIsSupported(invalid));
 }
 
+// A depth block written as one slice and read as another holds the written samples at XOR-translated positions.
+TEST(EmulatorTileDetile, Depth64KBSliceShiftTranslatesWrittenSamples)
+{
+	for (const uint32_t bpe: {2u, 4u})
+	{
+		const uint32_t block_width = bpe == 2u ? 256u : 128u;
+		for (uint32_t from = 0u; from < 16u; from++)
+		{
+			for (uint32_t to = 0u; to < 16u; to++)
+			{
+				uint32_t dx = 0u;
+				uint32_t dy = 0u;
+				TileGetDepth64KBSliceShift(bpe, from, to, &dx, &dy);
+				ASSERT_LT(dx, block_width);
+				ASSERT_LT(dy, 128u);
+				for (uint32_t y = 0u; y < 128u; y += 3u)
+				{
+					for (uint32_t x = 0u; x < block_width; x += 5u)
+					{
+						ASSERT_EQ(TileGetDepth64KBOffset(x, y, block_width, bpe, to), TileGetDepth64KBOffset(x ^ dx, y ^ dy, block_width, bpe, from))
+						    << "bpe=" << bpe << " from=" << from << " to=" << to << " x=" << x << " y=" << y;
+					}
+				}
+			}
+		}
+	}
+}
+
 TEST(EmulatorTileDetile, RejectsUnsupportedRequests)
 {
 	uint8_t dst[16] {};
@@ -1155,7 +1224,7 @@ TEST(EmulatorTileDetile, GpuRawRenderAliasCompositionPreservesMixedFormatBytes)
 		ASSERT_FALSE(command.IsInvalid());
 		command.Begin();
 		ASSERT_TRUE(StorageTextureCompositeRawRenderAliases(&vulkan.context, &command, sources, destination.Get(),
-		                                                  base, expected.size()));
+		                                                  nullptr, base, expected.size()));
 		command.End();
 		command.Execute();
 		command.WaitForFence();

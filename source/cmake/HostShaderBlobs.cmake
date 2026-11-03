@@ -160,6 +160,7 @@ endfunction()
 kyty_compute_words(gen5_detile kGen5DetileCompSpirv)
 kyty_compute_words(fragment_wave_scan kFragmentWaveScanSpirv)
 kyty_compute_words(fragment_wave_pack kFragmentWavePackSpirv)
+kyty_compute_words(dispatch_indirect_args kDispatchIndirectArgsSpirv)
 kyty_fragment_core(fragment_wave_capture Capture Reader read_lane_word_u1_)
 kyty_fragment_core(fragment_wave_resolve Resolve Writer write_colors_u1_ required_components)
 

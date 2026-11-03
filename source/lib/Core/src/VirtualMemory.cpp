@@ -1756,7 +1756,8 @@ bool ExceptionHandler::InstallVectored(handler_func_t func)
 
 		struct sigaction sa {};
 		sa.sa_sigaction = kyty_posix_signal_handler;
-		sa.sa_flags     = SA_SIGINFO;
+		// Faults are delivered on the thread's alternate stack (InstallThreadSignalStack).
+		sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
 		sigemptyset(&sa.sa_mask);
 
 		struct sigaction sigill = sa;
@@ -1771,7 +1772,7 @@ bool ExceptionHandler::InstallVectored(handler_func_t func)
 #if defined(__x86_64__) || defined(__i386__)
 		struct sigaction sat {};
 		sat.sa_sigaction = kyty_sigtrap_handler;
-		sat.sa_flags     = SA_SIGINFO;
+		sat.sa_flags     = SA_SIGINFO | SA_ONSTACK;
 		sigemptyset(&sat.sa_mask);
 		sigaction(SIGTRAP, &sat, nullptr);
 #endif
@@ -1794,6 +1795,59 @@ bool ExceptionHandler::InstallVectored(handler_func_t func)
 		return true;
 	}
 	return false;
+#else
+	return true;
+#endif
+}
+
+#ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
+static constexpr size_t kThreadSignalStackSize = 1024u * 1024u;
+#endif
+
+bool ExceptionHandler::InstallThreadSignalStack()
+{
+#ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
+	// Guest stacks live in guest memory that GPU write tracking can make read-only;
+	// a fault there could not push its signal frame and would kill the process.
+	struct ThreadSignalStack
+	{
+		ThreadSignalStack()
+		{
+			void* memory = mmap(nullptr, kThreadSignalStackSize, PROT_READ | PROT_WRITE,
+			                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
+			if (memory == MAP_FAILED)
+			{
+				return;
+			}
+			stack_t stack {};
+			stack.ss_sp   = memory;
+			stack.ss_size = kThreadSignalStackSize;
+			if (sigaltstack(&stack, nullptr) != 0)
+			{
+				munmap(memory, kThreadSignalStackSize);
+				return;
+			}
+			base = memory;
+		}
+		~ThreadSignalStack()
+		{
+			if (base == nullptr)
+			{
+				return;
+			}
+			stack_t disable {};
+			disable.ss_flags = SS_DISABLE;
+			if (sigaltstack(&disable, nullptr) == 0)
+			{
+				munmap(base, kThreadSignalStackSize);
+			}
+		}
+		KYTY_CLASS_NO_COPY(ThreadSignalStack);
+
+		void* base = nullptr;
+	};
+	thread_local ThreadSignalStack signal_stack;
+	return signal_stack.base != nullptr;
 #else
 	return true;
 #endif

@@ -1,6 +1,8 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Libs/LibCTime.h"
+#include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/SymbolDatabase.h"
 
 UT_BEGIN(EmulatorLibCTime);
 
@@ -39,6 +41,39 @@ TEST(EmulatorLibCTime, RejectsNullTimeInputs)
 	EXPECT_EQ(Kyty::Libs::LibC::Time::c_mktime(nullptr), -1);
 	EXPECT_EQ(Kyty::Libs::LibC::Time::c_strftime(nullptr, 0, nullptr, nullptr), 0u);
 	EXPECT_EQ(Kyty::Libs::LibC::Time::c_asctime(nullptr), nullptr);
+}
+
+TEST(EmulatorLibCTime, AsctimeSFormatsGuestTmAndValidatesArguments)
+{
+	Kyty::Libs::LibC::Time::GuestTm guest {};
+	guest.sec   = 5;
+	guest.min   = 4;
+	guest.hour  = 3;
+	guest.mday  = 2;
+	guest.mon   = 0;
+	guest.year  = 124;
+	guest.wday  = 2;
+	guest.yday  = 1;
+	guest.isdst = 0;
+
+	char buffer[32] = {};
+	EXPECT_EQ(Kyty::Libs::LibC::Time::c_asctime_s(buffer, sizeof(buffer), &guest), 0);
+	EXPECT_STREQ(buffer, "Tue Jan  2 03:04:05 2024\n");
+	EXPECT_EQ(Kyty::Libs::LibC::Time::c_asctime_s(nullptr, sizeof(buffer), &guest), 22);
+	EXPECT_EQ(Kyty::Libs::LibC::Time::c_asctime_s(buffer, 25, &guest), 22);
+	EXPECT_EQ(Kyty::Libs::LibC::Time::c_asctime_s(buffer, sizeof(buffer), nullptr), 22);
+
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+	Kyty::Loader::SymbolResolve query {};
+	query.name                 = Kyty::Loader::EncodeNameAsNid("asctime_s");
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Kyty::Loader::SymbolType::Func;
+	EXPECT_NE(symbols.Find(query), nullptr);
 }
 
 UT_END();

@@ -21,6 +21,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <array>
 #include <mutex>
 #include <vector>
 
@@ -331,6 +332,7 @@ private:
 	// Records a device window over backing [phys_addr, phys_addr + size);
 	// false when the interval is invalid or overlaps a pinned window.
 	[[nodiscard]] bool PinWindowUnlocked(uint64_t phys_addr, uint64_t size);
+	void               UnpinWindowUnlocked(uint64_t phys_addr, uint64_t size);
 	// Drops the bytes of backing [start, start + len): pinned windows are
 	// zeroed in place, the rest is punched out of the backing.
 	[[nodiscard]] bool DiscardBackingUnlocked(uint64_t start, uint64_t len);
@@ -375,7 +377,8 @@ private:
 	// Disjoint backing intervals that device imports hold pinned, by offset.
 	// A pinned page that is punched out keeps serving the device while CPU
 	// views fault in a fresh one, so discards zero these intervals in place.
-	std::map<uint64_t, uint64_t>       m_pinned_windows;
+	// Sorted by start; windows may overlap.
+	std::multimap<uint64_t, uint64_t>  m_pinned_windows;
 	uint64_t                           m_next_gen_auto_map_cursor = kNextGenAutoMapBegin;
 };
 
@@ -1902,15 +1905,6 @@ bool PhysicalMemory::PinWindowUnlocked(uint64_t phys_addr, uint64_t size)
 	{
 		return false;
 	}
-	const auto next = m_pinned_windows.lower_bound(phys_addr);
-	if (next != m_pinned_windows.end() && next->first < phys_addr + size)
-	{
-		return false;
-	}
-	if (next != m_pinned_windows.begin() && std::prev(next)->first + std::prev(next)->second > phys_addr)
-	{
-		return false;
-	}
 	m_pinned_windows.emplace(phys_addr, size);
 	return true;
 }
@@ -1931,7 +1925,7 @@ uint64_t PhysicalMemory::MapPinnedWindow(uint64_t phys_addr, uint64_t size, uint
 	const uint64_t alias = VirtualMemory::MapSharedAligned(m_backing, 0, phys_addr, size, VirtualMemory::Mode::ReadWrite, alignment);
 	if (alias == 0)
 	{
-		m_pinned_windows.erase(phys_addr);
+		UnpinWindowUnlocked(phys_addr, size);
 	}
 	return alias;
 }
@@ -1947,7 +1941,7 @@ bool PhysicalMemory::ExportPinnedWindowDmaBuf(uint64_t phys_addr, uint64_t size,
 	*dma_buf = VirtualMemory::ExportSharedBackingDmaBuf(m_backing, phys_addr, size);
 	if (*dma_buf < 0)
 	{
-		m_pinned_windows.erase(phys_addr);
+		UnpinWindowUnlocked(phys_addr, size);
 	}
 	return true;
 }
@@ -1955,10 +1949,19 @@ bool PhysicalMemory::ExportPinnedWindowDmaBuf(uint64_t phys_addr, uint64_t size,
 void PhysicalMemory::UnpinWindow(uint64_t phys_addr, uint64_t size)
 {
 	Core::LockGuard lock(m_mutex);
-	const auto      window = m_pinned_windows.find(phys_addr);
-	if (window != m_pinned_windows.end() && window->second == size)
+	UnpinWindowUnlocked(phys_addr, size);
+}
+
+void PhysicalMemory::UnpinWindowUnlocked(uint64_t phys_addr, uint64_t size)
+{
+	const auto range = m_pinned_windows.equal_range(phys_addr);
+	for (auto window = range.first; window != range.second; ++window)
 	{
-		m_pinned_windows.erase(window);
+		if (window->second == size)
+		{
+			m_pinned_windows.erase(window);
+			return;
+		}
 	}
 }
 
@@ -1966,15 +1969,14 @@ bool PhysicalMemory::DiscardBackingUnlocked(uint64_t start, uint64_t len)
 {
 	const uint64_t end    = start + len;
 	uint64_t       cursor = start;
-	auto           window = m_pinned_windows.upper_bound(start);
-	if (window != m_pinned_windows.begin() && std::prev(window)->first + std::prev(window)->second > start)
+	for (auto window = m_pinned_windows.begin(); window != m_pinned_windows.end() && window->first < end; ++window)
 	{
-		--window;
-	}
-	for (; window != m_pinned_windows.end() && window->first < end; ++window)
-	{
-		const uint64_t zero_begin = std::max(window->first, start);
+		const uint64_t zero_begin = std::max(window->first, cursor);
 		const uint64_t zero_end   = std::min(window->first + window->second, end);
+		if (zero_begin >= zero_end)
+		{
+			continue;
+		}
 		if (cursor < zero_begin && !VirtualMemory::DiscardSharedBackingRange(m_backing, cursor, zero_begin - cursor))
 		{
 			return false;
@@ -3619,6 +3621,87 @@ int KYTY_SYSV_ABI KernelAvailableFlexibleMemorySize(size_t* size)
 	KYTY_LOG_DEBUG("\t *size = 0x%016" PRIx64 "\n", *size);
 
 	return OK;
+}
+
+// PRT apertures 0..SCE_KERNEL_MAX_PRT_APERTURE_INDEX (2): GPU address ranges
+// whose unmapped pages read as partially resident texture pages.
+struct PrtAperture
+{
+	uint64_t addr = 0;
+	size_t   len  = 0;
+};
+constexpr int                                 kMaxPrtApertureIndex = 2;
+static std::array<PrtAperture, kMaxPrtApertureIndex + 1> g_prt_apertures;
+static std::mutex                             g_prt_apertures_mutex;
+
+int KYTY_SYSV_ABI KernelSetPrtAperture(int index, void* addr, size_t len)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t index = %d, addr = 0x%016" PRIx64 ", len = 0x%016" PRIx64 "\n", index, reinterpret_cast<uint64_t>(addr),
+	               static_cast<uint64_t>(len));
+
+	if (index < 0 || index > kMaxPrtApertureIndex)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	std::lock_guard lock(g_prt_apertures_mutex);
+	g_prt_apertures[index] = {reinterpret_cast<uint64_t>(addr), len};
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelGetPrtAperture(int index, void** addr, size_t* len)
+{
+	PRINT_NAME();
+
+	if (index < 0 || index > kMaxPrtApertureIndex || addr == nullptr || len == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	std::lock_guard lock(g_prt_apertures_mutex);
+	*addr = reinterpret_cast<void*>(g_prt_apertures[index].addr);
+	*len  = g_prt_apertures[index].len;
+	return OK;
+}
+
+bool KernelRangeInPrtAperture(uint64_t vaddr, uint64_t size)
+{
+	std::lock_guard lock(g_prt_apertures_mutex);
+	for (const auto& aperture: g_prt_apertures)
+	{
+		if (aperture.len != 0 && vaddr >= aperture.addr && size <= aperture.len && vaddr - aperture.addr <= aperture.len - size)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool KernelRangeResidentOrPrt(uint64_t vaddr, uint64_t size)
+{
+	if (size == 0 || vaddr > UINT64_MAX - (size - 1u))
+	{
+		return false;
+	}
+	const uint64_t end = vaddr + size;
+	for (uint64_t page = vaddr; page < end;)
+	{
+		const uint64_t page_end = std::min(end, (page & ~(kKernelPrtPageSize - 1u)) + kKernelPrtPageSize);
+		KernelMappedRange mapped {};
+		if (KernelQueryMappedRange(page, page_end - page, &mapped))
+		{
+			if (mapped.kind != KernelMappedRangeKind::Physical)
+			{
+				return false;
+			}
+		} else if (!KernelRangeInPrtAperture(page, page_end - page))
+		{
+			return false;
+		}
+		page = page_end;
+	}
+	return true;
 }
 
 int KYTY_SYSV_ABI KernelConfiguredFlexibleMemorySize(uint64_t* size)

@@ -1,29 +1,66 @@
+#include "ShaderMaskAnalysis.h"
 #include "ShaderSpirvInternal.h"
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
 
-// A split guest wave64 runs as host subgroups 2w (lanes 0-31) and 2w+1 (lanes
-// 32-63). The per-lane emitters see the guest lane in %gl_SubgroupInvocationID
-// and call the helpers below for every wave-wide value; each helper call is a
-// rendezvous of the two halves, which execute the same sequence of calls
-// because every branch they take depends only on wave-uniform state.
+// A split guest wave runs as P host subgroups of L lanes each (wave64: P = 64 / L,
+// L = 32, 16 or 8; wave32: P = 2, L = 16): subgroup P*w + p holds guest lanes
+// p*L .. p*L+L-1 of wave w.
+// The per-lane emitters see the guest lane in %gl_SubgroupInvocationID and
+// call the helpers below for every wave-wide value; each helper call is a
+// rendezvous of the parts, which execute the same sequence of calls because
+// every branch they take depends only on wave-uniform state.
 //
-// Per guest wave the exchange area holds, in kShaderSplitWaveExchangeDwords:
-// [0..1] the number of exchanges each half has published, [2..5] the words
-// they published (half * 2 + parity). Two parities suffice: a half reuses a
-// slot only after its partner reached the following exchange.
+// Per guest wave the exchange area (ShaderSplitWaveExchangeDwords) holds
+// [0..P-1] the number of exchanges each part has published, [P..3P-1] the
+// words they published (P + part * 2 + parity) and two banks of one dword per
+// guest lane for exchanges that cross parts. Two parities suffice: a part
+// reuses a slot only after every other part reached the following exchange.
 
 bool Spirv::UsesSplitComputeWave() const
 {
-	return m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->native_wave_sensitive &&
-	       m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32;
+	return (m_code.GetType() == ShaderType::Compute || UsesFragmentCompute()) && m_cs_input_info != nullptr &&
+	       m_cs_input_info->native_wave_sensitive && m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32;
+}
+
+const ShaderLaneMaskPlan* Spirv::LaneMaskPlan() const
+{
+	const bool split_compute = UsesSplitComputeWave() && m_code.GetType() == ShaderType::Compute;
+	if (!split_compute && (m_code.GetType() != ShaderType::Pixel || UsesFragmentCompute()))
+	{
+		return nullptr;
+	}
+	if (!m_lane_mask_plan_ready)
+	{
+		m_lane_mask_plan_ready = true;
+		m_lane_mask_plan       = ShaderLaneMaskPlanOf(m_code);
+	}
+	return &m_lane_mask_plan;
+}
+
+bool Spirv::IsLaneLocalMaskResult(uint32_t index) const
+{
+	const auto* plan = LaneMaskPlan();
+	return plan != nullptr && index < plan->local.size() && plan->local[index];
+}
+
+bool Spirv::IsLaneMaskGather(uint32_t index) const
+{
+	const auto* plan = LaneMaskPlan();
+	return plan != nullptr && index < plan->gather.size() && plan->gather[index];
 }
 
 String8 Spirv::HostLaneVariable() const
 {
 	return UsesSplitComputeWave() ? "split_host_lane" : "gl_SubgroupInvocationID";
+}
+
+uint32_t Spirv::SplitWavePartLanes() const
+{
+	EXIT_IF(!UsesSplitComputeWave());
+	return m_cs_input_info->wave_layout.native_subgroup_size;
 }
 
 String8 Spirv::SplitWaveTypes() const
@@ -32,14 +69,33 @@ String8 Spirv::SplitWaveTypes() const
 	{
 		return {};
 	}
-	const uint32_t dwords = m_cs_input_info->wave_layout.waves * kShaderSplitWaveExchangeDwords;
+	const uint32_t lanes  = SplitWavePartLanes();
+	const uint32_t parts  = m_cs_input_info->wave_layout.guest_wave_size / lanes;
+	const uint32_t stride = ShaderSplitWaveExchangeDwords(lanes);
 	return String8::FromPrintf(R"(
 %%split_c0 = OpConstant %%uint 0
 %%split_c1 = OpConstant %%uint 1
 %%split_c2 = OpConstant %%uint 2
+%%split_c3 = OpConstant %%uint 3
+%%split_c4 = OpConstant %%uint 4
 %%split_c5 = OpConstant %%uint 5
+%%split_c6 = OpConstant %%uint 6
+%%split_c7 = OpConstant %%uint 7
+%%split_c8 = OpConstant %%uint 8
+%%split_c10 = OpConstant %%uint 10
+%%split_c12 = OpConstant %%uint 12
+%%split_c14 = OpConstant %%uint 14
+%%split_c16 = OpConstant %%uint 16
+%%split_c24 = OpConstant %%uint 24
 %%split_c31 = OpConstant %%uint 31
+%%split_c48 = OpConstant %%uint 48
 %%split_c63 = OpConstant %%uint 63
+%%split_parts = OpConstant %%uint %u
+%%split_parts_mask = OpConstant %%uint %u
+%%split_parts_shift = OpConstant %%uint %u
+%%split_lanes_mask = OpConstant %%uint %u
+%%split_lanes_shift = OpConstant %%uint %u
+%%split_lane_area = OpConstant %%uint %u
 %%split_scope_workgroup = OpConstant %%uint 2
 %%split_scope_subgroup = OpConstant %%uint 3
 %%split_acquire = OpConstant %%uint 258
@@ -56,7 +112,9 @@ String8 Spirv::SplitWaveTypes() const
 %%function_split_b = OpTypeFunction %%bool
 %%function_split_ballot = OpTypeFunction %%v4uint %%bool
 )",
-	                           kShaderSplitWaveExchangeDwords, dwords);
+	                           parts, parts - 1u, parts == 8u ? 3u : parts == 4u ? 2u : 1u, lanes - 1u, lanes == 8u ? 3u : lanes == 16u ? 4u : 5u,
+	                           parts * 3u, stride,
+	                           m_cs_input_info->wave_layout.waves * stride);
 }
 
 String8 Spirv::SplitWaveVariables() const
@@ -73,26 +131,26 @@ String8 Spirv::SplitWaveVariables() const
 )";
 }
 
-// After the native prolog: publish the guest lane, then clear this half's
-// sequence before any half of the workgroup may wait on it.
+// After the native prolog: publish the guest lane, then clear this part's
+// sequence before any part of the workgroup may wait on it.
 String8 Spirv::SplitWaveProlog() const
 {
 	return R"(
-%split_half = OpBitwiseAnd %uint %native_wave_subgroup_id %split_c1
-%split_lane_base = OpShiftLeftLogical %uint %split_half %split_c5
+%split_part = OpBitwiseAnd %uint %native_wave_subgroup_id %split_parts_mask
+%split_lane_base = OpShiftLeftLogical %uint %split_part %split_lanes_shift
 %split_guest_lane = OpBitwiseOr %uint %split_lane_base %native_wave_lane_id
 OpStore %gl_SubgroupInvocationID %split_guest_lane
-%split_wave = OpShiftRightLogical %uint %native_wave_subgroup_id %split_c1
+%split_wave = OpShiftRightLogical %uint %native_wave_subgroup_id %split_parts_shift
 %split_wave_base = OpIMul %uint %split_wave %split_stride
-%split_own_sequence = OpIAdd %uint %split_wave_base %split_half
+%split_own_sequence = OpIAdd %uint %split_wave_base %split_part
 %split_own_sequence_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_own_sequence
 OpAtomicStore %split_own_sequence_ptr %split_scope_workgroup %split_c0 %split_c0
 OpControlBarrier %split_scope_workgroup %split_scope_workgroup %split_acq_rel
 )";
 }
 
-// LDS accesses of one guest wave are ordered on hardware; the two halves
-// order them with a rendezvous after each DS instruction.
+// LDS accesses of one guest wave are ordered on hardware; the parts order
+// them with a rendezvous after each DS instruction.
 String8 Spirv::SplitWaveDsOrder(uint32_t index) const
 {
 	// The subgroup barrier makes every lane's LDS access available before the elected lane publishes.
@@ -104,7 +162,7 @@ String8 Spirv::SplitWaveDsOrder(uint32_t index) const
 void Spirv::CheckSplitWaveCollectives(const String8& body) const
 {
 	// Quad operations and the DPP shuffles, whose targets come from the host
-	// lane and stay inside a 16-lane row, never leave one half.
+	// lane and stay inside a 16-lane row, never leave one part.
 	const String8 prefix = "OpGroupNonUniform";
 	for (uint32_t at = body.FindIndex(prefix); at != Core::STRING8_INVALID_INDEX; at = body.FindIndex(prefix, at + 1))
 	{
@@ -116,9 +174,180 @@ void Spirv::CheckSplitWaveCollectives(const String8& body) const
 		                     (rest.StartsWith("Shuffle ") && line.StartsWith("%dpp_"));
 		if (!allowed)
 		{
-			EXIT("split-wave compute collective without a two-half lowering: %s\n", body.Mid(at, 40).c_str());
+			EXIT("split-wave compute collective without a cross-part lowering: %s\n", body.Mid(at, 40).c_str());
 		}
 	}
+}
+
+// Picks the word of each part of exchange <n>: this part's own value, or the
+// slot another part published.
+static String8 SplitWavePartWords(uint32_t parts, const char* tag)
+{
+	String8 text = String8::FromPrintf("%%%s_slots = OpIAdd %%uint %%%s_base %%split_parts\n"
+	                                   "%%%s_parity = OpBitwiseAnd %%uint %%%s_n %%split_c1\n",
+	                                   tag, tag, tag, tag);
+	for (uint32_t part = 0; part < parts; ++part)
+	{
+		text += String8::FromPrintf("%%%s_slot%u = OpIAdd %%uint %%%s_slots %%split_c%u\n"
+		                            "%%%s_index%u = OpIAdd %%uint %%%s_slot%u %%%s_parity\n"
+		                            "%%%s_ptr%u = OpAccessChain %%_ptr_Workgroup_split_uint %%split_exchange %%%s_index%u\n"
+		                            "%%%s_load%u = OpLoad %%uint %%%s_ptr%u\n"
+		                            "%%%s_is%u = OpIEqual %%bool %%%s_part %%split_c%u\n"
+		                            "%%%s_word%u = OpSelect %%uint %%%s_is%u %%%s_own %%%s_load%u\n",
+		                            tag, part, tag, part * 2u, tag, part, tag, part, tag, tag, part, tag, part, tag, part, tag, part,
+		                            tag, part, tag, part, tag, part, tag, part, tag, tag, part);
+	}
+	return text;
+}
+
+// Publishes this part's word of the next exchange and waits until every other
+// part published its word of the same exchange.
+static String8 SplitWavePublishFunction(uint32_t parts)
+{
+	String8 text = R"(
+%split_publish = OpFunction %uint None %function_gen5_buffer_format_bytes
+%split_publish_value = OpFunctionParameter %uint
+%split_publish_entry = OpLabel
+%split_publish_subgroup = OpLoad %uint %gl_SubgroupID
+%split_publish_part = OpBitwiseAnd %uint %split_publish_subgroup %split_parts_mask
+%split_publish_wave = OpShiftRightLogical %uint %split_publish_subgroup %split_parts_shift
+%split_publish_base = OpIMul %uint %split_publish_wave %split_stride
+%split_publish_previous = OpLoad %uint %split_count
+%split_publish_n = OpIAdd %uint %split_publish_previous %split_c1
+OpStore %split_count %split_publish_n
+%split_publish_parity = OpBitwiseAnd %uint %split_publish_n %split_c1
+%split_publish_slots = OpIAdd %uint %split_publish_base %split_parts
+%split_publish_own2 = OpShiftLeftLogical %uint %split_publish_part %split_c1
+%split_publish_own_slot = OpIAdd %uint %split_publish_own2 %split_publish_parity
+%split_publish_own_index = OpIAdd %uint %split_publish_slots %split_publish_own_slot
+%split_publish_own_sequence = OpIAdd %uint %split_publish_base %split_publish_part
+%split_publish_own_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_publish_own_index
+%split_publish_sequence_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_publish_own_sequence
+%split_publish_elected = OpGroupNonUniformElect %bool %split_scope_subgroup
+OpSelectionMerge %split_publish_published None
+OpBranchConditional %split_publish_elected %split_publish_publish %split_publish_published
+%split_publish_publish = OpLabel
+OpStore %split_publish_own_ptr %split_publish_value
+OpAtomicStore %split_publish_sequence_ptr %split_scope_workgroup %split_release %split_publish_n
+OpBranch %split_publish_published
+%split_publish_published = OpLabel
+)";
+	// One spin reads every part's sequence, so the parts' latencies overlap
+	// instead of adding up; every seen value is n or n + 1. Only the last load
+	// acquires: an acquire load per part serializes the loads behind one fence
+	// each, while a spin of relaxed loads alone has no effect a caller may
+	// observe and the compiler drops it. The fence after the loop orders the
+	// reads of what the relaxed loads saw published.
+	text += R"(OpBranch %split_publish_header
+%split_publish_header = OpLabel
+%split_publish_spins = OpPhi %uint %split_c0 %split_publish_published %split_publish_next %split_publish_continue
+OpLoopMerge %split_publish_merge %split_publish_continue None
+OpBranch %split_publish_body
+%split_publish_body = OpLabel
+)";
+	String8 sequence = "%split_publish_n";
+	for (uint32_t part = 0; part < parts; ++part)
+	{
+		const char* semantics = part + 1u == parts ? "%split_acquire" : "%split_c0";
+		text += String8::FromPrintf("%%split_publish_sequence_index%u = OpIAdd %%uint %%split_publish_base %%split_c%u\n"
+		                            "%%split_publish_sequence%u_ptr = OpAccessChain %%_ptr_Workgroup_split_uint %%split_exchange "
+		                            "%%split_publish_sequence_index%u\n"
+		                            "%%split_publish_seen%u = OpAtomicLoad %%uint %%split_publish_sequence%u_ptr %%split_scope_workgroup "
+		                            "%s\n"
+		                            "%%split_publish_upto%u = OpExtInst %%uint %%GLSL_std_450 UMin %s %%split_publish_seen%u\n",
+		                            part, part, part, part, part, part, semantics, part, sequence.c_str(), part);
+		sequence = String8::FromPrintf("%%split_publish_upto%u", part);
+	}
+	text += String8::FromPrintf(R"(%%split_publish_ready = OpIEqual %%bool %s %%split_publish_n
+%%split_publish_next = OpIAdd %%uint %%split_publish_spins %%split_c1
+%%split_publish_late = OpUGreaterThanEqual %%bool %%split_publish_next %%split_spin_limit
+%%split_publish_done = OpLogicalOr %%bool %%split_publish_ready %%split_publish_late
+OpBranchConditional %%split_publish_done %%split_publish_merge %%split_publish_continue
+%%split_publish_continue = OpLabel
+OpBranch %%split_publish_header
+%%split_publish_merge = OpLabel
+OpMemoryBarrier %%split_scope_workgroup %%split_acquire
+OpReturnValue %s
+OpFunctionEnd
+)",
+	                            sequence.c_str(), sequence.c_str());
+	return text;
+}
+
+// The wave mask: part p supplies bits p*L .. p*L+L-1.
+static String8 SplitWaveBallotFunction(uint32_t parts, uint32_t lanes)
+{
+	String8 text = R"(
+%split_ballot = OpFunction %v4uint None %function_split_ballot
+%split_ballot_predicate = OpFunctionParameter %bool
+%split_ballot_entry = OpLabel
+%split_ballot_host = OpGroupNonUniformBallot %v4uint %split_scope_subgroup %split_ballot_predicate
+%split_ballot_own = OpCompositeExtract %uint %split_ballot_host 0
+%split_ballot_n = OpFunctionCall %uint %split_publish %split_ballot_own
+%split_ballot_subgroup = OpLoad %uint %gl_SubgroupID
+%split_ballot_part = OpBitwiseAnd %uint %split_ballot_subgroup %split_parts_mask
+%split_ballot_wave = OpShiftRightLogical %uint %split_ballot_subgroup %split_parts_shift
+%split_ballot_base = OpIMul %uint %split_ballot_wave %split_stride
+)";
+	text += SplitWavePartWords(parts, "split_ballot");
+	// Mask word w collects the parts whose lanes start in bits 32w .. 32w+31.
+	const uint32_t per_word = 32u / lanes;
+	for (uint32_t word = 0; word < 2u; ++word)
+	{
+		const char* name   = word == 0u ? "lo" : "hi";
+		if (word * per_word >= parts)
+		{
+			text += String8::FromPrintf("%%split_ballot_%s = OpCopyObject %%uint %%split_c0\n", name);
+			continue;
+		}
+		String8     merged = String8::FromPrintf("split_ballot_word%u", word * per_word);
+		for (uint32_t slot = 1; slot < per_word; ++slot)
+		{
+			const uint32_t part = word * per_word + slot;
+			text += String8::FromPrintf("%%split_ballot_word%u_shifted = OpShiftLeftLogical %%uint %%split_ballot_word%u %%split_c%u\n"
+			                            "%%split_ballot_%s_%u = OpBitwiseOr %%uint %%%s %%split_ballot_word%u_shifted\n",
+			                            part, part, slot * lanes, name, slot, merged.c_str(), part);
+			merged = String8::FromPrintf("split_ballot_%s_%u", name, slot);
+		}
+		text += String8::FromPrintf("%%split_ballot_%s = OpCopyObject %%uint %%%s\n", name, merged.c_str());
+	}
+	text += "%split_ballot_result = OpCompositeConstruct %v4uint %split_ballot_lo %split_ballot_hi %split_c0 %split_c0\n"
+	        "OpReturnValue %split_ballot_result\nOpFunctionEnd\n";
+	return text;
+}
+
+// Reads one guest lane per invocation through a dword per lane in the exchange
+// area; the rendezvous publishes the stores, and the bank of this exchange's
+// parity stays intact until every part has finished reading it.
+static String8 SplitWaveLaneReadFunction()
+{
+	return R"(
+%split_lane_read = OpFunction %uint None %function_u_u
+%split_lane_read_value = OpFunctionParameter %uint
+%split_lane_read_lane = OpFunctionParameter %uint
+%split_lane_read_entry = OpLabel
+%split_lane_read_subgroup = OpLoad %uint %gl_SubgroupID
+%split_lane_read_wave = OpShiftRightLogical %uint %split_lane_read_subgroup %split_parts_shift
+%split_lane_read_base = OpIMul %uint %split_lane_read_wave %split_stride
+%split_lane_read_previous = OpLoad %uint %split_count
+%split_lane_read_n = OpIAdd %uint %split_lane_read_previous %split_c1
+%split_lane_read_parity = OpBitwiseAnd %uint %split_lane_read_n %split_c1
+%split_lane_read_bank = OpShiftLeftLogical %uint %split_lane_read_parity %split_c6
+%split_lane_read_banks = OpIAdd %uint %split_lane_read_base %split_lane_area
+%split_lane_read_area = OpIAdd %uint %split_lane_read_banks %split_lane_read_bank
+%split_lane_read_guest = OpLoad %uint %gl_SubgroupInvocationID
+%split_lane_read_own_index = OpIAdd %uint %split_lane_read_area %split_lane_read_guest
+%split_lane_read_own_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_lane_read_own_index
+OpStore %split_lane_read_own_ptr %split_lane_read_value
+OpControlBarrier %split_scope_subgroup %split_scope_workgroup %split_acq_rel
+%split_lane_read_stored = OpFunctionCall %uint %split_sync
+%split_lane_read_source = OpBitwiseAnd %uint %split_lane_read_lane %split_c63
+%split_lane_read_index = OpIAdd %uint %split_lane_read_area %split_lane_read_source
+%split_lane_read_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_lane_read_index
+%split_lane_read_result = OpLoad %uint %split_lane_read_ptr
+OpReturnValue %split_lane_read_result
+OpFunctionEnd
+)";
 }
 
 String8 Spirv::SplitWaveFunctions() const
@@ -127,103 +356,61 @@ String8 Spirv::SplitWaveFunctions() const
 	{
 		return {};
 	}
+	const uint32_t lanes = SplitWavePartLanes();
+	const uint32_t parts = m_cs_input_info->wave_layout.guest_wave_size / lanes;
 	// %function_u_u is (uint, uint) -> uint and %function_gen5_buffer_format_bytes
 	// is (uint) -> uint; SPIR-V forbids declaring a function type twice.
-	return R"(
-%split_wait = OpFunction %uint None %function_u_u
-%split_wait_index = OpFunctionParameter %uint
-%split_wait_n = OpFunctionParameter %uint
-%split_wait_entry = OpLabel
-%split_wait_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_wait_index
-OpBranch %split_wait_header
-%split_wait_header = OpLabel
-%split_wait_spins = OpPhi %uint %split_c0 %split_wait_entry %split_wait_next %split_wait_continue
-OpLoopMerge %split_wait_merge %split_wait_continue None
-OpBranch %split_wait_body
-%split_wait_body = OpLabel
-%split_wait_seen = OpAtomicLoad %uint %split_wait_ptr %split_scope_workgroup %split_acquire
-%split_wait_ready = OpUGreaterThanEqual %bool %split_wait_seen %split_wait_n
-%split_wait_next = OpIAdd %uint %split_wait_spins %split_c1
-%split_wait_late = OpUGreaterThanEqual %bool %split_wait_next %split_spin_limit
-%split_wait_done = OpLogicalOr %bool %split_wait_ready %split_wait_late
-OpBranchConditional %split_wait_done %split_wait_merge %split_wait_continue
-%split_wait_continue = OpLabel
-OpBranch %split_wait_header
-%split_wait_merge = OpLabel
-OpReturnValue %split_wait_seen
+	String8 text = SplitWavePublishFunction(parts);
+	text += SplitWaveBallotFunction(parts, lanes);
+	// This part's bits of the wave mask, the other parts' bits zero: enough
+	// for a mask whose every reader takes only its own lane's bit.
+	text += R"(
+%split_part_ballot = OpFunction %v4uint None %function_split_ballot
+%split_part_ballot_predicate = OpFunctionParameter %bool
+%split_part_ballot_entry = OpLabel
+%split_part_ballot_host = OpGroupNonUniformBallot %v4uint %split_scope_subgroup %split_part_ballot_predicate
+%split_part_ballot_own = OpCompositeExtract %uint %split_part_ballot_host 0
+%split_part_ballot_subgroup = OpLoad %uint %gl_SubgroupID
+%split_part_ballot_part = OpBitwiseAnd %uint %split_part_ballot_subgroup %split_parts_mask
+%split_part_ballot_first = OpShiftLeftLogical %uint %split_part_ballot_part %split_lanes_shift
+%split_part_ballot_shift = OpBitwiseAnd %uint %split_part_ballot_first %split_c31
+%split_part_ballot_upper = OpINotEqual %bool %split_part_ballot_first %split_part_ballot_shift
+%split_part_ballot_bits = OpShiftLeftLogical %uint %split_part_ballot_own %split_part_ballot_shift
+%split_part_ballot_lo = OpSelect %uint %split_part_ballot_upper %split_c0 %split_part_ballot_bits
+%split_part_ballot_hi = OpSelect %uint %split_part_ballot_upper %split_part_ballot_bits %split_c0
+%split_part_ballot_result = OpCompositeConstruct %v4uint %split_part_ballot_lo %split_part_ballot_hi %split_c0 %split_c0
+OpReturnValue %split_part_ballot_result
 OpFunctionEnd
-
-%split_word = OpFunction %uint None %function_gen5_buffer_format_bytes
-%split_word_value = OpFunctionParameter %uint
-%split_word_entry = OpLabel
-%split_word_subgroup = OpLoad %uint %gl_SubgroupID
-%split_word_half = OpBitwiseAnd %uint %split_word_subgroup %split_c1
-%split_word_other = OpBitwiseXor %uint %split_word_half %split_c1
-%split_word_wave = OpShiftRightLogical %uint %split_word_subgroup %split_c1
-%split_word_base = OpIMul %uint %split_word_wave %split_stride
-%split_word_previous = OpLoad %uint %split_count
-%split_word_n = OpIAdd %uint %split_word_previous %split_c1
-OpStore %split_count %split_word_n
-%split_word_parity = OpBitwiseAnd %uint %split_word_n %split_c1
-%split_word_slots = OpIAdd %uint %split_word_base %split_c2
-%split_word_own2 = OpShiftLeftLogical %uint %split_word_half %split_c1
-%split_word_other2 = OpShiftLeftLogical %uint %split_word_other %split_c1
-%split_word_own_slot = OpIAdd %uint %split_word_own2 %split_word_parity
-%split_word_other_slot = OpIAdd %uint %split_word_other2 %split_word_parity
-%split_word_own_index = OpIAdd %uint %split_word_slots %split_word_own_slot
-%split_word_other_index = OpIAdd %uint %split_word_slots %split_word_other_slot
-%split_word_own_sequence = OpIAdd %uint %split_word_base %split_word_half
-%split_word_other_sequence = OpIAdd %uint %split_word_base %split_word_other
-%split_word_own_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_word_own_index
-%split_word_sequence_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_word_own_sequence
-%split_word_elected = OpGroupNonUniformElect %bool %split_scope_subgroup
-OpSelectionMerge %split_word_published None
-OpBranchConditional %split_word_elected %split_word_publish %split_word_published
-%split_word_publish = OpLabel
-OpStore %split_word_own_ptr %split_word_value
-OpAtomicStore %split_word_sequence_ptr %split_scope_workgroup %split_release %split_word_n
-OpBranch %split_word_published
-%split_word_published = OpLabel
-%split_word_seen = OpFunctionCall %uint %split_wait %split_word_other_sequence %split_word_n
-%split_word_other_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_word_other_index
-%split_word_result = OpLoad %uint %split_word_other_ptr
-OpReturnValue %split_word_result
-OpFunctionEnd
-
-%split_ballot = OpFunction %v4uint None %function_split_ballot
-%split_ballot_predicate = OpFunctionParameter %bool
-%split_ballot_entry = OpLabel
-%split_ballot_host = OpGroupNonUniformBallot %v4uint %split_scope_subgroup %split_ballot_predicate
-%split_ballot_own = OpCompositeExtract %uint %split_ballot_host 0
-%split_ballot_other = OpFunctionCall %uint %split_word %split_ballot_own
-%split_ballot_subgroup = OpLoad %uint %gl_SubgroupID
-%split_ballot_half = OpBitwiseAnd %uint %split_ballot_subgroup %split_c1
-%split_ballot_low = OpIEqual %bool %split_ballot_half %split_c0
-%split_ballot_lo = OpSelect %uint %split_ballot_low %split_ballot_own %split_ballot_other
-%split_ballot_hi = OpSelect %uint %split_ballot_low %split_ballot_other %split_ballot_own
-%split_ballot_result = OpCompositeConstruct %v4uint %split_ballot_lo %split_ballot_hi %split_c0 %split_c0
-OpReturnValue %split_ballot_result
-OpFunctionEnd
-
+)";
+	text += R"(
 %split_read = OpFunction %uint None %function_u_u
 %split_read_value = OpFunctionParameter %uint
 %split_read_lane = OpFunctionParameter %uint
 %split_read_entry = OpLabel
-%split_read_host_lane = OpBitwiseAnd %uint %split_read_lane %split_c31
-%split_read_host = OpGroupNonUniformBroadcast %uint %split_scope_subgroup %split_read_value %split_read_host_lane
-%split_read_other = OpFunctionCall %uint %split_word %split_read_host
+%split_read_host_lane = OpBitwiseAnd %uint %split_read_lane %split_lanes_mask
+%split_read_own = OpGroupNonUniformBroadcast %uint %split_scope_subgroup %split_read_value %split_read_host_lane
+%split_read_n = OpFunctionCall %uint %split_publish %split_read_own
 %split_read_subgroup = OpLoad %uint %gl_SubgroupID
-%split_read_half = OpBitwiseAnd %uint %split_read_subgroup %split_c1
-%split_read_source = OpShiftRightLogical %uint %split_read_lane %split_c5
-%split_read_source_half = OpBitwiseAnd %uint %split_read_source %split_c1
-%split_read_own = OpIEqual %bool %split_read_source_half %split_read_half
-%split_read_result = OpSelect %uint %split_read_own %split_read_host %split_read_other
+%split_read_part = OpBitwiseAnd %uint %split_read_subgroup %split_parts_mask
+%split_read_wave = OpShiftRightLogical %uint %split_read_subgroup %split_parts_shift
+%split_read_base = OpIMul %uint %split_read_wave %split_stride
+%split_read_source_lanes = OpShiftRightLogical %uint %split_read_lane %split_lanes_shift
+%split_read_source = OpBitwiseAnd %uint %split_read_source_lanes %split_parts_mask
+%split_read_source_is_own = OpIEqual %bool %split_read_source %split_read_part
+%split_read_slots = OpIAdd %uint %split_read_base %split_parts
+%split_read_parity = OpBitwiseAnd %uint %split_read_n %split_c1
+%split_read_source2 = OpShiftLeftLogical %uint %split_read_source %split_c1
+%split_read_source_slot = OpIAdd %uint %split_read_source2 %split_read_parity
+%split_read_index = OpIAdd %uint %split_read_slots %split_read_source_slot
+%split_read_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_read_index
+%split_read_other = OpLoad %uint %split_read_ptr
+%split_read_result = OpSelect %uint %split_read_source_is_own %split_read_own %split_read_other
 OpReturnValue %split_read_result
 OpFunctionEnd
 
 %split_sync = OpFunction %uint None %function_split_u
 %split_sync_entry = OpLabel
-%split_sync_result = OpFunctionCall %uint %split_word %split_c0
+%split_sync_result = OpFunctionCall %uint %split_publish %split_c0
 OpReturnValue %split_sync_result
 OpFunctionEnd
 
@@ -231,9 +418,9 @@ OpFunctionEnd
 %split_leader_entry = OpLabel
 %split_leader_elected = OpGroupNonUniformElect %bool %split_scope_subgroup
 %split_leader_subgroup = OpLoad %uint %gl_SubgroupID
-%split_leader_half = OpBitwiseAnd %uint %split_leader_subgroup %split_c1
-%split_leader_low = OpIEqual %bool %split_leader_half %split_c0
-%split_leader_result = OpLogicalAnd %bool %split_leader_elected %split_leader_low
+%split_leader_part = OpBitwiseAnd %uint %split_leader_subgroup %split_parts_mask
+%split_leader_first = OpIEqual %bool %split_leader_part %split_c0
+%split_leader_result = OpLogicalAnd %bool %split_leader_elected %split_leader_first
 OpReturnValue %split_leader_result
 OpFunctionEnd
 
@@ -241,14 +428,23 @@ OpFunctionEnd
 %split_first_value = OpFunctionParameter %uint
 %split_first_entry = OpLabel
 %split_first_own = OpGroupNonUniformBroadcastFirst %uint %split_scope_subgroup %split_first_value
-%split_first_other = OpFunctionCall %uint %split_word %split_first_own
+%split_first_n = OpFunctionCall %uint %split_publish %split_first_own
 %split_first_subgroup = OpLoad %uint %gl_SubgroupID
-%split_first_half = OpBitwiseAnd %uint %split_first_subgroup %split_c1
-%split_first_low = OpIEqual %bool %split_first_half %split_c0
-%split_first_result = OpSelect %uint %split_first_low %split_first_own %split_first_other
+%split_first_part = OpBitwiseAnd %uint %split_first_subgroup %split_parts_mask
+%split_first_is_first = OpIEqual %bool %split_first_part %split_c0
+%split_first_wave = OpShiftRightLogical %uint %split_first_subgroup %split_parts_shift
+%split_first_base = OpIMul %uint %split_first_wave %split_stride
+%split_first_parity = OpBitwiseAnd %uint %split_first_n %split_c1
+%split_first_index0 = OpIAdd %uint %split_first_base %split_parts
+%split_first_index = OpIAdd %uint %split_first_index0 %split_first_parity
+%split_first_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_first_index
+%split_first_other = OpLoad %uint %split_first_ptr
+%split_first_result = OpSelect %uint %split_first_is_first %split_first_own %split_first_other
 OpReturnValue %split_first_result
 OpFunctionEnd
 )";
+	text += SplitWaveLaneReadFunction();
+	return text;
 }
 
 } // namespace Kyty::Libs::Graphics

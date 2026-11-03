@@ -88,9 +88,14 @@ The cache store now:
 
 - uses `KYTY_VULKAN_PIPELINE_CACHE` when an explicit test location is needed,
   otherwise a per-user cache directory;
-- includes the Vulkan vendor ID, device ID, and pipeline-cache UUID in the
-  default filename;
-- accepts at most 64 MiB and validates the standard version-one header before
+- keeps one default file per title: the filename holds the title ID, the
+  Vulkan vendor ID, device ID and pipeline-cache UUID, and the shader
+  translator versions; with no title loaded nothing is persisted;
+- at load, removes this device's files that the current one replaces (the
+  title's files from other drivers or translator versions, and the file all
+  titles shared before 2026-10-28), plus temporary files left by a writer
+  that exited before its replace;
+- accepts at most 128 MiB and validates the standard version-one header before
   passing bytes to Vulkan;
 - retries with an empty cache if a driver rejects otherwise compatible data;
 - writes a sibling temporary file and replaces the destination;
@@ -98,7 +103,7 @@ The cache store now:
   once every 30 seconds;
 - charges attempted bytes before opening the temporary file, including failed
   write, flush, and replace operations;
-- enforces a 64 MiB attempted-write budget per process, so I/O failures and a
+- enforces a 128 MiB attempted-write budget per process, so I/O failures and a
   long session cannot repeatedly replace the bounded blob into gigabytes of
   cumulative writes.
 
@@ -374,20 +379,40 @@ against the same correct gameplay capture.
   asphalt colour of a strict Intel capture (96, 80, 63) and of that footage
   (98, 84, 52) agree within a few percent. Do not chase it as a lighting or
   exposure bug without a reference of the same scene that differs.
-- Robot-platformer title screen save cards (2026-10-14, open). The two lower
-  save cards render black because the tiled light classifier writes an
-  empty list for every tile. Excluded so far: dispatch ordering, the
-  classifier's control-flow, append and lane-count translation, a
-  render-target/storage alias of its normal input, and the G-buffer exports,
-  write masks and depth-stencil state. The debug image dump does not submit
-  the recording in progress, so states read through it are from earlier in
-  the frame: the constant normal input and the black temporal
-  antialiasing and HDR images are unverified, not exclusions. The lighting
-  stencil plane is excluded: with d72457e5 and 55cd634d the lighting reads
-  the device stencil, cleared each frame and written by the G-buffer, and
-  the screen does not change. Details, fixes found on the
-  way and open defects: "Robot platformer: title screen save cards" in
-  `docs/BRINGUP.md`.
+- Robot-platformer title screen save cards (2026-10-14, fixed 2026-10-27,
+  70a42245). The cards were black because a light-list walk kernel looped
+  until device loss: excluding unused metadata storage compacted the
+  storage list after the dynamic scalar-load records captured their
+  indices, so its pc-keyed head and node loads read the next descriptor.
+  The records now follow the compaction. Earlier leads are superseded, not
+  causes: the empty light lists of the tiled classifier, the constant
+  normal input, and a zero 128x128 head grid (a different structure filled
+  by a pixel shader). The earlier exclusions (dispatch ordering, the
+  classifier's control-flow, append and lane-count translation, the normal
+  buffer alias, the G-buffer exports and the lighting stencil plane) stand.
+  The debug image dump still does not submit the recording in progress.
+  Details: "Robot platformer: title screen save cards" in
+  `docs/titles/robot-platformer.md`.
+- Robot-platformer crash-site hub (2026-10-27). Two hub-load stops fixed:
+  the fragment transport now plans a draw as primitive chunks over one
+  128 MiB storage block per command pool (a 4343-primitive full-screen
+  draw went from no plan to 50 passes), and a tile-mode mismatch between
+  a storage view and an existing object counts as a redescription. The
+  vertex program cache emptied every few frames on a 64 MiB budget and
+  each draw re-proved its NGG front; at 256 MiB the ship cutscene went
+  from 1.3 to about 6 fps. Open: the hub is GPU bound at 0.7 fps, and the
+  cutscene ship ends in 16x16 blocks. Details: "Robot platformer:
+  crash-site hub stops and intro cost" in `docs/titles/robot-platformer.md`.
+- Robot-platformer title ship and robots absent (2026-10-27, expected
+  without a save). The guest loads and starts its title-ship level but
+  submits no ship or robot draw; the title shows them only once a gameplay
+  save exists, and these runs start from empty save data. Excluded as
+  renderer causes: GPU predication, synthetic occlusion-query magnitude
+  (a 2^20 step per query changes nothing) and skipped draws. The all-zero
+  output of the title's merged ES/GS effect draws matches emitters with no
+  live particles and is not, by itself, a geometry-pass defect. Details:
+  "Robot platformer: title ship and robots absent" in
+  `docs/titles/robot-platformer.md`.
 - Racing-title shadows (2026-10-11, partly open). The two shadow-receiver
   pixel shaders take one `image_sample_c_lz` against a 2048x1024 D16 atlas
   (two 1024x1024 cascades chosen from squared camera distance) with a GEQUAL

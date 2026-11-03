@@ -146,6 +146,7 @@ TEST(AgentGamesMatrix, DiscoversOnlyDirectEbootRootsAndSkipsPackageBulk)
 	const ScopedTestDirectory directory("agent-games-matrix");
 	const fs::path            games = directory.Path() / "games";
 	Touch(games / "pkg_a" / "eboot.bin");
+	Touch(games / "pkg_a" / "sce_sys" / "param.json");
 	Touch(games / "pkg_a" / "sce_module" / "inner" / "eboot.bin");
 	Touch(games / "nested" / "pkg_b" / "eboot.bin");
 	Touch(games / "nested" / "pkg_c" / "EBOOT.ELF");
@@ -162,6 +163,7 @@ TEST(AgentGamesMatrix, DiscoversOnlyDirectEbootRootsAndSkipsPackageBulk)
 
 	EXPECT_TRUE(InvalidPackageReason((games / "pkg_a").string()).empty());
 	EXPECT_EQ(InvalidPackageReason((games / "nested").string()), "missing_primary_executable");
+	EXPECT_EQ(InvalidPackageReason((games / "nested" / "pkg_b").string()), "missing_content_metadata");
 	EXPECT_EQ(InvalidPackageReason((games / "pkg_a" / "eboot.bin").string()), "not_a_directory");
 }
 

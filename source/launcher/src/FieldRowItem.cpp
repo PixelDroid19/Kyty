@@ -86,6 +86,7 @@ const ChoiceText CHOICE_TEXTS[] = {
     {"Linear", QT_TRANSLATE_NOOP("FieldRowItem", "Linear")},
     {"Nearest", QT_TRANSLATE_NOOP("FieldRowItem", "Nearest")},
     {"Fsr", "FSR", false},
+    {"Fsr3", "FSR 3.1", false},
     {"Guest", QT_TRANSLATE_NOOP("FieldRowItem", "As the game asks")},
     {"X2", "2×", false},
     {"X4", "4×", false},

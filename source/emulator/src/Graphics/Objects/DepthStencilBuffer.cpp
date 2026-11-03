@@ -11,6 +11,7 @@
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Profiler.h"
 
+#include <memory>
 #include <mutex>
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -161,19 +162,12 @@ VkFormat DepthStencilBufferStoragePlaneFormat(VkFormat depth_format)
 	}
 }
 
-StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+static StorageTextureVulkanImage* CreateStoragePlane(GraphicContext* ctx, const DepthStencilVulkanImage* depth, VkFormat format,
+                                                     VulkanMemory* memory)
 {
-	EXIT_IF(ctx == nullptr || depth == nullptr);
-	static std::mutex          create_mutex;
-	std::lock_guard<std::mutex> lock(create_mutex);
-	if (depth->storage_plane != nullptr)
-	{
-		return depth->storage_plane;
-	}
-
 	auto* plane = new StorageTextureVulkanImage;
 	plane->SetNativeExtent(depth->extent.width, depth->extent.height);
-	plane->format       = DepthStencilBufferStoragePlaneFormat(depth->format);
+	plane->format       = format;
 	plane->image        = nullptr;
 	plane->layout       = VK_IMAGE_LAYOUT_UNDEFINED;
 	plane->array_layers = 1u;
@@ -187,7 +181,7 @@ StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx
 	image_descriptor.extent = {depth->extent.width, depth->extent.height, 1u};
 	image_descriptor.format = plane->format;
 	image_descriptor.usage  = StorageTextureGetImageUsage();
-	if (!VulkanCreateDeviceImage(ctx, VulkanBuildImageCreateInfo(image_descriptor), plane, &depth->storage_plane_memory))
+	if (!VulkanCreateDeviceImage(ctx, VulkanBuildImageCreateInfo(image_descriptor), plane, memory))
 	{
 		EXIT("depth storage plane image creation failed: extent=%ux%u\n", depth->extent.width, depth->extent.height);
 	}
@@ -199,14 +193,36 @@ StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx
 	view_descriptor.view_type   = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
 	view_descriptor.layer_count = 1u;
 	EXIT_IF(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &plane->image_view[VulkanImage::VIEW_STORAGE_ARRAY]));
-
-	depth->storage_plane = plane;
 	return plane;
 }
 
-static void DeleteStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
 {
-	auto* plane = depth->storage_plane;
+	EXIT_IF(ctx == nullptr || depth == nullptr);
+	static std::mutex          create_mutex;
+	std::lock_guard<std::mutex> lock(create_mutex);
+	if (depth->storage_plane == nullptr)
+	{
+		depth->storage_plane = CreateStoragePlane(ctx, depth, DepthStencilBufferStoragePlaneFormat(depth->format), &depth->storage_plane_memory);
+	}
+	return depth->storage_plane;
+}
+
+StorageTextureVulkanImage* DepthStencilBufferGetStencilStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+{
+	EXIT_IF(ctx == nullptr || depth == nullptr);
+	static std::mutex          create_mutex;
+	std::lock_guard<std::mutex> lock(create_mutex);
+	if (depth->stencil_storage_plane == nullptr)
+	{
+		depth->stencil_storage_plane = CreateStoragePlane(ctx, depth, VK_FORMAT_R8_UINT, &depth->stencil_storage_plane_memory);
+	}
+	return depth->stencil_storage_plane;
+}
+
+static void DeleteStoragePlane(GraphicContext* ctx, StorageTextureVulkanImage** plane_slot, VulkanMemory* memory)
+{
+	auto* plane = *plane_slot;
 	if (plane == nullptr)
 	{
 		return;
@@ -220,44 +236,55 @@ static void DeleteStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* dep
 		}
 	}
 	vkDestroyImage(ctx->device, plane->image, nullptr);
-	VulkanFree(ctx, &depth->storage_plane_memory);
+	VulkanFree(ctx, memory);
 	delete plane;
-	depth->storage_plane = nullptr;
+	*plane_slot = nullptr;
 }
 
-DepthStencilVulkanImage* DepthStencilBufferGetSliceArray(GraphicContext* ctx, DepthStencilVulkanImage* first, uint32_t layers)
+DepthSliceArray* DepthStencilBufferGetSliceArray(GraphicContext* ctx, DepthStencilVulkanImage* owner, uint32_t width, uint32_t height,
+                                                 uint64_t layer_size, uint32_t layers)
 {
-	EXIT_IF(ctx == nullptr || first == nullptr || layers < 2u);
+	EXIT_IF(ctx == nullptr || owner == nullptr || layers < 2u || width == 0u || height == 0u);
 	static std::mutex           create_mutex;
 	std::lock_guard<std::mutex> lock(create_mutex);
-	if (first->slice_array != nullptr)
+	// In-flight submissions may still read an array, so none is replaced before its owner is destroyed.
+	for (const auto& existing: owner->slice_arrays)
 	{
-		// In-flight submissions may still read the array, so it is never replaced.
-		EXIT_IF(first->slice_array->array_layers != layers);
-		return first->slice_array;
+		if (existing->image->extent.width == width && existing->image->extent.height == height && existing->image->array_layers == layers)
+		{
+			return existing.get();
+		}
+	}
+	// Each distinct view over one depth plane costs a full array image.
+	static constexpr size_t k_max_arrays_per_owner = 4u;
+	if (owner->slice_arrays.size() >= k_max_arrays_per_owner)
+	{
+		EXIT("depth slice arrays exceed %zu views of one depth image: extent=%ux%u layers=%u\n", k_max_arrays_per_owner, width, height,
+		     layers);
 	}
 
-	auto* array = new DepthStencilVulkanImage;
-	array->SetNativeExtent(first->extent.width, first->extent.height);
-	array->format       = first->format;
+	auto  slice_array = std::make_unique<DepthSliceArray>();
+	auto* array       = new DepthStencilVulkanImage;
+	array->SetNativeExtent(width, height);
+	array->format       = owner->format;
 	array->image        = nullptr;
 	array->layout       = VK_IMAGE_LAYOUT_UNDEFINED;
 	array->array_layers = layers;
-	array->guest_size   = first->guest_size * layers;
+	array->guest_size   = layer_size * layers;
 	for (auto& view: array->image_view)
 	{
 		view = nullptr;
 	}
 
 	VulkanImageDescriptor image_descriptor {};
-	image_descriptor.extent       = {first->extent.width, first->extent.height, 1u};
+	image_descriptor.extent       = {width, height, 1u};
 	image_descriptor.array_layers = layers;
 	image_descriptor.format       = array->format;
 	// Sampled in DEPTH_STENCIL_READ_ONLY_OPTIMAL, a layout valid only for depth-stencil attachment images.
 	image_descriptor.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-	if (!VulkanCreateDeviceImage(ctx, VulkanBuildImageCreateInfo(image_descriptor), array, &first->slice_array_memory))
+	if (!VulkanCreateDeviceImage(ctx, VulkanBuildImageCreateInfo(image_descriptor), array, &slice_array->memory))
 	{
-		EXIT("depth slice array image creation failed: extent=%ux%u layers=%u\n", first->extent.width, first->extent.height, layers);
+		EXIT("depth slice array image creation failed: extent=%ux%u layers=%u\n", width, height, layers);
 	}
 
 	VulkanImageViewDescriptor view_descriptor {};
@@ -269,38 +296,37 @@ DepthStencilVulkanImage* DepthStencilBufferGetSliceArray(GraphicContext* ctx, De
 	view_descriptor.layer_count = layers;
 	EXIT_IF(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &array->image_view[VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY]));
 
-	first->slice_array_layers.assign(layers, {});
-	first->slice_array = array;
-	return array;
+	slice_array->image = array;
+	slice_array->layers.assign(layers, {});
+	owner->slice_arrays.push_back(std::move(slice_array));
+	return owner->slice_arrays.back().get();
 }
 
-static void DeleteSliceArray(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+static void DeleteSliceArrays(GraphicContext* ctx, DepthStencilVulkanImage* depth)
 {
-	auto* array = depth->slice_array;
-	if (array == nullptr)
+	for (auto& slice_array: depth->slice_arrays)
 	{
-		return;
-	}
-	for (auto& view: array->image_view)
-	{
-		if (view != nullptr)
+		auto* array = slice_array->image;
+		for (auto& view: array->image_view)
 		{
-			vkDestroyImageView(ctx->device, view, nullptr);
-			view = nullptr;
+			if (view != nullptr)
+			{
+				vkDestroyImageView(ctx->device, view, nullptr);
+				view = nullptr;
+			}
+		}
+		vkDestroyImage(ctx->device, array->image, nullptr);
+		VulkanFree(ctx, &slice_array->memory);
+		delete array;
+		for (const auto& layer: slice_array->layers)
+		{
+			if (layer.guest_size != 0u)
+			{
+				(void)GpuDirtyPageTracker::Instance().UnregisterRange(layer.guest_addr, layer.guest_size);
+			}
 		}
 	}
-	vkDestroyImage(ctx->device, array->image, nullptr);
-	VulkanFree(ctx, &depth->slice_array_memory);
-	delete array;
-	depth->slice_array = nullptr;
-	for (const auto& layer: depth->slice_array_layers)
-	{
-		if (layer.guest_size != 0u)
-		{
-			(void)GpuDirtyPageTracker::Instance().UnregisterRange(layer.guest_addr, layer.guest_size);
-		}
-	}
-	depth->slice_array_layers.clear();
+	depth->slice_arrays.clear();
 }
 
 static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
@@ -313,8 +339,9 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 	EXIT_IF(ctx == nullptr);
 
 	DeleteFramebuffer(vk_obj);
-	DeleteStoragePlane(ctx, vk_obj);
-	DeleteSliceArray(ctx, vk_obj);
+	DeleteStoragePlane(ctx, &vk_obj->storage_plane, &vk_obj->storage_plane_memory);
+	DeleteStoragePlane(ctx, &vk_obj->stencil_storage_plane, &vk_obj->stencil_storage_plane_memory);
+	DeleteSliceArrays(ctx, vk_obj);
 
 	for (auto& view: vk_obj->image_view)
 	{

@@ -61,7 +61,8 @@ struct ShaderFragmentMaskFlow
 //    the host (its subgroup's count) and on the guest (its wave's). Every scalar the body may
 //    write is diverged once control leaves it; lanes still inside see their own iterations, so
 //    a loop-carried scalar is fine. Other loops (a branch on a clean SCC) repeat uniformly.
-//  - Derivative texture fetches are refused inside a divergent region or divergent loop.
+//  - Derivative texture fetches are accepted inside a divergent region or divergent loop: EXEC and VCC branches
+//    are emitted quad-uniform, so a quad enters the region and runs each iteration as one.
 //  - S_WQM_B64 is the identity on an existing quad lane; it is only closed inside a
 //    validated save/widen/restore bracket with no export and no save-area write.
 //  - In a guest wave32 (guest_wave_size 32) a VALU lane mask is one dword (ShaderWave32LaneMasks): a compare

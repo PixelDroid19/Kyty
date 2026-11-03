@@ -256,6 +256,12 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA destination ignored\n");
 		return 6;
 	}
+	if (source_is_immediate && packet.byte_count == 4u &&
+	    cp->DeferImmediateStore(packet.destination_address, static_cast<uint32_t>(packet.source_address)))
+	{
+		return 6;
+	}
+	cp->RetireBeforeStore(packet.destination_address, packet.byte_count);
 	GpuMemoryNotifyHostWrite(packet.destination_address, packet.byte_count);
 
 	if (source_is_immediate)
@@ -310,6 +316,7 @@ KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
 		return 7;
 	}
 
+	cp->RetireBeforeStore(dst, byte_count);
 	if (src == 0)
 	{
 		GpuMemoryNotifyHostWrite(dst, byte_count);

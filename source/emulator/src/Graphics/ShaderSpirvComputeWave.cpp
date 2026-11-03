@@ -1,4 +1,5 @@
 #include "ShaderSpirvInternal.h"
+#include "Emulator/Graphics/ShaderVertexExecFlow.h"
 
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveLayout.h"
@@ -16,15 +17,20 @@ constexpr uint32_t kNativeSubgroupSize = 32u;
 
 bool NativeComputeWaveInputIsValid(const ShaderComputeInputInfo* input)
 {
-	if (input == nullptr || !input->native_wave_sensitive || input->required_subgroup_size != kNativeSubgroupSize ||
-	    input->thread_ids_num < 0 || input->thread_ids_num > 3 || input->thread_limits_used != input->bind.thread_limits_used)
+	if (input == nullptr || !input->native_wave_sensitive || input->thread_ids_num < 0 || input->thread_ids_num > 3 ||
+	    input->thread_limits_used != input->bind.thread_limits_used)
 	{
 		return false;
 	}
 
 	const auto& layout = input->wave_layout;
 	const bool  split  = layout.strategy == ShaderComputeWaveStrategy::Split64On32;
-	if (split ? layout.guest_wave_size != kGuestWaveSize || layout.native_subgroup_size != kNativeSubgroupSize || layout.waves == 0u
+	if (input->required_subgroup_size != (split ? layout.native_subgroup_size : kNativeSubgroupSize))
+	{
+		return false;
+	}
+	if (split ? (layout.guest_wave_size != kGuestWaveSize && (layout.guest_wave_size != kNativeSubgroupSize || layout.native_subgroup_size != 16u)) || (layout.native_subgroup_size != 8u && layout.native_subgroup_size != 16u && layout.native_subgroup_size != 32u) ||
+	                layout.waves == 0u
 	          : layout.strategy != ShaderComputeWaveStrategy::Native || layout.guest_wave_size != kNativeSubgroupSize ||
 	                (layout.native_subgroup_size != 0u && layout.native_subgroup_size != kNativeSubgroupSize) || layout.waves != 0u)
 	{
@@ -43,12 +49,12 @@ bool NativeComputeWaveInputIsValid(const ShaderComputeInputInfo* input)
 	if (split)
 	{
 		// Whole guest waves: the trailing one keeps its padding lanes inactive.
-		const uint64_t waves = (static_cast<uint64_t>(physical_local[0]) + kGuestWaveSize - 1u) / kGuestWaveSize;
-		if (waves != layout.waves || waves * kGuestWaveSize > UINT32_MAX)
+		const uint64_t waves = (static_cast<uint64_t>(physical_local[0]) + layout.guest_wave_size - 1u) / layout.guest_wave_size;
+		if (waves != layout.waves || waves * layout.guest_wave_size > UINT32_MAX)
 		{
 			return false;
 		}
-		physical_local[0] = static_cast<uint32_t>(waves * kGuestWaveSize);
+		physical_local[0] = static_cast<uint32_t>(waves * layout.guest_wave_size);
 	}
 
 	for (uint32_t axis = 0; axis < 3u; axis++)
@@ -108,7 +114,7 @@ bool Spirv::EmitNativeComputeWaveProlog(String8* output) const
 	}
 
 	const auto& local   = m_cs_input_info->wave_layout.guest_local;
-	const auto  wave    = GetConstantUint(kNativeSubgroupSize);
+	const auto  wave    = GetConstantUint(UsesSplitComputeWave() ? SplitWavePartLanes() : kNativeSubgroupSize);
 	const auto  size_x  = GetConstantUint(local[0]);
 	const auto  size_y  = GetConstantUint(local[1]);
 	const auto  size_xy = GetConstantUint(local[0] * local[1]);
@@ -145,7 +151,7 @@ bool Spirv::EmitNativeComputeWaveProlog(String8* output) const
 
 bool Spirv::UsesFragmentWaveTier() const
 {
-	if (m_code.GetType() != ShaderType::Pixel)
+	if (UsesFragmentCompute() || m_code.GetType() != ShaderType::Pixel)
 	{
 		return false;
 	}
@@ -160,9 +166,40 @@ bool Spirv::UsesFragmentWaveTier() const
 
 bool Spirv::UsesFragmentPartialWave() const
 {
-	return m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr &&
+	return !UsesFragmentCompute() && m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr &&
 	       m_ps_input_info->native_wave.proof == ShaderNativeWaveProof::FragmentPartialWave &&
 	       m_ps_input_info->native_wave.refusal_reason == nullptr;
+}
+
+const ShaderFragmentMaskFlow& Spirv::FragmentMaskFlow() const
+{
+	if (!m_fragment_mask_flow_ready)
+	{
+		m_fragment_mask_flow_ready = true;
+		m_fragment_mask_flow       = ShaderAnalyzeFragmentMaskFlow(m_code, m_ps_input_info->native_wave.guest_wave_size);
+	}
+	return m_fragment_mask_flow;
+}
+
+bool Spirv::ExecFullAfter(uint32_t index) const
+{
+	if (HasFusedVertexLanes())
+	{
+		if (!m_vertex_exec_full_ready)
+		{
+			m_vertex_exec_full_ready = true;
+			m_vertex_exec_full       = ShaderAnalyzeVertexExecFull(m_code, NativeWave32());
+		}
+		return index + 1u < m_vertex_exec_full.size() && m_vertex_exec_full[index + 1u];
+	}
+	// A transported lane starts from its captured EXEC bit, not from a live host invocation.
+	if (UsesFragmentCompute() || m_code.GetType() != ShaderType::Pixel || m_ps_input_info == nullptr ||
+	    m_ps_input_info->native_wave.refusal_reason != nullptr)
+	{
+		return false;
+	}
+	const auto& flow = FragmentMaskFlow();
+	return flow.lane_local && index + 1u < flow.exec_full.size() && flow.exec_full[index + 1u];
 }
 
 const ShaderLaneReductions& Spirv::LaneReductions() const
@@ -173,8 +210,7 @@ const ShaderLaneReductions& Spirv::LaneReductions() const
 		const auto* vertex = m_code.GetType() == ShaderType::Vertex ? m_vs_input_info : nullptr;
 		if (UsesFragmentPartialWave())
 		{
-			m_lane_reductions = ShaderFindFragmentLaneReductions(
-			    m_code, ShaderAnalyzeFragmentMaskFlow(m_code, m_ps_input_info->native_wave.guest_wave_size));
+			m_lane_reductions = ShaderFindFragmentLaneReductions(m_code, FragmentMaskFlow());
 		} else if (vertex != nullptr && vertex->native_wave.proof == ShaderNativeWaveProof::LaneLocal && vertex->native_wave.refusal_reason == nullptr)
 		{
 			// The NGG front proof admitted the program with these wave maxima in it.

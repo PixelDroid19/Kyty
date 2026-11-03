@@ -496,6 +496,10 @@ TEST(EmulatorKernelProcess, ContextRequestsReachSleepingThreads)
 				failures.fetch_add(1, std::memory_order_relaxed);
 				return;
 			}
+			// Keep raises one-per-delivery: the collector waits for the stop-world
+			// acknowledgement, not just for the handler to start and bump its
+			// counter.
+			std::this_thread::sleep_for(std::chrono::microseconds(200));
 		}
 	};
 	std::thread first(raiser, 0);
@@ -1461,7 +1465,7 @@ TEST(EmulatorKernelProcess, AprReadAndCompletionExecuteAtSubmitInRecordOrder)
 	Kernel::FileSystem::Mount(root, U"/app0/");
 	const char* paths[] = {"/app0/payload.bin"};
 	uint32_t file_id = 0;
-	ASSERT_EQ(Kernel::FileSystem::KernelAprResolveFilepathsToIds(paths, 1, &file_id), OK);
+	ASSERT_EQ(Kernel::FileSystem::KernelAprResolveFilepathsToIds(paths, 1, &file_id, nullptr), OK);
 	Kernel::FileSystem::FileStat apr_stat {};
 	ASSERT_EQ(Kernel::FileSystem::KernelAprGetFileStat(file_id, &apr_stat), OK);
 	EXPECT_EQ(apr_stat.st_flags, 0u);

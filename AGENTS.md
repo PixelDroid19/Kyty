@@ -27,6 +27,7 @@ stacks.
 | Runtime diagnostics (`kyty_agent`) | `docs/agent-tools.md` |
 | Gen5 graphics: verified advances, evidence and exclusions | `docs/kyty-runtime-graphics-investigation-handoff.md` |
 | Reproducible guest input routes | `docs/input-replay.md` |
+| Game patch files | `docs/game-patches.md` |
 | Graphics captures and offline scoring | `docs/graphics-captures.md` |
 | Audio, ATRAC9/rack ABI, video paths | `docs/AUDIO.md`, `docs/ngs2-rack-voice-abi.md`, `docs/avplayer-video-path.md` |
 | Host runtime layout and platform boundaries | `docs/HOST_RUNTIME.md` |

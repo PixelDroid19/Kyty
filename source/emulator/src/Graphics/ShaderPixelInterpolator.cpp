@@ -151,21 +151,34 @@ uint32_t ShaderPixelSystemInputRegister(const ShaderPixelInputInfo& info, uint32
 	return result;
 }
 
-void ShaderResolveCustomInterpolation(const ShaderCode& code, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info)
+ShaderPixelInterpolationUse ShaderSummarizePixelInterpolation(const ShaderCode& code)
 {
-	auto& layout = info->custom_interpolation;
+	ShaderPixelInterpolationUse use;
 	for (const auto& inst: code.GetInstructions())
 	{
 		if (inst.type != ShaderInstructionType::VInterpMovF32 && inst.type != ShaderInstructionType::VInterpP1F32 &&
 		    inst.type != ShaderInstructionType::VInterpP2F32) { continue; }
 		const uint32_t input = inst.src[1].constant.u;
 		EXIT_IF(input >= 32u);
-		layout.inputs |= 1u << input;
+		use.inputs |= 1u << input;
+		if (inst.type != ShaderInstructionType::VInterpMovF32) { use.barycentric_inputs |= 1u << input; }
+	}
+	return use;
+}
+
+void ShaderResolveCustomInterpolation(const ShaderPixelInterpolationUse& use, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info)
+{
+	auto& layout = info->custom_interpolation;
+	layout.inputs |= use.inputs;
+	for (uint32_t input = 0; input < 32u; ++input)
+	{
+		if ((use.inputs & (1u << input)) == 0) { continue; }
 		ShaderPixelInterpolator interpolator {};
 		if (!ShaderDecodePixelInterpolator(info->interpolator_settings[input], &interpolator)) { continue; }
 		if (interpolator.source == ShaderPixelInterpolatorSource::PerVertex)
 		{
-			EXIT_IF(inst.type != ShaderInstructionType::VInterpMovF32);
+			// Per-vertex attributes are only fetched raw; barycentric math needs a smooth parameter.
+			EXIT_IF((use.barycentric_inputs & (1u << input)) != 0);
 			layout.per_vertex_inputs |= 1u << input;
 		}
 	}

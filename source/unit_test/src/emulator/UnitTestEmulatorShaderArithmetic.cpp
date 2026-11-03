@@ -132,7 +132,7 @@ void CheckDeclaredModuleIds(const ShaderCode& code, const Core::String8& source)
 }
 
 Core::String8 Emit(const ShaderCode& code, uint8_t float_mode = 0xc0u, bool ieee = false, bool dx10 = false, bool validate = false,
-                   Fp16Overflow overflow = Fp16Overflow::Disabled)
+                   Fp16Overflow overflow = Fp16Overflow::Disabled, bool split_wave = false)
 {
 	// These are explicit synthetic initial controls, including known-disabled
 	// FP16_OVFL for the original fixtures. Production defaults remain unknown.
@@ -154,6 +154,12 @@ Core::String8 Emit(const ShaderCode& code, uint8_t float_mode = 0xc0u, bool ieee
 	compute.fp16_overflow_known = overflow_known;
 	compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
 	compute.wave_layout = {ShaderComputeWaveStrategy::Native, {1, 1, 1}, {1, 1, 1}, 32, 32, 1, 1, 0};
+	if (split_wave)
+	{
+		compute.native_wave_sensitive  = true;
+		compute.required_subgroup_size = 32;
+		compute.wave_layout            = {ShaderComputeWaveStrategy::Split64On32, {1, 1, 1}, {64, 1, 1}, 64, 32, 1, 1, 0};
+	}
 	const bool cs = code.GetType() == ShaderType::Compute;
 	const auto source = SpirvGenerateSource(code, nullptr, cs ? nullptr : &input, cs ? &compute : nullptr);
 	if (source.IsEmpty()) { Fail("empty production shader"); }
@@ -828,11 +834,213 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	std::_Exit(0);
 }
 
+[[noreturn]] void RunSdwaHalfDestination(ShaderType stage = ShaderType::Pixel)
+{
+	Initialize();
+	const auto run = [](const Program& program, uint32_t exec_lane)
+	{
+		return program.Run({{"%v0", 0x3c004000u}, {"%v3", 0x38004000u}, {"%v8", 0xdeadbeefu},
+		                    {"%exec_lo", exec_lane != 0u ? UINT32_MAX : 0u}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", exec_lane}, {"%exec_lane_hi", 0u}},
+		                   "%v8");
+	};
+	// V_MIN_F16 v8, v3, v0 as the hub encodes it: both sources read WORD_1,
+	// the result fills WORD_0 and DST_U=2 preserves WORD_1.
+	const Program preserve(Emit(Parse({0x741000f9u, 0x05051403u, kEnd}, stage)).c_str());
+	Equal(run(preserve, 1u), 0xdead3800u, "sdwa half destination preserves the other half");
+	Equal(run(preserve, 0u), 0xdeadbeefu, "inactive sdwa half destination");
+	// DST_U=0 pads the word DST_SEL did not select with zeros.
+	const Program zero(Emit(Parse({0x741000f9u, 0x05051403u & ~(3u << 11u), kEnd}, stage)).c_str());
+	Equal(run(zero, 1u), 0x00003800u, "sdwa half destination zeroes the other half");
+	// DST_SEL=WORD_1 writes the high half; DST_U=2 preserves the low half.
+	const Program high(Emit(Parse({0x741000f9u, (0x05051403u & ~(7u << 8u)) | (5u << 8u), kEnd}, stage)).c_str());
+	Equal(run(high, 1u), 0x3800beefu, "sdwa high half destination preserves the low half");
+	// DWORD selects: src0 reads v3's bits 15:0 (2), src1 still reads v0's WORD_1 (1), and DST_SEL
+	// DWORD stores like the plain instruction.
+	const uint32_t whole_control = (0x05051403u & ~((7u << 8u) | (7u << 16u))) | (6u << 8u) | (6u << 16u);
+	const Program whole(Emit(Parse({0x741000f9u, whole_control, kEnd}, stage)).c_str());
+	Equal(run(whole, 1u), 0x00003c00u, "sdwa dword selects read the low half and store the whole word");
+	Equal(run(whole, 0u), 0xdeadbeefu, "inactive sdwa dword destination");
+	// V_CNDMASK_B32 v15, v11, v8 with VCC as the hub's compute program encodes it: both sources
+	// read WORD_0, the selected word fills WORD_1 and DST_U=2 preserves WORD_0.
+	const Program select(Emit(Parse({0x021e10f9u, 0x0404150bu, kEnd}, stage)).c_str());
+	const auto run_select = [&](uint32_t vcc)
+	{
+		return select.Run({{"%v11", 0x11112222u}, {"%v8", 0x33334444u}, {"%v15", 0xdeadbeefu}, {"%vcc_lo", vcc}, {"%vcc_hi", 0u},
+		                   {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", UINT32_MAX}, {"%exec_hi", 0u}, {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}},
+		                  "%v15");
+	};
+	Equal(run_select(1u), 0x4444beefu, "sdwa select writes vsrc1's word into the high half");
+	Equal(run_select(0u), 0x2222beefu, "sdwa select writes src0's word into the high half");
+	std::_Exit(0);
+}
+
+[[noreturn]] void RunPackedHalfArithmetic(ShaderType stage)
+{
+	Initialize();
+	const auto run = [](const Program& program, uint32_t exec_lane)
+	{
+		return program.Run({{"%v0", 0x3c004000u}, {"%v3", 0x38004000u}, {"%v8", 0xdeadbeefu},
+		                    {"%exec_lo", exec_lane != 0u ? UINT32_MAX : 0u}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", exec_lane}, {"%exec_lane_hi", 0u}},
+		                   "%v8");
+	};
+	// V_PK_ADD_F16 v8, v0, v3 with the default OPSEL_HI: low halves 2 + 2, high halves 1 + 0.5.
+	constexpr uint32_t kWord0 = 0xcc0f4008u;
+	constexpr uint32_t kWord1 = 0x18020700u;
+	const Program plain(Emit(Parse({kWord0, kWord1, kEnd}, stage)).c_str());
+	Equal(run(plain, 1u), 0x3e004400u, "packed add adds each half");
+	Equal(run(plain, 0u), 0xdeadbeefu, "inactive packed add");
+	// OPSEL feeds the low result from v0's high half (1 + 2); a cleared OPSEL_HI
+	// feeds the high result from v0's low half (2 + 0.5).
+	const Program selected(Emit(Parse({kWord0 | (1u << 11u), kWord1 & ~(1u << 27u), kEnd}, stage)).c_str());
+	Equal(run(selected, 1u), 0x41004200u, "packed add selects each result's source halves");
+	// NEG_HI negates v3 for the high result only (1 - 0.5); NEG negates v0 for the low one (-2 + 2).
+	const Program negated(Emit(Parse({kWord0 | (1u << 9u), kWord1 | (1u << 29u), kEnd}, stage)).c_str());
+	Equal(run(negated, 1u), 0x38000000u, "packed add negates each result's sources separately");
+	// V_PK_MUL_F16 v8, v0, v3: 2 * 2 and 1 * 0.5.
+	const Program product(Emit(Parse({(kWord0 & ~(0x7fu << 16u)) | (0x10u << 16u), kWord1, kEnd}, stage)).c_str());
+	Equal(run(product, 1u), 0x38004400u, "packed multiply multiplies each half");
+	// V_PK_MIN_F16 / V_PK_MAX_F16 v8, v0, v3: min(2, 2), min(1, 0.5) and max(2, 2), max(1, 0.5);
+	// NEG on v0 gives min(-2, 2) for the low result only.
+	const uint32_t min0 = (kWord0 & ~(0x7fu << 16u)) | (0x11u << 16u);
+	const uint32_t max0 = (kWord0 & ~(0x7fu << 16u)) | (0x12u << 16u);
+	const Program minimum(Emit(Parse({min0, kWord1, kEnd}, stage)).c_str());
+	Equal(run(minimum, 1u), 0x38004000u, "packed min takes each half's minimum");
+	Equal(run(minimum, 0u), 0xdeadbeefu, "inactive packed min");
+	const Program maximum(Emit(Parse({max0, kWord1, kEnd}, stage)).c_str());
+	Equal(run(maximum, 1u), 0x3c004000u, "packed max takes each half's maximum");
+	const Program minimum_negated(Emit(Parse({min0, kWord1 | (1u << 29u), kEnd}, stage)).c_str());
+	Equal(run(minimum_negated, 1u), 0x3800c000u, "packed min negates the low source only");
+	// IEEE_MODE=0: a quiet NaN in v3's high half yields v0's high half (1).
+	const auto run_nan = [](const Program& program)
+	{
+		return program.Run({{"%v0", 0x3c004000u}, {"%v3", 0x7e004000u}, {"%v8", 0xdeadbeefu}, {"%exec_lo", UINT32_MAX},
+		                    {"%exec_hi", 0u}, {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}},
+		                   "%v8");
+	};
+	Equal(run_nan(maximum), 0x3c004000u, "packed max with one NaN half yields the other input");
+	// V_PK_FMA_F16 v8, v0, v3, v0: 2 * 2 + 2 and 1 * 0.5 + 1; NEG_HI on the addend gives 1 * 0.5 - 1.
+	const uint32_t fma0 = (kWord0 & ~(0x7fu << 16u)) | (0xeu << 16u);
+	const uint32_t fma1 = kWord1 | (256u << 18u);
+	const Program fused(Emit(Parse({fma0, fma1, kEnd}, stage)).c_str());
+	Equal(run(fused, 1u), 0x3e004600u, "packed fma fuses each half");
+	const Program fused_negated(Emit(Parse({fma0 | (1u << 10u), fma1, kEnd}, stage)).c_str());
+	Equal(run(fused_negated, 1u), 0xb8004600u, "packed fma negates the high addend only");
+	Equal(run(fused_negated, 0u), 0xdeadbeefu, "inactive packed fma");
+	// V_PK_FMAC_F16 v8, v0, v3 (VOP2 60) accumulates into v8 = 0x3c003c00: 2 * 2 + 1 and 1 * 0.5 + 1.
+	const auto run_accumulate = [](const Program& program)
+	{
+		return program.Run({{"%v0", 0x3c004000u}, {"%v3", 0x38004000u}, {"%v8", 0x3c003c00u}, {"%exec_lo", UINT32_MAX},
+		                    {"%exec_hi", 0u}, {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}},
+		                   "%v8");
+	};
+	const Program accumulate(Emit(Parse({(0x3cu << 25u) | (8u << 17u) | (3u << 9u) | 256u, kEnd}, stage)).c_str());
+	Equal(run_accumulate(accumulate), 0x3e004500u, "packed fmac accumulates each half into the destination");
+	std::_Exit(0);
+}
+
+[[noreturn]] void RunHalfCompareMaskDestination()
+{
+	Initialize();
+	// V_CMP_NEQ_F16 with an SDWA destination names one mask dword (vcc_hi in
+	// the hub's program); a plain compare names the VCC pair.
+	const auto emit = [](ShaderOperandType dst_type, int dst_size)
+	{
+		ShaderCode code;
+		code.SetType(ShaderType::Pixel);
+		ShaderInstruction inst {};
+		inst.pc                 = 0;
+		inst.type               = ShaderInstructionType::VCmpNeqF16;
+		inst.format             = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
+		inst.src_num            = 2;
+		inst.src[0].type        = ShaderOperandType::IntegerInlineConstant;
+		inst.src[0].constant.u  = 0u;
+		inst.src[1].type        = ShaderOperandType::Vgpr;
+		inst.src[1].register_id = 15;
+		inst.src[1].size        = 1;
+		inst.dst.type           = dst_type;
+		inst.dst.size           = dst_size;
+		inst.dst.register_id    = 0;
+		code.GetInstructions().Add(inst);
+		ShaderInstruction end {};
+		end.type = ShaderInstructionType::SEndpgm;
+		end.format = ShaderInstructionFormat::Empty;
+		code.GetInstructions().Add(end);
+		return Emit(code, 0xc0u, false, false, true);
+	};
+	const auto stores = [](const Core::String8& source, const char* text)
+	{
+		return source.FindIndex(text) != Core::STRING8_INVALID_INDEX;
+	};
+	const auto single = emit(ShaderOperandType::VccHi, 1);
+	if (!stores(single, "OpStore %vcc_hi %mask_out_lo_0") || stores(single, "OpStore %vcc_lo %mask_out_lo_0"))
+	{
+		Fail("a compare that names one mask word must not write the other");
+	}
+	const auto pair = emit(ShaderOperandType::VccLo, 2);
+	if (!stores(pair, "OpStore %vcc_lo %mask_out_lo_0") || !stores(pair, "OpStore %vcc_hi %mask_out_hi_0"))
+	{
+		Fail("a two-word compare must write both mask words");
+	}
+	std::_Exit(0);
+}
+
+[[noreturn]] void RunDsBpermuteAssembly(bool split)
+{
+	Initialize();
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderInstruction inst {};
+	inst.pc                 = 0;
+	inst.type               = ShaderInstructionType::DsBpermuteB32;
+	inst.format             = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	inst.src_num            = 2;
+	inst.dst.type           = ShaderOperandType::Vgpr;
+	inst.dst.register_id    = 8;
+	inst.dst.size           = 1;
+	inst.src[0].type        = ShaderOperandType::Vgpr;
+	inst.src[0].register_id = 0;
+	inst.src[0].size        = 1;
+	inst.src[1].type        = ShaderOperandType::Vgpr;
+	inst.src[1].register_id = 1;
+	inst.src[1].size        = 1;
+	code.GetInstructions().Add(inst);
+	ShaderInstruction end {};
+	end.type = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	code.GetInstructions().Add(end);
+	const auto source = Emit(code, 0xc0u, false, false, true, Fp16Overflow::Disabled, split);
+	if (split)
+	{
+		// One guest wave spans several host subgroups, so a subgroup shuffle
+		// cannot reach every source lane and the exchange must carry it. The
+		// wave64 permute stays inside the source lane's 32-lane half.
+		if (source.FindIndex("OpFunctionCall %uint %split_lane_read %bpermute_0_published %bpermute_0_lane") ==
+		        Core::STRING8_INVALID_INDEX ||
+		    source.FindIndex("OpBitwiseAnd %uint %bpermute_0_guest %uint_32") == Core::STRING8_INVALID_INDEX ||
+		    source.FindIndex("OpGroupNonUniformShuffle") != Core::STRING8_INVALID_INDEX)
+		{
+			Fail("split ds_bpermute must read guest half-wave lanes through the wave exchange");
+		}
+		std::_Exit(0);
+	}
+	if (source.FindIndex("OpGroupNonUniformShuffle %uint %uint_3 %bpermute_0_value") == Core::STRING8_INVALID_INDEX ||
+	    source.FindIndex("OpGroupNonUniformShuffle %uint %uint_3 %bpermute_0_own") == Core::STRING8_INVALID_INDEX)
+	{
+		Fail("ds_bpermute must name the subgroup scope in both shuffles");
+	}
+	std::_Exit(0);
+}
+
 enum class Rejected
 {
 	OpSel, Sdwa, Dpp, Omod, Round, RoundDown, RoundZero, Ieee, UnknownComputeMode,
-	UnknownOverflowConversion, UnknownOverflowInteger, UnknownOverflowArithmetic, IntClamp, BfeClamp, DenormClamp
+	UnknownOverflowConversion, UnknownOverflowInteger, UnknownOverflowArithmetic, IntClamp, BfeClamp
 };
+
+// A byte destination select: only whole-word and half selects are modeled.
+constexpr uint32_t kRejectedSdwaControl = (6u << 16u);
 
 Core::String8 RejectionDiagnostic(Rejected rejected, ShaderType stage)
 {
@@ -873,11 +1081,11 @@ Core::String8 RejectionDiagnostic(Rejected rejected, ShaderType stage)
 			type = ShaderInstructionType::VCvtI16F16;
 			reason = "unsupported-integer-clamp";
 			break;
-		case Rejected::DenormClamp: reason = "unsupported-output-denorm-clamp"; break;
 		default: Fail("missing rejection diagnostic contract");
 	}
-	return Core::String8::FromPrintf("shader fp16 unsupported: stage=%u instruction=%u pc=0x00000000 reason=%s\n",
-	                                 static_cast<unsigned>(stage), static_cast<unsigned>(type), reason);
+	return Core::String8::FromPrintf("shader fp16 unsupported: stage=%u instruction=%u pc=0x00000000 reason=%s sdwa=0x%08x\n",
+	                                 static_cast<unsigned>(stage), static_cast<unsigned>(type), reason,
+	                                 rejected == Rejected::Sdwa ? kRejectedSdwaControl : 0u);
 }
 
 void CaptureRejectionStdout()
@@ -910,7 +1118,7 @@ void CaptureRejectionStdout()
 		case Rejected::OpSel: inst.vop3_op_sel = 1u; break;
 		case Rejected::Sdwa:
 			inst.vop_sdwa = true;
-			inst.vop_sdwa_ctrl = (6u << 8u) | (6u << 16u);
+			inst.vop_sdwa_ctrl = kRejectedSdwaControl;
 			break;
 		case Rejected::Dpp: inst.src[0].dpp = true; break;
 		case Rejected::Omod: inst.dst.multiplier = 2.0f; inst.vop3_omod = 1u; break;
@@ -920,7 +1128,6 @@ void CaptureRejectionStdout()
 		case Rejected::Ieee: ieee = true; break;
 		case Rejected::IntClamp: inst.dst.clamp = true; break;
 		case Rejected::BfeClamp: inst.dst.clamp = true; break;
-		case Rejected::DenormClamp: inst.dst.clamp = true; break;
 		case Rejected::UnknownOverflowConversion:
 		case Rejected::UnknownOverflowInteger:
 		case Rejected::UnknownOverflowArithmetic:
@@ -1130,6 +1337,32 @@ TEST(EmulatorShaderArithmetic, CanonicalFp16EncodingsAssembleAndValidate) { ASSE
 TEST(EmulatorShaderArithmetic, Fp16NarrowingValuesRoundingAndExec) { ASSERT_EXIT(RunNarrowing(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, Fp16UnaryAndConversionValues) { ASSERT_EXIT(RunHalfValues(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, Fp16TernaryHalfSelectAndFusedValues) { ASSERT_EXIT(RunTernaryAndMinMax(), ::testing::ExitedWithCode(0), ""); }
+TEST(EmulatorShaderArithmetic, Fp16SdwaHalfDestinationReadsAndPreservesHalves)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunSdwaHalfDestination(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, PackedHalfArithmeticSelectsAndNegatesEachHalf)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunPackedHalfArithmetic(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, HalfCompareWritesOnlyTheMaskWordsTheDestinationNames)
+{
+	ASSERT_EXIT(RunHalfCompareMaskDestination(), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, DsBpermuteShuffleNamesTheSubgroupScope)
+{
+	ASSERT_EXIT(RunDsBpermuteAssembly(false), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, DsBpermuteSplitWaveReadsGuestLanesThroughTheWaveExchange)
+{
+	ASSERT_EXIT(RunDsBpermuteAssembly(true), ::testing::ExitedWithCode(0), "");
+}
 TEST(EmulatorShaderArithmetic, BfeDefinedForEveryMaskedOffsetAndWidth) { ASSERT_EXIT(RunBfe(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, ComputeFp16EncodingsAssembleAndValidate)
 {
@@ -1160,7 +1393,7 @@ TEST(EmulatorShaderArithmetic, ComputeFp16OverflowModeFiniteAndTrueInfinity)
 TEST(EmulatorShaderArithmetic, Fp16RefusesUnmodeledControlDomains)
 {
 	for (const auto rejected: {Rejected::OpSel, Rejected::Sdwa, Rejected::Dpp, Rejected::Omod, Rejected::Round, Rejected::RoundDown,
-	                          Rejected::RoundZero, Rejected::Ieee, Rejected::IntClamp, Rejected::BfeClamp, Rejected::DenormClamp,
+	                          Rejected::RoundZero, Rejected::Ieee, Rejected::IntClamp, Rejected::BfeClamp,
 	                          Rejected::UnknownOverflowConversion, Rejected::UnknownOverflowInteger, Rejected::UnknownOverflowArithmetic})
 	{
 		for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})

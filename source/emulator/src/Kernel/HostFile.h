@@ -178,6 +178,36 @@ public:
 #endif
 	}
 
+	// Commits data the host has accepted to stable storage. Buffered FILE data
+	// is not included; the caller flushes attached streams first.
+	bool Sync() const
+	{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		return ::_commit(m_descriptor) == 0;
+#else
+		return ::fsync(m_descriptor) == 0;
+#endif
+	}
+
+	// Syncs a host directory. POSIX fsync accepts directory descriptors (only sockets
+	// are refused), so this is a real sync, not a silent success. Windows cannot
+	// sync a directory here, so it fails explicitly.
+	static bool SyncDirectory(const char* path)
+	{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		errno = EINVAL;
+		return false;
+#else
+		const int descriptor = ::open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+		if (descriptor < 0) { return false; }
+		const bool synced = ::fsync(descriptor) == 0;
+		const int  saved  = errno;
+		::close(descriptor);
+		errno = saved;
+		return synced;
+#endif
+	}
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	using Stat = struct _stat64;
 #else

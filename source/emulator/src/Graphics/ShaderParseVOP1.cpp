@@ -60,6 +60,7 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	}
 
 	inst.src[0].swizzle  = static_cast<uint8_t>(src0_sel);
+	inst.src[0].sdwa_sext = sdwa && ((buffer[1] >> 19u) & 1u) != 0u;
 	inst.src[0].absolute = (src0_abs != 0);
 	inst.src[0].negate   = (src0_neg != 0);
 	inst.src[0].dpp = dpp;
@@ -234,9 +235,9 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x36: inst.type = ShaderInstructionType::VCosF32; break;
 		case 0x37: inst.type = ShaderInstructionType::VNotB32; break;
 		case 0x38: inst.type = ShaderInstructionType::VBfrevB32; break;
-		case 0x39: KYTY_NI("v_ffbh_u32"); break;
-		case 0x3A: KYTY_NI("v_ffbl_b32"); break;
-		case 0x3B: KYTY_NI("v_ffbh_i32"); break;
+		case 0x39: inst.type = ShaderInstructionType::VFfbhU32; break;
+		case 0x3A: inst.type = ShaderInstructionType::VFfblB32; break;
+		case 0x3B: inst.type = ShaderInstructionType::VFfbhI32; break;
 		case 0x3C: KYTY_NI("v_frexp_exp_i32_f64"); break;
 		case 0x3D: KYTY_NI("v_frexp_mant_f64"); break;
 		case 0x3E: {
@@ -273,9 +274,9 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x51: inst.type = ShaderInstructionType::VCvtF16I16; break;
 		case 0x52: inst.type = ShaderInstructionType::VCvtU16F16; break;
 		case 0x53: inst.type = ShaderInstructionType::VCvtI16F16; break;
-		case 0x54: KYTY_NI("v_rcp_f16"); break;
+		case 0x54: inst.type = ShaderInstructionType::VRcpF16; break;
 		case 0x55: inst.type = ShaderInstructionType::VSqrtF16; break;
-		case 0x56: KYTY_NI("v_rsq_f16"); break;
+		case 0x56: inst.type = ShaderInstructionType::VRsqF16; break;
 		case 0x57: inst.type = ShaderInstructionType::VLogF16; break;
 		case 0x58: inst.type = ShaderInstructionType::VExpF16; break;
 		case 0x59: KYTY_NI("v_frexp_mant_f16"); break;
@@ -295,9 +296,9 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		default: KYTY_UNKNOWN_OP();
 	}
 
-	// DPP VOP1 is currently represented only for v_mov_b32, whose lane routing
-	// can be emitted exactly. Other VOP1 operations need their own modifiers.
-	EXIT_NOT_IMPLEMENTED(dpp && inst.type != ShaderInstructionType::VMovB32);
+	// DPP VOP1 is represented only where the emitter routes the source through
+	// the generic operand load. Other VOP1 operations need their own modifiers.
+	EXIT_NOT_IMPLEMENTED(dpp && inst.type != ShaderInstructionType::VMovB32 && inst.type != ShaderInstructionType::VCvtU32F32);
 
 	dst->GetInstructions().Add(inst);
 

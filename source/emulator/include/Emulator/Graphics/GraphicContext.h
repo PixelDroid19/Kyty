@@ -15,6 +15,7 @@
 #include <vulkan/vulkan_core.h> // IWYU pragma: export
 
 #include <atomic>
+#include <memory>
 #include <vector>
 
 // The ratified derivative feature has the same ABI as the NV structure in
@@ -70,8 +71,11 @@ namespace Kyty::Libs::Graphics {
 }
 
 struct PresentationEncodeStage;
+struct PresentationDownscaleStage;
 struct PresentationFsrStage;
+struct PresentationFsr3Stage;
 struct TransientSnapshotPool;
+struct VulkanBuffer;
 
 struct VulkanSwapchain
 {
@@ -86,8 +90,12 @@ struct VulkanSwapchain
 	uint32_t       current_index              = 0;
 	// sRGB encoding stage for linear-light present sources; owned by PresentationScaler.
 	PresentationEncodeStage* encode_stage = nullptr;
+	// 2:1 prefilter stage for present downscales; owned by PresentationScaler.
+	PresentationDownscaleStage* downscale_stage = nullptr;
 	// FSR 1.0 passes of the Fsr presentation filter; owned by PresentationScaler.
 	PresentationFsrStage* fsr_stage = nullptr;
+	// FSR 3.1 upscaler of the Fsr3 presentation filter; owned by PresentationScaler.
+	PresentationFsr3Stage* fsr3_stage = nullptr;
 };
 
 struct VulkanCommandPool
@@ -101,6 +109,12 @@ struct VulkanCommandPool
 	uint32_t         buffers_count = 0;
 	// Guest snapshots shared by the command buffers of this pool; owned by the command buffer code.
 	TransientSnapshotPool* snapshots = nullptr;
+	// Fragment-transport storage shared by the command buffers of this pool; owned by the command buffer code.
+	VulkanBuffer* transport_storage = nullptr;
+	// Geometry-pass output shared by the command buffers of this pool, and the smaller ones it replaced, which
+	// recordings in flight may still read; owned by the command buffer code.
+	VulkanBuffer*              geometry_output = nullptr;
+	std::vector<VulkanBuffer*> retired_geometry_outputs;
 };
 
 struct VulkanQueueInfo
@@ -187,6 +201,9 @@ struct GraphicContext
 	// guest wave64 neutral region sees all lanes a partial wave carries.
 	bool shader_maximal_reconvergence_supported = false;
 	bool shader_maximal_reconvergence_enabled   = false;
+	// VK_EXT_image_view_min_lod clamps sampled LOD per view; it carries the
+	// guest T# MIN_LOD, which streaming titles raise above non-resident mips.
+	bool image_view_min_lod_supported = false;
 
 	// Vulkan subgroup limits used to validate shaders that require an exact guest
 	// wave width. A zero maximum means the physical-device query was unavailable.
@@ -198,10 +215,14 @@ struct GraphicContext
 	// Extension advertisement is diagnostic only; wave execution consumes the
 	// separate support and enabled fields in compute_wave_vulkan_state.
 	bool subgroup_size_control_supported = false;
-	// Guest memory is importable as device-addressable buffers (host pointer
-	// import, buffer device address and 64-bit shader integers).
+	// Guest memory is reachable through device-addressable buffers (buffer
+	// device address, 64-bit shader integers and a host pointer or dma-buf
+	// import for direct memory).
 	bool guest_device_address_supported = false;
-	// Device-addressable buffers can also import dma-buf descriptors.
+	VkDeviceSize min_storage_buffer_offset_alignment = 0;
+	// Device-addressable buffers can import host pointers.
+	bool guest_host_pointer_import_supported = false;
+	// Device-addressable buffers can import dma-buf descriptors.
 	bool guest_dma_buf_import_supported = false;
 	ShaderComputeWaveVulkanState compute_wave_vulkan_state {};
 
@@ -259,10 +280,15 @@ struct VulkanImageViewDescriptor
 	// Zero inherits the image usage; a view in another format of a mutable
 	// image restricts itself to the usage its format supports.
 	VkImageUsageFlags usage = 0;
+	// Minimum sampled LOD in image levels, unsigned 4.8 fixed point (the T#
+	// MIN_LOD encoding); zero leaves the view unclamped.
+	uint32_t min_lod = 0;
 };
 
 struct VulkanImage
 {
+	// Last batch of asynchronous fills that writes this image (0: none).
+	uint64_t fill_batch = 0;
 	static constexpr int VIEW_STORAGE_MIP_BASE  = 11;
 	static constexpr int VIEW_STORAGE_MIP_COUNT = 16;
 	static constexpr int VIEW_MAX               = VIEW_STORAGE_MIP_BASE + VIEW_STORAGE_MIP_COUNT;
@@ -362,16 +388,28 @@ struct VideoOutVulkanImage: public VulkanImage
 
 struct StorageTextureVulkanImage;
 
-// One layer of DepthStencilVulkanImage::slice_array.
+// One layer of a DepthSliceArray.
 struct DepthSliceArrayLayer
 {
-	// content_stamp of the slice image last copied into the layer, or the marker of a read from guest memory.
+	// content_stamp of the slice image last copied into the layer, a digest of the images whose 64 KiB blocks
+	// were last assembled into it, or the marker of a read from guest memory.
 	uint64_t stamp = 0;
 	// Guest range registered with the dirty-page tracker by the first read from guest memory (size 0 before it), and
 	// the page generation of the last read.
 	uint64_t guest_addr       = 0;
 	uint64_t guest_size       = 0;
 	uint64_t guest_generation = 0;
+};
+
+struct DepthStencilVulkanImage;
+
+// An array image that a sampled view of the memory starting at a depth image's depth plane reads, and the state
+// of each layer.
+struct DepthSliceArray
+{
+	DepthStencilVulkanImage*          image = nullptr;
+	VulkanMemory                      memory;
+	std::vector<DepthSliceArrayLayer> layers;
 };
 
 struct DepthStencilVulkanImage: public VulkanImage
@@ -388,16 +426,24 @@ struct DepthStencilVulkanImage: public VulkanImage
 	// first use and destroyed with this image.
 	StorageTextureVulkanImage* storage_plane = nullptr;
 	VulkanMemory               storage_plane_memory;
-	// Array image that a sampled view of this slice and the slices after it reads (each rendered guest slice is its
-	// own depth image), and the state of each layer. Created on first use and destroyed with this image.
-	DepthStencilVulkanImage*          slice_array = nullptr;
-	VulkanMemory                      slice_array_memory;
-	std::vector<DepthSliceArrayLayer> slice_array_layers;
+	// R8 copy of the stencil plane, for the same reason and with the same lifetime.
+	StorageTextureVulkanImage* stencil_storage_plane = nullptr;
+	VulkanMemory               stencil_storage_plane_memory;
+	// DB slice index of the last bind as a render target: the guest bytes of its depth plane XOR it into every
+	// 64 KiB block (Tile.h).
+	uint32_t depth_slice = 0;
+	// Arrays that sampled views of this slice and the memory after it read (each rendered guest slice is its own
+	// depth image), one per view extent and layer count. Created on first use and destroyed with this image.
+	std::vector<std::unique_ptr<DepthSliceArray>> slice_arrays;
 };
 
 struct TextureVulkanImage: public VulkanImage
 {
 	TextureVulkanImage(): VulkanImage(VulkanImageType::Texture) {}
+
+	// Descriptors of the sampled views created with the image, indexed by view
+	// id; a MIN_LOD-clamped variant copies one and caches it.
+	VulkanImageViewDescriptor standard_view_descriptors[VIEW_DEPTH_TEXTURE_ARRAY + 1] {};
 };
 
 struct StorageTextureVulkanImage: public VulkanImage
@@ -450,12 +496,23 @@ struct VulkanBuffer
 	// The page flags translated shaders set when they write this buffer; only
 	// storage objects, which are written back page by page, have one.
 	VulkanBuffer* write_mask = nullptr;
+	// Bound to imported guest pages (GuestDeviceAddressBindInPlace): `memory` holds no allocation.
+	bool guest_in_place = false;
+	// Where the guest object starts inside `buffer`: memory binds are coarser than guest addresses.
+	uint64_t guest_offset = 0;
 
 	[[nodiscard]] VulkanBufferDescriptorKey DescriptorKey() const { return {memory.unique_id, descriptor_range}; }
 };
 
+struct GuestInPlaceWindow
+{
+	uint64_t base = 0;
+	uint64_t size = 0;
+};
+
 struct StorageVulkanBuffer: public VulkanBuffer
 {
+	GuestInPlaceWindow    in_place_window;
 	uint64_t              guest_addr      = 0;
 	uint64_t              guest_size      = 0;
 	uint64_t              depth_meta_addr = 0;

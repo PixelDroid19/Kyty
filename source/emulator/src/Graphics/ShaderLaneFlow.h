@@ -49,6 +49,7 @@ constexpr uint8_t kExtent     = kOuter | kNotFull | kMissesQuad;
 [[nodiscard]] bool ReadsSccImplicitly(ShaderInstructionType type);
 // Every scalar ALU form defines SCC except moves, selects and the program counter.
 [[nodiscard]] bool WritesScc(ShaderInstructionType type);
+[[nodiscard]] bool MayReadVcc(ShaderInstructionType type);
 // S_MOV/S_AND/S_OR/... on lane masks: pointwise, so a mask in gives a mask out.
 [[nodiscard]] bool IsMaskAlgebra(ShaderInstructionType type);
 [[nodiscard]] bool IsSelect(ShaderInstructionType type);
@@ -59,8 +60,10 @@ constexpr uint8_t kExtent     = kOuter | kNotFull | kMissesQuad;
 // Image reads whose result depends only on this lane's address and on scalar resources: explicit
 // LOD (or none, for loads), no derivatives, no write.
 [[nodiscard]] bool IsLaneLocalImageRead(ShaderInstructionType type);
-// The address VGPRs an image load reads: its DIM's coordinates, then the level of a mip load.
-[[nodiscard]] int ImageLoadAddressCount(const ShaderInstruction& inst);
+// The address VGPRs a lane-local image read uses (RDNA2 ISA MIMG address table): the offset, z-compare or
+// derivatives its opcode adds, its DIM's coordinates, then the level of a mip load or sample_l. The decoded
+// vaddr range may name more registers; the hardware does not read them.
+[[nodiscard]] int ImageReadAddressCount(const ShaderInstruction& inst);
 [[nodiscard]] bool IsLaneExchange(ShaderInstructionType type);
 // Condition operand of a vector select or carry-in: one bit per lane, read as this lane's bit.
 [[nodiscard]] bool IsLaneBit(const ShaderInstruction& inst, int source);

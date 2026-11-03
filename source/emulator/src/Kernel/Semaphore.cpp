@@ -68,7 +68,10 @@ private:
 		~WaitCallGuard()
 		{
 			m_object->m_active_wait_calls--;
-			m_object->m_cond_var.SignalAll();
+			if (m_object->m_status == Status::Deleted && m_object->m_active_wait_calls == 0)
+			{
+				m_object->m_cond_var.SignalAll();
+			}
 		}
 
 	private:
@@ -340,7 +343,12 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 		}
 
 		m_waiting_threads.Remove(id);
-		m_cond_var.SignalAll();
+		// Only Cancel waits for waiters to leave. Waking every waiter here makes
+		// several waiters on an empty semaphore wake each other without end.
+		if (m_status == Status::Canceled && m_waiting_threads.IsEmpty())
+		{
+			m_cond_var.SignalAll();
+		}
 
 		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
 

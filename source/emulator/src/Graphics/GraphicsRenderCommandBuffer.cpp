@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/PresentationFsr3.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
@@ -55,6 +56,11 @@ namespace Kyty::Libs::Graphics {
 // CommandBuffer methods + TransientBufferPool
 
 namespace {
+
+// One transport set holds the five host transport buffers; a recording needs
+// one set per draw tile, and tiles are bounded per draw.
+constexpr uint32_t kTransportBindingsMax = 5;
+constexpr uint32_t kTransportSetsMax     = 1024;
 
 VulkanSubmitAttemptTrail g_submit_fault_trail;
 
@@ -472,6 +478,7 @@ std::string GraphicsSkippedGeStateJson(const GraphicsSkippedGeState& s)
 		       ",\"known\":" + (raw.known ? "true" : "false") + '}';
 	};
 	std::string report = "{\"stages\":" + std::to_string(s.stages) +
+	                     ",\"input_primitive\":" + std::to_string(s.input_primitive) +
 	                     ",\"raw_registers\":{\"stages\":" + raw_register(s.stages_raw) +
 	                     ",\"ge_control\":" + raw_register(s.ge_control_raw) +
 	                     ",\"ge_user_vgpr_en\":" + raw_register(s.ge_user_vgpr_raw) +
@@ -635,6 +642,7 @@ struct SkippedProgramCensusEntry
 	uint64_t es_program      = 0;
 	uint64_t gs_back_program = 0;
 	uint32_t stages          = 0;
+	uint32_t input_primitive = 0;
 	uint32_t max_vertex_out  = 0;
 	uint32_t output_primitive = 0;
 	uint32_t primitive_group = 0;
@@ -656,7 +664,8 @@ void CountSkippedProgram(const GraphicsSkippedGeState& state)
 	{
 		auto& entry = g_skipped_census[i];
 		if (entry.gs_checksum == state.gs_checksum && entry.es_program == state.es_program &&
-		    entry.gs_back_program == state.gs_back_program && entry.stages == state.stages)
+		    entry.gs_back_program == state.gs_back_program && entry.stages == state.stages &&
+		    entry.input_primitive == state.input_primitive)
 		{
 			++entry.draws;
 			return;
@@ -668,8 +677,8 @@ void CountSkippedProgram(const GraphicsSkippedGeState& state)
 		return;
 	}
 	g_skipped_census[g_skipped_census_size++] = {state.gs_checksum, state.es_program, state.gs_back_program, state.stages,
-	                                              state.max_vertex_out, state.output_primitive, state.primitive_group_size,
-	                                              state.vertex_group_size, 1u};
+	                                              state.input_primitive, state.max_vertex_out, state.output_primitive,
+	                                              state.primitive_group_size, state.vertex_group_size, 1u};
 }
 
 // Opt-in KYTY_SKIPPED_DRAW_REPORT=<prefix>: <prefix>-skipped-census.json is
@@ -686,7 +695,7 @@ void WriteSkippedProgramCensus()
 	{
 		return;
 	}
-	std::string report = "{\"schema\":\"guest_draw_skipped_census\",\"version\":1,\"programs\":[";
+	std::string report = "{\"schema\":\"guest_draw_skipped_census\",\"version\":2,\"programs\":[";
 	{
 		std::lock_guard<std::mutex> lock(g_skipped_census_mutex);
 		for (size_t i = 0; i < g_skipped_census_size; ++i)
@@ -695,10 +704,11 @@ void WriteSkippedProgramCensus()
 			char        row[384] {};
 			std::snprintf(row, sizeof(row),
 			              "%s{\"gs_checksum\":\"0x%016llx\",\"es\":\"0x%llx\",\"gs_back\":\"0x%llx\",\"stages\":%u,"
-			              "\"max_vertex_out\":%u,\"output_primitive\":%u,\"primitive_group\":%u,\"vertex_group\":%u,\"draws\":%llu}",
+			              "\"input_primitive\":%u,\"max_vertex_out\":%u,\"output_primitive\":%u,\"primitive_group\":%u,"
+			              "\"vertex_group\":%u,\"draws\":%llu}",
 			              i == 0 ? "" : ",", static_cast<unsigned long long>(e.gs_checksum), static_cast<unsigned long long>(e.es_program),
-			              static_cast<unsigned long long>(e.gs_back_program), e.stages, e.max_vertex_out, e.output_primitive,
-			              e.primitive_group, e.vertex_group, static_cast<unsigned long long>(e.draws));
+			              static_cast<unsigned long long>(e.gs_back_program), e.stages, e.input_primitive, e.max_vertex_out,
+			              e.output_primitive, e.primitive_group, e.vertex_group, static_cast<unsigned long long>(e.draws));
 			report += row;
 		}
 		report += "],\"overflow\":" + std::to_string(g_skipped_census_overflow) + "}\n";
@@ -847,8 +857,24 @@ struct TransientPoolUsageOccupancy
 	uint32_t largest_duplicate_group = 0;
 };
 
-static void ReportCriticalTransientPoolCapacityReject(uint64_t requested_size, uint32_t usage, uint32_t usage_entries,
-                                                      uint32_t total_entries, uint64_t total_bytes,
+// The 1-based number of the next capacity report, or 0 once the process's eight are spent.
+static uint32_t TakeTransientPoolCapacityReportNumber()
+{
+	static std::atomic<uint32_t> reports_remaining {8u};
+	uint32_t remaining = reports_remaining.load(std::memory_order_relaxed);
+	while (remaining != 0u)
+	{
+		if (reports_remaining.compare_exchange_weak(remaining, remaining - 1u, std::memory_order_relaxed,
+		                                          std::memory_order_relaxed))
+		{
+			return 9u - remaining;
+		}
+	}
+	return 0u;
+}
+
+static void ReportCriticalTransientPoolCapacityReject(uint32_t report_number, uint64_t requested_size, uint32_t usage,
+                                                      uint32_t usage_entries, uint32_t total_entries, uint64_t total_bytes,
                                                       const TransientPoolUsageOccupancy& occupancy)
 {
 	const auto critical_class = GpuMemoryTransientBufferAllocationClass::Critical;
@@ -858,23 +884,6 @@ static void ReportCriticalTransientPoolCapacityReject(uint64_t requested_size, u
 	const bool byte_cap_failed =
 	    !GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, total_bytes, requested_size, critical_class);
 	const uint64_t max_bytes = kGpuMemoryTransientBufferPoolMaxBytes;
-	static std::atomic<uint32_t> reports_remaining {8u};
-	uint32_t report_number = 0u;
-	uint32_t remaining = reports_remaining.load(std::memory_order_relaxed);
-	while (remaining != 0u)
-	{
-		const uint32_t event_number = 9u - remaining;
-		if (reports_remaining.compare_exchange_weak(remaining, remaining - 1u, std::memory_order_relaxed,
-		                                          std::memory_order_relaxed))
-		{
-			report_number = event_number;
-			break;
-		}
-	}
-	if (report_number == 0u)
-	{
-		return;
-	}
 
 	std::fprintf(stderr,
 	             "KYTY_TRANSIENT_POOL_CAPACITY_REJECT event=%" PRIu32 " class=critical(%u) requested=%" PRIu64
@@ -917,6 +926,12 @@ struct TransientBufferEntry
 	uint64_t tracked_generation = 0;
 	// Probes the tracked bytes served without a comparison.
 	uint32_t tracked_reuses = 0;
+	// Smallest and largest of the first `index_range_count` indexes of
+	// `index_range_width` bytes in the snapshot; width 0 until computed for these bytes.
+	uint32_t index_range_width = 0;
+	uint32_t index_range_count = 0;
+	uint32_t index_min         = 0;
+	uint32_t index_max         = 0;
 	// Creation order; the free index hands out the earliest-created fitting entry.
 	uint64_t creation = 0;
 	// Recordings of the shared snapshot pool that bind this entry, and the latest of them.
@@ -977,6 +992,20 @@ public:
 	                     GpuMemoryTransientBufferAllocationClass allocation_class)
 	{
 		EXIT_IF(ctx == nullptr || data == nullptr || size == 0u || usage == 0u);
+		// Shaders never write a uniform buffer, and a critical entry is not rewritten
+		// before the next Reset, so draws that spill the same user data share one
+		// entry (a hub pass spilled 16,234 constant blocks into one recording,
+		// 10,824 of them identical, and filled the per-usage entry ceiling).
+		const bool     shares_contents = usage == VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT &&
+		                             allocation_class == GpuMemoryTransientBufferAllocationClass::Critical;
+		const uint64_t contents_hash   = shares_contents ? HashContents(data, size) : 0u;
+		if (shares_contents)
+		{
+			if (auto* shared = FindSharedContents(contents_hash, data, size); shared != nullptr)
+			{
+				return &shared->buffer;
+			}
+		}
 		auto* entry = Acquire(ctx, size, usage, allocation_class);
 		if (entry == nullptr)
 		{
@@ -986,9 +1015,14 @@ public:
 		const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
 		UnindexSnapshot(entry);
 		entry->snapshot_valid = false;
+		entry->index_range_width = 0;
 		entry->nonzero_end    = std::max(entry->nonzero_end, size);
 		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
 		Commit(entry, size, true);
+		if (shares_contents)
+		{
+			m_shared_contents.emplace(contents_hash, entry);
+		}
 		return &entry->buffer;
 	}
 
@@ -1174,8 +1208,9 @@ public:
 		// A refused capture may already have copied part of the range, so the
 		// entry's previous snapshot is dropped first.
 		UnindexSnapshot(entry);
-		entry->snapshot_valid = false;
-		entry->nonzero_end    = std::max(entry->nonzero_end, capture_end);
+		entry->snapshot_valid    = false;
+		entry->index_range_width = 0;
+		entry->nonzero_end       = std::max(entry->nonzero_end, capture_end);
 		if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(vaddr + capture_begin, capture_end - capture_begin,
 		                                            static_cast<uint8_t*>(entry->mapped) + capture_begin, &atomic_validation_ns, &copy_ns,
 		                                            admission))
@@ -1224,6 +1259,34 @@ public:
 		}
 
 		std::memcpy(dst, static_cast<const uint8_t*>(entry->mapped) + offset, static_cast<size_t>(size));
+		return true;
+	}
+
+	bool SnapshotIndexRange(const VulkanBuffer* snapshot, uint64_t expected_vaddr, uint32_t element_size, uint32_t count,
+	                        uint32_t* minimum, uint32_t* maximum)
+	{
+		EXIT_IF(minimum == nullptr || maximum == nullptr || (element_size != 2u && element_size != 4u));
+		const auto found = m_by_buffer.find(snapshot);
+		if (found == m_by_buffer.end())
+		{
+			return false;
+		}
+		auto* entry = found->second;
+		if (!entry->used || !entry->snapshot_valid || entry->mapped == nullptr || entry->snapshot_vaddr != expected_vaddr ||
+		    entry->snapshot_begin != 0u || static_cast<uint64_t>(count) * element_size > entry->snapshot_size)
+		{
+			return false;
+		}
+		if (entry->index_range_width != element_size || entry->index_range_count != count)
+		{
+			const auto range         = GraphicsRenderIndexValueRange(entry->mapped, count, element_size);
+			entry->index_range_width = element_size;
+			entry->index_range_count = count;
+			entry->index_min         = range.first;
+			entry->index_max         = range.second;
+		}
+		*minimum = entry->index_min;
+		*maximum = entry->index_max;
 		return true;
 	}
 
@@ -1286,6 +1349,7 @@ public:
 	void Reset()
 	{
 		m_zero_carriers.clear();
+		m_shared_contents.clear();
 		for (auto* entry: m_entries)
 		{
 			entry->used = false;
@@ -1317,6 +1381,7 @@ public:
 		m_released = {};
 		m_usage_entries.clear();
 		m_zero_carriers.clear();
+		m_shared_contents.clear();
 		m_by_buffer.clear();
 		m_total_bytes = 0;
 	}
@@ -1565,10 +1630,15 @@ private:
 		{
 			return entry;
 		}
+		// The occupancy walk reads every entry, so only the reports actually printed pay for it.
 		if (allocation_class == GpuMemoryTransientBufferAllocationClass::Critical)
 		{
-			ReportCriticalTransientPoolCapacityReject(size, usage, m_usage_entries[usage], static_cast<uint32_t>(m_entries.size()),
-			                                          m_total_bytes, MeasureOccupancy(usage));
+			if (const uint32_t report_number = TakeTransientPoolCapacityReportNumber(); report_number != 0u)
+			{
+				ReportCriticalTransientPoolCapacityReject(report_number, size, usage, m_usage_entries[usage],
+				                                          static_cast<uint32_t>(m_entries.size()), m_total_bytes,
+				                                          MeasureOccupancy(usage));
+			}
 		}
 		return nullptr;
 	}
@@ -1692,6 +1762,38 @@ private:
 		IndexFree(entry);
 		m_total_bytes += size;
 		return entry;
+	}
+
+	static uint64_t HashContents(const void* data, uint64_t size)
+	{
+		const auto* bytes = static_cast<const uint8_t*>(data);
+		uint64_t    hash  = 1469598103934665603ull ^ size;
+		uint64_t    i     = 0;
+		for (; i + 8u <= size; i += 8u)
+		{
+			uint64_t word = 0;
+			std::memcpy(&word, bytes + i, sizeof(word));
+			hash = (hash ^ word) * 1099511628211ull;
+		}
+		for (; i < size; i++)
+		{
+			hash = (hash ^ bytes[i]) * 1099511628211ull;
+		}
+		return hash;
+	}
+
+	Entry* FindSharedContents(uint64_t hash, const void* data, uint64_t size) const
+	{
+		const auto [begin, end] = m_shared_contents.equal_range(hash);
+		for (auto it = begin; it != end; ++it)
+		{
+			Entry* entry = it->second;
+			if (entry->buffer.descriptor_range == size && std::memcmp(entry->mapped, data, static_cast<size_t>(size)) == 0)
+			{
+				return entry;
+			}
+		}
+		return nullptr;
 	}
 
 	// Refusal diagnostics only: groups used entries of one usage by size and committed bytes.
@@ -1878,6 +1980,8 @@ private:
 	std::unordered_map<uint32_t, uint32_t>                                        m_usage_entries;
 	// The zero carrier each usage holds until the next Reset.
 	std::unordered_map<uint32_t, Entry*>              m_zero_carriers;
+	// Uniform entries committed since the last Reset, by the hash of their bytes.
+	std::unordered_multimap<uint64_t, Entry*>         m_shared_contents;
 	std::unordered_map<const VulkanBuffer*, Entry*>   m_by_buffer;
 	uint64_t            m_total_bytes = 0;
 	uint64_t                                          m_lease_generation = 0;
@@ -1999,11 +2103,10 @@ void CommandBuffer::Free()
 		delete m_transient_copy_buffers;
 		m_transient_copy_buffers = nullptr;
 	}
-	if (m_transient_device_buffers != nullptr)
+	if (m_transport_descriptor_pool != VK_NULL_HANDLE)
 	{
-		m_transient_device_buffers->Destroy(g_render_ctx->GetGraphicCtx());
-		delete m_transient_device_buffers;
-		m_transient_device_buffers = nullptr;
+		vkDestroyDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, nullptr);
+		m_transport_descriptor_pool = VK_NULL_HANDLE;
 	}
 	DestroyRecordingUploads();
 
@@ -2120,11 +2223,14 @@ void CommandBuffer::Begin()
 	{
 		m_transient_copy_buffers->Reset();
 	}
-	if (m_transient_device_buffers != nullptr)
+	if (m_transport_descriptor_pool != VK_NULL_HANDLE)
 	{
-		m_transient_device_buffers->Reset();
+		vkResetDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, 0);
 	}
 	DestroyRecordingUploads();
+	m_device_awaited.clear();
+	m_device_wait_semaphores.clear();
+	m_device_wait_values.clear();
 
 	auto* buffer = m_pool->buffers[m_index];
 
@@ -2195,6 +2301,18 @@ bool CommandBuffer::ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buff
 	return shared->pool.ReadSnapshot(storage_buffer, expected_vaddr, offset, size, dst);
 }
 
+bool CommandBuffer::TransientSnapshotIndexRange(const VulkanBuffer* snapshot, uint64_t expected_vaddr, uint32_t element_size, uint32_t count,
+                                                uint32_t* minimum, uint32_t* maximum)
+{
+	if (m_snapshot_leases == nullptr)
+	{
+		return false;
+	}
+	auto*                       shared = m_pool->snapshots;
+	std::lock_guard<std::mutex> lock(shared->mutex);
+	return shared->pool.SnapshotIndexRange(snapshot, expected_vaddr, element_size, count, minimum, maximum);
+}
+
 VulkanBuffer* CommandBuffer::AllocateTransientScratchBuffer(uint64_t size, uint32_t usage)
 {
 	EXIT_IF(IsInvalid());
@@ -2216,14 +2334,89 @@ VulkanBuffer* CommandBuffer::AllocateTransientCopyBuffer(uint64_t size)
 	                                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
 }
 
-VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage)
+VulkanBuffer* CommandBuffer::TransportStorage(uint64_t size, uint32_t usage)
 {
 	EXIT_IF(IsInvalid());
-	if (m_transient_device_buffers == nullptr)
+	EXIT_IF(size == 0u);
+	Core::LockGuard lock(m_pool->mutex);
+	if (m_pool->transport_storage == nullptr)
 	{
-		m_transient_device_buffers = new TransientBufferPool;
+		auto* storage            = new VulkanBuffer;
+		storage->usage           = usage;
+		storage->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		VulkanCreateBuffer(g_render_ctx->GetGraphicCtx(), size, storage);
+		storage->descriptor_range = size;
+		m_pool->transport_storage = storage;
 	}
-	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true);
+	auto* storage = m_pool->transport_storage;
+	EXIT_IF(storage->usage != usage);
+	return size <= storage->descriptor_range ? storage : nullptr;
+}
+
+// Shared like the transport storage: each geometry pass orders its fill after
+// the earlier pulls of the queue. Capacity grows by powers of two, so the
+// replaced buffers kept until the pool is destroyed stay below the current one.
+VulkanBuffer* CommandBuffer::GeometryOutput(uint64_t size)
+{
+	EXIT_IF(IsInvalid());
+	EXIT_IF(size == 0u);
+	constexpr uint64_t kMinBytes = 16u * 1024u * 1024u;
+	constexpr uint64_t kMaxBytes = 1024u * 1024u * 1024u;
+	if (size > kMaxBytes)
+	{
+		return nullptr;
+	}
+	Core::LockGuard lock(m_pool->mutex);
+	auto*&          output = m_pool->geometry_output;
+	if (output != nullptr && size <= output->descriptor_range)
+	{
+		return output;
+	}
+	uint64_t capacity = kMinBytes;
+	while (capacity < size)
+	{
+		capacity *= 2u;
+	}
+	if (output != nullptr)
+	{
+		m_pool->retired_geometry_outputs.push_back(output);
+	}
+	output                  = new VulkanBuffer;
+	output->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	output->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	VulkanCreateBuffer(g_render_ctx->GetGraphicCtx(), capacity, output);
+	output->descriptor_range = capacity;
+	return output;
+}
+
+VkDescriptorSet CommandBuffer::AllocateTransportDescriptorSet(VkDescriptorSetLayout layout)
+{
+	EXIT_IF(IsInvalid());
+	EXIT_IF(layout == VK_NULL_HANDLE);
+	if (m_transport_descriptor_pool == VK_NULL_HANDLE)
+	{
+		VkDescriptorPoolSize size {};
+		size.type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		size.descriptorCount = kTransportSetsMax * kTransportBindingsMax;
+		VkDescriptorPoolCreateInfo info {};
+		info.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		info.maxSets       = kTransportSetsMax;
+		info.poolSizeCount = 1;
+		info.pPoolSizes    = &size;
+		const auto result  = vkCreateDescriptorPool(g_render_ctx->GetGraphicCtx()->device, &info, nullptr, &m_transport_descriptor_pool);
+		if (result != VK_SUCCESS)
+		{
+			m_transport_descriptor_pool = VK_NULL_HANDLE;
+			return VK_NULL_HANDLE;
+		}
+	}
+	VkDescriptorSetAllocateInfo info {};
+	info.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	info.descriptorPool     = m_transport_descriptor_pool;
+	info.descriptorSetCount = 1;
+	info.pSetLayouts        = &layout;
+	VkDescriptorSet set     = VK_NULL_HANDLE;
+	return vkAllocateDescriptorSets(g_render_ctx->GetGraphicCtx()->device, &info, &set) == VK_SUCCESS ? set : VK_NULL_HANDLE;
 }
 
 VulkanBuffer* CommandBuffer::UploadRecordingBuffer(const void* data, uint64_t size, uint32_t usage)
@@ -2264,6 +2457,15 @@ void CommandBuffer::DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth)
 	}
 }
 
+void CommandBuffer::DeferStencilPlaneStoreBack(DepthStencilVulkanImage* depth)
+{
+	EXIT_IF(depth == nullptr || depth->stencil_storage_plane == nullptr);
+	if (std::find(m_stencil_plane_store_backs.begin(), m_stencil_plane_store_backs.end(), depth) == m_stencil_plane_store_backs.end())
+	{
+		m_stencil_plane_store_backs.push_back(depth);
+	}
+}
+
 void CommandBuffer::StoreBackDepthPlanes()
 {
 	for (auto* depth: m_depth_plane_store_backs)
@@ -2276,6 +2478,16 @@ void CommandBuffer::StoreBackDepthPlanes()
 		depth->content_stamp = VulkanImageNextStamp();
 	}
 	m_depth_plane_store_backs.clear();
+	for (auto* depth: m_stencil_plane_store_backs)
+	{
+		if (!UtilCopyStencilBits(this, depth->stencil_storage_plane, depth, static_cast<uint64_t>(depth->layout)))
+		{
+			EXIT("stencil storage plane store-back failed: extent=%ux%u format=%u\n", depth->extent.width, depth->extent.height,
+			     static_cast<uint32_t>(depth->format));
+		}
+		depth->content_stamp = VulkanImageNextStamp();
+	}
+	m_stencil_plane_store_backs.clear();
 }
 
 void CommandBuffer::End()
@@ -2355,7 +2567,63 @@ struct SubmitSignals
 	VkSemaphore                   semaphores[2] {};
 	uint64_t                      values[2] {};
 	VkTimelineSemaphoreSubmitInfo timeline {};
+	std::vector<VkPipelineStageFlags> wait_stages;
 };
+
+void CommandBuffer::AwaitSubmissionOnDevice(SubmissionId submission, VkSemaphore timeline, uint64_t value)
+{
+	EXIT_IF(timeline == nullptr || value == 0);
+	for (size_t i = 0; i < m_device_awaited.size(); i++)
+	{
+		if (m_device_awaited[i].queue == submission.queue)
+		{
+			m_device_awaited[i].sequence = std::max(m_device_awaited[i].sequence, submission.sequence);
+			m_device_wait_values[i]      = std::max(m_device_wait_values[i], value);
+			return;
+		}
+	}
+	m_device_awaited.push_back(submission);
+	m_device_wait_semaphores.push_back(timeline);
+	m_device_wait_values.push_back(value);
+}
+
+void CommandBuffer::AwaitImageFills()
+{
+	if (m_image_fill_batch)
+	{
+		return;
+	}
+	const uint64_t value = UtilFlushImageFills();
+	if (value != 0)
+	{
+		AwaitSubmissionOnDevice(SubmissionId {GpuQueueId {GraphicContext::QUEUE_UTIL}, value},
+		                        g_render_ctx->GetGraphicCtx()->queues[GraphicContext::QUEUE_UTIL].timeline, value);
+	}
+}
+
+bool CommandBuffer::AwaitsSubmissionOnDevice(SubmissionId submission) const
+{
+	return std::any_of(m_device_awaited.begin(), m_device_awaited.end(), [&](const SubmissionId& awaited)
+	                   { return awaited.queue == submission.queue && awaited.sequence >= submission.sequence; });
+}
+
+// The submission waits, before any of its commands, for the timeline values of the submissions it awaits.
+static void AttachSubmitWaits(const std::vector<VkSemaphore>& semaphores, const std::vector<uint64_t>& values, SubmitSignals* signals,
+                              VkSubmitInfo* submit_info)
+{
+	if (semaphores.empty())
+	{
+		return;
+	}
+	signals->wait_stages.assign(semaphores.size(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+	signals->timeline.sType                   = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+	signals->timeline.waitSemaphoreValueCount = static_cast<uint32_t>(values.size());
+	signals->timeline.pWaitSemaphoreValues    = values.data();
+	submit_info->pNext                        = &signals->timeline;
+	submit_info->waitSemaphoreCount           = static_cast<uint32_t>(semaphores.size());
+	submit_info->pWaitSemaphores              = semaphores.data();
+	submit_info->pWaitDstStageMask            = signals->wait_stages.data();
+}
 
 // Call with the queue lock held: timeline values rise in submission order.
 static void AttachSubmitSignals(VulkanQueueInfo* queue, VkSemaphore binary, bool timeline, SubmitSignals* signals,
@@ -2399,6 +2667,7 @@ bool CommandBuffer::GetTimeline(VkDevice* device, VkSemaphore* semaphore, uint64
 void CommandBuffer::Execute()
 {
 	EXIT_IF(IsInvalid());
+	AwaitImageFills();
 
 	auto* buffer = m_pool->buffers[m_index];
 	auto* fence  = m_pool->fences[m_index];
@@ -2432,7 +2701,8 @@ void CommandBuffer::Execute()
 	    {
 		    EXIT_IF(queue.mutex == nullptr);
 		    Core::LockGuard queue_lock(*queue.mutex);
-		    AttachSubmitSignals(&queue, nullptr, m_has_submission, &signals, &submit_info, &m_timeline_value);
+		    AttachSubmitSignals(&queue, nullptr, m_has_submission || m_image_fill_batch, &signals, &submit_info, &m_timeline_value);
+		    AttachSubmitWaits(m_device_wait_semaphores, m_device_wait_values, &signals, &submit_info);
 		    MarkRecentDrawsSubmitCalled();
 		    return VulkanTraceSubmitAttempt(trail, attempt, [&] { return vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence); },
 		                                    &observed);
@@ -2455,6 +2725,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 {
 	EXIT_IF(IsInvalid());
 	EXIT_IF(signal_semaphore == nullptr);
+	AwaitImageFills();
 
 	auto* buffer = m_pool->buffers[m_index];
 	auto* fence  = m_pool->fences[m_index];
@@ -2489,6 +2760,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 		    EXIT_IF(queue.mutex == nullptr);
 		    Core::LockGuard queue_lock(*queue.mutex);
 		    AttachSubmitSignals(&queue, signal_semaphore, m_has_submission, &signals, &submit_info, &m_timeline_value);
+		    AttachSubmitWaits(m_device_wait_semaphores, m_device_wait_values, &signals, &submit_info);
 		    MarkRecentDrawsSubmitCalled();
 		    return VulkanTraceSubmitAttempt(trail, attempt, [&] { return vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence); },
 		                                    &observed);
@@ -2543,6 +2815,7 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 		    DebugStatsRecordSubmissionComplete();
 		    MarkRecentDrawsFenceCompleted();
 		    g_render_ctx->GetVertexClipProbeRenderer()->Complete(this);
+		    GraphicsRenderCheckDispatchIndirectLimits();
 		    const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
 		    if (fence_reset_result != VK_SUCCESS)
 		    {
@@ -2574,6 +2847,7 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 	return true;
 }
 
+
 void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_buffer)
 {
 	EXIT_IF(IsInvalid());
@@ -2592,6 +2866,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 			    DebugStatsRecordSubmissionComplete();
 			    MarkRecentDrawsFenceCompleted();
 			    g_render_ctx->GetVertexClipProbeRenderer()->Complete(this);
+			    GraphicsRenderCheckDispatchIndirectLimits();
 			    if (drain_label_callbacks)
 			    {
 				    LabelDrainCompleted();
@@ -2669,6 +2944,10 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	{
 		DebugStatsRecordRenderPassContinuation();
 		return;
+	}
+	if (Config::GetPresentationFilter() == Config::PresentationFilter::Fsr3)
+	{
+		PresentationFsr3NoteRenderPass(*color, *depth);
 	}
 	CloseRenderPass();
 

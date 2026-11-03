@@ -40,6 +40,8 @@ struct ShaderFragmentComputeInfo
 	uint32_t                     descriptor_set     = 1;
 	uint32_t                     input_binding      = 0;
 	uint32_t                     output_binding     = 1;
+	// Optional transport control buffer; word two is the active wave count.
+	uint32_t                     control_binding    = UINT32_MAX;
 	uint32_t                     initial_vgpr_count = 0;
 	uint32_t                     user_sgpr_count    = UINT32_MAX;
 	ShaderFragmentParameterState parameter_state    = ShaderFragmentParameterState::Captured;
@@ -68,7 +70,9 @@ enum class ShaderGeometryInputTopology
 // Exports and the allocation request land in an output buffer addressed by
 // the geometry push block (ShaderBindResources::geometry_offset_dw):
 // row 0 = {output_lo, output_hi, primitives per instance, groups per instance},
-// row 1 = {first vertex, first instance, 0, 0}.
+// row 1 = {first vertex, first instance, guest index address lo, hi}.
+// An indexed draw resolves each slot vertex through the guest index buffer at
+// that address; a non-indexed draw numbers its vertices from the first vertex.
 // Output group g holds one header word (the GS_ALLOC_REQ payload), one
 // primitive word per subgroup thread, then one record per thread: pos0, pos1, params.
 struct ShaderGeometryComputeInfo
@@ -79,6 +83,12 @@ struct ShaderGeometryComputeInfo
 	// Guest LDS allocation of the merged stage, in dwords.
 	uint32_t                    lds_dwords           = 0;
 	uint32_t                    waves                = 1;
+	// The draw is indexed: slot vertices come from the guest index buffer
+	// (address in row 1) whose elements are 32-bit unless index_format says 16.
+	bool                        indexed              = false;
+	uint32_t                    index_format         = 0;
+	// Host subgroup width of each guest wave's parts (ShaderSplitWavePartLanes).
+	uint32_t                    part_lanes           = 32;
 
 	static constexpr uint32_t kLanes                    = 64;
 	// An NGG subgroup holds at most 256 threads.
@@ -97,6 +107,11 @@ struct ShaderGeometryComputeInfo
 uint32_t SpirvResolvePixelParameterCount(const ShaderCode& code, uint32_t register_count);
 String8 SpirvGenerateSource(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info, const ShaderPixelInputInfo* ps_input_info,
                             const ShaderComputeInputInfo* cs_input_info);
+// Emits a guest pixel program as a split Wave64 compute module over the
+// captured per-lane records described by ShaderFragmentComputeInfo.
+String8 SpirvGenerateFragmentComputeSource(const ShaderCode& code, const ShaderPixelInputInfo& ps_input_info,
+                                           const ShaderComputeInputInfo& cs_input_info,
+                                           const ShaderFragmentComputeInfo& fragment_compute_info);
 // Highest vertex parameter the program exports, or the declared count when larger.
 uint32_t SpirvResolveVertexParameterCount(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info);
 // `code` is the linked ES+GS program; `vs_input_info` its fused-front input with

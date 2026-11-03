@@ -6,6 +6,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
+#include "Emulator/Graphics/Utils.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -68,12 +69,17 @@ public:
 // be either.
 [[nodiscard]] bool StorageTextureSharesDepthTexels(const uint64_t* storage, const uint64_t* depth, bool next_gen);
 // A storage view that re-describes memory of another view with a different
-// format, or the exact range with a different extent: a recycled allocation
-// whose texels mean nothing in the other layout.
-[[nodiscard]] bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming, bool exact_range);
-// The same over a render target: a different texel size, or the exact range
-// with a different extent.
-[[nodiscard]] bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool exact_range);
+// format or tile mode, or (compare_layout) with a different extent or pitch: a
+// recycled allocation whose texels mean nothing in the other layout. Callers
+// compare the layout for an equal or crossing range; a contained range may be
+// a sub-view of the same image.
+[[nodiscard]] bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming, bool compare_layout);
+// A one-level view of exactly the mip tail block of a 64 KiB-swizzled storage chain with the same element format.
+[[nodiscard]] bool StorageTextureViewsMipTail(const uint64_t* chain, uint64_t chain_address, const uint64_t* view, uint64_t view_address,
+                                              uint64_t view_size);
+// The same over a render target: a different texel size, a linear view of a
+// tiled target (or the reverse), or (compare_layout) a different extent or pitch.
+[[nodiscard]] bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool compare_layout);
 // The same over a Gen5 depth target: a storage view outside the depth layout (mode 24)
 // orders the texels differently, so it never reads what the depth target wrote.
 [[nodiscard]] bool StorageTextureRedescribesDepthTarget(const uint64_t* storage, bool next_gen);
@@ -83,6 +89,10 @@ public:
 // render-target (27) and Standard64KB (9) tilings follow it. Tile 9 is a different layout on Gen4, so
 // the colour case needs `gen5`. Every other layout keeps the single-level atlas.
 [[nodiscard]] bool StorageTextureUsesMipBacking(const uint64_t* params, bool gen5);
+// The guest platform decides the Gen5 layout contracts. Object identity is
+// evaluated before a platform is chosen (tools, tests): an unknown platform is
+// not Gen5.
+[[nodiscard]] bool StorageTextureGuestIsGen5();
 // Levels of the host image behind a mip backing (0 when there is none). A depth chain has exactly the
 // descriptor's levels. A colour chain carries every level its extent allows: captured descriptors
 // address levels past MAX_MIP (a downsample loop stores to level 6 of a MAX_MIP = 5 resource, into the
@@ -148,9 +158,19 @@ struct StorageTextureRawRenderSource
 	                                                    uint64_t address, uint64_t size);
 [[nodiscard]] bool StorageTextureCanCompositeRawRenderDestination(const uint64_t* storage_params,
 	                                                               uint64_t address, uint64_t size);
+// A linear (tile 0) view with several levels is one stacked image: guest
+// memory stores the levels as a GFX10 linear mip chain and the host image
+// keeps them as row rectangles at per-level atlas offsets. Plan the upload
+// regions and the stacked extent from the descriptor alone.
+[[nodiscard]] bool StorageTexturePlanLinearMipUpload(const uint64_t* storage_params, uint64_t size, bool mip_backing,
+	                                                  Vector<BufferImageCopy>* regions, uint32_t* image_width,
+	                                                  uint32_t* image_height, uint32_t* bytes_per_element);
+[[nodiscard]] bool StorageTextureCanCompositeLinearMipRawRenderDestination(const uint64_t* storage_params,
+	                                                                        uint64_t address, uint64_t size);
 [[nodiscard]] bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer* buffer,
 	                                                         const Vector<StorageTextureRawRenderSource>& sources,
-	                                                         VulkanImage* destination, uint64_t address,
+	                                                         VulkanImage* destination,
+	                                                         const uint64_t* destination_params, uint64_t address,
 	                                                         uint64_t size);
 
 struct StorageTextureArrayViewRange

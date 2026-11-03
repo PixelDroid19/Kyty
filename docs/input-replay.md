@@ -26,11 +26,13 @@ format and on the same clock (seconds from the first pad read), one line per
 completed press. A stick is written as its full-travel direction while it is
 past half deflection, mouse look included, so slow camera turns are not
 recorded and recorded ones replay at full speed; a press shorter than a poll is kept for 50 ms so a
-replay delivers it to a read. Script and agent input are not recorded. The
-file is written only when the user ends the session by closing the window or
-with the host quit key; a session that ends in a fault or a signal, or that
-exceeds the 4096-entry route limit, writes nothing (an earlier file at that
-path is left as it was). A press still held at the end is not written. A
+replay delivers it to a read. Script and agent input are not recorded. Each
+completed press is appended to `<file>.partial` at once, so a session that ends
+in a fault or a signal keeps its presses there; the route moves to the file
+only when the user ends the session by closing the window or with the host
+quit key. A session that exceeds the 4096-entry route limit writes nothing (an
+earlier file at that path is left as it was). A press still held at the end is
+not written. A
 replay follows wall-clock time, so loading-time differences
 between the recorded and the replayed run shift the guest state the inputs
 meet; record with the shader caches the replay will use.

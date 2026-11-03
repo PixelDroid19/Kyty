@@ -36,6 +36,8 @@ struct ShaderComputeWaveRequest
 	uint32_t             dispatch_mode;
 	uint32_t             lds_dwords;
 	ShaderGuestLaneOrder lane_order;
+	// VGPRs the guest program allocates per lane.
+	uint32_t vgprs;
 };
 
 struct ShaderComputeWaveCapabilities
@@ -70,11 +72,28 @@ struct ShaderComputeWaveLayout
 // wave may be partial and the padding lanes start with EXEC clear.
 [[nodiscard]] bool ShaderNativeWave32PhysicalLocal(const uint32_t (&guest_local)[3], uint32_t (&physical_local)[3]) noexcept;
 
-// Workgroup dwords each split guest wave reserves to exchange wave-wide values between its two host subgroups.
-constexpr uint32_t kShaderSplitWaveExchangeDwords = 6u;
+// Workgroup dwords each split guest wave reserves to exchange wave-wide values
+// between its host subgroups of <part_lanes> lanes: a sequence and two words
+// per subgroup, and two banks of one dword per guest lane for the lane
+// exchanges that cross them.
+[[nodiscard]] constexpr uint32_t ShaderSplitWaveExchangeDwords(uint32_t part_lanes) noexcept
+{
+	return 64u / part_lanes * 3u + 128u;
+}
 
-// Split wave64 runs each guest wave as two whole 32-lane host subgroups (SubgroupId 2w and 2w+1);
-// the workgroup keeps guest lane order, padded to whole guest waves.
+// Host subgroup width of each split guest wave's parts: 16 lanes where the host
+// allows exact width 16, else 32, and 8 where the host goes that low and the
+// guest allocates more than 64 <vgprs>. At width 16 each guest value
+// takes half the host registers; on Intel a large kernel at width 32 spends
+// minutes in register allocation and spills, at width 16 seconds.
+[[nodiscard]] uint32_t ShaderSplitWavePartLanes(const ShaderComputeWaveCapabilities& capabilities, uint32_t vgprs) noexcept;
+
+// Split wave64 runs each guest wave as whole host subgroups of 16 lanes where
+// the host allows exact width 16, of 8 lanes when the host also allows width 8
+// and the guest allocates more VGPRs than a 16-lane part holds, else of 32
+// lanes (SubgroupId P*w .. P*w+P-1 with P = 64 / lanes); the workgroup keeps
+// guest lane order, padded to whole guest waves. Wave32 takes this layout only
+// with more than 64 <vgprs> and exact host width 16: two parts per guest wave.
 [[nodiscard]] ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComputeWaveRequest&      request,
                                                                               const ShaderComputeWaveCapabilities& capabilities,
                                                                               ShaderComputeWaveLayout*             layout);

@@ -4,9 +4,12 @@
 
 namespace Kyty::Libs::Graphics {
 
+// RDNA2 ISA Table 85 plus the VOP2 carry opcodes promoted to VOP3: bits
+// [14:8] hold SDST instead of OPSEL/ABS.
 static bool is_gen5_vop3b(uint32_t opcode, bool next_gen)
 {
-	return next_gen && ((opcode >= 0x128u && opcode <= 0x12au) || opcode == 0x176u || opcode == 0x177u);
+	return next_gen && ((opcode >= 0x128u && opcode <= 0x12au) || opcode == 0x16du || opcode == 0x16eu || opcode == 0x176u ||
+	                    opcode == 0x177u || opcode == 0x30fu || opcode == 0x310u || opcode == 0x319u);
 }
 
 KYTY_SHADER_PARSER(shader_parse_vop3)
@@ -30,9 +33,14 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 	uint32_t   src1           = (buffer[1] >> 9u) & 0x1ffu;
 	uint32_t   src2           = (buffer[1] >> 18u) & 0x1ffu;
 	const bool permlane = next_gen && (opcode == 0x377u || opcode == 0x378u);
-	const bool half_opsel = next_gen && (opcode == 0x34bu || opcode == 0x351u || opcode == 0x354u || opcode == 0x357u);
+	const bool half_opsel = next_gen && (opcode == 0x34bu || opcode == 0x351u || opcode == 0x354u || opcode == 0x357u ||
+	                                     (opcode >= 0x303u && opcode <= 0x30eu && opcode != 0x306u) || opcode == 0x311u || opcode == 0x314u);
 	// OPSEL selects 16-bit halves; only these emitters read it.
-	EXIT_NOT_IMPLEMENTED(op_sel != 0 && !permlane && !half_opsel);
+	if (op_sel != 0 && !permlane && !half_opsel)
+	{
+		EXIT("unsupported VOP3 op_sel: opcode=0x%03" PRIx32 " op_sel=0x%" PRIx32 " pc=0x%08" PRIx32 " crc32=0x%08" PRIx32 "\n", opcode, op_sel, pc,
+		     dst->GetCrc32());
+	}
 
 	ShaderInstruction inst;
 	inst.pc      = pc;
@@ -69,6 +77,14 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 	uint32_t size = 2;
 
 	inst.format = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+
+	// The two-operand 16-bit integer opcodes keep their third encoded source field unused.
+	const auto binary16 = [&inst](ShaderInstructionType type)
+	{
+		inst.type    = type;
+		inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+		inst.src_num = 2;
+	};
 
 	if (opcode >= 0 && opcode <= 0xff)
 	{
@@ -432,7 +448,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			break;
 		case 0x107: KYTY_NI("v_mul_legacy_f32"); break;
 		case 0x108: inst.type = ShaderInstructionType::VMulF32; break;
-		case 0x109: KYTY_NI("v_mul_i32_i24"); break;
+		case 0x109: inst.type = ShaderInstructionType::VMulI32I24; break;
 		case 0x10A: KYTY_NI("v_mul_hi_i32_i24"); break;
 		case 0x10b: inst.type = ShaderInstructionType::VMulU32U24; break;
 		case 0x10C: KYTY_NI("v_mul_hi_u32_u24"); break;
@@ -699,72 +715,58 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.src[2].size = 2;
 			break;
 		case 0x177: KYTY_NI("v_mad_i64_i32"); break;
-		case 0x303:
-			if (next_gen)
-			{
-				KYTY_UNKNOWN_OP();
-			} else
-			{
-				inst.type = ShaderInstructionType::VAddU16;
-			};
-			break;
-		case 0x304:
-			if (next_gen)
-			{
-				KYTY_UNKNOWN_OP();
-			} else
-			{
-				inst.type = ShaderInstructionType::VSubU16;
-			};
-			break;
-		case 0x305: KYTY_NI("v_mul_lo_u16"); break;
-		case 0x307: KYTY_NI("v_lshrrev_b16"); break;
-		case 0x308: KYTY_NI("v_ashrrev_i16"); break;
-		case 0x309: inst.type = ShaderInstructionType::VMaxU16; break;
-		case 0x30A: inst.type = ShaderInstructionType::VMaxI16; break;
-		case 0x30B: inst.type = ShaderInstructionType::VMinU16; break;
-		case 0x30C: inst.type = ShaderInstructionType::VMinI16; break;
-		case 0x30D:
-			if (next_gen)
-			{
-				KYTY_UNKNOWN_OP();
-			} else
-			{
-				inst.type = ShaderInstructionType::VAddI16;
-			};
-			break;
-		case 0x30E:
-			if (next_gen)
-			{
-				KYTY_UNKNOWN_OP();
-			} else
-			{
-				inst.type = ShaderInstructionType::VSubI16;
-			};
-			break;
+		case 0x303: binary16(ShaderInstructionType::VAddU16); break;
+		case 0x304: binary16(ShaderInstructionType::VSubU16); break;
+		case 0x305: binary16(ShaderInstructionType::VMulU16); break;
+		case 0x307: binary16(ShaderInstructionType::VLshrrevB16); break;
+		case 0x308: binary16(ShaderInstructionType::VAshrrevI16); break;
+		case 0x309: binary16(ShaderInstructionType::VMaxU16); break;
+		case 0x30A: binary16(ShaderInstructionType::VMaxI16); break;
+		case 0x30B: binary16(ShaderInstructionType::VMinU16); break;
+		case 0x30C: binary16(ShaderInstructionType::VMinI16); break;
+		case 0x30D: binary16(ShaderInstructionType::VAddI16); break;
+		case 0x30E: binary16(ShaderInstructionType::VSubI16); break;
 		case 0x30F:
-			if (next_gen)
-			{
-				KYTY_UNKNOWN_OP();
-			} else
+			// Gen5 v_add_co_u32: VOP3B with the carry-out mask in SDST.
+			if (!next_gen)
 			{
 				KYTY_NI("v_add_u32");
-			};
+			}
+			inst.type      = ShaderInstructionType::VAddI32;
+			inst.format    = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
+			inst.src_num   = 2;
+			inst.dst2      = operand_parse(sdst);
+			inst.dst2.size = 2;
 			break;
 		case 0x310:
-			if (next_gen)
-			{
-				KYTY_UNKNOWN_OP();
-			} else
+			// Gen5 v_sub_co_u32: D = S0 - S1, SDST = S1 > S0.
+			if (!next_gen)
 			{
 				KYTY_NI("v_sub_u32");
-			};
+			}
+			inst.type      = ShaderInstructionType::VSubI32;
+			inst.format    = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
+			inst.src_num   = 2;
+			inst.dst2      = operand_parse(sdst);
+			inst.dst2.size = 2;
 			break;
-		case 0x311: KYTY_NI("v_pack_b32_f16"); break;
+		case 0x311: binary16(ShaderInstructionType::VPackB32F16); break;
 		case 0x312: KYTY_NI("v_cvt_pknorm_i16_f16"); break;
 		case 0x313: KYTY_NI("v_cvt_pknorm_u16_f16"); break;
-		case 0x314: KYTY_NI("v_lshlrev_b16"); break;
+		case 0x314: binary16(ShaderInstructionType::VLshlrevB16); break;
 		case 0x316: KYTY_UNKNOWN_OP();
+		case 0x319:
+			// Gen5 v_subrev_co_u32: D = S1 - S0, SDST = S0 > S1.
+			if (!next_gen)
+			{
+				KYTY_UNKNOWN_OP();
+			}
+			inst.type      = ShaderInstructionType::VSubrevI32;
+			inst.format    = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
+			inst.src_num   = 2;
+			inst.dst2      = operand_parse(sdst);
+			inst.dst2.size = 2;
+			break;
 		// Mixed-precision FMA has a separate VOP3P encoding and modifiers.
 		case 0x320:
 		case 0x321:
@@ -819,6 +821,11 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
 			inst.src_num = 2;
 			break;
+		case 0x363:
+			inst.type    = ShaderInstructionType::VBfmB32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src_num = 2;
+			break;
 		case 0x364:
 			inst.type    = ShaderInstructionType::VBcntU32B32;
 			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
@@ -859,6 +866,15 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 				KYTY_UNKNOWN_OP();
 			}
 			inst.type    = ShaderInstructionType::VCvtPkU16U32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src_num = 2;
+			break;
+		case 0x36b:
+			if (!next_gen || op_sel != 0u || abs != 0u || neg != 0u || omod != 0u || clamp != 0u)
+			{
+				KYTY_UNKNOWN_OP();
+			}
+			inst.type    = ShaderInstructionType::VCvtPkI16I32;
 			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
 			inst.src_num = 2;
 			break;
@@ -974,9 +990,9 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x1D1: inst.type = ShaderInstructionType::VCvtF16I16; break;
 		case 0x1D2: inst.type = ShaderInstructionType::VCvtU16F16; break;
 		case 0x1D3: inst.type = ShaderInstructionType::VCvtI16F16; break;
-		case 0x1D4: KYTY_NI("v_rcp_f16"); break;
+		case 0x1D4: inst.type = ShaderInstructionType::VRcpF16; break;
 		case 0x1D5: inst.type = ShaderInstructionType::VSqrtF16; break;
-		case 0x1D6: KYTY_NI("v_rsq_f16"); break;
+		case 0x1D6: inst.type = ShaderInstructionType::VRsqF16; break;
 		case 0x1D7: inst.type = ShaderInstructionType::VLogF16; break;
 		case 0x1D8: inst.type = ShaderInstructionType::VExpF16; break;
 		case 0x1D9: KYTY_NI("v_frexp_mant_f16"); break;

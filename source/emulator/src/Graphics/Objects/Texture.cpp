@@ -17,6 +17,7 @@
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/Log.h"
 
@@ -181,6 +182,30 @@ static VkImageUsageFlags get_usage()
 	return vk_usage;
 }
 
+static bool LayerIsPhysical(uint64_t vaddr, uint64_t size)
+{
+	Kernel::Memory::KernelMappedRange mapped {};
+	return Kernel::Memory::KernelQueryMappedRange(vaddr, size, &mapped) && mapped.kind == Kernel::Memory::KernelMappedRangeKind::Physical;
+}
+
+// Copies the resident pages of a layer whose other pages are unmapped inside a
+// PRT aperture; the GPU reads those as zero.
+static void StagePartiallyResidentLayer(uint64_t vaddr, uint64_t size, std::vector<uint8_t>* staged)
+{
+	staged->assign(static_cast<size_t>(size), 0u);
+	for (uint64_t offset = 0; offset < size; offset += Kernel::Memory::kKernelPrtPageSize)
+	{
+		const uint64_t page = std::min(Kernel::Memory::kKernelPrtPageSize, size - offset);
+		if (LayerIsPhysical(vaddr + offset, page))
+		{
+			std::memcpy(staged->data() + offset, reinterpret_cast<const void*>(vaddr + offset), static_cast<size_t>(page));
+		} else if (!Kernel::Memory::KernelRangeInPrtAperture(vaddr + offset, page))
+		{
+			EXIT("depth upload reads unmapped memory outside a PRT aperture: addr=0x%012" PRIx64 "\n", vaddr + offset);
+		}
+	}
+}
+
 // Layered depth surfaces stack whole 64 KiB-blocked slices contiguously;
 // each layer detiles into `linear` and fills its own array layer.
 static void upload_depth_layers(GraphicContext* ctx, TextureVulkanImage* image, uint64_t vaddr, uint64_t size,
@@ -193,11 +218,18 @@ static void upload_depth_layers(GraphicContext* ctx, TextureVulkanImage* image, 
 		EXIT("depth upload exceeds its source: format=%u %ux%u pitch=%u layers=%u size=0x%" PRIx64 "\n", fmt, width, height, pitch, layers,
 		     size);
 	}
-	const uint32_t bytes = State::Gen5DepthSampleBytesPerElement(fmt);
+	const uint32_t       bytes = State::Gen5DepthSampleBytesPerElement(fmt);
+	std::vector<uint8_t> staged;
 	for (uint32_t layer = 0; layer < layers; layer++)
 	{
-		TileConvertDepth64KBToLinear(linear->data(), reinterpret_cast<const void*>(vaddr + layer * layer_bytes), width, height, pitch,
-		                            bytes, layer);
+		const uint64_t layer_addr = vaddr + layer * layer_bytes;
+		const void*    source     = reinterpret_cast<const void*>(layer_addr);
+		if (!LayerIsPhysical(layer_addr, layer_bytes))
+		{
+			StagePartiallyResidentLayer(layer_addr, layer_bytes, &staged);
+			source = staged.data();
+		}
+		TileConvertDepth64KBToLinear(linear->data(), source, width, height, pitch, bytes, layer);
 		UtilFillDepthImage(ctx, image, linear->data(), linear->size(), width, layout, layer);
 	}
 }
@@ -233,7 +265,9 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	const bool three_dimensional = resource_type == 10u;
 	const bool arrayed_2d        = resource_type == 13u || resource_type == 11u;
 
-	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	// Depth views are sampled in DEPTH_STENCIL_READ_ONLY_OPTIMAL (their descriptors
+	// and the GPU detile use it); upload into the layout the descriptor names.
+	const VkImageLayout vk_layout = depth_view ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	// A writable StorageBuffer parent owns the authoritative D16 tile bytes.
 	// The renderer records its detile and upload in the active graphics command
 	// buffer immediately after creation; do not clear or read stale guest bytes
@@ -296,9 +330,15 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			     array_layout.tiled_size, array_layout.layers, array_layout.levels);
 		}
 
-		// Stream one layer at a time. A 4096^2 x6 BC7 cube is ~128 MiB linear;
-		// allocating every face plus a padded mip0 temp stalls the load path.
-		std::vector<uint8_t> slice(static_cast<size_t>(array_layout.linear_slice_size));
+		// Upload in bounded batches, each one submit and fence. A 4096^2 x6 BC7 cube
+		// is ~128 MiB linear and allocating every face stalls the load path; one
+		// submit per layer stalls the ring when guest stores keep hitting an array
+		// of hundreds of layers.
+		constexpr uint64_t kUploadBatchBytes = 32ull * 1024u * 1024u;
+		const auto         slice_bytes       = static_cast<size_t>(array_layout.linear_slice_size);
+		const uint32_t     batch_layers = std::clamp(static_cast<uint32_t>(kUploadBatchBytes / std::max<uint64_t>(slice_bytes, 1u)), 1u,
+		                                             array_layout.layers);
+		std::vector<uint8_t> batch(slice_bytes * batch_layers);
 		const uint32_t host_levels = resolve_host_mip_count(static_cast<uint16_t>(fmt), static_cast<uint32_t>(width),
 		                                                       static_cast<uint32_t>(height), static_cast<uint32_t>(levels));
 		uint32_t             layer_region_count = 0;
@@ -308,7 +348,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			EXIT("Gen5 2D-array layer upload regions are invalid: layers=%u levels=%u\n", array_layout.layers, array_layout.levels);
 		}
 		std::vector<Gen5TextureArrayUploadRegion> upload_regions(static_cast<size_t>(layer_region_count));
-		Vector<BufferImageCopy>                   regions(static_cast<int>(layer_region_count));
+		Vector<BufferImageCopy>                   regions;
 
 		const bool cube_trace_wanted = (std::getenv("KYTY_TRACE_CUBE_CONTENT") != nullptr &&
 		                                std::getenv("KYTY_TRACE_CUBE_CONTENT")[0] != '\0' && array_layout.layers >= 6u &&
@@ -338,7 +378,9 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 
 		for (uint32_t layer = 0; layer < array_layout.layers; ++layer)
 		{
-			if (!Gen5DetileTextureArrayLayer(slice.data(), slice.size(), reinterpret_cast<const void*>(*vaddr), *size, array_layout,
+			const uint32_t batch_slot = layer % batch_layers;
+			auto*          slice      = batch.data() + slice_bytes * batch_slot;
+			if (!Gen5DetileTextureArrayLayer(slice, slice_bytes, reinterpret_cast<const void*>(*vaddr), *size, array_layout,
 			                                 layer))
 			{
 				EXIT("Gen5 2D-array layer detile failed: format=%u layer=%u layers=%u levels=%u tile=%u\n",
@@ -347,7 +389,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			if (cube_trace_active && (layer == 0u || layer == 5u))
 			{
 				Gen5DetiledCubeFaceStats* stats = (layer == 0u ? &cube_face0 : &cube_face5);
-				const bool ok = Gen5ClassifyDetiledCubeFace(slice.data(), slice.size(), array_layout, 0u,
+				const bool ok = Gen5ClassifyDetiledCubeFace(slice, slice_bytes, array_layout, 0u,
 				                                            static_cast<uint32_t>(fmt), 16u, stats);
 				if (layer == 0u)
 				{
@@ -367,19 +409,21 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			}
 			for (uint32_t region_index = 0; region_index < layer_region_count; ++region_index)
 			{
-				const auto& upload                    = upload_regions[region_index];
-				regions[region_index].offset          = static_cast<uint32_t>(upload.offset);
-				regions[region_index].pitch           = upload.pitch_texels;
-				regions[region_index].width           = upload.width;
-				regions[region_index].height          = upload.height;
-				regions[region_index].dst_level       = upload.dst_level;
-				regions[region_index].dst_array_layer = upload.dst_array_layer;
-				regions[region_index].dst_x           = 0;
-				regions[region_index].dst_y           = 0;
-				regions[region_index].dst_z           = 0;
-				regions[region_index].depth           = 1u;
+				const auto&     upload = upload_regions[region_index];
+				BufferImageCopy region {};
+				region.offset          = static_cast<uint32_t>(slice_bytes * batch_slot + upload.offset);
+				region.pitch           = upload.pitch_texels;
+				region.width           = upload.width;
+				region.height          = upload.height;
+				region.dst_level       = upload.dst_level;
+				region.dst_array_layer = upload.dst_array_layer;
+				regions.Add(region);
 			}
-			UtilFillImage(ctx, vk_obj, slice.data(), slice.size(), regions, static_cast<uint64_t>(vk_layout));
+			if (batch_slot + 1u == batch_layers || layer + 1u == array_layout.layers)
+			{
+				UtilFillImage(ctx, vk_obj, batch.data(), slice_bytes * (batch_slot + 1u), regions, static_cast<uint64_t>(vk_layout));
+				regions.Clear();
+			}
 		}
 
 		if (cube_trace_active)
@@ -1575,6 +1619,7 @@ static void create_texture_image_views(GraphicContext* ctx, TextureVulkanImage* 
 		{
 			EXIT("failed to create sampled-depth image view\n");
 		}
+		vk_obj->standard_view_descriptors[VulkanImage::VIEW_DEPTH_TEXTURE] = descriptor;
 		if (config.arrayed_2d && config.depth > 1u)
 		{
 			// Layered depth arrays sample through the array view; layers stack
@@ -1587,18 +1632,21 @@ static void create_texture_image_views(GraphicContext* ctx, TextureVulkanImage* 
 			{
 				EXIT("failed to create sampled-depth array image view\n");
 			}
+			vk_obj->standard_view_descriptors[VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY] = descriptor;
 		}
 		return;
 	}
 
 	const int view_index = config.three_dimensional ? VulkanImage::VIEW_3D : VulkanImage::VIEW_DEFAULT;
 	if (!VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[view_index])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[view_index]) condition ignored (continuing)\n"); }
+	vk_obj->standard_view_descriptors[view_index] = descriptor;
 	if (!config.three_dimensional)
 	{
 		descriptor.view_type        = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
 		descriptor.base_array_layer = config.arrayed_2d ? config.base_array : 0u;
 		descriptor.layer_count      = config.arrayed_2d ? config.depth - config.base_array : 1u;
 		if (!VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[VulkanImage::VIEW_ARRAY])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]) condition ignored (continuing)\n"); }
+		vk_obj->standard_view_descriptors[VulkanImage::VIEW_ARRAY] = descriptor;
 	}
 }
 
@@ -1647,6 +1695,7 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 		}
 	}
 
+	UtilAwaitImageFill(vk_obj);
 	vkDestroyImage(ctx->device, vk_obj->image, nullptr);
 
 	VulkanFree(ctx, mem);

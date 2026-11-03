@@ -99,6 +99,8 @@ public:
 	bool Uninstall();
 
 	static bool InstallVectored(handler_func_t func);
+	// Gives the calling thread its own stack for fault signals. Idempotent per thread.
+	static bool InstallThreadSignalStack();
 
 private:
 	ExceptionHandlerPrivate* m_p = nullptr;

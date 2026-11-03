@@ -78,6 +78,13 @@ VulkanComputeProbe::Result DispatchInternal(VkPhysicalDevice physical_device,
 	                               layout.physical_local[0] == native_physical_local[0] &&
 	                               layout.physical_local[1] == native_physical_local[1] &&
 	                               layout.physical_local[2] == native_physical_local[2];
+	if (layout.strategy == ShaderComputeWaveStrategy::Split64On32 && layout.native_subgroup_size != 32u)
+	{
+		// This probe's SPIR-V indexes a guest wave with a fixed 32-lane subgroup;
+		// on a host layout with narrower subgroups its mapping does not apply.
+		*message = "wave probe's 32-lane SPIR-V does not cover the host layout's native subgroup size";
+		return VulkanComputeProbe::Result::Unavailable;
+	}
 	if (!split_layout && !native_w32_layout)
 	{
 		*message = "wave probe received an invalid split or native wave32 compute layout";

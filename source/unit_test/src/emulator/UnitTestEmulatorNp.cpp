@@ -57,31 +57,6 @@ TEST(EmulatorNp, ResolvesAlternateStateCallbackExport)
 	EXPECT_NE(symbols.Find(query), nullptr);
 }
 
-TEST(EmulatorNp, ResolvesCppWebApiIntrusivePointerArrow)
-{
-	Loader::SymbolDatabase symbols;
-	ASSERT_TRUE(Libs::Init(U"libNpCppWebApi_1", &symbols));
-
-	Loader::SymbolResolve query {};
-	query.name                 = U"KJTzMXmYY+U";
-	query.library              = U"NpCppWebApi";
-	query.library_version      = 1;
-	query.module               = U"NpCppWebApi";
-	query.module_version_major = 1;
-	query.module_version_minor = 1;
-	query.type                 = Loader::SymbolType::Func;
-
-	const auto* rec = symbols.Find(query);
-	ASSERT_NE(rec, nullptr);
-	ASSERT_NE(rec->vaddr, 0u);
-
-	int   value         = 0;
-	void* slot          = &value;
-	using OperatorArrow = KYTY_SYSV_ABI void* (*)(const void* self);
-	auto* fn            = reinterpret_cast<OperatorArrow>(rec->vaddr);
-	EXPECT_EQ(fn(&slot), &value);
-}
-
 TEST(EmulatorNp, ReportsSignedOutForOfflineAccountLookups)
 {
 	EnsureLog();

@@ -246,6 +246,10 @@ bool ModeledInstruction(Type type)
 		case Type::SLshrB32:
 		case Type::SSubI32:
 		case Type::SSubU32:
+		case Type::SCmpLgU32:
+		case Type::SBarrier:
+		case Type::VMbcntLoU32B32:
+		case Type::VCmpxGtU32:
 		case Type::SInstPrefetch:
 		case Type::VNop:
 		case Type::SWaitcnt:
@@ -286,12 +290,16 @@ struct VectorValue
 	uint64_t primitive = 0;
 	uint64_t vertex_id = 0;
 	uint64_t instance_id = 0;
+	// Lanes whose value is their wave position plus lane_base (V_MBCNT_LO); wave state, never vertex data.
+	uint64_t lane_position = 0;
+	uint32_t lane_base     = 0;
 };
 
 class Analyzer
 {
 public:
-	explicit Analyzer(const ShaderNggPassthroughCounts& counts, bool prologue_only = false): prologue_only_(prologue_only)
+	explicit Analyzer(const ShaderNggPassthroughCounts& counts, bool prologue_only = false, uint32_t first_end_index = 0)
+	    : prologue_only_(prologue_only), first_end_index_(first_end_index)
 	{
 		result.counts = counts;
 		for (unsigned i = 0; i < scalar.size(); ++i) { scalar[i].initial_dependencies.set(i); }
@@ -318,6 +326,10 @@ private:
 
 	bool ReadScalar(const ShaderOperand& op, unsigned width, Bits* value) const;
 	bool Scalar(const ShaderInstruction& inst);
+	bool ScalarCompare(const ShaderInstruction& inst);
+	bool Fallthrough(const ShaderInstruction& inst);
+	bool LanePosition(const ShaderInstruction& inst);
+	bool CompareExec(const ShaderInstruction& inst);
 	bool Instruction(const ShaderInstruction& inst);
 	bool Export(const ShaderInstruction& inst);
 	bool Vector(const ShaderInstruction& inst, int arity);
@@ -344,6 +356,7 @@ private:
 	bool primitive_input_intact = true;
 	bool ended = false;
 	bool prologue_only_ = false;
+	uint32_t first_end_index_ = 0;
 };
 
 bool Analyzer::ReadScalar(const ShaderOperand& op, unsigned width, Bits* value) const
@@ -466,7 +479,7 @@ bool Analyzer::PrologueComplete(const ShaderInstruction& inst) const
 {
 	if (result.allocation_index == ShaderNggPassthroughNoInstruction ||
 	    result.primitive_export_index == ShaderNggPassthroughNoInstruction || pending_export ||
-	    ScalarIndex(inst.dst) != static_cast<int>(kExecLo))
+	    (ScalarIndex(inst.dst) != static_cast<int>(kExecLo) && inst.type != Type::VCmpxGtU32))
 	{
 		return false;
 	}
@@ -538,6 +551,10 @@ bool Analyzer::VertexSource(const ShaderOperand& op, VectorValue* value)
 	{
 		return Fail(Reject::PrimitiveVectorInput, "packed primitive input cannot escape into the independent vertex residue");
 	}
+	if ((value->lane_position & result.vertex_mask) != 0u)
+	{
+		return Fail(Reject::ScalarVectorInput, "a wave lane position cannot escape into the independent vertex residue");
+	}
 	if ((value->vertex_id & result.vertex_mask) != 0u) { result.required_initial_vgprs.set(5); }
 	if ((value->instance_id & result.vertex_mask) != 0u) { result.required_initial_vgprs.set(8); }
 	return true;
@@ -575,10 +592,161 @@ bool Analyzer::Vector(const ShaderInstruction& inst, int arity)
 	auto& dst = vector[inst.dst.register_id];
 	dst.defined |= mask;
 	dst.primitive &= ~mask;
+	dst.lane_position &= ~mask;
 	dst.vertex_id = (dst.vertex_id & ~mask) | (value.vertex_id & mask);
 	dst.instance_id = (dst.instance_id & ~mask) | (value.instance_id & mask);
 	if (inst.dst.register_id == 0) { primitive_input_intact = false; }
 	Retain(Kind::VertexAlu);
+	return true;
+}
+
+// RDNA2 12.3: S_CMP_LG_U32 sets SCC = (S0 != S1). One known differing bit decides it.
+bool Analyzer::ScalarCompare(const ShaderInstruction& inst)
+{
+	if (inst.format != ShaderInstructionFormat::Ssrc0Ssrc1 || inst.src_num != 2 || inst.sopp_opcode != 0xffu || !Empty(inst.dst))
+	{
+		return Fail(Reject::UnsupportedScalarOperand, "scalar compare requires its exact two-source tuple");
+	}
+	for (int i = 0; i < 2; ++i)
+	{
+		if (!ReadScalar(inst.src[i], 32, &step.scalar_sources[i]))
+		{
+			return Fail(Reject::UnsupportedScalarOperand, "scalar compare source kind/span is unsupported");
+		}
+		step.scalar_source_mask |= 1u << i;
+		result.scalar_dependencies |= step.scalar_sources[i].initial_dependencies;
+	}
+	const auto& a = step.scalar_sources[0];
+	const auto& b = step.scalar_sources[1];
+	const auto both = a.known_mask & b.known_mask & 0xffffffffu;
+	const bool differs = ((a.value ^ b.value) & both) != 0u;
+	scalar[kScc] = Boolean(differs ? 2u : both == 0xffffffffu ? 1u : 3u, a.initial_dependencies | b.initial_dependencies);
+	return true;
+}
+
+// A conditional branch proved not taken for this launch falls through, so the
+// straight-line walk is its only path. A taken or undecided branch is refused.
+bool Analyzer::Fallthrough(const ShaderInstruction& inst)
+{
+	const auto wave = LowMask(result.counts.guest_wave_size);
+	const auto set = [](const Bits& bits, uint64_t mask) { return (bits.value & bits.known_mask & mask) != 0u; };
+	const auto clear = [](const Bits& bits, uint64_t mask) { return (bits.known_mask & mask) == mask && (bits.value & mask) == 0u; };
+	const auto& scc = scalar[kScc];
+	const auto exec = Pair(kExecLo);
+	const auto vcc = Pair(kVccLo);
+	bool falls = false;
+	switch (inst.type)
+	{
+		case Type::SCbranchScc0: falls = set(scc, 1u); result.scalar_dependencies |= scc.initial_dependencies; break;
+		case Type::SCbranchScc1: falls = clear(scc, 1u); result.scalar_dependencies |= scc.initial_dependencies; break;
+		case Type::SCbranchExecz: falls = set(exec, wave); result.scalar_dependencies |= exec.initial_dependencies; break;
+		case Type::SCbranchExecnz: falls = clear(exec, wave); result.scalar_dependencies |= exec.initial_dependencies; break;
+		case Type::SCbranchVccz: falls = set(vcc, wave); result.scalar_dependencies |= vcc.initial_dependencies; break;
+		case Type::SCbranchVccnz: falls = clear(vcc, wave); result.scalar_dependencies |= vcc.initial_dependencies; break;
+		default: break;
+	}
+	if (!falls)
+	{
+		return Fail(Reject::ControlFlow, "only a conditional branch proved not taken is inside the straight-line proof");
+	}
+	return true;
+}
+
+// RDNA2 12.12: V_MBCNT_LO_U32_B32 D = S1 + popcount(S0 & ThreadMask[31:0]). With S0 all ones in
+// Wave32, each active lane receives its wave position plus S1.
+bool Analyzer::LanePosition(const ShaderInstruction& inst)
+{
+	if (inst.format != ShaderInstructionFormat::SVdstSVsrc0SVsrc1 || inst.src_num != 2 || inst.dst.type != Operand::Vgpr ||
+	    inst.dst.size != 1 || inst.sopp_opcode != 0xffu)
+	{
+		return Fail(Reject::MalformedInstruction, "lane position requires the exact V_MBCNT_LO_U32_B32 tuple");
+	}
+	if (result.counts.guest_wave_size != 32)
+	{
+		return Fail(Reject::UnsupportedInstruction, "lane positions are modeled for Wave32 only; Wave64 also needs V_MBCNT_HI");
+	}
+	Bits mask;
+	Bits base;
+	if (!ReadScalar(inst.src[0], 32, &mask) || !ReadScalar(inst.src[1], 32, &base) || mask.known_mask != 0xffffffffu ||
+	    mask.value != 0xffffffffu || base.known_mask != 0xffffffffu)
+	{
+		return Fail(Reject::UnsupportedScalarOperand, "V_MBCNT_LO needs an all-ones lane mask and a known scalar base");
+	}
+	const auto exec = Pair(kExecLo);
+	const auto wave = LowMask(result.counts.guest_wave_size);
+	if ((exec.known_mask & wave) != wave)
+	{
+		return Fail(Reject::UnknownExec, "active architectural EXEC bits are not all proved; initial EXEC is unknown");
+	}
+	if (inst.dst.register_id == 0 && result.primitive_export_index == ShaderNggPassthroughNoInstruction)
+	{
+		return Fail(Reject::PrimitiveSourceModified, "v0 may not be written before forwarding its original packed primitive");
+	}
+	if (pending_export_sources.test(inst.dst.register_id))
+	{
+		return Fail(Reject::ExportDependency, "VGPR write before an export using that source is drained by S_WAITCNT expcnt(0)");
+	}
+	result.scalar_dependencies |= mask.initial_dependencies | base.initial_dependencies | exec.initial_dependencies;
+	const auto active = exec.value & wave;
+	auto& dst = vector[inst.dst.register_id];
+	// Positions kept from an older base on inactive lanes are no longer described: leave them undefined.
+	dst.defined = (dst.defined & ~(dst.lane_position & ~active)) | active;
+	dst.primitive &= ~active;
+	dst.vertex_id &= ~active;
+	dst.instance_id &= ~active;
+	dst.lane_position = active;
+	dst.lane_base = static_cast<uint32_t>(base.value);
+	if (inst.dst.register_id == 0) { primitive_input_intact = false; }
+	return true;
+}
+
+// RDNA2 12.8: V_CMPX_GT_U32 writes EXEC[lane] = S0 > S1 on active lanes and clears inactive ones.
+bool Analyzer::CompareExec(const ShaderInstruction& inst)
+{
+	if (inst.format != ShaderInstructionFormat::SmaskVsrc0Vsrc1 || inst.src_num != 2 || inst.sopp_opcode != 0xffu)
+	{
+		return Fail(Reject::MalformedInstruction, "lane compare requires the exact VOPC V_CMPX tuple");
+	}
+	if (pending_export)
+	{
+		return Fail(Reject::ExportDependency, "EXEC write before outstanding exports are drained by S_WAITCNT expcnt(0)");
+	}
+	Bits bound;
+	if (!ReadScalar(inst.src[0], 32, &bound) || bound.known_mask != 0xffffffffu)
+	{
+		return Fail(Reject::UnsupportedScalarOperand, "lane compare needs a known scalar bound");
+	}
+	const auto& source = inst.src[1];
+	if (source.type != Operand::Vgpr || source.size != 1)
+	{
+		return Fail(Reject::MalformedInstruction, "lane compare needs one full-word VGPR source");
+	}
+	const auto exec = Pair(kExecLo);
+	const auto wave = LowMask(result.counts.guest_wave_size);
+	if ((exec.known_mask & wave) != wave)
+	{
+		return Fail(Reject::UnknownExec, "active architectural EXEC bits are not all proved; initial EXEC is unknown");
+	}
+	const auto active = exec.value & wave;
+	const auto& lanes = vector[source.register_id];
+	if ((lanes.lane_position & active) != active)
+	{
+		return Fail(Reject::UndefinedVectorInput, "lane compare needs a known lane position on every active lane");
+	}
+	uint64_t next = 0;
+	for (unsigned lane = 0; lane < result.counts.guest_wave_size; ++lane)
+	{
+		const bool on = ((active >> lane) & 1u) != 0u;
+		if (on && static_cast<uint32_t>(bound.value) > lane + lanes.lane_base) { next |= uint64_t {1} << lane; }
+	}
+	// A lane position is wave state, so the new mask depends on the launch as well as on its bound.
+	const auto dependencies = exec.initial_dependencies | bound.initial_dependencies | WaveWords();
+	result.scalar_dependencies |= dependencies;
+	scalar[kExecLo] = {next & 0xffffffffu, 0xffffffffu, dependencies};
+	if (result.counts.guest_wave_size == 64) { scalar[kExecLo + 1] = {next >> 32u, 0xffffffffu, dependencies}; }
+	// RDNA2 VOPC V_CMPX writes EXEC only; VCC is left unknown so no reading of it can rely on either behavior.
+	scalar[kVccLo] = {0, 0, WaveWords()};
+	scalar[kVccLo + 1] = {0, 0, WaveWords()};
 	return true;
 }
 
@@ -791,6 +959,18 @@ bool Analyzer::Instruction(const ShaderInstruction& inst)
 			result.allocation_index = step.instruction_index;
 			step.kind = Kind::AllocationRequest;
 			return true;
+		case Type::SBarrier:
+			if (inst.format != ShaderInstructionFormat::Empty || inst.src_num != 0 || !Empty(inst.dst))
+			{
+				return Fail(Reject::MalformedInstruction, "proof requires the ordinary parsed S_BARRIER");
+			}
+			// The modeled launch is one guest wave per subgroup (ShaderNggFront.h) and this closed
+			// subset has no memory access: the barrier waits for no other wave and orders nothing.
+			step.kind = Kind::Wait;
+			return true;
+		case Type::SCmpLgU32: return ScalarCompare(inst);
+		case Type::VMbcntLoU32B32: return LanePosition(inst);
+		case Type::VCmpxGtU32: return CompareExec(inst);
 		case Type::Exp: return Export(inst);
 		case Type::SEndpgm:
 			if (inst.sopp_opcode != 1u || inst.format != ShaderInstructionFormat::Empty || inst.src_num != 0 || !Empty(inst.dst))
@@ -818,13 +998,13 @@ bool Analyzer::Instruction(const ShaderInstruction& inst)
 			ended = true;
 			Retain(Kind::End);
 			return true;
-		case Type::SBranch:
 		case Type::SCbranchScc0:
 		case Type::SCbranchScc1:
 		case Type::SCbranchVccz:
 		case Type::SCbranchVccnz:
 		case Type::SCbranchExecz:
-		case Type::SCbranchExecnz:
+		case Type::SCbranchExecnz: return Fallthrough(inst);
+		case Type::SBranch:
 		case Type::SSetpcB64:
 		case Type::SSwappcB64: return Fail(Reject::ControlFlow, "branches and program transfers are outside the straight-line proof");
 		default:
@@ -869,8 +1049,12 @@ ShaderNggPassthroughProof Analyzer::Run(const ShaderCode& code)
 	result.vertex_mask = LowMask(result.counts.es_vertex_count);
 	result.primitive_mask = LowMask(result.counts.gs_primitive_count);
 	result.allocation_payload = (result.counts.gs_primitive_count << 12u) | result.counts.es_vertex_count;
+	// s2 = gs_tg_info {verts [20:12], prims [30:22]}; s3 = merged_wave_info {verts [7:0], prims [15:8],
+	// wave id [27:24]}. One guest wave per subgroup: the subgroup counts are the wave's, and its id is 0.
+	scalar[2].value = (result.counts.gs_primitive_count << 22u) | (result.counts.es_vertex_count << 12u);
+	scalar[2].known_mask = 0x7fdff000u;
 	scalar[3].value = (result.counts.gs_primitive_count << 8u) | result.counts.es_vertex_count;
-	scalar[3].known_mask = 0xffffu;
+	scalar[3].known_mask = 0x0f00ffffu;
 	vector[0] = {result.primitive_mask, result.primitive_mask, 0, 0};
 	vector[5] = {result.vertex_mask, 0, result.vertex_mask, 0};
 	vector[8] = {result.vertex_mask, 0, 0, result.vertex_mask};
@@ -903,7 +1087,7 @@ ShaderNggPassthroughProof Analyzer::Run(const ShaderCode& code)
 		step.exec_after = Pair(kExecLo);
 		step.scc_after = scalar[kScc];
 		result.steps.push_back(step);
-		if (prologue_only_ && PrologueComplete(inst))
+		if (prologue_only_ && i >= first_end_index_ && PrologueComplete(inst))
 		{
 			FinishPrologue();
 			return std::move(result);
@@ -942,9 +1126,10 @@ ShaderNggPassthroughProof ShaderAnalyzeNggPassthrough(const ShaderCode& code, co
 	return Analyzer(counts).Run(code);
 }
 
-ShaderNggPassthroughProof ShaderAnalyzeNggPassthroughPrologue(const ShaderCode& code, const ShaderNggPassthroughCounts& counts)
+ShaderNggPassthroughProof ShaderAnalyzeNggPassthroughPrologue(const ShaderCode& code, const ShaderNggPassthroughCounts& counts,
+                                                              uint32_t first_end_index)
 {
-	return Analyzer(counts, true).Run(code);
+	return Analyzer(counts, true, first_end_index).Run(code);
 }
 
 } // namespace Kyty::Libs::Graphics

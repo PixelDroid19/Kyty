@@ -27,12 +27,14 @@ struct PipelineCacheHeaderV1
 
 [[nodiscard]] constexpr size_t PipelineCacheStoreMaxBytes()
 {
-	return 128u * 1024u * 1024u;
+	return 512u * 1024u * 1024u;
 }
 
+// Every checkpoint rewrites the whole blob, so the budget has to cover several
+// blobs: pipelines compiled after it runs out are compiled again on every launch.
 [[nodiscard]] constexpr size_t PipelineCacheStoreSessionWriteBudgetBytes()
 {
-	return PipelineCacheStoreMaxBytes();
+	return 4u * PipelineCacheStoreMaxBytes();
 }
 
 [[nodiscard]] constexpr bool PipelineCacheStoreWriteBudgetAllows(size_t bytes_written, size_t next_write)
@@ -47,14 +49,17 @@ struct PipelineCacheHeaderV1
 	return bytes_attempted >= budget || next_attempt >= budget - bytes_attempted ? budget : bytes_attempted + next_attempt;
 }
 
-[[nodiscard]] constexpr uint64_t PipelineCacheStoreCheckpointSeconds()
+// The interval grows with what this session already wrote, which keeps the disk
+// traffic of a title with a large blob proportional to the pipelines it adds.
+[[nodiscard]] constexpr uint64_t PipelineCacheStoreCheckpointSeconds(size_t bytes_attempted)
 {
-	return 30u;
+	const uint64_t steps = bytes_attempted / (64u * 1024u * 1024u);
+	return 30u * (steps > 0u ? steps : 1u);
 }
 
-[[nodiscard]] constexpr bool PipelineCacheStoreCheckpointDue(bool dirty, bool saved_once, uint64_t elapsed_seconds)
+[[nodiscard]] constexpr bool PipelineCacheStoreCheckpointDue(bool dirty, bool saved_once, uint64_t elapsed_seconds, size_t bytes_attempted)
 {
-	return dirty && (!saved_once || elapsed_seconds >= PipelineCacheStoreCheckpointSeconds());
+	return dirty && (!saved_once || elapsed_seconds >= PipelineCacheStoreCheckpointSeconds(bytes_attempted));
 }
 
 [[nodiscard]] inline bool PipelineCacheDataMatchesDevice(const void* data, size_t size, const VkPhysicalDeviceProperties& properties)

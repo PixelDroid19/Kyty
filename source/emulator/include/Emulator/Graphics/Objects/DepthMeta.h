@@ -81,6 +81,10 @@ struct DepthMetaTraceSnapshot
 [[nodiscard]] bool DepthMetaObserveStorageFlush(uint64_t storage_address, uint64_t storage_size, uint64_t htile_address,
                                                 uint64_t htile_size, const void* storage_data, uint64_t flush_address,
                                                 uint64_t flush_size);
+// A write-back that carries a fill already published by DepthMetaPublishComputeFill
+// is that same write, not a new clear: it can land after the clear was consumed,
+// in the middle of the depth pass that follows it.
+[[nodiscard]] bool DepthMetaObserveStorageWriteback(uint64_t address, const void* data, uint64_t size);
 void               DepthMetaMarkClear(uint64_t address, DepthMetaClearSource source = DepthMetaClearSource::Unknown,
 	                                  const DepthMetaPatternSnapshot* pattern = nullptr, uint64_t size = 0);
 // A compute fill is retained as a candidate until an exact HTILE range backed

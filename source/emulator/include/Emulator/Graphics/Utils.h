@@ -872,11 +872,17 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer,
                        const Vector<VkBufferImageCopy>& regions, uint64_t src_layout);
 void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
+// A descriptor samples color images in SHADER_READ_ONLY_OPTIMAL (or GENERAL when storage aliases it). A GPU-owned
+// render target starts UNDEFINED and its first consumer may be such a descriptor, which is a layout error even though
+// the texels are never read. Record the discard transition to the declared layout before the draw.
+void UtilTransitionColorImageLayout(CommandBuffer* buffer, VulkanImage* image, uint64_t dst_layout);
 // Copy the raw 32-bit texels of a single-sample, single-layer image into another of the same extent through a
 // transient buffer, one of them D32 depth (or the depth plane of D32S8, whose stencil it keeps) and the other R32 or
 // B10G11R11 color. Returns false for any other pair.
 // A depth destination keeps every word only on a device with unrestricted depth (VUID-VkCopyBufferToImageInfo2-pRegions-07931).
 [[nodiscard]] bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout);
+// The same copy between the stencil plane of a depth image and an R8 color image. Returns false for any other pair.
+[[nodiscard]] bool UtilCopyStencilBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter);
 // Blit the whole source into [0, dst_extent) of dst_image, which ends in TRANSFER_DST_OPTIMAL (its prior contents are discarded).
 void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_image, VkExtent2D dst_extent, VkFilter filter);
@@ -889,6 +895,13 @@ void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void*
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, const Vector<BufferImageCopy>& regions,
                    uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
+// Submits the region fills recorded so far. Returns the util queue timeline value the next submission must wait for
+// on the device (0: every fill already completed).
+[[nodiscard]] uint64_t UtilFlushImageFills();
+// Call before destroying an image: returns once no fill writes it.
+void UtilAwaitImageFill(VulkanImage* image);
+// Completes and releases every recorded fill; for a device that is about to go away.
+void UtilCompleteImageFills();
 void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image, uint64_t src_layout,
                     uint32_t src_array_layer = 0);
 void UtilFillDepthBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image,

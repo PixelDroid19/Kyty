@@ -179,6 +179,11 @@ KYTY_SYSV_ABI int c_signbit(double x)
 {
 	return std::signbit(x) ? 1 : 0;
 }
+// The guest library returns the sign in bit 15 (its _FSign convention).
+KYTY_SYSV_ABI int c_signbitf(float x)
+{
+	return std::signbit(x) ? 0x8000 : 0;
+}
 KYTY_SYSV_ABI int c_fpclassifyd(double x)
 {
 	const int category = std::fpclassify(x);

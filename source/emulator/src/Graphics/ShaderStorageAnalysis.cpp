@@ -246,7 +246,8 @@ static std::vector<uint8_t> ShaderGetMetadataSgprLiveness(const ShaderCode& code
 
 bool ShaderInstructionReadsImageResource(ShaderInstructionType type)
 {
-	return type == ShaderInstructionType::ImageGetResinfo || type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageLoad || type == ShaderInstructionType::ImageSample ||
+	return type == ShaderInstructionType::ImageGetResinfo || type == ShaderInstructionType::ImageGather4 ||
+	       type == ShaderInstructionType::ImageGather4C || type == ShaderInstructionType::ImageLoad || type == ShaderInstructionType::ImageSample ||
 	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
 	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleO ||
 	       type == ShaderInstructionType::ImageSampleB || type == ShaderInstructionType::ImageSampleDrefLz ||
@@ -259,9 +260,37 @@ bool ShaderInstructionWritesImageResource(ShaderInstructionType type)
 	       ShaderIsImageAtomic(type);
 }
 
+// FLAT and GLOBAL stores are not decoded (ShaderParseFLAT.cpp accepts only the loads), so a store
+// family added there must be added here as well.
+bool ShaderInstructionWritesStorage(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::BufferStoreDword:
+		case ShaderInstructionType::BufferStoreDwordx2:
+		case ShaderInstructionType::BufferStoreDwordx3:
+		case ShaderInstructionType::BufferStoreDwordx4:
+		case ShaderInstructionType::BufferStoreFormatX:
+		case ShaderInstructionType::BufferStoreFormatXy:
+		case ShaderInstructionType::BufferStoreFormatXyzw:
+		case ShaderInstructionType::BufferAtomicAdd:
+		case ShaderInstructionType::BufferAtomicAnd:
+		case ShaderInstructionType::BufferAtomicOr:
+		case ShaderInstructionType::BufferAtomicSmax:
+		case ShaderInstructionType::BufferAtomicSmin:
+		case ShaderInstructionType::BufferAtomicSub:
+		case ShaderInstructionType::BufferAtomicSwap:
+		case ShaderInstructionType::BufferAtomicUmax:
+		case ShaderInstructionType::BufferAtomicUmin:
+		case ShaderInstructionType::BufferAtomicXor: return true;
+		default: return ShaderInstructionWritesImageResource(type);
+	}
+}
+
 bool ShaderInstructionUsesImageSampler(ShaderInstructionType type)
 {
-	return type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageSample ||
+	return type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageGather4C ||
+	       type == ShaderInstructionType::ImageSample ||
 	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
 	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleO ||
 	       type == ShaderInstructionType::ImageSampleB || type == ShaderInstructionType::ImageSampleDrefLz ||
@@ -1878,6 +1907,7 @@ uint8_t ShaderBoundedGridFullStoreMask(uint32_t format)
 		case 20u:
 		case 22u: return 0x1u;
 		case 14u:
+		case 18u:
 		case 29u:
 		case 62u: return 0x3u;
 		case 36u: return 0x7u;
@@ -2311,7 +2341,7 @@ static ShaderStorageImageTileCoverage AnalyzeShaderStorageImageMetadataOriginGri
 			typed_read_count++;
 		} else if (inst.type == ShaderInstructionType::ImageStore)
 		{
-			if (target_store_index != UINT32_MAX || inst.mimg_dimension != 1 ||
+			if (target_store_index != UINT32_MAX || inst.mimg_d16 || inst.mimg_dimension != 1 ||
 			    inst.mimg_dmask == 0u || (inst.mimg_dmask & 0xf0u) != 0u || (inst.mimg_dmask & full_store_mask) != full_store_mask ||
 			    !ShaderBoundedGridStoreCoordinatesMatch(inst, x_final_register, y_final_register) ||
 			    ShaderFindImageStorageTextureDescriptor(code, index, bind, 0) != texture_index)
@@ -2545,7 +2575,7 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageBoundedGridCoverage(cons
 			}
 			if (inst.type == ShaderInstructionType::ImageStore && image_index == texture_index)
 			{
-				if (inst.mimg_dimension != 1 || inst.mimg_dmask != full_mask ||
+				if (inst.mimg_d16 || inst.mimg_dimension != 1 || inst.mimg_dmask != full_mask ||
 				    !ShaderBoundedGridStoreCoordinatesMatch(inst, x_reg, y_reg))
 				{
 					return {};
@@ -2666,7 +2696,7 @@ bool ShaderPairedSplitFindFlow(const ShaderCode& code, const ShaderBindResources
 			    (ShaderInstructionReadsImageResource(inst.type) && image_index == texture_index) ||
 			    (ShaderInstructionWritesImageResource(inst.type) &&
 			     (image_index != texture_index || inst.type != ShaderInstructionType::ImageStore ||
-			      inst.mimg_dimension != 1 || (inst.mimg_dmask & full_mask) != full_mask)))
+			      inst.mimg_d16 || inst.mimg_dimension != 1 || (inst.mimg_dmask & full_mask) != full_mask)))
 			{
 				return false;
 			}
@@ -2818,7 +2848,7 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImagePairedLinearCoverage(con
 			    (ShaderInstructionReadsImageResource(inst.type) && image_index == texture_index) ||
 			    (ShaderInstructionWritesImageResource(inst.type) &&
 			     (image_index != texture_index || inst.type != ShaderInstructionType::ImageStore ||
-			      inst.mimg_dimension != 1 || (inst.mimg_dmask & full_mask) != full_mask)))
+			      inst.mimg_d16 || inst.mimg_dimension != 1 || (inst.mimg_dmask & full_mask) != full_mask)))
 			{
 				return {};
 			}
@@ -3021,7 +3051,7 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageGridCoverage(const Shade
 			}
 			if (resource_index == texture_index)
 			{
-				if (!restored || inst.mimg_dimension != 1 || inst.mimg_dmask != 1)
+				if (!restored || inst.mimg_d16 || inst.mimg_dimension != 1 || inst.mimg_dmask != 1)
 				{
 					return {};
 				}
@@ -3118,7 +3148,7 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const Shade
 			}
 			if (resource_index == texture_index)
 			{
-				if (inst.type != ShaderInstructionType::ImageStore || inst.mimg_dimension != 1 || inst.mimg_dmask != 0xf)
+				if (inst.type != ShaderInstructionType::ImageStore || inst.mimg_d16 || inst.mimg_dimension != 1 || inst.mimg_dmask != 0xf)
 				{
 					return {};
 				}

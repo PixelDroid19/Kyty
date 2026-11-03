@@ -466,6 +466,7 @@ struct GraphicsSkippedGeState
 	GraphicsGeRawRegister gs_resource2_raw;
 	GraphicsGeRawRegister gs_resource3_raw;
 	uint32_t stages = 0;
+	uint32_t input_primitive = 0;
 	uint64_t es_program = 0;
 	uint64_t gs_back_program = 0;
 	uint64_t legacy_gs_program = 0;
@@ -661,6 +662,8 @@ public:
 		m_submission     = submission;
 		m_has_submission = true;
 	}
+	// This buffer carries asynchronous image fills: it signals the queue timeline and waits for no other fill.
+	void               MarkImageFillBatch() { m_image_fill_batch = true; }
 	[[nodiscard]] int GetQueueIndex() const { return m_queue; }
 	// False on a compute-only queue family: no graphics commands or stages.
 	[[nodiscard]] bool SupportsGraphics() const;
@@ -704,6 +707,10 @@ public:
 	// This never rereads guest memory; the buffer must come from the current recording.
 	[[nodiscard]] bool ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,
 	                                               uint64_t size, void* dst) const;
+	// Smallest and largest of the first `count` indexes of `element_size` bytes in an index snapshot
+	// of `expected_vaddr` this recording bound: the bytes the GPU reads. Computed once per snapshot contents.
+	[[nodiscard]] bool TransientSnapshotIndexRange(const VulkanBuffer* snapshot, uint64_t expected_vaddr, uint32_t element_size,
+	                                               uint32_t count, uint32_t* minimum, uint32_t* maximum);
 	// Reusable scratch for commands recorded in this buffer. Callers must order
 	// write/read/write hazards explicitly; lifetime extends through its fence.
 	VulkanBuffer* AllocateTransientScratchBuffer(uint64_t size, uint32_t usage);
@@ -712,14 +719,30 @@ public:
 	VulkanBuffer* AllocateTransientCopyBuffer(uint64_t size);
 	// Device-local intermediate written and read only by GPU commands of this recording (for example a
 	// geometry pass output), with its own budget. The same ordering and lifetime rules apply.
-	VulkanBuffer* AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage);
+	VulkanBuffer* GeometryOutput(uint64_t size);
+	// Storage-buffer set for one fragment-transport draw state. The pool is reset
+	// when the recording starts, so its sets live exactly as long as the commands
+	// that bind them.
+	VkDescriptorSet AllocateTransportDescriptorSet(VkDescriptorSetLayout layout);
+	// Device-local fragment-transport storage shared by every command buffer of this pool, created on the first
+	// request. They all submit to one queue, so the tile barriers order each use after the previous one, also
+	// across recordings. Returns nullptr when `size` exceeds the storage created first.
+	VulkanBuffer* TransportStorage(uint64_t size, uint32_t usage);
 	// Host-visible copy of data that only this recording reads, destroyed when the buffer next begins. For uploads
 	// too large for the transient pools' budget.
 	VulkanBuffer* UploadRecordingBuffer(const void* data, uint64_t size, uint32_t usage);
 	// A dispatch binds a storage view of a depth plane through the depth image's colour copy of it
 	// (DepthStencilVulkanImage::storage_plane); the copy returns to the depth plane once the dispatch is recorded.
 	void DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth);
+	void DeferStencilPlaneStoreBack(DepthStencilVulkanImage* depth);
 	void StoreBackDepthPlanes();
+	// A submission of another queue this recording waits for on the device before it executes, through that
+	// queue's timeline value; later submissions of a queue complete after earlier ones.
+	void AwaitSubmissionOnDevice(SubmissionId submission, VkSemaphore timeline, uint64_t value);
+	// Flushes recorded image fills and makes this submission wait for them on the device.
+	void AwaitImageFills();
+	[[nodiscard]] bool AwaitsSubmissionOnDevice(SubmissionId submission) const;
+	[[nodiscard]] const std::vector<SubmissionId>& DeviceAwaitedSubmissions() const { return m_device_awaited; }
 
 private:
 	friend class PipelineCache;
@@ -744,12 +767,13 @@ private:
 	SubmissionId       m_submission;
 	bool               m_has_submission = false;
 	uint64_t           m_timeline_value = 0;
+	bool               m_image_fill_batch = false;
 	TransientBufferPool* m_transient_buffers = nullptr;
 	TransientBufferPool* m_transient_scratch_buffers = nullptr;
 	TransientBufferPool* m_transient_copy_buffers    = nullptr;
-	TransientBufferPool* m_transient_device_buffers  = nullptr;
 	TransientSnapshotLeases*   m_snapshot_leases           = nullptr;
 	std::vector<VulkanBuffer*> m_recording_uploads;
+	VkDescriptorPool           m_transport_descriptor_pool = VK_NULL_HANDLE;
 
 	mutable std::mutex           m_pipeline_lease_mutex;
 	std::vector<VulkanPipeline*> m_pipeline_leases;
@@ -757,6 +781,10 @@ private:
 	bool                         m_resetting = false;
 	std::optional<OpenRenderPass> m_open_render_pass;
 	std::vector<DepthStencilVulkanImage*> m_depth_plane_store_backs;
+	std::vector<DepthStencilVulkanImage*> m_stencil_plane_store_backs;
+	std::vector<SubmissionId>             m_device_awaited;
+	std::vector<VkSemaphore>              m_device_wait_semaphores;
+	std::vector<uint64_t>                 m_device_wait_values;
 
 	bool               m_has_guest_context = false;
 	uint64_t           m_guest_submit = 0;
@@ -814,13 +842,17 @@ enum class ComputeDispatchResult
 	ProcessorWriteBackRequired,
 	SubmissionCompletionRequired,
 	ReaderCompletionRequired,
+	// The indirect arguments cannot be read on the device: read them on the host and dispatch directly.
+	IndirectArgumentsOnHost,
 };
 // Preparation and recording share one resource analysis. A required write-back
-// or submission wait leaves the command buffer untouched; retry with fresh inputs.
+// or submission wait records no dispatch; retry with fresh inputs.
+// A nonzero indirect_args_address takes the group counts from that guest record on
+// the device and ignores the thread_group arguments.
 [[nodiscard]] ComputeDispatchResult GraphicsRenderDispatchDirect(
     uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
-    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, bool processor_writeback_complete,
-    SubmissionId* pending_submission);
+    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, uint64_t indirect_args_address,
+    bool processor_writeback_complete, SubmissionId* pending_submission);
 void GraphicsRenderMemoryBarrier(CommandBuffer* buffer);
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);

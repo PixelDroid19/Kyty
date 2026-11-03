@@ -91,12 +91,15 @@ struct ShaderComputeWaveAnalysisResult
 // the unconditional entry prefix; an observable M0 read rejects this route.
 [[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentVirtualParameterState(const ShaderCode& code,
                                                                                          uint32_t          parameter_register);
-// A scalar memory load ignores EXEC and names no VGPR, so a lane reduction may hold it among its steps.
-[[nodiscard]] bool ShaderReductionRegionScalarLoad(const ShaderInstruction& instruction);
+// A scalar memory load, a scalar copy into M0 or an S_WAITCNT (which only waits for those loads) ignores EXEC
+// and names no VGPR, so a lane reduction may hold it among its steps.
+[[nodiscard]] bool ShaderReductionRegionScalarInstruction(const ShaderInstruction& instruction);
 // The same proof for a lane reduction, giving the index of its initializer and of the EXEC restore that closes
-// the region. The initializer is the first instruction after `index` that is not a scalar load; every other
-// instruction before the restore is a scalar load or a bitwise or permutation step that reads only registers
-// the region wrote. No load writes EXEC or the saved mask, and none before the initializer writes its condition.
+// the region. The initializer is the first instruction after `index` that is not a scalar load, and holds an integer
+// constant: the identity of the reduction's op, which ShaderProveLaneReductionNetwork checks. Every other instruction
+// before the restore is a scalar load or a pure step that reads only registers the region wrote: a bitwise or
+// permutation step, or an integer min or max. No load writes EXEC or the saved mask, and none before the initializer
+// writes its condition.
 // A guest Wave32 program (`guest_wave_size` 32) uses the B32 mask forms on single SGPRs and must have its VALU
 // lane masks narrowed by ShaderWave32LaneMasks.
 [[nodiscard]] bool ShaderFragmentNeutralRegionBounds(const ShaderCode& code, uint32_t guest_wave_size, uint32_t index, uint32_t* seed,

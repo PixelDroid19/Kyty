@@ -4,6 +4,7 @@
 
 #include <ctime>
 #include <cwchar>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -165,6 +166,25 @@ KYTY_SYSV_ABI char* c_asctime(const GuestTm* tmv)
 	}
 	const std::tm host = GuestToHostTm(*tmv);
 	return ::asctime(&host);
+}
+
+// Gen5 libc_v1 asctime_s — NID qPe7-h5Jnuc. The firmware formatter emits the
+// 26-byte asctime buffer and reports EINVAL (0x16) for bad arguments.
+KYTY_SYSV_ABI int c_asctime_s(char* buffer, size_t size, const GuestTm* tmv)
+{
+	constexpr size_t ASCTIME_S_SIZE = 26;
+	if (buffer == nullptr || tmv == nullptr || size < ASCTIME_S_SIZE)
+	{
+		return 22;
+	}
+	const std::tm host = GuestToHostTm(*tmv);
+	char          formatted[ASCTIME_S_SIZE] = {};
+	if (::asctime_r(&host, formatted) == nullptr)
+	{
+		return 22;
+	}
+	std::memcpy(buffer, formatted, ASCTIME_S_SIZE);
+	return 0;
 }
 
 // ctime(t) is asctime(localtime(t)).

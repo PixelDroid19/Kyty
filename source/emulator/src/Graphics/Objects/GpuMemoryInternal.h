@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <climits>
 #include <set>
 #include <tuple>
@@ -44,6 +45,9 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+// Changes when a device-address read may have new storage work; see StorageScanMemo.
+extern std::atomic<uint64_t> g_storage_scan_generation;
 
 struct StorageTextureRawRenderSource;
 
@@ -271,6 +275,8 @@ public:
 	void  ResetPlaneHash(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type);
 	void  FrameDone(GraphicContext* ctx);
 
+	[[nodiscard]] uint64_t ObjectGraphGeneration() const { return m_object_graph_generation.load(std::memory_order_acquire); }
+
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first, const SubmissionId* submission = nullptr);
 	Vector<GpuMemoryObject> FindEqualObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission);
@@ -291,9 +297,16 @@ public:
 	void WriteBackAllCompleted(GraphicContext* ctx);
 	void               WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer);
 	[[nodiscard]] bool PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
+	                                           const std::vector<SubmissionId>&          device_awaited,
 	                                           std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
+	[[nodiscard]] bool WriteBackStorageForGuestSeed(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuQueueId consumer,
+	                                                SubmissionId* dependency);
+	void CollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, SubmissionId reader, std::vector<GpuMemoryStorageSeedSource>* sources);
 	[[nodiscard]] bool PendingStorageHasAliases();
+	[[nodiscard]] bool PendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges);
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
+	[[nodiscard]] bool FindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
+	void               MarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId consumer);
 	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
 	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
 	[[nodiscard]] GpuMemoryGdsSource AcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
@@ -352,6 +365,8 @@ private:
 		uint64_t                            write_time                 = 0;
 		uint64_t                            device_write_time          = 0;
 		uint64_t                            guest_published_write_uses = 0;
+		uint64_t                            in_place_ordered_write_uses = 0;
+		uint32_t                            in_place_ordered_queue      = 0;
 		uint32_t                            guest_published_queue      = 0;
 		bool                                guest_published_uniform    = false;
 		GpuWritebackPageCache::UniformWords guest_published_words {};
@@ -459,7 +474,8 @@ private:
 	// whose writes are not published to the guest device-address view on `consumer`.
 	// `ranges` answers whether a block meets one of the queried guest ranges.
 	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const;
-	[[nodiscard]] static bool StorageIsWholeGuestContent(const Object& object);
+	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorageIn(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool StorageIsWholeGuestContent(int heap_id, const Object& object) const;
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);
 	bool TransientReadOnlyOverlapsAllowedLocked(uint64_t vaddr, uint64_t size, const GpuMemoryRangeQueryKey& query,
@@ -524,12 +540,34 @@ private:
 	// the per-draw pending-write scans, which titles with thousands of live
 	// storage buffers otherwise pay in full for every device-address draw.
 	std::set<std::pair<int, int>> m_writable_storage;
+	// The per-draw scans above mostly repeat with nothing new to do. A consumer's
+	// scan that found nothing stays true until g_storage_scan_generation changes,
+	// except for the in-place objects bound since, listed in m_storage_scan_changes;
+	// the write-back scan skips those while they are in flight, so it waits for a
+	// completion instead. Every scan asks about the same device-address ranges.
+	struct StorageScanMemo
+	{
+		uint32_t queue                  = 0;
+		uint64_t pending_generation     = 0;
+		size_t   pending_changes_seen   = 0;
+		uint64_t write_back_generation  = 0;
+		uint64_t write_back_completions = 0;
+	};
+	std::vector<StorageScanMemo>     m_storage_scan_memos;
+	std::vector<std::pair<int, int>> m_storage_scan_changes;
+	StorageScanMemo&                 StorageScanMemoFor(GpuQueueId consumer);
+	void                             RecordStorageScanChange(int heap_id, int object_id);
+	[[nodiscard]] bool               StorageScanCandidate(int heap_id, int object_id, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const;
 	// (heap id, object id) of every live object whose GPU writes are not yet
 	// written back (in use, writable, with a write-back): the only candidates
 	// of a completed-submission write-back, which otherwise visits every object
 	// of every heap on each completion.
 	std::set<std::pair<int, int>> m_pending_write_back;
 	void                          SyncWriteBackIndexes(int heap_id, int object_id);
+
+	// Advances whenever an object block enters or leaves a heap. Lookup results
+	// over the object graph stay valid while it is unchanged.
+	std::atomic<uint64_t> m_object_graph_generation {1};
 
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;

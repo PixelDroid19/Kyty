@@ -27,6 +27,8 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 
 
@@ -35,6 +37,22 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+// A sampled descriptor declares SHADER_READ_ONLY_OPTIMAL; an image still in
+// UNDEFINED means no transition was recorded for this submission. Trace the
+// resource when the validation layer is localizing such a bind.
+static void TraceUndefinedSampledImage(const VulkanImage* image, const char* list, int index)
+{
+	static const bool enabled = std::getenv("KYTY_DESC_LAYOUT_TRACE") != nullptr;
+	if (!enabled || image == nullptr || image->layout != VK_IMAGE_LAYOUT_UNDEFINED)
+	{
+		return;
+	}
+	std::fprintf(stderr,
+	             "KYTY_DESC_LAYOUT_TRACE list=%s index=%d image=%p type=%d format=%d extent=%ux%u mips=%u layers=%u usage=0x%x\n",
+	             list, index, reinterpret_cast<const void*>(image->image), static_cast<int>(image->type), static_cast<int>(image->format),
+	             image->extent.width, image->extent.height, image->mip_levels, image->array_layers, static_cast<unsigned>(image->usage));
+}
 
 // DescriptorCache, DeleteFramebuffer/Descriptor, stencil + Find* helpers
 
@@ -405,7 +423,7 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 		hash = (hash * 33u) ^ Core::hash32(word);
 	}
 	hash += Core::hash8(static_cast<uint8_t>(s.stage));
-	hash ^= Core::hash8(static_cast<uint8_t>(s.storage_buffers_num));
+	hash ^= Core::hash8(static_cast<uint8_t>(s.storage_buffers.size()));
 	hash += Core::hash8(static_cast<uint8_t>(s.textures2d_sampled_num));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.textures2d_sampled_depth_num));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.textures3d_sampled_num));
@@ -414,60 +432,25 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 	hash += Core::hash8(static_cast<uint8_t>(s.textures2d_array_sampled_uint_num));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.textures3d_sampled_uint_num));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.textures2d_storage_num));
-	hash += Core::hash8(static_cast<uint8_t>(s.samplers_num));
+	hash += Core::hash8(static_cast<uint8_t>(s.samplers_id.size()));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.gds_buffers_num));
-	for (int i = 0; i < s.storage_buffers_num; i++)
+	for (const auto& buffer: s.storage_buffers)
 	{
-		hash += Core::hash64(s.storage_buffers[i].unique_id);
-		hash ^= Core::hash64(s.storage_buffers[i].range);
+		hash += Core::hash64(buffer.unique_id);
+		hash ^= Core::hash64(buffer.range);
 	}
-	for (int i = 0; i < s.textures2d_sampled_num; i++)
+	for (const auto& image: s.images)
 	{
-		hash ^= Core::hash64(s.textures2d_sampled_id[i]);
-		hash += Core::hash8(s.textures2d_sampled_view[i]);
+		hash = (hash * 33u) ^ Core::hash64(image.unique_id);
+		hash += Core::hash8(image.view);
 	}
-	for (int i = 0; i < s.textures2d_sampled_depth_num; i++)
+	for (const uint64_t sampler: s.samplers_id)
 	{
-		hash += Core::hash64(s.textures2d_sampled_depth_id[i]);
-		hash ^= Core::hash8(s.textures2d_sampled_depth_view[i]);
-	}
-	for (int i = 0; i < s.textures2d_array_sampled_num; i++)
-	{
-		hash ^= Core::hash64(s.textures2d_array_sampled_id[i]);
-		hash += Core::hash8(s.textures2d_array_sampled_view[i]);
-	}
-	for (int i = 0; i < s.textures2d_storage_num; i++)
-	{
-		hash += Core::hash64(s.textures2d_storage_id[i]);
-		hash ^= Core::hash8(s.textures2d_storage_view[i]);
-	}
-	for (int i = 0; i < s.samplers_num; i++)
-	{
-		hash ^= Core::hash64(s.samplers_id[i]);
+		hash ^= Core::hash64(sampler);
 	}
 	for (int i = 0; i < s.gds_buffers_num; i++)
 	{
 		hash += Core::hash64(s.gds_buffers_id[i]);
-	}
-	for (int i = 0; i < s.textures3d_sampled_num; i++)
-	{
-		hash += Core::hash64(s.textures3d_sampled_id[i]);
-		hash ^= Core::hash8(s.textures3d_sampled_view[i]);
-	}
-	for (int i = 0; i < s.textures2d_sampled_uint_num; i++)
-	{
-		hash += Core::hash64(s.textures2d_sampled_uint_id[i]);
-		hash ^= Core::hash8(s.textures2d_sampled_uint_view[i]);
-	}
-	for (int i = 0; i < s.textures2d_array_sampled_uint_num; i++)
-	{
-		hash ^= Core::hash64(s.textures2d_array_sampled_uint_id[i]);
-		hash += Core::hash8(s.textures2d_array_sampled_uint_view[i]);
-	}
-	for (int i = 0; i < s.textures3d_sampled_uint_num; i++)
-	{
-		hash += Core::hash64(s.textures3d_sampled_uint_id[i]);
-		hash ^= Core::hash8(s.textures3d_sampled_uint_view[i]);
 	}
 	hash ^= Core::hash8(static_cast<uint8_t>(s.vsharp_uniform_buffer));
 	if (s.vsharp_uniform_buffer)
@@ -478,163 +461,33 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 	return hash;
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+bool DescriptorCache::SameBindings(const Set& a, const Set& b)
+{
+	return a.stage == b.stage && a.layout_key == b.layout_key && a.textures2d_sampled_num == b.textures2d_sampled_num &&
+	       a.textures2d_sampled_depth_num == b.textures2d_sampled_depth_num &&
+	       a.textures2d_array_sampled_num == b.textures2d_array_sampled_num && a.textures3d_sampled_num == b.textures3d_sampled_num &&
+	       a.textures2d_sampled_uint_num == b.textures2d_sampled_uint_num &&
+	       a.textures2d_array_sampled_uint_num == b.textures2d_array_sampled_uint_num &&
+	       a.textures3d_sampled_uint_num == b.textures3d_sampled_uint_num && a.textures2d_storage_num == b.textures2d_storage_num &&
+	       a.gds_buffers_num == b.gds_buffers_num && a.storage_buffers == b.storage_buffers && a.images == b.images &&
+	       a.samplers_id == b.samplers_id && std::equal(a.gds_buffers_id, a.gds_buffers_id + a.gds_buffers_num, b.gds_buffers_id) &&
+	       a.vsharp_uniform_buffer == b.vsharp_uniform_buffer &&
+	       (!a.vsharp_uniform_buffer || a.vsharp_uniform_buffer_key == b.vsharp_uniform_buffer_key);
+}
+
 int DescriptorCache::FindSet(const Set& s)
 {
 	const auto* list = m_sets_map.Find(s.hash);
-	if (list != nullptr)
+	if (list == nullptr)
 	{
-		for (int index: *list)
+		return -1;
+	}
+	for (int index: *list)
+	{
+		const auto& set = m_sets[index];
+		if (set.set != nullptr && SameBindings(set, s))
 		{
-			auto& set = m_sets[index];
-
-			if (set.set != nullptr && set.stage == s.stage && set.layout_key == s.layout_key &&
-			    set.storage_buffers_num == s.storage_buffers_num && set.textures2d_sampled_num == s.textures2d_sampled_num &&
-			    set.textures2d_sampled_depth_num == s.textures2d_sampled_depth_num &&
-			    set.textures2d_array_sampled_num == s.textures2d_array_sampled_num &&
-			    set.textures2d_storage_num == s.textures2d_storage_num && set.textures3d_sampled_num == s.textures3d_sampled_num &&
-			    set.textures2d_sampled_uint_num == s.textures2d_sampled_uint_num &&
-			    set.textures2d_array_sampled_uint_num == s.textures2d_array_sampled_uint_num &&
-			    set.textures3d_sampled_uint_num == s.textures3d_sampled_uint_num && set.samplers_num == s.samplers_num &&
-			    set.gds_buffers_num == s.gds_buffers_num)
-			{
-				bool match = true;
-				for (int i = 0; i < s.storage_buffers_num; i++)
-				{
-					if (match && s.storage_buffers[i] != set.storage_buffers[i])
-					{
-						match = false;
-						break;
-					}
-				}
-				if (match)
-				{
-					for (int i = 0; i < s.textures2d_sampled_num; i++)
-					{
-						if (s.textures2d_sampled_id[i] != set.textures2d_sampled_id[i] ||
-						    s.textures2d_sampled_view[i] != set.textures2d_sampled_view[i])
-						{
-							match = false;
-							break;
-						}
-					}
-				}
-				if (match)
-				{
-					for (int i = 0; i < s.textures2d_sampled_depth_num; i++)
-					{
-						if (s.textures2d_sampled_depth_id[i] != set.textures2d_sampled_depth_id[i] ||
-						    s.textures2d_sampled_depth_view[i] != set.textures2d_sampled_depth_view[i])
-						{
-							match = false;
-							break;
-						}
-					}
-				}
-				if (match)
-				{
-					for (int i = 0; i < s.textures2d_array_sampled_num; i++)
-					{
-						if (s.textures2d_array_sampled_id[i] != set.textures2d_array_sampled_id[i] ||
-						    s.textures2d_array_sampled_view[i] != set.textures2d_array_sampled_view[i])
-						{
-							match = false;
-							break;
-						}
-					}
-				}
-				if (match)
-				{
-					for (int i = 0; i < s.textures3d_sampled_num; i++)
-					{
-						if (s.textures3d_sampled_id[i] != set.textures3d_sampled_id[i] ||
-						    s.textures3d_sampled_view[i] != set.textures3d_sampled_view[i])
-						{
-							match = false;
-							break;
-						}
-					}
-				}
-				if (match)
-				{
-					for (int i = 0; i < s.textures2d_sampled_uint_num; i++)
-					{
-						if (s.textures2d_sampled_uint_id[i] != set.textures2d_sampled_uint_id[i] ||
-						    s.textures2d_sampled_uint_view[i] != set.textures2d_sampled_uint_view[i])
-						{
-							match = false;
-							break;
-						}
-					}
-				}
-				if (match)
-				{
-					for (int i = 0; i < s.textures2d_array_sampled_uint_num; i++)
-					{
-						if (s.textures2d_array_sampled_uint_id[i] != set.textures2d_array_sampled_uint_id[i] ||
-						    s.textures2d_array_sampled_uint_view[i] != set.textures2d_array_sampled_uint_view[i])
-						{
-							match = false;
-							break;
-						}
-					}
-				}
-				if (match)
-				{
-					for (int i = 0; i < s.textures3d_sampled_uint_num; i++)
-					{
-						if (s.textures3d_sampled_uint_id[i] != set.textures3d_sampled_uint_id[i] ||
-						    s.textures3d_sampled_uint_view[i] != set.textures3d_sampled_uint_view[i])
-						{
-							match = false;
-							break;
-						}
-					}
-				}
-				if (match)
-				{
-					for (int i = 0; i < s.textures2d_storage_num; i++)
-					{
-						if (s.textures2d_storage_id[i] != set.textures2d_storage_id[i] ||
-						    s.textures2d_storage_view[i] != set.textures2d_storage_view[i])
-						{
-							match = false;
-							break;
-						}
-					}
-				}
-				if (match)
-				{
-					for (int i = 0; i < s.samplers_num; i++)
-					{
-						if (s.samplers_id[i] != set.samplers_id[i])
-						{
-							match = false;
-							break;
-						}
-					}
-				}
-				if (match)
-				{
-					for (int i = 0; i < s.gds_buffers_num; i++)
-					{
-						if (s.gds_buffers_id[i] != set.gds_buffers_id[i])
-						{
-							match = false;
-							break;
-						}
-					}
-				}
-				if (match && (s.vsharp_uniform_buffer != set.vsharp_uniform_buffer ||
-			              (s.vsharp_uniform_buffer && s.vsharp_uniform_buffer_key != set.vsharp_uniform_buffer_key)))
-				{
-					match = false;
-				}
-				if (match)
-				{
-					return index;
-				}
-			}
+			return index;
 		}
 	}
 	return -1;
@@ -676,41 +529,46 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	const int  sampled_uint_total = bind.textures2D.textures2d_sampled_uint_num + bind.textures2D.textures2d_array_sampled_uint_num +
 	                               bind.textures2D.textures3d_sampled_uint_num;
 	const bool split_numeric_types = sampled_uint_total > 0 && sampled_uint_total < sampled_total;
-	int        textures2d_sampled_num = !split_numeric_types || bind.textures2D.textures2d_sampled_uint_num < bind.textures2D.textures2d_sampled_num
-	                                      ? bind.textures2D.textures2d_sampled_num
-	                                      : 0;
-	int textures2d_array_sampled_num =
-	    !split_numeric_types || bind.textures2D.textures2d_array_sampled_uint_num < bind.textures2D.textures2d_array_sampled_num
-	        ? bind.textures2D.textures2d_array_sampled_num
-	        : 0;
-	int textures3d_sampled_num = !split_numeric_types || bind.textures2D.textures3d_sampled_uint_num < bind.textures2D.textures3d_sampled_num
-	                                 ? bind.textures2D.textures3d_sampled_num
-	                                 : 0;
-	// When every sampled image is unsigned, PrepareTextures files them in the
-	// primary banks, yet the shader's unsigned load and sample paths read the
-	// unsigned banks (the layout declares them and both share the element
-	// type). Mirror the primary banks there; unwritten, a copy kernel's
-	// image_load read zero.
-	const bool unsigned_only = sampled_uint_total > 0 && sampled_uint_total == sampled_total;
-	if (unsigned_only)
+	// When any sampled image is unsigned, the layout declares a primary and an
+	// unsigned bank for every shape, and the shader statically references both.
+	// PrepareTextures fills the primary bank, the unsigned bank, or (split by
+	// numeric type) both. Every declared binding must hold valid descriptors, so
+	// an unfilled bank mirrors its counterpart: the shader's numeric dispatch
+	// reads only the bank of the image's numeric type. Unwritten, a copy
+	// kernel's image_load read zero and validation reports the binding.
+	const bool unsigned_banks = sampled_uint_total > 0;
+	const auto mirror_unfilled_bank = [&](int declared, int declared_uint, VulkanImage**& primary, const int*& primary_view,
+	                                      VulkanImage**& uint_images, const int*& uint_view, int* primary_num, int* uint_num)
 	{
-		textures2d_sampled_uint            = textures2d_sampled;
-		textures2d_sampled_uint_view       = textures2d_sampled_view;
-		textures2d_array_sampled_uint      = textures2d_array_sampled;
-		textures2d_array_sampled_uint_view = textures2d_array_sampled_view;
-		textures3d_sampled_uint            = textures3d_sampled;
-		textures3d_sampled_uint_view       = textures3d_sampled_view;
-	}
-	int textures2d_sampled_uint_num = (split_numeric_types && bind.textures2D.textures2d_sampled_uint_num > 0) || unsigned_only
-	                                      ? bind.textures2D.textures2d_sampled_num
-	                                      : 0;
-	int textures2d_array_sampled_uint_num =
-	    (split_numeric_types && bind.textures2D.textures2d_array_sampled_uint_num > 0) || unsigned_only
-	        ? bind.textures2D.textures2d_array_sampled_num
-	        : 0;
-	int textures3d_sampled_uint_num = (split_numeric_types && bind.textures2D.textures3d_sampled_uint_num > 0) || unsigned_only
-	                                      ? bind.textures2D.textures3d_sampled_num
-	                                      : 0;
+		const bool primary_filled = !split_numeric_types || declared_uint < declared;
+		const bool uint_filled    = split_numeric_types && declared_uint > 0;
+		*primary_num              = declared;
+		*uint_num                 = unsigned_banks ? declared : 0;
+		if (!primary_filled)
+		{
+			primary      = uint_images;
+			primary_view = uint_view;
+		} else if (unsigned_banks && !uint_filled)
+		{
+			uint_images = primary;
+			uint_view   = primary_view;
+		}
+	};
+	int textures2d_sampled_num            = 0;
+	int textures2d_sampled_uint_num       = 0;
+	int textures2d_array_sampled_num      = 0;
+	int textures2d_array_sampled_uint_num = 0;
+	int textures3d_sampled_num            = 0;
+	int textures3d_sampled_uint_num       = 0;
+	mirror_unfilled_bank(bind.textures2D.textures2d_sampled_num, bind.textures2D.textures2d_sampled_uint_num, textures2d_sampled,
+	                     textures2d_sampled_view, textures2d_sampled_uint, textures2d_sampled_uint_view, &textures2d_sampled_num,
+	                     &textures2d_sampled_uint_num);
+	mirror_unfilled_bank(bind.textures2D.textures2d_array_sampled_num, bind.textures2D.textures2d_array_sampled_uint_num,
+	                     textures2d_array_sampled, textures2d_array_sampled_view, textures2d_array_sampled_uint,
+	                     textures2d_array_sampled_uint_view, &textures2d_array_sampled_num, &textures2d_array_sampled_uint_num);
+	mirror_unfilled_bank(bind.textures2D.textures3d_sampled_num, bind.textures2D.textures3d_sampled_uint_num, textures3d_sampled,
+	                     textures3d_sampled_view, textures3d_sampled_uint, textures3d_sampled_uint_view, &textures3d_sampled_num,
+	                     &textures3d_sampled_uint_num);
 	int        sampled_descriptor_num = sampled_total;
 	int        textures2d_storage_num = bind.textures2D.textures2d_storage_num;
 	int        samplers_num           = bind.samplers.samplers_num;
@@ -736,79 +594,86 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	EXIT_IF(gctx == nullptr);
 
-	Set nset;
-	nset.set                    = nullptr;
-	nset.storage_buffers_num    = storage_buffers_num;
-	nset.textures2d_sampled_num = textures2d_sampled_num;
-	nset.textures2d_sampled_depth_num = bind.textures2D.textures2d_sampled_depth_num;
-	nset.textures2d_array_sampled_num = textures2d_array_sampled_num;
-	nset.textures3d_sampled_num = textures3d_sampled_num;
-	nset.textures2d_sampled_uint_num = textures2d_sampled_uint_num;
+	// The probe's vectors keep their capacity, so a lookup allocates nothing.
+	Set& nset = m_probe;
+	nset.set                               = nullptr;
+	nset.textures2d_sampled_num            = textures2d_sampled_num;
+	nset.textures2d_sampled_depth_num      = bind.textures2D.textures2d_sampled_depth_num;
+	nset.textures2d_array_sampled_num      = textures2d_array_sampled_num;
+	nset.textures3d_sampled_num            = textures3d_sampled_num;
+	nset.textures2d_sampled_uint_num       = textures2d_sampled_uint_num;
 	nset.textures2d_array_sampled_uint_num = textures2d_array_sampled_uint_num;
-	nset.textures3d_sampled_uint_num = textures3d_sampled_uint_num;
-	nset.textures2d_storage_num = textures2d_storage_num;
-	nset.samplers_num           = samplers_num;
-	nset.gds_buffers_num        = gds_buffers_num;
-	nset.vsharp_uniform_buffer  = vsharp_uniform_buffer;
-	nset.stage                  = stage;
+	nset.textures3d_sampled_uint_num       = textures3d_sampled_uint_num;
+	nset.textures2d_storage_num            = textures2d_storage_num;
+	nset.gds_buffers_num                   = gds_buffers_num;
+	nset.vsharp_uniform_buffer             = vsharp_uniform_buffer;
+	nset.vsharp_uniform_buffer_key         = {};
+	nset.stage                             = stage;
 	nset.layout_key = layout_plan.CacheKey(static_cast<uint32_t>(stage));
+	nset.storage_buffers.clear();
 	for (int i = 0; i < storage_buffers_num; i++)
 	{
-		nset.storage_buffers[i] = storage_buffers[i] != nullptr ? storage_buffers[i]->DescriptorKey() : VulkanBufferDescriptorKey {};
+		nset.storage_buffers.push_back(storage_buffers[i] != nullptr ? storage_buffers[i]->DescriptorKey() : VulkanBufferDescriptorKey {});
 	}
-	for (int i = 0; i < textures2d_sampled_num; i++)
+	nset.images.clear();
+	const auto add_images = [&nset](VulkanImage* const* images, const int* views, int num)
 	{
-		nset.textures2d_sampled_id[i]   = textures2d_sampled[i]->memory.unique_id;
-		nset.textures2d_sampled_view[i] = static_cast<uint8_t>(textures2d_sampled_view[i]);
-	}
-	for (int i = 0; i < nset.textures2d_sampled_depth_num; i++)
-	{
-		nset.textures2d_sampled_depth_id[i]   = textures2d_sampled_depth[i]->memory.unique_id;
-		nset.textures2d_sampled_depth_view[i] = static_cast<uint8_t>(textures2d_sampled_depth_view[i]);
-	}
-	for (int i = 0; i < textures2d_array_sampled_num; i++)
-	{
-		nset.textures2d_array_sampled_id[i]   = textures2d_array_sampled[i]->memory.unique_id;
-		nset.textures2d_array_sampled_view[i] = static_cast<uint8_t>(textures2d_array_sampled_view[i]);
-	}
-	for (int i = 0; i < textures2d_storage_num; i++)
-	{
-		nset.textures2d_storage_id[i]   = textures2d_storage[i]->memory.unique_id;
-		nset.textures2d_storage_view[i] = static_cast<uint8_t>(textures2d_storage_view[i]);
-	}
-	for (int i = 0; i < samplers_num; i++)
-	{
-		nset.samplers_id[i] = samplers[i];
-	}
+		for (int i = 0; i < num; i++)
+		{
+			nset.images.push_back({images[i] != nullptr ? images[i]->memory.unique_id : 0u, static_cast<uint8_t>(views[i])});
+		}
+	};
+	add_images(textures2d_sampled, textures2d_sampled_view, textures2d_sampled_num);
+	add_images(textures2d_sampled_depth, textures2d_sampled_depth_view, nset.textures2d_sampled_depth_num);
+	add_images(textures2d_array_sampled, textures2d_array_sampled_view, textures2d_array_sampled_num);
+	add_images(textures3d_sampled, textures3d_sampled_view, textures3d_sampled_num);
+	add_images(textures2d_sampled_uint, textures2d_sampled_uint_view, textures2d_sampled_uint_num);
+	add_images(textures2d_array_sampled_uint, textures2d_array_sampled_uint_view, textures2d_array_sampled_uint_num);
+	add_images(textures3d_sampled_uint, textures3d_sampled_uint_view, textures3d_sampled_uint_num);
+	add_images(textures2d_storage, textures2d_storage_view, textures2d_storage_num);
+	nset.samplers_id.assign(samplers, samplers + samplers_num);
 	for (int i = 0; i < gds_buffers_num; i++)
 	{
 		nset.gds_buffers_id[i] = gds_buffers[i]->memory.unique_id;
-	}
-	for (int i = 0; i < textures3d_sampled_num; i++)
-	{
-		nset.textures3d_sampled_id[i]   = textures3d_sampled[i] != nullptr ? textures3d_sampled[i]->memory.unique_id : 0u;
-		nset.textures3d_sampled_view[i] = static_cast<uint8_t>(textures3d_sampled_view[i]);
-	}
-	for (int i = 0; i < textures2d_sampled_uint_num; i++)
-	{
-		nset.textures2d_sampled_uint_id[i]   = textures2d_sampled_uint[i]->memory.unique_id;
-		nset.textures2d_sampled_uint_view[i] = static_cast<uint8_t>(textures2d_sampled_uint_view[i]);
-	}
-	for (int i = 0; i < textures2d_array_sampled_uint_num; i++)
-	{
-		nset.textures2d_array_sampled_uint_id[i]   = textures2d_array_sampled_uint[i]->memory.unique_id;
-		nset.textures2d_array_sampled_uint_view[i] = static_cast<uint8_t>(textures2d_array_sampled_uint_view[i]);
-	}
-	for (int i = 0; i < textures3d_sampled_uint_num; i++)
-	{
-		nset.textures3d_sampled_uint_id[i]   = textures3d_sampled_uint[i]->memory.unique_id;
-		nset.textures3d_sampled_uint_view[i] = static_cast<uint8_t>(textures3d_sampled_uint_view[i]);
 	}
 	if (vsharp_uniform_buffer)
 	{
 		nset.vsharp_uniform_buffer_key = vsharp_buffer->DescriptorKey();
 	}
 	nset.hash = CalcHash(nset);
+
+	// A GPU-owned render target starts UNDEFINED and may be sampled before any
+	// pass writes it. The descriptor's declared layout still applies, so record
+	// the discard transition here; the cached-set return must not skip it.
+	auto transition_undefined_sampled = [&](VulkanImage** images, int count)
+	{
+		for (int i = 0; i < count; i++)
+		{
+			auto* image = images[i];
+			if (image == nullptr || image->layout != VK_IMAGE_LAYOUT_UNDEFINED)
+			{
+				continue;
+			}
+			const auto layout = IsStorageAliasedSampledImage(image, textures2d_storage, textures2d_storage_num)
+			                        ? VK_IMAGE_LAYOUT_GENERAL
+			                        : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			UtilTransitionColorImageLayout(buffer, image, layout);
+		}
+	};
+	transition_undefined_sampled(textures2d_sampled, textures2d_sampled_num);
+	transition_undefined_sampled(textures2d_array_sampled, textures2d_array_sampled_num);
+	transition_undefined_sampled(textures3d_sampled, textures3d_sampled_num);
+	transition_undefined_sampled(textures2d_sampled_uint, textures2d_sampled_uint_num);
+	transition_undefined_sampled(textures2d_array_sampled_uint, textures2d_array_sampled_uint_num);
+	transition_undefined_sampled(textures3d_sampled_uint, textures3d_sampled_uint_num);
+	for (int i = 0; i < textures2d_storage_num; i++)
+	{
+		auto* image = textures2d_storage[i];
+		if (image != nullptr && image->layout == VK_IMAGE_LAYOUT_UNDEFINED)
+		{
+			UtilTransitionColorImageLayout(buffer, image, VK_IMAGE_LAYOUT_GENERAL);
+		}
+	}
 
 	if (const int found = FindSet(nset); found != -1)
 	{
@@ -830,7 +695,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		// and null V#). A null entry here is a host bug, not a guest layout.
 		EXIT_IF(storage_buffers[i] == nullptr || storage_buffers[i]->buffer == nullptr);
 		buffer_info[i].buffer = storage_buffers[i]->buffer;
-		buffer_info[i].offset = 0;
+		buffer_info[i].offset = storage_buffers[i]->guest_offset;
 		EXIT_IF(storage_buffers[i]->descriptor_range == 0u);
 		buffer_info[i].range  = storage_buffers[i]->descriptor_range;
 	}
@@ -954,6 +819,15 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                   ? VK_IMAGE_LAYOUT_GENERAL
 		                                                   : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
+
+	for (int i = 0; i < textures2d_sampled_num; i++) { TraceUndefinedSampledImage(textures2d_sampled[i], "2d-sampled", i); }
+	for (int i = 0; i < nset.textures2d_sampled_depth_num; i++) { TraceUndefinedSampledImage(textures2d_sampled_depth[i], "2d-sampled-depth", i); }
+	for (int i = 0; i < textures2d_array_sampled_num; i++) { TraceUndefinedSampledImage(textures2d_array_sampled[i], "2d-array-sampled", i); }
+	for (int i = 0; i < textures3d_sampled_num; i++) { TraceUndefinedSampledImage(textures3d_sampled[i], "3d-sampled", i); }
+	for (int i = 0; i < textures2d_sampled_uint_num; i++) { TraceUndefinedSampledImage(textures2d_sampled_uint[i], "2d-sampled-uint", i); }
+	for (int i = 0; i < textures2d_array_sampled_uint_num; i++) { TraceUndefinedSampledImage(textures2d_array_sampled_uint[i], "2d-array-sampled-uint", i); }
+	for (int i = 0; i < textures3d_sampled_uint_num; i++) { TraceUndefinedSampledImage(textures3d_sampled_uint[i], "3d-sampled-uint", i); }
+	for (int i = 0; i < textures2d_storage_num; i++) { TraceUndefinedSampledImage(textures2d_storage[i], "2d-storage", i); }
 
 	VkDescriptorBufferInfo vsharp_buffer_info {};
 	if (vsharp_uniform_buffer)
@@ -1212,18 +1086,13 @@ void DescriptorCache::CollectResourceIds(const Set& s, std::vector<uint64_t>* id
 {
 	EXIT_IF(ids == nullptr);
 	ids->clear();
-	const auto add = [ids](const uint64_t* first, int num) { ids->insert(ids->end(), first, first + num); };
-	add(s.textures2d_sampled_id, s.textures2d_sampled_num);
-	add(s.textures2d_sampled_depth_id, s.textures2d_sampled_depth_num);
-	add(s.textures2d_array_sampled_id, s.textures2d_array_sampled_num);
-	add(s.textures3d_sampled_id, s.textures3d_sampled_num);
-	add(s.textures2d_sampled_uint_id, s.textures2d_sampled_uint_num);
-	add(s.textures2d_array_sampled_uint_id, s.textures2d_array_sampled_uint_num);
-	add(s.textures3d_sampled_uint_id, s.textures3d_sampled_uint_num);
-	add(s.textures2d_storage_id, s.textures2d_storage_num);
-	for (int i = 0; i < s.storage_buffers_num; i++)
+	for (const auto& image: s.images)
 	{
-		ids->push_back(s.storage_buffers[i].unique_id);
+		ids->push_back(image.unique_id);
+	}
+	for (const auto& buffer: s.storage_buffers)
+	{
+		ids->push_back(buffer.unique_id);
 	}
 	if (s.vsharp_uniform_buffer)
 	{
@@ -1265,16 +1134,17 @@ VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 			m_sets_by_resource.erase(it);
 		}
 	}
-	set.resources.clear();
-	auto* released    = set.set;
-	set.set           = nullptr;
+	auto*          released = set.set;
+	const uint32_t hash     = set.hash;
+	// A free slot keeps no binding storage.
+	set               = Set {};
 	set.next_free_set = m_first_free_set;
 	m_first_free_set  = index;
-	auto& hash_ids    = m_sets_map[set.hash];
+	auto& hash_ids    = m_sets_map[hash];
 	hash_ids.Remove(index);
 	if (hash_ids.IsEmpty())
 	{
-		m_sets_map.Remove(set.hash);
+		m_sets_map.Remove(hash);
 	}
 	EXIT_IF(m_live_sets == 0);
 	m_live_sets--;
@@ -1426,8 +1296,8 @@ void DescriptorCache::FreeDescriptor(VulkanBuffer* buffer)
 	Core::LockGuard lock(m_mutex);
 	const uint64_t  unique_id = buffer->memory.unique_id;
 	FreeSetsReferencing(unique_id, [unique_id](const Set& set) {
-		return VulkanDescriptorReferencesBuffer(set.storage_buffers, set.storage_buffers_num, set.vsharp_uniform_buffer,
-		                                        set.vsharp_uniform_buffer_key, unique_id);
+		return VulkanDescriptorReferencesBuffer(set.storage_buffers.data(), static_cast<int>(set.storage_buffers.size()),
+		                                        set.vsharp_uniform_buffer, set.vsharp_uniform_buffer_key, unique_id);
 	});
 }
 
@@ -1440,14 +1310,11 @@ void DescriptorCache::FreeDescriptor(VulkanImage* image)
 	Core::LockGuard lock(m_mutex);
 	const uint64_t  unique_id = image->memory.unique_id;
 	FreeSetsReferencing(unique_id, [unique_id](const Set& set) {
-		const auto references = [unique_id](const uint64_t* ids, int num) { return std::find(ids, ids + num, unique_id) != ids + num; };
-		return references(set.textures2d_sampled_id, set.textures2d_sampled_num) ||
-		       references(set.textures2d_array_sampled_id, set.textures2d_array_sampled_num) ||
-		       references(set.textures3d_sampled_id, set.textures3d_sampled_num) ||
-		       references(set.textures2d_sampled_uint_id, set.textures2d_sampled_uint_num) ||
-		       references(set.textures2d_array_sampled_uint_id, set.textures2d_array_sampled_uint_num) ||
-		       references(set.textures3d_sampled_uint_id, set.textures3d_sampled_uint_num) ||
-		       references(set.textures2d_storage_id, set.textures2d_storage_num);
+		// The depth bank is not matched, as before the compact key.
+		const auto depth_begin = set.images.begin() + set.textures2d_sampled_num;
+		const auto depth_end   = depth_begin + set.textures2d_sampled_depth_num;
+		const auto references  = [unique_id](const ImageSlot& image) { return image.unique_id == unique_id; };
+		return std::any_of(set.images.begin(), depth_begin, references) || std::any_of(depth_end, set.images.end(), references);
 	});
 }
 

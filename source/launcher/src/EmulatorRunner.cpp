@@ -117,6 +117,7 @@ bool CreateLuaScript(const Kyty::Configuration& info, const QString& input_profi
 	s << "\t PipelineDumpEnabled = " << (info.pipeline_dump_enabled ? "true" : "false") << ";\n";
 	s << "\t PipelineDumpFolder = " << LuaQuote(info.pipeline_dump_folder) << ";\n";
 	s << "\t InputProfileFile = " << LuaQuote(input_profile_file) << ";\n";
+	s << "\t GamePatchFile = " << LuaQuote(info.game_patch_file) << ";\n";
 	s << "}\n";
 
 	s << KYTY_INIT << "(cfg);\n";

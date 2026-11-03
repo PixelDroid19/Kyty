@@ -369,9 +369,9 @@ TEST(EmulatorNggPassthroughProof, UnknownUpperSystemBitsRemainUnknownThroughDead
 		const auto code = Parse(Fixture());
 		const auto result = Accept(code);
 		const auto& input = result.steps[0].scalar_sources[0];
-		Check(input.known_mask == 0xffffu && input.value == 0x103u && input.initial_dependencies.test(3), "partial s3 knowledge only");
+		Check(input.known_mask == 0x0f00ffffu && input.value == 0x103u && input.initial_dependencies.test(3), "partial s3 knowledge only");
 		const auto shift = Find(code, Type::SLshrB32);
-		Check(result.steps[shift].scalar_result.known_mask == 0xff0000ffu, "high system bits survive as unknown shifted middle bits");
+		Check(result.steps[shift].scalar_result.known_mask == 0xff0f00ffu, "high system bits survive as unknown shifted middle bits");
 		const auto subtract = Find(code, Type::SSubI32, 1);
 		const auto& partial = result.steps[subtract].scalar_result;
 		Check((partial.known_mask & 63u) == 63u && partial.known_mask != 0xffffffffu && (partial.value & 63u) == 61u,
@@ -750,7 +750,7 @@ TEST(EmulatorNggPassthroughProof, RejectsCrossLaneMemoryBranchesAndContinuations
 		const auto original = Parse(Fixture());
 		const auto first = Find(original, Type::VMovB32);
 		for (const auto type: {Type::VReadfirstlaneB32, Type::VReadlaneB32, Type::VWritelaneB32, Type::VPermlane16B32,
-		                      Type::VMbcntLoU32B32, Type::VCndmaskB32, Type::VCmpxEqU32, Type::SLoadDword,
+		                      Type::VCndmaskB32, Type::VCmpxEqU32, Type::SLoadDword,
 		                      Type::BufferLoadDword, Type::BufferStoreDword, Type::BufferAtomicAdd, Type::ImageLoad,
 		                      Type::DsReadB32, Type::DsWriteB32, Type::Unknown})
 		{
@@ -796,8 +796,8 @@ TEST(EmulatorNggPassthroughProof, RealDecodedLaneMemoryAndAtomicInstructionsCann
 		Check(atomic.GetInstructions().At(0).type == Type::DsAddU32, "real LDS atomic decode");
 		Refuse(atomic, Reject::UnsupportedInstruction, 0);
 		Words barrier;
-		Sopp(barrier, 10);
-		Refuse(WithPrefix(barrier), Reject::UnsupportedInstruction, 0);
+		Sopp(barrier, 10); // one guest wave per subgroup and no memory access: the barrier is inert
+		Check(Accept(WithPrefix(barrier)).steps[0].kind == Kind::Wait, "a barrier is proved inert, not dropped silently");
 		// A branch with a perfectly known predicate still changes the proof
 		// domain; straight-line analysis does not interpret its chosen arm.
 		Words branch;

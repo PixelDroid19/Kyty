@@ -90,6 +90,14 @@ bool Spirv::EmitGeometryProlog(String8* output) const
 %geo_slices = OpLoad %uint %geo_slices_ptr
 %geo_first_vertex = OpLoad %uint %geo_first_vertex_ptr
 %geo_first_instance = OpLoad %uint %geo_first_instance_ptr
+%geo_index_lo_ptr = OpAccessChain %<ptr> %vsharp %int_0 %<row1> %int_2
+%geo_index_hi_ptr = OpAccessChain %<ptr> %vsharp %int_0 %<row1> %int_3
+%geo_index_lo = OpLoad %uint %geo_index_lo_ptr
+%geo_index_hi = OpLoad %uint %geo_index_hi_ptr
+%geo_index_lo64 = OpUConvert %ulong %geo_index_lo
+%geo_index_hi64 = OpUConvert %ulong %geo_index_hi
+%geo_index_his = OpShiftLeftLogical %ulong %geo_index_hi64 %uint_32
+%geo_index_base = OpBitwiseOr %ulong %geo_index_his %geo_index_lo64
 %geo_output_lo64 = OpUConvert %ulong %geo_output_lo
 %geo_output_hi64 = OpUConvert %ulong %geo_output_hi
 %geo_output_his = OpShiftLeftLogical %ulong %geo_output_hi64 %uint_32
@@ -149,12 +157,43 @@ bool Spirv::EmitGeometryProlog(String8* output) const
 	                                "%geo_offset2 = OpIAdd %uint %geo_offset1 %<scale>\n"
 	                                "%geo_offset1_field = OpShiftLeftLogical %uint %geo_offset1 %uint_16\n"
 	                                "%geo_offsets01 = OpBitwiseOr %uint %geo_offset0 %geo_offset1_field\n");
+	// An indexed draw reads each slot vertex from the guest index buffer at the
+	// guest address in row 1, through the device-address table like every other
+	// guest load of the pass; the block's first vertex is the draw's base vertex
+	// added to every fetched index. A 16-bit index is read from its aligned word,
+	// which never leaves the page holding the index.
+	String8 vertex_id;
+	if (geometry.indexed)
+	{
+		const String8 element = geometry.index_format == 0u ? String8(R"(%geo_ibytes = OpShiftLeftLogical %ulong %geo_islot64 %uint_2
+%geo_iguest = OpIAdd %ulong %geo_index_base %geo_ibytes
+)")
+		                                                    : String8(R"(%geo_ibytes = OpShiftLeftLogical %ulong %geo_islot64 %uint_1
+%geo_ielement = OpIAdd %ulong %geo_index_base %geo_ibytes
+%geo_iwords = OpShiftRightLogical %ulong %geo_ielement %uint_2
+%geo_iguest = OpShiftLeftLogical %ulong %geo_iwords %uint_2
+%geo_ihalf64 = OpShiftRightLogical %ulong %geo_ielement %uint_1
+%geo_ihalf32 = OpUConvert %uint %geo_ihalf64
+%geo_ihalf = OpBitwiseAnd %uint %geo_ihalf32 %uint_1
+%geo_ishift = OpIMul %uint %geo_ihalf %uint_16
+)");
+		const String8 extract = geometry.index_format == 0u
+		                            ? String8("%geo_fetched = OpCopyObject %uint %geo_iword\n")
+		                            : String8("%geo_fetched = OpBitFieldUExtract %uint %geo_iword %geo_ishift %uint_16\n");
+		vertex_id = "%geo_islot64 = OpUConvert %ulong %geo_vertex\n" + element +
+		            "%geo_idevice = OpFunctionCall %ulong %guest_device_address %geo_iguest %gda_u64_4\n"
+		            "%geo_ipointer = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %geo_idevice\n"
+		            "%geo_iword = OpLoad %uint %geo_ipointer Aligned 4\n" +
+		            extract + "%geo_vertex_id = OpIAdd %uint %geo_fetched %geo_first_vertex\n";
+	} else
+	{
+		vertex_id = "%geo_vertex_id = OpIAdd %uint %geo_first_vertex %geo_vertex\n";
+	}
 	*output += String8(R"(
 %geo_local = OpUDiv %uint %native_wave_logical_index %<corners>
 %geo_corner = OpUMod %uint %native_wave_logical_index %<corners>
 %geo_input = OpIAdd %uint %geo_base %geo_local
-<vertex>%geo_vertex_id = OpIAdd %uint %geo_first_vertex %geo_vertex
-%geo_vertex_float = OpBitcast %float %geo_vertex_id
+<vertex><vertex_id>%geo_vertex_float = OpBitcast %float %geo_vertex_id
                OpStore %v5 %geo_vertex_float
                OpStore %v8 %geo_instance_float
 %geo_offset0 = OpIMul %uint %native_wave_logical_index %<stride>
@@ -169,6 +208,7 @@ bool Spirv::EmitGeometryProlog(String8* output) const
                OpStore %v4 %geo_zero_float
 )")
 	               .ReplaceStr("<vertex>", vertex)
+	               .ReplaceStr("<vertex_id>", vertex_id)
 	               .ReplaceStr("<offsets>", offsets)
 	               .ReplaceStr("<corners>", corners)
 	               .ReplaceStr("<stride>", stride)
@@ -276,11 +316,11 @@ ShaderComputeInputInfo SpirvGeometryComputeHostInfo(const ShaderCode& code, cons
 	host.threads_num[0] = geometry.GroupLanes();
 	host.threads_num[1] = host.threads_num[2] = 1u;
 	host.lds_dwords  = geometry.lds_dwords;
-	// One guest lane per invocation: each guest wave64 spans two host subgroups of 32.
-	host.wave_layout = {ShaderComputeWaveStrategy::Split64On32, {geometry.GroupLanes(), 1u, 1u}, {geometry.GroupLanes(), 1u, 1u}, 64u, 32u, 1u,
-	                    geometry.waves, host.lds_dwords};
+	// One guest lane per invocation: each guest wave64 spans 64 / part_lanes host subgroups.
+	host.wave_layout = {ShaderComputeWaveStrategy::Split64On32, {geometry.GroupLanes(), 1u, 1u}, {geometry.GroupLanes(), 1u, 1u}, 64u,
+	                    geometry.part_lanes, 1u, geometry.waves, host.lds_dwords};
 	host.native_wave_sensitive    = true;
-	host.required_subgroup_size   = 32u;
+	host.required_subgroup_size   = geometry.part_lanes;
 	host.bind        = vs_input_info.bind;
 	host.float_mode  = vs_input_info.float_mode;
 	host.dx10_clamp  = vs_input_info.dx10_clamp;
@@ -314,15 +354,21 @@ String8 SpirvGenerateGeometryComputeSource(const ShaderCode& code, const ShaderV
 
 String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometry, bool layer)
 {
+	// A primitive export word holds three 10-bit corners: a 9-bit vertex index under that vertex's edge flag.
 	static const char* head = R"(               OpCapability Shader
                OpCapability Int64
                OpCapability PhysicalStorageBufferAddresses
+               OpCapability ClipDistance
+               OpCapability CullDistance
 <layer_capability>               OpExtension "SPV_KHR_physical_storage_buffer"
        %glsl = OpExtInstImport "GLSL.std.450"
                OpMemoryModel PhysicalStorageBuffer64 GLSL450
                OpEntryPoint Vertex %main "main" %gl_VertexIndex %outPerVertex %geometry<interface>
                OpDecorate %gl_VertexIndex BuiltIn VertexIndex
                OpMemberDecorate %gl_PerVertex 0 BuiltIn Position
+               OpMemberDecorate %gl_PerVertex 1 BuiltIn PointSize
+               OpMemberDecorate %gl_PerVertex 2 BuiltIn ClipDistance
+               OpMemberDecorate %gl_PerVertex 3 BuiltIn CullDistance
                OpDecorate %gl_PerVertex Block
                OpMemberDecorate %GeometryBlock 0 Offset 0
                OpMemberDecorate %GeometryBlock 1 Offset 4
@@ -345,7 +391,7 @@ String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometr
     %uint_32 = OpConstant %uint 32
  %uint_lanes = OpConstant %uint <lanes>
 %uint_group_corners = OpConstant %uint <group_corners>
- %uint_index_mask = OpConstant %uint 1023
+ %uint_index_mask = OpConstant %uint 511
  %uint_layer_mask = OpConstant %uint 2047
  %uint_count_mask = OpConstant %uint 4095
  %uint_null = OpConstant %uint 2147483648
@@ -358,7 +404,8 @@ String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometr
   %v4float_0 = OpConstantComposite %v4float %float_0 %float_0 %float_0 %float_0
 %_ptr_Input_int = OpTypePointer Input %int
 %gl_VertexIndex = OpVariable %_ptr_Input_int Input
-%gl_PerVertex = OpTypeStruct %v4float
+%single_float = OpTypeArray %float %uint_1
+%gl_PerVertex = OpTypeStruct %v4float %float %single_float %single_float
 %_ptr_Output_gl_PerVertex = OpTypePointer Output %gl_PerVertex
 %outPerVertex = OpVariable %_ptr_Output_gl_PerVertex Output
 %_ptr_Output_v4float = OpTypePointer Output %v4float

@@ -476,6 +476,50 @@ TEST(EmulatorNetwork, NpGameIntentRejectsUnprovenOutputLayoutWithoutWriting)
 	EXPECT_TRUE(Core::VirtualMemory::Free(storage));
 }
 
+TEST(EmulatorNetwork, NpGameIntentPropertyLookupRequiresInitializationAndReportsMissingValue)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libNpGameIntent_1", &symbols));
+	const auto* init_record = symbols.Find(NpFunction(u"NpGameIntent", u"m87BHxt-H60"));
+	const auto* get_record  = symbols.Find(NpFunction(u"NpGameIntent", u"rPl0INNc-M8"));
+	ASSERT_NE(init_record, nullptr);
+	ASSERT_NE(get_record, nullptr);
+
+	using InitFn    = int(KYTY_SYSV_ABI*)();
+	using GetPropFn = int(KYTY_SYSV_ABI*)(const void*, const char*, char*, uint64_t);
+	auto* init          = reinterpret_cast<InitFn>(init_record->vaddr);
+	auto* get_property  = reinterpret_cast<GetPropFn>(get_record->vaddr);
+
+	char value[8] = {};
+	EXPECT_EQ(get_property(&symbols, "key", value, sizeof(value)), static_cast<int>(0x80553802u));
+
+	EXPECT_EQ(init(), 0);
+	EXPECT_EQ(get_property(nullptr, "key", value, sizeof(value)), static_cast<int>(0x80553804u));
+	EXPECT_EQ(get_property(&symbols, "", value, sizeof(value)), static_cast<int>(0x80553804u));
+	EXPECT_EQ(get_property(&symbols, "key", nullptr, sizeof(value)), static_cast<int>(0x80553804u));
+	EXPECT_EQ(get_property(&symbols, "key", value, 0), static_cast<int>(0x80553804u));
+
+	value[0] = 'x';
+	EXPECT_EQ(get_property(&symbols, "key", value, sizeof(value)), static_cast<int>(0x80553807u));
+	EXPECT_EQ(value[0], '\0');
+}
+
+TEST(EmulatorNetwork, UserServiceInitialize2ValidatesIdAndRejectsRepeat)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libUserService_1", &symbols));
+	const auto* record = symbols.Find(NpFunction(u"UserService", u"az-0R6eviZ0"));
+	ASSERT_NE(record, nullptr);
+
+	using Init2Fn = int(KYTY_SYSV_ABI*)(int32_t, const void*);
+	auto* init2 = reinterpret_cast<Init2Fn>(record->vaddr);
+
+	EXPECT_EQ(init2(0xff, nullptr), Libs::UserService::USER_SERVICE_ERROR_INVALID_ARGUMENT);
+	EXPECT_EQ(init2(0x300, nullptr), Libs::UserService::USER_SERVICE_ERROR_INVALID_ARGUMENT);
+	EXPECT_EQ(init2(0x100, nullptr), 0);
+	EXPECT_EQ(init2(0x2ff, nullptr), Libs::UserService::USER_SERVICE_ERROR_ALREADY_INITIALIZED);
+}
+
 TEST(EmulatorNetwork, NpUniversalDataSystemRejectsUnprovenMemoryStatLayoutWithoutWriting)
 {
 	Loader::SymbolDatabase symbols;

@@ -351,6 +351,89 @@ TEST(EmulatorKernelLifetimes, EventFlagHandlesDoNotAliasDeletedObjects)
 	}
 }
 
+TEST(EmulatorKernelLifetimes, SemaphoreSignalTakenByOneWaiterDoesNotCreateWakeStorm)
+{
+#if defined(__linux__)
+	EnsureKernelLifetimesSubsystems();
+
+	using namespace Kyty::Kernel;
+	using namespace Kyty::Kernel::Semaphore;
+
+	constexpr int          kWaiterCount = 8;
+	constexpr auto         kSampleTime  = 250ms;
+	constexpr std::int64_t kCpuBudgetNs = 250'000'000; // One full CPU for the entire sample.
+	KernelSema             semaphore    = nullptr;
+	ASSERT_EQ(KernelCreateSema(&semaphore, "lifetime-sema-wake-storm", 1, 0, kWaiterCount, nullptr), OK);
+
+	std::atomic_int               waiters_started {0};
+	std::vector<std::future<int>> waiters;
+	waiters.reserve(kWaiterCount);
+	for (int i = 0; i < kWaiterCount; i++)
+	{
+		waiters.emplace_back(std::async(std::launch::async,
+		                                [semaphore, &waiters_started]
+		                                {
+			                                KernelUseconds timeout = 5'000'000;
+			                                waiters_started.fetch_add(1, std::memory_order_release);
+			                                return KernelWaitSema(semaphore, 1, &timeout);
+		                                }));
+	}
+
+	const auto waiter_deadline = std::chrono::steady_clock::now() + 1s;
+	while (waiters_started.load(std::memory_order_acquire) != kWaiterCount && std::chrono::steady_clock::now() < waiter_deadline)
+	{
+		std::this_thread::yield();
+	}
+	EXPECT_EQ(waiters_started.load(std::memory_order_acquire), kWaiterCount);
+	// Let each entered call reach the condition wait before one waiter takes the count.
+	std::this_thread::sleep_for(50ms);
+
+	struct rusage cpu_before {};
+	struct rusage cpu_after {};
+	const int     cpu_before_status = getrusage(RUSAGE_SELF, &cpu_before);
+	const int     signal_result     = KernelSignalSema(semaphore, 1);
+	const auto    sample_start      = std::chrono::steady_clock::now();
+	std::this_thread::sleep_for(kSampleTime);
+	const auto sample_elapsed   = std::chrono::steady_clock::now() - sample_start;
+	const int  cpu_after_status = getrusage(RUSAGE_SELF, &cpu_after);
+
+	int       canceled_waiters = -1;
+	const int cancel_result    = KernelCancelSema(semaphore, 0, &canceled_waiters);
+	int       ok_results       = 0;
+	for (auto& waiter: waiters)
+	{
+		EXPECT_EQ(waiter.wait_for(1s), std::future_status::ready);
+		const int wait_result = waiter.get();
+		ok_results += (wait_result == OK ? 1 : 0);
+		EXPECT_TRUE(wait_result == OK || wait_result == KERNEL_ERROR_ECANCELED);
+	}
+
+	EXPECT_EQ(signal_result, OK);
+	EXPECT_EQ(cancel_result, OK);
+	EXPECT_EQ(canceled_waiters, kWaiterCount - 1);
+	EXPECT_EQ(ok_results, 1);
+	EXPECT_EQ(KernelDeleteSema(semaphore), OK);
+
+	EXPECT_EQ(cpu_before_status, 0);
+	EXPECT_EQ(cpu_after_status, 0);
+	if (cpu_before_status == 0 && cpu_after_status == 0)
+	{
+		const auto process_cpu_ns = [](const rusage& usage)
+		{
+			return static_cast<std::int64_t>(usage.ru_utime.tv_sec) * 1'000'000'000 +
+			       static_cast<std::int64_t>(usage.ru_utime.tv_usec) * 1'000 +
+			       static_cast<std::int64_t>(usage.ru_stime.tv_sec) * 1'000'000'000 +
+			       static_cast<std::int64_t>(usage.ru_stime.tv_usec) * 1'000;
+		};
+		const auto aggregate_cpu_ns = process_cpu_ns(cpu_after) - process_cpu_ns(cpu_before);
+		EXPECT_LE(aggregate_cpu_ns, kCpuBudgetNs) << "aggregate process CPU during "
+		                                         << std::chrono::duration_cast<std::chrono::milliseconds>(sample_elapsed).count() << " ms sample";
+	}
+#else
+	GTEST_SKIP() << "Linux process CPU accounting is required for this regression check";
+#endif
+}
+
 TEST(EmulatorKernelLifetimes, SemaphoreCancelKeepsNewWaitersOutOfCanceledEpoch)
 {
 	EnsureKernelLifetimesSubsystems();

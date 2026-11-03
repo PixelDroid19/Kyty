@@ -135,24 +135,29 @@ TEST(EmulatorComputeWaveVulkan, SplitLayoutRequiresEveryCoreCapability)
 	EXPECT_EQ(SplitStatus(no_ballot_shuffle), ShaderComputeWaveLayoutStatus::MissingHostCapability);
 }
 
-TEST(EmulatorComputeWaveVulkan, SplitLayoutRequiresExactSize32InQueriedRange)
+TEST(EmulatorComputeWaveVulkan, SplitLayoutRequiresItsExactPartWidthInQueriedRange)
 {
-	const uint32_t ranges[][2] = {{8, 32}, {32, 64}};
+	// The split runs 16-lane parts when the host range holds 16, 8-lane parts
+	// when it also holds 8 and the guest allocates more than 64 VGPRs, else
+	// 32-lane parts. Columns: min, max, guest VGPRs, part width.
+	const uint32_t ranges[][4] = {{8, 32, 64, 16}, {8, 32, 68, 8}, {16, 32, 68, 16}, {16, 16, 16, 16}, {32, 64, 68, 32}};
 	for (const auto& range: ranges)
 	{
 		auto state              = CoreOnlyState();
 		state.min_subgroup_size = range[0];
 		state.max_subgroup_size = range[1];
 		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(state);
+		auto       request      = SplitRequest();
+		request.vgprs           = range[2];
 		ShaderComputeWaveLayout layout {};
-		ASSERT_EQ(ShaderBuildSplitComputeWaveLayout(SplitRequest(), capabilities, &layout),
-		          ShaderComputeWaveLayoutStatus::Supported);
+		ASSERT_EQ(ShaderBuildSplitComputeWaveLayout(request, capabilities, &layout), ShaderComputeWaveLayoutStatus::Supported);
+		EXPECT_EQ(layout.native_subgroup_size, range[3]);
 		VkPipelineShaderStageCreateInfo stage {};
 		stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 		stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
 		VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required {};
 		ASSERT_TRUE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &stage, &required));
-		EXPECT_EQ(required.requiredSubgroupSize, 32u);
+		EXPECT_EQ(required.requiredSubgroupSize, range[3]);
 		EXPECT_NE(stage.flags & VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT, 0u);
 	}
 
@@ -205,7 +210,7 @@ TEST(EmulatorComputeWaveVulkan, ChainsRequiredSizeStateWithoutDroppingExistingSt
 	EXPECT_EQ(stage.pNext, &required);
 	EXPECT_EQ(required.pNext, &prior_state);
 	EXPECT_EQ(required.sType, VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT);
-	EXPECT_EQ(required.requiredSubgroupSize, 32u);
+	EXPECT_EQ(required.requiredSubgroupSize, 16u);
 	EXPECT_NE(stage.flags & VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT, 0u);
 	EXPECT_EQ(stage.flags & VK_PIPELINE_SHADER_STAGE_CREATE_ALLOW_VARYING_SUBGROUP_SIZE_BIT_EXT, 0u);
 }

@@ -560,6 +560,7 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreEntry(const uint8_t* ide
 	// write stalls the write-behind queue once the cache holds thousands of entries.
 	if (!m_state->usage_known)
 	{
+		AtomicFileRemoveOrphans(m_state->root);
 		m_state->usage       = CacheUsage(m_state->root);
 		m_state->usage_known = true;
 	}

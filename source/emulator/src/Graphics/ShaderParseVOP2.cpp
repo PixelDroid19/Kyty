@@ -83,6 +83,8 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 
 	inst.src[0].swizzle  = static_cast<uint8_t>(src0_sel);
 	inst.src[1].swizzle  = static_cast<uint8_t>(src1_sel);
+	inst.src[0].sdwa_sext = sdwa && ((buffer[1] >> 19u) & 1u) != 0u;
+	inst.src[1].sdwa_sext = sdwa && ((buffer[1] >> 27u) & 1u) != 0u;
 	inst.src[0].absolute = (src0_abs != 0);
 	inst.src[1].absolute = (src1_abs != 0);
 	inst.src[0].negate   = (src0_neg != 0);
@@ -161,7 +163,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 			break;
 		case 0x07: KYTY_NI("v_mul_legacy_f32"); break;
 		case 0x08: inst.type = ShaderInstructionType::VMulF32; break;
-		case 0x09: KYTY_NI("v_mul_i32_i24"); break;
+		case 0x09: inst.type = ShaderInstructionType::VMulI32I24; break;
 		case 0x0A: KYTY_NI("v_mul_hi_i32_i24"); break;
 		case 0x0C: KYTY_NI("v_mul_hi_u32_u24"); break;
 		case 0x0D:
@@ -387,6 +389,20 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x39: inst.type = ShaderInstructionType::VMaxF16; break;
 		case 0x3A: inst.type = ShaderInstructionType::VMinF16; break;
 		case 0x3B: KYTY_NI("v_ldexp_f16"); break;
+		case 0x3C:
+			if (!next_gen)
+			{
+				KYTY_UNKNOWN_OP();
+			}
+			// V_PK_FMAC_F16 accumulates into VDST: each half of dst = fma(src0, src1, dst), the
+			// packed FMA with both halves read in place.
+			inst.type            = ShaderInstructionType::VPkFmaF16;
+			inst.format          = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+			inst.src_num         = 3;
+			inst.src[2]          = inst.dst;
+			inst.vop3_op_sel     = 0u;
+			inst.vop3p_op_sel_hi = 7u;
+			break;
 
 		default: KYTY_UNKNOWN_OP();
 	}

@@ -15,6 +15,7 @@ namespace Kyty::Libs::Graphics {
 
 struct GraphicContext;
 struct VulkanBuffer;
+struct GuestInPlaceWindow;
 struct GpuMemoryStoragePublication;
 
 // Guest GPU-visible mappings imported as host-pointer device memory, so a
@@ -26,9 +27,29 @@ struct GpuMemoryStoragePublication;
 //   {guest_base_lo, guest_base_hi, size_lo, size_hi, device_lo, device_hi, span_lo, span_hi}
 // `size` is the guest byte count and `span` the imported byte count. Chunks
 // cover whole pages; translated multiword loads resolve each page separately.
-constexpr uint32_t kGuestDeviceAddressEntryDwords = 8;
-constexpr uint32_t kGuestDeviceAddressNullBytes   = 256;
-constexpr uint32_t kGuestDeviceAddressPageBytes   = 4096;
+// A miss reads at most 128 bytes of the zero prefix, so the prefix also holds,
+// at kGuestDeviceAddressDirectoryHeaderOffset, the directory header
+//   {base_lo, base_hi, shift, last_region}
+// and the directory words follow the entries (GuestDeviceAddressBuildDirectory).
+constexpr uint32_t kGuestDeviceAddressEntryDwords           = 8;
+constexpr uint32_t kGuestDeviceAddressNullBytes             = 256;
+constexpr uint32_t kGuestDeviceAddressPageBytes             = 4096;
+constexpr uint32_t kGuestDeviceAddressDirectoryHeaderOffset = 128;
+
+// Bounds the device binary search to the entries of one region of guest space:
+// regions are 2^shift bytes from `base`, and an address past the last region
+// belongs to it. words[r] counts the entries whose guest base is at most the
+// start of region r; the final word is the entry count. Entries are disjoint
+// and sorted, so for an address in region r the count of entries whose base is
+// at most the address, which the search returns, lies in [words[r], words[r + 1]].
+struct GuestDeviceAddressDirectory
+{
+	uint64_t              base  = 0;
+	uint32_t              shift = 0;
+	std::vector<uint32_t> words;
+};
+
+[[nodiscard]] GuestDeviceAddressDirectory GuestDeviceAddressBuildDirectory(const uint64_t* sorted_bases, uint32_t count);
 
 struct GuestDeviceAddressTable
 {
@@ -76,12 +97,27 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 // Results already published to the imported view on that queue are skipped.
 void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
 
+// True when a registered range still waits for GPU results held outside storage
+// buffers (GpuMemoryPendingWriteBackOutsideStorage). Storage results reach
+// device-address readers through GuestDeviceAddressPendingWriteBack; these need
+// the processor write-back before the reader is recorded.
+[[nodiscard]] bool GuestDeviceAddressPendingWriteBackOutsideStorage();
+
+// Creates `out` directly over the guest pages of [vaddr, vaddr + size), so device
+// writes reach guest memory without a copy and CPU stores reach the device. False:
+// the range is not one bindable run of direct memory, and `out` stays untouched.
+[[nodiscard]] bool GuestDeviceAddressBindInPlace(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint32_t usage,
+                                                 VulkanBuffer* out, GuestInPlaceWindow* window);
+void               GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const GuestInPlaceWindow& window);
+
 // The caller holds the render recording lock through the later write-back.
 // Wait for a returned dependency only after releasing recording locks, then retry.
 // With `publishable`, results the caller can publish in the consumer's queue order
-// (GuestDeviceAddressRecordPublication) are listed there instead of reported.
-[[nodiscard]] bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, std::vector<GpuMemoryStoragePublication>* publishable,
-                                                      SubmissionId* dependency);
+// (GuestDeviceAddressRecordPublication) are listed there instead of reported;
+// `device_awaited` names the other queues' submissions the consumer's recording
+// waits for on the device (GpuMemoryPendingStorageWriteBack).
+[[nodiscard]] bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, const std::vector<SubmissionId>& device_awaited,
+                                                      std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
 
 // Records into `cmd`, after the GPU work already recorded there, a copy of
 // `source` (whose first byte is guest address `vaddr`, `size` bytes) into the

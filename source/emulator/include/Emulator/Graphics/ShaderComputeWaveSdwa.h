@@ -7,10 +7,10 @@
 
 namespace Kyty::Libs::Graphics {
 
-// Admit only v_mov_b32 in its SDWA form as a zero-extend BYTE/WORD/DWORD
+// Admit only v_mov_b32 in its SDWA form as a zero- or sign-extend BYTE/WORD/DWORD
 // extract: VGPR destination and source, dst_sel=DWORD, dst_u=PAD, no clamp,
-// output modifier, sign extension, negate or absolute, S0=0, and every
-// reserved control bit clear. Other SDWA forms and opcodes stay fail-closed.
+// output modifier, negate or absolute, S0=0, and every reserved control bit
+// clear. Other SDWA forms and opcodes stay fail-closed.
 [[nodiscard]] bool ShaderComputeWaveSdwaExtractSupported(const ShaderInstruction& instruction);
 
 // Exact VOP1 signed integer-to-float conversion with a selected VGPR byte,

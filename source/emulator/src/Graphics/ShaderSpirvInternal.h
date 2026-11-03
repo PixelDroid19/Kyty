@@ -37,11 +37,13 @@
 #include <vector>
 
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/FragmentTransportCapture.h"
 #include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
 #include "Emulator/Graphics/ShaderStorageImage.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 
 #include "ShaderControlFlowGraph.h"
+#include "ShaderMaskAnalysis.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -127,8 +129,17 @@ public:
 	// Built by GenerateSource.
 	[[nodiscard]] const ShaderControlFlowGraph& GetControlFlow() const { return m_control_flow; }
 	[[nodiscard]] bool UsesNativeComputeWave() const;
-	// Split wave64 (ShaderSpirvSplitWave.cpp): two host subgroups per guest wave on the native per-lane path.
+	// Split wave64 (ShaderSpirvSplitWave.cpp): two or four host subgroups per guest wave on the native per-lane path.
 	[[nodiscard]] bool UsesSplitComputeWave() const;
+	// Split compute wave: a mask producer whose result each lane reads only
+	// for itself, so its parts skip the wave-wide gather.
+	[[nodiscard]] bool IsLaneLocalMaskResult(uint32_t index) const;
+	[[nodiscard]] const ShaderLaneMaskPlan* LaneMaskPlan() const;
+	// Split compute wave: pointwise mask algebra that gathers its own result
+	// from the lane-local masks it combines.
+	[[nodiscard]] bool IsLaneMaskGather(uint32_t index) const;
+	// Guest lanes per host subgroup of a split wave: 32 or 16.
+	[[nodiscard]] uint32_t SplitWavePartLanes() const;
 	// The SubgroupLocalInvocationId builtin. A split wave keeps the guest lane in %gl_SubgroupInvocationID.
 	[[nodiscard]] String8 HostLaneVariable() const;
 	[[nodiscard]] String8 SplitWaveTypes() const;
@@ -145,8 +156,11 @@ public:
 	// explicit numeric operand loads are marked until the strategy is resolved.
 	[[nodiscard]] bool NativeWave32() const;
 	[[nodiscard]] String8 NativeExecRefresh(const String8& tag) const;
+	[[nodiscard]] static String8 NativeExecAllLanes();
 	[[nodiscard]] String8 NativeQuadUniform(const String8& value, const String8& type, const String8& result) const;
 	[[nodiscard]] String8 NativeMaskBallot(const String8& predicate, const String8& result) const;
+	// A mask result only ever read one lane bit at a time by its owner: each invocation holds its own bit.
+	[[nodiscard]] String8 NativeOwnBitMask(const String8& predicate, const String8& result) const;
 	// Pixel: ballot of the wave's valid pixels under the launch EXEC, the non-helper invocations with EXEC set.
 	// `result` is the v4uint ballot and `result`_valid this invocation's membership.
 	[[nodiscard]] String8 NativeValidPixelBallot(const String8& result) const;
@@ -159,9 +173,15 @@ public:
 	[[nodiscard]] bool UsesFragmentWaveTier() const;
 	// A pixel program admitted as FragmentPartialWave: each host subgroup is a partially populated guest wave.
 	[[nodiscard]] bool UsesFragmentPartialWave() const;
-	// The whole-wave OR reductions of a pixel program admitted as FragmentPartialWave; empty otherwise.
+	// The whole-wave idempotent reductions of a pixel program admitted as FragmentPartialWave; empty otherwise.
 	// Their network steps are not emitted and each read lowers to one subgroup reduction of the seed.
 	[[nodiscard]] const ShaderLaneReductions& LaneReductions() const;
+	// The mask proof of a pixel program, computed once.
+	[[nodiscard]] const ShaderFragmentMaskFlow& FragmentMaskFlow() const;
+	// A pixel program's EXEC write at index leaves every host invocation live: the proof says EXEC is full before the next instruction.
+	[[nodiscard]] bool ExecFullAfter(uint32_t index) const;
+	// A fused vertex program run by the graphics pipeline: every lane of a host subgroup is a live vertex.
+	[[nodiscard]] bool HasFusedVertexLanes() const { return m_vs_input_info != nullptr && m_vs_input_info->gs_prolog && !UsesGeometryCompute(); }
 	// ds_*_addtid_b32: a per-lane LDS slot at M0[15:0] + offset + TID*4.
 	// Compute lowers it onto the shared %lds array; other stages carry it in
 	// a function-local spill array since only the writing lane can observe it.
@@ -169,6 +189,13 @@ public:
 	[[nodiscard]] bool UsesDsAddtidLds() const;
 	[[nodiscard]] bool UsesGeometryCompute() const { return m_geometry_compute_info != nullptr; }
 	void SetGeometryComputeInfo(const ShaderGeometryComputeInfo* info) { m_geometry_compute_info = info; }
+	// A guest pixel program emitted as a split Wave64 compute module: inputs are
+	// read from the captured per-lane record and results are written to a lane
+	// output buffer. The guest stage stays Pixel for classification.
+	[[nodiscard]] bool UsesFragmentCompute() const { return m_fragment_compute_info != nullptr; }
+	void SetFragmentComputeInfo(const ShaderFragmentComputeInfo* info) { m_fragment_compute_info = info; }
+	[[nodiscard]] const ShaderFragmentComputeInfo* GetFragmentComputeInfo() const { return m_fragment_compute_info; }
+	[[nodiscard]] ShaderType HostType() const { return UsesFragmentCompute() ? ShaderType::Compute : m_code.GetType(); }
 	[[nodiscard]] bool EmitGeometryProlog(String8* output) const;
 	[[nodiscard]] bool EmitGeometryExport(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitGeometryAlloc(uint32_t index, String8* output) const;
@@ -179,6 +206,9 @@ public:
 	// (ShaderSdwaPartialDestinationSupported): the whole-dword result, then the merge into the prior bits.
 	[[nodiscard]] bool EmitSdwaPartialDestinationInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
 	                                                     uint32_t index, String8* output);
+	// A D16 image read: the whole-width emitter's components, packed by pairs into half-float VGPRs. The
+	// registers it wrote above those keep their prior value.
+	[[nodiscard]] bool EmitImageReadHalves(const RecompilerFunc* func, uint32_t index, String8* output);
 	[[nodiscard]] String8 EmitMetadataLoad(int row, int field, const String8& id) const;
 	// Writes the metadata of each assembled V# the instruction consumes into its
 	// descriptor SGPRs (see ShaderAssembledDescriptor).
@@ -194,6 +224,20 @@ public:
 	[[nodiscard]] String8 EmitNativeThreadLimitExec() const;
 	[[nodiscard]] String8 EmitGdsCounterPointer(uint16_t byte_offset, const String8& prefix) const;
 	[[nodiscard]] bool           CanLoadPackedHalfForExport(int export_index, ShaderOperand op) const;
+	[[nodiscard]] String8        FragmentTransportAnnotations() const;
+	[[nodiscard]] String8        FragmentTransportTypes() const;
+	[[nodiscard]] String8        FragmentTransportVariables() const;
+	// Attribute words the captured lane record holds for this program.
+	[[nodiscard]] const FragmentTransport::LanePacking& FragmentLanePacking() const;
+	[[nodiscard]] String8        FragmentLocalVariables() const;
+	void                         FindFragmentConstants();
+	[[nodiscard]] String8        FragmentProlog() const;
+	[[nodiscard]] String8        FragmentEpilog(uint32_t index) const;
+	[[nodiscard]] bool EmitFragmentInterpolation(const ShaderInstruction& instruction, const String8& exec, const String8& tag,
+	                                             String8* output) const;
+	[[nodiscard]] bool EmitFragmentExport(const ShaderInstruction& instruction, uint32_t index, const String8& exec, const String8& tag,
+	                                      String8* output);
+	[[nodiscard]] bool EmitFragmentInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output);
 	[[nodiscard]] bool UsesVertexClipProbe() const
 	{
 		return m_code.GetType() == ShaderType::Vertex && m_vs_input_info != nullptr && m_vs_input_info->clip_probe.enabled;
@@ -396,29 +440,35 @@ public:
 			{
 				continue;
 			}
-
-			const int resource_index = record.resource_index;
-			const int resource_field = record.resource_field_offset + offset - first_dword;
-			switch (record.kind)
-			{
-				case ShaderDynamicSLoadResourceKind::StorageBuffer:
-					if (resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num condition ignored (continuing)\n"); }
-					*buffer = resource_index;
-					*field  = resource_field;
-					return true;
-				case ShaderDynamicSLoadResourceKind::Texture:
-					if (resource_index < 0 || resource_index >= m_bind->textures2D.textures_num || resource_field >= 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->textures2D.textures_num || resource_field >= 8 condition ignored (continuing)\n"); }
-					*buffer = m_bind->storage_buffers.buffers_num + resource_index * 2 + resource_field / 4;
-					*field  = resource_field % 4;
-					return true;
-				case ShaderDynamicSLoadResourceKind::Sampler:
-					if (resource_index < 0 || resource_index >= m_bind->samplers.samplers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->samplers.samplers_num condition ignored (continuing)\n"); }
-					*buffer = m_bind->storage_buffers.buffers_num + m_bind->textures2D.textures_num * 2 + resource_index;
-					*field  = resource_field;
-					return true;
-			}
+			GetDynamicSLoadRecordField(record, offset - first_dword, buffer, field);
+			return true;
 		}
 		return false;
+	}
+
+	// Metadata row and field holding one dword of a mapped load's resource.
+	void GetDynamicSLoadRecordField(const ShaderDynamicSLoadMapping& record, int word, int* buffer, int* field) const
+	{
+		const int resource_index = record.resource_index;
+		const int resource_field = record.resource_field_offset + word;
+		switch (record.kind)
+		{
+			case ShaderDynamicSLoadResourceKind::StorageBuffer:
+				if (resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num condition ignored (continuing)\n"); }
+				*buffer = resource_index;
+				*field  = resource_field;
+				break;
+			case ShaderDynamicSLoadResourceKind::Texture:
+				if (resource_index < 0 || resource_index >= m_bind->textures2D.textures_num || resource_field >= 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->textures2D.textures_num || resource_field >= 8 condition ignored (continuing)\n"); }
+				*buffer = m_bind->storage_buffers.buffers_num + resource_index * 2 + resource_field / 4;
+				*field  = resource_field % 4;
+				break;
+			case ShaderDynamicSLoadResourceKind::Sampler:
+				if (resource_index < 0 || resource_index >= m_bind->samplers.samplers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->samplers.samplers_num condition ignored (continuing)\n"); }
+				*buffer = m_bind->storage_buffers.buffers_num + m_bind->textures2D.textures_num * 2 + resource_index;
+				*field  = resource_field;
+				break;
+		}
 	}
 
 private:
@@ -491,9 +541,18 @@ private:
 	const ShaderComputeInputInfo* m_cs_input_info = nullptr;
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
 	const ShaderGeometryComputeInfo* m_geometry_compute_info = nullptr;
+	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
+	mutable FragmentTransport::LanePacking m_fragment_lane_packing {};
+	mutable bool                  m_fragment_lane_packing_valid = false;
 	mutable int                   m_native_wave_tier = -1;
 	mutable bool                  m_lane_reductions_ready = false;
 	mutable ShaderLaneReductions m_lane_reductions;
+	mutable bool                  m_fragment_mask_flow_ready = false;
+	mutable ShaderFragmentMaskFlow m_fragment_mask_flow;
+	mutable bool                  m_vertex_exec_full_ready = false;
+	mutable std::vector<bool>     m_vertex_exec_full;
+	mutable bool                  m_lane_mask_plan_ready = false;
+	mutable ShaderLaneMaskPlan    m_lane_mask_plan;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;
@@ -538,6 +597,9 @@ bool UsesUnsignedIntegerImages(const ShaderBindResources* bind);
 int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction_index,
                                    const ShaderBindResources& bind, int user_data_register_base);
 bool UsesMixedSampledImageNumericTypes(const ShaderBindResources* bind);
+// Whether the image read at index returns floats in its registers; integer texels have no D16 layout here yet.
+// False when the read mixes numeric types with no descriptor to tell which one it fetches.
+bool ImageReadNumericKnown(const ShaderCode& code, uint32_t index, const Spirv* spirv, bool* returns_float);
 bool UsesFormatlessStorageImages(const ShaderCode& code, const ShaderBindResources* bind);
 bool UsesExtendedStorageImageFormats(const ShaderCode& code, const ShaderBindResources* bind);
 // The aliased views WriteHeader declares over the storage binding, in view order.
@@ -571,7 +633,12 @@ void    SpirvAddGen5BufferFormatConstants(Spirv* spirv);
 String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, bool bound_buffers);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
+extern const uint32_t SPIRV_WORKGROUP_STORE_BARRIER_MEMORY;
+// True when a compute barrier must also order storage: the shader writes a storage buffer or image.
+bool                  ShaderCodeWritesStorage(const ShaderCode& code);
 const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFormat::Format format);
+// Every constant the ds_swizzle_b32 lane formula for this offset names.
+std::array<uint32_t, 8> ShaderDsSwizzleConstants(uint16_t offset);
 
 } // namespace Kyty::Libs::Graphics
 

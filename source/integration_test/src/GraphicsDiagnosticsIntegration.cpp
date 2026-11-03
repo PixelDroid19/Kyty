@@ -399,9 +399,12 @@ struct ProvenanceContractStorageGpuObject final: public GpuObject
 
 	create_func_t GetCreateFunc() const override
 	{
-		return [](GraphicContext* /*ctx*/, const uint64_t* params, const uint64_t* /*vaddr*/, const uint64_t* /*size*/,
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, const uint64_t* /*vaddr*/, const uint64_t* /*size*/,
 		          int /*vaddr_num*/, VulkanMemory* /*mem*/) -> void*
-		{ return reinterpret_cast<void*>(params[0]); };
+		{
+			static VulkanBuffer storage {};
+			return &storage;
+		};
 	}
 
 	create_from_objects_func_t GetCreateFromObjectsFunc() const override { return nullptr; }
@@ -2091,12 +2094,12 @@ void VerifyTextureBlockDumpSpecContract()
 
 void VerifyEventWritePacketContract()
 {
-	uint32_t storage[8] = {};
+	uint32_t storage[12] = {};
 	TestCommandBuffer cb {};
 	cb.bottom      = storage;
-	cb.top         = storage + 8;
+	cb.top         = storage + 12;
 	cb.cursor_up   = storage;
-	cb.cursor_down = storage + 8;
+	cb.cursor_down = storage + 12;
 
 	auto* addressed = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x39u,
 	                                                reinterpret_cast<const volatile void*>(0x124e80f48ull));
@@ -2112,12 +2115,19 @@ void VerifyEventWritePacketContract()
 	Expect(ordinary[0] == KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u) && ordinary[1] == 0x07u,
 	       "ordinary EVENT_WRITE preserves its short encoding");
 
-	auto* unsupported_address = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x38u,
+	auto* second_addressed = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x38u,
+	                                                      reinterpret_cast<const volatile void*>(0x124e80f48ull));
+	Expect(second_addressed == storage + 6, "event 0x38 follows the ordinary packet");
+	Expect(cb.cursor_up == storage + 10, "event 0x38 takes the addressed form");
+	Expect(second_addressed[0] == KYTY_PM4(4, Pm4::IT_EVENT_WRITE, 0u) && second_addressed[1] == 0x138u,
+	       "event 0x38 selects event index one");
+
+	auto* unsupported_address = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x3au,
 	                                                         reinterpret_cast<const volatile void*>(0x124e80f48ull));
-	Expect(unsupported_address == storage + 6, "unsupported addressed event follows the ordinary packet");
-	Expect(cb.cursor_up == storage + 8, "event 0x38 remains short without a matching consumer contract");
-	Expect(unsupported_address[0] == KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u) && unsupported_address[1] == 0x38u,
-	       "event 0x38 does not invent an addressed packet form");
+	Expect(unsupported_address == storage + 10, "unsupported addressed event follows the addressed packet");
+	Expect(cb.cursor_up == storage + 12, "event 0x3a has no addressed form");
+	Expect(unsupported_address[0] == KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u) && unsupported_address[1] == 0x3au,
+	       "event 0x3a does not invent an addressed packet form");
 }
 
 std::vector<uint32_t> AssembleValidSpirv(const Kyty::Core::String8& source, const char* message)
@@ -3039,14 +3049,24 @@ void VerifyUnusedMetadataExclusionPreservesActiveOrdering()
 	resources.accesses[0]       = ShaderStorageAccess::Raw;
 	resources.accesses[1]       = ShaderStorageAccess::UnusedMetadata;
 	resources.accesses[2]       = ShaderStorageAccess::Typed;
+	ShaderDynamicSLoadMappings dynamic_sloads {};
+	ShaderDynamicSLoadMapping  storage_load {};
+	storage_load.resource_index = 2;
+	ShaderDynamicSLoadMapping texture_load {};
+	texture_load.kind           = ShaderDynamicSLoadResourceKind::Texture;
+	texture_load.resource_index = 2;
+	dynamic_sloads.records.Add(storage_load);
+	dynamic_sloads.records.Add(texture_load);
 
-	ExcludeUnusedMetadataStorage(&resources);
+	ExcludeUnusedMetadataStorage(&resources, &dynamic_sloads);
 
 	Expect(resources.buffers_num == 2, "unused metadata excluded before binding");
 	Expect(resources.slots[0] == 2 && resources.slots[1] == 9, "active slot ordering preserved");
 	Expect(resources.start_register[0] == 16 && resources.start_register[1] == 48, "active resource identity preserved");
 	Expect(resources.accesses[0] == ShaderStorageAccess::Raw && resources.accesses[1] == ShaderStorageAccess::Typed,
 	       "active access classifications preserved");
+	Expect(dynamic_sloads.records.At(0).resource_index == 1, "scalar load follows its compacted storage descriptor");
+	Expect(dynamic_sloads.records.At(1).resource_index == 2, "texture scalar load index unchanged");
 }
 
 void VerifyResidualStencilPm4Boundary()
@@ -5810,9 +5830,9 @@ void VerifyComparisonSamplerCacheIdentity()
 	Expect(vulkan.Initialize(), "Vulkan sampler context must initialize");
 	VerifyDepthStencilAttachmentAccess(vulkan.context.load_store_op_none_supported);
 	ShaderSamplerResource descriptor {};
-	const auto regular      = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::Regular, true, false);
-	const auto depth        = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference, true, false);
-	const auto depth_reused = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference, true, false);
+	const auto regular      = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::Regular, true, false, false);
+	const auto depth        = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference, true, false, false);
+	const auto depth_reused = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference, true, false, false);
 	Expect(regular != depth, "regular and depth-reference samplers must not alias");
 	Expect(depth == depth_reused, "identical depth-reference samplers must reuse the cache entry");
 	Expect(g_render_ctx->GetSamplerCache()->GetSampler(regular) != VK_NULL_HANDLE, "regular sampler must be created");

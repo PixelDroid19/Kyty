@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -283,13 +285,12 @@ static VkImageAspectFlags TexelBitsLayoutAspect(const VulkanImage* image)
 	return IsTexelBitsDepthFormat(image->format) ? DepthFormatAspectMask(image->format) : VK_IMAGE_ASPECT_COLOR_BIT;
 }
 
-bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout)
+// Moves one plane of each image through a tightly packed buffer, which is the only copy Vulkan
+// guarantees between a depth or stencil aspect and a colour image.
+static bool CopyPlaneBits(CommandBuffer* buffer, VulkanImage* src_image, VkImageAspectFlags src_aspect, VulkanImage* dst_image,
+                          VkImageAspectFlags dst_aspect, uint32_t texel_bytes, uint64_t dst_layout)
 {
-	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_image == nullptr || src_image->image == nullptr || dst_image->image == nullptr);
-	const uint32_t texel_bytes = TexelBitsColorBytes(IsTexelBitsDepthFormat(src_image->format) ? dst_image->format : src_image->format);
-	const bool     to_depth    = texel_bytes != 0u && TexelBitsDepthBytes(dst_image->format) == texel_bytes;
-	const bool     from_depth  = texel_bytes != 0u && TexelBitsDepthBytes(src_image->format) == texel_bytes;
-	if ((!to_depth && !from_depth) || src_image->layout == VK_IMAGE_LAYOUT_UNDEFINED || src_image->samples != VK_SAMPLE_COUNT_1_BIT ||
+	if (src_image->layout == VK_IMAGE_LAYOUT_UNDEFINED || src_image->samples != VK_SAMPLE_COUNT_1_BIT ||
 	    dst_image->samples != VK_SAMPLE_COUNT_1_BIT || src_image->array_layers != 1u || dst_image->array_layers != 1u ||
 	    src_image->extent.width != dst_image->extent.width || src_image->extent.height != dst_image->extent.height ||
 	    (src_image->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u || (dst_image->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u)
@@ -314,7 +315,7 @@ bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImag
 
 	const VkImageLayout src_layout = src_image->layout;
 	VkBufferImageCopy   region {};
-	region.imageSubresource.aspectMask = TexelBitsAspect(src_image);
+	region.imageSubresource.aspectMask = src_aspect;
 	region.imageSubresource.layerCount = 1u;
 	region.imageExtent                 = {src_image->extent.width, src_image->extent.height, 1u};
 	set_image_layout(buffer, vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), src_layout,
@@ -328,13 +329,39 @@ bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImag
 	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u, nullptr,
 	                     0u, nullptr);
 
-	region.imageSubresource.aspectMask = TexelBitsAspect(dst_image);
+	region.imageSubresource.aspectMask = dst_aspect;
 	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 	vkCmdCopyBufferToImage(vk_buffer, scratch->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
 	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 	                 static_cast<VkImageLayout>(dst_layout));
 	return true;
+}
+
+bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout)
+{
+	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_image == nullptr || src_image->image == nullptr || dst_image->image == nullptr);
+	const uint32_t texel_bytes = TexelBitsColorBytes(IsTexelBitsDepthFormat(src_image->format) ? dst_image->format : src_image->format);
+	const bool     to_depth    = texel_bytes != 0u && TexelBitsDepthBytes(dst_image->format) == texel_bytes;
+	const bool     from_depth  = texel_bytes != 0u && TexelBitsDepthBytes(src_image->format) == texel_bytes;
+	if (!to_depth && !from_depth)
+	{
+		return false;
+	}
+	return CopyPlaneBits(buffer, src_image, TexelBitsAspect(src_image), dst_image, TexelBitsAspect(dst_image), texel_bytes, dst_layout);
+}
+
+bool UtilCopyStencilBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout)
+{
+	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_image == nullptr || src_image->image == nullptr || dst_image->image == nullptr);
+	const bool to_stencil = src_image->format == VK_FORMAT_R8_UINT && (DepthFormatAspectMask(dst_image->format) & VK_IMAGE_ASPECT_STENCIL_BIT) != 0u;
+	const bool from_stencil = dst_image->format == VK_FORMAT_R8_UINT && (DepthFormatAspectMask(src_image->format) & VK_IMAGE_ASPECT_STENCIL_BIT) != 0u;
+	if (!to_stencil && !from_stencil)
+	{
+		return false;
+	}
+	return CopyPlaneBits(buffer, src_image, to_stencil ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_STENCIL_BIT, dst_image,
+	                     to_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 1u, dst_layout);
 }
 
 void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch, uint64_t src_layout,
@@ -715,8 +742,12 @@ void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_
 	vkCmdBlitImage(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain_image.image,
 	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, filter);
 
-	set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-	                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	// A presentation stage has no attachment usage and is only ever blitted from or to.
+	if ((src_image->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0u)
+	{
+		set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	}
 }
 
 void UtilBlitImageToImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, VkFilter filter, uint64_t dst_layout)
@@ -813,7 +844,10 @@ void VulkanDeleteBuffer(GraphicContext* gctx, VulkanBuffer* buffer)
 	DeleteDescriptor(buffer);
 
 	vkDestroyBuffer(gctx->device, buffer->buffer, nullptr);
-	VulkanFree(gctx, &buffer->memory);
+	if (!buffer->guest_in_place)
+	{
+		VulkanFree(gctx, &buffer->memory);
+	}
 	buffer->buffer           = nullptr;
 	buffer->descriptor_range = 0;
 }
@@ -1044,6 +1078,17 @@ void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image)
 	buffer.WaitForFence();
 }
 
+void UtilTransitionColorImageLayout(CommandBuffer* buffer, VulkanImage* image, uint64_t dst_layout)
+{
+	if (buffer == nullptr || image == nullptr || image->image == nullptr || image->layout == static_cast<VkImageLayout>(dst_layout))
+	{
+		return;
+	}
+	auto* cmd = buffer->RecordOutsideRenderPass();
+	set_image_layout(buffer, cmd, image, 0, image->mip_levels, VK_IMAGE_ASPECT_COLOR_BIT, image->layout,
+	                 static_cast<VkImageLayout>(dst_layout));
+}
+
 void UtilSetImageLayoutOptimal(VulkanImage* image)
 {
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
@@ -1067,6 +1112,188 @@ void UtilSetImageLayoutOptimal(VulkanImage* image)
 	buffer.WaitForFence();
 }
 
+// Region fills recorded without a CPU wait. The bytes are captured in staging at once; the commands reach the util queue
+// before any later submission, and that submission waits for them on the device.
+class ImageFillQueue
+{
+public:
+	void Record(GraphicContext* ctx, VulkanBuffer staging, uint64_t size, VulkanImage* image, const Vector<BufferImageCopy>& regions,
+	            uint64_t dst_layout)
+	{
+		std::vector<Batch> completed;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_ctx = ctx;
+			if (m_open.buffer == nullptr)
+			{
+				m_open.buffer = new CommandBuffer(GraphicContext::QUEUE_UTIL);
+				EXIT_IF(m_open.buffer->IsInvalid());
+				m_open.buffer->MarkImageFillBatch();
+				m_open.buffer->Begin();
+				m_open.id = ++m_last_id;
+			}
+			UtilBufferToImage(m_open.buffer, &staging, image, regions, dst_layout);
+			m_open.staging.push_back(staging);
+			m_open.bytes += size;
+			image->fill_batch = m_open.id;
+			if (m_open.bytes >= OPEN_BYTES_MAX)
+			{
+				SubmitOpenLocked(&completed);
+			}
+		}
+		Destroy(&completed);
+	}
+
+	uint64_t Flush()
+	{
+		std::vector<Batch> completed;
+		uint64_t           wait_value = 0;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			SubmitOpenLocked(&completed);
+			TakeCompletedLocked(&completed);
+			wait_value = m_in_flight.empty() ? 0 : m_in_flight.back().timeline_value;
+		}
+		Destroy(&completed);
+		return wait_value;
+	}
+
+	void Await(const VulkanImage* image)
+	{
+		if (image->fill_batch == 0)
+		{
+			return;
+		}
+		std::vector<Batch> completed;
+		uint64_t           wait_value = 0;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_open.id == image->fill_batch)
+			{
+				SubmitOpenLocked(&completed);
+			}
+			for (const auto& batch: m_in_flight)
+			{
+				if (batch.id == image->fill_batch)
+				{
+					wait_value = batch.timeline_value;
+				}
+			}
+		}
+		Destroy(&completed);
+		if (wait_value != 0)
+		{
+			WaitForTimeline(wait_value);
+		}
+	}
+
+	void Complete()
+	{
+		std::vector<Batch> completed;
+		uint64_t           wait_value = 0;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			SubmitOpenLocked(&completed);
+			wait_value = m_in_flight.empty() ? 0 : m_in_flight.back().timeline_value;
+			if (wait_value != 0)
+			{
+				WaitForTimeline(wait_value);
+				TakeCompletedLocked(&completed);
+			}
+		}
+		Destroy(&completed);
+	}
+
+private:
+	static constexpr uint64_t OPEN_BYTES_MAX = 64ull * 1024ull * 1024ull;
+	// The util command pool has CommandProcessorSubmissionSlots::SlotCount buffers shared with synchronous transfers.
+	static constexpr size_t IN_FLIGHT_MAX = 4;
+
+	struct Batch
+	{
+		CommandBuffer*            buffer = nullptr;
+		std::vector<VulkanBuffer> staging;
+		uint64_t                  id             = 0;
+		uint64_t                  timeline_value = 0;
+		uint64_t                  bytes          = 0;
+	};
+
+	void WaitForTimeline(uint64_t value) const
+	{
+		const auto&         queue = m_ctx->queues[GraphicContext::QUEUE_UTIL];
+		VkSemaphoreWaitInfo info {};
+		info.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+		info.semaphoreCount = 1;
+		info.pSemaphores    = &queue.timeline;
+		info.pValues        = &value;
+		const auto result   = vkWaitSemaphores(m_ctx->device, &info, UINT64_MAX);
+		if (result != VK_SUCCESS)
+		{
+			EXIT("vkWaitSemaphores (image fills) failed: result=%d\n", static_cast<int>(result));
+		}
+	}
+
+	void TakeCompletedLocked(std::vector<Batch>* completed)
+	{
+		if (m_in_flight.empty())
+		{
+			return;
+		}
+		uint64_t   done   = 0;
+		const auto result = vkGetSemaphoreCounterValue(m_ctx->device, m_ctx->queues[GraphicContext::QUEUE_UTIL].timeline, &done);
+		if (result != VK_SUCCESS)
+		{
+			EXIT("vkGetSemaphoreCounterValue (image fills) failed: result=%d\n", static_cast<int>(result));
+		}
+		while (!m_in_flight.empty() && m_in_flight.front().timeline_value <= done)
+		{
+			completed->push_back(std::move(m_in_flight.front()));
+			m_in_flight.pop_front();
+		}
+	}
+
+	void SubmitOpenLocked(std::vector<Batch>* completed)
+	{
+		if (m_open.buffer == nullptr)
+		{
+			return;
+		}
+		if (m_in_flight.size() >= IN_FLIGHT_MAX)
+		{
+			WaitForTimeline(m_in_flight.front().timeline_value);
+			TakeCompletedLocked(completed);
+		}
+		m_open.buffer->End();
+		m_open.buffer->Execute();
+		VkDevice    device   = nullptr;
+		VkSemaphore timeline = nullptr;
+		EXIT_IF(!m_open.buffer->GetTimeline(&device, &timeline, &m_open.timeline_value));
+		m_in_flight.push_back(std::move(m_open));
+		m_open = Batch {};
+	}
+
+	// Outside the lock: a command buffer's release can run label callbacks.
+	void Destroy(std::vector<Batch>* completed)
+	{
+		for (auto& batch: *completed)
+		{
+			delete batch.buffer;
+			for (auto& staging: batch.staging)
+			{
+				VulkanDeleteBuffer(m_ctx, &staging);
+			}
+		}
+	}
+
+	std::mutex        m_mutex;
+	GraphicContext*   m_ctx = nullptr;
+	Batch             m_open;
+	std::deque<Batch> m_in_flight;
+	uint64_t          m_last_id = 0;
+};
+
+static ImageFillQueue g_image_fills;
+
 void UtilFillImage(GraphicContext* ctx, VulkanImage* image, const void* src_data, uint64_t size, const Vector<BufferImageCopy>& regions,
                    uint64_t dst_layout)
 {
@@ -1084,21 +1311,23 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* image, const void* src_data
 	std::memcpy(data, src_data, size);
 	VulkanUnmapMemory(ctx, &staging_buffer.memory);
 
-	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
-	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
+	g_image_fills.Record(ctx, staging_buffer, size, image, regions, dst_layout);
+}
 
-	if (buffer.IsInvalid())
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n");
-	}
+uint64_t UtilFlushImageFills()
+{
+	return g_image_fills.Flush();
+}
 
-	buffer.Begin();
-	UtilBufferToImage(&buffer, &staging_buffer, image, regions, dst_layout);
-	buffer.End();
-	buffer.Execute();
-	buffer.WaitForFence();
+void UtilAwaitImageFill(VulkanImage* image)
+{
+	EXIT_IF(image == nullptr);
+	g_image_fills.Await(image);
+}
 
-	VulkanDeleteBuffer(ctx, &staging_buffer);
+void UtilCompleteImageFills()
+{
+	g_image_fills.Complete();
 }
 
 void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout)

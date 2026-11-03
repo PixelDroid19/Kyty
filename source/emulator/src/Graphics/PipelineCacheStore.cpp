@@ -1,8 +1,12 @@
 #include "Emulator/Graphics/PipelineCacheStore.h"
 
 #include "Emulator/AtomicFile.h"
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Host/Platform.h"
+#include "Emulator/SystemContentPort.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -20,33 +24,77 @@ namespace Kyty::Libs::Graphics {
 
 namespace {
 
-std::filesystem::path CacheRoot()
+const char* ExplicitCachePath()
 {
-	if (const char* explicit_path = std::getenv("KYTY_VULKAN_PIPELINE_CACHE"); explicit_path != nullptr && explicit_path[0] != '\0')
+	const char* path = std::getenv("KYTY_VULKAN_PIPELINE_CACHE");
+	return path != nullptr && path[0] != '\0' ? path : nullptr;
+}
+
+std::string DeviceName(const VkPhysicalDeviceProperties& properties)
+{
+	std::ostringstream name;
+	name << std::hex << std::setfill('0') << std::setw(8) << properties.vendorID << '-' << std::setw(8) << properties.deviceID;
+	return name.str();
+}
+
+// The running title's id made safe for a file name; empty before a title is loaded.
+std::string TitleName()
+{
+	Core::String title_id;
+	Core::String app_version;
+	if (!::Kyty::Emulator::SystemContentPort::GetMetadata(&title_id, &app_version) || title_id.IsEmpty())
+	{
+		return {};
+	}
+	std::string name = title_id.C_Str();
+	std::replace_if(name.begin(), name.end(), [](char c) { return !(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '.'); },
+	                '_');
+	return name;
+}
+
+// One blob per title, device, driver and translator version: titles share no
+// pipelines, and a blob shared by every title filled its size cap with modules
+// no translator produces any more, after which no save succeeded.
+std::filesystem::path CachePath(const VkPhysicalDeviceProperties& properties)
+{
+	if (const char* explicit_path = ExplicitCachePath(); explicit_path != nullptr)
 	{
 		return std::filesystem::path(explicit_path);
 	}
-	return Kyty::Emulator::Host::DefaultCacheDirectory();
-}
-
-std::filesystem::path CachePath(const VkPhysicalDeviceProperties& properties)
-{
-	const auto configured = CacheRoot();
-	const char* explicit_path = std::getenv("KYTY_VULKAN_PIPELINE_CACHE");
-	if (explicit_path != nullptr && explicit_path[0] != '\0')
+	const auto title = TitleName();
+	if (title.empty())
 	{
-		return configured;
+		return {};
 	}
 
 	std::ostringstream name;
-	name << "vulkan-pipeline-" << std::hex << std::setfill('0') << std::setw(8) << properties.vendorID << '-' << std::setw(8)
-	     << properties.deviceID << '-';
+	name << "vulkan-pipeline-" << title << '-' << DeviceName(properties) << '-' << std::hex << std::setfill('0');
 	for (uint8_t value: properties.pipelineCacheUUID)
 	{
 		name << std::setw(2) << static_cast<uint32_t>(value);
 	}
-	name << ".bin";
-	return configured / name.str();
+	name << ShaderTranslatorStoreSuffix() << ".bin";
+	return Kyty::Emulator::Host::DefaultCacheDirectory() / name.str();
+}
+
+// Removes this device's blobs that `current` replaces: the title's blobs from
+// other drivers or translator versions, and the blob every title once shared.
+void RemoveReplacedBlobs(const std::filesystem::path& current, const VkPhysicalDeviceProperties& properties)
+{
+	const auto      device = DeviceName(properties);
+	const auto      shared = "vulkan-pipeline-" + device + "-";
+	const auto      title  = "vulkan-pipeline-" + TitleName() + "-" + device + "-";
+	std::error_code error;
+	for (std::filesystem::directory_iterator it(current.parent_path(), error), end; !error && it != end; it.increment(error))
+	{
+		const auto name = it->path().filename().string();
+		if (it->path() != current && it->path().extension() == ".bin" && (name.rfind(shared, 0) == 0 || name.rfind(title, 0) == 0) &&
+		    it->is_regular_file(error))
+		{
+			std::filesystem::remove(it->path(), error);
+		}
+		error.clear();
+	}
 }
 
 // Identity of the blob the cache file holds, as this process last loaded or
@@ -90,6 +138,11 @@ std::vector<uint8_t> PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& pr
 	{
 		return {};
 	}
+	if (ExplicitCachePath() == nullptr)
+	{
+		RemoveReplacedBlobs(path, properties);
+	}
+	AtomicFileRemoveOrphans(path.parent_path());
 
 	std::error_code error;
 	const auto      file_size = std::filesystem::file_size(path, error);

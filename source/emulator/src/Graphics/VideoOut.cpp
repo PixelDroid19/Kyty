@@ -2825,6 +2825,53 @@ KYTY_SYSV_ABI int VideoOutSetWindowModeMargins(int handle, int top, int bottom)
 	return Kernel::OK;
 }
 
+KYTY_SYSV_ABI int VideoOutAllowOutputResolutionWqhdDetection(int handle)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_video_out_context == nullptr);
+
+	auto session = g_video_out_context->AcquireSession(handle);
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+	return Kernel::OK;
+}
+
+// Latency measurement is not tracked host-side; both calls only need a live
+// port so titles can keep their timing helpers enabled.
+KYTY_SYSV_ABI int VideoOutLatencyControlWaitBeforeInput(int handle, const VideoOutLatencyControl* control, uint32_t* timeout_usec)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_video_out_context == nullptr);
+
+	auto session = g_video_out_context->AcquireSession(handle);
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+	(void)control;
+	(void)timeout_usec;
+	return Kernel::OK;
+}
+
+KYTY_SYSV_ABI int VideoOutLatencyMeasureSetStartPoint(int handle, int64_t flip_arg)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_video_out_context == nullptr);
+
+	auto session = g_video_out_context->AcquireSession(handle);
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+	KYTY_LOG_DEBUG("\t flip_arg = %" PRId64 "\n", flip_arg);
+	return Kernel::OK;
+}
+
 namespace {
 
 constexpr uint64_t kVideoOutOutputModeDefault   = 1;

@@ -18,6 +18,7 @@
 #include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Loader/Elf.h"
+#include "Emulator/Loader/GamePatch.h"
 #include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/GuestProgramName.h"
 #include "Emulator/Loader/Instrumentation.h"
@@ -1291,86 +1292,15 @@ uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handle
 	return patched;
 }
 
-uint64_t LoaderPrepareThreadTlsImage(uint8_t* tls, uint64_t image_size, uint64_t template_vaddr, uint64_t program_base,
-                                     uint64_t program_size, bool (*guest_read64)(uint64_t addr, uint64_t* out, void* ctx), void* guest_ctx)
+uint64_t LoaderStaticTlsOffset(uint64_t previous_size, uint64_t image_size, uint64_t alignment)
 {
-	if (tls == nullptr || image_size < sizeof(uint64_t))
-	{
-		return 0;
-	}
+	return (previous_size + image_size + alignment - 1) & ~(alignment - 1);
+}
 
-	const uint64_t tmpl_lo  = template_vaddr;
-	const uint64_t tmpl_hi  = template_vaddr + image_size;
-	const uint64_t tls_base = reinterpret_cast<uint64_t>(tls);
-	const uint64_t prog_lo  = program_base;
-	const uint64_t prog_hi  = program_base + program_size;
-	// Context layout used by guest ensure: buffer control pointer at +0x3e0.
-	constexpr uint64_t kContextBufferControlOffset = 0x3e0;
-
-	uint64_t modified = 0;
-	for (uint64_t off = 0; off + sizeof(uint64_t) <= image_size; off += sizeof(uint64_t))
-	{
-		auto*          cell = reinterpret_cast<uint64_t*>(tls + off);
-		const uint64_t v    = *cell;
-		if (v == 0)
-		{
-			continue;
-		}
-
-		// Absolute self-pointer into the PT_TLS template → this thread's copy.
-		if (v >= tmpl_lo && v < tmpl_hi)
-		{
-			*cell = tls_base + (v - tmpl_lo);
-			modified++;
-			continue;
-		}
-
-		// Absolute pointer into the main program image.
-		if (guest_read64 == nullptr || v < prog_lo || v > prog_hi - sizeof(uint64_t))
-		{
-			continue;
-		}
-
-		uint64_t word0 = 1;
-		if (!guest_read64(v, &word0, guest_ctx))
-		{
-			continue;
-		}
-
-		// Static type/descriptor blobs (observed at TLS +0x70/+0x78 in Gen5):
-		// word0 = small size, word1 = small refcount, word2+ = function
-		// pointers into guest code. They must not occupy "current context"
-		// TLS slots — guest SET asserts s_pTls* == nullptr first.
-		if (word0 >= 0x20 && word0 < 0x1000 && (word0 & 7u) == 0 && v + 24 <= prog_hi)
-		{
-			uint64_t word1 = 0;
-			uint64_t word2 = 0;
-			if (guest_read64(v + 8, &word1, guest_ctx) && guest_read64(v + 16, &word2, guest_ctx) && word1 < 0x100 && word2 >= prog_lo &&
-			    word2 < prog_hi)
-			{
-				*cell = 0;
-				modified++;
-				continue;
-			}
-		}
-
-		// Unconstructed Context (null word0 + null buffer control at +0x3e0).
-		if (program_size < kContextBufferControlOffset + sizeof(uint64_t) || v > prog_hi - (kContextBufferControlOffset + sizeof(uint64_t)))
-		{
-			continue;
-		}
-		uint64_t buffer = 1;
-		if (!guest_read64(v + kContextBufferControlOffset, &buffer, guest_ctx))
-		{
-			continue;
-		}
-		if (word0 == 0 && buffer == 0)
-		{
-			*cell = 0;
-			modified++;
-		}
-	}
-	return modified;
+// The thread pointer stays 16-byte aligned so a module image keeps its own alignment below it.
+static uint64_t StaticTlsAreaSize(uint64_t static_tls_size)
+{
+	return (static_tls_size + 15) & ~static_cast<uint64_t>(15);
 }
 
 void LoaderInitializeThreadTlsImage(uint8_t* tls, uint64_t image_size, const uint8_t* template_data, uint64_t init_size)
@@ -1389,18 +1319,6 @@ void LoaderInitializeThreadTlsImage(uint8_t* tls, uint64_t image_size, const uin
 	{
 		std::memcpy(tls, template_data, init_size);
 	}
-}
-
-static bool TlsGuestRead64(uint64_t addr, uint64_t* out, void* /*ctx*/)
-{
-	if (out == nullptr || addr == 0)
-	{
-		return false;
-	}
-	// Main-image and demand-mapped guest pages are host-addressable at the
-	// guest VA after LoadProgramToMemory / VirtualMemory setup.
-	*out = *reinterpret_cast<const uint64_t*>(addr);
-	return true;
 }
 
 static uint64_t LoaderPatchNullRdiSanitizers(uint8_t* code, uint64_t size)
@@ -1872,6 +1790,10 @@ void RuntimeLinker::Execute()
 		EXIT("failed to allocate main guest stack\n");
 	}
 	RelocateAll();
+	if (const auto game_patch = Config::GetGamePatchFile(); !game_patch.IsEmpty())
+	{
+		GamePatchApply(game_patch, m_programs);
+	}
 	StartAllModulesOnStack(main_stack_top);
 
 	// After load+reloc the main image is final. Rewrite TLS GD call prefixes
@@ -2718,15 +2640,16 @@ uint8_t* RuntimeLinker::GetStaticTlsThreadPointerLocked()
 	auto&           allocation = m_static_tlss.GetOrPutDef(thread_id, nullptr);
 	if (allocation != nullptr)
 	{
-		EXIT_IF(allocation->area_size != m_static_tls_size);
+		EXIT_IF(allocation->area_size != StaticTlsAreaSize(m_static_tls_size));
 		return allocation->base + allocation->area_size;
 	}
 
-	EXIT_IF(m_static_tls_size > std::numeric_limits<uint64_t>::max() - tcb_size);
+	const uint64_t area_size = StaticTlsAreaSize(m_static_tls_size);
+	EXIT_IF(area_size > std::numeric_limits<uint64_t>::max() - tcb_size);
 	allocation            = new StaticTlsAllocation;
-	allocation->area_size = m_static_tls_size;
-	allocation->base      = new uint8_t[m_static_tls_size + tcb_size];
-	std::memset(allocation->base, 0, m_static_tls_size + tcb_size);
+	allocation->area_size = area_size;
+	allocation->base      = new uint8_t[area_size + tcb_size];
+	std::memset(allocation->base, 0, area_size + tcb_size);
 
 	auto* thread_pointer = allocation->base + allocation->area_size;
 	for (auto* program: m_programs)
@@ -2741,8 +2664,6 @@ uint8_t* RuntimeLinker::GetStaticTlsThreadPointerLocked()
 		auto* destination = thread_pointer - program->tls.static_offset;
 		LoaderInitializeThreadTlsImage(destination, program->tls.image_size,
 		                               reinterpret_cast<const uint8_t*>(program->tls.image_vaddr), program->tls.init_size);
-		LoaderPrepareThreadTlsImage(destination, program->tls.image_size, program->tls.image_vaddr, program->base_vaddr,
-		                            program->base_size, TlsGuestRead64, nullptr);
 	}
 
 	*reinterpret_cast<uint64_t*>(thread_pointer) = reinterpret_cast<uint64_t>(thread_pointer);
@@ -2773,8 +2694,6 @@ uint8_t* RuntimeLinker::GetDynamicTlsThreadAddrLocked(Program* program, uint64_t
 		buffer = new uint8_t[program->tls.image_size];
 		LoaderInitializeThreadTlsImage(buffer, program->tls.image_size,
 		                               reinterpret_cast<const uint8_t*>(program->tls.image_vaddr), program->tls.init_size);
-		LoaderPrepareThreadTlsImage(buffer, program->tls.image_size, program->tls.image_vaddr, program->base_vaddr, program->base_size,
-		                            TlsGuestRead64, nullptr);
 		per_thread.Put(thread_id, buffer);
 	}
 
@@ -2999,14 +2918,14 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 				program->tls.static_offset = 0;
 			} else
 			{
-				const uint64_t alignment = std::max<uint64_t>(phdr[i].p_align, 16);
+				const uint64_t alignment = std::max<uint64_t>(phdr[i].p_align, 1);
 				EXIT_IF((alignment & (alignment - 1)) != 0);
 				EXIT_IF(program->rt->m_static_tls_size > std::numeric_limits<uint64_t>::max() - phdr[i].p_memsz);
 
 				const uint64_t tls_end = program->rt->m_static_tls_size + phdr[i].p_memsz;
 				EXIT_IF(tls_end > std::numeric_limits<uint64_t>::max() - (alignment - 1));
 
-				program->tls.static_offset     = (tls_end + alignment - 1) & ~(alignment - 1);
+				program->tls.static_offset     = LoaderStaticTlsOffset(program->rt->m_static_tls_size, phdr[i].p_memsz, alignment);
 				program->rt->m_static_tls_size = program->tls.static_offset;
 			}
 

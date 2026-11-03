@@ -1,5 +1,7 @@
 #include "Emulator/Loader/GuestCall.h"
 
+#include "Kyty/Core/VirtualMemory.h"
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Loader::GuestCall {
@@ -74,6 +76,7 @@ uint64_t KYTY_SYSV_ABI Invoke4(uint64_t target, uint64_t arg0, uint64_t arg1, ui
 uint64_t KYTY_SYSV_ABI InvokeOnStack(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2, void* stack_top)
 {
 	EXIT_IF(target == 0 || stack_top == nullptr);
+	EXIT_IF(!Core::VirtualMemory::ExceptionHandler::InstallThreadSignalStack());
 
 	uint64_t result = 0;
 

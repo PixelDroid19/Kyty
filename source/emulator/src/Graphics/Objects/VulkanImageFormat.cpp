@@ -45,6 +45,7 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
     Gen5ImageFormat {11, VK_FORMAT_R16_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R16_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {13, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {14, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_UNORM, GuestImageNumericType::FloatingPoint},
+    Gen5ImageFormat {18, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {20, VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {22, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_SFLOAT, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {23, VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16_UNORM, GuestImageNumericType::FloatingPoint},
@@ -55,7 +56,7 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
                      VK_FORMAT_B10G11R11_UFLOAT_PACK32,
                      GuestImageNumericType::FloatingPoint},
     // IMG_FORMAT 2_10_10_10_UNORM: channel 0 in the low ten bits (Vulkan A2B10G10R10).
-    Gen5ImageFormat {50, VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_UNDEFINED,
+    Gen5ImageFormat {50, VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2B10G10R10_UNORM_PACK32,
                      GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {56, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM,
                      GuestImageNumericType::FloatingPoint},

@@ -34,8 +34,9 @@ namespace {
 // zero prefix), in chunks bounded to keep each pin modest.
 constexpr uint64_t kChunkBytes = 64ull << 20u;
 constexpr uint64_t kPageBytes  = kGuestDeviceAddressPageBytes;
-// Physical ranges read direct memory through shared windows: aligned
-// power-of-two intervals of whole blocks, at most one chunk long.
+// Physical ranges read direct memory through shared windows, one per aligned
+// chunk of the backing. Each imported object adds to the cost of every submit
+// on hosts that lock external objects per submit, about 0.1 us on xe.
 constexpr uint64_t kPhysicalImportBlockBytes = 2ull << 20u;
 // Bound host padding independently from the guest-visible chunk size.
 constexpr uint64_t kMaxHostImportPaddingBytes = 2ull << 20u;
@@ -53,10 +54,13 @@ struct Chunk
 	uint64_t       buffer_offset = 0; // where `guest` lies in `buffer`
 	uint64_t       alias  = 0;       // writable host view that was imported
 	bool           physical = false; // imports the direct-memory pages themselves
+	uint32_t       memory_type = 0;
+	VkExternalMemoryHandleTypeFlags handle_type = 0;
 	bool           windowed = false; // reads through the physical window at `window`
 	uint64_t       window   = 0;
 	void*          copy   = nullptr; // tracked snapshot that was imported
 	std::size_t    copy_alignment = 0;
+	bool           mapped     = false; // `copy` is the mapping of `memory`, not a host allocation
 	uint64_t       generation = 0;   // dirty-tracker generation of the snapshot
 	bool           tracked    = false; // snapshot is refreshed from tracker generations
 	bool           registered = false; // this chunk holds a dirty-tracker registration
@@ -111,6 +115,9 @@ struct Registry
 	// object on each submit, and titles map thousands of small direct-memory
 	// ranges, so ranges share the windows over their pages.
 	std::map<uint64_t, PhysicalWindow> windows;
+	// Windows that storage objects are bound to in place, by base and size.
+	// They may overlap `windows` and each other.
+	std::map<std::pair<uint64_t, uint64_t>, PhysicalWindow> in_place_windows;
 	// Titles map thousands of ranges. Preparation revisits flexible ranges and
 	// refreshes snapshots every time, and a physical scan visits the physical
 	// ranges with pages not imported yet, so it walks these subsets, not every range.
@@ -200,7 +207,10 @@ void DestroyImport(VkDevice device, const Chunk& chunk)
 	vkDestroyBuffer(device, chunk.buffer, nullptr);
 	vkFreeMemory(device, chunk.memory, nullptr);
 	Kernel::Memory::KernelUnmapPhysicalAlias(chunk.alias);
-	FreeHostSnapshot(chunk.copy, chunk.copy_alignment);
+	if (!chunk.mapped)
+	{
+		FreeHostSnapshot(chunk.copy, chunk.copy_alignment);
+	}
 	if (chunk.registered)
 	{
 		(void)GpuDirtyPageTracker::Instance().UnregisterRange(chunk.guest, chunk.span);
@@ -304,26 +314,27 @@ void DropChunks(VkDevice device, Registry* registry, uint64_t base, Range* range
 	}
 }
 
-// Copies guest memory into a snapshot using the dirty tracker's read protocol
-// (arm write protection, copy, validate the generation). Returns false when
-// the range is not tracked, since a snapshot could then go stale unnoticed.
+// Copies guest memory into a snapshot taken under armed write protection.
+// The snapshot keeps the generation observed before arming: a page the CPU
+// writes during or after the copy advances past it, so ChangedSince reports
+// the chunk and the next prepare refreshes it. Memory the guest writes
+// continuously (thread stacks) never holds one generation across the copy.
+// Returns false when the range is not tracked, since a snapshot could then go
+// stale unnoticed.
 bool SnapshotGuest(void* copy, uint64_t guest, uint64_t size, uint64_t* generation)
 {
-	auto& tracker = GpuDirtyPageTracker::Instance();
-	for (int attempt = 0; attempt < 8; attempt++)
+	auto&          tracker = GpuDirtyPageTracker::Instance();
+	const uint64_t before  = tracker.SnapshotGeneration(guest, size);
+	// A host write in flight (a guest thread stack, file I/O) refuses arming;
+	// the snapshot is still valid because ChangedSince keeps reporting the range
+	// changed. The second arm covers a write that ended before the check.
+	const bool armed = tracker.PrepareForRead(guest, size) || tracker.HasHostWrite(guest, size) || tracker.PrepareForRead(guest, size);
+	if (!armed || !Core::VirtualMemory::CopyFromGuest(copy, guest, size))
 	{
-		const auto observation = tracker.BeginRead(guest, size);
-		if (!observation.tracked || !Core::VirtualMemory::CopyFromGuest(copy, guest, size))
-		{
-			return false;
-		}
-		if (tracker.ReadObservationIsStable(guest, size, observation))
-		{
-			*generation = observation.generation;
-			return true;
-		}
+		return false;
 	}
-	return false;
+	*generation = before;
+	return true;
 }
 
 void DestroyTable(VkDevice device, const Table& table)
@@ -379,7 +390,8 @@ bool FindHostImportMemoryType(VkPhysicalDevice physical, uint32_t type_bits, uin
 }
 
 // A zero handle type creates a device-owned buffer.
-VkBuffer CreateAddressBuffer(const GraphicContext* ctx, uint64_t size, VkExternalMemoryHandleTypeFlags handle_type)
+VkBuffer CreateAddressBuffer(const GraphicContext* ctx, uint64_t size, VkExternalMemoryHandleTypeFlags handle_type,
+                             VkBufferUsageFlags extra_usage = 0)
 {
 	const bool external = handle_type != 0;
 	VkExternalMemoryBufferCreateInfo external_info {};
@@ -391,8 +403,7 @@ VkBuffer CreateAddressBuffer(const GraphicContext* ctx, uint64_t size, VkExterna
 	info.pNext       = external ? &external_info : nullptr;
 	info.size        = size;
 	// Imports also receive device-side publications of GPU results.
-	info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-	             (external ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : 0u);
+	info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | extra_usage;
 	VulkanApplyResourceSharing(*ctx, &info.sharingMode, &info.queueFamilyIndexCount, &info.pQueueFamilyIndices);
 	VkBuffer buffer = nullptr;
 	return vkCreateBuffer(ctx->device, &info, nullptr, &buffer) == VK_SUCCESS ? buffer : nullptr;
@@ -452,16 +463,23 @@ struct PreparedHostImport
 	             VkExternalMemoryHandleTypeFlags handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)
 	{
 		device = ctx->device;
-		VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_properties {};
-		host_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT;
-		VkPhysicalDeviceProperties2 physical_properties {};
-		physical_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-		physical_properties.pNext = &host_properties;
-		vkGetPhysicalDeviceProperties2(ctx->physical_device, &physical_properties);
-		min_pointer_alignment = host_properties.minImportedHostPointerAlignment;
-		if (!GuestHostImportPlan::IsPowerOfTwo(min_pointer_alignment))
+		if (handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)
 		{
-			return false;
+			if (!ctx->guest_host_pointer_import_supported)
+			{
+				return false;
+			}
+			VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_properties {};
+			host_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT;
+			VkPhysicalDeviceProperties2 physical_properties {};
+			physical_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+			physical_properties.pNext = &host_properties;
+			vkGetPhysicalDeviceProperties2(ctx->physical_device, &physical_properties);
+			min_pointer_alignment = host_properties.minImportedHostPointerAlignment;
+			if (!GuestHostImportPlan::IsPowerOfTwo(min_pointer_alignment))
+			{
+				return false;
+			}
 		}
 
 		buffer = CreateAddressBuffer(ctx, size, handle_type);
@@ -577,6 +595,8 @@ bool ImportPointer(GraphicContext* ctx, void* pointer, uint64_t span, uint64_t h
 		return false;
 	}
 	prepared->Release(out);
+	out->memory_type = type_index;
+	out->handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
 	return true;
 }
 
@@ -620,7 +640,9 @@ bool ImportDmaBuf(GraphicContext* ctx, int dma_buf, uint64_t span, Chunk* out)
 		return false;
 	}
 	prepared.Release(out);
-	out->physical = true;
+	out->physical    = true;
+	out->memory_type = type_index;
+	out->handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 	return true;
 }
 
@@ -641,8 +663,9 @@ enum class PhysicalImport
 PhysicalImport ProbePhysicalImport(GraphicContext* ctx)
 {
 	PreparedHostImport prepared;
-	auto*              backing = prepared.Prepare(ctx, kPageBytes) ? Core::VirtualMemory::CreateSharedBacking(kPageBytes) : nullptr;
-	const uint64_t     view    = backing == nullptr ? 0
+	auto*              backing      = Core::VirtualMemory::CreateSharedBacking(kPageBytes);
+	const bool         host_pointer = backing != nullptr && prepared.Prepare(ctx, kPageBytes);
+	const uint64_t     view         = !host_pointer ? 0
 	                                                : Core::VirtualMemory::MapSharedAligned(
 	                                                      backing, 0, 0, kPageBytes, Core::VirtualMemory::Mode::ReadWrite,
 	                                                      std::max(prepared.min_pointer_alignment, kPageBytes));
@@ -716,40 +739,34 @@ bool ImportWindow(GraphicContext* ctx, uint64_t offset, uint64_t size, Chunk* ou
 	return false;
 }
 
-// The window holding direct-memory offset `offset`, imported if none does. A
-// new window is the largest aligned power-of-two run of blocks, at most one
-// chunk, that starts at the block of `offset` and ends by `limit` and before
-// the next window.
-PhysicalWindow* AcquireWindow(GraphicContext* ctx, Registry* registry, uint64_t offset, uint64_t limit, uint64_t* base)
+void ReleaseInPlaceWindowLocked(VkDevice device, Registry* registry, std::map<std::pair<uint64_t, uint64_t>, PhysicalWindow>::iterator window)
 {
-	auto next = registry->windows.upper_bound(offset);
-	if (next != registry->windows.begin())
+	if (window->second.users != 0)
 	{
-		auto holder = std::prev(next);
-		if (offset - holder->first < holder->second.size)
-		{
-			*base = holder->first;
-			return &holder->second;
-		}
+		return;
 	}
-	const uint64_t start = offset / kPhysicalImportBlockBytes * kPhysicalImportBlockBytes;
-	if (next != registry->windows.end())
+	DestroyImport(device, window->second.import);
+	Kernel::Memory::KernelUnpinPhysicalWindow(window->first.first, window->first.second);
+	registry->in_place_windows.erase(window);
+}
+
+// The window of the chunk holding direct-memory offset `offset`, imported if
+// it is the first use of that chunk.
+PhysicalWindow* AcquireWindow(GraphicContext* ctx, Registry* registry, uint64_t offset, uint64_t* base)
+{
+	const uint64_t start = offset / kChunkBytes * kChunkBytes;
+	*base                = start;
+	if (auto holder = registry->windows.find(start); holder != registry->windows.end())
 	{
-		limit = std::min(limit, next->first);
-	}
-	uint64_t size = kPhysicalImportBlockBytes;
-	while (size < kChunkBytes && start % (size * 2u) == 0 && limit - start >= size * 2u)
-	{
-		size *= 2u;
+		return &holder->second;
 	}
 	PhysicalWindow window;
-	window.size = size;
-	if (!ImportWindow(ctx, start, size, &window.import))
+	window.size = kChunkBytes;
+	if (!ImportWindow(ctx, start, kChunkBytes, &window.import))
 	{
-		std::fprintf(stderr, "guest physical window import failed: offset=0x%012" PRIx64 " size=0x%" PRIx64 "\n", start, size);
+		std::fprintf(stderr, "guest physical window import failed: offset=0x%012" PRIx64 " size=0x%" PRIx64 "\n", start, kChunkBytes);
 		return nullptr;
 	}
-	*base = start;
 	return &registry->windows.emplace(start, window).first->second;
 }
 
@@ -757,12 +774,11 @@ PhysicalWindow* AcquireWindow(GraphicContext* ctx, Registry* registry, uint64_t 
 // the windows over those pages, one chunk per window.
 bool ImportPhysicalRun(GraphicContext* ctx, Registry* registry, Range* range, uint64_t guest, uint64_t offset, uint64_t size)
 {
-	const uint64_t end   = offset + size;
-	const uint64_t limit = (end + kPhysicalImportBlockBytes - 1u) / kPhysicalImportBlockBytes * kPhysicalImportBlockBytes;
+	const uint64_t end = offset + size;
 	for (uint64_t cursor = offset; cursor < end;)
 	{
 		uint64_t        base   = 0;
-		PhysicalWindow* window = AcquireWindow(ctx, registry, cursor, limit, &base);
+		PhysicalWindow* window = AcquireWindow(ctx, registry, cursor, &base);
 		if (window == nullptr)
 		{
 			return false;
@@ -786,6 +802,78 @@ bool ImportPhysicalRun(GraphicContext* ctx, Registry* registry, Range* range, ui
 	return true;
 }
 
+// Backs a snapshot with mapped device-addressable memory, for devices that do
+// not import host pointers. CPU-cached memory keeps write-back reads fast.
+bool AllocateMappedSnapshot(GraphicContext* ctx, uint64_t span, Chunk* out)
+{
+	VkBuffer buffer = CreateAddressBuffer(ctx, span, 0);
+	if (buffer == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	VkMemoryRequirements requirements {};
+	vkGetBufferMemoryRequirements(ctx->device, buffer, &requirements);
+	VkPhysicalDeviceMemoryProperties properties {};
+	vkGetPhysicalDeviceMemoryProperties(ctx->physical_device, &properties);
+	uint32_t flags[VK_MAX_MEMORY_TYPES] {};
+	for (uint32_t i = 0; i < properties.memoryTypeCount && i < VK_MAX_MEMORY_TYPES; i++)
+	{
+		flags[i] = properties.memoryTypes[i].propertyFlags;
+	}
+	constexpr uint32_t coherent  = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	uint32_t           type_index = 0;
+	const bool         typed =
+	    GuestHostImportPlan::SelectMemoryType(requirements.memoryTypeBits, flags, properties.memoryTypeCount,
+	                                          coherent | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, &type_index) ||
+	    GuestHostImportPlan::SelectMemoryType(requirements.memoryTypeBits, flags, properties.memoryTypeCount, coherent, &type_index);
+	VkMemoryAllocateFlagsInfo allocate_flags {};
+	allocate_flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+	allocate_flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+	VkMemoryAllocateInfo allocate {};
+	allocate.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocate.pNext           = &allocate_flags;
+	allocate.allocationSize  = requirements.size;
+	allocate.memoryTypeIndex = type_index;
+	VkDeviceMemory memory  = VK_NULL_HANDLE;
+	void*          mapping = nullptr;
+	if (!typed || vkAllocateMemory(ctx->device, &allocate, nullptr, &memory) != VK_SUCCESS ||
+	    vkBindBufferMemory(ctx->device, buffer, memory, 0) != VK_SUCCESS ||
+	    vkMapMemory(ctx->device, memory, 0, VK_WHOLE_SIZE, 0, &mapping) != VK_SUCCESS)
+	{
+		vkDestroyBuffer(ctx->device, buffer, nullptr);
+		vkFreeMemory(ctx->device, memory, nullptr);
+		return false;
+	}
+	out->buffer = buffer;
+	out->memory = memory;
+	out->device = BufferDeviceAddress(ctx->device, buffer);
+	out->copy   = mapping;
+	out->mapped = true;
+	return true;
+}
+
+// ImportChunk for devices that do not import host pointers: the snapshot is
+// the mapping itself, tracked or immutable under the same rules.
+bool ImportMappedChunk(GraphicContext* ctx, uint64_t guest, uint64_t span, Chunk* out)
+{
+	if (!AllocateMappedSnapshot(ctx, span, out))
+	{
+		return false;
+	}
+	auto&      tracker   = GpuDirtyPageTracker::Instance();
+	const bool writable  = Core::VirtualMemory::IsRangeWritable(guest, span);
+	out->registered      = writable && tracker.RegisterRange(guest, span);
+	out->tracked         = out->registered && SnapshotGuest(out->copy, guest, span, &out->generation);
+	const bool immutable = !writable && Core::VirtualMemory::CopyFromGuest(out->copy, guest, span);
+	if (out->tracked || immutable)
+	{
+		return true;
+	}
+	DestroyImport(ctx->device, *out);
+	*out = {};
+	return false;
+}
+
 // Imports [guest, guest + span) for a chunk mapping [guest, guest + size)
 // from a snapshot of flexible memory.
 // The guest view itself is never imported: dirty tracking and guest mprotect
@@ -802,6 +890,10 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 	out->guest = guest;
 	out->size  = size;
 	out->span  = span;
+	if (!ctx->guest_host_pointer_import_supported)
+	{
+		return ImportMappedChunk(ctx, guest, span, out);
+	}
 	PreparedHostImport prepared;
 	if (!prepared.Prepare(ctx, span))
 	{
@@ -844,12 +936,13 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 	return false;
 }
 
-// Marks every page of an import block that holds a resident page. `resident`
-// covers consecutive direct-memory pages from page index `first`; blocks are
-// counted in direct memory and clipped to that span.
+// Marks every page of a window chunk that holds a resident page: pinning the
+// window populates the rest of it anyway. `resident` covers consecutive
+// direct-memory pages from page index `first`; chunks are counted in direct
+// memory and clipped to that span.
 void ExpandToImportBlocks(uint64_t first, std::vector<uint8_t>* resident)
 {
-	constexpr uint64_t block_pages = kPhysicalImportBlockBytes / kPageBytes;
+	constexpr uint64_t block_pages = kChunkBytes / kPageBytes;
 	const uint64_t     pages       = resident->size();
 	for (uint64_t page = 0; page < pages;)
 	{
@@ -956,9 +1049,9 @@ bool ImportPhysicalSpan(GraphicContext* ctx, Registry* registry, uint64_t base, 
 		return true;
 	}
 	// Guest writes reach physical pages one at a time, and importing each newly
-	// resident run gave a chunk per page or two. Whole blocks bound the chunks
-	// per range; the pages a block import populates are imported with it, and a
-	// block without a resident page is not pinned.
+	// resident run gave a chunk per page or two. Whole window chunks bound the
+	// entries per range; the pages an import populates are imported with it, and
+	// a window chunk without a resident page is not pinned.
 	ExpandToImportBlocks(offset / kPageBytes, resident);
 	for (uint64_t page = 0; page < pages;)
 	{
@@ -1088,10 +1181,17 @@ bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
 // registered reader may still reference it.
 bool RebuildTable(GraphicContext* ctx, Registry* registry)
 {
-	// The device lookup binary-searches entries by guest base.
+	// The device lookup binary-searches entries by guest base within one directory region.
 	static_assert(sizeof(TableEntry) == kGuestDeviceAddressEntryDwords * 4u);
-	const uint64_t entry_bytes = registry->entries.size() * sizeof(TableEntry);
-	const uint64_t bytes       = kGuestDeviceAddressNullBytes + entry_bytes;
+	std::vector<uint64_t> bases(registry->entries.size());
+	for (std::size_t i = 0; i < bases.size(); ++i)
+	{
+		bases[i] = registry->entries[i].guest;
+	}
+	const auto     directory       = GuestDeviceAddressBuildDirectory(bases.data(), static_cast<uint32_t>(bases.size()));
+	const uint64_t entry_bytes     = registry->entries.size() * sizeof(TableEntry);
+	const uint64_t directory_bytes = directory.words.size() * sizeof(uint32_t);
+	const uint64_t bytes           = kGuestDeviceAddressNullBytes + entry_bytes + directory_bytes;
 	Table          table;
 	table.buffer = CreateAddressBuffer(ctx, bytes, 0);
 	VkMemoryRequirements requirements {};
@@ -1126,10 +1226,14 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 	// Each entry is the guest base, size, device address and span as
 	// little-endian 64-bit words, the layout TableEntry already has.
 	std::memset(mapped, 0, kGuestDeviceAddressNullBytes);
+	const uint32_t header[4] = {static_cast<uint32_t>(directory.base), static_cast<uint32_t>(directory.base >> 32u), directory.shift,
+	                            static_cast<uint32_t>(directory.words.size() - 2u)};
+	std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressDirectoryHeaderOffset, header, sizeof(header));
 	if (entry_bytes != 0)
 	{
 		std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes, registry->entries.data(), entry_bytes);
 	}
+	std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes + entry_bytes, directory.words.data(), directory_bytes);
 	vkUnmapMemory(ctx->device, table.memory);
 	table.device  = BufferDeviceAddress(ctx->device, table.buffer);
 	table.entries = static_cast<uint32_t>(registry->entries.size());
@@ -1143,6 +1247,38 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 }
 
 } // namespace
+
+GuestDeviceAddressDirectory GuestDeviceAddressBuildDirectory(const uint64_t* sorted_bases, uint32_t count)
+{
+	// Few enough regions to rebuild with every table, fine enough that a region holds few entries.
+	constexpr uint32_t kMaxRegions = 16384;
+	constexpr uint32_t kMinShift   = 12;
+	GuestDeviceAddressDirectory directory;
+	directory.shift = kMinShift;
+	if (count != 0)
+	{
+		const uint64_t extent = sorted_bases[count - 1u] - sorted_bases[0];
+		while ((extent >> directory.shift) >= kMaxRegions)
+		{
+			++directory.shift;
+		}
+		directory.base = sorted_bases[0] & ~((uint64_t {1} << directory.shift) - 1u);
+	}
+	const uint64_t regions = count == 0 ? 1u : ((sorted_bases[count - 1u] - directory.base) >> directory.shift) + 1u;
+	directory.words.resize(regions + 1u);
+	uint32_t entry = 0;
+	for (uint64_t region = 0; region < regions; ++region)
+	{
+		const uint64_t start = directory.base + (region << directory.shift);
+		while (entry < count && sorted_bases[entry] <= start)
+		{
+			++entry;
+		}
+		directory.words[region] = entry;
+	}
+	directory.words[regions] = count;
+	return directory;
+}
 
 void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physical_backing)
 {
@@ -1174,6 +1310,7 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physica
 	}
 	registry.dirty              = true;
 	registry.population_scanned = false;
+	GpuMemoryInvalidateStorageScans();
 }
 
 void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
@@ -1245,16 +1382,21 @@ static bool OverlapsRegisteredRange(uint64_t vaddr, uint64_t size)
 	return it != registry.ranges.end() && it->first < vaddr + size;
 }
 
-bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, std::vector<GpuMemoryStoragePublication>* publishable,
-                                        SubmissionId* dependency)
+bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, const std::vector<SubmissionId>& device_awaited,
+                                        std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency)
 {
 	EXIT_IF(dependency == nullptr);
-	return GpuMemoryPendingStorageWriteBack(OverlapsRegisteredRange, consumer, publishable, dependency);
+	return GpuMemoryPendingStorageWriteBack(OverlapsRegisteredRange, consumer, device_awaited, publishable, dependency);
 }
 
 void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer)
 {
 	GpuMemoryWriteBackStorageRanges(ctx, OverlapsRegisteredRange, consumer);
+}
+
+bool GuestDeviceAddressPendingWriteBackOutsideStorage()
+{
+	return GpuMemoryPendingWriteBackOutsideStorage(OverlapsRegisteredRange);
 }
 
 struct PublicationPiece
@@ -1321,11 +1463,131 @@ static void RecordPublicationBarrierAfter(VkCommandBuffer_T* cmd)
 	                     &after, 0, nullptr, 0, nullptr);
 }
 
+
+// A buffer over `size` bytes at `object_offset` of an imported window. Binding is coarser
+// than guest addresses, so it can start below the object, at `*guest_offset` in the buffer.
+static VkBuffer CreateInPlaceBuffer(const GraphicContext* ctx, const Chunk& import, uint64_t object_offset, uint64_t size,
+                                    uint64_t window_size, uint32_t usage, uint64_t* guest_offset)
+{
+	VkBuffer buffer = CreateAddressBuffer(ctx, size, import.handle_type, usage);
+	if (buffer == VK_NULL_HANDLE)
+	{
+		return VK_NULL_HANDLE;
+	}
+	VkMemoryRequirements requirements {};
+	vkGetBufferMemoryRequirements(ctx->device, buffer, &requirements);
+	const uint64_t pad = object_offset % requirements.alignment;
+	if (pad != 0u)
+	{
+		vkDestroyBuffer(ctx->device, buffer, nullptr);
+		if ((pad & 3u) != 0u || pad % ctx->min_storage_buffer_offset_alignment != 0u)
+		{
+			return VK_NULL_HANDLE;
+		}
+		buffer = CreateAddressBuffer(ctx, size + pad, import.handle_type, usage);
+		if (buffer == VK_NULL_HANDLE)
+		{
+			return VK_NULL_HANDLE;
+		}
+		vkGetBufferMemoryRequirements(ctx->device, buffer, &requirements);
+	}
+	const uint64_t memory_offset = object_offset - pad;
+	if ((memory_offset % requirements.alignment) != 0u || ((requirements.memoryTypeBits >> import.memory_type) & 1u) == 0u ||
+	    requirements.size > window_size - memory_offset ||
+	    vkBindBufferMemory(ctx->device, buffer, import.memory, memory_offset) != VK_SUCCESS)
+	{
+		vkDestroyBuffer(ctx->device, buffer, nullptr);
+		return VK_NULL_HANDLE;
+	}
+	*guest_offset = pad;
+	return buffer;
+}
+
+// A device store, fill or copy into part of a cache line reverts what the CPU
+// stored elsewhere in that line (measured on Arc A770 over imported pages, not
+// on RADV), so small ranges reach guest memory through the host write-back,
+// which copies exact bytes. Large objects keep their device path: their copies
+// cost whole frames, and only their two edge lines stay exposed.
+static bool DeviceMayWriteGuestRange(uint64_t vaddr, uint64_t size)
+{
+	constexpr uint64_t kCacheLineBytes    = 64u;
+	constexpr uint64_t kExactCopyMaxBytes = 64u * 1024u;
+	return size >= kExactCopyMaxBytes || ((vaddr | size) & (kCacheLineBytes - 1u)) == 0u;
+}
+
+bool GuestDeviceAddressBindInPlace(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint32_t usage, VulkanBuffer* out,
+                                   GuestInPlaceWindow* window)
+{
+	EXIT_IF(ctx == nullptr || out == nullptr || window == nullptr || out->buffer != nullptr || size == 0);
+	uint64_t offset = 0;
+	if (!ctx->guest_device_address_supported || vaddr > UINT64_MAX - size || !DeviceMayWriteGuestRange(vaddr, size) ||
+	    Kernel::Memory::KernelResolvePhysical(vaddr, size, &offset) != Kernel::Memory::KernelPhysicalResolution::Resolved)
+	{
+		return false;
+	}
+	const uint64_t base = offset / kPhysicalImportBlockBytes * kPhysicalImportBlockBytes;
+	const uint64_t end  = (offset + size + kPhysicalImportBlockBytes - 1u) / kPhysicalImportBlockBytes * kPhysicalImportBlockBytes;
+	if (end - base > kChunkBytes)
+	{
+		return false;
+	}
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	auto                        found = registry.in_place_windows.find({base, end - base});
+	if (found == registry.in_place_windows.end())
+	{
+		PhysicalWindow imported;
+		imported.size = end - base;
+		if (!ImportWindow(ctx, base, end - base, &imported.import))
+		{
+			return false;
+		}
+		found = registry.in_place_windows.emplace(std::make_pair(base, end - base), imported).first;
+	}
+	uint64_t       guest_offset = 0;
+	const VkBuffer buffer = CreateInPlaceBuffer(ctx, found->second.import, offset - base, size, end - base, usage, &guest_offset);
+	if (buffer == VK_NULL_HANDLE)
+	{
+		ReleaseInPlaceWindowLocked(ctx->device, &registry, found);
+		return false;
+	}
+	found->second.users++;
+	out->buffer           = buffer;
+	out->descriptor_range = size;
+	out->guest_in_place   = true;
+	out->guest_offset     = guest_offset;
+	VulkanAssignMemoryUniqueId(&out->memory);
+	*window = {base, end - base};
+	return true;
+}
+
+void GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const GuestInPlaceWindow& window)
+{
+	EXIT_IF(ctx == nullptr || window.size == 0);
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	const auto                  found = registry.in_place_windows.find({window.base, window.size});
+	EXIT_IF(found == registry.in_place_windows.end() || found->second.users == 0);
+	found->second.users--;
+	ReleaseInPlaceWindowLocked(ctx->device, &registry, found);
+}
+
 bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source, uint64_t vaddr,
                                          uint64_t size)
 {
 	if (ctx == nullptr || cmd == nullptr || source.buffer == nullptr || size == 0 || vaddr > UINT64_MAX - size ||
 	    !ctx->guest_device_address_supported)
+	{
+		return false;
+	}
+	if (source.guest_in_place)
+	{
+		// The device wrote these bytes where the consumer reads them.
+		RecordPublicationBarrierBefore(cmd);
+		RecordPublicationBarrierAfter(cmd);
+		return true;
+	}
+	if (!DeviceMayWriteGuestRange(vaddr, size))
 	{
 		return false;
 	}
@@ -1348,7 +1610,8 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 
 bool GuestDeviceAddressRecordFill(GraphicContext* ctx, VkCommandBuffer_T* cmd, uint32_t word, uint64_t vaddr, uint64_t size)
 {
-	if (ctx == nullptr || cmd == nullptr || size == 0 || vaddr > UINT64_MAX - size || !ctx->guest_device_address_supported)
+	if (ctx == nullptr || cmd == nullptr || size == 0 || vaddr > UINT64_MAX - size || !ctx->guest_device_address_supported ||
+	    !DeviceMayWriteGuestRange(vaddr, size))
 	{
 		return false;
 	}

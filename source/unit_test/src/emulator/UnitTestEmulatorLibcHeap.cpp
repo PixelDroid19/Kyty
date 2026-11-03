@@ -10,11 +10,19 @@
 #include "Emulator/Log.h"
 
 #include <cstring>
+#include <cstddef>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+
+namespace Kyty::Libs::LibC {
+void* cxx_new_aligned(size_t size, size_t alignment);
+void  cxx_delete_nothrow(void* pointer);
+void* c_get_new_handler();
+void  cxx_invalid_argument_dtor(void* self);
+} // namespace Kyty::Libs::LibC
 
 UT_BEGIN(EmulatorLibcHeap);
 
@@ -292,6 +300,46 @@ TEST(EmulatorLibcHeap, ConcurrentStartupWaitsForTheInitializingThread)
 	EXPECT_TRUE(first_result);
 	EXPECT_TRUE(second_result);
 	EXPECT_EQ(g_initialize_count, 1);
+}
+
+TEST(EmulatorLibcHeap, AlignedNewUsesOwnerTrackingAndNothrowDelete)
+{
+	void* page_aligned = Kyty::Libs::LibC::cxx_new_aligned(0x100, 0x1000);
+	ASSERT_NE(page_aligned, nullptr);
+	EXPECT_EQ(reinterpret_cast<uintptr_t>(page_aligned) % 0x1000u, 0u);
+	Kyty::Libs::LibC::cxx_delete_nothrow(page_aligned);
+
+	void* zero_sized = Kyty::Libs::LibC::cxx_new_aligned(0, 0x40);
+	ASSERT_NE(zero_sized, nullptr);
+	EXPECT_EQ(reinterpret_cast<uintptr_t>(zero_sized) % 0x40u, 0u);
+	Kyty::Libs::LibC::cxx_delete_nothrow(zero_sized);
+	EXPECT_EQ(Kyty::Libs::LibC::c_get_new_handler(), nullptr);
+}
+
+TEST(EmulatorLibcHeap, ExceptionStringDtorResetsSmallString)
+{
+	struct ExceptionObject
+	{
+		void*    vptr      = nullptr;
+		void*    reserved  = nullptr;
+		char     data[16]  = {};
+		uint64_t size      = 0;
+		uint64_t capacity  = 0;
+	};
+	static_assert(offsetof(ExceptionObject, data) == 0x10);
+	static_assert(offsetof(ExceptionObject, size) == 0x20);
+	static_assert(offsetof(ExceptionObject, capacity) == 0x28);
+
+	ExceptionObject object {};
+	std::memset(object.data, 'x', sizeof(object.data));
+	object.size     = 3;
+	object.capacity = 0xf;
+
+	Kyty::Libs::LibC::cxx_invalid_argument_dtor(&object);
+	EXPECT_EQ(object.size, 0u);
+	EXPECT_EQ(object.capacity, 0xfu);
+	EXPECT_EQ(object.data[0], 0);
+	Kyty::Libs::LibC::cxx_invalid_argument_dtor(nullptr);
 }
 
 UT_END();

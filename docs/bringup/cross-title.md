@@ -1,8 +1,380 @@
+## Storage objects bound over imported guest pages (2026-10-30)
+
+- **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, Mesa 26.2.5, strict hub route):
+  publication copies from storage objects to the guest window ran 1,000-2,000 times per 3-second
+  window, moving 1.3-2.2 GB for 230-300 ms of processor time, with same-queue host waits behind them.
+  A CPU and a device write on one page could also clobber each other at write-back, which is a stop
+  (`RejectWriteBackConflict`).
+- **Change:** a writable storage object inside one physical run gets a `VkBuffer` bound to the
+  imported memory of its pages, in a window rounded to 2 MiB and at most 64 MiB. Device writes are
+  guest bytes and CPU stores reach the device, so such an object needs no publication copy and no
+  same-queue wait; a reader on the same queue needs a barrier after each new write. Objects outside
+  one physical run, and hosts without the import, keep the copy path.
+- **Binding is coarser than guest addresses.** The A770 requires 64 bytes for these buffers; a census
+  (gw226) found 39 % of writable objects by count and 42 % by bytes not 64-aligned (all 16-aligned).
+  The buffer then starts below the object and `VulkanBuffer::guest_offset` carries the difference to
+  every consumer: storage descriptors, transfer fills, vertex binds and vertex copies, and GDS copies.
+  The difference must be a multiple of `minStorageBufferOffsetAlignment`; otherwise the object keeps
+  the copy path.
+- **Measured** (one 150 s and one 300 s strict run against gw225, heavy unrelated host load in all of
+  them, so frame rates are not a comparison):
+  - gw228, before unaligned objects: publication calls fell about 60 %, bytes did not.
+  - gw230 and gw231: publication calls are 0 in every window.
+  - Fence wait time in the matching windows: 2.62 s (gw225) to 1.73 s (gw231) in window 4.
+- **Verified:** full `kyty_unit_test`, 2,695 passed; `games-matrix` strict, 26 of 28 titles interactive and
+  every case with the outcome of the baseline (`PPSA07393` crashes at boot, `PPSA01341` is parked; the
+  4 further `launch_failed` cases were loose `decrypted` copies, which discovery now rejects); validation run gw232 (300 s) has only the
+  `VUID-vkCmdDispatch-format-07753` messages already in gw224 (12 in each).
+- **Not established:**
+  - Hosts other than the A770 are untested, including the host-pointer import path.
+  - A reader on another queue now relies on the guest's own ordering and has no host wait. Vulkan gives
+    no availability guarantee between queues without a semaphore, and no failure has been seen.
+  - The queue-8 device time is unchanged: this moves processor work and waits, not the shader cost.
+
+## Guest `fprintf` read past its buffer and `strto*` dropped range errors (2026-10-30, fixed)
+
+- **Found by review** of `source/emulator/src/Libs/LibC.cpp`; no title is known to reach either
+  path.
+- `fprintf` and `vfprintf` formatted into a 64 KiB stack buffer, then wrote the full formatted
+  length, so output longer than 64 KiB read past the buffer. Longer output is now formatted again
+  into a heap buffer of the reported length; the formatter copies its argument list, so both
+  passes read the same arguments.
+- `strtod`, `strtof`, `strtol`, `strtoul`, `strtoll` and `strtoull` returned the host result but
+  left the guest `errno` untouched when the host reported `ERANGE`. They now store `ERANGE` in the
+  guest errno slot; other host errno values are not mapped.
+- Verified by review and build only: no test or title reaches either path. The gw164 run of the
+  mspace record below used the same build and kept its frontier.
+
+## Guest mspaces fragmented and reported freed memory as in use (2026-10-30, fixed)
+
+- **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, strict default-route runs):
+  - The title prints `JsParticle heap memory is full!` about 65 times a run, in passing and failing
+    runs alike, for requests of 69 KB to 1.3 MB against a 36 MiB `sceLibcMspace` heap. The title
+    prints it after the particle heap fails a request and then retries the request on its engine
+    allocator, so each message marks a spill, not a lost allocation.
+  - A temporary arena walk at each failed request (gw154) found 16.9 MB free in 467 chunks, the
+    largest 199392 bytes, beside 20.8 MB in use in 8592 chunks. The guest asked for 207915 bytes.
+  - `sceLibcMspaceMallocStats` reported 34 MB in use for the same arena.
+- **Cause.** `MSpace.cpp` kept freed chunks in exact-size lists and carved every other request
+  from one "key" chunk, merging free neighbours only after that chunk ran out. Freed chunks were
+  reused only by a request of exactly their size, so free space splintered between live blocks.
+  The in-use statistic was the arena minus the key chunk, so every listed free chunk counted as
+  used.
+- **Fix.** A freed chunk merges with both free neighbours at once. Malloc takes the best fit:
+  exact lists for chunks of 2-10 blocks, then 116 segregated bins (four per power of two) with a
+  bitmap to find the next non-empty bin. In-use statistics count checked-out blocks. The block
+  format, alignment prefix, out-of-memory callback loop and nested-heap checks are unchanged.
+- **Verified.**
+  - New `CoreMSpace` tests: `MixedWorkloadKeepsLargeRequestsSatisfiable` and
+    `StatsTrackInUseBytes` fail before the fix and pass after it;
+    `RandomizedStressKeepsDataIntact` (20000 operations, aligned and plain blocks, realloc) passes
+    on both. The 9 `CoreMSpace` tests pass; `ctest --no-tests=error -R '^KytyUnitTest$'` runs the
+    whole unit binary (2704 cases) and passes, exit 0.
+  - gw155 (strict default route, 330 s, with the temporary arena probe): the particle heap message
+    appeared 0 times and no mspace request failed. The run reached the hub and stopped at the
+    hub-start command buffer assert of `docs/titles/robot-platformer.md`, so that assert does not
+    depend on the particle heap.
+  - `kyty_agent games-matrix --mode strict` (32 cases, 60 fps limit): 26 interactive, 4
+    launch_failed, 1 host_crash and 1 stalled at its first frames, the same frontier per case as
+    the three matrices of 2026-10-29.
+- **Fixed later the same day** (`source/lib/Core/src/MSpace.cpp`,
+  `source/emulator/src/Libs/LibCInternal.cpp`), defects found by reading the allocator, none seen
+  in this title:
+  - `MSpaceInternalRealloc_align` kept the raw chunk when the new size fit within 128 bytes of
+    the old one, then recomputed the aligned pointer for the new boundary without moving the data,
+    so a block from `memalign(4096, n)` resized through the 32-byte path came back pointing away
+    from its data. The block now stays in place only when its pointer is still aligned for the new
+    boundary and its chunk holds the new size within the same 128-byte slack; otherwise the data
+    moves to a new aligned block, bounded by the old usable size.
+  - `MSpaceInternalMallocUnsafe` rounded with `(size + 11) / 8` in 32 bits, which wrapped to a
+    zero-block request within 11 bytes of 4 GiB, and its out-of-memory loop bound
+    `ctx.capacity * 16` wrapped for arenas of 2 GiB or more. Both are computed in 64 bits, and a
+    request larger than the arena is refused before the free lists are searched.
+  - `LibcMspaceFree` dropped the result of `Core::MSpaceFree`; a refused free (unknown mspace, bad
+    header, pinned block or a block backing a nested arena) is now logged, rate limited.
+  - Verified: the new `CoreMSpace` tests `ReallocOfOverAlignedBlockKeepsData` and
+    `OversizedRequestIsRefusedWithoutTouchingArena` fail before the fix (the realloc test reads
+    other bytes after both resizes; the oversized request crashes the test binary) and pass after
+    it, with the 11 `CoreMSpace` tests. `ctest --no-tests=error` over the build: 105 of 108 pass,
+    1 skipped, and the 2 failures are the open EVENT_WRITE 0x38 record below. gw164 (strict
+    default route, 330 s, 60 fps limit, `PPSA21567 - Astro Bot` 01.018, Intel Arc A770) took the
+    same boot, title, world map and intro path, logged no refused free, and stopped at about
+    228 s at the hub-start command buffer assert of `docs/titles/robot-platformer.md`.
+
+## GDS is shared across queue families (2026-10-24)
+
+- **Observed.** After compute queues moved to a compute-only family, a title
+  that initializes GDS on a compute queue and later binds it on the graphics
+  queue stopped at boot with `GDS queue-family migration is unsupported`.
+- **Cause and fix.** The GDS buffer is created through the common buffer path,
+  which already applies concurrent sharing across every used family; the
+  first-use family check still treated it as exclusively owned. The check and
+  the owner field are removed.
+- **Verified.** A strict boot on Intel A770 passes the publisher card, the
+  studio logo and the title, and loads the intro level.
+
 # Cross-title records (2026-10-10 onward)
 
 Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
+
+## Small `DMA_DATA` stores behind a consolidated wait retire it first (2026-10-27, fixed)
+
+- **Observed** (`PPSA03061 - void tRrLM();++ //Void Terrarium++`, Intel Arc
+  A770, Mesa 26.2.5, strict runs without the present limit): the title menu
+  froze with the last frame on screen. 2 of 4 runs froze, one after about
+  2 s; `kyty_agent status` showed presents stopped and the submitter parked
+  in the decode-completion hold of 32b27516.
+- **Cause.** Each frame the guest submits a small command buffer that clears
+  a scratch dword inside the command buffer itself, releases 1 to it at end
+  of pipe, waits on it with `WAIT_REG_MEM`, and then copies an 8-byte token
+  with `DMA_DATA` to its "command buffer consumed" marker. The wait's
+  producer is a plain label store of the same queue, so the command
+  processor consolidates it and goes on; the label store becomes visible at
+  fence completion. `DMA_DATA` was executed at parse time, so the marker
+  was visible before the label. The guest then reused the ring memory for
+  its next large command buffer, and the late label store wrote 1 over the
+  address dword of that buffer's `RELEASE_MEM` (the scratch dword and that
+  dword share an address). The release went to `0x2000000001`, the
+  following `WAIT_REG_MEM` never resolved, and the submitter stayed held.
+- **Evidence.** A conditional hardware watchpoint (`== 1`) on the address
+  dword of the three large command-buffer slots caught
+  `LabelManager::FireCallbacks` (from `CompleteSubmission`) writing it; a
+  breakpoint on `LabelManager::Create32` for that address showed the label
+  created by `cp_op_release_mem` of the small buffer. The watchpoint was
+  checked on the legitimate value first. This is the `DMA_DATA` form of the
+  `WRITE_DATA` ordering fixed for `PPSA03706 - My Friend Peppa Pig`
+  (`docs/titles/preschool-unity.md`, 2026-10-25).
+- **Excluded.** The decode-completion hold (32b27516) is not the root: it
+  only keeps the submitter parked once the corrupted wait cannot resolve.
+- **First fix, withdrawn** (52d28b6f): one- and two-dword `DMA_DATA` stores
+  behind a consolidated wait or a pending deferred store were published at
+  end of pipe like `WRITE_DATA`. It fixed the menu, but it regressed
+  `PPSA21567 - Astro Bot`: its frames open with a consolidated drain wait,
+  so every small store later in the batch reached memory only at fence
+  completion, after the GPU work of the same batch that reads it. At the
+  first crash-site hub frame the GPU job timed out (`xe` "Timedout job" on
+  the render ring, then `vkWaitForFences` -4) in 3 of 5 route runs; 0 of 9
+  runs of the binaries before it hung there.
+- **Cause of the regression.** End-of-pipe publication is later than the
+  CP order: the CP passes the wait once the label lands and then stores at
+  once, before it reaches the following work. Deferring the store to the
+  fence moves it behind that work.
+- **Fix** (`CommandProcessor::RetireBeforeStore` in `GraphicsRun.cpp`,
+  called from `cp_op_dma_data` and `cp_op_custom_dma_data`): a `DMA_DATA`
+  store that follows a consolidated wait first waits for that wait's
+  producer submission, and a one- or two-dword store over bytes that an
+  end-of-pipe store still targets waits for that producer; then it stores
+  at parse time. It submits the work recorded so far only when the producer
+  is still in the command buffer being recorded. The store lands after the
+  label, as on the CP, and before any later work of the batch reads it.
+  `WRITE_DATA` keeps its end-of-pipe deferral (2b17707f,
+  `docs/titles/preschool-unity.md`).
+- **Cost.** A first version submitted on every such store: it tripled the
+  buffer flushes and slowed the robot platformer's intro by 25-30 %. The
+  fix submits only for a producer that is still being recorded.
+- **Verified.** Void menu, five strict 80 s runs without the present limit:
+  no stall, about 52,000 presents each. Repository gates and the packet,
+  `DMA_DATA`, `WRITE_DATA`, wait and command-processor unit suites
+  (355 tests) pass. A strict 480 s robot platformer run on Intel A770
+  reached the crash-site hub and stayed there with no GPU timeout, together
+  with the native hub OR reductions (`docs/titles/robot-platformer.md`,
+  "hub OR reductions run natively"), which removed a second cause of a hub
+  GPU timeout; the two causes were not separated by a run.
+- The first fix's strict `games-matrix` sweep at the 60 fps present limit,
+  together with the survival-title depth-only fix
+  (`docs/titles/survival.md`, 2026-10-27), had 26 of 32 cases interactive
+  against 23 of 32. The sweep has not been repeated with this fix.
+
+## Semaphore waiters woke each other without end (2026-10-29, fixed)
+
+- **Observed** (`PPSA21567 - Astro Bot`, Intel Arc A770, strict warm 400 s dune runs, per-thread
+  `/proc` counters read every 30 s):
+  - Eight guest threads were each on CPU about 40% of the time, about 26% of it in the kernel.
+    Each switched context about 116000 times a second. Together they used about 3.2 of the
+    host's 12 CPUs.
+  - A user-time profile (gw125) placed all eight in `KernelWaitSema`, in futex wake and wait.
+- **Cause.** `KernelSemaPrivate::Wait` broadcast the condition variable each time a waiter woke,
+  and again whenever a wait call returned. Only `Cancel` (waiting for the waiter list to empty) and
+  `Delete` (waiting for active calls to end) need those notifications. With two or more waiters
+  on an empty semaphore, one `Signal` started a loop: each woken waiter found no count, rewoke the
+  others and waited again.
+- **Fix.** The waiter notifies only when a cancel is waiting and the waiter list is now empty, or
+  when a delete is waiting and the last active call ends. This is the rule `EventFlag.cpp` already
+  follows.
+- **Verified.**
+  - The new `SemaphoreSignalTakenByOneWaiterDoesNotCreateWakeStorm` test (8 waiters, one
+    `Signal`) used 787 ms of process CPU in a 250 ms sample before the fix and passes after it.
+  - 141 kernel, semaphore and pthread tests pass; one is skipped, as it was before.
+  - gw127 against gw126, same route, store and settings: process CPU fell from about 420% to 96%
+    and the eight threads dropped out of the busiest list.
+  - Frame rate and command-processor cost are unchanged within noise: about 9.7 fps over windows
+    9-13 in both, and 195 against 186 us/draw. Captures match.
+  - The command-processor thread was not starved before the fix (its run-queue time was below 1%).
+    The fix frees host CPU, not frame time, on this 12-CPU host.
+  - Strict `games-matrix` sweep at the 60 fps present limit: every case has the same outcome as
+    the previous sweep (`f0db2e1b5`, 26 of 32 interactive), and no interactive case lost
+    presents beyond run-to-run spread.
+  - A waiter takes on count alone, and `Signal` still wakes every waiter, so no waiter can be
+    left asleep with count available.
+
+## Open: PPSA01341 - Demon's Souls stalls at boot (2026-10-29, parked)
+
+- **Observed.**
+  - Intel A770, kernel `7.2.11-zen1`, `8f3b5d6b6`. Strict runs des1 and des2 (300 s and 260 s)
+    stop at frame 3 with 2 presents, and the command processor gets no draw or dispatch after
+    about 60 s.
+  - The games matrix shows it as `controlled_timeout` at 2 presents: its 120 s deadline ends the
+    case with SIGTERM. The label flips between sweeps at the same 2 presents: `presenting` on
+    `51dc2553e`, `controlled_timeout` on `f0db2e1b5`.
+  - On 2026-10-26 at `b248d1a57` the same title reached a gray loading screen at 0.2-0.9 fps.
+- **Localized.**
+  - `kyty_agent threads` at 175 s: the main guest thread waits on event flag 3, and 11 job-worker
+    threads (entry `0x900841a80`) are in no tracked wait.
+  - Those 11 threads and one more host thread run at about 100% CPU each on a 12-CPU host.
+  - A static read of `EventFlag.cpp` shows that polls return `EBUSY` without blocking, so a guest
+    poll loop on an unset flag or label spins this way.
+  - The word the workers poll and its producer are not identified. Two attempts to sample their
+    stacks as perf's parent lost the data when the harness killed perf (`EXIT=137`).
+- **Boot cost, fixed (2026-11-02).**
+  - The guest resolves its whole package (223,261 files, 19,698 directories) in batched path
+    resolves; temporary counters showed more than 90,000 resolves at about 1,000 per second, no
+    misses, about 30 host system calls per path. `05f79da2f` resolves a package file with one
+    lookup, with the host directory cached. "Starting main loop" moved from 52-66 s to 17-18 s.
+    Not rerun on other titles beyond the suite and the matrix.
+- **Stall after the main loop, localized (2026-11-02).**
+  - It is not a poll on the GPU. The 12 workers are the guest's normal idle spin in its job
+    scheduler and the main thread waits for its frame event. A debugger dump of the scheduler's
+    job queues shows a chain: the game loop job and the render thread job wait on a counter
+    that the render job completes, and the render job waits on an early counter that stays at 1.
+    The owner of that counter is not identified, and a hardware watch on it reported no write at
+    all, not even initialization, so that watch is not trusted.
+  - The title's own "job system deadlocked" message is not logged.
+- **Unverified lead, not implemented.** `DRAW_INDEX_INDIRECT` drops the base vertex and start
+  instance register fields of the packet (`GraphicsRunOpParsers.cpp`). It cannot be verified on
+  this title until it boots.
+- **Parked** at the maintainer's request (2026-10-29) in favour of `PPSA21567 - Astro Bot`
+  performance.
+- **Next step.**
+  - Attaching perf with `-p` is refused at `perf_event_paranoid` 2, so perf has to start the
+    process and be stopped with SIGINT before the run is killed.
+  - Then compare one run of the 2026-10-26 binary to confirm the regression range.
+
+## Open: index objects over pending storage (2026-10-27, found by inspection)
+
+- **State.** The index bind has the shape the vertex bind had before the
+  beat 'em up black-frame fix (`docs/titles/beat-em-up.md`, 2026-10-27):
+  writable storage in use refuses the transient index snapshot, and the
+  fallback `IndexBufferGpuObject` is seeded from guest bytes
+  (`GraphicsRenderDraw.cpp`, the `GpuMemoryCreateObject(..., IndexBufferGpuObject())`
+  calls in `GraphicsRenderDrawIndex`, its fragment-transport branch and
+  `GraphicsRenderDepthStencilCopy`). An index range written by a dispatch
+  that has not been written back would be drawn with stale indices, and the
+  vertex range resolved from them on the CPU (`ResolveIndexedVertexRecords`)
+  would be stale as well.
+- **Not observed.** No title is known to draw GPU-written indices through
+  this path; no fix was made without a reproducer.
+- **Direction.** Because the CPU reads the indices to size the vertex range,
+  a device copy is not enough: draw preparation would write back the
+  completed results over the index range and make any pending one a
+  dependency, as `GpuMemoryWriteBackStorageForGuestSeed` does for results of
+  another queue.
+
+## Open: `KYTY_DUMP_VIDEOOUT` stops on a display image without a guest address (2026-10-27)
+
+- **Observed** (beat 'em up intro, strict run with `KYTY_DUMP_VIDEOOUT=1`):
+  the run stops in `UtilImageToBuffer` (`Utils.cpp:347`,
+  `RequireGuestAddressableImage`, "image-to-buffer readback") when the dump
+  reads back a present source. Diagnostics only; normal runs are unaffected.
+- **Direction.** Read the present source back through the host image the
+  presenter uses instead of the guest-addressable readback.
+
+## A declared unsigned sampled bank is left unwritten (2026-10-26)
+
+- **Observed.** A validation run of robot platformer (PPSA21567) at
+  `hub_crashsite_tutorial` reports a draw whose descriptor set was never
+  updated at set 0, binding 7, index 0. The layout assigns, for a pixel stage
+  that also binds storage buffers, storage 0, sampled 1, storage images 2,
+  array 3, 3D 4, sampled uint 5, array uint 6, 3D uint 7 and depth 8, so the
+  report matches the 3D unsigned bank; the full validation message (which
+  names the descriptor type) is not yet captured, so that identity is a
+  match, not a conclusion.
+- **Cause.** `ShaderBuildDescriptorLayoutPlan` declares all three unsigned
+  sampled banks whenever the bind holds any unsigned sampled texture, and
+  sizes each declared bank with the shape's total descriptor count
+  (`ShaderDescriptorLayoutPlan.cpp:64-75`). `DescriptorCache::BindDescriptors`
+  only writes a shape's unsigned bank when that same shape has an unsigned
+  texture (`GraphicsRenderDescriptor.cpp:695-720`), so a bank the layout
+  retains for the module's unsigned load path is left unwritten when the
+  unsigned resources live in another shape. The generated module keeps the
+  numeric selection for mixed binds (`ShaderSpirvImage.cpp:4098`, `4438`) and
+  declares the unsigned banks sized by the shape totals
+  (`ShaderSpirvGenerator.cpp:1284-1318`, `1863-1896`), so the binding is
+  statically used even when no descriptor of that shape carries the unsigned
+  tag. The draw-time bank is chosen from the texture descriptor's own format
+  (`GraphicsRenderBind.cpp:4485-4516`), so a resource table rewritten after
+  pipeline creation can also select a bank whose static count left it empty.
+  The mirror case exists: when every texture of one shape is unsigned in a
+  mixed bind, the writer sets that shape's signed count to zero while the
+  plan still declares the signed bank with the shape total
+  (`GraphicsRenderDescriptor.cpp:700-706`).
+- **Open.** Whether the unwritten descriptor contributes to the queue-8
+  device lost is not established: the hub draw executes and the loss surfaces
+  later at a fence wait. Next: capture the complete validation message with
+  `KYTY_SHADER_VALIDATION=1` at the hub, then write every declared unsigned
+  bank with valid unsigned views for its shape (a 1x1 R32_UINT 2D, array and
+  3D placeholder held by the descriptor cache, bound when the shape has no
+  unsigned texture), or mark the empty declaration partially bound, and
+  measure both options on the same scripted route.
+
+## A suspended batch waits for the command processor (2026-10-26)
+
+- **Observed.** On Intel Arc A770 (Mesa ANV 26.2.5) the merged runtime stopped
+  presenting at boot (`frame 1`, `present 0`) while a guest thread held a
+  mutex whose owner polled its end-of-pipe event queue, and every command
+  processor was parked in `WaitForSuspendedRuns`. The `KYTY_WAIT_TIMEOUT_MS`
+  deadline named 8-byte `WAIT_REG_MEM` waits (function equal, reference 1) on
+  CPU-written labels with no pending GPU producer; `KYTY_WAIT_TRACE` recorded
+  77 suspensions and no end-of-pipe label for one of them.
+- **Cause.** `GraphicsRing::SetDecodeReleased` signaled the decode completion
+  of the batch suspended at the wait as well as the queued batches. The
+  suspended batch's completion interrupt follows the packets after the wait,
+  so the command processor cannot have consumed them yet; returning its
+  submitter let the title take a lock ahead of the thread that stores the
+  awaited value, and the wait never resolved.
+- **Change.** While decode waits on a value no submitted GPU work writes, only
+  queued batches' submitters return. The suspended batch keeps waiting until
+  decode continues, matching the command processor's in-order consumption.
+- **Verified.** Robot platformer (PPSA21567), strict 420 s run: 3832 presents
+  in 360 s with no stall; the HLE-only merge control presents 3374 in 420 s.
+  Reverting the whole release instead gives 586 presents at 45 s, one ~90 s
+  stall that recovers, and 2157 presents at 360 s.
+
+## GDS backing shared across queue families (2026-10-26)
+
+- **Observed** (robot platformer, Intel Arc A770, Mesa ANV 26.2.5, strict,
+  1280x720, `fc_script` with the first-gameplay route): once the Gen5
+  AGC/AgcDriver HLE implementations let the title issue its GDS work, startup
+  stopped immediately at `GDS queue-family migration is unsupported: owner=1
+  requested=0` (`GdsBuffer::Init`). The first command buffer touched GDS on a
+  compute family and the next one on the graphics family.
+- **Cause:** the guard predates concurrent resource sharing. With more than one
+  queue family the context creates every image and buffer with
+  `VK_SHARING_MODE_CONCURRENT` (`VulkanApplyResourceSharing`), so one GDS
+  backing needs no ownership transfer. The guard could only fire in a context
+  that already shares resources concurrently; otherwise every queue reports the
+  same family.
+- **Change:** `GdsBuffer::Init` no longer tracks an owner family; the sharing
+  mode and the recorded barriers are unchanged. This does not qualify exclusive
+  ownership migration: cross-family ordering still relies on the guest's waits
+  and labels, as for every other concurrent buffer.
+- **Verified:** the red run exited at initialization (status 65). After the
+  change a bounded strict run reaches `StartLevel title` at 0:44 and loads the
+  worldmap (3.4 s) with no fatal stop in its 180 s window; a 300 s warm-cache
+  run then runs `intro_next` and starts the crash-site tutorial load;
+  `kyty_gds_transfer_integration` passes and the full unit suite reports 2519
+  tests, 2505 passed, 0 failed.
 
 ## Render-target scaling on the AMD integrated GPU (2026-10-25)
 
@@ -568,7 +940,24 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   anime fighter reached its consent screen at 14.4 fps with correct output
   and no validation error. That run did not confirm that a compute-family
   queue recorded work before it ended.
-- **Not verified:** the robot platformer; async compute on the AMD host.
+- **Not verified:** async compute on the AMD host. The robot platformer records on this family and hits an open GPU timeout on the render engine, 9 of 11 hub starts against 0 of 2 on one family, with no cause separated; depth-aspect copies on this family are an open specification defect (`docs/titles/robot-platformer.md`, GPU job timeout).
+- **Later (2026-10-30): compression cost of concurrent sharing.** On Intel
+  before Xe2, ANV disables CCS compression, HiZ and fast clears for
+  concurrent images when the device has more than one queue, so this layout
+  runs every image uncompressed on the A770. A same-binary A/B on the robot
+  platformer's dune route found no fps or per-draw GPU difference
+  (`docs/titles/robot-platformer.md`, 2026-10-30 record); other titles are
+  not measured.
+
+- **Update 2026-10-30: gated on depth copies.** The family is now used only when the host
+  declares `DEPTH_COPY_ON_COMPUTE_QUEUE` for every depth format it renders to, because depth
+  storage planes are seeded and stored back through buffers around dispatches, which is otherwise
+  invalid on a compute-only queue (924 copy pairs in a 200 s run of `PPSA21567 - Astro Bot`). Intel
+  Arc A770 (Mesa 26.2.5) does not declare it, so it runs every queue on the graphics family again.
+  Cost on that host is not settled: `PPSA04220 - JoJo's Bizarre Adventure: All-Star Battle R`, one
+  150 s run per arm on the default menu route under heavy foreign CPU load, gave fps windows 60, 43,
+  40, 34 with the gate and 58, 22, 26, 42 without it, which shows no loss and proves no gain. The
+  story-scene measurement behind the earlier +21 % was not repeated.
 
 ## Early submissions at least half a millisecond apart (2026-10-24)
 
@@ -735,6 +1124,26 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 - **Open.** Both fills still write the range to system memory over PCIe.
   Removing that cost needs storage objects in device-local memory with an
   explicit read-back for the CPU write-back.
+- **Placement probe, excluded as a switch (2026-10-29,** `PPSA21567 - Astro Bot`,
+  Intel A770 with resizable BAR, strict 480 s runs on the dune route). A
+  temporary probe allocated storage data, write masks, the transient snapshot
+  pool and vertex buffers in device-local, host-visible memory, with every
+  other line unchanged.
+  - Snapshot pool and vertex buffers (gw122): 0.7-1.3 fps for the whole run,
+    which never left the boot scenes; the base run gw121 reached the dunes at
+    8.9 fps. All four kinds (gw123): frame 100 after about three minutes.
+  - The CPU reads mapped memory of these objects on hot paths, and reads of
+    device-local memory over the BAR are uncached: the snapshot comparison
+    against guest bytes, the index range of a snapshot, the uniform-block
+    deduplication, and the write-back page comparison and adoption.
+  - GPU time per kernel rose 1.5-4.8x against the same scenes of gw121. This
+    does not measure placement: at 1 fps the GPU runs mostly idle, and its
+    clock is not controlled.
+  - For storage data, write masks and the snapshot pool, placement can only
+    follow a change that moves every CPU reader to guest memory or a host-side
+    copy. Vertex buffers have no CPU reader, but they were only tested together
+    with the snapshot pool, so their placement alone is not excluded. The GPU
+    gain is not measured.
 
 ## Crash evidence read only for a reported fault (2026-10-23)
 
@@ -2592,6 +3001,8 @@ checked against the code; none is hit by a title in the current strict runs.
 - Changes:
   - The recycle limit is now four trim batches (`RECYCLED_SETS_MAX`, 32,768). Pools never give memory
     back to the system, so holding a set only reserves pool space.
+    (2026-10-28: the live-set cap is 16,384 and a trim retires 2,048 sets, so the limit is 8,192; see
+    `PPSA21567 - ASTRO BOT` in `docs/titles/robot-platformer.md`.)
   - A full recycle list frees its oldest set, not the incoming one. With the incoming set freed, sets
     of layouts no longer in use stayed in the list until it was full of them, and driver frees per
     200,000 requests rose over the session from 3,400 to 29,000. Released sets are kept in release
@@ -2643,11 +3054,10 @@ checked against the code; none is hit by a title in the current strict runs.
     - Retries repeating draw preparation: 2 retries in 54,000 waits. Device-address preparation runs
       before descriptor binding.
     - Waiting on read-only uses: every waited buffer had pending writes and one recorded use.
-  - Direction, not yet taken: skipping the wait would need write-backs that become visible in guest
-    memory on the device timeline, ordered before every guest-visible compute signal (label events fire
-    mid-submission). Copying the whole storage object into the guest window is not equivalent, because
-    a dispatch may write only part of the object. Binding storage in physical ranges directly to the
-    imported window is the sound form, and it is a structural change.
+  - Direction, taken 2026-10-30: copying the whole storage object into the guest window is not
+    equivalent to skipping the wait, because a dispatch may write only part of the object. Storage in
+    physical ranges is now bound directly to the imported window; see "Storage objects bound over
+    imported guest pages".
 
 ## Vertex shader identity limited to attribute dwords the program loads (2026-10-16)
 
@@ -3695,6 +4105,11 @@ the command-processor thread over 15 s puts 6.7% on the span scan of
   640-wide StorageTexture (IsContainedWithin). This is open. The pool reuses
   the same memory across passes, so it needs an aliasing policy for transient
   GPU-owned memory, not another relation special case.
+  On Intel the cold-boot form of this stop (an incoming 1920x1080
+  RenderTexture over 14 pool objects) had a single blocker, a depth target
+  wholly inside the new colour target. A colour target now reclaims a depth
+  target it fully covers (2026-10-29, `docs/titles/robot-platformer.md`).
+  That closes one relation, not the AMD case above.
 - On Intel the same title stops presenting at about 26 s, before this
   dispatch. The command processor spends about 99% of its time inside the
   Intel Vulkan driver creating a compute pipeline from
@@ -4836,3 +5251,776 @@ preparation and 2.670 seconds of texture preparation; these nested measurements
 must not be added to their parent. The different binaries and independent runs
 do not isolate the cause of the rate difference. Completed multi-workload
 acceptance remains open.
+
+## Unverified ISA leads from a fork comparison (2026-10-24)
+
+- **Context.** A comparison against a derivative tree surfaced four general
+  instruction contracts that our decoder still refuses. They are secondary
+  implementation leads to verify against the published ISA and a live trace,
+  not evidence-backed contracts, and none is the current platformer blocker.
+  - `ds_cmpst_rtn_b32` (opcode 0x30): returns the pre-compare value and stores
+    only on match.
+  - 64-bit returning LDS forms (`ds_min_rtn_u64`, `ds_max_rtn_u64`,
+    `ds_cmpst_rtn_b64`, opcodes around 0x68-0x70), including the 64-bit source
+    width.
+  - D16 XY/XYZ formatted buffer loads and stores (MUBUF forms 0x80-0x87).
+  - Raw D16 depth bits through integer image loads (an integer view over a live
+    depth target), which matches the open defect recorded for integer T# over
+    depth binds.
+  The same review confirmed that no existing derivative implements the
+  level-aware linear R32F composite seed this title's tutorial needs; the
+  mixed-view storage alias remains a local design task.
+- **Lineage.** The reviewed derivative tree belongs to an unrelated project
+  lineage: it uses different top-level paths (`src/graphics`, `src/kernel`) and
+  shares no commit with our repository, so merging it is neither possible nor
+  appropriate. Its synchronisations also mention two split-wave leads worth
+  verifying later: sharing SMEM load results across emulated wave64 halves and
+  allocating split-wave dispatcher spill IDs in program order. Both overlap
+  files we own; treat them as leads, never as patches.
+
+## EVENT_WRITE 0x38 packet form disagrees with its test (2026-10-27, open)
+
+- **Observed.** `KytyGraphicsDiagnosticsIntegration.SerializationAndBounds`
+  and `.EventWrite` fail on the current tree at "unsupported addressed event
+  follows the ordinary packet" (`VerifyEventWritePacketContract`,
+  `source/integration_test/src/GraphicsDiagnosticsIntegration.cpp`). The test
+  expects event type 0x38 with an address to keep the two-dword form, as
+  the addressed occlusion record in the graphics handoff states.
+- **Code.** `GraphicsDcbEventWrite` and `GraphicsDcbEventWriteGetSize`
+  (`source/emulator/src/Graphics/Graphics.cpp`) treat
+  `(event_type & 0xfe) == 0x38`, that is 0x38 and 0x39, as addressed.
+  `GetSize` came with the import closure in febdc198. The encoder predicate
+  was aligned to it in the merge 3868181f, without new evidence for 0x38
+  and without updating the test. The command processor publishes counters
+  only for 0x39, so a four-dword 0x38 packet is parsed and its address
+  ignored.
+- **Why it is not simply reverted.** The guest reserves command space from
+  `GetSize`; the encoder and `GetSize` must agree. Reverting only the
+  encoder would leave reserved words unwritten.
+- **Direction.** Find whether a title calls the size query or the writer
+  with 0x38 and an address (a bounded trace of both entry points), and what
+  the guest expects in the reserved words. Then make the encoder, `GetSize`
+  and the test follow that evidence together.
+
+## Wide formatting consumes the caller's va_list (2026-10-27, fixed)
+
+- **Observed.** In bounded 120 s strict runs, `PPSA03969 - F.I.S.T.: Forged
+  In Shadow Torch` and `PPSA09809 - OCTOPATH TRAVELER II` crashed at boot
+  (exit 139, no present) on this branch. Main (cd7f8f50) reached 664 and 4451
+  presents on the same host. gdb placed the fault in the `%s` conversion of
+  `FormatWide` under `vswprintf`, which dereferenced 0xf00 (3840, an integer
+  argument already consumed by the previous call) as a string pointer.
+- **Cause.** 63ccc027 made the narrow and wide formatters work from a copy of
+  the caller's va_list. These titles format one va_list in successive
+  `vswprintf` calls, each continuing after the arguments the previous call
+  consumed, so with the copy every call restarted at the first argument. The
+  wide engine delegates each numeric conversion to the narrow engine, so that
+  path copied as well.
+- **Fix.** `FormatWide` and its numeric conversions now consume the caller's
+  list. The narrow `vsnprintf`/`vprintf` entries keep formatting from a copy, as
+  63ccc027 introduced. `EmulatorLibcCxxLocale.VswprintfConsumesTheCallersArguments`
+  covers two successive calls on one list.
+- **Verified.** Strict 120 s runs: PPSA03969 reaches 664 presents and stops at
+  the same `SLoadDwordx4` shader-emitter refusal as main; PPSA09809 runs the
+  whole window (4350 presents). Unit tests 2653/2653 and the repository gates
+  pass.
+- **Open.** The narrow copy still has no recorded guest trace; it should be
+  confirmed or replaced by the same successive-call evidence.
+
+## Strict sweep against main (2026-10-27)
+
+All 23 titles of the strict `games-matrix` sweep behave as on main. The
+titles the matrix skips were run directly for 120 s on main, on this branch
+before the day's graphics commits (14a95c57) and on its head; base and head
+matched on all of them. Failures shared with main, not caused by this branch:
+
+- `PPSA02070 - Don't Starve Together: Console Edition` and `PPSA17221 -
+  Minecraft` stop before the first present at "Render resolution plan
+  unsupported ... mismatched_host_extent" on the depth-only path of
+  `GraphicsRenderAttachments.cpp`.
+- PPSA07393 crashes at boot (exit 139) on main and on this branch.
+- PPSA01341 reaches 2 presents on base and head; main was not run.
+
+## Intermittent guest write fault at boot (2026-10-27, open)
+
+- **Observed.** `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` sometimes
+  exits with 139 before or soon after its first present in bounded 120 s
+  strict runs (Intel Arc A770, xe). The same binary otherwise reaches 664
+  presents and the known `SLoadDwordx4` shader-emitter refusal. Counts on
+  the same host and day: branch head e712b190 crashed in 5 of 7 runs, its
+  parent 66bee914 in 1 of 6, and the head without 46156a93 in 2 of 4. The
+  crashes came in streaks: the last four runs, alternating head and parent,
+  all passed. The strict `games-matrix` sweep reported this as
+  `host_crash` at 17 presents. It is not a regression of the branch.
+- **Fault.** A guest thread in a bulk-write loop (destination register at the
+  start of a 208 MiB block, end register 0xd000000 bytes further) takes
+  SIGSEGV with `si_code` 2 (SEGV_ACCERR) on its first page. The page is
+  mapped but write-protected. Under gdb, with SIGSEGV passed to the
+  emulator's handler, the run completed normally, so most such faults are
+  claimed write watches; the fatal one is a protected page that the
+  handler (`source/lib/Core/src/VirtualMemory.cpp`, the POSIX
+  `sigaction(SIGSEGV)` path) does not claim.
+- **Excluded.** The tile-mode redescription of 46156a93: an env-gated trace
+  in both changed predicates never fired before the crash.
+- **Direction.** Log, for the unclaimed fault, the page's protection and
+  owner (GPU write watch, demand range, guest mapping) as the handler sees
+  it. The streaks suggest a race between a watch being installed or
+  released and the guest write, rather than a wrong mapping.
+
+## Host disk writes while a title runs (2026-10-28)
+
+- **Observed.** Intel A770 host, 31 GiB RAM, 10 GiB zram plus a 24 GiB swap
+  file on the system disk, `vm.swappiness=180`. During a 206 s strict run of
+  `PPSA21567 - Astro Bot` the system disk received 1.7 GB of writes and the
+  kernel swapped out 2.0 GB; the emulator process itself wrote about 105 MB
+  (`/proc/<pid>/io`). Swap is the writer, driven by host memory pressure.
+- **Cache files.** The Vulkan pipeline cache was one file per device shared by
+  every title. It had reached 133 MB, just under its 128 MiB cap, so it was
+  read whole at each boot and every save failed. Killed writers had also left
+  43 temporary files (`<file>.<pid>.<seq>.tmp`, 366 MB in the cache root) that
+  nothing removed.
+  - Fixed: one pipeline cache file per title, device, driver and translator
+    version; replaced files of the same device are removed at load; temporary
+    files whose writer exited are removed from the pipeline cache root, the
+    SPIR-V cache and the compute recipe stores. Verified live: the orphans and
+    the stale shared files were removed and the per-title file was created at
+    boot (46 MB after two runs). Focused test
+    `EmulatorAtomicFile.RemovesOnlyTemporariesOfExitedWriters`.
+- **Excluded: smaller physical import blocks.** Physical imports pin whole
+  2 MiB blocks through udmabuf, and pinning populates every page of the block.
+  A temporary probe counted 2.9 GB of 7.4 GB pinned pages that the guest had
+  not written before the pin. A 64 KiB block cut that to 0.19 GB at 206 s,
+  but made 5.5 times more window imports, and two 340 s runs never reached
+  the dunes (CP about 600 us/draw from the first measured window, against
+  225-272 us/draw with 2 MiB blocks). The second run kept the emulator out of
+  swap, and its shared guest memory still peaked at 7.8 GB, the same as with
+  2 MiB blocks: the guest writes those pages later anyway. Smaller blocks cost
+  CP time and do not lower the peak.
+- **Runs out of swap.** A bounded run inside a user scope with
+  `MemorySwapMax=0` (no root needed) kept the emulator's memory out of swap;
+  the system disk received 1.2 GB of writes in 340 s against 3.1 GB without
+  it, the rest being other processes swapped out by the host.
+
+## Reimplemented feature leads: landed, refused and excluded (2026-10-29)
+
+- **Context.** A review of another project's change list gave a set of leads.
+  Each one was checked against the local RDNA2 ISA, our code and the published
+  contracts before it was reimplemented. The leads that landed are on
+  `agent/astro-split-wave64`:
+  - device-side `DISPATCH_INDIRECT` (0a7dc5b29, b24ae77ab);
+  - LDS compare-and-store `DS_CMPST_B32` and `DS_CMPST_RTN_B32` (6f4d6c367);
+  - `fsync`/`fdatasync` that flush, plus vectored write and path truncate
+    (fa392a6a0). `fsync` on fd 0-2 or a socket now returns EINVAL, and on an
+    unknown fd EBADF. A save-writing title has not been run against this yet;
+  - GLOBAL byte loads into the high half of a VGPR (ab512e40d);
+  - AND and integer min/max whole-wave reductions (12325b8be);
+  - compute `S_BARRIER` that also orders storage writes (c5a580803). Strict
+    340 s dune A/B on the Intel A770, 60 fps cap, same save state (gw99 with it,
+    gw100 without): frame rate matched window by window (for example 13.65 vs
+    11.06, 16.22 vs 17.69 fps), and GPU time per presented frame was 42.3 vs
+    41.7 ms over the 60-210 s windows. No measurable cost. The run without
+    the change lost the device (`vkWaitForFences` -4) at frame 3364. That fits
+    the intermittent device losses already seen in earlier dune runs; one loss
+    does not show that the barrier causes or prevents them. Not a measurement
+    of the change (found later the same day): both arms ran translator version
+    184 against the shared module store, so each loaded modules the other arm
+    or a pre-release build had written (stale-module record in
+    `docs/titles/robot-platformer.md`).
+- **Refused explicitly (not implemented).**
+  - `GLOBAL_LOAD_SHORT_D16_HI`. At an odd address its result depends on
+    `SH_MEM_CONFIG.alignment_mode` (ISA section 8.1.7), and the ISA gives no
+    result for that case. We don't model that register.
+  - `V_INTERP_P1LL_F16` and `V_INTERP_P2_F16` (VOP3 0x342, 0x35a). Nothing we
+    have documents the packed f16 parameter layout, how the PARAM export is
+    compressed or where the accumulator comes from. Only the decode is known:
+    the attribute word is SRC0 bit 8 and `op_sel[3]` selects the destination
+    half.
+  - `SPI_SHADER_PGM_RSRC1_LS`/`RSRC2_LS` (0x14A, 0x14B) and the
+    `VGT_SHADER_STAGES_EN` LS field. No local GFX10 source documents their
+    fields.
+  - Loading an application PRX from `sceSysmodule`. No local source backs a
+    table mapping module IDs to files.
+- **Excluded.**
+  - GPU timestamps from host queries. The end-of-pipe clock write already reads
+    the clock when the fence completes. The clock rate is a separate defect,
+    recorded in `docs/titles/robot-platformer.md` (the Gen5 title converts
+    intervals at 100 MHz while Kyty wrote a 1 GHz counter). An earlier version
+    of this entry said that defect was not recorded; that was wrong.
+    `S_MEMREALTIME` is documented only as "constant frequency".
+  - Host occlusion queries. The guest counter contract is only partly
+    evidenced, and the lead itself was withdrawn without a stated reason.
+  - P010 video output. `Videodec2` accepts only AVC and HEVC
+    (`LibVideodec2.cpp`), and no 10-bit output contract is known.
+  - DCC clears over several mips. Multi-mip images are deliberately excluded
+    from DCC clears, and no layout evidence exists.
+  - HTILE clears only for real metadata. The rule could not be tied to
+    evidence, so the size-keyed variant was dropped.
+  - Returning freed memory to the host. This is already implemented:
+    `fallocate` `PUNCH_HOLE` through `sys_virtual_discard_shared_backing_range`,
+    and flexible memory is released by `munmap`. Gap: discard is a no-op on
+    Windows.
+- **Defects found, not fixed.**
+  - GLOBAL dword loads don't clear address bits [1:0]
+    (`EmitGlobalLoadAddress` in `ShaderSpirvBuffer.cpp`, and
+    `Spirv::EmitGuestLoad` in `ShaderSpirvGuestAddress.cpp`). Under the DWORD
+    alignment modes the hardware ignores those bits. A misaligned
+    `global_load_dword` therefore reads different bytes on the host. Direction:
+    get the alignment mode a title runs with (a trace of `SH_MEM_CONFIG`), then
+    mask or refuse to match it.
+  - GLOBAL dword loads and the MUBUF loads are not gated by EXEC
+    (`ShaderSpirvBuffer.cpp`, the `TODO() check EXEC` notes in the buffer-load
+    lowerings). An inactive lane still reads memory and overwrites its
+    destination VGPR. The new byte loads are gated. Direction: gate the access
+    and the store with the predicate the store lowerings already use.
+  - `GraphicsGetTheTessellationFactorRingBufferBaseAddress`
+    (`source/emulator/src/Graphics/Graphics.cpp`) frees the 128 KiB ring it
+    re-maps before returning its address, and only logs a failed
+    `AllocFixed`. A guest that writes the ring writes unmapped memory.
+    Tessellation itself is not translated (`docs/bringup/tessellation-design.md`).
+    Direction: keep the mapping for the process lifetime and fail explicitly
+    when it cannot be made.
+
+## Intermittent boot crashes on a NULL guest pointer (2026-10-31)
+
+Open defect, seen on the clean tree of commit `38d8a8e53`. Host: Intel Arc A770, ANV 26.2.5, xe, kernel 7.2.11.
+
+- `PPSA03969 - F.I.S.T.: Forged In Shadow Torch`: `PthreadMutexLock(0x58)` called from guest code that receives
+  a NULL object. Clean binary 2 of 9 short runs, translator 193 binary 3 of 9. The same pair of binaries also
+  stops in some runs on the refused `SLoadDwordx4` of a stage 2 program at `pc=4` (`shader emitter missing`).
+- `PPSA03355 - Hades`: a guest row copy writes to a NULL base (`memcpy` to offset `0x1f80`). Crashed with the
+  mask fold disabled and passed with it enabled, so the fold is not its cause.
+- `PPSA09809 - OCTOPATH TRAVELER II`: exit 139 with 2 to 15 presents under `games-matrix`. Clean binary 2 of 4,
+  translator 193 binary 0 of 4 after 2 of 2 in full matrices.
+
+Three full matrices before 2026-10-31 11:07 UTC did not show these; the three after it show them at varying
+rates. No graphics or kernel package changed in between; the only package operation removed the container
+runtime and its dependencies. Not checked: whether the removal or a host state change matters, and which guest
+allocation or query returns NULL. Suggested direction: trace failed memory and network query results on the
+F.I.S.T. boot path, whose crash stack is stable from run to run.
+
+F.I.S.T. trace: the mutex address `0x58` comes from guest `lea 0x58(%rsi),%r14`, where `rsi` is the result of a guest
+weak object pointer lookup (index and serial checked against the object array), called without a null check. The lookup
+returned NULL on a stale or flagged object, so the failure here is a guest object lifetime race and not a failed
+allocation. What shifts its timing was not found.
+
+Cause narrowed (2026-11-02, gdb trap on the NULL mutex address, 2 of 17 short tries): the crashing thread is the audio
+render thread, on the first process call of a submix effect, whose setup resolves its preset through the weak pointer
+without a null check. At the trap the object is valid and carries no flag. Sampling the object's array entry from a parent
+process shows `Unreachable` set for only 1.5 to 7.5 ms per collection, the first collection at about 8 s of boot. The heap
+block of the effect is allocated within tens of milliseconds of that collection, so its first process call lands near the
+window with a probability close to window / audio period. No emulator contract is involved in the weak pointer: flags and
+serial match guest writes. The race is in the guest and its rate depends on when the effect is created relative to the
+first collection. No general fix is available; patching the read or delaying a thread would be a title hack. A retry of
+the run passes.
+
+Games matrix on `74552a64a` with LTO (2026-11-01, strict, 60 fps cap, same host): 25 interactive, 2 host crashes,
+1 controlled timeout, 5 invalid fixtures. `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` crashed with exit 139 after
+27 presents, the intermittent crash recorded above. `PPSA07393` crashed as it did in the 2026-10-29 baseline, and
+`PPSA01341` is still slow to present (2 presents). Four invalid fixtures are the former launch failures, now labelled by
+the missing metadata; the fifth is a folder of patch files that holds no title. No other case changed.
+
+## Wide-string and strlcpy exports bound with the wrong contract (2026-10-31, fixed)
+
+`PPSA02929 - Dreaming Sarah` showed `■Ne    gam` on its first menu frame and kept it until the
+selection changed. The guest vertex buffer already held empty glyph quads with the fallback advance,
+so the host draw path was excluded. A live memory scan found vector elements with size 5 and text
+`*Ne`, and a hardware watchpoint caught the writer: guest vector relocation calling the import
+`Noj9PsJrsa8` with `size + 1` code units.
+
+That NID hashes to `wmemmove`, but it was bound to the byte `memcpy` after an earlier guess from a
+call site. A hash audit of `LIB_FUNC` entries against host libc, libm and libstdc++ exports plus a
+wide-string name list found two more with the wrong contract: `fnUEjBCNRVU` (`wmemchr`, bound to
+`memchr`) and `SfQIZcqvvms` (`strlcpy`, bound to `strncpy`). All three now follow their exported
+contract, and `EmulatorLibcCxxLocale.StringNidsMatchTheirExportedNames` covers them through the symbol
+table. The audit only covers names in that list, so mangled guest C++ exports stay unchecked.
+
+Verified on `PPSA02929`: the menu shows `■New game■`, and a new game reaches the first area at 60 fps.
+
+## Gameplay sweep on the current branch (2026-10-31)
+
+Intel Arc A770, ANV Mesa 26.2.5, xe, 60 fps present limit, generic pad route or agent pad input. One
+bounded run per title, native capture checked by eye, no hardware comparison.
+
+| Title | Reached | fps |
+| --- | --- | --- |
+| `PPSA28311 - Absolum` | first area | 40.7 |
+| `PPSA02929 - Dreaming Sarah` | first area | 60 |
+| `PPSA13579 - Blasphemous 2` | gameplay | 59.9 |
+| `PPSA15552 - Dead Cells` | gameplay | 59.9 |
+| `PPSA09076 - DREDGE` | at sea | 26.4 |
+| `PPSA09804 - GRIS` | first scene | 59.0 |
+| `PPSA03355 - Hades` | gameplay | 59.7 |
+| `PPSA03706 - My Friend Peppa Pig` | gameplay | 60.0 |
+| `PPSA29802 - Plants vs. Zombies: Replanted` | gameplay | 59.6 |
+| `PPSA20052 - Worms Armageddon` | gameplay | 60.0 |
+| `PPSA17189 - Formula Retro Racing` | race | 57.0 |
+| `PPSA03061 - Void Terrarium` | gameplay | 59.8 |
+| `PPSA12544 - Hollow Knight: Silksong` | gameplay, black region still open | 59.9 |
+| `PPSA06084 - Superliminal` | first area | 59.2 |
+| `PPSA21402 - Balatro` | hand in play | 59.8 |
+| `PPSA34971 - Hollow Knight: Voidheart Edition` | gameplay | 59.7 |
+| `PPSA24643 - The Messenger` | gameplay | 60.0 |
+| `PPSA06438 - Let's Build A Zoo` | first task | 59.8 |
+| `PPSA04220 - JoJo's Bizarre Adventure: All-Star Battle R` | gameplay | 37.2 |
+| `PPSA28997 - God of War Sons of Sparta` | gameplay | 59.9 |
+| `PPSA21567 - Astro Bot` | title screen | 22.6 |
+
+Not confirmed in this sweep:
+
+- `PPSA22520 - ANIMAL WELL`: three outcomes on one build. One clean run, one with no presents until the
+  timeout, one stopped 9 s in at `EXIT_IF(old_image_layout ...)`, `Utils.cpp:61` (`set_image_layout`), after
+  "sampled texture type 13 bound as 2D". The image's tracked layout differs from the one the caller expects.
+  Suggested direction: log the caller and both layouts at that check.
+- `PPSA03969 - F.I.S.T.`: one run stopped at `shader emitter missing` (`ShaderSpirvGenerator.cpp`) on stage 2,
+  `SLoadDwordx4` with format `Sdst4SbaseSoffset`, `s[32:35], s[28:29], 896`, crc `7b6e57dc`. The same title
+  also shows the intermittent boot failures above.
+- `PPSA09809 - OCTOPATH TRAVELER II` exit 139 at boot, guest read of NULL; `PPSA07393` exit 139 at about 4 s,
+  guest write of NULL. Both are in the boot record above.
+- `PPSA02070 - Don't Starve Together` stays at its EULA screen at 30.0 fps and needs input that was not sent.
+  Minecraft stays at Select Character at 59.9 fps. Neither was driven further.
+- `PPSA15552 - Dead Cells`: trails lasting seconds were reported by a player; not confirmed fixed.
+
+## Link-time optimization on Linux packages (2026-10-31)
+
+Host: Intel Arc A770, ANV 26.2.5, xe, kernel 7.2.11, GCC 16.2. Same source, same settings, 14 s window at the same
+point of the route, one run at a time.
+
+| Title | Scene | Without | With LTO |
+| --- | --- | --- | --- |
+| PPSA09076 - DREDGE | Dock, limited by the command processor | 26.5, 24.9 fps | 28.6, 26.7 fps |
+| PPSA28311 - Absolum | First area, limited by GPU fences | 40.3 fps, 338 draws per frame | 37.3 fps, 370 draws per frame |
+| PPSA21567 - Astro Bot | Bounded route | no error | no error, GPU totals equal |
+
+Processor-bound scenes gain 7-8 % in both run orders. The Absolum runs reached a different draw count, so they show it
+runs correctly and no speed claim. `scripts/package_linux.sh` now sets `CMAKE_INTERPROCEDURAL_OPTIMIZATION`: the emulator
+and launcher build and link, and the launcher starts offscreen. Development builds stay without it: a link takes about a
+minute. Windows packages stay without it because MinGW LTO was not tested.
+
+## Suspended register waits poll every 100 us (2026-10-31)
+
+Observed on `PPSA21567 - Astro Bot` gameplay route, Intel Arc A770: about 3.5
+suspended `WAIT_REG_MEM` per frame whose producer is a guest store, so no host
+signal exists and the wait polls. A 1 ms poll measured 1.1 ms, about 0.55 ms lost
+per wait. Same binary, two runs per arm: 1000 us 16.7 and 17.3 fps, 100 us 18.7
+and 19.9 fps. The gain is larger than the polling arithmetic predicts; the rest
+was not explained. The route's scene mix varies between runs, so read this as
+about +11 %, not an exact figure. A 100 us request measured about 170 us.
+
+A 1 us timer slack (`PR_SET_TIMERSLACK`, Linux) cut that poll to about 120 us, but
+frame rate did not measurably move. Five runs with it: 18.0, 18.4, 19.8, 20.2,
+20.5 fps, mean 19.3; two without: 18.7, 19.9, mean 19.3. Commit b949f593b quoted
+only the best two and overstates the gain. Same-code runs on this route spread by
+2.5 fps, so a single A/B below about 10 % says nothing here.
+
+## Released descriptor sets stay held up to 65536 (2026-10-31)
+
+Past the old 8192 limit released sets returned to their pools. Allocation cost
+went from 0.4 us to about 13 us per set once frees began, up to 50 ms per 5 s on
+the same route. At 65536 frees were zero and allocation under 5 ms per 5 s. Frame
+rate did not move (17.3 fps); the change removes bursts, not average cost. Peak
+memory stayed within run-to-run noise (8.3-9.4 GiB), not separately isolated.
+
+## Physical windows are whole 64 MiB chunks (2026-10-31)
+
+- **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, xe, Mesa 26.2.5, gameplay route):
+  `vkQueueSubmit` took 172-274 us per call on the command-processor thread, 16-19 % of its wall time,
+  against 11 us on `PPSA21402 - Balatro`. Temporary counters showed 2,360 live physical windows (1,871
+  of them 2 MiB) against 16 imports on the lighter title, which gives about 0.1 us per imported object.
+  The windows held 7,814 MiB inside only 142 aligned 64 MiB chunks. The per-object link to the kernel
+  was not traced; it rests on this scaling and on the fall below.
+- **Change:** a window is now the aligned 64 MiB chunk of the backing around the first page used,
+  replacing the power-of-two sizes in "Shared physical device-address windows". 64 MiB is also the
+  default `udmabuf` size limit. Discards still zero pinned pages in place, so a page that shares a
+  chunk with a live range keeps its contract; unallocated pages in a used chunk are pinned and
+  populated.
+- **Measured** (same binary apart from the change; temporary counters in both):
+
+  | Title | Windows | Pinned MiB | Submit us | Frames |
+  | --- | --- | --- | --- | --- |
+  | `PPSA21567 - Astro Bot` | 2,432 → 137 | 7,836 → 8,768 | 143-274 → 21-24 | 14.9, 14.7 → 17.3 fps at 295-297 draws/frame |
+  | `PPSA28311 - Absolum` | 1,348 → 56 | 3,196 → 3,584 | 58-130 → 9-16 | different scene, no speed claim |
+  | `PPSA09076 - DREDGE` | 711 → 38 | 2,152 → 2,432 | 39-58 → 11 | different scene, no speed claim |
+
+  Peak process memory on DREDGE stayed at 2,717 → 2,702 MiB. Astro's was not measured at baseline;
+  its pinned memory grows 12 %. `PPSA21402 - Balatro` holds 60 fps with 6 windows.
+- **Open:** one Astro run per side after a repeat of the baseline; the first use of a chunk now
+  imports 64 MiB at once and that single stall was not timed. Storage objects bound in place keep
+  their own windows (35 of 36 lie inside a chunk window on Astro).
+
+## Huge pages for direct memory: not adopted, GPU reads go through the IOMMU (2026-10-31)
+
+- **Host fact** (Intel Arc A770, Ryzen 5 7600, kernel 7.2.11, default command line): the GPU's IOMMU
+  group is in `DMA-FQ`, so every device read of system memory is translated. Identity mapping needs a
+  reboot with another command line and was not tested, so its effect is unknown.
+- **Microbenchmark** (stand-alone Vulkan compute, one invocation chasing a random 64-byte-stride cycle):
+
+  | Set | Host pointer 4 KiB | Host pointer 2 MiB | dma-buf 4 KiB | dma-buf 2 MiB |
+  | --- | --- | --- | --- | --- |
+  | 16 MiB | 818-822 ns | 734-735 ns | 816 ns | 736-737 ns |
+  | 64 MiB | 1,176-1,178 ns | 1,028-1,029 ns | 1,174 ns | 1,027-1,028 ns |
+  | 512 MiB | 1,185-1,186 ns | 1,033-1,034 ns | not run | not run |
+
+  The 2 MiB arms were confirmed with `AnonHugePages` and `ShmemPmdMapped`. `shmem_enabled=advise` on
+  this host allows them without root; other hosts may not.
+- **Trial** (`PPSA21567 - Astro Bot`, one run, temporary switch): `MADV_HUGEPAGE` on guest views plus
+  populating each chunk through a 2 MiB-aligned view before its pin.
+  - Only 1,110 MiB of 7,488 MiB became huge, because the guest touches most pages first through views
+    with other alignments or on pages already split.
+  - Some memory-heavy programs ran 5-10 % faster per call (`f4cfb9a5` 139.9 → 127.2 us, `ff2adfc8`
+    3,057 → 2,739 us), others not at all (`c4a8f3bb` 70.8 → 70.1 us). The scenes were not identical.
+  - The route was behind at the same wall time (117 against 129 windows, 43 s of GPU work against
+    70 s), and the window held 12.2 fps. The cause of that delay was not traced.
+- **Decision:** not adopted on one run with a slower load. Raising coverage means choosing page size
+  before the guest's first touch, across view alignments. Open lead: at most 10-13 % per system-memory
+  miss.
+
+## Frame budget of `PPSA21567 - Astro Bot` against native rate (2026-10-31)
+
+Host: Intel Arc A770, ANV 26.2.5, Ryzen 5 7600. 14 s offline window of the gameplay route: 19.9 fps, 272 draws per frame.
+
+- **GPU:** about 36 ms per frame as the sum of timed segments (overlap between segments not excluded), so the GPU alone caps
+  near 27 fps. 60 fps needs at most 16.6 ms.
+- **Command processor:** 44.8 ms per frame including waits: draws 24.4 ms (89 us per draw), dispatches 8.2 ms, fence wait
+  9.6 ms, register wait 8.2 ms. 35.6 submits and 113 render pass begins per frame.
+- **Graphics thread samples:** 77 of 150 in our own command processing, 66 waiting, 7 in the driver. Moving only Vulkan
+  recording to another thread would buy about 5 %.
+- **Reading:** guest CPU code already runs natively, so the distance to native rate is GPU work per frame plus per-draw
+  resolve on the graphics thread. Both have to fall; neither alone reaches 60 fps.
+- **GPU top:** geometry `f4cfb9a5` 17 %, end-of-batch segment 15 % (its count follows submits; cause unverified), index
+  `c4a8f3bb` 7.8 %, `55db270b` 7.2 %, compute `ff2adfc8` 5.8 %.
+
+## Profile-guided optimization on Linux (2026-11-01)
+
+Host: Intel Arc A770, ANV 26.2.5, Ryzen 5 7600, GCC 16.2. Same source, LTO in both arms, one 240 s training run of
+PPSA21567 - Astro Bot, then the same title in an 18 s window at the same route state (252 draws per frame in both arms):
+
+| Measure | LTO | LTO + profile |
+| --- | --- | --- |
+| Draw processing | 71.1 us | 63.2 us |
+| Dispatch processing | 57.8 us | 49.0 us |
+| Frame rate | 23.5 fps | 24.6 fps |
+
+Per-draw work falls 11-15 %. The frame rate gain is inside the same-code spread (about 2.5 fps): the freed time moves
+into GPU waits here. A second pair ended at different scenes (draws 67.9 and 62 us), so it gives no frame rate claim.
+Other titles were not measured.
+
+Not adopted: a profile matches one exact source revision and needs a run of real titles, which CI cannot do. Recipe
+for a local build: configure with `-fprofile-generate -fprofile-update=prefer-atomic`, run titles, have the process
+write its counters (it was stopped by a signal here, so a thread called `__gcov_dump`), then rebuild in the same
+directory with `-fprofile-use -fprofile-correction -fprofile-partial-training`. Partial training keeps unexecuted code
+optimized for speed, which other titles depend on. An instrumented build plus a rebuild take under 2 minutes each with
+six jobs.
+
+## Static TLS offsets follow the module alignment (2026-11-01)
+
+`PPSA07393 - Gori: Cuddly Carnage` faulted at boot: guest code at `0x9018ef83d` reads a pointer at `fs:-0x2d0` and
+increments through it. The module declares a TLS size of `0x2d1` with alignment 8, so the linker placed its block at
+offset `0x2d8`; the loader rounded to 16 and used `0x2e0`. The read landed in zeroed TLS instead of the relocated cell.
+
+The offset now rounds to the module's own `p_align`, and the thread pointer alone stays 16-aligned. The old layout was
+wrong in seven titles: `PPSA13579 - Blasphemous 2`, `PPSA09076 - DREDGE`, `PPSA03969 - F.I.S.T.: Forged In Shadow Torch`,
+`PPSA09804 - GRIS`, `PPSA34971 - Hollow Knight: Voidheart Edition`, `PPSA07393` and `PPSA28997 - God of War Sons of Sparta`.
+A rewrite that cleared thread TLS pointers by their shape was removed with it; it had been added when TLS BSS was copied
+wrongly and hid the same class of error.
+
+**Verified:** 75 s strict runs at 60.15 fps in Blasphemous 2, GRIS and Hollow Knight, 60.2 in God of War and 48.15 in
+DREDGE. Unit test `StaticOffsetFollowsModuleAlignment`.
+
+**Open in `PPSA07393`:** the boot passes and the run now exits at `DepthStencilBuffer - Crosses - StorageTexture`: a
+storage view of exactly the stencil plane of a 3456x1944 D32S8 target (tile 24), type 13 array, one layer, in a compute
+pass. An arrayed stencil view only moved the refusal to `storage image has no compatible Vulkan view` (the plane has no
+storage format), so it was reverted. A fix needs an R8 storage plane with store-back, as depth storage planes have.
+Later: the run passes this stop and reaches its settings screen; the seed and store-back of that stencil plane remain
+unverified. See "Large wave32 compute in `PPSA07393 - Gori: Cuddly Carnage`".
+
+Storage views also gained two overlaps found by the same sweep: a view crossing a CPU-uploaded texture
+(`PPSA34971`, back from exit 65 to 60.15 fps) and a storage texture inside a writable CPU-uploaded storage buffer with no
+device write (`PPSA07393`). The second is only verified to pass the stop; coherence of its seed against an in-flight
+write was not checked.
+
+## Pipeline cache: working set, lookup and persistence (2026-11-01)
+
+`PPSA03969 - F.I.S.T.: Forged In Shadow Torch` looked frozen for 20-35 s at a time after its first load. Agent and
+`perf` samples put the command processor in `vkCreateGraphicsPipelines`. Three separate defects, none vendor specific:
+
+1. **Eviction by age.** The in-memory cache held 512 pipelines and evicted in slot order, so the entries a title draws
+   with every frame went first. The title uses over 1,000. It now evicts the least recently used entry and holds 4,096.
+   Driver blobs keep the compiled code either way, so the cap costs little more than the entry objects.
+2. **Linear lookups.** Every draw scanned the entries, and releasing a lease scanned them per pipeline. Lookup now goes
+   through a hash of the shader identities, and a pipeline remembers its slot.
+3. **Blobs never saved.** Each title's blob was capped at 128 MiB, equal to the session write budget, and every checkpoint
+   rewrites the whole blob. This title's blob reached 122.9 MB: one write used the budget, so pipelines compiled later were
+   compiled again on every launch. `PPSA21567 - Astro Bot` (63.6 MB) got two writes per session. The cap is now 512 MiB and
+   the budget four caps. The checkpoint interval grows with the bytes the session wrote (30 s per 64 MiB), so a title that
+   keeps adding pipelines writes less often, and a session with no new pipeline writes nothing.
+
+Same route, 120 s, Intel Arc A770, ANV Mesa 26.2.5:
+
+| | Before (clean build) | After (diagnostic build, slower) |
+| --- | --- | --- |
+| Evictions | 799 | 0 |
+| Graphics pipeline misses | 1,197 | 960 |
+| Time in misses | 58.1 s | 44.7 s |
+| Presents at 120 s | 1,300, stalled since before 90 s | 1,469, no miss since 90 s |
+
+With saving fixed the blob grew from 122.9 MB to 212.7 MB over four clean runs, and presents at 40 s reached 1,091 where
+the clean build had 1,103 only at 60 s. Driver feedback from one run: 837 of 907 creations hit the driver cache in under
+20 ms, 26 misses took over 200 ms and account for most of the time (up to 5 s for one pipeline). A counter of shader pairs
+compiled again was misleading (415 with no eviction at all): two entries with equal hashes can differ in `ids`. Do not
+reuse it.
+
+Going faster exposed a further stop, fixed: a 2688x1512 storage view over a 336x189x32 volume at the same address, a
+recycled arena the multi-parent path already accepted; the single-parent path now compares layouts the same way.
+
+## Guest small-block free lists corrupted by partial-line device writes (2026-11-01, fixed 2026-11-02)
+
+Host: Ryzen 5 7600, Arc A770, ANV Mesa 26.2.5, clean LTO build, 60 fps limit. Fixed by `0c26c49a8`.
+
+`PPSA09809 - OCTOPATH TRAVELER II` faulted popping the 16-byte bin of the per-thread free list, reached through
+`pthread_getspecific` (read through `0x100000000` at `0x901449749`). `PPSA03969` faulted the same way once, reading
+through `-1` at `0x900dc6c0e`. The list head came from the first eight bytes of a block on the list, so a freed block held
+stale bytes. Baseline on `PPSA09809`: about 1 crash in 5 boots.
+
+Cause: the guest binds writable storage V#s on 4-byte counters inside small heap blocks whose 16-byte neighbours hold
+free-list links. `GuestDeviceAddressBindInPlace` bound them over imported guest pages, so device writes hit guest memory.
+A standalone Vulkan test (memfd, udmabuf, imported memory; one CPU thread stores in a line while the GPU writes 4 bytes of
+it) shows the mechanism without any title:
+
+| Device access on the 4 bytes | Arc A770 | Raphael iGPU (RADV) |
+| --- | --- | --- |
+| Store, atomic, fill or copy, CPU bytes in the same 64-byte line | reverted to an older value about once per submit (45,782 in 45,891 submits) | 0 |
+| Same, CPU bytes at +64 | 0 | 0 |
+| Shader read only | 0 | 0 |
+| Fill of the full line | 0 | 0 |
+
+All 6 importable memory types behave the same on Arc, so import memory type is not a cure. NVIDIA not tested.
+
+Runtime evidence on `PPSA09809`, 25 s boots: in-place binding off 0 crashes in 15; rejecting partial-line binds 0 in 15;
+the shipped rule, clean binary, 0 in 15, and 45-60 fps over a 60 s run.
+
+Fix: a device write into guest memory is allowed only for whole lines or ranges of at least 64 KiB, checked at bind,
+publication and fill. Smaller partial-line ranges take the host write-back, which copies exact bytes. The size limit exists
+because `PPSA21567 - Astro Bot` keeps its heavy storage in 10-32 MB objects with 16-byte starts: refusing those cost
+24-27.5 fps against 29.5-31.5 in the hub. With the limit, the scene then called the hub measures 28.5-32.9 fps warm against the earlier 31-39. That window was a cinematic and a pause menu, not play (`docs/titles/robot-platformer.md`, 2026-11-02). In the dunes, single runs give 12.3-13 fps with the limit and 13.6-14 without, a loss of about 7-10 %, spent on a few small objects with pending publications (a counter
+right after a 16 MB buffer, for one). The first run after a rebuild measures 15-26 fps: pipeline creation, not this rule.
+
+Strict matrix, 33 folders: 27 interactive, 1 presenting, 5 invalid, 0 crashes, against 25, 0, 5 and 2 host crashes before.
+`PPSA03969 - F.I.S.T.: Forged In Shadow Torch` went from a host crash to interactive; its boot crash was not traced separately, so sharing this
+cause is inferred from the change. On an earlier revision of the rule one `Blasphemous 2` boot exited 0 at launch; it did not
+repeat in 2 reruns or in this matrix, unexplained. `PPSA09809` presented 15 in this matrix against 276 in the earlier one:
+the window ends at stability, and the 60 s run above shows the rate.
+
+Excluded on the way: guest double free at the API level, physical aliasing, recorded emulator writes, page tracking, stale
+pointer writes of 16 bytes or less, wrong import binding (the GOT holds the right mutex and self functions), allocator lock
+violations (none in a crashing run), a CPU self-copy of in-place ranges, out-of-bounds shader access (robustBufferAccess on).
+
+Open: the two edge lines of objects of 64 KiB or more remain exposed on Arc. Rejected ranges were guest memory type 12 in
+`PPSA09809` and type 11 in `PPSA21567`; a rule keyed on the type could recover the Astro cost, but the meaning of the types
+has no evidence yet and the rule would leave CPU-hot data in type 11 unprotected, so it was not adopted. The cause inside the
+Arc memory path was not identified; the test shows the behavior only.
+
+`pthread_getspecific` is not a performance lever: in a 20 s profile of the `PPSA21567 - Astro Bot` hub it and the mutex under it
+take about 1.5 % of process samples, spread over guest workers, and the command processor thread holds 50 of the 330 mutex samples.
+
+The preset weak-pointer fault recorded in `docs/titles/mechanical-fist-platformer.md` also got more frequent as the cache
+warmed: 2 faults in 4 warm clean runs, at under 30 s, and none in the one run with `perf` attached. Not retested as its own
+case after this fix.
+
+## Storage scans and image fills in `PPSA28311 - Absolum` (2026-11-01)
+
+Host: Ryzen 5 7600, Arc A770, ANV Mesa 26.2.5, clean LTO build, 60 fps limit. AMD and NVIDIA not tested.
+
+Averages hid the limiter: frame time was bimodal (p50 17 ms, p95 112 ms, 416 of 1206 frames above 50 ms). A fence stack
+trace attributed the waits:
+
+| Site | Wait in 62 s | Calls |
+| --- | --- | --- |
+| Command buffer release in flip | 6.13 s | 721 |
+| Region fill, new sampled image | 3.16 s | 8594 |
+| Region fill, new storage image | 2.54 s | 8128 |
+| Submit backpressure | 2.61 s | 735 |
+| Quiesce per guest map or unmap | 2.22 s | 7607 |
+
+Changes:
+
+- **Incremental storage scans.** Each draw walked about 250 writable storage objects, about 90 times per frame, because one
+  compute shader binds a small writable buffer at a new address about 2900 times per second. A memo per consumer queue now
+  scans only the objects that changed since its last clean scan. Anything that is not an in-place object, a heap removal and a
+  device-address registration invalidates the memos. Command processor CPU 44.2 -> 31.6 % of a core, no fps change alone. A
+  single global memo was measured first and is useless here, since every walk has about 0.5 inserts.
+- **Image fills without a CPU wait.** Region fills copied into staging and waited on a fence, about 0.33 ms each and 270 per
+  second. They now record into one batch on the util queue. Every later submission flushes the batch first and waits for it
+  with the util queue timeline on the device, so ordering against consumers holds on any queue. The batch is bounded to
+  64 MiB open and 4 in flight. Destroying an image waits only if a batch still writes it. Nothing here depends on the vendor.
+  Fills through other paths still wait as before.
+
+Result: the first gameplay window went 33.9 -> 39.9 fps in the sweep, and held 41 fps with no frame above 50 ms in the 10 s
+windows from 60 s to 90 s of a 100 s run. The same sweep on `PPSA21567`, `PPSA21402`, `PPSA09076`, `PPSA09804`, `PPSA03355`
+and `PPSA17221` shows no change and no crash. `PPSA02070` reached a different menu screen, so its 30 vs 40 fps does not
+compare.
+
+Open in this title: `GpuMemory::RebuildHeapIndex` and its sort are 57 % of the guest thread (38 % of a core), rebuilt on every
+heap add and remove. Staging is still allocated per fill.
+
+## Render target aliased by a storage view of another format (2026-11-01)
+
+`PPSA03969 - F.I.S.T.: Forged In Shadow Torch` stopped at `RenderTexture - Equals - StorageTexture`: a device-written
+`B8G8R8A8` render target and a `10_11_11` storage view over the same 64 KiB blocks, 2688x1512, tile 27, EXIT 65. The alias
+plan accepted only equal formats and the 8-bit four-channel family. Memory holds one set of bytes, so the view sees them
+whatever its format, and Vulkan copies between any two formats of one texel size unchanged. The plan now accepts any such
+pair; different texel sizes stay refused. The title then ran the full 120 s run without a stop. Pixels of this view were
+not compared against a reference.
+
+## Large wave32 compute in `PPSA07393 - Gori: Cuddly Carnage` (2026-11-02)
+
+The title stood at 3.9 fps on its brightness settings screen on an Intel Arc A770 (ANV, Mesa 26.2.5), clean LTO binary,
+fixed input route, frame limit 60. Shader `eb48c258` is one flat block of about 143,000 SPIR-V operations using 16-bit
+packed arithmetic and 404 `ds_swizzle` and `ds_bpermute` instructions, and took 128 ms per dispatch. The guest aborted
+when a cold compile stalled it near 120 s.
+
+| Change | Result on the screen above |
+| --- | --- |
+| Wave-sensitive wave32 above 64 VGPRs runs as two 16-lane parts where the host allows exact width 16 | 5.8 fps; no cold stall abort |
+| 64 KiB `R_X` storage detile by whole blocks, zero blocks skipped | 8.2 fps |
+| Per-lane exchange fixed, one rendezvous instead of two | 11.0 fps; frame byte-identical to the previous capture |
+| Float min and max through `NMin`/`NMax` and one equality test | 12.7 fps, offline 100,933 -> 61,013 instructions and 3.26 M -> 1.69 M estimated cycles at SIMD16 |
+
+`eb48c258` now takes 39 ms per dispatch; the frame is 77 ms with 57 ms of fence wait, so the title stays GPU-limited.
+AMD and NVIDIA hosts keep native wave32 (minimum or fixed width 32) and were not tested; the min and max lowering is the
+only one of these changes that reaches them.
+
+**Defect fixed.** `%split_read` lowers through `OpGroupNonUniformBroadcast` with one elected publisher per part, which is
+only correct when every lane asks for the same lane. `ds_swizzle` and `ds_bpermute` compute a target per lane and went
+through it, so all lanes received one value on every split wave. They now use `%split_lane_read`. That helper stores
+every lane in the exchange area and keeps two banks selected by exchange parity: the bank of one exchange cannot be
+reused before every part has finished reading it, so the second rendezvous is gone. The exchange area therefore grows
+by 128 dwords per guest wave on every split shader, and the rendezvous `SplitWaveDsOrder` adds is skipped for these two
+instructions, which touch no LDS. The menu frame did not change, so this screen does not show the correction by
+itself; a scene whose output depends on those values was not identified.
+
+**Min and max.** The old lowering compared each operand against zero and tested both for NaN. `NMin`/`NMax` give the
+result for one NaN operand. A NaN first operand still selects the second, which keeps two NaNs returning the second
+operand. An equality test routes equal operands to a bitwise OR (min) or AND (max), which is the identity for equal
+non-zero values and orders signed zeros. The arithmetic interpreter suite runs the emitted contract, including
+signaling NaN. On a host that flushes denormals, a denormal compared equal to zero can pass through min unflushed.
+
+**Excluded by measurement on `eb48c258`:**
+
+- Rendezvous cost: replacing `%split_lane_read` with a subgroup shuffle (wrong results on purpose, private cache) gave
+  48.6 ms per dispatch against 39 ms, so the exchange is not what limits it.
+- EXEC guards: rewriting all 3,902 guarded selects offline leaves the instruction count at 61,001 of 61,013; the
+  compiler already folds them because this shader keeps a constant EXEC.
+- Forwarding written 16-bit halves to later extracts within a block: offline 1,083 of 5,905 extracts, 61,013 -> 59,246
+  instructions, 3 %.
+
+**Validation.** Strict matrix, warm cache, against the previous baseline of the same day: 27 interactive and 1 controlled
+timeout (unchanged) against 25, 2 and 1 host crash. `PPSA09809 - OCTOPATH TRAVELER II` crashes
+intermittently before these changes, so its clean pass here is not a fix. `PPSA21567 - Astro Bot` warm: main menu 22-25
+fps and 31 fps entering the hub at the end of the bounded run, no visual change at the capture. Hub fps past that point
+was not re-measured in this run.
+
+**Open:** the frame still creates about 8 objects per flip in one arena (shaders `41a73222` and `ff442d33` write
+transient storage textures; zero-seeded guest bytes change their hash each frame). The route stops at this settings
+screen, so gameplay of this title has not been measured.
+
+## Attribute words in shader identity for `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` (2026-11-02)
+
+Observed: the title compiled for minutes on every boot and its SPIR-V store kept
+growing (105.8, 127.6, 175.7 MB over three runs). 140 s run with timed creates: 157
+driver compiles for 81.5 s; 1038 creates held 299 guest VS as 626 variants, 308 guest
+PS as 539 variants, 340 guest pairs as 889 variant pairs. Driver hits cost about 0 ms,
+so extended dynamic state is not the lever for this title.
+
+Cause: two equal-size store entries of one program differed only in `OpConstant`
+values with no reference in the module, the attribute-table words. Bits 27-31 of those
+words change (`0x2540`, `0xc0002540`, `0xf8002540`) with the low 27 bits fixed. They fed
+both the shader id and the module bytes, so the driver saw a new program. Whether the
+bits are stale guest memory is not established.
+
+Changed:
+
+- When a program uses guest device addresses, a table `S_LOAD` reads guest memory at
+  run time and the snapshot never reaches the module, so the snapshot is cleared. A
+  load mapped by a dynamic record or an extended base keeps it.
+- Unwritten pixel targets clear their stale order and number; no emitter reads them
+  after the mode check.
+- `OutOfBounds` left the vertex id: only logs and traces read it.
+
+Verified (Intel Arc A770, ANV 26.2.5): same 340 guest pairs now give 333 VS, 377 PS and
+444 variant pairs. Two priming runs, then a clean warm run reaches gameplay at t=50 s
+instead of 110-130 s, with no 0 fps window and 11.7 fps. Capture correct. Unit suites
+pass. One boot crash in the five runs (exit 139 before the agent endpoint, no dump),
+consistent with the open NULL guest pointer crash but not proven to be it.
+
+Programs without guest device addresses load the words as live constants. A scan of the
+guest code now keeps only the bits it can observe: a straight line of `S_BFE_U32`,
+`S_AND_B32` with a constant, `S_LSHL_B32` whose SCC is dead and `S_MOV_B32`; any other
+reader, a branch or a live SCC keeps the whole word. Result, warm run with timed creates:
+16 driver compiles for 3.0 s, against 142 for 37 s before, 317 VS and 427 variant pairs.
+Clean warm: 11.7 fps, gameplay at t=50-60 s. Full tests: 108 of 108 CTest entries passed.
+Strict matrix: 27 interactive, 1 controlled timeout, 5 invalid fixtures, as before.
+
+Image check: masked and unmasked runs both render correct characters and geometry, but
+the cinematic advances by wall clock, so equal frame numbers show different shots and no
+pixel comparison was possible. One masked capture in a fast shot shows blur with white
+streaks; the same shot was not captured unmasked.
+
+Open: 14 variants remain on bit 27 where a shifted word reaches an `S_LOAD` offset, kept
+because that reader demands the whole shifted value. The priming cost is one cold pass
+for every title that used these ids. AMD and NVIDIA not run.
+
+## Render engine hang evidence for `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` (2026-11-01)
+
+About 1 run in 6 reset the render engine (`Timedout job`, `vkWaitForFences` -4 after about 680 ms). Two kernel
+devcoredumps stopped at the identical draw sequence by kernel hash, and the only loops in those kernels are the GDA
+binary search. Its midpoint `(lo + hi) >> 1` wraps for `hi >= 2^31` and loops forever on any vendor, so the search now
+halves the gap and is bounded to 32 steps. After the change no reset in 5 warm runs that reached gameplay. With the old
+rate that has a 33 % chance by luck, so the cure is not proven; a recurrence at the same draws would exclude the loop.
+The table lifetime was audited without finding why `hi` could be garbage: only CP-level end and execute submit, readers
+per queue clear on exact acknowledgment, and quiesced release drains the rings.
+
+Recurrence (2026-11-02, translator 202, boot under gdb, 1 of 17 tries): a render engine reset at the same two draws
+(94308 and 42012 vertices, same vertex program and fragment program sizes), waiting at the CS stall after them. Every
+loop left in those kernels is the bounded search: `lo < hi`, the midpoint lies in `[lo, hi)`, and each step shrinks the
+gap whatever the table holds. So a shader loop no longer explains the hang and the midpoint change is not its cure. The
+hung job starts with several driver rectangle operations before the first of those draws, in both dumps. Lead not tested:
+`INTEL_DEBUG=reemit` cured a driver stale-state hang on this host before; at this rate it needs many runs per arm.
+
+**Recipe:** the driver exposes the last dump in sysfs under `devcoredump/data`; writing to it dismisses the dump so the
+next hang is captured. Batch buffers and kernels decode with `iga64`; compare kernel hashes between two hangs.
+
+**Excluded by measurement:** `-march=x86-64-v3` (11.6 against 11.7 fps), a shared empty `Vector` (29.7 against 28.9
+us/draw), skipping the wait of a DMA copy (the fence only moves), a free-list index in the transient pool (31 against 29
+us/draw). `spirv-opt` performance passes do not shrink `eb48c258`'s compile enough to matter.
+
+
+## Descriptors loaded from guest tables and the AMD matrix (2026-11-02)
+
+- **Observed.** `kyty_agent games-matrix` on RADV (AMD Raphael iGPU, 2 CUs, Mesa 26.2.5, clean build on translator 202): 28 attempted, 25
+  interactive, one controlled timeout, one presenting at exit, and `PPSA01341 - Demon's Souls` stopped by a GPU VM fault (`SQC (data)`,
+  permission fault, then a gfx ring timeout). The fps of this GPU say nothing; the run checks correctness only. NVIDIA has no host here.
+- **Cause found.** Nested-table and GS user-data loads keep reading guest memory, and their records only name the bound resource. Their
+  image and buffer consumers still use the descriptor's first register as the descriptor slot, so they indexed the array with the raw guest
+  base. `RADV_DEBUG=hang` reports showed the faulting address equal to the descriptor set plus that base shifted by the descriptor size. Mesa's
+  Intel driver clamps an out-of-range index, which hides the defect when one resource is bound and picks the wrong one otherwise.
+- **Change.** The guest load stores its binding's words into the mapped dwords, as a mapped load does. Translator 203, geometry 98.
+- **Verified.** Unit and integration suite 108 of 108. Intel matrix: 26 interactive, 5 invalid fixtures, Demon's Souls presenting, and F.I.S.T.
+  `PPSA03969` one known boot crash (exit 139 at 27 presents, the recorded guest race). `PPSA21567 - Astro Bot` reaches the hub at 37 fps.
+- **Open.** Demon's Souls still faults on RADV after this change (same address in two of three runs, another in one). The shader of the last
+  report samples through a raw register slot of a load the fix should have covered; that report predates the generalised fix, and the fault after
+  it has no report yet. The fix is therefore recorded as correct by contract and not as the cure of this title.
+
+## Context request retries in phase with guest sleeps (2026-11-02)
+
+- **Observed.** `EmulatorKernelProcess.ContextRequestsReachSleepingThreads` failed intermittently in CI with both DevTools
+  configurations: request counts stopped at single digits of 200 and the 5 s waits expired. Not reproduced as a failure on the
+  Ryzen 5 7600 host, but the same starvation was measured there.
+- **Cause.** A signal that misses a safe point re-armed a fixed 100 us retry, the sleep length of the test's targets. The retry
+  then kept landing as the sleep returned (`RCX == RIP`, `RAX == 0`, which proves no interrupted syscall), never inside it. On two
+  host cores: 4 903 to 35 149 deferred signals and 444 to 3 728 ms per test. On all cores a 100 us period took 390 to 1 315 ms,
+  while 105 us took 52 ms with 84 deferrals.
+  Every deferral in those runs had that register state, which excludes a lost signal as the cause of the stall.
+- **Change.** Each retry of a thread uses a different delay, 100 to 163 us, so no periodic sleep stays in phase with it. The safe
+  point proof is unchanged.
+- **Verified.** On two cores, 18 to 26 deferrals and 49 to 51 ms over six runs; guest sleeps from 50 to 500 us stayed at 48 to
+  54 ms. Unit and integration suite 108 of 108 with one skipped. No title was run for this change.

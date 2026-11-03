@@ -99,6 +99,21 @@ bool ShaderInstructionIsScalarMemoryLoad(ShaderInstructionType type)
 	return ShaderInstructionTypeIn(kTable, type);
 }
 
+// The mixed-precision operations carry a negate or absolute modifier on an
+// inline constant; the dump shows the modifier with the value.
+static const char* OperandModifierPrefix(const ShaderOperand& op)
+{
+	if (op.negate)
+	{
+		return "-";
+	}
+	if (op.absolute)
+	{
+		return "abs ";
+	}
+	return "";
+}
+
 static String8 operand_to_str(ShaderOperand op)
 {
 	String8 ret = "???";
@@ -106,18 +121,15 @@ static String8 operand_to_str(ShaderOperand op)
 	{
 		case ShaderOperandType::LiteralConstant:
 			EXIT_IF(op.size != 0);
-			EXIT_IF(op.negate || op.absolute);
-			return String8::FromPrintf("%f (%u)", op.constant.f, op.constant.u);
+			return String8::FromPrintf("%s%f (%u)", OperandModifierPrefix(op), op.constant.f, op.constant.u);
 			break;
 		case ShaderOperandType::IntegerInlineConstant:
 			EXIT_IF(op.size != 0);
-			EXIT_IF(op.negate || op.absolute);
-			return String8::FromPrintf("%d", op.constant.i);
+			return String8::FromPrintf("%s%d", OperandModifierPrefix(op), op.constant.i);
 			break;
 		case ShaderOperandType::FloatInlineConstant:
 			EXIT_IF(op.size != 0);
-			EXIT_IF(op.negate || op.absolute);
-			return String8::FromPrintf("%f", op.constant.f);
+			return String8::FromPrintf("%s%f", OperandModifierPrefix(op), op.constant.f);
 			break;
 		default: break;
 	}
@@ -340,6 +352,8 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::VdstOffset: return "VdstOffset"; break;
 		case ShaderInstructionFormat::Vdst2VaddrOffset01: return "Vdst2VaddrOffset01"; break;
 		case ShaderInstructionFormat::VaddrVdata2Offset01: return "VaddrVdata2Offset01"; break;
+		case ShaderInstructionFormat::VaddrVdata2Offset: return "VaddrVdata2Offset"; break;
+		case ShaderInstructionFormat::VdstVaddrVdata2Offset: return "VdstVaddrVdata2Offset"; break;
 		case ShaderInstructionFormat::Label: return "Label"; break;
 		default: return "????"; break;
 	}
@@ -418,8 +432,10 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 				break;
 			}
 			case ShaderInstructionFormat::DA2:
+				// The array part names a dword destination; the read2 forms carry
+				// two dwords for b32 and four for b64.
 				s = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1 ? operand_to_str(inst.dst)
-				                                                                  : operand_array_to_str(inst.dst, 2);
+				                                                                  : operand_array_to_str(inst.dst, inst.dst.size);
 				break;
 			case ShaderInstructionFormat::DA3: s = operand_array_to_str(inst.dst, 3); break;
 			case ShaderInstructionFormat::DA4: s = operand_array_to_str(inst.dst, 4); break;
@@ -428,7 +444,9 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::D2A2: s = operand_array_to_str(inst.dst2, 2); break;
 			case ShaderInstructionFormat::D2A3: s = operand_array_to_str(inst.dst2, 3); break;
 			case ShaderInstructionFormat::D2A4: s = operand_array_to_str(inst.dst2, 4); break;
-			case ShaderInstructionFormat::S0A2: s = operand_array_to_str(inst.src[0], 2); break;
+			case ShaderInstructionFormat::S0A2:
+				s = inst.mimg_address_num > 0 ? operand_to_str(inst.src[0]) : operand_array_to_str(inst.src[0], 2);
+				break;
 			case ShaderInstructionFormat::S0A3: s = operand_array_to_str(inst.src[0], 3); break;
 			case ShaderInstructionFormat::S0A4: s = operand_array_to_str(inst.src[0], 4); break;
 			case ShaderInstructionFormat::S0A6:
@@ -571,7 +589,13 @@ String8 ShaderCode::DbgInstructionToStr(const ShaderInstruction& inst)
 	String8 format = dbg_fmt_to_str(inst);
 
 	ret += String8::FromPrintf("%-20s [%-30s] ", name.c_str(), format.c_str());
-	ret += dbg_fmt_print(inst);
+	// The format strings name one register per component; a D16 read packs them.
+	auto printed = inst;
+	if (inst.mimg_d16 && inst.type != ShaderInstructionType::ImageStore)
+	{
+		printed.dst.size = __builtin_popcount(inst.mimg_dmask);
+	}
+	ret += dbg_fmt_print(printed);
 	if (inst.mimg_address_num > 0)
 	{
 		ret += String8::FromPrintf(" dim:%u nsa:", static_cast<unsigned>(inst.mimg_dimension));

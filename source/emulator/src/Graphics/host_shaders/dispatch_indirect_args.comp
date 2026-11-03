@@ -1,0 +1,38 @@
+#version 450
+// Converts one guest DISPATCH_INDIRECT record (three 32-bit group counts) that a
+// storage buffer of the current recording holds into host vkCmdDispatchIndirect
+// arguments. Counts above the host limits dispatch nothing and set a sticky
+// flag that the processor checks when the recording completes.
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// 0: guest storage buffer, 1: host dispatch arguments, 2: limit violation flag.
+layout(std430, binding = 0) buffer IndirectBuffer
+{
+	uint words[];
+}
+buffers[3];
+
+layout(push_constant) uniform PushConstants
+{
+	uint source_word;
+	uint max_x;
+	uint max_y;
+	uint max_z;
+}
+push;
+
+void main()
+{
+	const uint x = buffers[0].words[push.source_word];
+	const uint y = buffers[0].words[push.source_word + 1u];
+	const uint z = buffers[0].words[push.source_word + 2u];
+	const bool within = x <= push.max_x && y <= push.max_y && z <= push.max_z;
+	buffers[1].words[0] = within ? x : 0u;
+	buffers[1].words[1] = within ? y : 0u;
+	buffers[1].words[2] = within ? z : 0u;
+	if (!within)
+	{
+		atomicOr(buffers[2].words[0], 1u);
+	}
+}

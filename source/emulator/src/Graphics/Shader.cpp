@@ -373,6 +373,7 @@ static bool ShaderInstructionIsPureLaneAlu(const ShaderInstruction& inst)
 		case ShaderInstructionType::VMulF32:
 		case ShaderInstructionType::VMulHiI32:
 		case ShaderInstructionType::VMulHiU32:
+		case ShaderInstructionType::VMulI32I24:
 		case ShaderInstructionType::VMulLoI32:
 		case ShaderInstructionType::VMulLoU32:
 		case ShaderInstructionType::VMulU32U24:
@@ -1021,8 +1022,8 @@ static uint32_t ShaderFragmentFirstQuadLoss(const ShaderCode& code)
 // Whether a lane-local Wave64 or Wave32 pixel program runs as a partially populated guest wave. Which pixels share a
 // wave is the rasterizer's choice, so a host subgroup of any width holding whole quads is such a wave, as long
 // as nothing observes a lane by its position:
-//  - an OR reduction proven by ShaderFindFragmentLaneReductions folds only lanes that hold their seed, so a
-//    lane outside the subgroup is an absent guest lane that seeds zero;
+//  - an idempotent reduction (OR, AND, integer min or max) proven by ShaderFindFragmentLaneReductions folds only the
+//    lanes its read selects, so a lane outside the subgroup is an absent guest lane that seeds the op's identity;
 //  - quad DPP and a READFIRSTLANE over an EXEC inside the launched quads see only lanes that exist, while no
 //    quad has lost a member yet;
 //  - scalar spills keep their own storage;
@@ -1079,6 +1080,31 @@ static bool ShaderFragmentRunsAsPartialWave(const ShaderCode& code, const Shader
 		}
 	}
 	return true;
+}
+
+bool ShaderNativeWaveParticipationRefusal(const char* reason)
+{
+	if (reason == nullptr)
+	{
+		return false;
+	}
+	static constexpr const char* kParticipation[] = {
+	    "fragment wave append/consume lacks a participating-lane proof",
+	    "fragment mask packing after an export or indirect jump lacks a quad participation proof",
+	    "READFIRSTLANE target quad is not proven to retain a participating real member",
+	    "READLANE physical source may be unavailable or in an all-helper quad",
+	    "fragment permutation source participation is unproven",
+	    "fragment DPP after an export or indirect jump lacks a quad participation proof",
+	    "fragment row DPP source participation is unproven (neutral values do not prove helper recovery)",
+	};
+	for (const auto* candidate: kParticipation)
+	{
+		if (std::strcmp(reason, candidate) == 0)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t guest_wave_size)
@@ -1315,6 +1341,10 @@ struct ShaderVertexProgram
 	ShaderNativeWaveVerdict native_wave;
 	// Width-neutrality of the fused NGG front, proved once for this immutable code.
 	ShaderNggFrontVerdict  ngg_front;
+	// Scans of front_code that every draw used to repeat.
+	bool                   front_has_getpc              = false;
+	bool                   front_has_global_memory_load = false;
+	std::bitset<108>       front_sbuffer_base_sgprs;
 	// Vertex-stream access scan of `code` for the last fetch-register pair it was asked for.
 	mutable std::mutex                                          stream_access_mutex;
 	mutable std::shared_ptr<const ShaderVertexStreamAccessScan> stream_access;
@@ -1337,7 +1367,10 @@ struct ShaderVertexProgramKeyHash
 using ShaderVertexProgramCache =
     std::unordered_map<ShaderVertexProgramKey, std::shared_ptr<const ShaderVertexProgram>, ShaderVertexProgramKeyHash>;
 static constexpr size_t   kVertexProgramCacheEntries = 256u;
-static constexpr uint64_t kVertexProgramCacheBytes   = 64u * 1024u * 1024u;
+// A 3D scene keeps more than 64 MiB of vertex IR live (measured: 45 fused fronts
+// of up to 5.5 MiB each); a smaller budget empties the cache every few frames and
+// each draw re-parses its program and re-proves its NGG front.
+static constexpr uint64_t kVertexProgramCacheBytes   = 256u * 1024u * 1024u;
 static ShaderVertexProgramCache* g_vs_isa_cache = nullptr;
 static std::mutex                g_vs_isa_cache_mutex;
 static uint64_t                  g_vs_isa_cache_bytes = 0;
@@ -1461,16 +1494,10 @@ static bool NggCapturedBufferQuad(const HW::UserSgprInfo& user_sgpr, int user_sg
 // (s8+). Hardware user-data slot 0 is that register minus 8. Rebase only when
 // the ISA actually SBUFFERs that scalar and the captured user-data quad looks
 // like a buffer — same contract as the measured NGG constant-sharp rebase.
-static void RebaseNggConstantSharps(ShaderUserData* user_data, const ShaderCode* code, const HW::UserSgprInfo& user_sgpr,
-                                    int user_sgpr_num)
+static std::bitset<108> ShaderScalarBufferBaseSgprs(const ShaderCode& code)
 {
-	if (user_data == nullptr || code == nullptr || user_data->sharp_resource_offset[3] == nullptr)
-	{
-		return;
-	}
-	constexpr int kNggScalarBase = 8;
-	bool          used[108]      = {};
-	for (const auto& inst: code->GetInstructions())
+	std::bitset<108> used;
+	for (const auto& inst: code.GetInstructions())
 	{
 		if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr)
 		{
@@ -1479,9 +1506,20 @@ static void RebaseNggConstantSharps(ShaderUserData* user_data, const ShaderCode*
 		const int reg = inst.src[0].register_id;
 		if (reg >= 0 && reg < 108)
 		{
-			used[reg] = true;
+			used.set(static_cast<size_t>(reg));
 		}
 	}
+	return used;
+}
+
+static void RebaseNggConstantSharps(ShaderUserData* user_data, const std::bitset<108>& used, const HW::UserSgprInfo& user_sgpr,
+                                    int user_sgpr_num)
+{
+	if (user_data == nullptr || user_data->sharp_resource_offset[3] == nullptr)
+	{
+		return;
+	}
+	constexpr int kNggScalarBase = 8;
 	for (uint16_t slot = 0; slot < user_data->sharp_resource_count[3]; ++slot)
 	{
 		auto& sharp = user_data->sharp_resource_offset[3][slot];
@@ -1495,7 +1533,7 @@ static void RebaseNggConstantSharps(ShaderUserData* user_data, const ShaderCode*
 		// Metadata that already names a captured user-data slot (offset <
 		// captured) is left alone. Only scalar registers past that window
 		// are NGG-encoded (s8 + slot) and need the minus-eight rebase.
-		if (scalar < captured || scalar < kNggScalarBase || scalar >= 108 || !used[scalar])
+		if (scalar < captured || scalar < kNggScalarBase || scalar >= 108 || !used.test(static_cast<size_t>(scalar)))
 		{
 			continue;
 		}
@@ -2047,6 +2085,9 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 		     shader_addr, data.code_size_bytes);
 	}
 	program->front_scalar_flow = ShaderScalarFlowOf(program->front_code);
+	program->front_has_getpc              = program->front_code.HasAnyOf({ShaderInstructionType::SGetpcB64});
+	program->front_has_global_memory_load = ShaderHasGlobalMemoryLoad(program->front_code);
+	program->front_sbuffer_base_sgprs     = ShaderScalarBufferBaseSgprs(program->front_code);
 	program->code = program->front_code;
 	std::vector<uint32_t> back_words;
 	if (ShaderHasTerminalSetpc(program->front_code))
@@ -2825,14 +2866,15 @@ bool ShaderPreventsNoopPixelElision(const ShaderCode& code)
 	                      ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX,
 	                      ShaderInstructionType::BufferStoreFormatXy, ShaderInstructionType::BufferStoreFormatXyzw,
 	                      ShaderInstructionType::DsAppend, ShaderInstructionType::DsConsume, ShaderInstructionType::DsAddU32,
-	                      ShaderInstructionType::DsAddRtnU32,
+	                      ShaderInstructionType::DsAddRtnU32, ShaderInstructionType::DsCmpstB32, ShaderInstructionType::DsCmpstRtnB32,
 	                      ShaderInstructionType::DsAndB32, ShaderInstructionType::DsDecU32, ShaderInstructionType::DsIncU32,
 	                      ShaderInstructionType::DsMaxI32, ShaderInstructionType::DsMaxU32, ShaderInstructionType::DsMinI32,
 	                      ShaderInstructionType::DsMinU32, ShaderInstructionType::DsOrB32, ShaderInstructionType::DsRsubU32,
 	                      ShaderInstructionType::DsSubU32, ShaderInstructionType::DsXorB32, ShaderInstructionType::DsWriteB32,
 	                      ShaderInstructionType::DsWrite2B32, ShaderInstructionType::DsWrite2St64B32,
-	                      ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
-	                      ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
+	                      ShaderInstructionType::DsWrite2B64, ShaderInstructionType::DsWrite2St64B64,
+	                      ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip}) ||
+	                  ShaderHasImageAtomic(code);
 
 	return prevents;
 }
@@ -3585,6 +3627,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	{
 		ShaderCollectPointerTableResources(*code, bind, user_sgpr, info, user_data->srt_size_dw, user_data_register_base, *code_flow,
 		                                   code_memo);
+		ShaderCollectConstantSamplers(*code, bind, info, user_data_register_base, code_memo);
 	}
 
 	// Gen5 metadata is advisory: some shaders address an S# descriptor directly
@@ -3665,15 +3708,6 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		}
 	}
 
-	for (int i = 0; i < HW::UserSgprInfo::SGPRS_MAX; i++)
-	{
-		if (direct_sgprs[i])
-		{
-			ShaderGetDirectSgpr(&bind->direct_sgprs, i, user_sgpr, user_data);
-			info->direct_sgprs++;
-		}
-	}
-
 	for (int i = 0; i < bind->storage_buffers.buffers_num; ++i)
 	{
 		const bool local_dynamic_sload = bind->storage_buffers.dynamic_sload[i];
@@ -3735,6 +3769,22 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		bind->storage_buffers.unbased_matches[i]         = evidence.unbased_match;
 		bind->storage_buffers.decoded_unknown[i]         = exact_evidence.decoded_unknown;
 		bind->storage_buffers.indirect_descriptor_use[i] = exact_evidence.indirect_descriptor_use;
+		// A metadata V# that no instruction consumes as a descriptor, but whose
+		// words are read as data (for example copied to other SGPRs that a
+		// runtime descriptor resolves), is not a binding: binding it rewrites
+		// its base to a slot index, so its SGPRs keep the guest words instead.
+		const int start_register = bind->storage_buffers.start_register[i];
+		if (evidence.reason == ShaderStorageUnknownReason::MetadataOnlyBinding && exact_evidence.indirect_descriptor_use &&
+		    !exact_evidence.decoded_unknown && !bind->storage_buffers.extended[i] && !local_dynamic_sload && !has_dynamic_sload &&
+		    start_register >= 0)
+		{
+			bind->storage_buffers.accesses[i] = ShaderStorageAccess::UnusedMetadata;
+			for (int r = start_register; r < start_register + 4 && r < user_sgpr_num; r++)
+			{
+				direct_sgprs[r] = true;
+			}
+			continue;
+		}
 		const auto& matched_evidence = evidence.exact_match ? exact_evidence : unbased_evidence;
 		bind->storage_buffers.raw_vmem_oob_guarded[i]    = matched_evidence.raw_vmem_oob_guarded;
 		bind->storage_buffers.raw_smem_use[i]            = matched_evidence.raw_smem_use;
@@ -3763,6 +3813,21 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 		}
 	}
+
+	if (bind->extended.read_at_runtime)
+	{
+		direct_sgprs[bind->extended.start_register]     = true;
+		direct_sgprs[bind->extended.start_register + 1] = true;
+	}
+	for (int i = 0; i < HW::UserSgprInfo::SGPRS_MAX; i++)
+	{
+		if (direct_sgprs[i])
+		{
+			ShaderGetDirectSgpr(&bind->direct_sgprs, i, user_sgpr, user_data);
+			info->direct_sgprs++;
+		}
+	}
+
 	if (code != nullptr)
 	{
 		for (int i = 0; i < bind->textures2D.textures_num; ++i)
@@ -3807,13 +3872,15 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		                          &bind->zero_image_resources);
 	}
 
-	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
+	ExcludeUnusedMetadataStorage(&bind->storage_buffers, &bind->dynamic_sloads);
 	// After compaction, so the recorded resource indices stay final.
 	if (code != nullptr && !vertex_resource_types)
 	{
 		// Before assembly, whose resources reuse their consumer's register.
 		ShaderCollectRedefinedBufferDescriptors(*code, bind, user_data_register_base, *code_flow, code_memo);
 		ShaderCollectAssembledBufferDescriptors(*code, bind, user_sgpr, user_sgpr_num, user_data_register_base, *code_flow, code_memo);
+		ShaderCollectNestedCopiedBufferDescriptors(*code, bind, user_sgpr, user_data->srt_size_dw, user_data_register_base, *code_flow,
+		                                           code_memo);
 	}
 }
 
@@ -3925,18 +3992,49 @@ static std::shared_ptr<const ShaderVertexStreamAccessScan> VertexProgramStreamSc
 	return scan;
 }
 
-// An attribute-table dword the program never loads is not guest-visible. A hole between
-// declared semantics holds unrelated memory that changes per draw; keeping it would split
-// the shader identity and recompile the same program for every value.
+// Attribute-table bits the program cannot observe are not guest-visible. A hole between
+// declared semantics and the unused high bits of a dword change per draw; keeping them would
+// split the shader identity and recompile the same program for every value.
 static void ClearUnreadAttribData(ShaderVertexInputInfo* info, const ShaderVertexStreamAccessScan& scan)
 {
+	// With guest device addresses a table load reads guest memory at run time unless a
+	// binding maps it, so the snapshot never reaches the program. Its unused high bits
+	// differ between boots and would otherwise recompile the same program on every run.
+	constexpr int kGsFrontUserDataBase = 8;
+	const auto&   bind                 = info->bind;
+	const auto    load_is_mapped       = [&](uint32_t pc)
+	{
+		return std::any_of(bind.dynamic_sloads.records.begin(), bind.dynamic_sloads.records.end(),
+		                   [&](const auto& record) { return record.instruction_pc == pc && !record.guest_load; });
+	};
+	const bool snapshot_unused = bind.device_address_used &&
+	                             !(bind.extended.used && bind.extended.start_register == scan.fetch_attrib_reg + kGsFrontUserDataBase) &&
+	                             std::none_of(scan.attrib_load_pcs.begin(), scan.attrib_load_pcs.end(), load_is_mapped);
 	for (int i = 0; i < info->fetch_attrib_data_num; i++)
 	{
-		if ((scan.attrib_dwords_read & (1u << static_cast<uint32_t>(i))) == 0)
-		{
-			info->fetch_attrib_data[i] = 0;
-		}
+		info->fetch_attrib_data[i] = snapshot_unused ? 0u : info->fetch_attrib_data[i] & scan.attrib_demanded_bits[i];
 	}
+}
+
+static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, const ShaderBindResources& bind);
+
+// A scalar load whose base is a pointer the program computed (VCC or an SGPR
+// outside the user-data window) has no binding-time mapping: it reads guest
+// memory at run time.
+static bool ShaderHasComputedPointerScalarLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_base,
+                                               int user_data_count)
+{
+	const auto& instructions = code.GetInstructions();
+	return std::any_of(instructions.begin(), instructions.end(),
+	                   [&](const ShaderInstruction& inst)
+	                   {
+		                   const bool computed_base =
+		                       inst.src_num >= 1 && (inst.src[0].type == ShaderOperandType::VccLo ||
+		                                             (inst.src[0].type == ShaderOperandType::Sgpr &&
+		                                              (inst.src[0].register_id < user_data_base ||
+		                                               inst.src[0].register_id + 1 >= user_data_base + user_data_count)));
+		                   return computed_base && ShaderScalarLoadNeedsGuestAddress(inst, bind);
+	                   });
 }
 
 void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
@@ -4028,7 +4126,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			std::memcpy(sharp_copy, data.user_data->sharp_resource_offset[3],
 			            static_cast<size_t>(data.user_data->sharp_resource_count[3]) * sizeof(ShaderSharp));
 			rebased_user.sharp_resource_offset[3] = sharp_copy;
-			RebaseNggConstantSharps(&rebased_user, vs_isa, user_sgpr, static_cast<int>(user_sgpr_num));
+			RebaseNggConstantSharps(&rebased_user, info->program->front_sbuffer_base_sgprs, user_sgpr, static_cast<int>(user_sgpr_num));
 			usage_user = &rebased_user;
 		}
 		// Keep general ISA analysis disabled: the scalar-buffer fallback on a
@@ -4049,10 +4147,11 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			                                      &info->program->resource_memo);
 			// Constant tables embedded after the code are addressed from GETPC;
 			// the base stays runtime data so a cached pipeline can relocate.
-			info->bind.program_base_used   = vs_isa->HasAnyOf({ShaderInstructionType::SGetpcB64});
+			info->bind.program_base_used   = info->program->front_has_getpc;
 			info->bind.program_base        = info->bind.program_base_used ? shader_addr : 0u;
 			info->bind.device_address_used =
-			    ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) || ShaderHasGlobalMemoryLoad(*vs_isa);
+			    info->program->front_has_global_memory_load || ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) ||
+			    ShaderHasComputedPointerScalarLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase, static_cast<int>(user_sgpr_num));
 		}
 	} else
 	{
@@ -4235,7 +4334,8 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 	{
 		return false;
 	}
-	if (inst.src[0].type == ShaderOperandType::Sgpr && bind.extended.used && inst.src[0].register_id == bind.extended.start_register)
+	if (inst.src[0].type == ShaderOperandType::Sgpr && bind.extended.used && inst.src[0].register_id == bind.extended.start_register &&
+	    !ShaderEudDescriptorLoadIsUnmapped(bind, inst))
 	{
 		return false;
 	}
@@ -4441,10 +4541,16 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	// whatever SPI_SHADER_COL_FORMAT and the stale CB_COLOR*_INFO say.
 	for (int i = 0; i < 8; i++)
 	{
-		const bool written              = State::ResolveColorWriteMask(cb_target_mask, sh->m_cbShaderMask, static_cast<uint32_t>(i)) != 0u;
-		ps_info->target_output_mode[i]  = written ? sh->target_output_mode[i] : 0u;
-		ps_info->target_output_order[i] = sh->target_output_order[i];
-		ps_info->target_output_number[i] = sh->target_output_number[i];
+		const bool written             = State::ResolveColorWriteMask(cb_target_mask, sh->m_cbShaderMask, static_cast<uint32_t>(i)) != 0u;
+		ps_info->target_output_mode[i] = written ? sh->target_output_mode[i] : 0u;
+		// A discarded target's order and type are stale registers. No emitter reads
+		// them, and in the shader identity they would split one program into variants
+		// the driver compiles again.
+		if (ps_info->target_output_mode[i] != 0u)
+		{
+			ps_info->target_output_order[i]  = sh->target_output_order[i];
+			ps_info->target_output_number[i] = sh->target_output_number[i];
+		}
 	}
 
 	bool ps5 = Config::IsNextGen();
@@ -4483,8 +4589,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 			    auto pixel_analysis = std::make_shared<ShaderImmutablePixelAnalysis>();
 			    pixel_analysis->has_only_null_exports        = ShaderHasOnlyNullPixelExports(*code);
 			    pixel_analysis->color_exports                = ShaderSummarizePixelColorExports(*code);
+			    pixel_analysis->interpolation                = ShaderSummarizePixelInterpolation(*code);
 			    pixel_analysis->uses_native_wave_state      = ShaderUsesNativeWaveState(*code);
-			    pixel_analysis->prevents_noop_pixel_elision = ShaderPreventsNoopPixelElision(*code);
 			    pixel_analysis->has_getpc                   = code->HasAnyOf({ShaderInstructionType::SGetpcB64});
 			    pixel_analysis->has_global_memory_load      = ShaderHasGlobalMemoryLoad(*code);
 			    pixel_analysis->descriptor_load_indices     = ShaderFindDescriptorLoadIndices(*code);
@@ -4502,12 +4608,14 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->required_subgroup_size = analysis.pixel_analysis->uses_native_wave_state ? ps_info->native_wave.guest_wave_size : 0u;
 		ps_info->has_only_null_exports = analysis.pixel_analysis->has_only_null_exports;
 		ps_info->color_exports         = analysis.pixel_analysis->color_exports;
-		if (allow_noop_stage_disable && !analysis.pixel_analysis->prevents_noop_pixel_elision)
+		// DB_SHADER_CONTROL decides whether an output-free shader runs; its memory
+		// writes stay unexecuted unless EXEC_ON_NOOP requests them.
+		if (allow_noop_stage_disable)
 		{
 			ps_info->stage_enabled = false;
 			return;
 		}
-		ShaderResolveCustomInterpolation(*analysis.code, *vs_info, ps_info);
+		ShaderResolveCustomInterpolation(analysis.pixel_analysis->interpolation, *vs_info, ps_info);
 		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr, analysis.code.get(), 0,
 		                  false, nullptr, analysis.scalar_flow.get(), nullptr, analysis.resource_memo.get());
 		// GETPC uses runtime metadata so relocated pixel programs keep their
@@ -4547,7 +4655,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 bool ShaderHasGlobalMemoryLoad(const ShaderCode& code)
 {
 	return code.HasAnyOf({ShaderInstructionType::GlobalLoadDword, ShaderInstructionType::GlobalLoadDwordx2,
-	                      ShaderInstructionType::GlobalLoadDwordx3, ShaderInstructionType::GlobalLoadDwordx4});
+	                      ShaderInstructionType::GlobalLoadDwordx3, ShaderInstructionType::GlobalLoadDwordx4,
+	                      ShaderInstructionType::GlobalLoadUbyteD16Hi, ShaderInstructionType::GlobalLoadSbyteD16Hi});
 }
 
 static bool ShaderUsesGuestDeviceAddress(const ShaderCode& code, const ShaderBindResources& bind)
@@ -4562,7 +4671,7 @@ static bool ShaderUsesGuestDeviceAddress(const ShaderCode& code, const ShaderBin
 		{
 			return true;
 		}
-		if (ShaderScalarLoadNeedsGuestAddress(inst, bind))
+		if (ShaderScalarLoadNeedsGuestAddress(inst, bind) || ShaderScalarBufferUsesRuntimeDescriptor(bind, inst))
 		{
 			return true;
 		}
@@ -4724,6 +4833,11 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		{
 			info->native_wave_sensitive = ShaderUsesNativeWaveState(code);
 			info->required_subgroup_size = info->native_wave_sensitive ? 32u : 0u;
+			if (info->native_wave_sensitive && info->wave32_split_valid)
+			{
+				info->wave_layout            = info->wave32_split_layout;
+				info->required_subgroup_size = info->wave_layout.native_subgroup_size;
+			}
 		}
 		// Resource-coupled S_LOAD admission needs the exact per-PC EUD mapping.
 		// This is still before shader-cache, pipeline and descriptor preparation.
@@ -4732,17 +4846,17 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			const auto& native = program->NativeEquivalence();
 			if (!native.supported)
 			{
-				EXIT("wave64 dispatch has no paired layout and is not wave-width independent: mode=0x%08" PRIx32
+				EXIT("wave64 dispatch has no paired layout and is not wave-width independent: cs=0x%016" PRIx64 " mode=0x%08" PRIx32
 				     " local=%ux%ux%u pc=0x%08" PRIx32 " reason=%s\n",
-				     dispatch_mode, info->threads_num[0], info->threads_num[1], info->threads_num[2], native.unsupported_pc,
-				     native.reason.c_str());
+				     regs->cs_regs.chksum, dispatch_mode, info->threads_num[0], info->threads_num[1], info->threads_num[2],
+				     native.unsupported_pc, native.reason.c_str());
 			}
 			if (!NativeEquivalenceFitsWorkgroup(native, *info))
 			{
 				EXIT("wave64 dispatch reads DPP quads across a partial quad: local=%ux%ux%u\n", info->threads_num[0],
 				     info->threads_num[1], info->threads_num[2]);
 			}
-		} else if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32)
+		} else if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32 && info->wave_layout.guest_wave_size == 64u)
 		{
 			// A program proven wave-width independent runs one guest lane per
 			// invocation without exchanges between the halves of a guest wave.
@@ -4753,7 +4867,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			} else
 			{
 				info->native_wave_sensitive  = true;
-				info->required_subgroup_size = 32u;
+				info->required_subgroup_size = info->wave_layout.native_subgroup_size;
 			}
 		}
 		// Compute parsing preserves byte PCs relative to this dispatch's start.
@@ -4813,9 +4927,10 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 				continue;
 			}
 			const bool native_xy_thread_ids =
-			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Native && info->thread_ids_num >= 2;
-			const bool paired_xy_thread_ids =
-			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32 && info->thread_ids_num >= 2;
+			    (info->wave_layout.strategy == ShaderComputeWaveStrategy::Native || info->wave_layout.guest_wave_size == 32u) &&
+			    info->thread_ids_num >= 2;
+			const bool paired_xy_thread_ids = info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32 &&
+			                                  info->wave_layout.guest_wave_size == 64u && info->thread_ids_num >= 2;
 			auto coverage = AnalyzeShaderStorageImageTileCoverage(code, info->bind, i, info->workgroup_register, info->threads_num,
 			                                                       native_xy_thread_ids, info->group_id[0] && info->group_id[1],
 			                                                       paired_xy_thread_ids);
@@ -5740,6 +5855,13 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 		ids->Add(static_cast<uint32_t>(record.resource_index));
 	}
 
+	ids->Add(bind.constant_samplers.Size());
+	for (const auto& record: bind.constant_samplers)
+	{
+		ids->Add(record.consumer_pc);
+		ids->Add(static_cast<uint32_t>(record.sampler_index));
+	}
+
 	ids->Add(bind.redefined_descriptor_consumers.Size());
 	for (const auto pc: bind.redefined_descriptor_consumers)
 	{
@@ -5984,7 +6106,6 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 		if (gen5)
 		{
 			ids.Add(r.Format());
-			ids.Add(r.OutOfBounds());
 		} else
 		{
 			ids.Add(r.Nfmt());
@@ -6009,7 +6130,7 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 
 	if (input_info->geometry_pull)
 	{
-		ids.Add(0x47504c31u); // GPL1: geometry pass output pull.
+		ids.Add(0x47504c32u); // GPL2: geometry pass output pull, full vertex block.
 		ids.Add(input_info->geometry_pull_parameters);
 		ids.Add(static_cast<uint32_t>(input_info->geometry_pull_layer));
 		ids.Add(input_info->geometry_pull_waves);

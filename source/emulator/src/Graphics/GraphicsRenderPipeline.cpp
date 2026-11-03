@@ -3,6 +3,7 @@
 
 #include "GraphicsRenderInternal.h"
 #include "GraphicsRenderPipelineLimits.h"
+#include "ShaderSpirvToolchain.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -16,6 +17,11 @@
 #include "Emulator/Graphics/ComputePipelinePrecompile.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/DiagnosticDump.h"
+#include "Emulator/Graphics/FragmentTransportCapture.h"
+#include "Emulator/Graphics/FragmentTransportLayout.h"
+#include "Emulator/Graphics/FragmentTransportResolve.h"
+#include "Emulator/Graphics/FragmentTransportRuntime.h"
+#include "Emulator/Graphics/FragmentTransportShade.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
@@ -43,6 +49,7 @@
 #include "spirv/unified1/spirv.hpp"
 
 #include <algorithm>
+#include <mutex>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -108,7 +115,7 @@ VulkanColorAttachmentBlendAdmission VulkanValidateColorAttachmentBlendRequest(Vk
 }
 
 uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized,
-                                    bool uses_r_coordinate)
+                                    bool uses_r_coordinate, bool integer_border)
 {
 	if (operation == State::ImageSampleOperation::Mixed)
 	{
@@ -135,7 +142,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 		const auto& s = m_samplers.At(i);
 		if (s.r.fields[0] == r.fields[0] && s.r.fields[1] == r.fields[1] && s.r.fields[2] == r.fields[2] &&
 		    s.r.fields[3] == r.fields[3] && s.operation == operation && s.allow_unnormalized == allow_unnormalized &&
-		    s.uses_r_coordinate == uses_r_coordinate)
+		    s.uses_r_coordinate == uses_r_coordinate && s.integer_border == integer_border)
 		{
 			return i;
 		}
@@ -145,6 +152,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	s.operation           = operation;
 	s.allow_unnormalized  = allow_unnormalized;
 	s.uses_r_coordinate   = uses_r_coordinate;
+	s.integer_border      = integer_border;
 	s.vk                  = nullptr;
 
 	auto mag_filter = r.XyMagFilter();
@@ -180,15 +188,12 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 		return VK_COMPARE_OP_NEVER;
 	};
 
-	VkBorderColor border = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
+	VkBorderColor border = integer_border ? VK_BORDER_COLOR_INT_TRANSPARENT_BLACK : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
 	switch (r.BorderColorType())
 	{
-		case 0: border = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK; break;
-		case 1: border = VK_BORDER_COLOR_INT_OPAQUE_BLACK; break;
-		case 2:
-			border = VK_BORDER_COLOR_INT_OPAQUE_WHITE;
-			break;
-			KYTY_LOG_DEBUG("WARNING: unknown border color (continuing)\n");
+		case 1: border = integer_border ? VK_BORDER_COLOR_INT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK; break;
+		case 2: border = integer_border ? VK_BORDER_COLOR_INT_OPAQUE_WHITE : VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; break;
+		default: break;
 	}
 
 	sampler_info.sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -322,12 +327,30 @@ static void CreateLayout(VkDescriptorSetLayout* set_layouts, uint32_t* set_layou
 	}
 }
 
+// Placeholder set for guest stages a host shader does not read. It stays alive
+// for the device lifetime, so pipelines keep a stable layout identity.
+static VkDescriptorSetLayout EmptyDescriptorSetLayout(VkDevice device)
+{
+	static std::once_flag    once;
+	static VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+	std::call_once(once,
+	               [device]
+	               {
+		               VkDescriptorSetLayoutCreateInfo info {};
+		               info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		               info.bindingCount = 0;
+		               vkCreateDescriptorSetLayout(device, &info, nullptr, &layout);
+	               });
+	return layout;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const ShaderVertexInputInfo* vs_input_info,
                                               const Vector<uint32_t>& vs_shader, const ShaderPixelInputInfo* ps_input_info,
                                               const Vector<uint32_t>& ps_shader, const Vector<uint32_t>& geometry_shader,
                                               const PipelineStaticParameters* static_params,
-                                              PipelineDynamicParameters* dynamic_params)
+                                              PipelineDynamicParameters* dynamic_params, VkDescriptorSetLayout transport_layout,
+                                              bool host_pixel_shader)
 {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(render_pass == nullptr);
@@ -381,7 +404,12 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		                                                  wave.proof == ShaderNativeWaveProof::FragmentPartialWave,
 		                                                  wave.proof == ShaderNativeWaveProof::FragmentNeutral32,
 		                                                  spirv_version >= 0x00010600u);
-		const char* reason = wave.refusal_reason;
+		// Every guest lane exists in an exact-width subgroup, so a participation
+		// refusal does not apply there. Semantic refusals still stop the draw.
+		const bool  exact_host = wave.proof == ShaderNativeWaveProof::ExactSubgroup && selection.supported &&
+		                        selection.size == wave.guest_wave_size;
+		const char* reason = exact_host && ShaderNativeWaveParticipationRefusal(wave.refusal_reason) ? nullptr
+		                                                                                            : wave.refusal_reason;
 		if (reason == nullptr && wave.proof == ShaderNativeWaveProof::Unclassified) { reason = "unclassified guest wave"; }
 		if (reason == nullptr && requested != 0 && requested != wave.guest_wave_size) { reason = "inconsistent guest width metadata"; }
 		if (reason == nullptr && !selection.supported) { reason = "exact guest lane map or explicit width-neutral proof unavailable"; }
@@ -399,7 +427,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	                                          VK_SHADER_STAGE_VERTEX_BIT, vertex_ops, vs_shader.At(1),
 	                                          ShaderVertexNggFrontRefusal(*vs_input_info));
 	ShaderNativeSubgroupSelection fragment_mapping;
-	if (has_fragment_stage)
+	if (has_fragment_stage && !host_pixel_shader)
 	{
 		fragment_mapping = select_native(ps_input_info->native_wave, ps_input_info->required_subgroup_size,
 		                                 VK_SHADER_STAGE_FRAGMENT_BIT, fragment_ops, ps_shader.At(1), String8());
@@ -442,7 +470,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		EXIT_IF(!ShaderAttachNativeSubgroup(gctx->compute_wave_vulkan_state, vertex_mapping, &vert_shader_stage_info,
 		                                    &vert_required_subgroup_size));
 	}
-	if (fragment_ops != 0u)
+	if (fragment_ops != 0u && !host_pixel_shader)
 	{
 		EXIT_IF(!ShaderAttachNativeSubgroup(gctx->compute_wave_vulkan_state, fragment_mapping, &frag_shader_stage_info,
 		                                    &frag_required_subgroup_size));
@@ -722,14 +750,32 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	VkDescriptorSetLayout set_layouts[3]  = {};
 	uint32_t              set_layouts_num = 0;
 
-	VkPushConstantRange push_constant_info[2];
+	VkPushConstantRange push_constant_info[3];
 	uint32_t            push_constant_info_num = 0;
 
 	CreateLayout(set_layouts, &set_layouts_num, push_constant_info, &push_constant_info_num, vs_input_info->bind,
 	             /*additional_params->vs_bind,*/ VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
-	CreateLayout(set_layouts, &set_layouts_num, push_constant_info, &push_constant_info_num, ps_input_info->bind,
-	             /*additional_params->ps_bind,*/ VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
-	if (vs_input_info->clip_probe.enabled || ps_input_info->input0_probe.enabled)
+	if (!host_pixel_shader)
+	{
+		CreateLayout(set_layouts, &set_layouts_num, push_constant_info, &push_constant_info_num, ps_input_info->bind,
+		             /*additional_params->ps_bind,*/ VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
+	}
+	if (transport_layout != VK_NULL_HANDLE)
+	{
+		// The host capture and resolve shaders read only the transport set, at
+		// index two; missing guest sets stay as empty layouts.
+		while (set_layouts_num < 2u)
+		{
+			set_layouts[set_layouts_num++] = EmptyDescriptorSetLayout(gctx->device);
+		}
+		EXIT_IF(set_layouts_num != 2u);
+		set_layouts[set_layouts_num++] = transport_layout;
+		push_constant_info[push_constant_info_num].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		push_constant_info[push_constant_info_num].offset     = 0;
+		push_constant_info[push_constant_info_num].size       = FragmentTransport::KERNEL_PARAMETER_BYTES;
+		push_constant_info_num++;
+	}
+	if (transport_layout == VK_NULL_HANDLE && (vs_input_info->clip_probe.enabled || ps_input_info->input0_probe.enabled))
 	{
 		const uint32_t descriptor_set = vs_input_info->clip_probe.enabled ? vs_input_info->clip_probe_descriptor_set
 		                                                               : ps_input_info->input0_probe_descriptor_set;
@@ -938,26 +984,32 @@ static ComputePipelineRecipe BuildComputePipelineRecipe(const ShaderComputeInput
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
 	if (input_info->native_wave_sensitive)
 	{
-		// A split guest wave identifies its halves by SubgroupId, so it always requires the exact width.
+		// A split guest wave identifies its parts by SubgroupId, so it always requires the exact width.
 		const bool split = input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32;
-		if (input_info->required_subgroup_size != 32u ||
-		    (split ? input_info->wave_layout.guest_wave_size != 64u
-		           : input_info->wave_layout.strategy != ShaderComputeWaveStrategy::Native || input_info->wave_layout.guest_wave_size != 32u))
+		if (split ? (input_info->wave_layout.guest_wave_size != 64u && input_info->wave_layout.guest_wave_size != 32u) ||
+		                input_info->required_subgroup_size != input_info->wave_layout.native_subgroup_size
+		          : input_info->required_subgroup_size != 32u || input_info->wave_layout.strategy != ShaderComputeWaveStrategy::Native ||
+		                input_info->wave_layout.guest_wave_size != 32u)
 		{
 			EXIT("native-wave compute sensitivity has inconsistent guest-width metadata\n");
 		}
-		const auto selection = ShaderSelectNativeSubgroup(gctx->compute_wave_vulkan_state, VK_SHADER_STAGE_COMPUTE_BIT,
-		                                                   gctx->subgroup_size, input_info->required_subgroup_size,
-		                                                   false, false, cs_shader.At(1) >= 0x00010600u);
-		if (!selection.supported)
+		bool require_size = split;
+		if (!split)
 		{
-			EXIT("native-wave compute shader requires exact subgroup width 32, unavailable from the default width or enabled compute subgroup-size control\n");
+			const auto selection = ShaderSelectNativeSubgroup(gctx->compute_wave_vulkan_state, VK_SHADER_STAGE_COMPUTE_BIT,
+			                                                   gctx->subgroup_size, input_info->required_subgroup_size,
+			                                                   false, false, cs_shader.At(1) >= 0x00010600u);
+			if (!selection.supported)
+			{
+				EXIT("native-wave compute shader requires exact subgroup width 32, unavailable from the default width or enabled compute subgroup-size control\n");
+			}
+			require_size = selection.require_size;
 		}
 		auto native_layout = input_info->wave_layout;
 		native_layout.native_subgroup_size = input_info->required_subgroup_size;
 		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
 		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(native_layout, capabilities, &comp_shader_stage_info,
-		                                                     &required_subgroup_size, split || selection.require_size, cs_shader.At(1)))
+		                                                     &required_subgroup_size, require_size, cs_shader.At(1)))
 		{
 			EXIT("native-wave compute layout lacks full subgroups or exceeds exact-width workgroup limits\n");
 		}
@@ -1234,6 +1286,16 @@ void PipelineCache::DeletePipelineInternal(uint32_t id)
 
 	DumpPipeline("delete", id);
 
+	const auto [first, last] = m_pipeline_index.equal_range(PipelineIndexKey(p));
+	for (auto it = first; it != last; ++it)
+	{
+		if (it->second == id)
+		{
+			m_pipeline_index.erase(it);
+			break;
+		}
+	}
+
 	delete p.static_params;
 	delete p.dynamic_params;
 
@@ -1247,23 +1309,63 @@ void PipelineCache::DeletePipelineInternal(uint32_t id)
 	vkDestroyPipeline(gctx->device, p.pipeline->pipeline, nullptr);
 	vkDestroyPipelineLayout(gctx->device, p.pipeline->pipeline_layout, nullptr);
 
+	if (p.transport != nullptr)
+	{
+		p.transport->resolve = nullptr;
+		FragmentTransportDestroyPasses(p.transport);
+		p.transport = nullptr;
+	}
 	delete p.pipeline;
 	p = {};
 }
 
 PipelineCache::Pipeline* PipelineCache::Find(const Pipeline& p)
 {
-	for (auto& pn: m_pipelines)
+	const auto [first, last] = m_pipeline_index.equal_range(PipelineIndexKey(p));
+	for (auto it = first; it != last; ++it)
 	{
-		if (pn.pipeline != nullptr && !pn.lifetime.RetirementRequested() && p.render_pass_id == pn.render_pass_id &&
-		    p.vs_shader_id == pn.vs_shader_id &&
-		    p.ps_shader_id == pn.ps_shader_id && p.cs_shader_id == pn.cs_shader_id && *p.static_params == *pn.static_params &&
-		    *p.dynamic_params == *pn.dynamic_params)
+		auto& pn = m_pipelines[it->second];
+		if (pn.pipeline != nullptr && !pn.lifetime.RetirementRequested() && p.vs_shader_id == pn.vs_shader_id &&
+		    p.ps_shader_id == pn.ps_shader_id && p.cs_shader_id == pn.cs_shader_id && p.render_pass == pn.render_pass &&
+		    *p.static_params == *pn.static_params && *p.dynamic_params == *pn.dynamic_params)
 		{
+			pn.last_use = ++m_use_clock;
 			return &pn;
 		}
 	}
 	return nullptr;
+}
+
+uint64_t PipelineCache::PipelineIndexKey(const Pipeline& p)
+{
+	uint64_t key = 0;
+	for (const uint32_t part: {p.vs_shader_id.hash0, p.vs_shader_id.crc32, p.ps_shader_id.hash0, p.ps_shader_id.crc32,
+	                           p.cs_shader_id.hash0, p.cs_shader_id.crc32})
+	{
+		key = (key ^ part) * 0x100000001b3ULL;
+	}
+	return key;
+}
+
+void PipelineCache::StorePipeline(uint32_t slot, const Pipeline& p)
+{
+	if (slot < m_pipelines.Size())
+	{
+		if (m_pipelines[slot].pipeline != nullptr)
+		{
+			DebugStatsRecordPipelineEviction();
+			DeletePipelineInternal(slot);
+		}
+		m_pipelines[slot] = p;
+	} else
+	{
+		EXIT_IF(slot != m_pipelines.Size());
+		m_pipelines.Add(p);
+	}
+	auto& entry                = m_pipelines[slot];
+	entry.last_use             = ++m_use_clock;
+	entry.pipeline->cache_slot = slot;
+	m_pipeline_index.emplace(PipelineIndexKey(entry), slot);
 }
 
 uint32_t PipelineCache::FindAvailableSlot()
@@ -1281,9 +1383,10 @@ uint32_t PipelineCache::FindAvailableSlot()
 		return m_pipelines.Size();
 	}
 
-	const auto evict =
-	    PipelineCacheNextEvictableIndex(m_pipelines.Size(), &m_evict_cursor, [this](uint32_t index)
-	                                    { return m_pipelines[index].pipeline != nullptr && m_pipelines[index].lifetime.CanEvict(); });
+	const auto evict = PipelineCacheLeastRecentlyUsedIndex(
+	    m_pipelines.Size(),
+	    [this](uint32_t index) { return m_pipelines[index].pipeline != nullptr && m_pipelines[index].lifetime.CanEvict(); },
+	    [this](uint32_t index) { return m_pipelines[index].last_use; });
 	if (evict == UINT32_MAX)
 	{
 		EXIT("pipeline cache limit reached: all %u pipeline entries are leased by recorded command buffers\n",
@@ -1331,7 +1434,7 @@ void PipelineCache::SaveDriverCacheIfDue()
 	    m_driver_cache_attempted_once
 	        ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now - m_last_driver_cache_attempt).count())
 	        : 0u;
-	if (!PipelineCacheStoreCheckpointDue(m_driver_cache_dirty, m_driver_cache_attempted_once, elapsed_seconds))
+	if (!PipelineCacheStoreCheckpointDue(m_driver_cache_dirty, m_driver_cache_attempted_once, elapsed_seconds, m_driver_cache_bytes_attempted))
 	{
 		return;
 	}
@@ -1386,6 +1489,160 @@ static const VulkanImage* ResolutionScaledFramebufferImage(const RenderColorInfo
 	const auto*        attachment = RenderColorFirstConfiguredAttachment(color);
 	const VulkanImage* image      = attachment != nullptr ? attachment->vulkan_buffer : depth.vulkan_buffer;
 	return image != nullptr && image->IsResolutionScaled() ? image : nullptr;
+}
+
+static uint32_t TransportColorMask(const PipelineStaticParameters& state)
+{
+	uint32_t mask = 0;
+	for (uint32_t target = 0; target < std::min(state.color_targets_num, 8u); ++target)
+	{
+		mask |= (state.color_mask[target] & 15u) << (target * 4u);
+	}
+	return mask;
+}
+
+static bool TransportColorTargetsWritable(const RenderColorInfo& color)
+{
+	for (uint32_t target = 0; target < std::min(color.targets_num, 8u); ++target)
+	{
+		if (!RenderColorSlotActive(color, target))
+		{
+			continue;
+		}
+		switch (color.attachment[target].attachment_format)
+		{
+			case VK_FORMAT_R16_UINT:
+			case VK_FORMAT_R16G16_UINT:
+			case VK_FORMAT_R16G16B16A16_UINT:
+			case VK_FORMAT_R32_UINT:
+			case VK_FORMAT_R16_SINT:
+			case VK_FORMAT_R16G16_SINT:
+			case VK_FORMAT_R16G16B16A16_SINT:
+			case VK_FORMAT_R32_SINT: return false;
+			default: break;
+		}
+	}
+	return true;
+}
+
+// One transported draw state: the host capture and resolve graphics pipelines
+// plus the split compute pass that shades captured lanes. The resolve pipeline
+// carries the guest draw's fixed-function state so depth, stencil, blending and
+// MRT writes apply exactly once per pixel.
+static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer* framebuffer, const RenderColorInfo& color,
+                                                              const ShaderVertexInputInfo& vs_input, const Vector<uint32_t>& vs_shader,
+                                                              const ShaderPixelInputInfo& ps_input, const ShaderCode& ps_code,
+                                                              const Vector<uint32_t>& geometry_shader,
+                                                              const PipelineStaticParameters& static_params,
+                                                              PipelineDynamicParameters* dynamic_params, uint32_t user_sgprs,
+                                                              uint32_t lds_dwords, const String8& requirement_facts)
+{
+	auto* gctx = g_render_ctx->GetGraphicCtx();
+	if (gctx == nullptr)
+	{
+		return nullptr;
+	}
+	if (static_params.rasterization_samples != VK_SAMPLE_COUNT_1_BIT)
+	{
+		EXIT("fragment transport needs single-sample rasterization: %s\n", requirement_facts.c_str());
+	}
+	if (!framebuffer->compatibility.begins_without_clear)
+	{
+		EXIT("fragment transport cannot begin a clearing pass yet: %s\n", requirement_facts.c_str());
+	}
+	if (!TransportColorTargetsWritable(color))
+	{
+		EXIT("fragment transport has no integer color export interface: %s\n", requirement_facts.c_str());
+	}
+	const VkDescriptorSetLayout transport_layout = FragmentTransportDescriptorSetLayout();
+	if (transport_layout == VK_NULL_HANDLE)
+	{
+		EXIT("fragment transport descriptor layout is unavailable: %s\n", requirement_facts.c_str());
+	}
+
+	ShaderFragmentComputeInfo info;
+	info.descriptor_set     = 2u;
+	info.input_binding      = 3u;
+	info.output_binding     = 4u;
+	info.initial_vgpr_count = FragmentTransportInitialVgprs(ps_input);
+	info.user_sgpr_count    = user_sgprs;
+	info.parameter_state    = ShaderFragmentParameterState::Virtualized;
+
+	const uint32_t resolved_inputs = SpirvResolvePixelParameterCount(ps_code, ps_input.input_num);
+
+	Vector<uint32_t> capture_binary;
+	Vector<uint32_t> resolve_binary;
+	Vector<uint32_t> shade_binary;
+	String8          error;
+	ShaderPixelInputInfo capture_input = ps_input;
+	capture_input.input_num            = resolved_inputs;
+	const auto capture_source          = FragmentTransport::GenerateCaptureSource(ps_code, capture_input, info);
+	if (capture_source.StartsWith("OpKyty"))
+	{
+		uint32_t interp_count = 0;
+		int      first_interp = -1;
+		for (uint32_t i = 0; i < ps_code.GetInstructions().Size(); ++i)
+		{
+			const auto& instruction = ps_code.GetInstructions().At(i);
+			if (instruction.type == ShaderInstructionType::VInterpP1F32 || instruction.type == ShaderInstructionType::VInterpP2F32 ||
+			    instruction.type == ShaderInstructionType::VInterpMovF32)
+			{
+				++interp_count;
+				if (first_interp < 0)
+				{
+					first_interp = static_cast<int>(instruction.src[1].constant.u);
+				}
+			}
+		}
+		EXIT("fragment transport capture inputs are unavailable: %s custom=%u scale=%u interp=%u/%d %s\n", capture_source.TrimRight().c_str(),
+		     ps_input.custom_interpolation.Enabled() ? 1u : 0u, ps_input.host_to_guest_scale.IsIdentity() ? 1u : 0u, interp_count, first_interp,
+		     requirement_facts.c_str());
+	}
+	if (!ShaderToolchain::Run(capture_source, &capture_binary, &error))
+	{
+		EXIT("fragment transport capture assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());
+	}
+	const auto resolve_source = FragmentTransport::GenerateResolveSource(2u, TransportColorMask(static_params));
+	if (!ShaderToolchain::Run(resolve_source, &resolve_binary, &error))
+	{
+		EXIT("fragment transport resolve assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());
+	}
+	if (!FragmentTransportBuildShadeModule(ps_code, ps_input, user_sgprs, lds_dwords, &shade_binary, &error))
+	{
+		EXIT("fragment transport shade compilation failed: %s %s\n", error.c_str(), requirement_facts.c_str());
+	}
+
+	auto* passes            = new FragmentTransportPasses;
+	passes->lane_words      = FragmentTransportLaneWords(ps_code, ps_input);
+	passes->initial_vgpr    = info.initial_vgpr_count;
+	passes->capture_static  = new PipelineStaticParameters(static_params);
+	passes->capture_dynamic = new PipelineDynamicParameters(*dynamic_params);
+	passes->capture_static->depth_test_enable        = false;
+	passes->capture_static->depth_write_enable       = false;
+	passes->capture_static->depth_bounds_test_enable = false;
+	passes->capture_static->stencil_test_enable      = false;
+	passes->capture_static->depth_bias_enable        = false;
+	passes->capture_static->sample_shading_enable    = false;
+	for (uint32_t target = 0; target < 8u; ++target)
+	{
+		passes->capture_static->color_mask[target]   = 0;
+		passes->capture_static->blend_enable[target] = false;
+	}
+
+	passes->capture = CreatePipelineInternal(framebuffer->render_pass, &vs_input, vs_shader, &ps_input, capture_binary, geometry_shader,
+	                                         passes->capture_static, passes->capture_dynamic, transport_layout, true);
+	passes->resolve = CreatePipelineInternal(framebuffer->render_pass, &vs_input, vs_shader, &ps_input, resolve_binary, geometry_shader,
+	                                         &static_params, dynamic_params, transport_layout, true);
+	if (passes->capture == nullptr || passes->resolve == nullptr)
+	{
+		EXIT("fragment transport pipeline creation failed: %s\n", requirement_facts.c_str());
+	}
+	if (!FragmentTransportCreateShadePipeline(gctx->device, gctx->pipeline_cache, ps_input.bind, shade_binary, true, transport_layout,
+	                                          &passes->shade_layout, &passes->shade, &error))
+	{
+		EXIT("fragment transport split compute pipeline creation failed: %s %s\n", error.c_str(), requirement_facts.c_str());
+	}
+	return passes;
 }
 
 namespace {
@@ -1461,7 +1718,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	EXIT_IF(gctx == nullptr);
 
 	Pipeline p {};
-	p.render_pass_id = framebuffer->render_pass_id;
+	p.render_pass    = framebuffer->compatibility;
 	p.ps_shader_id   = ps_id;
 	p.vs_shader_id   = vs_id;
 	p.static_params  = new PipelineStaticParameters {};
@@ -1554,9 +1811,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	{
 		// Depth-only: FramebufferCache attaches one dummy color image so the
 		// Vulkan render pass stays valid; the pipeline must match that count
-		// with a zero write mask (no color output).
-		if (!p.static_params->with_depth) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !p.static_params->with_depth condition ignored (continuing)\n"); }
-		p.static_params->color_targets_num = 1;
+		// with a zero write mask (no color output). An attachment-less pass,
+		// which only runs the pixel shader's memory effects, has no color slot.
+		p.static_params->color_targets_num = p.static_params->with_depth ? 1u : 0u;
 		p.static_params->color_mask[0]     = 0;
 		p.static_params->blend_enable[0]   = false;
 	} else
@@ -1692,24 +1949,6 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		        static_cast<uint32_t>(vs_input_info->export_count) * 4u + 4u > limits.maxGeometryInputComponents);
 	}
 
-	if (ps_input_info->stage_enabled)
-	{
-		const auto ps_transport_code = ShaderParsePS(&ps_regs, &sh_regs);
-		const auto requirement       = FragmentTransportRequire(ps_transport_code, *ps_input_info,
-                                                          static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr), *p.static_params,
-                                                          framebuffer->extent);
-		if (requirement.required)
-		{
-			char dump_note[160] {};
-			if (const char* dump_dir = std::getenv("KYTY_TRANSPORT_DUMP"); dump_dir != nullptr && dump_dir[0] != '\0')
-			{
-				std::snprintf(dump_note, sizeof(dump_note), " (transport dump: %s)",
-				              ShaderDumpGuestProgram(dump_dir, "ps", ps_regs.ps_regs.chksum, ps_regs.ps_regs.data_addr, ps_transport_code).c_str());
-			}
-			EXIT("fragment wave transport is required by the pixel stage but the renderer does not select it yet: %s%s\n",
-			     requirement.facts.c_str(), dump_note);
-		}
-	}
 
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
@@ -1729,6 +1968,41 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		                                    return ShaderRecompileVS(vs_code, vs_input_info);
 	                                    });
 	DebugStatsRecordShaderTranslationCache(vs_translation.hit, vs_translation.evicted);
+
+
+	if (ps_input_info->stage_enabled)
+	{
+		const auto ps_transport_code = ShaderParsePS(&ps_regs, &sh_regs);
+		const auto requirement       = FragmentTransportRequire(ps_transport_code, *ps_input_info,
+		                                                        static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr), *p.static_params,
+		                                                        framebuffer->extent);
+		if (requirement.required)
+		{
+			ShaderTranslationCacheResult transport_geometry;
+			if (ps_input_info->custom_interpolation.Enabled())
+			{
+				transport_geometry = translation_cache->GetOrCompile(
+				    ShaderModuleKey::Create(ps_id, ShaderModuleStage::GeometryForwardingPrimitiveId, optimization, next_gen),
+				    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info, true); });
+				EXIT_IF(transport_geometry.binary.IsEmpty());
+			}
+			auto* passes = CreateFragmentTransportPasses(framebuffer, *color, *vs_input_info, vs_translation.binary, *ps_input_info,
+			                                             ps_transport_code, transport_geometry.binary, *p.static_params, p.dynamic_params,
+			                                             static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr),
+			                                             ps_transport_code.GetPixelExtraLdsDwords(), requirement.facts);
+			const uint32_t transport_slot = FindAvailableSlot();
+			p.pipeline                    = passes->resolve;
+			p.transport                   = passes;
+			p.pipeline->transport         = passes;
+			p.pipeline->framebuffer_extent = framebuffer->extent;
+			StorePipeline(transport_slot, p);
+			AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(transport_slot)]);
+			m_driver_cache_dirty = true;
+			SaveDriverCacheIfDue();
+			return m_pipelines[static_cast<int>(transport_slot)].pipeline;
+		}
+	}
+
 	ShaderTranslationCacheResult ps_translation;
 	if (ps_input_info->stage_enabled)
 	{
@@ -1759,31 +2033,20 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	{
 		geometry_translation = translation_cache->GetOrCompile(
 		    ShaderModuleKey::Create(ps_id, ShaderModuleStage::Geometry, optimization, next_gen),
-		    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info); });
+		    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info, false); });
 		DebugStatsRecordShaderTranslationCache(geometry_translation.hit, geometry_translation.evicted);
 		EXIT_IF(geometry_translation.binary.IsEmpty());
 	}
 
 	const uint32_t slot = FindAvailableSlot();
 	p.pipeline = CreatePipelineInternal(framebuffer->render_pass, vs_input_info, vs_translation.binary, ps_input_info,
-	                                    ps_translation.binary, geometry_translation.binary, p.static_params, p.dynamic_params);
+	                                    ps_translation.binary, geometry_translation.binary, p.static_params, p.dynamic_params,
+	                                    VK_NULL_HANDLE, false);
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 	p.pipeline->framebuffer_extent = framebuffer->extent;
 
-	if (slot < m_pipelines.Size())
-	{
-		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
-		{
-			DebugStatsRecordPipelineEviction();
-			DeletePipelineInternal(slot);
-		}
-		m_pipelines[static_cast<int>(slot)] = p;
-	} else
-	{
-		EXIT_IF(slot != m_pipelines.Size());
-		m_pipelines.Add(p);
-	}
+	StorePipeline(slot, p);
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
@@ -1859,19 +2122,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 
-	if (slot < m_pipelines.Size())
-	{
-		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
-		{
-			DebugStatsRecordPipelineEviction();
-			DeletePipelineInternal(slot);
-		}
-		m_pipelines[static_cast<int>(slot)] = p;
-	} else
-	{
-		EXIT_IF(slot != m_pipelines.Size());
-		m_pipelines.Add(p);
-	}
+	StorePipeline(slot, p);
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
@@ -1899,6 +2150,8 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 	id.ids.Add(geometry.parameter_count);
 	id.ids.Add(geometry.lds_dwords);
 	id.ids.Add(geometry.waves);
+	id.ids.Add(geometry.indexed ? geometry.index_format + 1u : 0u);
+	id.ids.Add(geometry.part_lanes);
 
 	Pipeline p {};
 	p.cs_shader_id   = id;
@@ -1931,19 +2184,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 
 	const uint32_t slot = FindAvailableSlot();
 	p.pipeline          = CreatePipelineInternal(&host, translation.binary, p.static_params, p.dynamic_params);
-	if (slot < m_pipelines.Size())
-	{
-		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
-		{
-			DebugStatsRecordPipelineEviction();
-			DeletePipelineInternal(slot);
-		}
-		m_pipelines[static_cast<int>(slot)] = p;
-	} else
-	{
-		EXIT_IF(slot != m_pipelines.Size());
-		m_pipelines.Add(p);
-	}
+	StorePipeline(slot, p);
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
@@ -1968,23 +2209,6 @@ void PipelineCache::DeletePipeline(VulkanPipeline* pipeline)
 	}
 }
 
-void PipelineCache::DeletePipelines(VulkanFramebuffer* framebuffer)
-{
-	EXIT_IF(framebuffer == nullptr);
-
-	Core::LockGuard lock(m_mutex);
-
-	int index = 0;
-	for (auto& p: m_pipelines)
-	{
-		if (p.pipeline != nullptr && p.render_pass_id == framebuffer->render_pass_id)
-		{
-			DeletePipelineInternal(index);
-		}
-		index++;
-	}
-}
-
 void PipelineCache::DeleteAllPipelines()
 {
 	Core::LockGuard lock(m_mutex);
@@ -1999,18 +2223,14 @@ void PipelineCache::ReleasePipelineLease(VulkanPipeline* pipeline)
 {
 	EXIT_IF(pipeline == nullptr);
 	Core::LockGuard lock(m_mutex);
-	const auto      index = m_pipelines.Find(pipeline, [](const auto& entry, const auto* value) { return value == entry.pipeline; });
-	EXIT_IF(!m_pipelines.IndexValid(index));
-	if (!m_pipelines.IndexValid(index))
-	{
-		return;
-	}
+	const uint32_t  index = pipeline->cache_slot;
+	EXIT_IF(!m_pipelines.IndexValid(index) || m_pipelines[index].pipeline != pipeline);
 
 	Pipeline& entry = m_pipelines[index];
 	EXIT_IF(entry.lifetime.ReferenceCount() == 0);
 	if (entry.lifetime.Release())
 	{
-		DeletePipelineInternal(static_cast<uint32_t>(index));
+		DeletePipelineInternal(index);
 	}
 }
 

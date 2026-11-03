@@ -113,13 +113,25 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.format      = ShaderInstructionFormat::SVdstSVsrc02;
 			inst.src[0].size = 2;
 			break;
-		case 0x15: KYTY_NI("s_flbit_i32_b32"); break;
-		case 0x16: KYTY_NI("s_flbit_i32_b64"); break;
+		case 0x15:
+			inst.type   = ShaderInstructionType::SFlbitI32B32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
+			break;
+		case 0x16:
+			inst.type        = ShaderInstructionType::SFlbitI32B64;
+			inst.format      = ShaderInstructionFormat::SVdstSVsrc02;
+			inst.src[0].size = 2;
+			break;
 		case 0x17: KYTY_NI("s_flbit_i32"); break;
 		case 0x18: KYTY_NI("s_flbit_i32_i64"); break;
 		case 0x19: KYTY_NI("s_sext_i32_i8"); break;
 		case 0x1A: KYTY_NI("s_sext_i32_i16"); break;
-		case 0x1B: KYTY_NI("s_bitset0_b32"); break;
+		case 0x1B:
+			inst.type    = ShaderInstructionType::SBitset0B32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src[1]  = inst.dst;
+			inst.src_num = 2;
+			break;
 		case 0x1C: KYTY_NI("s_bitset0_b64"); break;
 		case 0x1D:
 			inst.type    = ShaderInstructionType::SBitset1B32;

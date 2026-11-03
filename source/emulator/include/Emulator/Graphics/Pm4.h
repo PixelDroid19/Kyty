@@ -50,6 +50,8 @@ constexpr uint32_t IT_COPY_DATA                 = 0x40;
 constexpr uint32_t IT_CP_DMA                    = 0x41;
 constexpr uint32_t IT_PFP_SYNC_ME               = 0x42;
 constexpr uint32_t IT_SURFACE_SYNC              = 0x43;
+// AGC COND_WRITE (sceAgcCbCondWrite, NID 7toV+elXqNM).
+constexpr uint32_t IT_COND_WRITE                = 0x45;
 constexpr uint32_t IT_EVENT_WRITE               = 0x46;
 constexpr uint32_t IT_EVENT_WRITE_EOP           = 0x47;
 constexpr uint32_t IT_EVENT_WRITE_EOS           = 0x48;
@@ -58,6 +60,7 @@ constexpr uint32_t IT_DMA_DATA                  = 0x50;
 constexpr uint32_t IT_ONE_REG_WRITE             = 0x57;
 constexpr uint32_t IT_ACQUIRE_MEM               = 0x58;
 constexpr uint32_t IT_REWIND                    = 0x59;
+constexpr uint32_t IT_PRIME_UTCL2               = 0x5D;
 constexpr uint32_t IT_SET_CONFIG_REG            = 0x68;
 constexpr uint32_t IT_SET_CONTEXT_REG           = 0x69;
 constexpr uint32_t IT_SET_SH_REG                = 0x76;
@@ -73,6 +76,8 @@ constexpr uint32_t IT_WAIT_ON_DE_COUNTER_DIFF   = 0x88;
 constexpr uint32_t IT_GET_LOD_STATS             = 0x8E;
 constexpr uint32_t IT_DISPATCH_DRAW_PREAMBLE    = 0x8C;
 constexpr uint32_t IT_DISPATCH_DRAW             = 0x8D;
+// AGC SET_INDEX_INDIRECT_ARGS (sceAgcDcbSetIndexIndirectArgs, NID 0o3VDdtA6nM).
+constexpr uint32_t IT_SET_INDEX_INDIRECT_ARGS   = 0x91;
 
 /* Custom codes. Implemented via IT_NOP */
 
@@ -993,8 +998,11 @@ constexpr uint32_t VGT_PRIMITIVE_TYPE_PRIM_TYPE_SHIFT = 0;
 constexpr uint32_t VGT_PRIMITIVE_TYPE_PRIM_TYPE_MASK  = 0x3F;
 constexpr uint32_t VGT_INDEX_TYPE                     = 0x243;
 constexpr uint32_t VGT_INDEX_TYPE_INDEXED_UCONFIG_SELECTOR = (2u << 28u) | VGT_INDEX_TYPE;
-constexpr uint32_t VGT_INDEX_TYPE_DEFAULT_VALUE            = 0x00000400u;
+// Bit 10 is always set by the Agc index-size encoder; its hardware meaning is not modelled.
+constexpr uint32_t VGT_INDEX_TYPE_AGC_BASE_VALUE           = 0x00000400u;
 constexpr uint32_t VGT_INDEX_TYPE_SIZE_MASK                = 0x3u;
+constexpr uint32_t VGT_INDEX_TYPE_CACHE_POLICY_SHIFT       = 6u;
+constexpr uint32_t VGT_INDEX_TYPE_PER_INSTANCE_OBJECT_ID_SHIFT = 14u;
 
 constexpr uint32_t VGT_OBJECT_ID             = 0x248;
 constexpr uint32_t GE_INDX_OFFSET            = 0x24A;

@@ -350,8 +350,37 @@ namespace LibNpWebApi2 {
 
 LIB_VERSION("NpWebApi2", 1, "NpWebApi2", 1, 1);
 
-static constexpr int kNpWebApi2ErrorInvalidArgument = static_cast<int>(0x80553402u);
-static constexpr int kNpWebApi2ErrorRequestNotFound = static_cast<int>(0x80553406u);
+static constexpr int kNpWebApi2ErrorInvalidArgument         = static_cast<int>(0x80553402u);
+static constexpr int kNpWebApi2ErrorUserContextNotFound     = static_cast<int>(0x80553405u);
+static constexpr int kNpWebApi2ErrorRequestNotFound         = static_cast<int>(0x80553406u);
+static constexpr int kNpWebApi2ErrorNotSignedIn             = static_cast<int>(0x80553407u);
+static constexpr int kNpWebApi2ErrorInvalidContentParameter = static_cast<int>(0x80553408u);
+
+struct NpWebApi2ContentParameter
+{
+	size_t      content_length;
+	const char* content_type;
+	uint8_t     reserved[16];
+};
+
+// User contexts and requests live only on the host: the offline NP account is
+// signed out, so no request is ever sent.
+struct NpWebApi2Registry
+{
+	std::mutex        mutex;
+	int               next_user_context_id = 1;
+	int64_t           next_request_id      = 1;
+	std::set<int>     user_contexts;
+	std::set<int64_t> requests;
+};
+
+static NpWebApi2Registry g_npwebapi2_registry;
+
+static bool NpWebApi2RequestExists(int64_t request_id)
+{
+	std::lock_guard lock(g_npwebapi2_registry.mutex);
+	return g_npwebapi2_registry.requests.count(request_id) != 0;
+}
 
 // Gen5 sceNpWebApi2Initialize (NID +o9816YQhqQ). Returns a positive library
 // context id; no real NP traffic yet.
@@ -377,15 +406,78 @@ static int KYTY_SYSV_ABI NpWebApi2CreateUserContext(int lib_ctx_id, int user_id)
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t lib_ctx_id = %d\n", lib_ctx_id);
 	KYTY_LOG_DEBUG("\t user_id    = %d\n", user_id);
-	static int next = 1;
-	return next++;
+	std::lock_guard lock(g_npwebapi2_registry.mutex);
+	const int       user_ctx_id = g_npwebapi2_registry.next_user_context_id++;
+	g_npwebapi2_registry.user_contexts.insert(user_ctx_id);
+	return user_ctx_id;
 }
 
 static int KYTY_SYSV_ABI NpWebApi2DeleteUserContext(int user_ctx_id)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t user_ctx_id = %d\n", user_ctx_id);
+	std::lock_guard lock(g_npwebapi2_registry.mutex);
+	g_npwebapi2_registry.user_contexts.erase(user_ctx_id);
 	return OK;
+}
+
+static int KYTY_SYSV_ABI NpWebApi2CreateRequest(int user_ctx_id, const char* api_group, const char* path, const char* method,
+                                                const NpWebApi2ContentParameter* content, int64_t* request_id)
+{
+	PRINT_NAME();
+	if (api_group == nullptr || path == nullptr || method == nullptr)
+	{
+		return kNpWebApi2ErrorInvalidArgument;
+	}
+	KYTY_LOG_DEBUG("\t user_ctx_id = %d %s %s%s\n", user_ctx_id, method, api_group, path);
+	if (content != nullptr && content->content_length != 0 && content->content_type == nullptr)
+	{
+		return kNpWebApi2ErrorInvalidContentParameter;
+	}
+
+	std::lock_guard lock(g_npwebapi2_registry.mutex);
+	if (g_npwebapi2_registry.user_contexts.count(user_ctx_id) == 0)
+	{
+		return kNpWebApi2ErrorUserContextNotFound;
+	}
+	const int64_t id = g_npwebapi2_registry.next_request_id++;
+	g_npwebapi2_registry.requests.insert(id);
+	if (request_id != nullptr)
+	{
+		*request_id = id;
+	}
+	return OK;
+}
+
+static int KYTY_SYSV_ABI NpWebApi2DeleteRequest(int64_t request_id)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_npwebapi2_registry.mutex);
+	return g_npwebapi2_registry.requests.erase(request_id) != 0 ? OK : kNpWebApi2ErrorRequestNotFound;
+}
+
+static int KYTY_SYSV_ABI NpWebApi2AbortRequest(int64_t request_id)
+{
+	PRINT_NAME();
+	return NpWebApi2RequestExists(request_id) ? OK : kNpWebApi2ErrorRequestNotFound;
+}
+
+// Headers need no storage: a request is never sent.
+static int KYTY_SYSV_ABI NpWebApi2AddHttpRequestHeader(int64_t request_id, const char* field_name, const char* value)
+{
+	PRINT_NAME();
+	if (field_name == nullptr || value == nullptr)
+	{
+		return kNpWebApi2ErrorInvalidArgument;
+	}
+	return NpWebApi2RequestExists(request_id) ? OK : kNpWebApi2ErrorRequestNotFound;
+}
+
+// Sending requires a signed-in account, which the offline NP account never is.
+static int KYTY_SYSV_ABI NpWebApi2SendRequest(int64_t request_id, const void* /*data*/, size_t /*data_size*/, void* /*response_info*/)
+{
+	PRINT_NAME();
+	return NpWebApi2RequestExists(request_id) ? kNpWebApi2ErrorNotSignedIn : kNpWebApi2ErrorRequestNotFound;
 }
 
 static int KYTY_SYSV_ABI NpWebApi2PushEventCreateHandle(int lib_ctx_id)
@@ -442,6 +534,11 @@ LIB_DEFINE(InitNet_1_NpWebApi2)
 	LIB_FUNC("bEvXpcEk200", LibNpWebApi2::NpWebApi2Terminate);
 	LIB_FUNC("sk54bi6FtYM", LibNpWebApi2::NpWebApi2CreateUserContext);
 	LIB_FUNC("9X9+cneTGUU", LibNpWebApi2::NpWebApi2DeleteUserContext);
+	LIB_FUNC("3EI-OSJ65Xc", LibNpWebApi2::NpWebApi2CreateRequest);
+	LIB_FUNC("vvzWO-DvG1s", LibNpWebApi2::NpWebApi2DeleteRequest);
+	LIB_FUNC("zpiPsH7dbFQ", LibNpWebApi2::NpWebApi2AbortRequest);
+	LIB_FUNC("egOOvrnF6mI", LibNpWebApi2::NpWebApi2AddHttpRequestHeader);
+	LIB_FUNC("lQOCF84lvzw", LibNpWebApi2::NpWebApi2SendRequest);
 	LIB_FUNC("WV1GwM32NgY", LibNpWebApi2::NpWebApi2PushEventCreateHandle);
 	LIB_FUNC("fIATVMo4Y1w", LibNpWebApi2::NpWebApi2PushEventDeleteHandle);
 	LIB_FUNC("MsaFhR+lPE4", LibNpWebApi2::NpWebApi2PushEventCreateFilter);

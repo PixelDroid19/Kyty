@@ -215,6 +215,13 @@ bool BypassesDefinition(const ShaderCode& code, uint32_t first_pc, uint32_t last
 	return false;
 }
 
+// An S_*_SAVEEXEC writes the EXEC it replaces to its destination, as a copy of EXEC does.
+bool SavesExec(const MaskForm& form, const ShaderInstruction& instruction, const ShaderOperand& mask)
+{
+	return Core::EnumName8(instruction.type).ContainsStr("Saveexec") && instruction.format == form.unary && instruction.src_num == 1 &&
+	       SamePair(form, instruction.dst, mask) && Unused(instruction.dst2) && ScalarMetadata(instruction);
+}
+
 bool SavedMaskIsAllocated(const MaskForm& form, const ShaderCode& code, uint32_t before, const ShaderOperand& mask,
                           const ShaderOperand& exec)
 {
@@ -222,7 +229,7 @@ bool SavedMaskIsAllocated(const MaskForm& form, const ShaderCode& code, uint32_t
 	for (uint32_t cursor = before; cursor > 0;)
 	{
 		const auto& instruction = instructions.At(--cursor);
-		if (ScalarMove(form, instruction, mask, exec))
+		if (ScalarMove(form, instruction, mask, exec) || SavesExec(form, instruction, mask))
 		{
 			return !BypassesDefinition(code, instruction.pc, instructions.At(before).pc);
 		}
@@ -290,10 +297,15 @@ bool MaskSubset(const MaskForm& form, const ShaderCode& code, uint32_t begin, ui
 	return false;
 }
 
+bool IntegerConstant(const ShaderOperand& operand)
+{
+	return Plain(operand) && operand.size == 0 &&
+	       (operand.type == ShaderOperandType::LiteralConstant || operand.type == ShaderOperandType::IntegerInlineConstant);
+}
+
 bool ZeroConstant(const ShaderOperand& operand)
 {
-	return Plain(operand) && operand.size == 0 && operand.constant.u == 0u &&
-	       (operand.type == ShaderOperandType::LiteralConstant || operand.type == ShaderOperandType::IntegerInlineConstant);
+	return IntegerConstant(operand) && operand.constant.u == 0u;
 }
 
 bool Contribution(const ShaderOperand& operand)
@@ -315,12 +327,12 @@ bool InitializerShape(const MaskForm& form, const ShaderInstruction& instruction
 
 bool RegionScalarLoad(const ShaderInstruction& instruction)
 {
-	return ShaderReductionRegionScalarLoad(instruction) && !WritesExec(instruction);
+	return ShaderReductionRegionScalarInstruction(instruction) && !WritesExec(instruction);
 }
 
-// The initializer follows the entry, after the scalar loads a reduction region may hold before it. No label
+// The initializer follows the entry, after the scalar loads and M0 copies a reduction region may hold before it. No label
 // may enter between them.
-bool SeedIndex(const ShaderCode& code, uint32_t begin, bool scalar_loads, uint32_t* seed)
+bool SeedIndex(const ShaderCode& code, uint32_t begin, bool lane_reduction, uint32_t* seed)
 {
 	for (uint32_t cursor = begin + 1u; cursor < code.GetInstructions().Size(); ++cursor)
 	{
@@ -329,7 +341,7 @@ bool SeedIndex(const ShaderCode& code, uint32_t begin, bool scalar_loads, uint32
 		{
 			return false;
 		}
-		if (!scalar_loads || !RegionScalarLoad(instruction))
+		if (!lane_reduction || !RegionScalarLoad(instruction))
 		{
 			*seed = cursor;
 			return true;
@@ -338,11 +350,12 @@ bool SeedIndex(const ShaderCode& code, uint32_t begin, bool scalar_loads, uint32
 	return false;
 }
 
-// Lanes outside the condition receive the zero constant. The condition is
-// a subset of the saved mask, itself a subset of the captured allocation.
+// Lanes outside the condition receive the initializer constant: zero for the uncaptured-lane tier, and for a lane
+// reduction any integer constant, whose identity ShaderProveLaneReductionNetwork checks against its op. The condition
+// is a subset of the saved mask, itself a subset of the captured allocation.
 // A load before the initializer keeps the condition and the saved mask.
 bool Initializer(const MaskForm& form, const ShaderCode& code, uint32_t begin, uint32_t seed, uint32_t anchor, const ShaderOperand& mask,
-                 const ShaderOperand& saved)
+                 const ShaderOperand& saved, bool lane_reduction)
 {
 	const auto& instruction = code.GetInstructions().At(seed);
 	for (uint32_t cursor = begin + 1u; cursor < seed; ++cursor)
@@ -352,8 +365,9 @@ bool Initializer(const MaskForm& form, const ShaderCode& code, uint32_t begin, u
 			return false;
 		}
 	}
-	return InitializerShape(form, instruction) && ZeroConstant(instruction.src[0]) && Contribution(instruction.src[1]) &&
-	       !Overlaps(saved, instruction.src[2]) && MaskSubset(form, code, begin, anchor, instruction.src[2], mask);
+	const bool constant = lane_reduction ? IntegerConstant(instruction.src[0]) : ZeroConstant(instruction.src[0]);
+	return InitializerShape(form, instruction) && constant && Contribution(instruction.src[1]) && !Overlaps(saved, instruction.src[2]) &&
+	       MaskSubset(form, code, begin, anchor, instruction.src[2], mask);
 }
 
 bool DefinedSource(const ShaderOperand& operand, const VectorSet& defined)
@@ -384,16 +398,28 @@ bool DefinedSources(const ShaderInstruction& instruction, const VectorSet& defin
 	return true;
 }
 
+// The integer min and max folds of a lane reduction. Only their shape is checked here: the classifier has no entry for
+// them, and ShaderProveLaneReductionNetwork checks the operands and DPP controls of each fold it admits.
+bool IntegerFold(const ShaderInstruction& instruction)
+{
+	const auto type    = instruction.type;
+	const bool min_max = type == ShaderInstructionType::VMinU32 || type == ShaderInstructionType::VMaxU32 ||
+	                     type == ShaderInstructionType::VMinI32 || type == ShaderInstructionType::VMaxI32;
+	return min_max && instruction.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1 && instruction.src_num == 2 &&
+	       VectorMetadata(instruction) && instruction.vop3_op_sel == 0u;
+}
+
 // A pure instruction writes one VGPR and reads only fully defined registers.
 // Without a full overwrite, a DPP destination keeps its previous value, so it
-// must already be defined in every lane.
-bool PureVector(const ShaderInstruction& instruction, const VectorSet& defined)
+// must already be defined in every lane. Integer min and max are pure only
+// inside a lane reduction; the uncaptured-lane tier never admits them.
+bool PureVector(const ShaderInstruction& instruction, const VectorSet& defined, bool lane_reduction)
 {
 	if (!SourceCount(instruction) || !VectorDestination(instruction))
 	{
 		return false;
 	}
-	if (!ShaderComputeWavePermutationSupported(instruction) && !BitwiseVector(instruction))
+	if (!ShaderComputeWavePermutationSupported(instruction) && !BitwiseVector(instruction) && !(lane_reduction && IntegerFold(instruction)))
 	{
 		return false;
 	}
@@ -473,7 +499,7 @@ bool GhostZeroSources(const ShaderInstruction& instruction, const VectorSet& zer
 }
 
 bool ClosedRegion(const MaskForm& form, const ShaderCode& code, uint32_t begin, uint32_t seed, const ShaderOperand& saved,
-                  bool scalar_loads, NeutralRegion* region)
+                  bool lane_reduction, NeutralRegion* region)
 {
 	region->begin = begin;
 	region->seed  = seed;
@@ -488,7 +514,7 @@ bool ClosedRegion(const MaskForm& form, const ShaderCode& code, uint32_t begin, 
 		{
 			return false;
 		}
-		if (scalar_loads && RegionScalarLoad(instruction) && !Writes(instruction, saved))
+		if (lane_reduction && RegionScalarLoad(instruction) && !Writes(instruction, saved))
 		{
 			continue;
 		}
@@ -502,7 +528,7 @@ bool ClosedRegion(const MaskForm& form, const ShaderCode& code, uint32_t begin, 
 			}
 			return true;
 		}
-		if (!PureVector(instruction, region->written))
+		if (!PureVector(instruction, region->written, lane_reduction))
 		{
 			return false;
 		}
@@ -534,14 +560,30 @@ bool RegionEntry(const MaskForm& form, const ShaderCode& code, uint32_t index)
 	const auto& mask        = instruction.src[0];
 	const auto& saved       = instruction.dst;
 	return instruction.type == form.entry && instruction.format == form.unary && instruction.src_num == 1 && Pair(form, mask) &&
-	       mask.type == ShaderOperandType::Sgpr && Pair(form, saved) &&
+	       (mask.type == ShaderOperandType::Sgpr || SamePair(form, mask, Exec(form))) && Pair(form, saved) &&
 	       saved.type != ShaderOperandType::ExecLo && !Overlaps(saved, mask) && Unused(instruction.dst2) && Unused(instruction.src[1]) &&
 	       Unused(instruction.src[2]) && Unused(instruction.src[3]) && ScalarMetadata(instruction) && !LabelAt(code, instruction.pc);
 }
 
-// `scalar_loads` admits scalar memory loads before the initializer and among the steps: a lane reduction runs
-// them as written, while the uncaptured-lane tier keeps its regions free of scalar writes.
-bool AnalyzeRegion(const MaskForm& form, const ShaderCode& code, uint32_t index, bool scalar_loads, NeutralRegion* region)
+// An entry that saves EXEC itself (S_ORN2_SAVEEXEC with EXEC as its source) widens EXEC the same way and
+// needs no copy of it. The anchor is the last instruction before the entry that writes EXEC, transfers
+// control or is a branch target, so that the condition is proven only where EXEC already held its value.
+bool ExecAnchor(const ShaderCode& code, uint32_t begin, uint32_t* anchor)
+{
+	uint32_t cursor = begin;
+	while (cursor > 0)
+	{
+		const auto& instruction = code.GetInstructions().At(--cursor);
+		if (WritesExec(instruction) || Transfer(instruction) || LabelAt(code, instruction.pc)) { break; }
+	}
+	*anchor = cursor;
+	return !BypassesDefinition(code, code.GetInstructions().At(cursor).pc, code.GetInstructions().At(begin).pc);
+}
+
+// `lane_reduction` selects the mode of the proof. A lane reduction admits scalar memory loads and M0 copies before the
+// initializer and among the steps, which it runs as written, an identity initializer and the integer min and max folds.
+// The uncaptured-lane tier keeps its regions free of scalar writes, integer folds and any initializer but zero.
+bool AnalyzeRegion(const MaskForm& form, const ShaderCode& code, uint32_t index, bool lane_reduction, NeutralRegion* region)
 {
 	if (code.GetType() != ShaderType::Pixel || index >= code.GetInstructions().Size() || code.GetInstructions().Size() - index < 2u ||
 	    !RegionEntry(form, code, index))
@@ -551,9 +593,11 @@ bool AnalyzeRegion(const MaskForm& form, const ShaderCode& code, uint32_t index,
 	const auto& instruction = code.GetInstructions().At(index);
 	uint32_t    anchor      = 0;
 	uint32_t    seed        = 0;
-	return SavedMaskEqualsExec(form, code, index, instruction.src[0], &anchor) && SeedIndex(code, index, scalar_loads, &seed) &&
-	       Initializer(form, code, index, seed, anchor, instruction.src[0], instruction.dst) &&
-	       ClosedRegion(form, code, index, seed, instruction.dst, scalar_loads, region);
+	const bool  saves_exec  = SamePair(form, instruction.src[0], Exec(form));
+	return (saves_exec ? ExecAnchor(code, index, &anchor) : SavedMaskEqualsExec(form, code, index, instruction.src[0], &anchor)) &&
+	       SeedIndex(code, index, lane_reduction, &seed) &&
+	       Initializer(form, code, index, seed, anchor, instruction.src[0], instruction.dst, lane_reduction) &&
+	       ClosedRegion(form, code, index, seed, instruction.dst, lane_reduction, region);
 }
 
 std::vector<NeutralRegion> CollectRegions(const ShaderCode& code)
@@ -649,11 +693,19 @@ bool DefinedBeforeRead(const ShaderCode& code, const std::vector<NeutralRegion>&
 
 } // namespace
 
-bool ShaderReductionRegionScalarLoad(const ShaderInstruction& instruction)
+bool ShaderReductionRegionScalarInstruction(const ShaderInstruction& instruction)
 {
-	return ShaderInstructionIsScalarMemoryLoad(instruction.type) || ShaderInstructionIsScalarBufferLoad(instruction);
+	const auto& source  = instruction.src[0];
+	const bool  m0_move = instruction.type == ShaderInstructionType::SMovB32 && instruction.format == ShaderInstructionFormat::SVdstSVsrc0 &&
+	                     instruction.dst.type == ShaderOperandType::M0 && Plain(instruction.dst) && Plain(source) &&
+	                     (source.type == ShaderOperandType::Sgpr || source.type == ShaderOperandType::IntegerInlineConstant ||
+	                      source.type == ShaderOperandType::LiteralConstant);
+	return ShaderInstructionIsScalarMemoryLoad(instruction.type) || ShaderInstructionIsScalarBufferLoad(instruction) || m0_move ||
+	       instruction.type == ShaderInstructionType::SWaitcnt;
 }
 
+// Only the seed and the end leave this function, so the zero and tier flags a reduction-mode region records
+// are never read; the tier path analyses its regions with lane_reduction off.
 bool ShaderFragmentNeutralRegionBounds(const ShaderCode& code, uint32_t guest_wave_size, uint32_t index, uint32_t* seed, uint32_t* end)
 {
 	NeutralRegion region;

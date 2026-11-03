@@ -66,7 +66,8 @@ enum class PresentationFilter
 {
 	Linear,
 	Nearest,
-	Fsr
+	Fsr,
+	Fsr3
 };
 
 // Host texture filtering override. Guest keeps each sampler's own anisotropy;
@@ -114,6 +115,7 @@ String                 GetShaderLogFolder();
 
 // Absolute path of a kyty_input_profile_v1 file, empty for the built-in profile.
 String GetInputProfileFile();
+String GetGamePatchFile();
 
 bool   CommandBufferDumpEnabled();
 String GetCommandBufferDumpFolder();
