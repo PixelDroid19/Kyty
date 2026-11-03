@@ -36,6 +36,10 @@ TEST(EmulatorSaveData, BuildsPortablePerTitleSaveRoots)
 	          std::filesystem::path("/portable/user/savedata/.kyty-memory/PPSA-12345/memory/user-7/slot-3.bin"));
 	EXPECT_TRUE(Libs::SaveData::SaveDataBuildMemoryPath(root, -1, 3).empty());
 	EXPECT_TRUE(Libs::SaveData::SaveDataBuildMemoryPath(std::filesystem::path("relative"), 7, 3).empty());
+	EXPECT_EQ(Libs::SaveData::SaveDataBuildTrophyPath(root, 1),
+	          std::filesystem::path("/portable/user/savedata/.kyty-trophies/PPSA-12345/user-1.json"));
+	EXPECT_TRUE(Libs::SaveData::SaveDataBuildTrophyPath(root, -1).empty());
+	EXPECT_TRUE(Libs::SaveData::SaveDataBuildTrophyPath(std::filesystem::path("relative"), 1).empty());
 }
 
 TEST(EmulatorSaveData, RejectsSaveSlotPathTraversal)

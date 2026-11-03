@@ -24,6 +24,7 @@ constexpr qreal NAME_FONT      = 38;
 constexpr qreal CARD_SPACING   = 16;
 constexpr qreal CARD_PADDING   = 18;
 constexpr qreal CARD_LINES     = 6;
+constexpr int   TROPHY_COLUMNS = 2;
 
 constexpr int PLAY     = 0;
 constexpr int STOP     = 1;
@@ -54,6 +55,32 @@ QString PlayTimeText(qint64 seconds, bool played)
 	return minutes < 60 ? GamePageItem::tr("%1 min").arg(minutes) : GamePageItem::tr("%1 h %2 min").arg(minutes / 60).arg(minutes % 60);
 }
 
+QString GradeText(QChar grade)
+{
+	switch (grade.unicode())
+	{
+		case 'P': return GamePageItem::tr("Platinum");
+		case 'G': return GamePageItem::tr("Gold");
+		case 'S': return GamePageItem::tr("Silver");
+		case 'B': return GamePageItem::tr("Bronze");
+		default: return {};
+	}
+}
+
+QString TrophyStatus(const GameTrophy& trophy)
+{
+	if (trophy.unlocked > 0)
+	{
+		return GamePageItem::tr("Unlocked %1")
+		    .arg(QLocale().toString(QDateTime::fromSecsSinceEpoch(trophy.unlocked), QLocale::ShortFormat));
+	}
+	if (trophy.progress >= 0 && trophy.target > 0)
+	{
+		return GamePageItem::tr("Progress %1 of %2").arg(std::min(trophy.progress, trophy.target)).arg(trophy.target);
+	}
+	return GamePageItem::tr("Locked");
+}
+
 } // namespace
 
 GamePageItem::GamePageItem(QQuickItem* parent): PageItem(MAX_WIDTH, TOP, SPACING, parent)
@@ -77,8 +104,9 @@ void GamePageItem::SetGame(const QVariantMap& game, bool latest)
 	{
 		return;
 	}
-	m_game   = game;
-	m_latest = latest;
+	m_game     = game;
+	m_latest   = latest;
+	m_trophies = LauncherBackend::Instance()->Trophies(Row());
 	m_art->SetGame(game.value("icon").toString(), GameName(game));
 	Recompose();
 }
@@ -235,6 +263,79 @@ void GamePageItem::AddCards(PageLayout* layout) const
 	layout->Advance(height);
 }
 
+// The game's trophies as glass tiles in columns under a count of the unlocked ones; a locked hidden trophy keeps its
+// name and description to itself.
+void GamePageItem::AddTrophies(PageLayout* layout) const
+{
+	if (m_trophies.isEmpty())
+	{
+		return;
+	}
+	const auto* theme = Theme::Instance();
+	const qreal u     = layout->U();
+	const auto  unlocked =
+	    std::count_if(m_trophies.begin(), m_trophies.end(), [](const GameTrophy& trophy) { return trophy.unlocked > 0; });
+	layout->AddParagraph(tr("Trophies  ·  %1 of %2 unlocked").arg(unlocked).arg(m_trophies.size()),
+	                     SceneFont(theme->FontBody() * 1.2, QFont::DemiBold), theme->TextPrimary());
+
+	const qreal spacing = CARD_SPACING * u;
+	const qreal padding = CARD_PADDING * u;
+	const qreal tile_w  = std::floor((layout->Width() - (TROPHY_COLUMNS - 1) * spacing) / TROPHY_COLUMNS);
+	const qreal inner   = std::max<qreal>(0, tile_w - 2 * padding);
+	const auto  name    = SceneFont(theme->FontBody(), QFont::DemiBold);
+	const auto  small   = SceneFont(theme->FontSmall());
+	qreal       top     = layout->Y();
+	for (int first = 0; first < m_trophies.size(); first += TROPHY_COLUMNS)
+	{
+		QVector<PageLayout::Text> texts;
+		qreal                     height = 0;
+		const int                 last   = std::min<int>(first + TROPHY_COLUMNS, static_cast<int>(m_trophies.size()));
+		for (int i = first; i < last; i++)
+		{
+			const auto& trophy = m_trophies[i];
+			const bool  secret = trophy.hidden && trophy.unlocked == 0;
+			const bool  earned = trophy.unlocked > 0;
+			const auto  title  = secret ? tr("Hidden trophy") : trophy.name;
+			const qreal left   = (i - first) * (tile_w + spacing) + padding;
+			qreal       y      = top + padding;
+			const auto  head   = GradeText(trophy.grade) + QStringLiteral("  ·  ") + title;
+			for (const auto& [text, font, color]: {std::tuple {head, name, earned ? theme->TextPrimary() : theme->TextSecondary()},
+			                                       std::tuple {secret ? QString() : trophy.detail, small, theme->TextSecondary()},
+			                                       std::tuple {TrophyStatus(trophy), small, earned ? theme->Accent() : theme->TextMuted()}})
+			{
+				if (text.isEmpty())
+				{
+					continue;
+				}
+				PageLayout::Text line;
+				line.text  = text;
+				line.font  = font;
+				line.color = color;
+				line.wrap  = QTextOption::WrapAtWordBoundaryOrAnywhere;
+				line.rect  = QRectF(left, y, inner, TextBlockHeight(text, font, inner, line.wrap));
+				texts << line;
+				y += line.rect.height() + CARD_LINES * u;
+			}
+			height = std::max(height, y - CARD_LINES * u + padding - top);
+		}
+		for (int i = first; i < last; i++)
+		{
+			PageLayout::Box tile;
+			tile.rect   = QRectF((i - first) * (tile_w + spacing), top, tile_w, height);
+			tile.fill   = theme->Glass();
+			tile.border = theme->GlassBorder();
+			tile.radius = theme->Radius();
+			layout->AddBox(tile);
+		}
+		for (const auto& text: texts)
+		{
+			layout->AddText(text);
+		}
+		layout->Advance(height);
+		top = layout->Y();
+	}
+}
+
 void GamePageItem::Compose(PageLayout* layout)
 {
 	if (m_game.isEmpty())
@@ -258,6 +359,7 @@ void GamePageItem::Compose(PageLayout* layout)
 	        << PageLayout::ButtonSpec {QStringLiteral("…"), OPTIONS};
 	layout->AddButtonRow(buttons);
 	AddCards(layout);
+	AddTrophies(layout);
 }
 
 void GamePageItem::Press(int id)

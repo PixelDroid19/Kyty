@@ -69,6 +69,7 @@ UT_LINK(EmulatorKernelLifetimes);
 UT_LINK(EmulatorAmprRead);
 UT_LINK(EmulatorNp);
 UT_LINK(EmulatorNpTrophy2);
+UT_LINK(EmulatorTrophies);
 UT_LINK(EmulatorHttp2);
 UT_LINK(EmulatorNetwork);
 UT_LINK(EmulatorLibcPrintf);

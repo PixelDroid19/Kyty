@@ -1,6 +1,7 @@
 #ifndef LAUNCHER_INCLUDE_GAME_PAGE_ITEM_H_
 #define LAUNCHER_INCLUDE_GAME_PAGE_ITEM_H_
 
+#include "GameTrophies.h"
 #include "PageItem.h"
 
 #include <QVariantMap>
@@ -42,8 +43,10 @@ protected:
 private:
 	void AddHeader(PageLayout* layout);
 	void AddCards(PageLayout* layout) const;
+	void AddTrophies(PageLayout* layout) const;
 
-	QVariantMap  m_game;
+	QVariantMap         m_game;
+	QVector<GameTrophy> m_trophies;
 	bool         m_latest    = false;
 	bool         m_shows_art = true;
 	GameArtItem* m_art       = nullptr;

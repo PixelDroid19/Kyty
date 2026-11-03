@@ -139,17 +139,23 @@ Each of these was checked against what it would change for the guest:
 - **Guest refresh rate.** Vblank events follow the host present loop
   (`game_show_window`), not a fixed clock. A rate setting needs that clock
   first.
-- **Turning off occlusion queries, tessellation or image readback.** Each one
-  skips work the guest asked for.
-- **Trophies.** The `NpTrophy` and `NpTrophy2` calls succeed and report nothing
-  unlocked. On PS5 a trophy unlocks when a UDS stat meets the condition in
-  `sce_sys/trophy2/trophy00.ucp` (`tropconf.json`). Those stats come from the
-  events the title posts, through the rules in `sce_sys/uds/uds00.ucp`
-  (`events_definition.json`, `stats_extraction.json`). Both containers are
-  plain: a 0x60-byte header with the entry count at 0x10, then 0x40-byte
-  entries holding a 32-byte name and a big-endian 64-bit offset and size. Real
-  trophies need the posted event values (today `PostEvent` drops them), that
-  rule engine, and stored stats.
+- **Turning off occlusion queries, tessellation or image readback.** There is
+  no such work to turn off. Tessellation is not implemented (no tessellation
+  state in `GraphicsRenderPipeline.cpp`), occlusion queries already report a
+  synthetic always-visible result (`CommandProcessor::TriggerEvent`), and on
+  PS5 render targets are never written back to guest memory
+  (`write_back = false` in `GraphicsRenderAttachments.cpp`). Only storage
+  buffers are written back, and they carry the labels the guest waits on.
+  A memory wait already proceeds at once when the value in memory meets its
+  condition (`CommandProcessor::WaitRegMem32`).
+- **Keeping textures as first uploaded.** Measured on 2026-11-03 with a
+  per-game switch that skipped the re-hash and upload of textures (Linux,
+  60 fps limit, 80 s runs). `PPSA03706 - My Friend Peppa Pig` re-hashed
+  textures 5169 times, 5147 of them with new content, for 265 ms in the first
+  minute and none in the next 20 s. `PPSA21402 - Balatro` re-hashed 19 times
+  for 3 ms, and when they were skipped the textures it fills after creating
+  them stayed blank. The work is real content, paid while loading, so skipping it
+  only shows wrong images. The switch was not kept.
 
 A game's "Environment variables" field in the launcher holds `NAME=value`
 pairs separated by `;`, so a value cannot contain `;`. The launcher adds them
@@ -180,7 +186,7 @@ digits, `-` and `_`; other characters become `_`.
 Mounted slots retain their exact validated guest name. SaveDataMemory uses:
 
 ```text
-<title-root>/memory/user-<USER_ID>/slot-<SLOT_ID>.bin
+<root>/.kyty-memory/<NORMALIZED_TITLE_ID>/memory/user-<USER_ID>/slot-<SLOT_ID>.bin
 ```
 
 There is no legacy `_SaveData` search, relative-path fallback or automatic
@@ -190,6 +196,47 @@ SaveDataMemory has a 64 MiB limit per slot. `Setup` loads the backing file and
 reports its previous size; `Get` and `Set` require that setup and enforce exact
 ranges. `Sync` writes a process-unique temporary file, atomically replaces the
 slot, then publishes the guest completion event.
+
+## Trophies
+
+A title unlocks a trophy by posting Universal Data System (UDS) events. The
+emulator keeps the scalar properties a title sets on an event (integers of
+every width, bools as 0 or 1, strings) and, on `PostEvent`, applies the title's
+own rules:
+
+- `sce_sys/uds/uds00.ucp` holds the rules (`stats_extraction.json`) that turn
+  an event into a stat value and the stats (`stats_definition.json`).
+- `sce_sys/trophy2/trophy00.ucp` holds the trophies (`tropconf.json`); a
+  trophy unlocks when its stat reaches its target.
+- Both containers are plain: a big-endian header with the magic `b228c60a`,
+  the entry count at 0x10 and the entry size 0x40 at 0x14, then from 0x60
+  entries of a 32-byte name and a 64-bit offset and size.
+
+Only rules that feed a stat a trophy waits for are kept. They match one
+top-level property with `==` or `>` and update a `count`, `max` or `latest`
+stat; the platinum unlocks once every trophy of its set is unlocked. A rule in
+another form is skipped and counted in one warning when the set loads, and its
+trophy cannot unlock. Every rule of the 28 sets checked on 2026-11-03 uses the
+kept forms.
+
+Stats and unlock times (Unix seconds) are kept for user `1`, written
+atomically after each change:
+
+```text
+<root>/.kyty-trophies/<NORMALIZED_TITLE_ID>/user-1.json
+{"stats":{"<stat id>":<value>},"unlocked":{"<trophy id>":<time>}}
+```
+
+A progress file that cannot be read turns trophies off for that run, so it is
+never overwritten. The launcher's game page lists the set in the interface
+language when the set has it, with each unlock time and the progress of
+progressive trophies; a locked hidden trophy shows neither its name nor its
+description.
+
+The game itself still sees nothing unlocked: the `NpTrophy2` query layouts and
+the unlock callback are not sourced, so those calls keep returning empty
+results. Trophies with a server unlock type are evaluated locally from the same
+stats.
 
 ## Focused verification
 

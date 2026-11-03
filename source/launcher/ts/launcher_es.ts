@@ -1271,6 +1271,34 @@
             <translation>%1 h %2 min</translation>
         </message>
         <message>
+            <source>Platinum</source>
+            <translation>Platino</translation>
+        </message>
+        <message>
+            <source>Gold</source>
+            <translation>Oro</translation>
+        </message>
+        <message>
+            <source>Silver</source>
+            <translation>Plata</translation>
+        </message>
+        <message>
+            <source>Bronze</source>
+            <translation>Bronce</translation>
+        </message>
+        <message>
+            <source>Unlocked %1</source>
+            <translation>Desbloqueado el %1</translation>
+        </message>
+        <message>
+            <source>Progress %1 of %2</source>
+            <translation>Progreso: %1 de %2</translation>
+        </message>
+        <message>
+            <source>Locked</source>
+            <translation>Bloqueado</translation>
+        </message>
+        <message>
             <source>Select</source>
             <translation>Seleccionar</translation>
         </message>
@@ -1317,6 +1345,14 @@
         <message>
             <source>In no section</source>
             <translation>En ninguna sección</translation>
+        </message>
+        <message>
+            <source>Trophies  ·  %1 of %2 unlocked</source>
+            <translation>Trofeos  ·  %1 de %2 desbloqueados</translation>
+        </message>
+        <message>
+            <source>Hidden trophy</source>
+            <translation>Trofeo oculto</translation>
         </message>
         <message>
             <source>Stop game</source>
