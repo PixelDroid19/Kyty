@@ -4,6 +4,7 @@
 #include "EditorFields.h"
 #include "FieldControls.h"
 #include "FocusButtonItem.h"
+#include "GamePatchMods.h"
 #include "LauncherBackend.h"
 #include "SceneNodes.h"
 #include "TextFieldItem.h"
@@ -90,6 +91,11 @@ const ChoiceText CHOICE_TEXTS[] = {
     {"Nearest", QT_TRANSLATE_NOOP("FieldRowItem", "Nearest")},
     {"Fsr", "FSR", false},
     {"Fsr3", "FSR 3.1", false},
+    {"Stretch", QT_TRANSLATE_NOOP("FieldRowItem", "Stretch to the window")},
+    {"Fit", QT_TRANSLATE_NOOP("FieldRowItem", "Fit, keep the shape")},
+    {"Integer", QT_TRANSLATE_NOOP("FieldRowItem", "Whole-pixel steps")},
+    {"Red", QT_TRANSLATE_NOOP("FieldRowItem", "Red")},
+    {"White", QT_TRANSLATE_NOOP("FieldRowItem", "White")},
     {"Guest", QT_TRANSLATE_NOOP("FieldRowItem", "As the game asks")},
     {"X2", "2×", false},
     {"X4", "4×", false},
@@ -225,6 +231,11 @@ FieldRowItem::FieldRowItem(const EditorField& field, QQuickItem* parent): QQuick
 			connect(m_button, &FocusButtonItem::Activated, this,
 			        [this, key]() { emit Edited(key, LauncherBackend::Instance()->ScanElfs(m_basedir, m_value.toList())); });
 			break;
+		case FieldType::Mods:
+			m_button = new FocusButtonItem(this);
+			m_button->SetText(tr("Reload mods"));
+			connect(m_button, &FocusButtonItem::Activated, this, [this, key]() { emit Edited(key, ReadPatchMods(m_patch_file)); });
+			break;
 		case FieldType::Params: break;
 	}
 
@@ -307,7 +318,8 @@ void FieldRowItem::SetValues(const QVariantMap& values, bool shown)
 {
 	m_shown   = shown;
 	m_value   = values.value(m_field.key);
-	m_basedir = values.value("basedir").toString();
+	m_basedir    = values.value("basedir").toString();
+	m_patch_file = values.value("game_patch_file").toString();
 	if (m_field.type == FieldType::Choice)
 	{
 		// Some lists change while the form is open, such as the connected controllers.
@@ -347,7 +359,8 @@ void FieldRowItem::ShowValue()
 			m_choice->SetValue(shown);
 			break;
 		}
-		case FieldType::Modules: ShowModules(m_value.toList()); break;
+		case FieldType::Modules:
+		case FieldType::Mods: ShowModules(m_value.toList()); break;
 		case FieldType::Params:
 			// Read again only when the file changes, since every edit in the form passes through here.
 			if (m_value.toString() != m_params_file)
@@ -497,12 +510,14 @@ qreal FieldRowItem::PlaceControl(const QRectF& rect)
 		m_choice->setSize(rect.size());
 	}
 
-	if (m_field.type == FieldType::Modules)
+	if (m_field.type == FieldType::Modules || m_field.type == FieldType::Mods)
 	{
 		qreal y = rect.top() + m_button->implicitHeight() + MODULE_SPACING * u;
 		if (m_modules.isEmpty())
 		{
-			auto note = Line(QRectF(), tr("No modules found yet. Set the game folder, then rescan."), SmallFont(), theme->TextMuted());
+			const auto empty = m_field.type == FieldType::Mods ? tr("The game patch file has no mods, or it cannot be read.")
+			                                                   : tr("No modules found yet. Set the game folder, then rescan.");
+			auto       note  = Line(QRectF(), empty, SmallFont(), theme->TextMuted());
 			note.wrap = QTextOption::WordWrap;
 			note.rect = QRectF(rect.left(), y, rect.width(), TextBlockHeight(note.text, note.font, rect.width()));
 			m_texts << note;

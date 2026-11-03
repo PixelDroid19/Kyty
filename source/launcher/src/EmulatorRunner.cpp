@@ -1,12 +1,14 @@
 #include "EmulatorRunner.h"
 
 #include "Configuration.h"
+#include "ConfigurationFields.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QIODevice>
+#include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTextStream>
@@ -42,6 +44,7 @@ constexpr char KYTY_LOAD_ELF[]         = "kyty_load_elf";
 constexpr char KYTY_LOAD_SYMBOLS_ALL[] = "kyty_load_symbols_all";
 constexpr char KYTY_LOAD_PARAM_SFO[]   = "kyty_load_param_sfo";
 constexpr char KYTY_LOAD_PARAM_JSON[]  = "kyty_load_param_json";
+constexpr char KYTY_LOAD_ADDCONT[]     = "kyty_load_addcont";
 constexpr char KYTY_INIT[]             = "kyty_init";
 constexpr char KYTY_LUA_FILE[]         = "kyty_run.lua";
 constexpr char KYTY_LOG_FILE[]         = "kyty_run.log";
@@ -97,6 +100,7 @@ bool CreateLuaScript(const Kyty::Configuration& info, const QString& input_profi
 	s << "\t RenderResolutionWidth = " << info.render_resolution_width << ";\n";
 	s << "\t RenderResolutionHeight = " << info.render_resolution_height << ";\n";
 	s << "\t PresentationFilter = '" << EnumToText(info.presentation_filter) << "';\n";
+	s << "\t PresentationScaling = '" << EnumToText(info.presentation_scaling) << "';\n";
 	s << "\t PresentationFsrSharpness = " << info.presentation_fsr_sharpness << ";\n";
 	s << "\t TextureAnisotropy = '" << EnumToText(info.texture_anisotropy) << "';\n";
 	s << "\t GpuDevice = " << LuaQuote(info.gpu_device) << ";\n";
@@ -110,6 +114,9 @@ bool CreateLuaScript(const Kyty::Configuration& info, const QString& input_profi
 	s << "\t NoticeScreenSkipEnabled = " << (info.notice_screen_skip_enabled ? "true" : "false") << ";\n";
 	s << "\t NetworkConnected = " << (info.network_connected ? "true" : "false") << ";\n";
 	s << "\t ControllerVibration = " << info.controller_vibration << ";\n";
+	s << "\t ControllerLightBar = " << LuaQuote(ControllerLightBarHex(info.controller_light_bar)) << ";\n";
+	s << "\t ControllerSpeakerVolume = " << info.controller_speaker_volume << ";\n";
+	s << "\t MicrophoneEnabled = " << (info.microphone_enabled ? "true" : "false") << ";\n";
 	s << "\t ShaderCacheEnabled = " << (info.shader_cache_enabled ? "true" : "false") << ";\n";
 	s << "\t Neo = " << (info.neo ? "true" : "false") << ";\n";
 	s << "\t VulkanValidationEnabled = " << (info.vulkan_validation_enabled ? "true" : "false") << ";\n";
@@ -145,6 +152,8 @@ bool CreateLuaScript(const Kyty::Configuration& info, const QString& input_profi
 		{
 			s << KYTY_LOAD_PARAM_SFO << "(" << LuaQuote(info.param_file) << ");\n";
 		}
+		// The title id of the parameters file names the game's add-on folder.
+		s << KYTY_LOAD_ADDCONT << "(" << LuaQuote(info.basedir) << ", " << LuaQuote(info.addcont_folder) << ");\n";
 	}
 
 	for (const auto& elf: info.elfs_selected)
@@ -311,6 +320,25 @@ QString EmulatorRunner::Start(const Kyty::Configuration& info, const QString& mo
 	{
 		return QCoreApplication::translate("Launcher", "Emulator not found. Set its path in Settings.");
 	}
+
+	QList<QPair<QString, QString>> variables;
+	if (!ParseEnvironment(info.environment, &variables))
+	{
+		return QCoreApplication::translate("Launcher", "Environment variables must be NAME=value pairs separated by ';'");
+	}
+	auto environment = QProcessEnvironment::systemEnvironment();
+	if (info.renderdoc_capture_enabled)
+	{
+		// The capture layer's own switch; the layer does not hook Wayland surfaces.
+		environment.insert("ENABLE_VULKAN_RENDERDOC_CAPTURE", "1");
+		environment.insert("SDL_VIDEODRIVER", "x11");
+	}
+	// The game's own variables on top of the launcher's environment.
+	for (const auto& [name, value]: variables)
+	{
+		environment.insert(name, value);
+	}
+	m_process.setProcessEnvironment(environment);
 
 	const QFileInfo f(m_path);
 	const auto      dir = f.absoluteDir();

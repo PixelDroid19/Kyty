@@ -6024,3 +6024,11 @@ us/draw). `spirv-opt` performance passes do not shrink `eb48c258`'s compile enou
   point proof is unchanged.
 - **Verified.** On two cores, 18 to 26 deferrals and 49 to 51 ms over six runs; guest sleeps from 50 to 500 us stayed at 48 to
   54 ms. Unit and integration suite 108 of 108 with one skipped. No title was run for this change.
+
+## `NpGetState` writes through a null state pointer (2026-11-02, open)
+
+- **Observed.** `NpGetState` in `source/emulator/src/Network.cpp` (line 4786) logs a warning when `state` is null and then
+  stores the signed-out value through it at line 4790. A guest that passes a null pointer crashes the host instead of getting
+  an error. Found while reviewing the sign-in setting; no title has been seen to pass null.
+- **Direction.** Return the NP invalid-argument error for a null `state` once its code comes from a trace or a published
+  contract; the file has no NP error constant to reuse yet.

@@ -4,6 +4,7 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Config.h"
 
 #include <cstdint>
 
@@ -40,6 +41,8 @@ enum class PresentationScaleStatus : uint8_t
 // most 2:1, whose bilinear footprint is a 2x2 box that cancels it. Returns
 // {0,0} when the source is not larger than twice the target on either axis.
 [[nodiscard]] VkExtent2D PresentationDownscaleExtent(VkExtent2D source, VkExtent2D target);
+// The centred part of the target a frame of the source extent fills; the rest is cleared to black.
+[[nodiscard]] VkRect2D PresentationViewport(VkExtent2D source, VkExtent2D target, Config::PresentationScaling scaling);
 
 [[nodiscard]] PresentationScaleStatus PresentationScalerBlitFinalImage(CommandBuffer* command_buffer, GraphicContext* context,
                                                                        VulkanImage* source, VulkanSwapchain* destination);

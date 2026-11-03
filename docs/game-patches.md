@@ -29,7 +29,11 @@ the game's *Game patch file* field. Empty means no patches.
 - `id` and `version` must equal the title ID and content version of the game.
 - `process` names the module, by file name.
 - A mod with `enabled` false adds nothing, and its entries are not validated.
-  Choosing mods means editing this flag; the launcher has no per-mod switches.
+  A mod without the flag is applied.
+- The launcher's game editor lists the mods of the game's patch file with a
+  switch each. Saving the game writes those switches to the file as `enabled`,
+  keeping the other keys; it refuses when the file's mods changed since they
+  were shown. The rewrite orders keys alphabetically and keeps names in UTF-8.
 - `off` holds the expected bytes and `on` the new ones: hex, same size. The JSON
   reader does not accept `\u` escapes, so store names as UTF-8.
 

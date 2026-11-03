@@ -9,6 +9,8 @@
 #include "Emulator/Graphics/PresentationFsr3.h"
 #include "Emulator/Graphics/Utils.h"
 
+#include <algorithm>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -72,70 +74,50 @@ struct PresentationDownscaleStage
 	VulkanMemory memory;
 };
 
+// The letterboxed view in the swapchain format, copied into the centre of the cleared swapchain image.
+struct PresentationViewStage
+{
+	VulkanImage  image {VulkanImageType::Unknown};
+	VulkanMemory memory;
+};
+
 namespace {
 
-void DestroyEncodeStage(GraphicContext* context, VulkanSwapchain* swapchain)
+// The swapchain image, or the view stage, that the scaling paths write.
+struct PresentationTarget
 {
-	if (swapchain->encode_stage == nullptr) { return; }
-	vkDestroyImage(context->device, swapchain->encode_stage->image.image, nullptr);
-	VulkanFree(context, &swapchain->encode_stage->memory);
-	delete swapchain->encode_stage;
-	swapchain->encode_stage = nullptr;
+	VkImage    image  = nullptr;
+	VkExtent2D extent = {};
+	VkFormat   format = VK_FORMAT_UNDEFINED;
+};
+
+template <typename Stage>
+void DestroyStage(GraphicContext* context, Stage** slot)
+{
+	if (*slot == nullptr) { return; }
+	vkDestroyImage(context->device, (*slot)->image.image, nullptr);
+	VulkanFree(context, &(*slot)->memory);
+	delete *slot;
+	*slot = nullptr;
 }
 
-// Swapchain recreation waits for the device to idle before its extent changes, so a stage of the old extent is no
-// longer referenced by any present when it is replaced here.
-PresentationEncodeStage* EnsureEncodeStage(GraphicContext* context, VulkanSwapchain* swapchain, VkFormat format)
+// The stage is recreated whenever its format or extent changes; swapchain recreation waits for the device to idle,
+// so a stage of an old extent is no longer read by any present here.
+template <typename Stage>
+Stage* EnsureStage(GraphicContext* context, Stage** slot, VkFormat format, VkExtent2D extent)
 {
-	auto* stage = swapchain->encode_stage;
-	if (stage != nullptr && stage->image.format == format && stage->image.extent.width == swapchain->swapchain_extent.width &&
-	    stage->image.extent.height == swapchain->swapchain_extent.height)
-	{
-		return stage;
-	}
-	DestroyEncodeStage(context, swapchain);
-	VulkanImageDescriptor descriptor {};
-	descriptor.extent = {swapchain->swapchain_extent.width, swapchain->swapchain_extent.height, 1};
-	descriptor.format = format;
-	descriptor.usage  = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-	stage             = new PresentationEncodeStage;
-	if (!VulkanCreateDeviceImage(context, VulkanBuildImageCreateInfo(descriptor), &stage->image, &stage->memory))
-	{
-		delete stage;
-		return nullptr;
-	}
-	stage->image.format = format;
-	stage->image.extent = {descriptor.extent.width, descriptor.extent.height};
-	stage->image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
-	swapchain->encode_stage = stage;
-	return stage;
-}
-
-void DestroyDownscaleStage(GraphicContext* context, VulkanSwapchain* swapchain)
-{
-	if (swapchain->downscale_stage == nullptr) { return; }
-	vkDestroyImage(context->device, swapchain->downscale_stage->image.image, nullptr);
-	VulkanFree(context, &swapchain->downscale_stage->memory);
-	delete swapchain->downscale_stage;
-	swapchain->downscale_stage = nullptr;
-}
-
-// The stage is recreated whenever the source format or the selected half extent changes; swapchain recreation
-// waits for the device to idle, so a stage of an old extent is no longer read by any present here.
-PresentationDownscaleStage* EnsureDownscaleStage(GraphicContext* context, VulkanSwapchain* swapchain, VkFormat format, VkExtent2D extent)
-{
-	auto* stage = swapchain->downscale_stage;
+	auto* stage = *slot;
 	if (stage != nullptr && stage->image.format == format && stage->image.extent.width == extent.width &&
 	    stage->image.extent.height == extent.height)
 	{
 		return stage;
 	}
-	DestroyDownscaleStage(context, swapchain);
+	DestroyStage(context, slot);
 	VulkanImageDescriptor descriptor {};
 	descriptor.extent = {extent.width, extent.height, 1};
 	descriptor.format = format;
 	descriptor.usage  = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-	stage             = new PresentationDownscaleStage;
+	stage             = new Stage;
 	if (!VulkanCreateDeviceImage(context, VulkanBuildImageCreateInfo(descriptor), &stage->image, &stage->memory))
 	{
 		delete stage;
@@ -144,19 +126,19 @@ PresentationDownscaleStage* EnsureDownscaleStage(GraphicContext* context, Vulkan
 	stage->image.format = format;
 	stage->image.extent = extent;
 	stage->image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
-	swapchain->downscale_stage = stage;
+	*slot               = stage;
 	return stage;
 }
 
-// Blit into the stage (decoded, filtered, sRGB-encoded), then copy its bytes into the UNORM swapchain image, which ends
-// in TRANSFER_DST_OPTIMAL like a direct blit.
-void BlitThroughEncodeStage(CommandBuffer* command_buffer, VulkanImage* source, VulkanSwapchain* swapchain, PresentationEncodeStage* stage,
-                            VkFilter filter)
+// Blit into the stage (decoded, filtered, sRGB-encoded), then copy its bytes into the UNORM target, which ends in
+// TRANSFER_DST_OPTIMAL like a direct blit.
+void BlitThroughEncodeStage(CommandBuffer* command_buffer, VulkanImage* source, const PresentationTarget& target,
+                            PresentationEncodeStage* stage, VkFilter filter)
 {
 	auto* cmd = command_buffer->RecordOutsideRenderPass();
 	// The previous present may still be copying out of the stage on this queue: order that read before this write.
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
-	UtilBlitImageTo(command_buffer, source, stage->image.image, swapchain->swapchain_extent, filter);
+	UtilBlitImageTo(command_buffer, source, stage->image.image, target.extent, filter);
 	stage->image.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
 	VkImageMemoryBarrier barriers[2] {};
@@ -176,17 +158,64 @@ void BlitThroughEncodeStage(CommandBuffer* command_buffer, VulkanImage* source, 
 	barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	barriers[1].oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
 	barriers[1].newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	barriers[1].image         = swapchain->swapchain_images[swapchain->current_index];
+	barriers[1].image         = target.image;
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers);
 	stage->image.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
 	VkImageCopy region {};
 	region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
 	region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-	region.extent         = {swapchain->swapchain_extent.width, swapchain->swapchain_extent.height, 1};
-	// Same texel block size and byte order: the sRGB-encoded bytes reach the UNORM swapchain unchanged.
-	vkCmdCopyImage(cmd, stage->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain->swapchain_images[swapchain->current_index],
-	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+	region.extent         = {target.extent.width, target.extent.height, 1};
+	// Same texel block size and byte order: the sRGB-encoded bytes reach the UNORM target unchanged.
+	vkCmdCopyImage(cmd, stage->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+	               &region);
+}
+
+// Clears the swapchain image black and copies the view into its centre; the image ends in TRANSFER_DST_OPTIMAL like a
+// direct blit.
+void CopyViewToSwapchain(CommandBuffer* command_buffer, PresentationViewStage* stage, VulkanSwapchain* swapchain, VkRect2D view)
+{
+	auto*         cmd             = command_buffer->RecordOutsideRenderPass();
+	const VkImage swapchain_image = swapchain->swapchain_images[swapchain->current_index];
+
+	VkImageMemoryBarrier barriers[2] {};
+	for (auto& barrier: barriers)
+	{
+		barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+	}
+	barriers[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	barriers[0].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barriers[0].newLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	barriers[0].image         = stage->image.image;
+	barriers[1].srcAccessMask = 0;
+	barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barriers[1].oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
+	barriers[1].newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barriers[1].image         = swapchain_image;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers);
+	stage->image.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+	const VkClearColorValue       black {{0.0f, 0.0f, 0.0f, 1.0f}};
+	const VkImageSubresourceRange range {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+	vkCmdClearColorImage(cmd, swapchain_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+
+	VkMemoryBarrier cleared {};
+	cleared.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	cleared.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	cleared.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &cleared, 0, nullptr, 0, nullptr);
+
+	VkImageCopy region {};
+	region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+	region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+	region.dstOffset      = {view.offset.x, view.offset.y, 0};
+	region.extent         = {view.extent.width, view.extent.height, 1};
+	vkCmdCopyImage(cmd, stage->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+	               &region);
 }
 
 } // namespace
@@ -243,6 +272,92 @@ VkExtent2D PresentationDownscaleExtent(VkExtent2D source, VkExtent2D target)
 	return extent;
 }
 
+VkRect2D PresentationViewport(VkExtent2D source, VkExtent2D target, Config::PresentationScaling scaling)
+{
+	VkRect2D view {{0, 0}, target};
+	if (scaling == Config::PresentationScaling::Stretch || source.width == 0 || source.height == 0 || target.width == 0 ||
+	    target.height == 0)
+	{
+		return view;
+	}
+	const bool fits = source.width <= target.width && source.height <= target.height;
+	if (scaling == Config::PresentationScaling::Integer && fits)
+	{
+		const uint32_t scale = std::min(target.width / source.width, target.height / source.height);
+		view.extent          = {source.width * scale, source.height * scale};
+	} else if (static_cast<uint64_t>(source.width) * target.height > static_cast<uint64_t>(target.width) * source.height)
+	{
+		view.extent.height = std::max(1u, static_cast<uint32_t>(static_cast<uint64_t>(target.width) * source.height / source.width));
+	} else
+	{
+		view.extent.width = std::max(1u, static_cast<uint32_t>(static_cast<uint64_t>(target.height) * source.width / source.height));
+	}
+	view.offset = {static_cast<int32_t>((target.width - view.extent.width) / 2u), static_cast<int32_t>((target.height - view.extent.height) / 2u)};
+	return view;
+}
+
+namespace {
+
+PresentationScaleStatus BlitToTarget(CommandBuffer* command_buffer, GraphicContext* context, VulkanImage* source, VulkanSwapchain* destination,
+                                     const PresentationTarget& target, VkFilter filter)
+{
+	const auto     presentation_filter = Config::GetPresentationFilter();
+	const bool     upscales            = PresentationFsrApplies(source->extent, target.extent);
+	const VkFormat content_format      = source->format;
+	VulkanImage*   temporal            = nullptr;
+	if (presentation_filter == Config::PresentationFilter::Fsr3)
+	{
+		temporal = PresentationFsr3Record(command_buffer, context, source, target.extent, Config::GetPresentationFsrSharpness(),
+		                                  &destination->fsr3_stage);
+	}
+	if (temporal != nullptr)
+	{
+		source = temporal;
+	} else if (upscales && presentation_filter != Config::PresentationFilter::Nearest && presentation_filter != Config::PresentationFilter::Linear)
+	{
+		// The passes encode and decode sRGB themselves, so no encode stage is needed.
+		return PresentationFsrRecord(command_buffer, context, source, target.image, target.extent, target.format,
+		                             Config::GetPresentationFsrSharpness(), &destination->fsr_stage)
+		           ? PresentationScaleStatus::Success
+		           : PresentationScaleStatus::UnsupportedFilter;
+	}
+	// A 3:1 blit samples texel centres, so the game's one-texel dither survives as a static beat. Halve the source
+	// first: the final blit is then at most 2:1, whose bilinear footprint is a 2x2 box.
+	const VkExtent2D prefilter = PresentationDownscaleExtent(source->extent, target.extent);
+	const VkFormatFeatureFlags prefilter_features =
+	    VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+	if (filter == VK_FILTER_LINEAR && prefilter.width != 0 && FormatSupports(context->physical_device, source->format, prefilter_features))
+	{
+		if (auto* stage = EnsureStage(context, &destination->downscale_stage, source->format, prefilter); stage != nullptr)
+		{
+			auto* cmd = command_buffer->RecordOutsideRenderPass();
+			// The previous present may still be reading this stage on the same queue.
+			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
+			UtilBlitImageTo(command_buffer, source, stage->image.image, stage->image.extent, VK_FILTER_LINEAR);
+			stage->image.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			source              = &stage->image;
+		}
+	}
+	if (!PresentationNeedsEncodeStage(content_format, target.format))
+	{
+		UtilBlitImageTo(command_buffer, source, target.image, target.extent, filter);
+		return PresentationScaleStatus::Success;
+	}
+	// A UNORM swapchain without an sRGB twin cannot show linear light correctly: refuse instead of darkening it.
+	const VkFormat twin = PresentationSrgbTwin(target.format);
+	if (twin == VK_FORMAT_UNDEFINED ||
+	    !FormatSupports(context->physical_device, twin, VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
+	{
+		return PresentationScaleStatus::UnsupportedDestinationFormat;
+	}
+	auto* stage = EnsureStage(context, &destination->encode_stage, twin, target.extent);
+	if (stage == nullptr) { return PresentationScaleStatus::UnsupportedDestinationFormat; }
+	BlitThroughEncodeStage(command_buffer, source, target, stage, filter);
+	return PresentationScaleStatus::Success;
+}
+
+} // namespace
+
 PresentationScaleStatus PresentationScalerBlitFinalImage(CommandBuffer* command_buffer, GraphicContext* context, VulkanImage* source,
                                                          VulkanSwapchain* destination)
 {
@@ -273,60 +388,31 @@ PresentationScaleStatus PresentationScalerBlitFinalImage(CommandBuffer* command_
 		return PresentationScaleStatus::UnsupportedDestinationFormat;
 	}
 
-	const auto     presentation_filter = Config::GetPresentationFilter();
-	const bool     upscales            = PresentationFsrApplies(source->extent, destination->swapchain_extent);
-	const VkFormat content_format      = source->format;
-	VulkanImage*   temporal            = nullptr;
-	if (presentation_filter == Config::PresentationFilter::Fsr3)
+	const VkRect2D view = PresentationViewport(source->extent, destination->swapchain_extent, Config::GetPresentationScaling());
+	const bool     letterboxed =
+	    view.extent.width != destination->swapchain_extent.width || view.extent.height != destination->swapchain_extent.height;
+	if (!letterboxed)
 	{
-		temporal = PresentationFsr3Record(command_buffer, context, source, destination->swapchain_extent,
-		                                  Config::GetPresentationFsrSharpness(), &destination->fsr3_stage);
+		const PresentationTarget target {destination->swapchain_images[destination->current_index], destination->swapchain_extent,
+		                                 destination->swapchain_format};
+		return BlitToTarget(command_buffer, context, source, destination, target, filter);
 	}
-	if (temporal != nullptr)
-	{
-		source = temporal;
-	} else if (upscales && presentation_filter != Config::PresentationFilter::Nearest && presentation_filter != Config::PresentationFilter::Linear)
-	{
-		// The passes encode and decode sRGB themselves, so no encode stage is needed.
-		return PresentationFsrRecord(command_buffer, context, source, destination->swapchain_images[destination->current_index],
-		                             destination->swapchain_extent, destination->swapchain_format,
-		                             Config::GetPresentationFsrSharpness(), &destination->fsr_stage)
-		           ? PresentationScaleStatus::Success
-		           : PresentationScaleStatus::UnsupportedFilter;
-	}
-	// A 3:1 blit samples texel centres, so the game's one-texel dither survives as a static beat. Halve the source
-	// first: the final blit is then at most 2:1, whose bilinear footprint is a 2x2 box.
-	const VkExtent2D prefilter = PresentationDownscaleExtent(source->extent, destination->swapchain_extent);
-	const VkFormatFeatureFlags prefilter_features =
-	    VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-	if (filter == VK_FILTER_LINEAR && prefilter.width != 0 && FormatSupports(context->physical_device, source->format, prefilter_features))
-	{
-		if (auto* stage = EnsureDownscaleStage(context, destination, source->format, prefilter); stage != nullptr)
-		{
-			auto* cmd = command_buffer->RecordOutsideRenderPass();
-			// The previous present may still be reading this stage on the same queue.
-			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
-			UtilBlitImageTo(command_buffer, source, stage->image.image, stage->image.extent, VK_FILTER_LINEAR);
-			stage->image.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-			source              = &stage->image;
-		}
-	}
-	if (!PresentationNeedsEncodeStage(content_format, destination->swapchain_format))
-	{
-		UtilBlitImage(command_buffer, source, destination, filter);
-		return PresentationScaleStatus::Success;
-	}
-	// A UNORM swapchain without an sRGB twin cannot show linear light correctly: refuse instead of darkening it.
-	const VkFormat twin = PresentationSrgbTwin(destination->swapchain_format);
-	if (twin == VK_FORMAT_UNDEFINED ||
-	    !FormatSupports(context->physical_device, twin, VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
+	if (!FormatSupports(context->physical_device, destination->swapchain_format, VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
 	{
 		return PresentationScaleStatus::UnsupportedDestinationFormat;
 	}
-	auto* stage = EnsureEncodeStage(context, destination, twin);
+	auto* stage = EnsureStage(context, &destination->view_stage, destination->swapchain_format, view.extent);
 	if (stage == nullptr) { return PresentationScaleStatus::UnsupportedDestinationFormat; }
-	BlitThroughEncodeStage(command_buffer, source, destination, stage, filter);
-	return PresentationScaleStatus::Success;
+	// The previous present may still be copying out of the view on this queue: order that read before these writes.
+	vkCmdPipelineBarrier(command_buffer->RecordOutsideRenderPass(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+	                     nullptr, 0, nullptr, 0, nullptr);
+	const auto blit_status =
+	    BlitToTarget(command_buffer, context, source, destination, {stage->image.image, view.extent, destination->swapchain_format}, filter);
+	if (blit_status == PresentationScaleStatus::Success)
+	{
+		CopyViewToSwapchain(command_buffer, stage, destination, view);
+	}
+	return blit_status;
 }
 
 const char* PresentationScaleStatusName(PresentationScaleStatus status)

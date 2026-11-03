@@ -4,6 +4,10 @@
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/MagicEnum.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Config {
@@ -17,6 +21,7 @@ struct Config
 	uint32_t               render_resolution_width     = 1280;
 	uint32_t               render_resolution_height    = 720;
 	PresentationFilter     presentation_filter         = PresentationFilter::Nearest;
+	PresentationScaling    presentation_scaling        = PresentationScaling::Stretch;
 	uint32_t               presentation_fsr_sharpness  = 90;
 	uint32_t               present_fps_limit           = 0;
 	TextureAnisotropy      texture_anisotropy          = TextureAnisotropy::Guest;
@@ -31,6 +36,9 @@ struct Config
 	bool                   notice_screen_skip_enabled  = false;
 	bool                   network_connected           = true;
 	uint32_t               controller_vibration        = 100;
+	int32_t                controller_light_bar        = -1;
+	uint32_t               controller_speaker_volume   = 0;
+	bool                   microphone_enabled          = false;
 	bool                   neo                         = true;
 	GuestPlatform          guest_platform              = GuestPlatform::Unknown;
 	bool                   vulkan_validation_enabled   = false;
@@ -119,6 +127,19 @@ void LoadStr(String& dst, const ConfigSource& cfg, const String& key)
 	}
 }
 
+// "#RRGGBB" as 0xRRGGBB.
+int32_t ParseLightBar(const String& text)
+{
+	const auto utf8 = text.utf8_str();
+	const char* hex = utf8.GetData();
+	const bool  ok  = text.Size() == 7 && hex[0] == '#' && std::all_of(hex + 1, hex + 7, [](char c) { return std::isxdigit(static_cast<unsigned char>(c)) != 0; });
+	if (!ok)
+	{
+		EXIT("Invalid config value for ControllerLightBar: expected #RRGGBB\n");
+	}
+	return static_cast<int32_t>(std::strtol(hex + 1, nullptr, 16));
+}
+
 void Load(const ConfigSource& cfg)
 {
 	LoadInt(g_config->screen_width, cfg, U"ScreenWidth");
@@ -128,6 +149,7 @@ void Load(const ConfigSource& cfg)
 	LoadInt(g_config->render_resolution_width, cfg, U"RenderResolutionWidth");
 	LoadInt(g_config->render_resolution_height, cfg, U"RenderResolutionHeight");
 	LoadStrictEnum(g_config->presentation_filter, cfg, U"PresentationFilter");
+	LoadStrictEnum(g_config->presentation_scaling, cfg, U"PresentationScaling");
 	LoadInt(g_config->presentation_fsr_sharpness, cfg, U"PresentationFsrSharpness");
 	LoadInt(g_config->present_fps_limit, cfg, U"PresentFpsLimit");
 	LoadStrictEnum(g_config->texture_anisotropy, cfg, U"TextureAnisotropy");
@@ -170,6 +192,14 @@ void Load(const ConfigSource& cfg)
 	LoadBool(g_config->notice_screen_skip_enabled, cfg, U"NoticeScreenSkipEnabled");
 	LoadBool(g_config->network_connected, cfg, U"NetworkConnected");
 	LoadInt(g_config->controller_vibration, cfg, U"ControllerVibration");
+	LoadInt(g_config->controller_speaker_volume, cfg, U"ControllerSpeakerVolume");
+	LoadBool(g_config->microphone_enabled, cfg, U"MicrophoneEnabled");
+	if (cfg.Has(U"ControllerLightBar"))
+	{
+		// An empty value hands the colour back to the guest.
+		const auto light_bar           = cfg.GetString(U"ControllerLightBar");
+		g_config->controller_light_bar = light_bar.IsEmpty() ? -1 : ParseLightBar(light_bar);
+	}
 	if (g_config->console_language < 0 || g_config->console_language > 29)
 	{
 		EXIT("Invalid config value for ConsoleLanguage: %d is outside 0..29\n", g_config->console_language);
@@ -183,6 +213,10 @@ void Load(const ConfigSource& cfg)
 	if (g_config->controller_vibration > 100)
 	{
 		EXIT("Invalid config value for ControllerVibration: %u is above 100\n", g_config->controller_vibration);
+	}
+	if (g_config->controller_speaker_volume > 100)
+	{
+		EXIT("Invalid config value for ControllerSpeakerVolume: %u is above 100\n", g_config->controller_speaker_volume);
 	}
 }
 
@@ -219,6 +253,11 @@ uint32_t GetRenderResolutionHeight()
 PresentationFilter GetPresentationFilter()
 {
 	return g_config->presentation_filter;
+}
+
+PresentationScaling GetPresentationScaling()
+{
+	return g_config->presentation_scaling;
 }
 
 uint32_t GetPresentationFsrSharpness()
@@ -289,6 +328,21 @@ bool NetworkConnected()
 uint32_t GetControllerVibration()
 {
 	return g_config->controller_vibration;
+}
+
+int32_t GetControllerLightBar()
+{
+	return g_config->controller_light_bar;
+}
+
+uint32_t GetControllerSpeakerVolume()
+{
+	return g_config->controller_speaker_volume;
+}
+
+bool MicrophoneEnabled()
+{
+	return g_config->microphone_enabled;
 }
 
 bool IsNeo()

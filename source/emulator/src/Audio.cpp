@@ -1,6 +1,7 @@
 #include "Emulator/Audio.h"
 #include "Emulator/AudioHost.h"
 #include "Emulator/AudioVideoBackend.h"
+#include "Emulator/Config.h"
 #include "Emulator/Host/Clock.h"
 #include "Emulator/VideoFrameMemory.h"
 
@@ -159,7 +160,7 @@ int KYTY_SYSV_ABI AudioOutOpen(int user_id, int type, int index, uint32_t len, u
 	{
 		return AUDIO_OUT_ERROR_PORT_FULL;
 	}
-	auto id = audio->AudioOutOpen(type, len, freq, format);
+	auto id = audio->AudioOutOpen(type, len, freq, format, Config::GetControllerSpeakerVolume());
 
 	if (!id.IsValid())
 	{
@@ -589,7 +590,7 @@ static bool EnsureHostSinkLocked(ContextSlot* ctx)
 		return false;
 	}
 	// Type 0 is the primary output and opens the host output device.
-	const auto id = audio->AudioOutOpen(0, ctx->grain, ctx->sample_rate, HostAudio::Format::FloatStereo);
+	const auto id = audio->AudioOutOpen(0, ctx->grain, ctx->sample_rate, HostAudio::Format::FloatStereo, 0);
 	if (!id.IsValid())
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 4, "AudioOut2: host sink open failed (grain=%u rate=%u)\n", ctx->grain,
@@ -1310,7 +1311,7 @@ int KYTY_SYSV_ABI AudioInOpen(int user_id, uint32_t type, uint32_t index, uint32
 	{
 		return AUDIO_IN_ERROR_PORT_FULL;
 	}
-	auto id = audio->AudioInOpen(type, len, freq, format);
+	auto id = audio->AudioInOpen(type, len, freq, format, Config::MicrophoneEnabled());
 
 	if (!id.IsValid())
 	{

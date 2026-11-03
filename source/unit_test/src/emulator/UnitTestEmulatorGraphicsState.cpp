@@ -3693,6 +3693,29 @@ TEST(EmulatorGraphicsState, PrefiltersPresentationDownscalesLargerThanTwoToOne)
 	}
 }
 
+TEST(EmulatorGraphicsState, CentresTheFrameForFitAndIntegerScaling)
+{
+	using Scaling = Config::PresentationScaling;
+	const auto expect_view = [](VkRect2D view, int32_t x, int32_t y, uint32_t width, uint32_t height)
+	{
+		EXPECT_EQ(view.offset.x, x);
+		EXPECT_EQ(view.offset.y, y);
+		EXPECT_EQ(view.extent.width, width);
+		EXPECT_EQ(view.extent.height, height);
+	};
+	// 16:9 in a 16:10 window gets bars above and below; in an ultrawide one, at the sides.
+	expect_view(PresentationViewport({1920, 1080}, {1280, 800}, Scaling::Fit), 0, 40, 1280, 720);
+	expect_view(PresentationViewport({1920, 1080}, {2560, 1080}, Scaling::Fit), 320, 0, 1920, 1080);
+	// Integer keeps whole multiples while the frame fits, and fits a larger frame like Fit.
+	expect_view(PresentationViewport({640, 360}, {1920, 1200}, Scaling::Integer), 0, 60, 1920, 1080);
+	expect_view(PresentationViewport({1280, 720}, {1920, 1200}, Scaling::Integer), 320, 240, 1280, 720);
+	expect_view(PresentationViewport({1920, 1080}, {1280, 800}, Scaling::Integer), 0, 40, 1280, 720);
+	// Stretch, a matching shape and degenerate extents fill the whole target.
+	expect_view(PresentationViewport({1920, 1080}, {1280, 800}, Scaling::Stretch), 0, 0, 1280, 800);
+	expect_view(PresentationViewport({1920, 1080}, {1280, 720}, Scaling::Fit), 0, 0, 1280, 720);
+	expect_view(PresentationViewport({0, 1080}, {1280, 800}, Scaling::Fit), 0, 0, 1280, 800);
+}
+
 TEST(EmulatorGraphicsState, KeepsColorExportsLogicalForPhysicalAttachmentOrder)
 {
 	for (uint32_t channel_order = 0; channel_order < 4; channel_order++)

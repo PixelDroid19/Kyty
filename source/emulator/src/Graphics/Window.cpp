@@ -794,7 +794,10 @@ static void SetPadLightBar(uint8_t red, uint8_t green, uint8_t blue)
 static void ApplyPadFeedback(int id)
 {
 	const uint32_t vibration = g_pad_feedback.vibration.load();
-	const uint32_t light_bar = g_pad_feedback.light_bar.load();
+	const int32_t  host_bar  = Config::GetControllerLightBar();
+	// A host colour replaces whatever the guest sets, from the moment the pad connects.
+	const uint32_t light_bar =
+	    host_bar >= 0 ? (PadFeedback::LIGHT_BAR_SET | static_cast<uint32_t>(host_bar)) : g_pad_feedback.light_bar.load();
 	// 257 maps 0..255 onto SDL's 0..0xFFFF; the large motor is the low-frequency one.
 	const uint32_t strength = Config::GetControllerVibration();
 	::Kyty::Emulator::Host::HostInput::RumbleController(id, static_cast<uint16_t>((vibration >> 8u) * 257u * strength / 100u),

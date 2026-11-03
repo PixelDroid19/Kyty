@@ -129,6 +129,14 @@ public:
 	};
 	Q_ENUM(PresentationFilter)
 
+	enum class PresentationScaling
+	{
+		Stretch,
+		Fit,
+		Integer
+	};
+	Q_ENUM(PresentationScaling)
+
 	enum class PresentMode
 	{
 		Mailbox,
@@ -166,6 +174,8 @@ public:
 	QString basedir;    /* Game base directory */
 	QString param_file; /* Path to param.sfo / param.json */
 	QString game_patch_file; /* Path to a mods file applied at boot, empty for none */
+	QString addcont_folder; /* Folder holding <TITLE_ID>/ add-on packages, empty for none */
+	QString environment; /* NAME=value pairs separated by ';' added to the emulator's environment */
 	qint64  last_run = 0; /* Milliseconds since epoch of the last run, 0 when never run */
 	qint64  play_time       = 0; /* Seconds the game has run when started from the library */
 	bool    favorite        = false;
@@ -184,6 +194,7 @@ public:
 	int                   render_resolution_width    = 1280;
 	int                   render_resolution_height   = 720;
 	PresentationFilter    presentation_filter        = PresentationFilter::Linear;
+	PresentationScaling   presentation_scaling       = PresentationScaling::Stretch;
 	int                   presentation_fsr_sharpness = 90;
 	TextureAnisotropy     texture_anisotropy         = TextureAnisotropy::Guest;
 
@@ -201,11 +212,15 @@ public:
 	bool    notice_screen_skip_enabled = false;
 	bool    network_connected          = true;
 	int     controller_vibration       = 100;
+	QString controller_light_bar       = "Guest"; /* A colour name from ControllerLightBarColors(), or Guest */
+	int     controller_speaker_volume  = 0;
+	bool    microphone_enabled         = false;
 
 	// Platform / validation
 	bool                   neo                         = true;
 	bool                   shader_cache_enabled        = true;
 	bool                   vulkan_validation_enabled   = false;
+	bool                   renderdoc_capture_enabled   = false;
 	bool                   shader_validation_enabled   = false;
 	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::None;
 	ShaderLogDirection     shader_log_direction        = ShaderLogDirection::Silent;
@@ -232,6 +247,8 @@ public:
 		KYTY_CFG_SET(basedir);
 		KYTY_CFG_SET(param_file);
 		KYTY_CFG_SET(game_patch_file);
+		KYTY_CFG_SET(addcont_folder);
+		KYTY_CFG_SET(environment);
 		s->setValue("last_run", last_run);
 		s->setValue("play_time", play_time);
 		s->setValue("favorite", favorite);
@@ -243,6 +260,7 @@ public:
 		s->setValue("render_resolution_width", render_resolution_width);
 		s->setValue("render_resolution_height", render_resolution_height);
 		KYTY_CFG_SET(presentation_filter);
+		KYTY_CFG_SET(presentation_scaling);
 		s->setValue("presentation_fsr_sharpness", presentation_fsr_sharpness);
 		KYTY_CFG_SET(texture_anisotropy);
 		KYTY_CFG_SET(gpu_device);
@@ -256,9 +274,13 @@ public:
 		s->setValue("notice_screen_skip_enabled", notice_screen_skip_enabled);
 		s->setValue("network_connected", network_connected);
 		s->setValue("controller_vibration", controller_vibration);
+		KYTY_CFG_SET(controller_light_bar);
+		s->setValue("controller_speaker_volume", controller_speaker_volume);
+		s->setValue("microphone_enabled", microphone_enabled);
 		s->setValue("shader_cache_enabled", shader_cache_enabled);
 		KYTY_CFG_SET(neo);
 		KYTY_CFG_SET(vulkan_validation_enabled);
+		KYTY_CFG_SET(renderdoc_capture_enabled);
 		KYTY_CFG_SET(shader_validation_enabled);
 		KYTY_CFG_SET(shader_optimization_type);
 		KYTY_CFG_SET(shader_log_direction);
@@ -289,6 +311,8 @@ public:
 		KYTY_CFG_GET(basedir);
 		KYTY_CFG_GET(param_file);
 		KYTY_CFG_GET(game_patch_file);
+		KYTY_CFG_GET(addcont_folder);
+		KYTY_CFG_GET(environment);
 		if (s->contains("screen_width"))
 		{
 			screen_width = s->value("screen_width").toInt();
@@ -331,6 +355,10 @@ public:
 		{
 			KYTY_CFG_GET(presentation_filter);
 		}
+		if (s->contains("presentation_scaling"))
+		{
+			KYTY_CFG_GET(presentation_scaling);
+		}
 		if (s->contains("presentation_fsr_sharpness"))
 		{
 			presentation_fsr_sharpness = std::clamp(s->value("presentation_fsr_sharpness").toInt(), 0, 100);
@@ -353,9 +381,13 @@ public:
 		notice_screen_skip_enabled = s->value("notice_screen_skip_enabled", false).toBool();
 		network_connected          = s->value("network_connected", true).toBool();
 		controller_vibration       = std::clamp(s->value("controller_vibration", 100).toInt(), 0, 100);
+		controller_light_bar       = s->value("controller_light_bar", "Guest").toString();
+		controller_speaker_volume  = std::clamp(s->value("controller_speaker_volume", 0).toInt(), 0, 100);
+		microphone_enabled         = s->value("microphone_enabled", false).toBool();
 		shader_cache_enabled       = s->value("shader_cache_enabled", true).toBool();
 		KYTY_CFG_GET(neo);
 		KYTY_CFG_GET(vulkan_validation_enabled);
+		KYTY_CFG_GET(renderdoc_capture_enabled);
 		KYTY_CFG_GET(shader_validation_enabled);
 		KYTY_CFG_GET(shader_optimization_type);
 		KYTY_CFG_GET(shader_log_direction);
