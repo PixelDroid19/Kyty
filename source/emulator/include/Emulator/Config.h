@@ -70,6 +70,15 @@ enum class PresentationFilter
 	Fsr3
 };
 
+// How finished frames reach the screen. Mailbox falls back to Immediate and
+// Immediate to Fifo, the one mode every Vulkan surface has.
+enum class PresentMode
+{
+	Mailbox,
+	Immediate,
+	Fifo
+};
+
 // Host texture filtering override. Guest keeps each sampler's own anisotropy;
 // a level raises linear-minified samplers to at least that ratio.
 enum class TextureAnisotropy
@@ -104,6 +113,20 @@ PresentationFilter GetPresentationFilter();
 uint32_t GetPresentationFsrSharpness();
 uint32_t GetPresentFpsLimit();
 TextureAnisotropy GetTextureAnisotropy();
+// Vulkan device name, empty for the automatic choice.
+String      GetGpuDevice();
+PresentMode GetPresentMode();
+bool        FullscreenEnabled();
+bool        HideCursorEnabled();
+bool        PerfOverlayEnabled();
+bool        ShaderCacheEnabled();
+// The value games read as the system language (SYSTEM_PARAM_ID_LANG).
+int32_t GetConsoleLanguage();
+String  GetUserName();
+bool    NoticeScreenSkipEnabled();
+bool    NetworkConnected();
+// Percentage applied to the vibration games request.
+uint32_t GetControllerVibration();
 bool     IsNeo();
 bool     IsNextGen();
 bool     VulkanValidationEnabled();

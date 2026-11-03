@@ -32,4 +32,10 @@ QVariantMap ApplyGraphicsPreset(const QVariantMap& fields, const QString& preset
 // Allowed texts for each enum field, keyed by field name.
 QVariantMap ConfigurationChoices();
 
+// The value of the gpu_device field that leaves the choice to the emulator.
+inline constexpr char AUTOMATIC_GPU[] = "Auto";
+
+inline constexpr int CONSOLE_LANGUAGE_COUNT = 30;
+QString              ConsoleLanguageName(int language);
+
 #endif /* LAUNCHER_INCLUDE_CONFIGURATION_FIELDS_H_ */

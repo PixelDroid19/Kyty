@@ -164,6 +164,11 @@ void HostWindow::UpdateCursorPolicy(bool temporary_visibility)
 	{
 		return;
 	}
+	if (m_cursor_always_hidden)
+	{
+		SetCursorVisible(false);
+		return;
+	}
 	if (!m_fullscreen)
 	{
 		m_cursor_hide_deadline_ms = 0;
@@ -195,6 +200,12 @@ bool HostWindow::SetMouseCaptured(bool captured)
 		return false;
 	}
 	return true;
+}
+
+void HostWindow::SetCursorAlwaysHidden(bool hidden)
+{
+	m_cursor_always_hidden = hidden;
+	UpdateCursorPolicy();
 }
 
 bool HostWindow::ToggleFullscreen()

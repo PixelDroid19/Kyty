@@ -68,6 +68,9 @@ struct ChoiceText
 };
 
 const ChoiceText CHOICE_TEXTS[] = {
+    {"Mailbox", QT_TRANSLATE_NOOP("FieldRowItem", "No tearing, lowest delay (Mailbox)")},
+    {"Immediate", QT_TRANSLATE_NOOP("FieldRowItem", "No waiting, may tear (Immediate)")},
+    {"Fifo", QT_TRANSLATE_NOOP("FieldRowItem", "Vertical sync (FIFO)")},
     {"System", QT_TRANSLATE_NOOP("FieldRowItem", "Same as the system")},
     {"Dark", QT_TRANSLATE_NOOP("FieldRowItem", "Dark")},
     {"Light", QT_TRANSLATE_NOOP("FieldRowItem", "Light")},

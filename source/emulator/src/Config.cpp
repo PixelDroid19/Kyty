@@ -20,6 +20,17 @@ struct Config
 	uint32_t               presentation_fsr_sharpness  = 90;
 	uint32_t               present_fps_limit           = 0;
 	TextureAnisotropy      texture_anisotropy          = TextureAnisotropy::Guest;
+	String                 gpu_device;
+	PresentMode            present_mode                = PresentMode::Mailbox;
+	bool                   fullscreen_enabled          = false;
+	bool                   hide_cursor_enabled         = false;
+	bool                   perf_overlay_enabled        = false;
+	bool                   shader_cache_enabled        = true;
+	int32_t                console_language            = 1;
+	String                 user_name                   = U"Kyty";
+	bool                   notice_screen_skip_enabled  = false;
+	bool                   network_connected           = true;
+	uint32_t               controller_vibration        = 100;
 	bool                   neo                         = true;
 	GuestPlatform          guest_platform              = GuestPlatform::Unknown;
 	bool                   vulkan_validation_enabled   = false;
@@ -148,6 +159,31 @@ void Load(const ConfigSource& cfg)
 	LoadBool(g_config->spirv_debug_printf_enabled, cfg, U"SpirvDebugPrintfEnabled");
 	LoadBool(g_config->pipeline_dump_enabled, cfg, U"PipelineDumpEnabled");
 	LoadStr(g_config->pipeline_dump_folder, cfg, U"PipelineDumpFolder");
+	LoadStr(g_config->gpu_device, cfg, U"GpuDevice");
+	LoadStrictEnum(g_config->present_mode, cfg, U"PresentMode");
+	LoadBool(g_config->fullscreen_enabled, cfg, U"FullscreenEnabled");
+	LoadBool(g_config->hide_cursor_enabled, cfg, U"HideCursorEnabled");
+	LoadBool(g_config->perf_overlay_enabled, cfg, U"PerfOverlayEnabled");
+	LoadBool(g_config->shader_cache_enabled, cfg, U"ShaderCacheEnabled");
+	LoadInt(g_config->console_language, cfg, U"ConsoleLanguage");
+	LoadStr(g_config->user_name, cfg, U"UserName");
+	LoadBool(g_config->notice_screen_skip_enabled, cfg, U"NoticeScreenSkipEnabled");
+	LoadBool(g_config->network_connected, cfg, U"NetworkConnected");
+	LoadInt(g_config->controller_vibration, cfg, U"ControllerVibration");
+	if (g_config->console_language < 0 || g_config->console_language > 29)
+	{
+		EXIT("Invalid config value for ConsoleLanguage: %d is outside 0..29\n", g_config->console_language);
+	}
+	// The guest's name buffers hold 16 bytes and a terminator; utf8_str() counts its own terminator.
+	const auto user_name_size = g_config->user_name.utf8_str().Size() - 1;
+	if (user_name_size == 0 || user_name_size > 16)
+	{
+		EXIT("Invalid config value for UserName: it must have 1 to 16 bytes\n");
+	}
+	if (g_config->controller_vibration > 100)
+	{
+		EXIT("Invalid config value for ControllerVibration: %u is above 100\n", g_config->controller_vibration);
+	}
 }
 
 uint32_t GetScreenWidth()
@@ -198,6 +234,61 @@ uint32_t GetPresentFpsLimit()
 TextureAnisotropy GetTextureAnisotropy()
 {
 	return g_config->texture_anisotropy;
+}
+
+String GetGpuDevice()
+{
+	return g_config->gpu_device;
+}
+
+PresentMode GetPresentMode()
+{
+	return g_config->present_mode;
+}
+
+bool FullscreenEnabled()
+{
+	return g_config->fullscreen_enabled;
+}
+
+bool HideCursorEnabled()
+{
+	return g_config->hide_cursor_enabled;
+}
+
+bool PerfOverlayEnabled()
+{
+	return g_config->perf_overlay_enabled;
+}
+
+bool ShaderCacheEnabled()
+{
+	return g_config->shader_cache_enabled;
+}
+
+int32_t GetConsoleLanguage()
+{
+	return g_config->console_language;
+}
+
+String GetUserName()
+{
+	return g_config->user_name;
+}
+
+bool NoticeScreenSkipEnabled()
+{
+	return g_config->notice_screen_skip_enabled;
+}
+
+bool NetworkConnected()
+{
+	return g_config->network_connected;
+}
+
+uint32_t GetControllerVibration()
+{
+	return g_config->controller_vibration;
 }
 
 bool IsNeo()

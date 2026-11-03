@@ -50,6 +50,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <set>
 #include <string>
@@ -795,8 +796,9 @@ static void ApplyPadFeedback(int id)
 	const uint32_t vibration = g_pad_feedback.vibration.load();
 	const uint32_t light_bar = g_pad_feedback.light_bar.load();
 	// 257 maps 0..255 onto SDL's 0..0xFFFF; the large motor is the low-frequency one.
-	::Kyty::Emulator::Host::HostInput::RumbleController(id, static_cast<uint16_t>((vibration >> 8u) * 257u),
-	                                                    static_cast<uint16_t>((vibration & 0xffu) * 257u));
+	const uint32_t strength = Config::GetControllerVibration();
+	::Kyty::Emulator::Host::HostInput::RumbleController(id, static_cast<uint16_t>((vibration >> 8u) * 257u * strength / 100u),
+	                                                    static_cast<uint16_t>((vibration & 0xffu) * 257u * strength / 100u));
 	if ((light_bar & PadFeedback::LIGHT_BAR_SET) != 0)
 	{
 		::Kyty::Emulator::Host::HostInput::SetControllerLed(id, static_cast<uint8_t>(light_bar >> 16u),
@@ -1776,6 +1778,36 @@ static void WindowCreate(WindowContext* ctx)
 
 	ctx->host_window = ::Kyty::Emulator::Host::HostWindow::Create(ctx->graphic_ctx.screen_width, ctx->graphic_ctx.screen_height);
 	ctx->controls.SetFocused(ctx->host_window->IsFocused());
+	ctx->host_window->SetCursorAlwaysHidden(Config::HideCursorEnabled());
+	if (Config::FullscreenEnabled() && !ctx->host_window->ToggleFullscreen())
+	{
+		KYTY_LOG_WARN("Starting in a window: full screen is not available\n");
+	}
+}
+
+// FIFO is the one mode every surface has, so it ends each fallback.
+static VkPresentModeKHR ChoosePresentMode(Config::PresentMode requested, const Vector<VkPresentModeKHR>& available)
+{
+	if (requested == Config::PresentMode::Fifo)
+	{
+		return VK_PRESENT_MODE_FIFO_KHR;
+	}
+	const auto supported = [&available](VkPresentModeKHR wanted)
+	{
+		for (const auto mode: available)
+		{
+			if (mode == wanted)
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	if (requested == Config::PresentMode::Mailbox && supported(VK_PRESENT_MODE_MAILBOX_KHR))
+	{
+		return VK_PRESENT_MODE_MAILBOX_KHR;
+	}
+	return supported(VK_PRESENT_MODE_IMMEDIATE_KHR) ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
 }
 
 static void VulkanGetSurfaceCapabilities(VkPhysicalDevice physical_device, VkSurfaceKHR surface, SurfaceCapabilities* r)
@@ -1995,6 +2027,8 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 
 	VkPhysicalDevice best_device = nullptr;
 	VulkanQueues     best_queues;
+	const auto       requested_gpu = Config::GetGpuDevice();
+	const auto       requested_name = requested_gpu.utf8_str();
 
 	for (const auto& device: devices)
 	{
@@ -2011,6 +2045,10 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		device_features2.pNext = &color_write_ext;
 
 		vkGetPhysicalDeviceProperties(device, &device_properties);
+		if (!requested_gpu.IsEmpty() && std::strcmp(device_properties.deviceName, requested_name.GetData()) != 0)
+		{
+			continue;
+		}
 		if (device_properties.apiVersion < VK_API_VERSION_1_4)
 		{
 			KYTY_LOG_DEBUG("Vulkan 1.4 required; skipping device %s (API %u.%u.%u)\n", device_properties.deviceName,
@@ -2250,6 +2288,10 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		}
 	}
 
+	if (best_device == nullptr && !requested_gpu.IsEmpty())
+	{
+		EXIT("GPU '%s' is not present or does not support what the renderer needs\n", requested_name.GetData());
+	}
 	*out_device = best_device;
 	*out_queues = std::move(best_queues);
 }
@@ -2756,22 +2798,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 		}
 	}
 	EXIT_IF(create_info.compositeAlpha == 0);
-	// Capability-driven present mode: prefer MAILBOX (low-latency triple-buffer)
-	// then IMMEDIATE, else FIFO (guaranteed vsync). Hardcoding FIFO alone can
-	// couple host present to display refresh with only minImageCount images.
-	create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
-	for (const auto mode: r->present_modes)
-	{
-		if (mode == VK_PRESENT_MODE_MAILBOX_KHR)
-		{
-			create_info.presentMode = mode;
-			break;
-		}
-		if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR)
-		{
-			create_info.presentMode = mode;
-		}
-	}
+	create_info.presentMode = ChoosePresentMode(Config::GetPresentMode(), r->present_modes);
 	// MAILBOX needs ≥3 images to avoid degenerating into FIFO-like blocking.
 	if (create_info.presentMode == VK_PRESENT_MODE_MAILBOX_KHR && image_count < 3)
 	{

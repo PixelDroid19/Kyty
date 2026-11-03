@@ -49,6 +49,7 @@ namespace {
 enum Category
 {
 	Graphics,
+	Console,
 	Shaders,
 	Logs,
 	Emulator,
@@ -100,6 +101,7 @@ SettingsPageItem::SettingsPageItem(QQuickItem* parent): QQuickItem(parent)
 
 	m_rail = new SettingsRailItem(this);
 	m_rail->SetEntries({{tr("Graphics"), SettingsIcon::Graphics},
+	                    {tr("Console"), SettingsIcon::Console},
 	                    {tr("Shaders"), SettingsIcon::Shaders},
 	                    {tr("Logs and dumps"), SettingsIcon::Logs},
 	                    {tr("Emulator"), SettingsIcon::Emulator},
@@ -228,7 +230,7 @@ void SettingsPageItem::GoTo(const Place& place)
 bool SettingsPageItem::EmulatorCategory() const
 {
 	const int category = m_rail->Current();
-	return category == Graphics || category == Shaders || category == Logs;
+	return category == Graphics || category == Console || category == Shaders || category == Logs;
 }
 
 // The current category's buttons, decided from the category and not from visibility, which is false while the
@@ -280,6 +282,7 @@ void SettingsPageItem::ShowCategory()
 	switch (category)
 	{
 		case Graphics: m_form->AddFields(Fields(FieldGroup::Display)); break;
+		case Console: m_form->AddFields(Fields(FieldGroup::System)); break;
 		case Shaders: m_form->AddFields(Fields(FieldGroup::Shaders)); break;
 		case Logs: m_form->AddFields(Fields(FieldGroup::Logs)); break;
 		case Emulator: m_form->AddFields(Fields(FieldGroup::Program)); break;
@@ -409,6 +412,7 @@ void SettingsPageItem::RestoreDefaults()
 	const auto defaults = LauncherBackend::Instance()->FieldsFor(-1);
 	auto       values   = m_global;
 	for (const auto& field: EditorFields(m_rail->Current() == Graphics  ? FieldGroup::Display
+	                                     : m_rail->Current() == Console ? FieldGroup::System
 	                                     : m_rail->Current() == Shaders ? FieldGroup::Shaders
 	                                                                    : FieldGroup::Logs))
 	{
@@ -562,7 +566,8 @@ void SettingsPageItem::updatePolish()
 	const qreal   x                      = margin + (RAIL_WIDTH + COLUMN_GAP) * u;
 	const qreal   width                  = std::clamp<qreal>(this->width() - margin - x, 0, MAX_CONTENT * u);
 	qreal         y                      = TOP * u;
-	const QString titles[CATEGORY_COUNT] = {tr("Graphics"), tr("Shaders"), tr("Logs and dumps"), tr("Emulator"), tr("Controls"), tr("Interface")};
+	const QString titles[CATEGORY_COUNT] = {tr("Graphics"), tr("Console"),  tr("Shaders"),  tr("Logs and dumps"),
+	                                        tr("Emulator"), tr("Controls"), tr("Interface")};
 	m_texts << TextAt(QRectF(x, y, width, TITLE_HEIGHT * u), titles[std::clamp(category, 0, CATEGORY_COUNT - 1)], title_font,
 	                  theme->TextPrimary(), QTextOption::NoWrap);
 	y += TITLE_HEIGHT * u;
@@ -583,7 +588,12 @@ void SettingsPageItem::updatePolish()
 	switch (category)
 	{
 		case Graphics:
-			add_block(tr("Screen size, render resolution and how the image is filtered.") + QLatin1Char(' ') + saved_note,
+			add_block(tr("Graphics card, screen size, render resolution and how the image is filtered.") + QLatin1Char(' ') + saved_note,
+			          theme->TextMuted());
+			break;
+		case Console:
+			add_block(tr("What games see of the console: its language, your name, the network and the controller's vibration.") +
+			              QLatin1Char(' ') + saved_note,
 			          theme->TextMuted());
 			break;
 		case Shaders:

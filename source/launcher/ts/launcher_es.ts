@@ -28,10 +28,6 @@
         <translation>Intro</translation>
     </message>
     <message>
-        <source>Double-click</source>
-        <translation type="vanished">Doble clic</translation>
-    </message>
-    <message>
         <source>Options</source>
         <translation>Options</translation>
     </message>
@@ -494,6 +490,58 @@
         <translation>Shaders y validación</translation>
     </message>
     <message>
+        <source>Graphics card</source>
+        <translation>Tarjeta gráfica</translation>
+    </message>
+    <message>
+        <source>Start in full screen</source>
+        <translation>Iniciar a pantalla completa</translation>
+    </message>
+    <message>
+        <source>Frame delivery</source>
+        <translation>Entrega de fotogramas</translation>
+    </message>
+    <message>
+        <source>Frame limit (0 = none)</source>
+        <translation>Límite de FPS (0 = ninguno)</translation>
+    </message>
+    <message>
+        <source>Show performance overlay</source>
+        <translation>Superponer rendimiento</translation>
+    </message>
+    <message>
+        <source>Hide the mouse cursor</source>
+        <translation>Ocultar el cursor</translation>
+    </message>
+    <message>
+        <source>System language</source>
+        <translation>Idioma del sistema</translation>
+    </message>
+    <message>
+        <source>Console</source>
+        <translation>Consola</translation>
+    </message>
+    <message>
+        <source>User name</source>
+        <translation>Nombre de usuario</translation>
+    </message>
+    <message>
+        <source>Network connected</source>
+        <translation>Red conectada</translation>
+    </message>
+    <message>
+        <source>Skip notice screens</source>
+        <translation>Omitir avisos</translation>
+    </message>
+    <message>
+        <source>Vibration strength (0–100)</source>
+        <translation>Vibración (0–100)</translation>
+    </message>
+    <message>
+        <source>Shader cache</source>
+        <translation>Caché de shaders</translation>
+    </message>
+    <message>
         <source>Shader validation</source>
         <translation>Validación de shaders</translation>
     </message>
@@ -630,170 +678,6 @@
         <translation>Ventana del launcher</translation>
     </message>
     <message>
-        <source>Profile</source>
-        <translation type="vanished">Perfil</translation>
-    </message>
-    <message>
-        <source>Profile name</source>
-        <translation type="vanished">Nombre del perfil</translation>
-    </message>
-    <message>
-        <source>Controller</source>
-        <translation type="vanished">Mando</translation>
-    </message>
-    <message>
-        <source>Left stick</source>
-        <translation type="vanished">Stick izquierdo</translation>
-    </message>
-    <message>
-        <source>Left stick dead zone</source>
-        <translation type="vanished">Zona muerta del stick izquierdo</translation>
-    </message>
-    <message>
-        <source>Invert left stick across</source>
-        <translation type="vanished">Invertir eje X izquierdo</translation>
-    </message>
-    <message>
-        <source>Invert left stick up and down</source>
-        <translation type="vanished">Invertir eje Y izquierdo</translation>
-    </message>
-    <message>
-        <source>Right stick</source>
-        <translation type="vanished">Stick derecho</translation>
-    </message>
-    <message>
-        <source>Right stick dead zone</source>
-        <translation type="vanished">Zona muerta del stick derecho</translation>
-    </message>
-    <message>
-        <source>Invert right stick across</source>
-        <translation type="vanished">Invertir eje X derecho</translation>
-    </message>
-    <message>
-        <source>Invert right stick up and down</source>
-        <translation type="vanished">Invertir eje Y derecho</translation>
-    </message>
-    <message>
-        <source>Trigger press point</source>
-        <translation type="vanished">Umbral de los gatillos</translation>
-    </message>
-    <message>
-        <source>Look with the mouse</source>
-        <translation type="vanished">Mirar con el ratón</translation>
-    </message>
-    <message>
-        <source>Mouse</source>
-        <translation type="vanished">Ratón</translation>
-    </message>
-    <message>
-        <source>Mouse sensitivity</source>
-        <translation type="vanished">Sensibilidad del ratón</translation>
-    </message>
-    <message>
-        <source>Invert mouse up and down</source>
-        <translation type="vanished">Invertir el ratón en vertical</translation>
-    </message>
-    <message>
-        <source>✕ Cross</source>
-        <translation type="vanished">✕ Equis</translation>
-    </message>
-    <message>
-        <source>Buttons</source>
-        <translation type="vanished">Botones</translation>
-    </message>
-    <message>
-        <source>○ Circle</source>
-        <translation type="vanished">○ Círculo</translation>
-    </message>
-    <message>
-        <source>□ Square</source>
-        <translation type="vanished">□ Cuadrado</translation>
-    </message>
-    <message>
-        <source>△ Triangle</source>
-        <translation type="vanished">△ Triángulo</translation>
-    </message>
-    <message>
-        <source>D-pad up</source>
-        <translation type="vanished">Cruceta arriba</translation>
-    </message>
-    <message>
-        <source>D-pad down</source>
-        <translation type="vanished">Cruceta abajo</translation>
-    </message>
-    <message>
-        <source>D-pad left</source>
-        <translation type="vanished">Cruceta izquierda</translation>
-    </message>
-    <message>
-        <source>D-pad right</source>
-        <translation type="vanished">Cruceta derecha</translation>
-    </message>
-    <message>
-        <source>L1</source>
-        <translation type="vanished">L1</translation>
-    </message>
-    <message>
-        <source>R1</source>
-        <translation type="vanished">R1</translation>
-    </message>
-    <message>
-        <source>L2</source>
-        <translation type="vanished">L2</translation>
-    </message>
-    <message>
-        <source>R2</source>
-        <translation type="vanished">R2</translation>
-    </message>
-    <message>
-        <source>L3</source>
-        <translation type="vanished">L3</translation>
-    </message>
-    <message>
-        <source>R3</source>
-        <translation type="vanished">R3</translation>
-    </message>
-    <message>
-        <source>Options</source>
-        <translation type="vanished">Options</translation>
-    </message>
-    <message>
-        <source>Touchpad</source>
-        <translation type="vanished">Panel táctil</translation>
-    </message>
-    <message>
-        <source>Left stick left</source>
-        <translation type="vanished">Stick izquierdo a la izquierda</translation>
-    </message>
-    <message>
-        <source>Left stick right</source>
-        <translation type="vanished">Stick izquierdo a la derecha</translation>
-    </message>
-    <message>
-        <source>Left stick up</source>
-        <translation type="vanished">Stick izquierdo arriba</translation>
-    </message>
-    <message>
-        <source>Left stick down</source>
-        <translation type="vanished">Stick izquierdo abajo</translation>
-    </message>
-    <message>
-        <source>Right stick left</source>
-        <translation type="vanished">Stick derecho a la izquierda</translation>
-    </message>
-    <message>
-        <source>Right stick right</source>
-        <translation type="vanished">Stick derecho a la derecha</translation>
-    </message>
-    <message>
-        <source>Right stick up</source>
-        <translation type="vanished">Stick derecho arriba</translation>
-    </message>
-    <message>
-        <source>Right stick down</source>
-        <translation type="vanished">Stick derecho abajo</translation>
-    </message>
-    <message>
         <source>The folder that holds the game&apos;s files.</source>
         <translation>La carpeta que contiene los archivos del juego.</translation>
     </message>
@@ -816,10 +700,6 @@
     <message>
         <source>Render targets also scales the game&apos;s full-screen render textures; not every game supports it.</source>
         <translation>Render targets también escala las texturas de render a pantalla completa del juego; no todos los juegos lo admiten.</translation>
-    </message>
-    <message>
-        <source>How the finished picture is scaled to the window.</source>
-        <translation>Cómo se escala la imagen final a la ventana.</translation>
     </message>
     <message>
         <source>Sharper textures seen at a slant. It does not change the resolution.</source>
@@ -864,34 +744,6 @@
     <message>
         <source>How the launcher opens. Full screen suits a TV.</source>
         <translation>Cómo se abre el launcher. Pantalla completa va bien en un televisor.</translation>
-    </message>
-    <message>
-        <source>Every game uses the profile chosen here. Default is the emulator&apos;s own layout and can&apos;t be changed; duplicate it to make a profile of your own.</source>
-        <translation type="vanished">Todos los juegos usan el perfil elegido aquí. Default es la distribución propia del emulador y no se puede cambiar; duplícalo para crear un perfil propio.</translation>
-    </message>
-    <message>
-        <source>Any controller uses the first one connected. Choosing one keeps the game on it while it is connected.</source>
-        <translation type="vanished">Cualquier mando usa el primero que se conecte. Si eliges uno, el juego lo usa mientras siga conectado.</translation>
-    </message>
-    <message>
-        <source>Move the stick: the outer dot is where it is, the filled dot what the game sees after the dead zone. On this page the left stick does not move between settings; the D-pad does.</source>
-        <translation type="vanished">Mueve el stick: el punto exterior es su posición y el punto relleno lo que ve el juego tras la zona muerta. En esta página el stick izquierdo no cambia de ajuste; la cruceta sí.</translation>
-    </message>
-    <message>
-        <source>Movements smaller than this are ignored, so a worn stick does not drift.</source>
-        <translation type="vanished">Los movimientos menores que esto se ignoran, para que un stick gastado no derive.</translation>
-    </message>
-    <message>
-        <source>How far L2 and R2 must be pulled to count as pressed.</source>
-        <translation type="vanished">Cuánto hay que apretar L2 y R2 para que cuenten como pulsados.</translation>
-    </message>
-    <message>
-        <source>In the game, F3 captures the mouse; while it is captured, moving it moves the right stick.</source>
-        <translation type="vanished">En el juego, F3 captura el ratón; mientras está capturado, moverlo mueve el stick derecho.</translation>
-    </message>
-    <message>
-        <source>Choose a box, then press the key or button to use. Delete or □ clears it.</source>
-        <translation type="vanished">Elige una casilla y pulsa la tecla o el botón que quieras usar. Supr o □ la vacía.</translation>
     </message>
     <message>
         <source>Language</source>
@@ -950,6 +802,54 @@
         <translation>Volumen de los sonidos</translation>
     </message>
     <message>
+        <source>Automatic prefers a dedicated card. Only cards with Vulkan 1.4 are listed.</source>
+        <translation>Automático prefiere una tarjeta dedicada. Solo aparecen las tarjetas con Vulkan 1.4.</translation>
+    </message>
+    <message>
+        <source>Vertical sync never tears but adds delay. If the screen lacks a mode, the next one that works is used.</source>
+        <translation>La sincronización vertical nunca muestra cortes, pero añade retardo. Si la pantalla no tiene un modo, se usa el siguiente que funcione.</translation>
+    </message>
+    <message>
+        <source>The most frames per second shown on screen. 0 leaves them unlimited.</source>
+        <translation>Máximo de fotogramas por segundo en pantalla. 0 los deja sin límite.</translation>
+    </message>
+    <message>
+        <source>Shows frame rate and timings over the game.</source>
+        <translation>Muestra los FPS y los tiempos sobre el juego.</translation>
+    </message>
+    <message>
+        <source>In full screen the cursor already hides when the mouse stops. This also hides it in a window.</source>
+        <translation>A pantalla completa el cursor ya se oculta cuando el ratón se detiene. Esto también lo oculta en ventana.</translation>
+    </message>
+    <message>
+        <source>The language games read from the console. A game without it uses its own default.</source>
+        <translation>El idioma que los juegos leen de la consola. Un juego que no lo tenga usa el suyo por defecto.</translation>
+    </message>
+    <message>
+        <source>The name games show for the player. It does not change where saves are kept.</source>
+        <translation>El nombre que los juegos muestran para el jugador. No cambia dónde se guardan las partidas.</translation>
+    </message>
+    <message>
+        <source>Off tells games the console has no network. On reports a local connection; there is no online play.</source>
+        <translation>Apagado indica a los juegos que la consola no tiene red. Encendido informa de una conexión local; no hay juego en línea.</translation>
+    </message>
+    <message>
+        <source>Tells games that show a notice at the start that it may be skipped. Not every game asks.</source>
+        <translation>Indica a los juegos que muestran un aviso al inicio que pueden omitirlo. No todos lo consultan.</translation>
+    </message>
+    <message>
+        <source>How strongly the controller follows the vibration games request. 0 turns it off.</source>
+        <translation>Con qué fuerza sigue el mando la vibración que piden los juegos. 0 la apaga.</translation>
+    </message>
+    <message>
+        <source>Keeps compiled shaders on disk so games load and run smoothly the next time. Turn it off only to rule out a bad cache.</source>
+        <translation>Guarda los shaders compilados en disco para que los juegos carguen y vayan fluidos la próxima vez. Apágalo solo para descartar una caché dañada.</translation>
+    </message>
+    <message>
+        <source>How the finished picture is scaled to the window. Fsr3 only works in an emulator built with its SDK.</source>
+        <translation>Cómo se escala la imagen final a la ventana. Fsr3 solo funciona en un emulador compilado con su SDK.</translation>
+    </message>
+    <message>
         <source>Add-on themes are folders with a theme.ini inside the themes folder above, found when the launcher starts. Their colours win over the accent colour.</source>
         <translation>Los temas complementarios son carpetas con un theme.ini dentro de la carpeta de temas de arriba; se buscan al iniciar el launcher. Sus colores mandan sobre el color de acento.</translation>
     </message>
@@ -968,6 +868,18 @@
 </context>
 <context>
     <name>FieldRowItem</name>
+    <message>
+        <source>No tearing, lowest delay (Mailbox)</source>
+        <translation>Sin cortes, menor retardo (Mailbox)</translation>
+    </message>
+    <message>
+        <source>No waiting, may tear (Immediate)</source>
+        <translation>Sin espera, con cortes (Immediate)</translation>
+    </message>
+    <message>
+        <source>Vertical sync (FIFO)</source>
+        <translation>Sincronización vertical (FIFO)</translation>
+    </message>
     <message>
         <source>Same as the system</source>
         <translation>Igual que el sistema</translation>
@@ -1209,48 +1121,12 @@
         <translation>Examinar…</translation>
     </message>
     <message>
-        <source>Trigger</source>
-        <translation type="vanished">Gatillo</translation>
-    </message>
-    <message>
-        <source>Not bound</source>
-        <translation type="vanished">Sin asignar</translation>
-    </message>
-    <message>
-        <source>%1, keyboard and mouse</source>
-        <translation type="vanished">%1, teclado y ratón</translation>
-    </message>
-    <message>
-        <source>%1, controller</source>
-        <translation type="vanished">%1, mando</translation>
-    </message>
-    <message>
         <source>No modules found yet. Set the game folder, then rescan.</source>
         <translation>Aún no hay módulos. Elige la carpeta del juego y vuelve a buscar.</translation>
     </message>
     <message>
         <source>No parameters file selected.</source>
         <translation>No hay archivo de parámetros.</translation>
-    </message>
-    <message>
-        <source>Left stick</source>
-        <translation type="vanished">Stick izquierdo</translation>
-    </message>
-    <message>
-        <source>Right stick</source>
-        <translation type="vanished">Stick derecho</translation>
-    </message>
-    <message>
-        <source>%1 on the controller</source>
-        <translation type="vanished">%1 en el mando</translation>
-    </message>
-    <message>
-        <source>Keyboard and mouse</source>
-        <translation type="vanished">Teclado y ratón</translation>
-    </message>
-    <message>
-        <source>Controller</source>
-        <translation type="vanished">Mando</translation>
     </message>
     <message>
         <source>The last game played</source>
@@ -1500,6 +1376,18 @@
         <translation>La nitidez FSR debe estar entre 0 y 100</translation>
     </message>
     <message>
+        <source>The frame limit must be between 0 and 1000</source>
+        <translation>El límite de FPS debe estar entre 0 y 1000</translation>
+    </message>
+    <message>
+        <source>The user name must have 1 to 16 bytes</source>
+        <translation>El nombre de usuario debe tener de 1 a 16 bytes</translation>
+    </message>
+    <message>
+        <source>Vibration must be between 0 and 100</source>
+        <translation>La vibración debe estar entre 0 y 100</translation>
+    </message>
+    <message>
         <source>Emulator not found. Set its path in Settings.</source>
         <translation>No se encontró el emulador. Indica su ruta en Configuración.</translation>
     </message>
@@ -1571,6 +1459,10 @@
     <message>
         <source>A game is already running.</source>
         <translation>Ya hay un juego en ejecución.</translation>
+    </message>
+    <message>
+        <source>The GPU %1 is not available. Choose another one in Settings › Graphics.</source>
+        <translation>La GPU %1 no está disponible. Elige otra en Ajustes › Gráficos.</translation>
     </message>
     <message>
         <source>The controls profile %1 can&apos;t be used: %2 Choose another one or repair it in Settings › Controls.</source>
@@ -1683,6 +1575,10 @@
     <message>
         <source>Paddle 4</source>
         <translation>Paleta 4</translation>
+    </message>
+    <message>
+        <source>Automatic</source>
+        <translation>Automática</translation>
     </message>
     <message>
         <source>%1 %</source>
@@ -1867,18 +1763,6 @@
         <translation>Nuevo apartado…</translation>
     </message>
     <message>
-        <source>Emulator ready</source>
-        <translation type="vanished">Emulador listo</translation>
-    </message>
-    <message>
-        <source>Emulator not found</source>
-        <translation type="vanished">Emulador no encontrado</translation>
-    </message>
-    <message>
-        <source>No controller</source>
-        <translation type="vanished">Sin mando</translation>
-    </message>
-    <message>
         <source>No games yet. Add a game folder to start your library.</source>
         <translation>Aún no hay juegos. Añade la carpeta de un juego para empezar tu biblioteca.</translation>
     </message>
@@ -1923,6 +1807,10 @@
     <message>
         <source>Graphics</source>
         <translation>Gráficos</translation>
+    </message>
+    <message>
+        <source>Console</source>
+        <translation>Consola</translation>
     </message>
     <message>
         <source>Shaders</source>
@@ -1997,10 +1885,6 @@
         <translation>Todos los juegos sin ajustes de emulador propios usan estos. Los cambios se guardan al hacerlos.</translation>
     </message>
     <message>
-        <source>Screen size, render resolution and how the image is filtered.</source>
-        <translation>Tamaño de pantalla, resolución de render y cómo se filtra la imagen.</translation>
-    </message>
-    <message>
         <source>How shaders are optimized, and the validation that helps find rendering bugs; validation slows games down.</source>
         <translation>Cómo se optimizan los shaders y la validación que ayuda a encontrar errores de render; la validación ralentiza los juegos.</translation>
     </message>
@@ -2047,6 +1931,14 @@
     <message>
         <source>Controller</source>
         <translation>Mando</translation>
+    </message>
+    <message>
+        <source>Graphics card, screen size, render resolution and how the image is filtered.</source>
+        <translation>Tarjeta gráfica, tamaño de pantalla, resolución de renderizado y filtrado de la imagen.</translation>
+    </message>
+    <message>
+        <source>What games see of the console: its language, your name, the network and the controller&apos;s vibration.</source>
+        <translation>Lo que los juegos ven de la consola: su idioma, tu nombre, la red y la vibración del mando.</translation>
     </message>
     <message>
         <source>None connected. Keyboard and mouse work everywhere.</source>

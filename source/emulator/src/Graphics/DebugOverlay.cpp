@@ -4,6 +4,7 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Host/HostWindow.h"
@@ -162,13 +163,15 @@ void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext
 	EXIT_IF(swapchain == nullptr);
 	EXIT_IF(g_initialized);
 
-	g_visible = EnvHudEnabledByDefault();
+	g_visible = EnvHudEnabledByDefault() || Config::PerfOverlayEnabled();
 	DebugStatsInit();
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	// The host window decides when the cursor shows; the overlay would show it again every frame.
+	io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 	io.IniFilename = nullptr;
 
 	ImGui::StyleColorsDark();

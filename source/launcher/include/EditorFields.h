@@ -12,6 +12,7 @@ enum class FieldGroup
 {
 	Game,
 	Display,
+	System,
 	Shaders,
 	Logs,
 	Modules,

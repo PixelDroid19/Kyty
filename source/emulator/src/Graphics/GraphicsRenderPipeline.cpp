@@ -1138,7 +1138,9 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 	EXIT_IF(gctx == nullptr);
 
 	const auto recipe = BuildComputePipelineRecipe(input_info, cs_shader);
-	ComputePipelinePrecompileStart(ComputePipelinePrecompileDirectory(), recipe.vendor_id, recipe.device_id, PrecompileComputePipeline);
+	// Without a directory the recipes are neither read nor recorded.
+	const auto precompile_directory = Config::ShaderCacheEnabled() ? ComputePipelinePrecompileDirectory() : std::filesystem::path();
+	ComputePipelinePrecompileStart(precompile_directory, recipe.vendor_id, recipe.device_id, PrecompileComputePipeline);
 	ComputePipelinePrecompileClaim(recipe);
 
 	EXIT_IF(pipeline->pipeline_layout != nullptr);

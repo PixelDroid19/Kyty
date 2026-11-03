@@ -17,8 +17,14 @@ const QVector<EditorField> GAME_FIELDS = {
 };
 
 const QVector<EditorField> DISPLAY_FIELDS = {
-    {"screen_width", QT_TRANSLATE_NOOP("EditorPageItem", "Screen width"), FieldType::Number, nullptr, false, nullptr,
+    {"gpu_device", QT_TRANSLATE_NOOP("EditorPageItem", "Graphics card"), FieldType::Choice, "gpu_device", false, nullptr,
 	 QT_TRANSLATE_NOOP("EditorPageItem", "Display")},
+    {"fullscreen_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Start in full screen"), FieldType::Toggle},
+    {"present_mode", QT_TRANSLATE_NOOP("EditorPageItem", "Frame delivery"), FieldType::Choice, "present_mode"},
+    {"present_fps_limit", QT_TRANSLATE_NOOP("EditorPageItem", "Frame limit (0 = none)"), FieldType::Number},
+    {"perf_overlay_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Show performance overlay"), FieldType::Toggle},
+    {"hide_cursor_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Hide the mouse cursor"), FieldType::Toggle},
+    {"screen_width", QT_TRANSLATE_NOOP("EditorPageItem", "Screen width"), FieldType::Number},
     {"screen_height", QT_TRANSLATE_NOOP("EditorPageItem", "Screen height"), FieldType::Number},
     {"graphics_preset", QT_TRANSLATE_NOOP("EditorPageItem", "Graphics preset"), FieldType::Choice, "graphics_preset"},
     {"render_resolution_mode", QT_TRANSLATE_NOOP("EditorPageItem", "Render resolution"), FieldType::Choice, "render_resolution_mode"},
@@ -35,9 +41,19 @@ const QVector<EditorField> DISPLAY_FIELDS = {
     {"neo", QT_TRANSLATE_NOOP("EditorPageItem", "Neo mode"), FieldType::Toggle},
 };
 
+const QVector<EditorField> SYSTEM_FIELDS = {
+    {"console_language", QT_TRANSLATE_NOOP("EditorPageItem", "System language"), FieldType::Choice, "console_language", false, nullptr,
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Console")},
+    {"user_name", QT_TRANSLATE_NOOP("EditorPageItem", "User name"), FieldType::Text},
+    {"network_connected", QT_TRANSLATE_NOOP("EditorPageItem", "Network connected"), FieldType::Toggle},
+    {"notice_screen_skip_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Skip notice screens"), FieldType::Toggle},
+    {"controller_vibration", QT_TRANSLATE_NOOP("EditorPageItem", "Vibration strength (0–100)"), FieldType::Number},
+};
+
 const QVector<EditorField> SHADER_FIELDS = {
-    {"shader_optimization_type", QT_TRANSLATE_NOOP("EditorPageItem", "Optimization"), FieldType::Choice, "shader_optimization_type", false,
-	 nullptr, QT_TRANSLATE_NOOP("EditorPageItem", "Shaders and validation")},
+    {"shader_cache_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Shader cache"), FieldType::Toggle, nullptr, false, nullptr,
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Shaders and validation")},
+    {"shader_optimization_type", QT_TRANSLATE_NOOP("EditorPageItem", "Optimization"), FieldType::Choice, "shader_optimization_type"},
     {"shader_validation_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Shader validation"), FieldType::Toggle},
     {"vulkan_validation_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Vulkan validation"), FieldType::Toggle},
     {"spirv_debug_printf_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "SPIR-V debug printf"), FieldType::Toggle},
@@ -108,6 +124,17 @@ struct Help
 };
 
 const Help HELP[] = {
+    {"gpu_device", QT_TRANSLATE_NOOP("EditorPageItem", "Automatic prefers a dedicated card. Only cards with Vulkan 1.4 are listed.")},
+    {"present_mode", QT_TRANSLATE_NOOP("EditorPageItem", "Vertical sync never tears but adds delay. If the screen lacks a mode, the next one that works is used.")},
+    {"present_fps_limit", QT_TRANSLATE_NOOP("EditorPageItem", "The most frames per second shown on screen. 0 leaves them unlimited.")},
+    {"perf_overlay_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Shows frame rate and timings over the game.")},
+    {"hide_cursor_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "In full screen the cursor already hides when the mouse stops. This also hides it in a window.")},
+    {"console_language", QT_TRANSLATE_NOOP("EditorPageItem", "The language games read from the console. A game without it uses its own default.")},
+    {"user_name", QT_TRANSLATE_NOOP("EditorPageItem", "The name games show for the player. It does not change where saves are kept.")},
+    {"network_connected", QT_TRANSLATE_NOOP("EditorPageItem", "Off tells games the console has no network. On reports a local connection; there is no online play.")},
+    {"notice_screen_skip_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Tells games that show a notice at the start that it may be skipped. Not every game asks.")},
+    {"controller_vibration", QT_TRANSLATE_NOOP("EditorPageItem", "How strongly the controller follows the vibration games request. 0 turns it off.")},
+    {"shader_cache_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Keeps compiled shaders on disk so games load and run smoothly the next time. Turn it off only to rule out a bad cache.")},
     {"basedir", QT_TRANSLATE_NOOP("EditorPageItem", "The folder that holds the game's files.")},
     {"custom_settings", QT_TRANSLATE_NOOP("EditorPageItem", "Off runs the game with the emulator settings from Settings.")},
     {"screen_width", QT_TRANSLATE_NOOP("EditorPageItem", "The game window's size. It does not change the resolution the game renders at.")},
@@ -117,7 +144,8 @@ const Help HELP[] = {
 	                   "Native renders at the game's own size. Fixed renders at most at the size below, keeping the shape.")},
     {"render_resolution_scope",
 	 QT_TRANSLATE_NOOP("EditorPageItem", "Render targets also scales the game's full-screen render textures; not every game supports it.")},
-    {"presentation_filter", QT_TRANSLATE_NOOP("EditorPageItem", "How the finished picture is scaled to the window.")},
+    {"presentation_filter",
+	 QT_TRANSLATE_NOOP("EditorPageItem", "How the finished picture is scaled to the window. Fsr3 only works in an emulator built with its SDK.")},
     {"texture_anisotropy", QT_TRANSLATE_NOOP("EditorPageItem", "Sharper textures seen at a slant. It does not change the resolution.")},
     {"vulkan_validation_enabled",
 	 QT_TRANSLATE_NOOP("EditorPageItem", "Checks every graphics call for mistakes. For debugging; games run much slower.")},
@@ -157,6 +185,7 @@ const QVector<EditorField>& EditorFields(FieldGroup group)
 	{
 		case FieldGroup::Game: return GAME_FIELDS;
 		case FieldGroup::Display: return DISPLAY_FIELDS;
+		case FieldGroup::System: return SYSTEM_FIELDS;
 		case FieldGroup::Shaders: return SHADER_FIELDS;
 		case FieldGroup::Logs: return LOG_FIELDS;
 		case FieldGroup::Modules: return MODULE_FIELDS;

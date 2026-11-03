@@ -3,6 +3,7 @@
 #include "Kyty/Core/String.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Config.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SystemContent.h"
@@ -134,7 +135,7 @@ static int KYTY_SYSV_ABI SystemServiceParamGetInt(int param_id, int* value)
 
 	switch (param_id)
 	{
-		case PARAM_ID_LANG: v = PARAM_LANG_ENGLISH_US; break;
+		case PARAM_ID_LANG: v = Config::GetConsoleLanguage(); break;
 		case PARAM_ID_DATE_FORMAT: v = PARAM_DATE_FORMAT_DDMMYYYY; break;
 		case PARAM_ID_TIME_FORMAT: v = PARAM_TIME_FORMAT_24HOUR; break;
 		case PARAM_ID_TIME_ZONE: v = +180; break;
@@ -207,7 +208,7 @@ static int KYTY_SYSV_ABI SystemServiceGetHdrToneMapLuminance(SystemServiceHdrTon
 }
 
 // sceSystemServiceGetNoticeScreenSkipFlag — NID 3RQ5aQfnstU.
-// Report that the notice screen was not skipped (false).
+// Whether the title may skip its notice screen, as the user chose.
 static int KYTY_SYSV_ABI SystemServiceGetNoticeScreenSkipFlag(bool* value)
 {
 	PRINT_NAME();
@@ -215,7 +216,7 @@ static int KYTY_SYSV_ABI SystemServiceGetNoticeScreenSkipFlag(bool* value)
 	{
 		return SYSTEM_SERVICE_ERROR_PARAMETER;
 	}
-	*value = false;
+	*value = Config::NoticeScreenSkipEnabled();
 	return OK;
 }
 

@@ -4,6 +4,7 @@
 #include "Configuration.h"
 #include "ConfigurationFields.h"
 #include "GamepadInput.h"
+#include "GpuDevices.h"
 #include "Psf.h"
 #include "Theme.h"
 #include "UiSounds.h"
@@ -658,6 +659,14 @@ void LauncherBackend::ApplyLook()
 
 QString LauncherBackend::ChoiceLabel(const QString& list, const QString& value) const
 {
+	if (list == QLatin1String("console_language"))
+	{
+		return ConsoleLanguageName(value.toInt());
+	}
+	if (list == QLatin1String("gpu_device") && value == QLatin1String(AUTOMATIC_GPU))
+	{
+		return tr("Automatic");
+	}
 	if (list == QLatin1String("deadzone"))
 	{
 		return tr("%1 %").arg(qRound(value.toDouble() * 100));
@@ -1099,6 +1108,11 @@ QString LauncherBackend::StartGame(const QVariantMap& fields, int row)
 	if (const auto error = ApplyFields(FieldsToRun(fields, GlobalFields()), &info); !error.isEmpty())
 	{
 		return error;
+	}
+	// An empty list means Vulkan could not be asked, and the emulator reports a missing GPU itself.
+	if (const auto gpus = GpuDeviceNames(); !info.gpu_device.isEmpty() && !gpus.isEmpty() && !gpus.contains(info.gpu_device))
+	{
+		return tr("The GPU %1 is not available. Choose another one in Settings › Graphics.").arg(info.gpu_device);
 	}
 	const auto* profile = ActiveProfile();
 	if (profile == nullptr || !profile->error.isEmpty())
