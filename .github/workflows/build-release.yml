@@ -3,6 +3,9 @@ name: Build and Release
 on:
   push:
     tags: ["v*"]
+    # Caches are scoped to their branch, and only main's are shared with pull requests and tags, so builds of
+    # main keep the compiler cache warm for everything else.
+    branches: [main]
   # Pull requests build both packages so a Windows-only break shows before a release.
   pull_request:
     branches: [main]
@@ -14,6 +17,14 @@ permissions:
 concurrency:
   group: kyty-build-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 1G
+  # The compiler is reinstalled on every run, so its contents, not its timestamp, identify it.
+  CCACHE_COMPILERCHECK: content
+  CMAKE_C_COMPILER_LAUNCHER: ccache
+  CMAKE_CXX_COMPILER_LAUNCHER: ccache
 
 jobs:
   build-windows:
@@ -33,6 +44,7 @@ jobs:
           install: >-
             git
             make
+            mingw-w64-x86_64-ccache
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-libatomic
@@ -81,9 +93,18 @@ jobs:
           -DKYTY_BUILD_UNIT_TESTS=OFF
           -DKYTY_GENERATE_MAP_CSV=OFF
 
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-windows-${{ github.sha }}
+          restore-keys: ccache-windows-
+
       - name: Build
         shell: msys2 {0}
-        run: cmake --build build --target fc_script launcher --parallel 4
+        run: |
+          cmake --build build --target fc_script launcher --parallel 4
+          ccache --show-stats
 
       # Installing only the launcher directory runs windeployqt without the vendored libraries' install rules.
       - name: Stage launcher
@@ -179,14 +200,24 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev libasound2-dev libpulse-dev libgl-dev libegl-dev libxkbcommon-dev
+          sudo apt-get install -y ccache ninja-build libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev libasound2-dev libpulse-dev libgl-dev libegl-dev libxkbcommon-dev
 
-      - name: Build Vulkan 1.4 SDK components
-        uses: humbletim/setup-vulkan-sdk@c25f41106918cde0bf347e6f201277392b3a9e9d # v1.2.1
-        with:
-          vulkan-query-version: 1.4.357.0
-          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Headers, SPIRV-Tools
-          vulkan-use-cache: true
+      # LunarG's prebuilt SDK replaces building its components from source, which took 10-14 minutes whenever
+      # the branch had no cache of its own. Its loader sits outside lib/, so the library path names it.
+      - name: Install Vulkan 1.4 SDK
+        env:
+          VULKAN_SDK_VERSION: 1.4.357.0
+          VULKAN_SDK_SHA256: 0f09bf6a0625e346bf004be70b92907e934a4c76606b323441b2baf3a5a0e66d
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/vulkansdk.tar.xz"
+          curl -fsSL --retry 3 -o "$archive" "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
+          echo "$VULKAN_SDK_SHA256  $archive" | sha256sum -c -
+          tar -xJf "$archive" -C "$RUNNER_TEMP" "${VULKAN_SDK_VERSION}/x86_64/include" "${VULKAN_SDK_VERSION}/x86_64/lib"
+          rm "$archive"
+          sdk="$RUNNER_TEMP/${VULKAN_SDK_VERSION}/x86_64"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "CMAKE_LIBRARY_PATH=$sdk/lib/VulkanLoader/lib" >> "$GITHUB_ENV"
 
       # The official Qt binaries are relocatable, so the package can carry them; the launcher dev shell pins the same version.
       - name: Install Qt
@@ -198,10 +229,18 @@ jobs:
           arch: linux_gcc_64
           cache: true
 
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-linux-${{ github.sha }}
+          restore-keys: ccache-linux-
+
       - name: Build package
         run: |
           package="kyty-${GITHUB_REF_NAME//\//-}-linux-x64"
           CMAKE_PREFIX_PATH="$QT_ROOT_DIR" scripts/package_linux.sh build "dist/${package}.tar.gz"
+          ccache --show-stats
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
