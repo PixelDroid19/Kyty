@@ -137,6 +137,69 @@ bool ReadContainer(const std::vector<uint8_t>& file, std::map<std::string, std::
 	return true;
 }
 
+bool ReadCatalog(const std::map<std::string, std::string>& trophy_files, TrophyCatalog* catalog)
+{
+	const auto conf_file = trophy_files.find("tropconf.json");
+	const auto conf      = conf_file != trophy_files.end() ? ParseJson(conf_file->second) : nullptr;
+	const auto* list     = conf != nullptr ? ArrayOf(*conf, "trophies") : nullptr;
+	if (list == nullptr)
+	{
+		return false;
+	}
+	TrophyCatalog read;
+	if (const auto* groups = ArrayOf(*conf, "groups"); groups != nullptr)
+	{
+		read.groups = static_cast<int>(groups->Size());
+	}
+	for (const auto* item: *list)
+	{
+		TrophyEntry entry;
+		int64_t     id    = 0;
+		const auto  grade = item->IsObject() ? Utf8(item->GetString("grade")) : std::string();
+		if (!JsonInteger(Member(*item, "id"), &id) || grade.size() != 1 || std::string("PGSB").find(grade[0]) == std::string::npos)
+		{
+			return false;
+		}
+		int64_t group = 0;
+		(void)JsonInteger(Member(*item, "groupId"), &group);
+		entry.id         = static_cast<int>(id);
+		entry.grade      = grade[0];
+		entry.group      = static_cast<int>(group);
+		entry.hidden     = item->GetBool("hidden", false);
+		entry.has_reward = item->GetBool("hasReward", false);
+		read.trophies.push_back(entry);
+	}
+	std::sort(read.trophies.begin(), read.trophies.end(), [](const TrophyEntry& a, const TrophyEntry& b) { return a.id < b.id; });
+
+	static const Core::Json::ListType no_texts;
+	const auto  meta_file    = trophy_files.find("tropmeta_" + Utf8(conf->GetString("defaultLanguage")) + ".json");
+	const auto  meta         = meta_file != trophy_files.end() ? ParseJson(meta_file->second) : nullptr;
+	const auto* metadata     = meta != nullptr ? Member(*meta, "metadata") : nullptr;
+	const bool  has_metadata = metadata != nullptr && metadata->IsObject();
+	const auto* title        = has_metadata ? Member(*metadata, "titleMetadata") : nullptr;
+	const auto* texts        = has_metadata ? ArrayOf(*metadata, "trophyMetadata") : nullptr;
+	if (title != nullptr && title->IsObject())
+	{
+		read.title = Utf8(title->GetString("name"));
+	}
+	for (const auto* text: texts != nullptr ? *texts : no_texts)
+	{
+		int64_t    id    = 0;
+		const auto match = [&](const TrophyEntry& entry) { return entry.id == id; };
+		if (!text->IsObject() || !JsonInteger(Member(*text, "id"), &id))
+		{
+			continue;
+		}
+		if (const auto found = std::find_if(read.trophies.begin(), read.trophies.end(), match); found != read.trophies.end())
+		{
+			found->name   = Utf8(text->GetString("name"));
+			found->detail = Utf8(text->GetString("detail"));
+		}
+	}
+	*catalog = std::move(read);
+	return true;
+}
+
 bool TrophySet::Load(const std::string& tropconf, const std::string& stats_definition, const std::string& stats_extraction,
                      std::string* error)
 {

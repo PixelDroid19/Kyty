@@ -1,6 +1,5 @@
 #include "Emulator/Libs/TrophyRecorder.h"
 
-#include "Kyty/Core/JsonReader.h"
 #include "Kyty/Core/String.h"
 
 #include "Emulator/AtomicFile.h"
@@ -9,13 +8,12 @@
 #include "Emulator/Libs/SaveDataPaths.h"
 #include "Emulator/Log.h"
 
-#include <charconv>
+#include <algorithm>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
-#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -38,7 +36,7 @@ struct Recorder
 	TrophySet                  set;
 	Progress                   progress;
 	std::filesystem::path      path;
-	std::map<int, std::string> names;
+	TrophyCatalog              catalog;
 };
 
 Recorder g_recorder;
@@ -82,45 +80,6 @@ bool ReadContainerFile(const char* guest_path, std::map<std::string, std::string
 	return true;
 }
 
-// Trophy names in the set's default language, for the unlock notice.
-std::map<int, std::string> ReadNames(const std::map<std::string, std::string>& trophy_files)
-{
-	std::map<int, std::string>              names;
-	const auto                              conf = trophy_files.find("tropconf.json");
-	const std::unique_ptr<const Core::Json> conf_json(Core::Json::Create(String::FromUtf8(conf->second.c_str())));
-	if (conf_json == nullptr || !conf_json->IsObject())
-	{
-		return names;
-	}
-	const auto meta = trophy_files.find("tropmeta_" + std::string(conf_json->GetString("defaultLanguage").utf8_str().GetData()) + ".json");
-	if (meta == trophy_files.end())
-	{
-		return names;
-	}
-	const std::unique_ptr<const Core::Json> meta_json(Core::Json::Create(String::FromUtf8(meta->second.c_str())));
-	const auto* metadata = meta_json != nullptr && meta_json->IsObject() ? meta_json->GetItem("metadata") : nullptr;
-	const auto* list     = metadata != nullptr && metadata->IsObject() ? metadata->GetItem("trophyMetadata") : nullptr;
-	if (list == nullptr || !list->IsArray())
-	{
-		return names;
-	}
-	for (const auto* item: list->ToArray())
-	{
-		if (!item->IsObject())
-		{
-			continue;
-		}
-		const std::string id_text = item->GetString("id").utf8_str().GetData();
-		int               id      = 0;
-		const auto        parsed  = std::from_chars(id_text.data(), id_text.data() + id_text.size(), id);
-		if (!id_text.empty() && parsed.ec == std::errc() && parsed.ptr == id_text.data() + id_text.size())
-		{
-			names[id] = item->GetString("name").utf8_str().GetData();
-		}
-	}
-	return names;
-}
-
 bool Load(Recorder* recorder)
 {
 	std::map<std::string, std::string> trophy_files;
@@ -132,10 +91,10 @@ bool Load(Recorder* recorder)
 		return false;
 	}
 	std::string error;
-	if (trophy_files.count("tropconf.json") == 0 ||
+	if (!ReadCatalog(trophy_files, &recorder->catalog) ||
 	    !recorder->set.Load(trophy_files["tropconf.json"], uds_files["stats_definition.json"], uds_files["stats_extraction.json"], &error))
 	{
-		KYTY_LOG_ERROR("Trophies: cannot load the trophy set: %s\n", error.empty() ? "tropconf.json is missing" : error.c_str());
+		KYTY_LOG_ERROR("Trophies: cannot load the trophy set: %s\n", error.empty() ? "tropconf.json is missing or malformed" : error.c_str());
 		return false;
 	}
 	recorder->path = SaveData::SaveDataBuildTrophyPath(SaveData::SaveDataCurrentTitleRoot(), TROPHY_USER_ID);
@@ -153,7 +112,6 @@ bool Load(Recorder* recorder)
 		KYTY_LOG_ERROR("Trophies: %s cannot be read; trophies stay off for this run\n", recorder->path.u8string().c_str());
 		return false;
 	}
-	recorder->names = ReadNames(trophy_files);
 	if (recorder->set.Unsupported() > 0)
 	{
 		KYTY_LOG_WARN("Trophies: %d trophy rules use forms Kyty does not evaluate; their trophies cannot unlock\n",
@@ -191,8 +149,9 @@ void TrophyRecordEvent(const std::string& event, const EventValues& values)
 	}
 	for (const int id: unlocked)
 	{
-		const auto name = g_recorder.names.find(id);
-		KYTY_LOG_INFO("Trophy unlocked: %s\n", name != g_recorder.names.end() ? name->second.c_str() : std::to_string(id).c_str());
+		const auto& trophies = g_recorder.catalog.trophies;
+		const auto  found    = std::find_if(trophies.begin(), trophies.end(), [id](const TrophyEntry& entry) { return entry.id == id; });
+		KYTY_LOG_INFO("Trophy unlocked: %s\n", found != trophies.end() ? found->name.c_str() : std::to_string(id).c_str());
 	}
 	const auto json = ProgressToJson(g_recorder.progress);
 	if (!AtomicFileWrite(g_recorder.path, json.data(), json.size()))
@@ -201,6 +160,18 @@ void TrophyRecordEvent(const std::string& event, const EventValues& values)
 		return;
 	}
 	g_recorder.unsaved = false;
+}
+
+bool TrophyQuery(TrophyCatalog* catalog, Progress* progress)
+{
+	std::lock_guard lock(g_recorder.mutex);
+	if (!EnsureLoadedLocked())
+	{
+		return false;
+	}
+	*catalog  = g_recorder.catalog;
+	*progress = g_recorder.progress;
+	return true;
 }
 
 } // namespace Kyty::Libs::Trophies

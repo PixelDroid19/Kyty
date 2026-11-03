@@ -29,6 +29,29 @@ struct Progress
 	std::map<int, int64_t> unlocked;
 };
 
+// One trophy as the title's trophy set describes it, with its texts in the set's default language.
+struct TrophyEntry
+{
+	int         id         = 0;
+	char        grade      = 'B'; // P, G, S or B
+	int         group      = 0;   // 0 is the base game
+	bool        hidden     = false;
+	bool        has_reward = false;
+	std::string name;
+	std::string detail;
+};
+
+// What a title's trophy set declares: tropconf.json and tropmeta_<defaultLanguage>.json of the trophy container.
+struct TrophyCatalog
+{
+	std::string              title;
+	int                      groups = 0; // additional groups; the base game is not counted
+	std::vector<TrophyEntry> trophies;   // ordered by id
+};
+
+// False when tropconf.json is missing or not valid JSON with a trophy list; missing texts stay empty.
+bool ReadCatalog(const std::map<std::string, std::string>& trophy_files, TrophyCatalog* catalog);
+
 // Real containers stay far below these: 29 MB for the largest file and 450 KB of JSON for the largest set checked.
 constexpr size_t CONTAINER_MAX_SIZE      = 256u << 20u;
 constexpr size_t CONTAINER_MAX_JSON_SIZE = 16u << 20u;

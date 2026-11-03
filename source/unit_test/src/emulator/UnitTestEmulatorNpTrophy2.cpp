@@ -95,21 +95,17 @@ TEST(EmulatorNpTrophy2, GameInfoUsesFourArgumentAbiAndInitializesEveryOutputByte
 	EXPECT_TRUE(Core::VirtualMemory::Free(page));
 }
 
-TEST(EmulatorNpTrophy2, TrophyInfoUsesFiveArgumentAbiAndPublishesTheRequestedId)
+// Without a trophy set no id names a trophy, so the query fails and leaves the outputs as they were.
+TEST(EmulatorNpTrophy2, TrophyInfoRejectsAnIdOutsideTheSet)
 {
 	const uint64_t page = Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
 	ASSERT_NE(page, 0u);
 	auto* details = reinterpret_cast<uint8_t*>(page);
 	auto* data    = details + 1312;
-	std::fill_n(details, 1312, uint8_t {0xcd});
-	std::fill_n(data, 32, uint8_t {0xcd});
+	std::fill_n(details, 1312 + 32, uint8_t {0xcd});
 
-	constexpr int32_t trophy_id = 7;
-	EXPECT_EQ(Libs::NpTrophy2::GetTrophyInfo(1, 1, trophy_id, details, data), 0);
-	EXPECT_EQ(*reinterpret_cast<const int32_t*>(details), trophy_id);
-	EXPECT_EQ(*reinterpret_cast<const int32_t*>(data), trophy_id);
-	EXPECT_TRUE(std::all_of(details + sizeof(trophy_id), details + 1312, [](uint8_t value) { return value == 0; }));
-	EXPECT_TRUE(std::all_of(data + sizeof(trophy_id), data + 32, [](uint8_t value) { return value == 0; }));
+	EXPECT_EQ(Libs::NpTrophy2::GetTrophyInfo(1, 1, 7, details, data), static_cast<int>(0x80551604u));
+	EXPECT_TRUE(std::all_of(details, details + 1312 + 32, [](uint8_t value) { return value == 0xcd; }));
 	EXPECT_TRUE(Core::VirtualMemory::Free(page));
 }
 

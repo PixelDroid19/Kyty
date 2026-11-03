@@ -203,6 +203,42 @@ TEST(EmulatorTrophies, UnlocksPlatinumAfterItsSet)
 	EXPECT_EQ(progress.unlocked.at(0), 9);
 }
 
+// The catalog the trophy queries report: trophies in id order with grade, group, flags and default-language texts.
+TEST(EmulatorTrophies, ReadsCatalog)
+{
+	const std::map<std::string, std::string> files = {
+	    {"tropconf.json", R"({"defaultLanguage":"fr-FR","groups":[{"id":"001"}],"trophies":[
+		{"id":"002","grade":"G","groupId":"001","hidden":true,"hasReward":true},
+		{"id":"000","grade":"P"},
+		{"id":"001","grade":"B","platinumTrophyId":"000"}
+	]})"},
+	    {"tropmeta_fr-FR.json", R"({"metadata":{"titleMetadata":{"name":"Jeu"},"trophyMetadata":[
+		{"id":"000","name":"Platine","detail":"Tout"},{"id":"002","name":"Or","detail":"Cache"},{"id":"009","name":"Absent"}
+	]}})"},
+	    {"tropmeta_en-US.json", R"({"metadata":{"titleMetadata":{"name":"Game"},"trophyMetadata":[]}})"}};
+
+	Libs::Trophies::TrophyCatalog catalog;
+	ASSERT_TRUE(Libs::Trophies::ReadCatalog(files, &catalog));
+	EXPECT_EQ(catalog.title, "Jeu");
+	EXPECT_EQ(catalog.groups, 1);
+	ASSERT_EQ(catalog.trophies.size(), 3u);
+	EXPECT_EQ(catalog.trophies[0].id, 0);
+	EXPECT_EQ(catalog.trophies[0].grade, 'P');
+	EXPECT_EQ(catalog.trophies[0].name, "Platine");
+	EXPECT_EQ(catalog.trophies[1].id, 1);
+	EXPECT_EQ(catalog.trophies[1].group, 0);
+	EXPECT_TRUE(catalog.trophies[1].name.empty());
+	EXPECT_EQ(catalog.trophies[2].id, 2);
+	EXPECT_EQ(catalog.trophies[2].grade, 'G');
+	EXPECT_EQ(catalog.trophies[2].group, 1);
+	EXPECT_TRUE(catalog.trophies[2].hidden);
+	EXPECT_TRUE(catalog.trophies[2].has_reward);
+	EXPECT_EQ(catalog.trophies[2].detail, "Cache");
+
+	EXPECT_FALSE(Libs::Trophies::ReadCatalog({{"tropconf.json", R"({"trophies":[{"id":"000","grade":"X"}]})"}}, &catalog));
+	EXPECT_FALSE(Libs::Trophies::ReadCatalog({}, &catalog));
+}
+
 TEST(EmulatorTrophies, RoundTripsProgress)
 {
 	Progress progress;
