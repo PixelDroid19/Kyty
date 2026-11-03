@@ -119,7 +119,7 @@ runtime, and a value out of range ends the start with an error.
 | `ControllerVibration` | `0` to `100` (`100`) | Scales guest vibration requests before they reach the host pad. |
 | `ControllerLightBar` | `#RRGGBB` (empty) | Replaces the light bar colour the guest sets, from the moment the pad connects. Empty forwards the guest's colour. |
 | `ControllerSpeakerVolume` | `0` to `100` (`0`) | Plays the guest's pad speaker port on the default host output at this gain. `0` keeps that port silent. |
-| `MicrophoneEnabled` | boolean (`false`) | Audio input ports record the default host recording device in the port's format (16-bit mono or stereo). Off, or when the recording falls behind, the guest reads silence. At most four periods are kept for a guest that reads late. |
+| `MicrophoneEnabled` | boolean (`false`) | Audio input ports record the default host recording device in the port's format (16-bit mono or stereo). Off, or when the recording falls behind, the guest reads silence. At most four periods are kept for a guest that reads late. With the setting on and no recording device that opens, the port does not open and the guest gets the port-full error. |
 | `PresentationScaling` | `Stretch`, `Fit`, `Integer` (`Stretch`) | How the final image fills the window; see [render-resolution.md](render-resolution.md#presentation). |
 
 ### Settings not offered
@@ -128,8 +128,9 @@ Each of these was checked against what it would change for the guest:
 
 - **Signed in to PSN.** `NpGetState` reports signed out. Signing in would make
   titles reach for online services that do not exist offline.
-- **User id.** The guest sees user `1`. No path or answer depends on the
-  number, so a choice would have no effect.
+- **User id.** The guest sees user `1`. The number only names the
+  save-memory folder (`user-1`), so another value would hide existing saves
+  and change nothing else.
 - **Guest TSC frequency.** `KernelGetTscFrequency` reports the frequency of the
   host counter that `KernelReadTsc` reads. Another value would no longer match
   the counter.
