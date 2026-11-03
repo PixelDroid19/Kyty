@@ -121,6 +121,11 @@ runtime, and a value out of range ends the start with an error.
 | `ControllerSpeakerVolume` | `0` to `100` (`0`) | Plays the guest's pad speaker port on the default host output at this gain. `0` keeps that port silent. |
 | `PresentationScaling` | `Stretch`, `Fit`, `Integer` (`Stretch`) | How the final image fills the window; see [render-resolution.md](render-resolution.md#presentation). |
 
+A game's "Environment variables" field in the launcher holds `NAME=value`
+pairs separated by `;`, so a value cannot contain `;`. The launcher adds them
+to its own environment when it starts the emulator for that game, and refuses
+to start when a pair is malformed.
+
 ## Audio pause and queueing
 
 `F9` closes the audio producer gate before pausing SDL devices. Resume starts

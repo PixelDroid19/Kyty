@@ -181,8 +181,9 @@ using the configured filter after validating Vulkan support.
 When the view is smaller than the window, the filter path writes a stage image
 of the view's extent in the swapchain format. The swapchain image is cleared
 black and the stage is copied into its centre. The filters, FSR included, then
-scale to the view's extent instead of the window's. Verified on Intel with a
-16:9 final image in a 1280x800 window under `Fit`: window rows 0 to 39
+scale to the view's extent instead of the window's. Verified on Intel with
+`PPSA21402 - Balatro`, a 16:9 final image, in a 1280x800 window under `Fit`:
+window rows 0 to 39
 and 760 to 799 are black and the image fills 1280x720 between them.
 
 `Fsr` upscales the final image with AMD FidelityFX Super Resolution 1.0 (MIT,
