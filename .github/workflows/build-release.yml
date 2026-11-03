@@ -256,11 +256,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # A tag with a prerelease label (v1.2.3-beta.1) publishes a prerelease.
-          prerelease=()
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=(--prerelease); fi
+          # Every version, beta tags included, becomes the latest release; GitHub never marks a prerelease as
+          # latest, so the newest beta would otherwise sit behind the last stable version.
           gh release create "${GITHUB_REF_NAME}" release-assets/* \
             --verify-tag \
             --title "Kyty ${GITHUB_REF_NAME}" \
             --generate-notes \
-            "${prerelease[@]}"
+            --latest

@@ -72,8 +72,9 @@ is vendored in `source/3rdparty/sdl3`.
 
 Tagged releases are published on the
 [GitHub Releases](https://github.com/PixelDroid19/Kyty/releases) page. Every
-release is built by GitHub Actions for Windows and Linux. Versions with a
-prerelease label (for example `v0.0.2-beta.1`) are published as prereleases.
+release is built by GitHub Actions for Windows and Linux. The newest version is
+always marked as the latest release, including versions with a prerelease label
+such as `v0.0.2-beta.1`.
 The Linux archive contains the emulator and the desktop launcher with its Qt 6
 runtime; extract it and run `launcher`. To build the same archive locally, see
 [the Linux release package](docs/devtools/reproducible-contract-environment.md#linux-release-package).
