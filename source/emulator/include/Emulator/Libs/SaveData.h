@@ -4,6 +4,7 @@
 #include "Emulator/Common.h"
 
 #include <cstdint>
+#include <filesystem>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -82,6 +83,10 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, S
 struct SaveDataTransferringMountParam;
 struct SaveDataMountResult;
 int KYTY_SYSV_ABI SaveDataTransferringMount(const SaveDataTransferringMountParam* mount, SaveDataMountResult* mount_result);
+
+// The running title's save root (KYTY_SAVEDATA_DIR or <executable>/user/savedata, then the title id), or empty
+// when it cannot be resolved.
+std::filesystem::path SaveDataCurrentTitleRoot();
 
 } // namespace Kyty::Libs::SaveData
 

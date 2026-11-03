@@ -2,12 +2,14 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/Np.h"
+#include "Emulator/Libs/TrophyRecorder.h"
 #include "Emulator/Network.h"
 #include "Emulator/Loader/AddcontInventory.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -30,6 +32,8 @@ struct EventPropertyObject
 {
 	uint64_t magic     = event_properties_magic;
 	bool     standalone = false;
+	// Top-level scalar properties, which trophy rules read.
+	Trophies::EventValues values;
 };
 
 // Opaque array node for ObjectSetArray / CreateEventPropertyArray.
@@ -42,6 +46,7 @@ struct EventPropertyArray
 struct Event
 {
 	uint64_t            magic = event_magic;
+	std::string         name;
 	EventPropertyObject properties;
 };
 
@@ -70,16 +75,6 @@ static bool IsLiveArray(const EventPropertyArray* array)
 	}
 	std::lock_guard lock(g_objects_mutex);
 	return g_arrays.find(const_cast<EventPropertyArray*>(array)) != g_arrays.end();
-}
-
-static bool IsLiveEvent(const Event* event)
-{
-	if (event == nullptr)
-	{
-		return false;
-	}
-	std::lock_guard lock(g_objects_mutex);
-	return g_events.find(const_cast<Event*>(event)) != g_events.end();
 }
 
 int KYTY_SYSV_ABI Initialize(const void* parameters)
@@ -131,6 +126,7 @@ int KYTY_SYSV_ABI CreateEvent(const char* name, uint64_t /*options*/, Event** ev
 	}
 
 	auto* local_event = new Event;
+	local_event->name = name;
 	{
 		std::lock_guard lock(g_objects_mutex);
 		g_events.insert(local_event);
@@ -181,18 +177,43 @@ int KYTY_SYSV_ABI DestroyEventPropertyObject(EventPropertyObject* properties)
 	return OK;
 }
 
-int KYTY_SYSV_ABI EventPropertyObjectSetInt32(EventPropertyObject* properties, const char* name, int32_t /*value*/)
+static int StoreValue(EventPropertyObject* properties, const char* key, Trophies::EventValue value)
 {
-	return (IsLivePropertyObject(properties) && name != nullptr && name[0] != '\0'
-	            ? OK
-	            : error_invalid_argument);
+	if (properties == nullptr || key == nullptr || key[0] == '\0')
+	{
+		return error_invalid_argument;
+	}
+	std::lock_guard lock(g_objects_mutex);
+	if (g_properties.find(properties) == g_properties.end())
+	{
+		return error_invalid_argument;
+	}
+	properties->values[key] = std::move(value);
+	return OK;
+}
+
+static Trophies::EventValue NumberValue(int64_t number)
+{
+	Trophies::EventValue value;
+	value.number = number;
+	return value;
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetInt32(EventPropertyObject* properties, const char* name, int32_t value)
+{
+	return StoreValue(properties, name, NumberValue(value));
 }
 
 int KYTY_SYSV_ABI EventPropertyObjectSetString(EventPropertyObject* properties, const char* name, const char* value)
 {
-	return (IsLivePropertyObject(properties) && name != nullptr && name[0] != '\0' && value != nullptr
-	            ? OK
-	            : error_invalid_argument);
+	if (value == nullptr)
+	{
+		return error_invalid_argument;
+	}
+	Trophies::EventValue text;
+	text.is_text = true;
+	text.text    = value;
+	return StoreValue(properties, name, std::move(text));
 }
 
 // Observed guest call: (properties, key*, value=null, value_ptr*).
@@ -310,24 +331,26 @@ static int AcceptObjectValue(const EventPropertyObject* properties, const char* 
 	return (IsLivePropertyObject(properties) && key != nullptr && key[0] != '\0' ? OK : error_invalid_argument);
 }
 
-int KYTY_SYSV_ABI EventPropertyObjectSetBool(EventPropertyObject* properties, const char* key, bool /*value*/)
+int KYTY_SYSV_ABI EventPropertyObjectSetBool(EventPropertyObject* properties, const char* key, bool value)
 {
-	return AcceptObjectValue(properties, key);
+	return StoreValue(properties, key, NumberValue(value ? 1 : 0));
 }
 
-int KYTY_SYSV_ABI EventPropertyObjectSetUInt32(EventPropertyObject* properties, const char* key, uint32_t /*value*/)
+int KYTY_SYSV_ABI EventPropertyObjectSetUInt32(EventPropertyObject* properties, const char* key, uint32_t value)
 {
-	return AcceptObjectValue(properties, key);
+	return StoreValue(properties, key, NumberValue(value));
 }
 
-int KYTY_SYSV_ABI EventPropertyObjectSetInt64(EventPropertyObject* properties, const char* key, int64_t /*value*/)
+int KYTY_SYSV_ABI EventPropertyObjectSetInt64(EventPropertyObject* properties, const char* key, int64_t value)
 {
-	return AcceptObjectValue(properties, key);
+	return StoreValue(properties, key, NumberValue(value));
 }
 
-int KYTY_SYSV_ABI EventPropertyObjectSetUInt64(EventPropertyObject* properties, const char* key, uint64_t /*value*/)
+int KYTY_SYSV_ABI EventPropertyObjectSetUInt64(EventPropertyObject* properties, const char* key, uint64_t value)
 {
-	return AcceptObjectValue(properties, key);
+	// Rules compare signed values; a count past INT64_MAX stays at the largest one.
+	constexpr auto largest = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+	return StoreValue(properties, key, NumberValue(static_cast<int64_t>(std::min(value, largest))));
 }
 
 int KYTY_SYSV_ABI EventPropertyObjectSetFloat32(EventPropertyObject* properties, const char* key, float /*value*/)
@@ -436,7 +459,19 @@ int KYTY_SYSV_ABI EventPropertyArraySetObject(EventPropertyArray* array, const E
 
 int KYTY_SYSV_ABI PostEvent(int32_t /*context*/, int32_t /*handle*/, Event* event, uint32_t /*options*/)
 {
-	return (IsLiveEvent(event) ? OK : error_invalid_argument);
+	std::string           name;
+	Trophies::EventValues values;
+	{
+		std::lock_guard lock(g_objects_mutex);
+		if (event == nullptr || g_events.find(event) == g_events.end())
+		{
+			return error_invalid_argument;
+		}
+		name   = event->name;
+		values = event->properties.values;
+	}
+	Trophies::TrophyRecordEvent(name, values);
+	return OK;
 }
 
 int KYTY_SYSV_ABI DestroyEvent(Event* event)

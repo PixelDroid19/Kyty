@@ -36,6 +36,10 @@ namespace Kyty::Libs::SaveData {
 // roots and guest user identifiers are rejected instead of being redirected.
 [[nodiscard]] std::filesystem::path SaveDataBuildMemoryPath(const std::filesystem::path& title_root, int32_t user_id, uint32_t slot_id);
 
+// Build the host-only path of one user's trophy stats and unlocks for a title,
+// beside the SaveDataMemory root and outside the guest-enumerated title directory.
+[[nodiscard]] std::filesystem::path SaveDataBuildTrophyPath(const std::filesystem::path& title_root, int32_t user_id);
+
 } // namespace Kyty::Libs::SaveData
 
 #endif // KYTY_EMU_ENABLED

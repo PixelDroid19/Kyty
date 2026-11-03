@@ -106,7 +106,8 @@ std::filesystem::path SaveDataBuildTitleRoot(const std::filesystem::path& save_d
 	return save_data_root / normalized_title_id;
 }
 
-std::filesystem::path SaveDataBuildMemoryRoot(const std::filesystem::path& title_root)
+// <save root>/<host_folder>/<title>: host-only data kept beside the guest-enumerated title directory.
+static std::filesystem::path BuildHostOnlyTitleRoot(const std::filesystem::path& title_root, const char* host_folder)
 {
 	if (title_root.empty() || !title_root.is_absolute())
 	{
@@ -118,7 +119,13 @@ std::filesystem::path SaveDataBuildMemoryRoot(const std::filesystem::path& title
 	{
 		return {};
 	}
-	return normalized_title_root.parent_path() / ".kyty-memory" / title_name / "memory";
+	return normalized_title_root.parent_path() / host_folder / title_name;
+}
+
+std::filesystem::path SaveDataBuildMemoryRoot(const std::filesystem::path& title_root)
+{
+	const auto root = BuildHostOnlyTitleRoot(title_root, ".kyty-memory");
+	return root.empty() ? root : root / "memory";
 }
 
 std::filesystem::path SaveDataBuildMemoryPath(const std::filesystem::path& title_root, int32_t user_id, uint32_t slot_id)
@@ -133,6 +140,16 @@ std::filesystem::path SaveDataBuildMemoryPath(const std::filesystem::path& title
 		return {};
 	}
 	return memory_root / ("user-" + std::to_string(user_id)) / ("slot-" + std::to_string(slot_id) + ".bin");
+}
+
+std::filesystem::path SaveDataBuildTrophyPath(const std::filesystem::path& title_root, int32_t user_id)
+{
+	const auto root = BuildHostOnlyTitleRoot(title_root, ".kyty-trophies");
+	if (user_id < 0 || root.empty())
+	{
+		return {};
+	}
+	return root / ("user-" + std::to_string(user_id) + ".json");
 }
 
 } // namespace Kyty::Libs::SaveData

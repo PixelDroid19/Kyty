@@ -751,6 +751,11 @@ int KYTY_SYSV_ABI SaveDataGetMountInfo(const SaveDataMountPoint* mount_point, Sa
 
 static SaveDataMemoryStore g_save_memory_store;
 
+std::filesystem::path SaveDataCurrentTitleRoot()
+{
+	return ResolveSaveDataRoot(nullptr);
+}
+
 static int ResolveSaveDataMemorySlot(int32_t user_id, uint32_t slot_id, std::filesystem::path* path)
 {
 	const auto title_root = ResolveSaveDataRoot(nullptr);
