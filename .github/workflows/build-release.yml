@@ -73,23 +73,34 @@ jobs:
           Copy-Item scripts/run_guest.lua,README.md,CHANGELOG.md,LICENSE dist/
 
       # windeployqt copies Qt itself; the MinGW runtime, the shader toolchain and Qt's own dependencies
-      # (ICU, HarfBuzz, zstd, ...) come from MSYS2 and are copied here.
+      # (ICU, HarfBuzz, zstd, ...) come from MSYS2. Import tables are read rather than running ldd, which
+      # starts each binary and missed the emulator's own imports.
       - name: Stage MSYS2 runtime libraries
         shell: msys2 {0}
         run: |
           set -euo pipefail
-          find dist -name '*.exe' -o -name '*.dll' | while read -r binary; do
-            ldd "$binary" | awk '$3 ~ /^\/mingw64\/bin\// { print $3 }'
-          done | sort -u | while read -r library; do
-            cp -n "$library" dist/
+          pending="$(find dist -name '*.exe' -o -name '*.dll')"
+          while [ -n "$pending" ]; do
+            added=""
+            for binary in $pending; do
+              for library in $(objdump -p "$binary" | awk '/DLL Name:/ { print $3 }'); do
+                if [ -f "/mingw64/bin/$library" ] && [ ! -f "dist/$library" ]; then
+                  cp "/mingw64/bin/$library" dist/
+                  added="$added dist/$library"
+                fi
+              done
+            done
+            pending="$added"
           done
           test -f dist/launcher.exe && test -f dist/Qt6Quick.dll && test -f dist/platforms/qwindows.dll
 
-      # Outside the MSYS2 shell nothing but the package provides the DLLs, so a missing one stops the emulator here.
+      # With only the system directories on PATH, nothing but the package provides the DLLs, so a missing one
+      # stops the emulator here.
       - name: Check the emulator starts from the package
         shell: pwsh
         working-directory: dist
         run: |
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           $usage = & ./fc_script.exe | Out-String
           if ($usage -notmatch 'fc_script <lua_script>') { throw "fc_script.exe did not start (exit code $LASTEXITCODE)" }
 
