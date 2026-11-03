@@ -41,15 +41,38 @@ jobs:
             mingw-w64-x86_64-vulkan-loader
             mingw-w64-x86_64-spirv-headers
             mingw-w64-x86_64-spirv-tools
-            mingw-w64-x86_64-qt6-base
-            mingw-w64-x86_64-qt6-declarative
-            mingw-w64-x86_64-qt6-svg
-            mingw-w64-x86_64-qt6-tools
+
+      # The official MinGW Qt uses the same msvcrt runtime as MSYS2's MINGW64 toolchain and, unlike MSYS2's Qt,
+      # needs neither ICU nor GLib, which were a third of the package. aqtinstall cannot read Qt 6.11's
+      # per-toolchain Windows repository, so the archives are fetched directly and checked against pinned hashes.
+      - name: Install Qt
+        shell: bash
+        env:
+          QT_REPO: https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qt6_6112/qt6_6112_mingw/qt.qt6.6112.win64_mingw
+          QT_ARCHIVE_PREFIX: 6.11.2-0-202608131017
+          QT_ARCHIVE_SUFFIX: -Windows-Windows_11_24H2-Mingw-Windows-Windows_11_24H2-X86_64.7z
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/qt" && cd "$RUNNER_TEMP/qt"
+          while read -r module sha256; do
+            archive="${QT_ARCHIVE_PREFIX}${module}${QT_ARCHIVE_SUFFIX}"
+            curl -fsSL --retry 3 -o "$module.7z" "$QT_REPO/$archive"
+            echo "$sha256  $module.7z" | sha256sum -c -
+            7z x -y "$module.7z" > /dev/null
+            rm "$module.7z"
+          done <<'EOF_QT'
+          qtbase 8bbd42aa6b7dbb3ac9c88762bbf6f974e29348054186ef5cb920b105c786d81d
+          qtdeclarative 4dbcc61542dabaa4c391d05e0a641feb33ca0678ceeb809541942466f7e8b881
+          qtsvg ef549555ca64d160a32ea2f794ceb7d05d323a70896e7c55410c0aed24b7ba05
+          qttools a3313f75d62c1fbbdaa6bf65c5ba36bd3b7c7c3bc1b24d6d2d7054c40b3e1dd3
+          EOF_QT
+          echo "QT_ROOT_DIR=$(cygpath -w "$PWD")" >> "$GITHUB_ENV"
 
       - name: Configure
         shell: msys2 {0}
         run: >-
           cmake -S source -B build -G Ninja
+          -DCMAKE_PREFIX_PATH="$(cygpath -m "$QT_ROOT_DIR")"
           -DCMAKE_BUILD_TYPE=Release
           -DKYTY_PROJECT_NAME=Emulator
           -DKYTY_WARNINGS_ARE_ERRORS=OFF
@@ -73,14 +96,16 @@ jobs:
           Copy-Item build/fc_script.exe dist/
           Copy-Item scripts/run_guest.lua,README.md,CHANGELOG.md,LICENSE dist/
 
-      # windeployqt copies Qt itself; the MinGW runtime, the shader toolchain and Qt's own dependencies
-      # (ICU, HarfBuzz, zstd, ...) come from MSYS2. Import tables are read rather than running ldd, which
-      # starts each binary and missed the emulator's own imports. objdump is a native Windows tool, so its
-      # lines end in CRLF.
+      # windeployqt copies Qt itself; the MinGW runtime and the shader toolchain come from MSYS2. Import tables
+      # are read rather than running ldd, which starts each binary and missed the emulator's own imports.
+      # objdump is a native Windows tool, so its lines end in CRLF.
       - name: Stage MSYS2 runtime libraries
         shell: msys2 {0}
         run: |
           set -euo pipefail
+          # windeployqt copies the runtime of Qt's older MinGW; the binaries built here need MSYS2's
+          # (winpthread's clock_gettime64), which still serves Qt.
+          cp /mingw64/bin/libgcc_s_seh-1.dll /mingw64/bin/libstdc++-6.dll /mingw64/bin/libwinpthread-1.dll dist/
           pending="$(find dist -name '*.exe' -o -name '*.dll')"
           while [ -n "$pending" ]; do
             added=""
