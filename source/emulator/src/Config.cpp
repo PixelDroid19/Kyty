@@ -194,11 +194,11 @@ void Load(const ConfigSource& cfg)
 	LoadInt(g_config->controller_vibration, cfg, U"ControllerVibration");
 	LoadInt(g_config->controller_speaker_volume, cfg, U"ControllerSpeakerVolume");
 	LoadBool(g_config->microphone_enabled, cfg, U"MicrophoneEnabled");
-	String light_bar;
-	LoadStr(light_bar, cfg, U"ControllerLightBar");
-	if (!light_bar.IsEmpty())
+	if (cfg.Has(U"ControllerLightBar"))
 	{
-		g_config->controller_light_bar = ParseLightBar(light_bar);
+		// An empty value hands the colour back to the guest.
+		const auto light_bar           = cfg.GetString(U"ControllerLightBar");
+		g_config->controller_light_bar = light_bar.IsEmpty() ? -1 : ParseLightBar(light_bar);
 	}
 	if (g_config->console_language < 0 || g_config->console_language > 29)
 	{
