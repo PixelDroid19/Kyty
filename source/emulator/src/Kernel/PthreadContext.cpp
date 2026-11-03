@@ -59,6 +59,8 @@ constexpr uint32_t kContextRunning = 1u << 2u; // the guest handler runs on the 
 
 constexpr int      kGuestContextSignal = 30;
 constexpr uint32_t kRetryMicros        = 100;
+constexpr uint32_t kRetryStepMicros    = 37;
+constexpr uint32_t kRetrySpreadMicros  = 64;
 
 std::mutex            g_context_mutex;
 std::atomic<uint64_t> g_context_handler {0};
@@ -140,6 +142,7 @@ struct PthreadContextDelivery
 	uintptr_t                  signal_frame   = 0;
 	timer_t                    retry_timer {};
 	bool                       has_retry_timer = false;
+	uint32_t                   retry_count     = 0;
 	std::unique_ptr<uint8_t[]> trampoline_stack;
 };
 
@@ -207,7 +210,10 @@ bool AtSafePoint(const PthreadPrivate* self, const mcontext_t& mcontext)
 void ArmRetry(PthreadContextDelivery* delivery)
 {
 	itimerspec retry {};
-	retry.it_value.tv_nsec = static_cast<long>(kRetryMicros) * 1000;
+	// A fixed period equal to a guest's sleep length stays in phase with it: each
+	// retry lands as the sleep returns, never inside it, so the request starves.
+	const uint32_t micros  = kRetryMicros + (delivery->retry_count++ * kRetryStepMicros) % kRetrySpreadMicros;
+	retry.it_value.tv_nsec = static_cast<long>(micros) * 1000;
 	(void)timer_settime(delivery->retry_timer, 0, &retry, nullptr);
 }
 
