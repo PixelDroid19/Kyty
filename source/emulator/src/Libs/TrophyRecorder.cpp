@@ -33,6 +33,8 @@ struct Recorder
 	std::mutex                 mutex;
 	bool                       loaded    = false;
 	bool                       available = false;
+	// Progress changed in memory that is not on disk yet; a failed write is tried again on the next event.
+	bool                       unsaved = false;
 	TrophySet                  set;
 	Progress                   progress;
 	std::filesystem::path      path;
@@ -56,7 +58,19 @@ bool ReadContainerFile(const char* guest_path, std::map<std::string, std::string
 {
 	const auto  host = Kernel::FileSystem::GetExistingFilename(String::FromUtf8(guest_path));
 	std::string bytes;
-	if (host.IsEmpty() || !ReadHostFile(std::filesystem::u8path(host.utf8_str().GetData()), &bytes))
+	if (host.IsEmpty())
+	{
+		return false;
+	}
+	const auto      path = std::filesystem::u8path(host.utf8_str().GetData());
+	std::error_code size_error;
+	const auto      size = std::filesystem::file_size(path, size_error);
+	if (!size_error && size > CONTAINER_MAX_SIZE)
+	{
+		KYTY_LOG_ERROR("Trophies: %s is larger than a trophy container can be\n", guest_path);
+		return false;
+	}
+	if (size_error || !ReadHostFile(path, &bytes))
 	{
 		return false;
 	}
@@ -170,7 +184,8 @@ void TrophyRecordEvent(const std::string& event, const EventValues& values)
 	}
 	const auto stats_before = g_recorder.progress.stats;
 	const auto unlocked     = g_recorder.set.Post(event, values, static_cast<int64_t>(std::time(nullptr)), &g_recorder.progress);
-	if (unlocked.empty() && g_recorder.progress.stats == stats_before)
+	g_recorder.unsaved = g_recorder.unsaved || !unlocked.empty() || g_recorder.progress.stats != stats_before;
+	if (!g_recorder.unsaved)
 	{
 		return;
 	}
@@ -183,7 +198,9 @@ void TrophyRecordEvent(const std::string& event, const EventValues& values)
 	if (!AtomicFileWrite(g_recorder.path, json.data(), json.size()))
 	{
 		KYTY_LOG_ERROR("Trophies: cannot save progress to %s\n", g_recorder.path.u8string().c_str());
+		return;
 	}
+	g_recorder.unsaved = false;
 }
 
 } // namespace Kyty::Libs::Trophies
