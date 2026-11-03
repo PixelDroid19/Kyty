@@ -170,6 +170,8 @@ void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	// The host window decides when the cursor shows; the overlay would show it again every frame.
+	io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 	io.IniFilename = nullptr;
 
 	ImGui::StyleColorsDark();
