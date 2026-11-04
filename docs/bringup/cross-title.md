@@ -5704,12 +5704,30 @@ Per-draw work falls 11-15 %. The frame rate gain is inside the same-code spread 
 into GPU waits here. A second pair ended at different scenes (draws 67.9 and 62 us), so it gives no frame rate claim.
 Other titles were not measured.
 
-Not adopted: a profile matches one exact source revision and needs a run of real titles, which CI cannot do. Recipe
-for a local build: configure with `-fprofile-generate -fprofile-update=prefer-atomic`, run titles, have the process
-write its counters (it was stopped by a signal here, so a thread called `__gcov_dump`), then rebuild in the same
-directory with `-fprofile-use -fprofile-correction -fprofile-partial-training`. Partial training keeps unexecuted code
-optimized for speed, which other titles depend on. An instrumented build plus a rebuild take under 2 minutes each with
-six jobs.
+**Adopted as a build option (2026-11-03).** `KYTY_PGO=GENERATE` builds an instrumented emulator that writes its
+counters to `KYTY_PGO_DIR` when it exits or receives `SIGTERM`; `KYTY_PGO=USE` rebuilds the same build directory from
+them with `-fprofile-correction -fprofile-partial-training`, so code the training did not reach stays optimized for
+speed. CI cannot train on titles, so release builds stay without it; `scripts/package_linux.sh` passes `KYTY_PGO` and
+`KYTY_PGO_DIR` through. Steps in `README.md`, "Profile-guided builds".
+
+Trained on two `PPSA21567 - Astro Bot` runs to the dunes and one `PPSA09076 - DREDGE` run to the dock, GCC 16.2, LTO in
+both arms, same source:
+
+| Workload | Without | With profile |
+| --- | --- | --- |
+| `PPSA09076 - DREDGE` dock, first pair | 26.4 us per draw, 30.3 fps at 1,043 draws per frame | 21.4 us, 38.1 fps at 994 |
+| `PPSA09076 - DREDGE` dock, second pair | 22.0 us per draw, 32.4 fps at 1,171 draws per frame | 20.1 us, 32.8 fps at 1,230 |
+| `PPSA21567 - Astro Bot` dunes, recorded route, 140-205 s | 103.1 us per draw, 13.1 fps | 95.9 us, 14.0 fps |
+
+Per-draw work falls 7-19 %. The DREDGE scenes differ in draw count between runs, so their frame rates do not compare
+directly; the Astro pair is one run per arm, inside the same-code spread for frame rate.
+
+**Defect found on the way: the replaced allocation functions were inlined.** The first profile-guided build stopped at
+boot of `PPSA21567` on `header == nullptr || header->magic != mem_block_magic` (`MemoryAlloc.cpp`), freeing the copy of
+an AMPR command-buffer state. With the profile, GCC inlined `operator new` and `mem_alloc` into the caller; it assumes a
+replaceable `operator delete` does not read the object, so the block header stores looked dead and were removed, and
+`operator delete` found no header. The replacements are now `noinline`. Any link-time optimized build could hit the
+same removal when the inliner's choices change.
 
 ## Static TLS offsets follow the module alignment (2026-11-01)
 
