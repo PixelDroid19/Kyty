@@ -135,6 +135,24 @@ desktop launcher, which lists installed workloads, starts them and offers
 themes and personalization; see [docs/launcher-themes.md](docs/launcher-themes.md)
 for add-on themes and the layouts.
 
+### Profile-guided builds (Linux)
+
+A profile-guided build is faster on the command-processor thread. It takes
+three steps in one build directory:
+
+1. Configure with `-DKYTY_PGO=GENERATE` (counters go to `<build>/pgo`, or to
+   `-DKYTY_PGO_DIR=...`) and build `fc_script`.
+2. Run the workloads to train on. The counters are written when the emulator
+   exits or receives `SIGTERM`, so bounded `timeout` runs work.
+3. Reconfigure the same directory with `-DKYTY_PGO=USE` and build again. With
+   Clang, merge the counters first:
+   `llvm-profdata merge -o <dir>/kyty.profdata <dir>/*.profraw`.
+
+Code that the training runs did not reach stays optimized for speed. The
+counters match one source revision; rebuild them after pulling changes.
+`scripts/package_linux.sh` passes `KYTY_PGO` and `KYTY_PGO_DIR` from the
+environment.
+
 ## Running a lawful test workload
 
 Kyty uses a Lua entry point. The repository includes `scripts/run_guest.lua`

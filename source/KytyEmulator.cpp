@@ -41,7 +41,32 @@
 #include <cstdlib>
 #include <cstring>
 
+#ifdef KYTY_PGO_GENERATE
+#include <csignal>
+#include <unistd.h>
+
+#if defined(__clang__)
+extern "C" int __llvm_profile_write_file(void); // NOLINT(bugprone-reserved-identifier)
+#else
+extern "C" void __gcov_dump(void); // NOLINT(bugprone-reserved-identifier)
+#endif
+#endif
+
 namespace Kyty::Emulator {
+
+#ifdef KYTY_PGO_GENERATE
+// Training runs are bounded and end with SIGTERM, which skips the exit handlers that write the
+// profile counters. An instrumented build writes them from the signal instead.
+static void pgo_dump_on_terminate(int /*signal*/)
+{
+#if defined(__clang__)
+	(void)__llvm_profile_write_file();
+#else
+	__gcov_dump();
+#endif
+	_exit(128 + SIGTERM);
+}
+#endif
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -221,6 +246,10 @@ KYTY_SCRIPT_FUNC(kyty_init_func)
 
 	int ok = atexit(kyty_close);
 	if (ok != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+
+#ifdef KYTY_PGO_GENERATE
+	(void)std::signal(SIGTERM, pgo_dump_on_terminate);
+#endif
 
 	return 0;
 }
