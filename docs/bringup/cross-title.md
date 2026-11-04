@@ -5748,7 +5748,12 @@ same removal when the inliner's choices change.
   waits for the producer, and `DRAW_INDEX_INDIRECT` argument reads grow. The dune frame stays bound by GPU work (about
   60 ms per frame, "real gameplay frame rate" in `docs/titles/robot-platformer.md`); the freed processor time does not
   raise its rate on this host. The dune capture matches the base runs.
-- **Not established:** other titles that read partial-line storage results through device addresses were not run.
+- **Other titles** (75 s strict boots with `reach_first_gameplay.pad`, a temporary counter of deferrals): the path ran in
+  `PPSA28311 - Absolum` (36.5 fps), `PPSA09076 - DREDGE` (33.4), `PPSA09809 - OCTOPATH TRAVELER II` (43.8, settings
+  screen captured clean), `PPSA06084 - Superliminal` (58.6) and `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` (still in
+  first pipeline compiles at 75 s on a cold driver cache, as recorded before). Balatro, Dead Cells, Hades, GRIS, Hollow
+  Knight, Blasphemous 2 and God of War Sons of Sparta never deferred. All twelve ran to the time limit without a stop.
+  Gameplay of the deferring titles beyond their first minute was not checked.
 
 ## Static TLS offsets follow the module alignment (2026-11-01)
 
