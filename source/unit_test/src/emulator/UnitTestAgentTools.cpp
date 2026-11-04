@@ -1366,12 +1366,15 @@ TEST(AgentTools, AgentPadTapHoldsTwoPressSamplesBeforeRelease)
 	using Kyty::Libs::Controller::PAD_BUTTON_CROSS;
 
 	AgentPadClear();
-	ASSERT_TRUE(AgentPadScheduleTap(PAD_BUTTON_CROSS));
-
+	// The delivered-tap count is process-wide and other cases deliver taps too; count from here.
 	AgentPadReadStats stats {};
 	AgentPadGetReadStats(&stats);
+	const uint64_t delivered_before = stats.delivered_taps;
+	ASSERT_TRUE(AgentPadScheduleTap(PAD_BUTTON_CROSS));
+
+	AgentPadGetReadStats(&stats);
 	EXPECT_TRUE(stats.tap_pending);
-	EXPECT_EQ(stats.delivered_taps, 0u);
+	EXPECT_EQ(stats.delivered_taps - delivered_before, 0u);
 
 	uint32_t sample = 0;
 	AgentPadApplyReadStateSample(&sample);
@@ -1383,7 +1386,7 @@ TEST(AgentTools, AgentPadTapHoldsTwoPressSamplesBeforeRelease)
 		AgentPadApplyReadStateSample(&sample);
 		EXPECT_EQ(sample & PAD_BUTTON_CROSS, PAD_BUTTON_CROSS);
 		AgentPadGetReadStats(&stats);
-		EXPECT_EQ(stats.delivered_taps, 1u);
+		EXPECT_EQ(stats.delivered_taps - delivered_before, 1u);
 		EXPECT_TRUE(stats.tap_pending);
 	}
 
@@ -1393,7 +1396,7 @@ TEST(AgentTools, AgentPadTapHoldsTwoPressSamplesBeforeRelease)
 
 	AgentPadGetReadStats(&stats);
 	EXPECT_FALSE(stats.tap_pending);
-	EXPECT_EQ(stats.delivered_taps, 1u);
+	EXPECT_EQ(stats.delivered_taps - delivered_before, 1u);
 
 	// PadRead-style samples must not advance a new tap by themselves.
 	ASSERT_TRUE(AgentPadScheduleTap(PAD_BUTTON_CROSS));

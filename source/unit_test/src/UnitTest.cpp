@@ -1,5 +1,8 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Config.h"
+#include "Emulator/ConfigSource.h"
+
 #include <cstdlib>
 
 namespace Kyty::UnitTest {
@@ -174,6 +177,33 @@ UT_LINK(EmulatorSystemContentPort);
 UT_LINK(EmulatorVideoOutResolution);
 UT_LINK(EmulatorVulkanQueueIdentity);
 
+namespace {
+
+// Shader suites turn validation on for the whole process and leave it on, so a later case
+// would be validated or not depending on which suites ran before it. Every case starts with
+// validation off; a case that wants it turns it on itself.
+class ShaderValidationReset final: public ::testing::EmptyTestEventListener
+{
+	class Off final: public Config::ConfigSource
+	{
+	public:
+		bool         Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+		int64_t      GetInteger(const Core::String& /*key*/) const override { return 0; }
+		bool         GetBool(const Core::String& /*key*/) const override { return false; }
+		Core::String GetString(const Core::String& /*key*/) const override { return {}; }
+	};
+
+	void OnTestStart(const ::testing::TestInfo& /*info*/) override
+	{
+		if (Config::IsInitialized())
+		{
+			Config::Load(Off());
+		}
+	}
+};
+
+} // namespace
+
 void UnitTestSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	// Earlier suites can leave worker threads alive. Re-exec the death-test
@@ -184,6 +214,7 @@ void UnitTestSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 		::testing::FLAGS_gtest_death_test_style = "threadsafe";
 	}
 	testing::InitGoogleTest(parent->GetArgc(), parent->GetArgv());
+	::testing::UnitTest::GetInstance()->listeners().Append(new ShaderValidationReset);
 }
 
 void UnitTestSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent) {}

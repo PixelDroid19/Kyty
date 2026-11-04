@@ -480,16 +480,21 @@ TEST(EmulatorNetwork, NpGameIntentPropertyLookupRequiresInitializationAndReports
 {
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libNpGameIntent_1", &symbols));
-	const auto* init_record = symbols.Find(NpFunction(u"NpGameIntent", u"m87BHxt-H60"));
-	const auto* get_record  = symbols.Find(NpFunction(u"NpGameIntent", u"rPl0INNc-M8"));
+	const auto* init_record      = symbols.Find(NpFunction(u"NpGameIntent", u"m87BHxt-H60"));
+	const auto* terminate_record = symbols.Find(NpFunction(u"NpGameIntent", u"0HBYxYAjmf0"));
+	const auto* get_record       = symbols.Find(NpFunction(u"NpGameIntent", u"rPl0INNc-M8"));
 	ASSERT_NE(init_record, nullptr);
+	ASSERT_NE(terminate_record, nullptr);
 	ASSERT_NE(get_record, nullptr);
 
 	using InitFn    = int(KYTY_SYSV_ABI*)();
 	using GetPropFn = int(KYTY_SYSV_ABI*)(const void*, const char*, char*, uint64_t);
 	auto* init          = reinterpret_cast<InitFn>(init_record->vaddr);
+	auto* terminate     = reinterpret_cast<InitFn>(terminate_record->vaddr);
 	auto* get_property  = reinterpret_cast<GetPropFn>(get_record->vaddr);
 
+	// The library state is process-wide; start from a terminated library whatever ran before.
+	ASSERT_EQ(terminate(), 0);
 	char value[8] = {};
 	EXPECT_EQ(get_property(&symbols, "key", value, sizeof(value)), static_cast<int>(0x80553802u));
 
@@ -502,6 +507,7 @@ TEST(EmulatorNetwork, NpGameIntentPropertyLookupRequiresInitializationAndReports
 	value[0] = 'x';
 	EXPECT_EQ(get_property(&symbols, "key", value, sizeof(value)), static_cast<int>(0x80553807u));
 	EXPECT_EQ(value[0], '\0');
+	EXPECT_EQ(terminate(), 0);
 }
 
 TEST(EmulatorNetwork, UserServiceInitialize2ValidatesIdAndRejectsRepeat)

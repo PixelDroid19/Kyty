@@ -6430,6 +6430,10 @@ TEST(EmulatorGraphicsPackets, MaterializesImageSampleBWithBias)
 	ShaderInstruction nop {};
 	nop.type   = ShaderInstructionType::VNop;
 	nop.format = ShaderInstructionFormat::Empty;
+	// Distinct addresses, as in a parsed program: the fragment tap below selects the sample by its pc.
+	sample.pc = 0u;
+	nop.pc    = 8u;
+	end.pc    = 12u;
 
 	if (!Config::IsInitialized())
 	{

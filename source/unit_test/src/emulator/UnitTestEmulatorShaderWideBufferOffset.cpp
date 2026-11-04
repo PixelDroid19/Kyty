@@ -30,24 +30,45 @@ constexpr uint32_t kOffsetRegister = 24u;
 constexpr uint32_t kRegisterOffset = 0x1234u;
 constexpr uint32_t kInstructionImmediate = 0x28u;
 
-void InitializeShaderTest()
+void LoadShaderValidation(bool enabled)
 {
-	if (!Config::IsInitialized())
-	{
-		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-	}
-	Config::SetNextGen(true);
-	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	class ValidationConfig final: public Config::ConfigSource
 	{
 	public:
-		bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
-		int64_t GetInteger(const Core::String&) const override { return 0; }
-		bool GetBool(const Core::String&) const override { return true; }
+		explicit ValidationConfig(bool enabled): m_enabled(enabled) {}
+		bool         Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+		int64_t      GetInteger(const Core::String&) const override { return 0; }
+		bool         GetBool(const Core::String&) const override { return m_enabled; }
 		Core::String GetString(const Core::String&) const override { return {}; }
-	} validation;
+
+	private:
+		bool m_enabled;
+	} validation(enabled);
 	Config::Load(validation);
 }
+
+// Validation is a process-wide setting; later suites must see the value they started with.
+class ScopedShaderTest final
+{
+public:
+	ScopedShaderTest()
+	{
+		if (!Config::IsInitialized())
+		{
+			Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		}
+		Config::SetNextGen(true);
+		Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		m_previous_validation = Config::ShaderValidationEnabled();
+		LoadShaderValidation(true);
+	}
+	~ScopedShaderTest() { LoadShaderValidation(m_previous_validation); }
+
+	KYTY_CLASS_NO_COPY(ScopedShaderTest);
+
+private:
+	bool m_previous_validation = false;
+};
 
 std::vector<uint32_t> SBufferLoadWords(uint32_t components, uint32_t soffset, uint32_t immediate)
 {
@@ -198,7 +219,7 @@ String8 GenerateWideLoad(uint32_t components, uint32_t soffset, uint32_t immedia
 
 TEST(EmulatorShaderWideBufferOffset, RegisterOffsetIncludesInstructionImmediate)
 {
-	InitializeShaderTest();
+	const ScopedShaderTest scope;
 	for (const uint32_t components: {8u, 16u})
 	{
 		const auto source = GenerateWideLoad(components, kOffsetRegister, kInstructionImmediate);
@@ -215,7 +236,7 @@ TEST(EmulatorShaderWideBufferOffset, RegisterOffsetIncludesInstructionImmediate)
 
 TEST(EmulatorShaderWideBufferOffset, ZeroImmediatePreservesRegisterAndNullSoffsetUsesInlineZero)
 {
-	InitializeShaderTest();
+	const ScopedShaderTest scope;
 	for (const uint32_t components: {8u, 16u})
 	{
 		const auto register_source = GenerateWideLoad(components, kOffsetRegister, 0u);

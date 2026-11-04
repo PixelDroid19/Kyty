@@ -1897,16 +1897,15 @@ struct CoveredIndexTestGpuObject: public GpuObject
 
 void EnsureGpuMemoryForTests()
 {
-	static bool initialized = false;
 	if (!Config::IsInitialized())
 	{
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-	if (!initialized)
+	// Suites of other files may have initialized it already in this process.
+	if (g_gpu_memory == nullptr)
 	{
 		GpuMemoryInit();
-		initialized = true;
 	}
 }
 
@@ -6319,6 +6318,12 @@ TEST(EmulatorGraphicsState, StorageTextureUsesMipBackingForDepthAndGen5ColourCha
 // alone at level 1. That descriptor is a view of the live array, and so is one naming another slice.
 TEST(EmulatorGraphicsState, StorageTextureArrayDescriptorsAreViewsOfTheLiveArray)
 {
+	// Array chains share one backing only on Gen5, so the case sets the platform itself.
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
 	const uint32_t identity = DstSel(4, 5, 6, 7);
 	const StorageTextureObject array(0u, 0u, 71u, 128u, 128u, 128u, 0u, 8u, 27u, true, identity, 13u, 6u, 5u);
 	const StorageTextureObject other_slice(0u, 0u, 71u, 128u, 128u, 128u, 2u, 8u, 27u, true, identity, 13u, 6u, 0u);
