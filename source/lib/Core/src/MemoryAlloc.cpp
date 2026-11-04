@@ -781,35 +781,48 @@ void mem_print(int from_state)
 } // namespace Kyty::Core
 
 #ifndef KYTY_SHARED_DLL
-void* operator new(size_t size)
+// The replacements must not be inlined into their callers. The compiler assumes that
+// a replaceable deallocation function does not read the object, so once operator new
+// is inlined (link-time and profile-guided builds do), the block header it writes
+// looks dead to the caller and is removed before operator delete checks it.
+#if defined(__GNUC__) || defined(__clang__)
+#define KYTY_ALLOCATION_FUNCTION __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define KYTY_ALLOCATION_FUNCTION __declspec(noinline)
+#else
+#define KYTY_ALLOCATION_FUNCTION
+#endif
+
+KYTY_ALLOCATION_FUNCTION void* operator new(size_t size)
 {
 	return Kyty::Core::mem_alloc(size);
 }
 
-void* operator new(std::size_t size, const std::nothrow_t& /*nothrow_value*/) noexcept
+KYTY_ALLOCATION_FUNCTION void* operator new(std::size_t size, const std::nothrow_t& /*nothrow_value*/) noexcept
 {
 	return Kyty::Core::mem_alloc(size);
 }
 
-void* operator new[](size_t size)
+KYTY_ALLOCATION_FUNCTION void* operator new[](size_t size)
 {
 	return Kyty::Core::mem_alloc(size);
 }
 
-void* operator new[](std::size_t size, const std::nothrow_t& /*nothrow_value*/) noexcept
+KYTY_ALLOCATION_FUNCTION void* operator new[](std::size_t size, const std::nothrow_t& /*nothrow_value*/) noexcept
 {
 	return Kyty::Core::mem_alloc(size);
 }
 
-void operator delete(void* block) noexcept
+KYTY_ALLOCATION_FUNCTION void operator delete(void* block) noexcept
 {
 	Kyty::Core::mem_free(block);
 }
 
-void operator delete[](void* block) noexcept
+KYTY_ALLOCATION_FUNCTION void operator delete[](void* block) noexcept
 {
 	Kyty::Core::mem_free(block);
 }
+#undef KYTY_ALLOCATION_FUNCTION
 #else
 // #error "haha"
 #endif
