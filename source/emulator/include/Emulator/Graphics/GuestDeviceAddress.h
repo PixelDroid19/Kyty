@@ -130,6 +130,13 @@ void               GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const G
 [[nodiscard]] bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source,
                                                        uint64_t vaddr, uint64_t size);
 
+// True when [vaddr, vaddr + size) lies wholly inside chunks that alias the guest's
+// physical memory, so device-address readers observe host stores there, while a
+// device copy may not write it (it covers part of a cache line, see
+// GuestDeviceAddressRecordPublication). A result in such a range reaches later
+// readers through the host write-back, which copies exact bytes.
+[[nodiscard]] bool GuestDeviceAddressHostPublicationReachesReaders(uint64_t vaddr, uint64_t size);
+
 // Records, with the same ordering and range rules as GuestDeviceAddressRecordPublication,
 // `word` repeated over the imported view of `size` bytes at guest address `vaddr`.
 // Fails without recording when a piece of the range is not 4-byte aligned.

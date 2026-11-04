@@ -1454,6 +1454,15 @@ void GpuMemoryCollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, Submissi
 // written again since the identity was taken.
 // `uniform_words`, when known, is the content repeated over the whole object; the
 // completed submission then writes back without reading the GPU copy.
+// A device-address consumer recording on the producer's queue copies this object's current result
+// into guest memory on the host before it is submitted (CommandBuffer::DeferHostPublication), and
+// GpuMemoryWriteBackStorageRanges leaves the incomplete result to that copy. False, deferring
+// nothing, when the identity no longer names the current result or `recording` already uses it.
+[[nodiscard]] bool GpuMemoryDeferStorageHostPublication(const GpuMemoryStorageWriteIdentity& identity, SubmissionId recording);
+// After the producers of `queue`'s deferred publications completed: copies each object's bytes into
+// guest memory, as the write-back does, and leaves its write-back state alone, so the write-back
+// after its later uses still runs.
+void GpuMemoryCopyDeferredStorageToGuest(GraphicContext* ctx, GpuQueueId queue);
 [[nodiscard]] bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
                                                       const GpuWritebackPageCache::UniformWords* uniform_words);
 // Source of a memory->GDS transfer recorded at the current position of `buffer`.

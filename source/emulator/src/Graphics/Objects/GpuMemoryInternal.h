@@ -307,6 +307,8 @@ public:
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
 	[[nodiscard]] bool FindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
 	void               MarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId consumer);
+	[[nodiscard]] bool DeferStorageHostPublication(const GpuMemoryStorageWriteIdentity& identity, SubmissionId recording);
+	void               CopyDeferredStorageToGuest(GraphicContext* ctx, GpuQueueId queue);
 	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
 	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
 	[[nodiscard]] GpuMemoryGdsSource AcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
@@ -366,6 +368,9 @@ private:
 		uint64_t                            device_write_time          = 0;
 		uint64_t                            guest_published_write_uses = 0;
 		uint64_t                            in_place_ordered_write_uses = 0;
+		// The write uses whose host write-back a device-address consumer deferred to before
+		// it submits (GpuMemoryDeferStorageHostPublication).
+		uint64_t                            host_deferred_write_uses    = 0;
 		uint32_t                            in_place_ordered_queue      = 0;
 		uint32_t                            guest_published_queue      = 0;
 		bool                                guest_published_uniform    = false;
@@ -540,6 +545,8 @@ private:
 	// the per-draw pending-write scans, which titles with thousands of live
 	// storage buffers otherwise pay in full for every device-address draw.
 	std::set<std::pair<int, int>> m_writable_storage;
+	// Per queue: objects whose host publication a recording deferred (DeferStorageHostPublication).
+	std::array<std::vector<GpuMemoryStorageWriteIdentity>, GraphicContext::QUEUES_NUM> m_host_deferred;
 	// The per-draw scans above mostly repeat with nothing new to do. A consumer's
 	// scan that found nothing stays true until g_storage_scan_generation changes,
 	// except for the in-place objects bound since, listed in m_storage_scan_changes;

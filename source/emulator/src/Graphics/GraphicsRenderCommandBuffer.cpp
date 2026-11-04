@@ -2229,6 +2229,7 @@ void CommandBuffer::Begin()
 	}
 	DestroyRecordingUploads();
 	m_device_awaited.clear();
+	m_deferred_host_publication = {};
 	m_device_wait_semaphores.clear();
 	m_device_wait_values.clear();
 
@@ -2599,6 +2600,22 @@ void CommandBuffer::AwaitImageFills()
 		AwaitSubmissionOnDevice(SubmissionId {GpuQueueId {GraphicContext::QUEUE_UTIL}, value},
 		                        g_render_ctx->GetGraphicCtx()->queues[GraphicContext::QUEUE_UTIL].timeline, value);
 	}
+}
+
+void CommandBuffer::DeferHostPublication(SubmissionId producer)
+{
+	EXIT_IF(producer.sequence == 0 || producer.queue.Value() != static_cast<uint32_t>(m_queue));
+	if (producer.sequence > m_deferred_host_publication.sequence)
+	{
+		m_deferred_host_publication = producer;
+	}
+}
+
+SubmissionId CommandBuffer::TakeDeferredHostPublication()
+{
+	const SubmissionId producer = m_deferred_host_publication;
+	m_deferred_host_publication = {};
+	return producer;
 }
 
 bool CommandBuffer::AwaitsSubmissionOnDevice(SubmissionId submission) const

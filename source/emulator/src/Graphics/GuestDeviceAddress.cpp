@@ -1608,6 +1608,18 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 	return true;
 }
 
+bool GuestDeviceAddressHostPublicationReachesReaders(uint64_t vaddr, uint64_t size)
+{
+	if (size == 0 || vaddr > UINT64_MAX - size || DeviceMayWriteGuestRange(vaddr, size))
+	{
+		return false;
+	}
+	std::vector<PublicationPiece> pieces;
+	auto&                         registry = GetRegistry();
+	std::lock_guard<std::mutex>   lock(registry.mutex);
+	return ResolvePublicationPiecesLocked(registry, vaddr, size, &pieces);
+}
+
 bool GuestDeviceAddressRecordFill(GraphicContext* ctx, VkCommandBuffer_T* cmd, uint32_t word, uint64_t vaddr, uint64_t size)
 {
 	if (ctx == nullptr || cmd == nullptr || size == 0 || vaddr > UINT64_MAX - size || !ctx->guest_device_address_supported ||

@@ -417,6 +417,31 @@ bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUnifor
 	return true;
 }
 
+// A result the device may not copy into guest memory (part of a cache line) normally makes the
+// reader wait for its producer and the host write-back. When the producer is an earlier submission
+// of the reader's queue and the range aliases guest memory that readers observe, the reader keeps
+// recording instead: the command processor completes the producer and writes the result back
+// before it submits this recording, so the reader still executes after the bytes are in place.
+static bool DeferHostPublication(CommandBuffer* buffer, const GpuMemoryStoragePublication& publication, SubmissionId recording)
+{
+	const auto& producer = publication.dependency;
+	if (producer.queue != recording.queue || producer.sequence == 0 || producer.sequence >= recording.sequence ||
+	    !GuestDeviceAddressHostPublicationReachesReaders(publication.vaddr, publication.size) ||
+	    !GpuMemoryDeferStorageHostPublication(publication.identity, recording))
+	{
+		return false;
+	}
+	buffer->DeferHostPublication(producer);
+	return true;
+}
+
+void GraphicsRenderWriteBackDeferredPublications(int queue)
+{
+	EXIT_IF(g_render_ctx == nullptr);
+	Core::LockGuard lock(g_render_ctx->GetMutex());
+	GpuMemoryCopyDeferredStorageToGuest(g_render_ctx->GetGraphicCtx(), GpuQueueId(static_cast<uint32_t>(queue)));
+}
+
 bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* dependency)
 {
 	EXIT_IF(buffer == nullptr || dependency == nullptr);
@@ -435,6 +460,10 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 		if (recorded && publication.identity.buffer->guest_in_place)
 		{
 			GpuMemoryMarkInPlaceStorageOrdered(publication.identity, consumer);
+			continue;
+		}
+		if (!recorded && DeferHostPublication(buffer, publication, recording))
+		{
 			continue;
 		}
 		if (!recorded || !GpuMemoryMarkStorageGuestPublished(publication.identity, recording, nullptr))

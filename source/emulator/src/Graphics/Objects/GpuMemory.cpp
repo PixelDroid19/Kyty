@@ -1077,6 +1077,17 @@ void GpuMemoryMarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& ide
 	g_gpu_memory->MarkInPlaceStorageOrdered(identity, consumer);
 }
 
+bool GpuMemoryDeferStorageHostPublication(const GpuMemoryStorageWriteIdentity& identity, SubmissionId recording)
+{
+	return g_gpu_memory != nullptr && g_gpu_memory->DeferStorageHostPublication(identity, recording);
+}
+
+void GpuMemoryCopyDeferredStorageToGuest(GraphicContext* ctx, GpuQueueId queue)
+{
+	EXIT_IF(g_gpu_memory == nullptr || ctx == nullptr);
+	g_gpu_memory->CopyDeferredStorageToGuest(ctx, queue);
+}
+
 bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
                                         const GpuWritebackPageCache::UniformWords* uniform_words)
 {

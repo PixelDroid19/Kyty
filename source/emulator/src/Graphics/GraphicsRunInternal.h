@@ -425,6 +425,8 @@ private:
 	void                 CompleteSubmittedThroughLocked(SubmissionId target, SubmissionId* latest_completed);
 	void                 TryCompleteSubmittedLocked(SubmissionId* latest_completed);
 	SubmissionId         SubmitCurrentLocked(SubmissionId* latest_completed);
+	[[nodiscard]] bool   IsCurrentRecording(SubmissionId submission);
+	void                 SettleDeferredHostPublication();
 	void                 PublishCompletedSubmissions();
 	void                 WaitUntilPublishedUnlessReentrant(SubmissionId submission);
 	SubmissionId         BufferFlushForGpuWait();
@@ -453,6 +455,9 @@ private:
 
 	Core::Mutex m_mutex;
 	Core::Mutex m_run_mutex;
+	// Held from taking a recording's deferred host publication until its write-back is done, so
+	// no thread submits that recording in between.
+	std::recursive_mutex m_host_publication_mutex;
 
 	CommandBuffer*                  m_buffer[VK_BUFFERS_NUM] = {};
 	int                             m_current_buffer         = -1;

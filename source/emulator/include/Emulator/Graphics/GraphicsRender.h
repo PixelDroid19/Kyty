@@ -743,6 +743,11 @@ public:
 	void AwaitImageFills();
 	[[nodiscard]] bool AwaitsSubmissionOnDevice(SubmissionId submission) const;
 	[[nodiscard]] const std::vector<SubmissionId>& DeviceAwaitedSubmissions() const { return m_device_awaited; }
+	// A storage result of an earlier submission of this queue that this recording's device-address readers
+	// need, and that only the host write-back can publish. The command processor completes that submission
+	// and writes the result back before it submits this recording.
+	void                       DeferHostPublication(SubmissionId producer);
+	[[nodiscard]] SubmissionId TakeDeferredHostPublication();
 
 private:
 	friend class PipelineCache;
@@ -783,6 +788,7 @@ private:
 	std::vector<DepthStencilVulkanImage*> m_depth_plane_store_backs;
 	std::vector<DepthStencilVulkanImage*> m_stencil_plane_store_backs;
 	std::vector<SubmissionId>             m_device_awaited;
+	SubmissionId                          m_deferred_host_publication;
 	std::vector<VkSemaphore>              m_device_wait_semaphores;
 	std::vector<uint64_t>                 m_device_wait_values;
 
@@ -836,6 +842,9 @@ void GraphicsRenderQueueQueuedGraphicsInterrupt(CommandBuffer* buffer);
 // The caller submits after releasing its CommandProcessor mutex so publication
 // cannot precede GPU -> CPU materialization.
 void GraphicsRenderPrepareWriteBack(CommandBuffer* buffer);
+// Copies the storage results that recordings of `queue` deferred into guest memory
+// (CommandBuffer::DeferHostPublication). Call after the deferred producer completed.
+void GraphicsRenderWriteBackDeferredPublications(int queue);
 enum class ComputeDispatchResult
 {
 	Completed,

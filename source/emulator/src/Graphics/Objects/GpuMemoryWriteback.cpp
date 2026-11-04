@@ -757,10 +757,12 @@ void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQ
 	bool               nothing_written = true;
 	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges, consumer))
 	{
-		// Consumers do not wait for an in-place object; its completion writes it back.
-		const auto& info = m_heaps[heap_id].objects[object_id].info;
-		if (static_cast<const VulkanBuffer*>(info.object.obj)->guest_in_place &&
-		    !m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()))
+		// Consumers do not wait for an in-place object; its completion writes it back. A deferred
+		// host publication is written back before the consumer's recording is submitted.
+		const auto& info     = m_heaps[heap_id].objects[object_id].info;
+		const bool  deferred = static_cast<const VulkanBuffer*>(info.object.obj)->guest_in_place ||
+		                      (info.host_deferred_write_uses != 0u && info.host_deferred_write_uses == info.write_uses);
+		if (deferred && !m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()))
 		{
 			continue;
 		}
@@ -847,6 +849,66 @@ void GpuMemory::MarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& i
 		object.info.in_place_ordered_write_uses = identity.write_uses;
 		object.info.in_place_ordered_queue      = consumer.Value();
 	}
+}
+
+bool GpuMemory::DeferStorageHostPublication(const GpuMemoryStorageWriteIdentity& identity, SubmissionId recording)
+{
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	if (identity.heap_id < 0 || static_cast<uint32_t>(identity.heap_id) >= m_heaps.Size() || identity.object_id < 0 ||
+	    static_cast<uint32_t>(identity.object_id) >= m_heaps[identity.heap_id].objects.Size())
+	{
+		return false;
+	}
+	auto& object = m_heaps[identity.heap_id].objects[identity.object_id];
+	auto& info   = object.info;
+	if (object.free || info.logical_generation != identity.logical_generation || info.write_uses != identity.write_uses ||
+	    !info.in_use || info.read_only || info.object.obj != identity.buffer || identity.write_uses == 0u ||
+	    object.block.vaddr_num != 1 || recording.queue.Value() >= m_host_deferred.size())
+	{
+		return false;
+	}
+	// A use in the recording itself executes after the copy, so the copy would not hold its result.
+	SubmissionId latest;
+	if (info.submission_uses.LatestForQueue(recording.queue, &latest) && latest.sequence >= recording.sequence)
+	{
+		return false;
+	}
+	info.host_deferred_write_uses = info.write_uses;
+	auto& deferred                = m_host_deferred[recording.queue.Value()];
+	const bool listed             = std::any_of(deferred.begin(), deferred.end(), [&](const GpuMemoryStorageWriteIdentity& entry)
+	                                            { return entry.heap_id == identity.heap_id && entry.object_id == identity.object_id; });
+	if (!listed)
+	{
+		deferred.push_back(identity);
+	}
+	return true;
+}
+
+void GpuMemory::CopyDeferredStorageToGuest(GraphicContext* ctx, GpuQueueId queue)
+{
+	EXIT_IF(ctx == nullptr || queue.Value() >= m_host_deferred.size());
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	auto&           deferred = m_host_deferred[queue.Value()];
+	for (const auto& identity: deferred)
+	{
+		if (identity.heap_id < 0 || static_cast<uint32_t>(identity.heap_id) >= m_heaps.Size() || identity.object_id < 0 ||
+		    static_cast<uint32_t>(identity.object_id) >= m_heaps[identity.heap_id].objects.Size())
+		{
+			continue;
+		}
+		const auto& object = m_heaps[identity.heap_id].objects[identity.object_id];
+		const auto& info   = object.info;
+		if (object.free || info.logical_generation != identity.logical_generation || info.object.obj != identity.buffer ||
+		    info.write_back_func == nullptr || object.block.vaddr_num != 1)
+		{
+			continue;
+		}
+		const auto result = info.write_back_func(ctx, info.params, info.object.obj, object.block.vaddr, object.block.size, 1);
+		DebugStatsRecordGpuMemoryWriteBack(GpuMemoryStatsTypeIndex(info.object.type), result.copied_bytes, 0);
+	}
+	deferred.clear();
 }
 
 bool GpuMemory::MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,

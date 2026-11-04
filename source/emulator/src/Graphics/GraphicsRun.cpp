@@ -512,8 +512,40 @@ void CommandProcessor::BufferInit()
 	}
 }
 
+// Before the current recording is submitted: complete the producer of a storage result that its
+// device-address readers need and that only the host write-back publishes, then write it back
+// (CommandBuffer::DeferHostPublication).
+void CommandProcessor::SettleDeferredHostPublication()
+{
+	std::lock_guard<std::recursive_mutex> settle(m_host_publication_mutex);
+	SubmissionId                          producer;
+	{
+		Core::LockGuard lock(m_mutex);
+		if (m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM || m_buffer[m_current_buffer] == nullptr)
+		{
+			return;
+		}
+		producer = m_buffer[m_current_buffer]->TakeDeferredHostPublication();
+	}
+	if (producer.sequence == 0)
+	{
+		return;
+	}
+	WaitSubmission(producer);
+	GraphicsRenderWriteBackDeferredPublications(m_queue);
+}
+
+bool CommandProcessor::IsCurrentRecording(SubmissionId submission)
+{
+	Core::LockGuard lock(m_mutex);
+	SubmissionId    current;
+	return m_current_buffer >= 0 && m_current_buffer < VK_BUFFERS_NUM && m_buffer[m_current_buffer] != nullptr &&
+	       m_buffer[m_current_buffer]->GetSubmissionId(&current) && current == submission;
+}
+
 SubmissionId CommandProcessor::BufferFlush()
 {
+	SettleDeferredHostPublication();
 	SubmissionId latest_completed;
 	SubmissionId submitted;
 
@@ -529,6 +561,7 @@ SubmissionId CommandProcessor::BufferFlush()
 
 SubmissionId CommandProcessor::BufferFlushForGpuWait()
 {
+	SettleDeferredHostPublication();
 	SubmissionId latest_completed;
 	SubmissionId submitted;
 
@@ -581,13 +614,17 @@ void CommandProcessor::SubmitRecordedDispatchesBeforeDraw()
 	// that follows a dispatch in the same command buffer; a full barrier there
 	// does not help, re-emitting all graphics state does. A new command buffer
 	// starts with every graphics state emitted again.
-	SubmissionId latest_completed;
 	{
 		Core::LockGuard lock(m_mutex);
 		if (!m_dispatch_recorded)
 		{
 			return;
 		}
+	}
+	SettleDeferredHostPublication();
+	SubmissionId latest_completed;
+	{
+		Core::LockGuard lock(m_mutex);
 		(void)SubmitCurrentLocked(&latest_completed);
 	}
 	PublishCompletedSubmissions();
@@ -726,6 +763,10 @@ void CommandProcessor::WaitUntilPublishedUnlessReentrant(SubmissionId submission
 void CommandProcessor::WaitSubmission(SubmissionId submission)
 {
 	EXIT_IF(!OwnsSubmissionQueue(submission));
+	if (IsCurrentRecording(submission))
+	{
+		SettleDeferredHostPublication();
+	}
 
 	SubmissionId latest_completed;
 
@@ -767,6 +808,10 @@ void CommandProcessor::WaitSubmission(SubmissionId submission)
 bool CommandProcessor::SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value)
 {
 	EXIT_IF(!OwnsSubmissionQueue(submission) || timeline == nullptr || value == nullptr);
+	if (IsCurrentRecording(submission))
+	{
+		SettleDeferredHostPublication();
+	}
 	Core::LockGuard lock(m_mutex);
 
 	uint32_t           slot  = 0;

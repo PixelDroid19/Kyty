@@ -5729,6 +5729,27 @@ replaceable `operator delete` does not read the object, so the block header stor
 `operator delete` found no header. The replacements are now `noinline`. Any link-time optimized build could hit the
 same removal when the inliner's choices change.
 
+## Partial-line storage results published before submission, not before recording (2026-11-03)
+
+- **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, ANV Mesa 26.2.5, LTO build, recorded route to the dunes,
+  140-210 s window): a temporary attribution of fence waits put about 39 % of the command processor thread's time in
+  draws waiting for one 8-byte storage result at a 16-byte offset of its cache line, in direct memory. The partial-line
+  rule ("Guest small-block free lists corrupted by partial-line device writes") refuses its device publication, so every
+  device-address draw after each write submitted nothing new and waited for the previous submission of its own queue,
+  about 4.6 ms each, then copied the 8 bytes on the host.
+- **Change:** when such a result's producer is an earlier submission of the reader's queue, its range aliases guest
+  memory the readers observe, and the recording does not use the object itself, the reader keeps recording. The
+  recording carries the producer (`CommandBuffer::DeferHostPublication`); before any path submits it, the command
+  processor completes that producer and copies the object's bytes into guest memory with its write-back function
+  (`GpuMemoryCopyDeferredStorageToGuest`), leaving the write-back state alone so the write-back after later uses still
+  runs. Results written in the recording itself keep the wait.
+- **Measured** (one run against the base runs of the same window): draw processing 103.1 to 67.8 us per draw, waits for
+  that result about 1.95 s to 0.19 s per 5 s, frame rate 13.1 to 12.9 fps. The waits move: the copy before submission now
+  waits for the producer, and `DRAW_INDEX_INDIRECT` argument reads grow. The dune frame stays bound by GPU work (about
+  60 ms per frame, "real gameplay frame rate" in `docs/titles/robot-platformer.md`); the freed processor time does not
+  raise its rate on this host. The dune capture matches the base runs.
+- **Not established:** other titles that read partial-line storage results through device addresses were not run.
+
 ## Static TLS offsets follow the module alignment (2026-11-01)
 
 `PPSA07393 - Gori: Cuddly Carnage` faulted at boot: guest code at `0x9018ef83d` reads a pointer at `fs:-0x2d0` and
