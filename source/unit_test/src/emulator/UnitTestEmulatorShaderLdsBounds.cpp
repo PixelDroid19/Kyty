@@ -1097,8 +1097,9 @@ TEST(EmulatorShaderLdsBounds, MtbufRejectsEveryUnimplementedOpcodeAndFormatCompo
 			const uint32_t expected = next_gen ? gen5[opcode] : legacy[opcode];
 			for (uint32_t format: {0u, 22u, 64u, 74u, 77u, 0x74u, 0x7bu, 0x7eu})
 			{
-				// Gen5 XY and XYZ also read the leading components of a wider float element.
-				const bool leading = next_gen && ((opcode == 1u && (format == 74u || format == 77u)) || (opcode == 2u && format == 77u));
+				// Gen5 X, XY and XYZ also read the leading components of a wider float element.
+				const bool leading = next_gen && ((opcode == 0u && (format == 64u || format == 74u || format == 77u)) ||
+				                                  (opcode == 1u && (format == 74u || format == 77u)) || (opcode == 2u && format == 77u));
 				if (format == expected || leading) { continue; }
 				EXPECT_EXIT(RunRejectedMtbuf(opcode, format, next_gen), ::testing::ExitedWithCode(kRejectedExit), MtbufRejection(opcode, true));
 			}
