@@ -1,3 +1,74 @@
+## Truncate, munmap, setenv and DMA copy contracts; Windows cancel; three proposals excluded (2026-11-05)
+
+Host: Linux, Intel Arc A770, Mesa 26.2.5 (ANV), strict runs at the 60 fps present limit. Each fix
+below came from reviewing proposed changes against Kyty's own contract and evidence.
+
+- **Truncate through a regular file returned ENOENT, fixed** (`source/emulator/src/Kernel/FileSystemSync.cpp`).
+  A path whose parent is a regular file (`/dir/file/child`) is ENOTDIR under POSIX. The host name of
+  such a path resolved empty, and the empty name read as an existing directory, so `KernelTruncate`
+  returned EISDIR. It now walks the guest ancestors: the first one that exists decides ENOTDIR (a file)
+  or ENOENT (a directory). Unit test `TruncateByPathShortensFileAndRejectsBadTargets`.
+- **munmap of a length that is not a page multiple, fixed** (`source/emulator/src/Kernel/Memory.cpp`).
+  The length is rounded up to the 16 KiB guest page, as a BSD kernel does, and an overflow of
+  `vaddr + len` is EINVAL. The address check is unchanged. Unit test
+  `EmulatorKernelMemory.MunmapRoundsLengthUpToGuestPage`; it fails without the fix.
+- **Custom `R_DMA_DATA` copies used memcpy, fixed** (`source/emulator/src/Graphics/GraphicsRunOpParsers.cpp`).
+  The ranges may overlap; it now uses memmove, which `IT_DMA_DATA` already did.
+- **Guest `setenv` and host variables in `getenv`, fixed** (`source/emulator/src/Libs/LibCString.cpp`,
+  `source/emulator/src/Libs/ProcessEnvironment.cpp`). `setenv` (NID `M4YYbSFfJ8g`) was not exported,
+  so titles without their own libc resolved it to nothing; `getenv` fell back to the host process
+  environment, so host variables such as `PATH` reached the guest. `setenv` now stores guest values
+  (EINVAL for a null, empty or `=`-containing name, or a null value), and `getenv` reads only guest
+  values and the environment passed in the libc start parameters. The test that asserted host `PATH` in the
+  guest was removed: no documented contract backs it. Neither symbol is HLE-owned, so a title that ships
+  its own libc keeps its own pair. Every runnable local title ships one; the only local title that
+  imports `setenv` without it, `PPSA05496 - Builder's Journey`, is an incomplete dump with no
+  `sce_sys/param.json`, so the new export is covered by unit tests only.
+- **Windows: acting on a thread cancel stopped the process, fixed** (`source/emulator/src/Kernel/Pthread.cpp`).
+  winpthreads acts on a cancel with an SEH unwind, which cannot walk guest frames. On Windows
+  `PthreadCancel` records the request and `PthreadTestcancel` leaves through `PthreadExit` when
+  cancellation is enabled, with the `PTHREAD_CANCELED` value of the Linux build. Limit: a thread
+  blocked in a host wait is not woken by the cancel. Linux keeps the host cancel. Not run on Windows
+  here; the Windows CI builds it.
+
+**Excluded:**
+
+- **Ordering V_MIN/V_MAX/V_MED3_F32 by raw bits.** The RDNA2 ISA defines these by value comparison,
+  and FP_DENORM single-precision mode 0 flushes input denormals; the common guest mode `0xc0` sets
+  it. On hardware `max(+0, +denormal)` is therefore +0, while a bit ordering returns the denormal.
+  The current lowering and its recorded limit stay ("Min and max", later in this file).
+- **Backing off failed event-flag polls with host yields and sleeps.** `PPSA28311 - Absolum`, the
+  only local title whose `eboot.bin` names the audio middleware the proposal targets (modules were not
+  searched), stayed under 262,144 failed zero-timeout polls in 100 s from boot to gameplay, under
+  2,700 per second against the hundreds of thousands per second the proposal addresses (temporary
+  counter that logged once per 262,144 failures, not committed). No spinning poll loop was measured,
+  so a host sleep would add latency with no measured gain.
+- **Synthetic unwind tables for guest modules on Windows.** One frame shape per module is invented:
+  guest code ships no unwind data and does not keep a frame pointer in every function. Kyty leaves
+  guest frames by jumping back to the native entry frame instead (record "Windows strict sweep").
+**Open lead, not ported and not measured:**
+
+- **Select-guarded buffer loads.** The proposal targets pipeline build time on another
+  vendor and is off by default there. On Arc, the heavy-shader build time measured earlier is
+  register allocation and spills, which depend on the subgroup size (record "Astro compile split").
+  Loads through a runtime descriptor read the guest address, not a robust binding, so running them
+  unconditionally could fault; a port must keep their branch. Open lead: it needs a cold-cache
+  build-time A/B on the same shaders before it ships.
+
+**Validation.** `ctest --no-tests=error`: 108 tests, 107 passed, 1 skipped
+(`KytyShaderComputeIntegration.PairedWave64`, skipped before as well), including the architecture,
+archive DAG and host-shader gates. Strict runs of about 110 s each: `PPSA28311 - Absolum` gameplay
+at 39 fps (binary with the env-gated poll counter; 37.3-40.3 fps recorded for that area on 2026-11-01), `PPSA15552 - Dead Cells` and `PPSA21402 - Balatro` gameplay at 59.9 fps,
+`PPSA34971 - Hollow Knight: Voidheart Edition` at the display-scale screen where its scripted route
+ends, as before these changes. No title in the local set exercises truncate through a file, an
+unaligned munmap length or an overlapping custom DMA copy, so those fixes are covered by unit tests only.
+
+**Linux impact of the Windows fixes on this branch.** Every line those commits compile on Linux was
+reviewed with the Windows-only blocks stripped. Those lines are equivalent (calling convention macro,
+`strtoll`, path conversion, stack-range checks that are no-ops on Linux, the lock helpers that call
+pthread directly) or extend support: storage format 69 used to stop the run, and the pipeline cache
+lock is held only around creation, with the checkpoint deferring on `try_lock`.
+
 ## Windows collector context requests, host lock waits, FFmpeg, SysV exports, scanf and reserves (2026-11-04)
 
 Host: Windows 11, Intel Arc A770, driver 32.0.101.9150, MinGW UCRT build, strict runs at the
