@@ -774,6 +774,10 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 	EXIT_IF(buffer == nullptr || first == nullptr || slice_size == 0u);
 	auto* slice_array = DepthStencilBufferGetSliceArray(g_render_ctx->GetGraphicCtx(), first, width, height, slice_size, layers);
 	auto* array       = slice_array->image;
+	if (slice_array->store_pending)
+	{
+		EXIT("a draw samples the depth slices its own layered pass renders: addr=0x%012" PRIx64 " layers=%u\n", addr, layers);
+	}
 	VkCommandBuffer vk_buffer = nullptr;
 	const auto      record    = [&]()
 	{
@@ -871,6 +875,99 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 		TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
 	}
 	return array;
+}
+
+void GraphicsRenderStoreLayeredDepth(VkCommandBuffer vk_buffer, DepthSliceArray* slice_array,
+                                     const std::vector<DepthStencilVulkanImage*>& slices)
+{
+	EXIT_IF(vk_buffer == nullptr || slice_array == nullptr || slices.size() != slice_array->layers.size());
+	auto* array = slice_array->image;
+	TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	for (uint32_t layer = 0; layer < slices.size(); layer++)
+	{
+		auto*      slice  = slices[layer];
+		const auto layout = slice->layout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : slice->layout;
+		TransitionDepthStencilImage(vk_buffer, slice, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		VkImageCopy region {};
+		region.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, layer, 1u};
+		region.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, 0u, 1u};
+		region.extent         = {array->extent.width, array->extent.height, 1u};
+		vkCmdCopyImage(vk_buffer, array->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slice->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u,
+		               &region);
+		TransitionDepthStencilImage(vk_buffer, slice, layout);
+		slice->content_stamp               = VulkanImageNextStamp();
+		slice_array->layers[layer].stamp = slice->content_stamp;
+	}
+	// Samplers of the array expect this layout, and its layers now match the slices.
+	TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	slice_array->store_pending = false;
+}
+
+// A draw that exports a render-target index renders the slices of its depth view in one pass, through the slice
+// array of its first slice: the slices' contents go into the array before the pass and come back when it ends, so the
+// slice images stay what every other bind and sampler reads. Draws that continue the pass render into the array as is.
+static void BindLayeredDepth(uint64_t submit_id, CommandBuffer* buffer, RenderDepthInfo* r, const DepthStencilBufferObject& info)
+{
+	auto* ctx = g_render_ctx->GetGraphicCtx();
+	EXIT_IF(r->vulkan_buffer == nullptr || r->vaddr_num != 1);
+	std::vector<DepthStencilVulkanImage*> slices(r->layers);
+	for (uint32_t layer = 0; layer < r->layers; layer++)
+	{
+		uint64_t vaddr = r->depth_buffer_vaddr + layer * r->depth_buffer_size;
+		uint64_t size  = r->depth_buffer_size;
+		auto*    slice = layer == 0u ? r->vulkan_buffer
+		                             : static_cast<DepthStencilVulkanImage*>(GpuMemoryCreateObject(submit_id, ctx, buffer, &vaddr, &size, 1, info));
+		if (slice == nullptr || slice->format != r->vulkan_buffer->format || slice->extent.width != r->vulkan_buffer->extent.width ||
+		    slice->extent.height != r->vulkan_buffer->extent.height)
+		{
+			EXIT("layered depth slice %u at 0x%012" PRIx64 " has no image matching slice 0\n", layer, vaddr);
+		}
+		slice->depth_slice   = r->slice_start + layer;
+		slice->depth_vaddr   = vaddr;
+		slice->stencil_vaddr = 0u;
+		slices[layer]        = slice;
+	}
+	auto* slice_array = DepthStencilBufferGetSliceArray(ctx, slices[0], slices[0]->extent.width, slices[0]->extent.height,
+	                                                    r->depth_buffer_size, r->layers);
+	auto* array       = slice_array->image;
+	r->vulkan_buffer  = array;
+	if (slice_array->store_pending)
+	{
+		return;
+	}
+	// Closes any other open pass first, so the store below runs at the end of this one.
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
+	TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	for (uint32_t layer = 0; layer < r->layers; layer++)
+	{
+		auto* slice = slices[layer];
+		auto& state = slice_array->layers[layer];
+		if (slice->layout == VK_IMAGE_LAYOUT_UNDEFINED)
+		{
+			// An unused depth image starts cleared to DB_DEPTH_CLEAR (ResolveDepthAttachmentLoadOps).
+			const VkClearDepthStencilValue clear {r->depth_clear_value, 0u};
+			const VkImageSubresourceRange  range {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, 1u, layer, 1u};
+			vkCmdClearDepthStencilImage(vk_buffer, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1u, &range);
+			continue;
+		}
+		if (state.stamp == slice->content_stamp)
+		{
+			continue;
+		}
+		const auto source_layout = slice->layout;
+		TransitionDepthStencilImage(vk_buffer, slice, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		VkImageCopy region {};
+		region.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, 0u, 1u};
+		region.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, layer, 1u};
+		region.extent         = {array->extent.width, array->extent.height, 1u};
+		vkCmdCopyImage(vk_buffer, slice->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u,
+		               &region);
+		TransitionDepthStencilImage(vk_buffer, slice, source_layout);
+		state.stamp = slice->content_stamp;
+	}
+	TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+	slice_array->store_pending = true;
+	buffer->DeferLayeredDepthStore(slice_array, std::move(slices));
 }
 
 void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInfo& depth)
@@ -1482,7 +1579,15 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	{
 		if (layer_export && z.depth_view.slice_max != z.depth_view.slice_start)
 		{
-			EXIT("layered depth rendering is not implemented: slices %u..%u\n", z.depth_view.slice_start, z.depth_view.slice_max);
+			// Only the shape seen so far: whether the exported index counts from SLICE_START is unverified.
+			if (htile || effective_stencil != 0u || z.z_info.num_samples != 0u || z.depth_view.slice_start != 0u ||
+			    z.depth_view.slice_max < z.depth_view.slice_start)
+			{
+				EXIT("layered depth rendering is not implemented: slices %u..%u htile=%u stencil=%u samples=%u\n",
+				     z.depth_view.slice_start, z.depth_view.slice_max, htile ? 1u : 0u, effective_stencil,
+				     static_cast<uint32_t>(z.z_info.num_samples));
+			}
+			r->layers = z.depth_view.slice_max - z.depth_view.slice_start + 1u;
 		}
 		if (!ps5 || z.z_info.num_mip_levels != 0u)
 		{
@@ -1676,6 +1781,11 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
 	if (r->vulkan_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->vulkan_buffer == nullptr condition ignored (continuing)\n"); }
+	if (r->layers > 1u)
+	{
+		BindLayeredDepth(submit_id, buffer, r, vulkan_buffer_info);
+		return;
+	}
 	// Every bind may write the image (draws, clears); sampled copies of it compare this stamp.
 	r->vulkan_buffer->content_stamp = VulkanImageNextStamp();
 	r->vulkan_buffer->depth_slice   = r->slice_start;

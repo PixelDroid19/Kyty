@@ -413,6 +413,8 @@ struct DepthSliceArray
 	DepthStencilVulkanImage*          image = nullptr;
 	VulkanMemory                      memory;
 	std::vector<DepthSliceArrayLayer> layers;
+	// A layered pass renders into the array and has not yet copied its layers back to the slice images.
+	bool store_pending = false;
 };
 
 struct DepthStencilVulkanImage: public VulkanImage

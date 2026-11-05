@@ -177,12 +177,18 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		EXIT("read-only sampled depth attachments require load-store-op-none support\n");
 	}
 
+	// A layered depth image renders all its layers (BindLayeredDepth); every attachment then has that many.
+	const uint32_t depth_layers = with_depth ? depth->vulkan_buffer->array_layers : 1u;
+	if (with_color && depth_layers > 1u)
+	{
+		EXIT("layered depth with color attachments is not implemented: layers=%u\n", depth_layers);
+	}
 	// A depth-only pass binds one dummy color image; an attachment-less pass binds none.
 	VulkanImage* vulkan_buffer =
 	    (with_color ? RenderColorFirstActiveImage(*color)
 	     : with_depth
 	         ? CreateDummyBuffer(VK_FORMAT_B8G8R8A8_SRGB, depth->vulkan_buffer->extent.width, depth->vulkan_buffer->extent.height,
-	                             attachment_samples)
+	                             depth_layers, attachment_samples)
 	         : nullptr);
 	VkExtent2D framebuffer_extent =
 	    (vulkan_buffer != nullptr ? VkExtent2D {vulkan_buffer->extent.width, vulkan_buffer->extent.height} : attachmentless_extent);
@@ -206,7 +212,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		auto*       image            = with_color ? color_attachment->vulkan_buffer : vulkan_buffer;
 		if (image->samples != attachment_samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: image->samples != attachment_samples condition ignored (continuing)\n"); }
 		const uint32_t base_array_layer = with_color ? color_attachment->base_array_layer : 0u;
-		const uint32_t layer_count      = with_color ? color_attachment->layer_count : 1u;
+		const uint32_t layer_count      = with_color ? color_attachment->layer_count : depth_layers;
 		const uint32_t mip_level        = with_color ? color_attachment->mip_level : 0u;
 		if (mip_level >= image->mip_levels)
 		{
@@ -271,7 +277,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	{
 		framebuffer_layers = 1u;
 	}
-	if (with_depth && framebuffer_layers > 1u)
+	if (with_depth && framebuffer_layers != depth_layers)
 	{
 		EXIT("layered color attachments with a depth attachment are not supported: layers=%" PRIu32
 		     " color=%ux%u depth=%ux%u slices=%u..%u size=0x%" PRIx64 " htile=%u stencil=%u\n",
@@ -497,11 +503,13 @@ void FramebufferCache::FreeFramebufferByDepth(DepthStencilVulkanImage* image)
 	}
 }
 
-VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(VkFormat format, uint32_t width, uint32_t height, VkSampleCountFlagBits samples)
+VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(VkFormat format, uint32_t width, uint32_t height, uint32_t layers,
+                                                         VkSampleCountFlagBits samples)
 {
 	for (auto* b: m_dummy_buffers)
 	{
-		if (b->extent.width == width && b->extent.height == height && b->format == format && b->samples == samples)
+		if (b->extent.width == width && b->extent.height == height && b->array_layers == layers && b->format == format &&
+		    b->samples == samples)
 		{
 			return b;
 		}
@@ -518,6 +526,7 @@ VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(VkFormat format, uint32
 	vk_obj->image  = nullptr;
 	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 	vk_obj->samples = samples;
+	vk_obj->array_layers = layers;
 
 	for (auto& view: vk_obj->image_view)
 	{
@@ -526,6 +535,7 @@ VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(VkFormat format, uint32
 
 	VulkanImageDescriptor image_descriptor {};
 	image_descriptor.extent         = {vk_obj->extent.width, vk_obj->extent.height, 1};
+	image_descriptor.array_layers   = layers;
 	image_descriptor.format         = vk_obj->format;
 	image_descriptor.initial_layout = vk_obj->layout;
 	image_descriptor.usage          = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
