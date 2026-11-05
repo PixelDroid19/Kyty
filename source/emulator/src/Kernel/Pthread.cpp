@@ -606,7 +606,15 @@ int KYTY_SYSV_ABI PthreadCancel(Pthread thread)
 		return KERNEL_ERROR_EINVAL;
 	}
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// winpthreads acts on a cancel with an SEH unwind, which cannot walk guest frames;
+	// PthreadTestcancel leaves through PthreadExit instead. A thread blocked in a host
+	// wait is therefore not woken by the cancel.
+	thread->cancel_requested.store(true, std::memory_order_release);
+	int result = 0;
+#else
 	int result = pthread_cancel(thread->p);
+#endif
 
 	KYTY_LOG_DEBUG("\tthread cancel: %s, %d\n", thread->name.C_Str(), result);
 
@@ -749,7 +757,23 @@ void KYTY_SYSV_ABI PthreadTestcancel()
 {
 	PRINT_NAME();
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	if (g_pthread_self == nullptr || !g_pthread_self->cancel_requested.load(std::memory_order_acquire))
+	{
+		return;
+	}
+	// Read the cancel state without changing it.
+	int state = PTHREAD_CANCEL_ENABLE;
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &state);
+	pthread_setcancelstate(state, nullptr);
+	if (state == PTHREAD_CANCEL_ENABLE)
+	{
+		// The value glibc reports as PTHREAD_CANCELED on the Linux build.
+		PthreadExit(reinterpret_cast<void*>(-1));
+	}
+#else
 	pthread_testcancel();
+#endif
 }
 
 void KYTY_SYSV_ABI PthreadExit(void* value)
