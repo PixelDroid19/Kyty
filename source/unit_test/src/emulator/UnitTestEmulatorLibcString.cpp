@@ -18,13 +18,13 @@
 // HLE bodies live in LibCString.cpp; declare the tested surface here so the
 // unit test links against the emulator's own implementations.
 namespace Kyty::Libs::LibC {
-int c_strcasecmp(const char* a, const char* b);
-int c_strncasecmp(const char* a, const char* b, size_t count);
-int c_strncat_s(char* dst, size_t dst_size, const char* src, size_t count);
-char* c_strnstr(const char* haystack, const char* needle, size_t count);
-int c_vsnprintf(char* s, size_t n, const char* fmt, Kyty::Libs::VaList* ap);
-size_t c_fread(void* ptr, size_t size, size_t count, FILE* stream);
-char* c_fgets(char* buffer, int size, FILE* stream);
+int KYTY_SYSV_ABI    c_strcasecmp(const char* a, const char* b);
+int KYTY_SYSV_ABI    c_strncasecmp(const char* a, const char* b, size_t count);
+int KYTY_SYSV_ABI    c_strncat_s(char* dst, size_t dst_size, const char* src, size_t count);
+char* KYTY_SYSV_ABI  c_strnstr(const char* haystack, const char* needle, size_t count);
+int KYTY_SYSV_ABI    c_vsnprintf(char* s, size_t n, const char* fmt, Kyty::Libs::VaList* ap);
+size_t KYTY_SYSV_ABI c_fread(void* ptr, size_t size, size_t count, FILE* stream);
+char* KYTY_SYSV_ABI  c_fgets(char* buffer, int size, FILE* stream);
 } // namespace Kyty::Libs::LibC
 
 UT_BEGIN(EmulatorLibcString);
@@ -218,6 +218,28 @@ TEST(EmulatorLibcString, ResolvedScanfExportsKeepClassicIntegerTokenBoundary)
 	EXPECT_EQ(next, 'b');
 }
 #endif
+
+// Guest destinations arrive through a SysV va_list and a guest long is 64 bits on every host.
+TEST(EmulatorLibcString, ResolvedSscanfStoresGuestDestinationsInFormatOrder)
+{
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+
+	using Sscanf             = int(KYTY_SYSV_ABI*)(const char*, const char*, ...);
+	const auto sscanf_export = ResolveLibcExport<Sscanf>(&symbols, "sscanf");
+	ASSERT_NE(sscanf_export, nullptr);
+
+	const char input[]  = "-5000000000 skip ab]c 1f";
+	int64_t    signed64 = 0;
+	uint64_t   hex64    = 0xFFFFFFFF00000000ull;
+	char       word[8]  = {};
+	int        consumed = -1;
+	EXPECT_EQ(sscanf_export(input, "%ld %*s %7[]ab]c %lx%n", &signed64, word, &hex64, &consumed), 3);
+	EXPECT_EQ(signed64, -5000000000ll);
+	EXPECT_STREQ(word, "ab]");
+	EXPECT_EQ(hex64, 0x1fu);
+	EXPECT_EQ(consumed, static_cast<int>(sizeof(input) - 1));
+}
 
 TEST(EmulatorLibcString, StdioReadsPrepareProtectedGuestDestinations)
 {

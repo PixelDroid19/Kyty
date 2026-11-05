@@ -41,7 +41,7 @@ int KYTY_SYSV_ABI c_fclose(FILE*);
 int KYTY_SYSV_ABI c_fileno(FILE*);
 size_t KYTY_SYSV_ABI c_fread(void*, size_t, size_t, FILE*);
 size_t KYTY_SYSV_ABI c_fwrite(const void*, size_t, size_t, FILE*);
-int KYTY_SYSV_ABI c_fseek(FILE*, long, int);
+int KYTY_SYSV_ABI c_fseek(FILE*, int64_t, int);
 int KYTY_SYSV_ABI c_feof(FILE*);
 int KYTY_SYSV_ABI c_ferror(FILE*);
 char* KYTY_SYSV_ABI c_fgets(char*, int, FILE*);

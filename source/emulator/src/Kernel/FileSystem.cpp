@@ -2740,12 +2740,17 @@ static bool TryResolvePackageFile(const char* guest_path, String* host_path, uin
 	const auto host_directory = PackageHostDirectory(guest.substr(0, name_position));
 	if (host_directory.empty()) { return false; }
 
-	const auto      file = std::filesystem::u8path(host_directory) / std::filesystem::u8path(guest.substr(name_position + 1));
+	const auto      name = guest.substr(name_position + 1);
+	const auto      file = std::filesystem::u8path(host_directory) / std::filesystem::u8path(name);
 	std::error_code error;
 	if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(file, error))) { return false; }
+#if defined(_WIN32)
+	// Windows finds the file under any spelling; only the exact one takes this path.
+	if (Path::FindEntryIgnoringCase(host_directory, name) != name) { return false; }
+#endif
 	*size = std::filesystem::file_size(file, error);
 	if (error) { return false; }
-	*host_path = String::FromUtf8(file.u8string().c_str());
+	*host_path = String::FromUtf8(file.generic_u8string().c_str());
 	return true;
 }
 

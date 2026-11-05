@@ -344,7 +344,7 @@ TEST(EmulatorLibcCxxLocale, SetlocaleExposesTheStandardLocaleContract)
 
 	const auto* rec = ResolveLibcFunction(&symbols, u"PtsB1Q9wsFA");
 	ASSERT_NE(rec, nullptr);
-	using Setlocale = KYTY_SYSV_ABI char* (*)(int category, const char* locale);
+	using Setlocale = KYTY_SYSV_ABI char*(KYTY_SYSV_ABI*)(int category, const char* locale);
 	auto* setlocale = reinterpret_cast<Setlocale>(rec->vaddr);
 	ASSERT_NE(setlocale, nullptr);
 
@@ -531,7 +531,7 @@ TEST(EmulatorLibcCxxLocale, GetenvExposesHostProcessConfiguration)
 	ASSERT_NE(rec, nullptr);
 	ASSERT_NE(rec->vaddr, 0u);
 
-	using Getenv = KYTY_SYSV_ABI char* (*)(const char* name);
+	using Getenv = KYTY_SYSV_ABI char*(KYTY_SYSV_ABI*)(const char* name);
 	auto* getenv = reinterpret_cast<Getenv>(rec->vaddr);
 
 	EXPECT_EQ(getenv("PATH"), ::getenv("PATH"));
@@ -672,7 +672,7 @@ TEST(EmulatorLibcCxxLocale, BsearchReturnsMatchingGuestElement)
 	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
 	const auto* rec = ResolveLibcFunction(&symbols, u"NesIgTmfF0Q");
 	ASSERT_NE(rec, nullptr);
-	using Bsearch = KYTY_SYSV_ABI void* (*)(const void* key, const void* base, size_t count, size_t size,
+	using Bsearch = KYTY_SYSV_ABI void*(KYTY_SYSV_ABI*)(const void* key, const void* base, size_t count, size_t size,
 	                                      int(KYTY_SYSV_ABI* compare)(const void*, const void*));
 	auto* bsearch_fn = reinterpret_cast<Bsearch>(rec->vaddr);
 
@@ -694,7 +694,7 @@ TEST(EmulatorLibcCxxLocale, Udivti3DividesGuestUnsigned128BitValues)
 	ASSERT_NE(rec, nullptr);
 	ASSERT_NE(rec->vaddr, 0u);
 
-	using Udivti3 = KYTY_SYSV_ABI unsigned __int128 (*)(unsigned __int128 numerator, unsigned __int128 denominator);
+	using Udivti3 = KYTY_SYSV_ABI unsigned __int128(KYTY_SYSV_ABI*)(unsigned __int128 numerator, unsigned __int128 denominator);
 	auto* udivti3 = reinterpret_cast<Udivti3>(rec->vaddr);
 
 	const unsigned __int128 numerator = (static_cast<unsigned __int128>(9) << 80u) + 77u;
@@ -914,7 +914,7 @@ TEST(EmulatorLibcCxxLocale, Fl3WideCopyMatchesGuestSixteenBitCodeUnits)
 	ASSERT_NE(rec, nullptr);
 	ASSERT_NE(rec->vaddr, 0u);
 
-	using Wmemcpy16 = KYTY_SYSV_ABI char16_t* (*)(char16_t* dst, const char16_t* src, size_t count);
+	using Wmemcpy16 = KYTY_SYSV_ABI char16_t*(KYTY_SYSV_ABI*)(char16_t* dst, const char16_t* src, size_t count);
 	auto* fn        = reinterpret_cast<Wmemcpy16>(rec->vaddr);
 
 	char16_t dst[]       = u"______";
@@ -988,7 +988,7 @@ TEST(EmulatorLibcCxxLocale, NineRMmReturnsClassicLocimp)
 	ASSERT_NE(rec, nullptr);
 	ASSERT_NE(rec->vaddr, 0u);
 
-	using GetLocimp = KYTY_SYSV_ABI CxxLocimpLayout* (*)();
+	using GetLocimp = KYTY_SYSV_ABI CxxLocimpLayout*(KYTY_SYSV_ABI*)();
 	auto* fn        = reinterpret_cast<GetLocimp>(rec->vaddr);
 
 	CxxLocimpLayout* locimp = fn();
@@ -1098,7 +1098,7 @@ TEST(EmulatorLibcCxxLocale, QxqReturnsMultibyteConversionState)
 	ASSERT_NE(rec, nullptr);
 	ASSERT_NE(rec->vaddr, 0u);
 
-	using GetState = KYTY_SYSV_ABI std::mbstate_t* (*)();
+	using GetState = KYTY_SYSV_ABI std::mbstate_t*(KYTY_SYSV_ABI*)();
 	auto* fn       = reinterpret_cast<GetState>(rec->vaddr);
 
 	EXPECT_NE(fn(), nullptr);
@@ -1125,7 +1125,7 @@ TEST(EmulatorLibcCxxLocale, Zs94ReturnsWideConversionState)
 	ASSERT_NE(rec, nullptr);
 	ASSERT_NE(rec->vaddr, 0u);
 
-	using GetState = KYTY_SYSV_ABI std::mbstate_t* (*)();
+	using GetState = KYTY_SYSV_ABI std::mbstate_t*(KYTY_SYSV_ABI*)();
 	auto* fn       = reinterpret_cast<GetState>(rec->vaddr);
 
 	EXPECT_NE(fn(), nullptr);
@@ -1482,7 +1482,7 @@ TEST(EmulatorLibcCxxLocale, CtypeCaseTablesInitializeSafelyUnderConcurrentFirstU
 	const auto* lower_record = ResolveLibcFunction(&symbols, u"1uJgoVq3bQU");
 	ASSERT_NE(upper_record, nullptr);
 	ASSERT_NE(lower_record, nullptr);
-	using GetCaseTable = KYTY_SYSV_ABI const short* (*)();
+	using GetCaseTable = KYTY_SYSV_ABI const short*(KYTY_SYSV_ABI*)();
 	auto* upper = reinterpret_cast<GetCaseTable>(upper_record->vaddr);
 	auto* lower = reinterpret_cast<GetCaseTable>(lower_record->vaddr);
 
@@ -1887,7 +1887,7 @@ TEST(EmulatorLibcCxxLocale, NothrowNewOverloadsResolveAndUseLibcAllocationOwners
 	ASSERT_NE(delete_rec, nullptr);
 	ASSERT_NE(delete_array_rec, nullptr);
 
-	using NothrowNew      = KYTY_SYSV_ABI void* (*)(size_t size, const void* nothrow_tag);
+	using NothrowNew      = KYTY_SYSV_ABI void*(KYTY_SYSV_ABI*)(size_t size, const void* nothrow_tag);
 	using Delete          = KYTY_SYSV_ABI void (*)(void* ptr);
 	auto* new_fn          = reinterpret_cast<NothrowNew>(new_rec->vaddr);
 	auto* new_array_fn    = reinterpret_cast<NothrowNew>(new_array_rec->vaddr);

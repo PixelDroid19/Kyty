@@ -18,10 +18,10 @@
 #include <thread>
 
 namespace Kyty::Libs::LibC {
-void* cxx_new_aligned(size_t size, size_t alignment);
-void  cxx_delete_nothrow(void* pointer);
-void* c_get_new_handler();
-void  cxx_invalid_argument_dtor(void* self);
+KYTY_SYSV_ABI void* cxx_new_aligned(size_t size, size_t alignment);
+KYTY_SYSV_ABI void  cxx_delete_nothrow(void* pointer);
+KYTY_SYSV_ABI void* c_get_new_handler();
+KYTY_SYSV_ABI void  cxx_invalid_argument_dtor(void* self);
 } // namespace Kyty::Libs::LibC
 
 UT_BEGIN(EmulatorLibcHeap);
@@ -148,7 +148,7 @@ void CallInitEnv()
 	resolve.type = Kyty::Loader::SymbolType::Func;
 	const auto* record = symbols.Find(resolve);
 	ASSERT_NE(record, nullptr);
-	using InitEnv = void KYTY_SYSV_ABI (*)(const Kyty::Libs::ProcessEnvironment::InitParameters*);
+	using InitEnv = void KYTY_SYSV_ABI(KYTY_SYSV_ABI*)(const Kyty::Libs::ProcessEnvironment::InitParameters*);
 	Kyty::Libs::ProcessEnvironment::InitParameters args {};
 	args.argc = 1;
 	args.argv[0] = "heap-contract";
