@@ -1203,32 +1203,44 @@ static bool emit_gen5_mubuf_format_load(Spirv* spirv, const ShaderInstruction& i
 	return true;
 }
 
-static bool emit_gen5_mubuf_format_store(Spirv* spirv, const ShaderInstruction& inst, int instruction_index,
-	                                       const char* function_name, uint32_t components, String8* dst_source)
+// BUFFER_STORE_FORMAT through a bound V#: the data, encoded in the V#'s
+// format, written as one element of that format's size.
+static bool emit_gen5_mubuf_format_store(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t components,
+                                         String8* dst_source)
 {
 	EXIT_IF(spirv == nullptr);
 	EXIT_IF(dst_source == nullptr);
 
-	String8 inputs;
-	for (uint32_t component = 0; component < components; component++)
+	const auto tag = String8::FromPrintf("%u_0", instruction_index);
+	String8    values;
+	String8    value_ids;
+	for (uint32_t component = 0; component < 4; component++)
 	{
+		if (component >= components)
+		{
+			value_ids += " %" + spirv->GetConstantUint(0u);
+			continue;
+		}
 		const auto value = operand_variable_to_str(inst.dst, static_cast<int>(component));
 		if (value.type != SpirvType::Float)
 		{
 			return false;
 		}
-		inputs += String8::FromPrintf(" %%%s", value.value.c_str());
+		values += String8::FromPrintf("%%gen5_mubuf_store_f%u_%s = OpLoad %%float %%%s\n"
+		                              "%%gen5_mubuf_store_u%u_%s = OpBitcast %%uint %%gen5_mubuf_store_f%u_%s\n",
+		                              component, tag.c_str(), value.value.c_str(), component, tag.c_str(), component, tag.c_str());
+		value_ids += String8::FromPrintf(" %%gen5_mubuf_store_u%u_%s", component, tag.c_str());
 	}
 
 	BufferAddressSetup address_setup;
-	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, components * 4u, BufferAddressRangeCheck::None,
-	                               &address_setup))
+	// A V# without records writes nothing (RDNA2 ISA 8.1.5).
+	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, components * 4u, BufferAddressRangeCheck::RawZeroRecord,
+	                               &address_setup, true))
 	{
 		return false;
 	}
-	const auto tag = String8::FromPrintf("%u_0", instruction_index);
-	String8    enable_source;
-	String8    enable_condition = String8::FromPrintf("%%gen5_mubuf_store_active_%s", tag.c_str());
+	String8 enable_source;
+	String8 enable_condition = String8::FromPrintf("%%gen5_mubuf_store_active_%s", tag.c_str());
 	if (!address_setup.access_enabled.IsEmpty())
 	{
 		enable_source = String8("        %gen5_mubuf_store_enabled_<tag> = OpLogicalAnd %bool %gen5_mubuf_store_active_<tag> <access_enabled>\n")
@@ -1246,19 +1258,28 @@ static bool emit_gen5_mubuf_format_store(Spirv* spirv, const ShaderInstruction& 
                OpBranchConditional <enable_condition> %gen5_mubuf_store_then_<tag> %gen5_mubuf_store_merge_<tag>
         %gen5_mubuf_store_then_<tag> = OpLabel
         %gen5_mubuf_store_format_u_<tag> = OpShiftRightLogical %uint %buf_addr_desc3_<tag> %uint_12
-        %gen5_mubuf_store_format_m_<tag> = OpBitwiseAnd %uint %gen5_mubuf_store_format_u_<tag> %uint_127
-        %gen5_mubuf_store_format_i_<tag> = OpBitcast %int %gen5_mubuf_store_format_m_<tag>
-               OpStore %temp_int_5 %gen5_mubuf_store_format_i_<tag>
-%gen5_mubuf_store_<tag> = OpFunctionCall %void %<function><inputs> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
+        %gen5_mubuf_store_format_<tag> = OpBitwiseAnd %uint %gen5_mubuf_store_format_u_<tag> %uint_127
+        %gen5_mubuf_store_index_<tag> = OpLoad %int %temp_int_1
+        %gen5_mubuf_store_offset_<tag> = OpLoad %int %temp_int_2
+        %gen5_mubuf_store_stride_<tag> = OpLoad %int %temp_int_3
+        %gen5_mubuf_store_buffer_i_<tag> = OpLoad %int %temp_int_4
+        %gen5_mubuf_store_record_<tag> = OpIMul %int %gen5_mubuf_store_index_<tag> %gen5_mubuf_store_stride_<tag>
+        %gen5_mubuf_store_address_i_<tag> = OpIAdd %int %gen5_mubuf_store_offset_<tag> %gen5_mubuf_store_record_<tag>
+        %gen5_mubuf_store_address_<tag> = OpBitcast %uint %gen5_mubuf_store_address_i_<tag>
+        %gen5_mubuf_store_buffer_<tag> = OpBitcast %uint %gen5_mubuf_store_buffer_i_<tag>
+<values>        %gen5_mubuf_store_values_<tag> = OpCompositeConstruct %v4uint<value_ids>
+        %gen5_mubuf_store_words_<tag> = OpFunctionCall %v4uint %gen5_buffer_format_encode %gen5_mubuf_store_values_<tag> %gen5_mubuf_store_format_<tag> %buf_addr_desc3_<tag>
+        %gen5_mubuf_store_bytes_<tag> = OpFunctionCall %uint %gen5_buffer_format_bytes %gen5_mubuf_store_format_<tag>
+        %gen5_mubuf_store_<tag> = OpFunctionCall %void %gen5_buffer_store_words %gen5_mubuf_store_buffer_<tag> %gen5_mubuf_store_address_<tag> %gen5_mubuf_store_bytes_<tag> %gen5_mubuf_store_words_<tag>
                OpBranch %gen5_mubuf_store_merge_<tag>
         %gen5_mubuf_store_merge_<tag> = OpLabel
 )")
 	                   .ReplaceStr("<address_setup>", address_setup.source)
 	                   .ReplaceStr("<enable_source>", enable_source)
 	                   .ReplaceStr("<enable_condition>", enable_condition)
-	                   .ReplaceStr("<tag>", tag)
-	                   .ReplaceStr("<function>", function_name)
-	                   .ReplaceStr("<inputs>", inputs);
+	                   .ReplaceStr("<values>", values)
+	                   .ReplaceStr("<value_ids>", value_ids)
+	                   .ReplaceStr("<tag>", tag);
 	return true;
 }
 
@@ -2152,7 +2173,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatX_Vdata1VaddrSvSoffsIdxen)
 	{
 		if (Config::IsNextGen())
 		{
-			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), "tbuffer_store_format_x", 1, dst_source);
+			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), 1, dst_source);
 		}
 
 		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
@@ -2227,7 +2248,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen)
 	{
 		if (Config::IsNextGen())
 		{
-			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), "tbuffer_store_format_xy", 2, dst_source);
+			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), 2, dst_source);
 		}
 
 		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
@@ -2304,7 +2325,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 	{
 		if (Config::IsNextGen())
 		{
-			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), "tbuffer_store_format_xyzw", 4, dst_source);
+			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), 4, dst_source);
 		}
 
 		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }

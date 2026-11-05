@@ -362,6 +362,57 @@ TEST(EmulatorShaderGetpc, FormatLoadsDecodeDescriptorFormatOnBothPaths)
 	EXPECT_FALSE(binary.IsEmpty());
 }
 
+// BUFFER_STORE_FORMAT encodes the V#'s format instead of storing only 32-bit
+// formats, and merges a partial dword through the uint alias.
+TEST(EmulatorShaderGetpc, FormatStoresEncodeDescriptorFormat)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction narrow {};
+	narrow.type               = ShaderInstructionType::BufferStoreFormatX;
+	narrow.format             = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	narrow.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	narrow.src[0]             = {.type = ShaderOperandType::Vgpr, .register_id = 5, .size = 1};
+	narrow.src[1]             = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+	narrow.src[2].type        = ShaderOperandType::IntegerInlineConstant;
+	narrow.src[2].constant.u  = 0;
+	narrow.src_num            = 3;
+	narrow.buffer_idxen       = true;
+	narrow.buffer_flags       = 0;
+	ShaderInstruction pair    = narrow;
+	pair.pc                   = 8;
+	pair.type                 = ShaderInstructionType::BufferStoreFormatXy;
+	pair.format               = ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen;
+	pair.dst                  = {.type = ShaderOperandType::Vgpr, .register_id = 1, .size = 2};
+	ShaderInstruction end {};
+	end.pc     = 16;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(narrow);
+	code.GetInstructions().Add(pair);
+	code.GetInstructions().Add(end);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = input.threads_num[1] = input.threads_num[2] = 1;
+	input.bind.storage_buffers.buffers_num        = 1;
+	input.bind.storage_buffers.start_register[0] = 8;
+	input.bind.storage_buffers.usages[0]          = ShaderStorageUsage::ReadWrite;
+	ShaderCalcBindingIndices(&input.bind);
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("%gen5_mubuf_store_0_0 = OpFunctionCall %void %gen5_buffer_store_words"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gen5_mubuf_store_1_0 = OpFunctionCall %void %gen5_buffer_store_words"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpAtomicOr %uint %gbsw_up0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%tbuffer_store_format_x"), Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
+}
+
 TEST(EmulatorShaderGetpc, OnlyAttributeTableFormatLoadsAreVertexFetches)
 {
 	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }

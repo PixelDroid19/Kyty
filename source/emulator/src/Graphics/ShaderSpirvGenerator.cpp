@@ -616,10 +616,12 @@ static bool spirv_uses_dpp_row(const ShaderCode& code)
 	return false;
 }
 
+// Gen5 format stores merge partial dwords with atomics, through %buf_uint too.
 static bool spirv_uses_buffer_atomics(const ShaderCode& code)
 {
-	return Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd,
-	                                           ShaderInstructionType::BufferAtomicUmax});
+	return (Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd,
+	                                            ShaderInstructionType::BufferAtomicUmax})) ||
+	       SpirvUsesGen5BufferFormatStores(code);
 }
 
 static bool spirv_uses_buffer_descriptor_addressing(const ShaderCode& code)
@@ -1551,6 +1553,7 @@ void Spirv::WriteTypes()
 %function_gen5_buffer_format_bytes = OpTypeFunction %uint %uint
 %function_gen5_buffer_element = OpTypeFunction %v4uint %v4uint %uint %uint
 %function_gen5_buffer_load_words = OpTypeFunction %v4uint %uint %uint %uint
+%function_gen5_buffer_store_words = OpTypeFunction %void %uint %uint %uint %v4uint
           %function_sbuffer_load_dword = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_2 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_4 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
@@ -3339,14 +3342,15 @@ void Spirv::WriteFunctions()
 	    ShaderInstructionType::BufferLoadDwordx4, ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy,
 	    ShaderInstructionType::BufferLoadFormatXyz, ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionType::TBufferLoadFormatX,
 	    ShaderInstructionType::TBufferLoadFormatXy, ShaderInstructionType::TBufferLoadFormatXyz, ShaderInstructionType::TBufferLoadFormatXyzw});
-	// Gen5 BUFFER_LOAD_FORMAT decodes through the shared format functions;
-	// the format helpers serve typed TBUFFER loads and the legacy encoding.
-	const bool gen5_format_loads          = SpirvUsesGen5BufferFormatLoads(m_code);
+	// Gen5 BUFFER_LOAD_FORMAT and BUFFER_STORE_FORMAT go through the shared
+	// format functions; the format helpers serve typed TBUFFER loads and the
+	// legacy encoding.
+	const bool gen5_formats               = SpirvUsesGen5BufferFormats(m_code);
 	const bool needs_tbuffer_load_helpers = m_code.HasAnyOf({ShaderInstructionType::TBufferLoadFormatX,
 	                                                         ShaderInstructionType::TBufferLoadFormatXy,
 	                                                         ShaderInstructionType::TBufferLoadFormatXyz,
 	                                                         ShaderInstructionType::TBufferLoadFormatXyzw}) ||
-	                                        (!gen5_format_loads &&
+	                                        (!gen5_formats &&
 	                                         m_code.HasAnyOf({ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy,
 	                                                          ShaderInstructionType::BufferLoadFormatXyz,
 	                                                          ShaderInstructionType::BufferLoadFormatXyzw}));
@@ -3354,9 +3358,9 @@ void Spirv::WriteFunctions()
 	    ShaderInstructionType::BufferStoreDword, ShaderInstructionType::BufferStoreDwordx2, ShaderInstructionType::BufferStoreDwordx3,
 	    ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX, ShaderInstructionType::BufferStoreFormatXy,
 	    ShaderInstructionType::BufferStoreFormatXyzw});
-	const bool needs_tbuffer_store_helpers = m_code.HasAnyOf({ShaderInstructionType::BufferStoreFormatX,
-	                                                          ShaderInstructionType::BufferStoreFormatXy,
-	                                                          ShaderInstructionType::BufferStoreFormatXyzw});
+	const bool needs_tbuffer_store_helpers = !gen5_formats && m_code.HasAnyOf({ShaderInstructionType::BufferStoreFormatX,
+	                                                                           ShaderInstructionType::BufferStoreFormatXy,
+	                                                                           ShaderInstructionType::BufferStoreFormatXyzw});
 
 	// The scalar format predicate is a dependency of the typed buffer helper
 	// families only. Raw dword operations use the buffer helpers directly and
@@ -3366,9 +3370,9 @@ void Spirv::WriteFunctions()
 		m_source += TBUFFER_FORMAT_SCALAR32;
 	}
 
-	if (gen5_format_loads && (has_storage_buffers || UsesGuestDeviceAddress()))
+	if (gen5_formats && (has_storage_buffers || UsesGuestDeviceAddress()))
 	{
-		m_source += SpirvGen5BufferFormatFunctions(*this, has_storage_buffers);
+		m_source += SpirvGen5BufferFormatFunctions(*this, m_code, has_storage_buffers);
 	}
 
 	if (has_storage_buffers && needs_buffer_load_helpers)
@@ -3541,7 +3545,7 @@ void Spirv::FindConstants()
 			}
 		}
 	}
-	if (SpirvUsesGen5BufferFormatLoads(m_code))
+	if (SpirvUsesGen5BufferFormats(m_code))
 	{
 		SpirvAddGen5BufferFormatConstants(this);
 	}

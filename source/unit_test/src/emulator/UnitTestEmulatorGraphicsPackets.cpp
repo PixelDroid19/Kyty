@@ -2306,8 +2306,8 @@ TEST(EmulatorGraphicsPackets, ReusesFourComponentBufferFunctionType)
 	EXPECT_NE(source.FindIndex("%function_tbuffer_load_store_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%function_tbuffer_load_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%function_tbuffer_store_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpSGreaterThanEqual %bool %tbuf_s_f_xyzw_11 %int_75"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpSLessThanEqual %bool %tbuf_s_f_xyzw_11 %int_77"), Core::STRING8_INVALID_INDEX);
+	// Gen5 format stores encode the descriptor format instead of the legacy store helper.
+	EXPECT_NE(source.FindIndex("%gen5_mubuf_store_2_0 = OpFunctionCall %void %gen5_buffer_store_words"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, StructuresBackwardSBranchAsLoopHeader)
@@ -7634,9 +7634,12 @@ TEST(EmulatorGraphicsPackets, Gen5LiveBufferAtomicUsesResolvedStorageSlot)
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%buf_addr_access_size_2_0 = OpSelect %uint %buf_addr_format_known_2_0 %buf_addr_format_bytes_2_0 %uint_8"),
 	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%buf_addr_bytes_enough_3_0_0 = OpUGreaterThanEqual %bool %buf_addr_bytes_3_0_0 %uint_16"),
+	// A format store writes one element of the descriptor's format, like the format loads above.
+	EXPECT_NE(source.FindIndex("%buf_addr_access_size_3_0 = OpSelect %uint %buf_addr_format_known_3_0 %buf_addr_format_bytes_3_0 %uint_16"),
 	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%gen5_mubuf_store_enabled_3_0 = OpLogicalAnd %bool %gen5_mubuf_store_active_3_0 %buf_addr_valid_c_3_0"),
+	EXPECT_NE(source.FindIndex("%buf_addr_access_final_3_0 = OpLogicalAnd %bool %buf_addr_access_enabled_3_0 %buf_addr_valid_c_3_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gen5_mubuf_store_enabled_3_0 = OpLogicalAnd %bool %gen5_mubuf_store_active_3_0 %buf_addr_access_final_3_0"),
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%buf_addr_bytes_enough_4_0_0 = OpUGreaterThanEqual %bool %buf_addr_bytes_4_0_0 %uint_16"),
 	          Core::STRING8_INVALID_INDEX);
