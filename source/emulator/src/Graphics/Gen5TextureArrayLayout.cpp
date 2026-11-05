@@ -150,7 +150,7 @@ bool Gen5GetTextureArrayLayout(uint32_t format, uint32_t width, uint32_t height,
 	const bool standard_4kb       = tile == 5u;
 	const bool block_compressed   = ShaderGen5TextureIsBlockCompressed(format);
 	const bool standard_64kb      = tile == 9u && TileGet64KBBlockWidth(bytes_per_element) != 0u;
-	const bool render_target_64kb = tile == 27u && (bytes_per_element == 1u || bytes_per_element == 4u || bytes_per_element == 8u) &&
+	const bool render_target_64kb = tile == 27u && (bytes_per_element == 1u || bytes_per_element == 2u || bytes_per_element == 4u || bytes_per_element == 8u) &&
 	                                !ShaderGen5TextureIsBlockCompressed(format);
 	// Gen5GetStandard256BTextureMipLayout validates the element size, block-compressed formats included.
 	const bool standard_256b_chain = tile == 1u && levels > 1u;
