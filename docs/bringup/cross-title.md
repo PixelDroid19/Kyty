@@ -1,3 +1,68 @@
+## Bring-up contracts from `PPSA05496 - Builder's Journey`: formats, sample_l addresses, quiesce hold (2026-11-05)
+
+`PPSA05496 - Builder's Journey` (Unity 2021.2) is a local dump without `sce_sys/param.json` and without six of
+its `sce_module` libraries; the run below borrowed them from another title's dump (a different SDK
+version), so its later failures are leads, not evidence about this title. Each stop was a general contract
+gap, fixed in the shared path:
+
+- **Loader.** `kyty_load_addcont` no longer stops a title that declares no title id: no add-on content can
+  match it, and a package source given for it is reported invalid. A program path that does not resolve to
+  a host file inside its mount (a malformed path, or a link leaving the mount) now names the path instead
+  of failing later as "guest path is empty".
+- **Render targets.** 32_32 FLOAT and 16_16 UNORM colour targets map to `R32G32_SFLOAT` and `R16G16_UNORM`,
+  with COMP_SWAP 0 and 1 like the other two-channel formats.
+- **`image_sample_l` on 3D and 2D-array T#.** RDNA2 ISA table 43 addresses DIM 2 (3D) and DIM 5 (2D array)
+  as x, y, z/slice, LOD for every DMASK. The decoder read three addresses for DMASK 0x7, 0xB and 0xF, so the
+  LOD came from the slice and an NSA fourth address was lost (an assert in the operand reader). Both DIMs now
+  use the 4-address DMASK form and its emitter, which samples the bound 3D or 2D-array view; a single-layer
+  2D-array view bound as 2D samples its only slice.
+- **Thin 3D mip chains.** A tile-27 volume with a mip chain is uploaded level by level from the 2D-array
+  layout of its slices; other volume tilings with mips stay refused.
+- **R_X 2D arrays with 2-byte elements** (16_FLOAT) use the 64 KB render-target layout like 1, 4 and 8 bytes.
+- **`tbuffer_load_format_x`** reads the first component of a wider float element (formats 64, 74, 77), as XY
+  and XYZ already did.
+- **`v_mad_i32_i24`** (VOP3 0x142) is decoded: sign-extended 24-bit operands, low 32 bits of the product plus
+  src2. **`v_cmp_eq_i64` / `v_cmp_ne_i64`** decode to the 64-bit equality compares: equality does not depend
+  on the sign. The ordered signed 64-bit compares stay refused.
+- **Duplicate SPIR-V ids from negated absolute sources.** With neg and abs on two operands of one instruction
+  the temporaries were named by instruction index, so both operands defined the same id and pipeline creation
+  failed (`VK_ERROR_UNKNOWN`). They are named per result now. Test:
+  `EmulatorShaderGetpc.NegatedAbsoluteSourcesKeepDistinctTemporaries`.
+- **Sampler operation of a bound T# merged reloaded descriptors.** The post-pass that classifies each bound
+  read-only texture (regular, depth reference or mixed) scanned every image instruction naming the T#'s
+  SGPRs, including ones after the shader had reloaded those SGPRs with other descriptors. A pixel shader
+  that reuses `s[0:7]` for many textures was classified "mixed" on its bound 3D texture and stopped the run.
+  The pass now counts only reads through registers still holding the bound value, as the binding pass
+  already did.
+- **Quiesce against a parked ring deadlocked.** `Gpu::RunQuiesced` drains the rings to idle while holding the
+  submission admission gate. A graphics or async ring parked on a wait whose producer is a submission or
+  host store behind that gate never goes idle, so the quiesce and the producer waited on each other. A
+  quiesce now counts a ring parked with its decode released as drained, and the ring does not resume decode
+  until the quiesce's action finishes (`GraphicsRing::HoldParkedDecode`).
+
+Open, recorded here:
+- The compute ring parks in `ComputeRing::ThreadRun` (`WaitForSuspendedRun`, `GraphicsRun.cpp`) and is
+  drained by `ComputeRing::WaitForIdle` without the hold; the same deadlock is possible there. Not observed.
+- The compute write-only storage-image pass (`AnalyzeShaderDirectImageUse` in the compute usage pass of
+  `Shader.cpp`) still scans without entry values; a reload can only make it report reads, which is the safe
+  direction.
+- Builder's Journey frontier: about 93 presents in the first 6 s, then the render thread spends more than
+  90 s in `vkCreateComputePipelines` for a fragment-transport shade pipeline of 341k SPIR-V words pinned to
+  `requiredSubgroupSize` 32 (Arc A770, Mesa 26.2.5); the run never finished it. A smaller shade pipeline of
+  the same title (255k words) was already in the driver cache. Same cost class as the pinned-32 kernels of
+  `PPSA21567 - Astro Bot` (SIMD32 spills); direction: let spanned waves run at the driver's width. No capture was taken
+  before the stall, so nothing is claimed about what renders.
+
+Validation: Linux, Intel Arc A770, Mesa 26.2.5, strict 110 s runs with a 60 fps present limit and a private
+shader cache, host shared with a foreign process. `PPSA21402 - Balatro` (59.8 fps), `PPSA22520 - ANIMAL WELL`
+(59.8), `PPSA15552 - Dead Cells` (59.9), `PPSA09804 - GRIS` (59.5), `PPSA34971 - Hollow Knight` (59.9),
+`PPSA03706 - My Friend Peppa Pig` (59.4) and `PPSA17189 - Formula Retro Racing` (59.6) reached their usual
+states. `PPSA09076 - DREDGE` held 30.6 fps docked at its first town: the title had saved there, and the scripted
+route does not undock, so the figure is not comparable with the 34 fps measured at sea. `PPSA21567 - Astro Bot`,
+same scene and host load, warm caches: 17.4 fps for the previous head and 18.1 fps with these changes. ANIMAL WELL
+stopped once on the intermittent image-layout tracker fatal recorded in the graphics handoff; the rerun was
+clean. `ctest`: 108 tests, 107 passed, 1 skipped.
+
 ## Format stores, two-channel ALT targets and LDS loads fixed; PC clear-state defaults excluded (2026-11-05)
 
 Contract defects found while reviewing outside proposals. Three are fixed in the general path; none was
@@ -143,7 +208,9 @@ below came from reviewing proposed changes against Kyty's own contract and evide
   guest was removed: no documented contract backs it. Neither symbol is HLE-owned, so a title that ships
   its own libc keeps its own pair. Every runnable local title ships one; the only local title that
   imports `setenv` without it, `PPSA05496 - Builder's Journey`, is an incomplete dump with no
-  `sce_sys/param.json`, so the new export is covered by unit tests only.
+  `sce_sys/param.json` and no libc. It now boots with another title's modules (section "Bring-up contracts
+  from `PPSA05496 - Builder's Journey`"), whose libc supplies `setenv`, so the new export is still covered
+  by unit tests only.
 - **Windows: acting on a thread cancel stopped the process, fixed** (`source/emulator/src/Kernel/Pthread.cpp`).
   winpthreads acts on a cancel with an SEH unwind, which cannot walk guest frames. On Windows
   `PthreadCancel` records the request and `PthreadTestcancel` leaves through `PthreadExit` when
