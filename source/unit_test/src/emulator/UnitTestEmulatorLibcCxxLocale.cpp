@@ -520,23 +520,6 @@ TEST(EmulatorLibcCxxLocale, InitEnvCapturesBoundedProcessArguments)
 	EXPECT_EQ(arguments.argv[1], nullptr);
 }
 
-TEST(EmulatorLibcCxxLocale, GetenvExposesHostProcessConfiguration)
-{
-	EnsureLog();
-
-	Loader::SymbolDatabase symbols;
-	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
-
-	const auto* rec = ResolveLibcFunction(&symbols, u"smbQukfxYJM");
-	ASSERT_NE(rec, nullptr);
-	ASSERT_NE(rec->vaddr, 0u);
-
-	using Getenv = KYTY_SYSV_ABI char*(KYTY_SYSV_ABI*)(const char* name);
-	auto* getenv = reinterpret_cast<Getenv>(rec->vaddr);
-
-	EXPECT_EQ(getenv("PATH"), ::getenv("PATH"));
-}
-
 TEST(EmulatorLibcCxxLocale, CeilDoubleMatchesLibcContract)
 {
 	EnsureLog();

@@ -2,7 +2,9 @@
 
 #include "Emulator/VideoFrameMemory.h"
 #include "Emulator/Libs/VaContext.h"
+#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Libs/ProcessEnvironment.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Kyty/Core/VirtualMemory.h"
 
@@ -468,6 +470,44 @@ TEST(EmulatorLibcString, ResolvedC16ConversionsMatchFirmwareStateMachine)
 	EXPECT_EQ(mbrtoc16(&unit, "\x80", 1, invalid_state), static_cast<size_t>(-1));
 	EXPECT_EQ(errno, 86);
 	EXPECT_EQ(mbrtoc16(nullptr, "A", 1, decode_state), 1u);
+}
+
+TEST(EmulatorLibcString, ResolvedEnvironmentKeepsGuestValuesApartFromTheHost)
+{
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+	using GetEnv = char*(KYTY_SYSV_ABI*)(const char*);
+	using SetEnv = int(KYTY_SYSV_ABI*)(const char*, const char*, int);
+	const auto getenv = ResolveLibcExport<GetEnv>(&symbols, "getenv");
+	const auto setenv = ResolveLibcExport<SetEnv>(&symbols, "setenv");
+	ASSERT_NE(getenv, nullptr);
+	ASSERT_NE(setenv, nullptr);
+
+	Kyty::Libs::ProcessEnvironment::InitParameters args {};
+	args.argc    = 1;
+	args.argv[0] = "environment-contract";
+	args.argv[2] = "KYTY_GUEST_INITIAL=boot";
+	ASSERT_TRUE(Kyty::Libs::ProcessEnvironment::Initialize(&args));
+
+	// PATH is set in every host environment, never in the guest's.
+	EXPECT_EQ(getenv("PATH"), nullptr);
+	EXPECT_STREQ(getenv("KYTY_GUEST_INITIAL"), "boot");
+
+	EXPECT_EQ(setenv("KYTY_GUEST_INITIAL", "kept", 0), 0);
+	EXPECT_STREQ(getenv("KYTY_GUEST_INITIAL"), "boot");
+	EXPECT_EQ(setenv("KYTY_GUEST_INITIAL", "replaced", 1), 0);
+	EXPECT_STREQ(getenv("KYTY_GUEST_INITIAL"), "replaced");
+	EXPECT_EQ(setenv("KYTY_GUEST_NEW", "set", 0), 0);
+	EXPECT_STREQ(getenv("KYTY_GUEST_NEW"), "set");
+	EXPECT_EQ(std::getenv("KYTY_GUEST_NEW"), nullptr);
+
+	*Kyty::Libs::Posix::GetErrorAddr() = 0;
+	EXPECT_EQ(setenv("BAD=NAME", "x", 1), -1);
+	EXPECT_EQ(*Kyty::Libs::Posix::GetErrorAddr(), Kyty::Libs::Posix::POSIX_EINVAL);
+	EXPECT_EQ(setenv("", "x", 1), -1);
+
+	ASSERT_TRUE(Kyty::Libs::ProcessEnvironment::Initialize(nullptr));
+	EXPECT_EQ(getenv("KYTY_GUEST_NEW"), nullptr);
 }
 
 UT_END();

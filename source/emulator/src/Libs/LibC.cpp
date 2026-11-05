@@ -5778,6 +5778,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("g7zzzLDYGw0", LibC::c_strdup);
 	LIB_FUNC("2X5agFjKxMc", LibC::c_calloc);
 	LIB_FUNC("smbQukfxYJM", LibC::c_getenv);
+	LIB_FUNC("M4YYbSFfJ8g", LibC::c_setenv);
 	LIB_FUNC("PtsB1Q9wsFA", LibC::c_setlocale);
 	LIB_FUNC("802pFCwC9w0", LibC::c_udivti3);
 	LIB_FUNC("Y7aJ1uydPMo", LibC::c_realloc);
