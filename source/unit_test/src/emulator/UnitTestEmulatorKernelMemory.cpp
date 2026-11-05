@@ -646,6 +646,27 @@ TEST(EmulatorKernelMemory, AutomaticDirectMapUsesPs5UserAddressRange)
 	Config::SetNextGen(false);
 }
 
+TEST(EmulatorKernelMemory, MunmapRoundsLengthUpToGuestPage)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr size_t kSize     = 0x10000;
+	constexpr size_t kPageSize = 0x4000;
+	int64_t          physical_address = 0;
+	ASSERT_EQ(KernelAllocateMainDirectMemory(kSize, kSize, 12, &physical_address), OK);
+	void* mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&mapping, kSize, 0x02, 0, physical_address, kSize), OK);
+	const auto address = reinterpret_cast<uint64_t>(mapping);
+
+	EXPECT_EQ(KernelMunmap(address, kSize - kPageSize + 0xa0), OK);
+	// The last page went with the rounded range, so nothing is left to unmap there.
+	EXPECT_NE(KernelMunmap(address + kSize - kPageSize, kPageSize), OK);
+
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
+	Config::SetNextGen(false);
+}
+
 TEST(EmulatorKernelMemory, PhysicalAliasSpansProtectionSegmentsWithoutChangingGuestRights)
 {
 	EnsureMemorySubsystemInitialized();

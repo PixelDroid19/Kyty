@@ -2799,10 +2799,13 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 	EXIT_IF(g_physical_memory == nullptr);
 	EXIT_IF(g_flexible_memory == nullptr);
 
-	if (vaddr == 0 || len == 0 || vaddr > UINT64_MAX - len)
+	constexpr uint64_t kGuestPage = 0x4000;
+	if (vaddr == 0 || len == 0 || vaddr > UINT64_MAX - len || vaddr + len > UINT64_MAX - (kGuestPage - 1))
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
+	// As in BSD munmap, the range covers every guest page it touches.
+	len = ((vaddr + len + kGuestPage - 1) & ~(kGuestPage - 1)) - vaddr;
 	std::unique_lock<std::recursive_mutex> lifecycle_lock(g_gpu_mapping_lifecycle_mutex);
 
 	PendingUnmap pending {};
