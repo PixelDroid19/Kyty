@@ -1380,9 +1380,15 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadUbyte_Vdata1VaddrSvSoffsIdxen)
 	return false;
 }
 
+static bool emit_gen5_buffer_load_lds(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, String8* dst_source);
+
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if ((inst.buffer_flags & 1u) != 0)
+	{
+		return emit_gen5_buffer_load_lds(spirv, inst, static_cast<int>(index), dst_source);
+	}
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
@@ -3211,10 +3217,10 @@ void EmitDsAddtidActive(const String8& tag, String8* dst_source, String8* active
 // function-local spill array and capacity; these are lowering policy, not proof
 // of an architectural LDS allocation or general cross-lane spill equivalence.
 static bool EmitDsAddtidLdsStore(const SpirvValue& data, const String8& active, const String8& tag,
-                                 const String8& bound, const String8& tid, Spirv* spirv, const ShaderInstruction& inst,
+                                 const String8& bound, const String8& tid, Spirv* spirv, uint16_t offset,
                                  String8* dst_source)
 {
-	*dst_source += DsAddtidIndex(spirv, inst.ds_offset, bound, tid, active, tag);
+	*dst_source += DsAddtidIndex(spirv, offset, bound, tid, active, tag);
 	*dst_source += String8::FromPrintf(
 	    "               OpSelectionMerge %%addtid_merge_%s None\n"
 	    "               OpBranchConditional %%addtid_gate_%s %%addtid_then_%s %%addtid_merge_%s\n"
@@ -3228,6 +3234,56 @@ static bool EmitDsAddtidLdsStore(const SpirvValue& data, const String8& active, 
 	    tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(),
 	    data.value.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
 	return true;
+}
+
+// buffer_load_dword with LDS=1 writes the loaded dword to LDS at
+// M0[15:0] + OFFSET + TIDinWave*4 and leaves VDATA untouched (RDNA2 ISA 8.1.9).
+// Out-of-range buffer reads store zero, as a plain load would return.
+static bool emit_gen5_buffer_load_lds(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, String8* dst_source)
+{
+	const auto* bind_info = spirv->GetBindInfo();
+	const auto* cs_info   = spirv->GetCsInputInfo();
+	if (!Config::IsNextGen() || !ShaderInstructionLoweringPreconditions(inst) ||
+	    spirv->GetCode().GetType() != ShaderType::Compute || cs_info == nullptr || cs_info->lds_dwords == 0 ||
+	    bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0 || buffer_descriptor_is_runtime(spirv, inst))
+	{
+		return false;
+	}
+	const auto bound      = spirv->GetConstantUint(cs_info->lds_dwords);
+	const auto zero_float = spirv->GetConstantFloat(0.0f);
+	if (bound == "unknown_uint_constant" || zero_float == "unknown_float_constant")
+	{
+		return false;
+	}
+	BufferAddressSetup address_setup;
+	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, 4u, BufferAddressRangeCheck::RawZeroRecord, &address_setup) ||
+	    address_setup.access_enabled.IsEmpty())
+	{
+		return false;
+	}
+	const auto tag = String8::FromPrintf("bll%d", instruction_index);
+	*dst_source += String8(R"(
+<address_setup>
+               OpStore %temp_float %<zero>
+               OpSelectionMerge %<tag>_load_merge None
+               OpBranchConditional <access_enabled> %<tag>_load %<tag>_load_merge
+         %<tag>_load = OpLabel
+         %<tag>_call = OpFunctionCall %void %buffer_load_float1 %temp_float %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4
+               OpBranch %<tag>_load_merge
+   %<tag>_load_merge = OpLabel
+         %<tag>_lane = OpLoad %uint %gl_SubgroupInvocationID
+          %<tag>_tid = OpBitwiseAnd %uint %<tag>_lane %uint_63
+)")
+	                   .ReplaceStr("<address_setup>", address_setup.source)
+	                   .ReplaceStr("<access_enabled>", address_setup.access_enabled)
+	                   .ReplaceStr("<zero>", zero_float)
+	                   .ReplaceStr("<tag>", tag);
+	String8 active;
+	EmitDsAddtidActive(tag, dst_source, &active);
+	SpirvValue data;
+	data.type  = SpirvType::Float;
+	data.value = "temp_float";
+	return EmitDsAddtidLdsStore(data, active, tag, bound, tag + "_tid", spirv, inst.buffer_imm_offset, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset)
@@ -3256,7 +3312,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset)
 		{
 			return false;
 		}
-		return EmitDsAddtidLdsStore(data, active, index_str, bound, "addtid_tid_" + index_str, spirv, inst, dst_source);
+		return EmitDsAddtidLdsStore(data, active, index_str, bound, "addtid_tid_" + index_str, spirv, inst.ds_offset, dst_source);
 	}
 
 	// Private spill array: compute without an LDS allocation or any graphics

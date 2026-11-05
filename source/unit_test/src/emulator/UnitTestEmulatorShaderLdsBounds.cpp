@@ -437,8 +437,11 @@ void RunBuffer(uint32_t control, uint32_t second_flags, bool next_gen = true, in
 	if (corrupt == 1) { code.GetInstructions()[0].mtbuf_format = 0xffu; }
 	if (corrupt == 2) { code.GetInstructions()[0].mtbuf_components = 3; }
 	if (corrupt == 3) { code.GetInstructions()[0].mtbuf_format_is_gen5 = !next_gen; }
-	Check(ShaderInstructionLoweringPreconditions(code.GetInstructions().At(0)) ==
-	      ((code.GetInstructions().At(0).buffer_flags & ~0x0au) == 0));
+	// Gen5 buffer_load_dword with only LDS set decodes with a null VDATA and lowers onto LDS.
+	const auto& parsed   = code.GetInstructions().At(0);
+	const auto  unmodeled = parsed.buffer_flags & ~0x0au;
+	const bool  lds_load  = next_gen && parsed.type == ShaderInstructionType::BufferLoadDword && unmodeled == 1u;
+	Check(ShaderInstructionLoweringPreconditions(parsed) == (unmodeled == 0 || lds_load));
 	ShaderComputeInputInfo input {};
 	input.threads_num[0] = 64;
 	input.threads_num[1] = input.threads_num[2] = 1;
@@ -503,8 +506,12 @@ void RunParserMetadata()
 		for (const auto& flag: {Flags {1u << 16u, 0, 1, 1}, Flags {1u << 17u, 0, 128, 128}, Flags {0, 1u << 21u, 128, 128}})
 		{
 			const auto code = ParsePair(0xe0302000u | flag.first, 0x8004052bu | flag.second, next_gen);
-			Check(code.GetInstructions().At(0).buffer_flags == flag.gen5);
-			Check(!ShaderInstructionLoweringPreconditions(code.GetInstructions().At(0)));
+			const auto& inst = code.GetInstructions().At(0);
+			Check(inst.buffer_flags == flag.gen5);
+			// Gen5 LDS=1 keeps the flag, drops VDATA and passes; legacy LDS and other bits stay refused.
+			const bool lds_load = next_gen && flag.gen5 == 1;
+			Check(ShaderInstructionLoweringPreconditions(inst) == lds_load);
+			Check((inst.dst.type == ShaderOperandType::Null) == lds_load);
 		}
 		struct Format { uint32_t opcode; uint8_t gen5; uint8_t legacy; uint8_t components; ShaderInstructionType type; };
 		const Format formats[] = {{0, 22, 0x74, 1, ShaderInstructionType::TBufferLoadFormatX},
@@ -1021,10 +1028,9 @@ TEST(EmulatorShaderLdsBounds, NativeMubufRejectUnmodeledAndReservedFlags)
 	ASSERT_EXIT(RunMubuf(0, 0), ::testing::ExitedWithCode(0), "");
 	ASSERT_EXIT(RunMubuf(0, 1u << 22u), ::testing::ExitedWithCode(0), ""); // SLC hint
 	ASSERT_EXIT(RunMubuf(1u << 15u, 0), ::testing::ExitedWithCode(0), ""); // DLC, ISA table 98
-	for (uint32_t first: {1u << 16u, 1u << 17u})
-	{
-		EXPECT_EXIT(RunMubuf(first, 0), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::BufferLoadDword, true));
-	}
+	// LDS=1 targets workgroup LDS; this fixture allocates none, so the emitter refuses it.
+	EXPECT_EXIT(RunMubuf(1u << 16u, 0), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::BufferLoadDword));
+	EXPECT_EXIT(RunMubuf(1u << 17u, 0), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::BufferLoadDword, true));
 	for (uint32_t second: {1u << 23u, 1u << 21u})
 	{
 		EXPECT_EXIT(RunMubuf(0, second), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::BufferLoadDword, true));

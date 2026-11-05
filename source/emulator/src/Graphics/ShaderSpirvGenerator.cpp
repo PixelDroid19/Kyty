@@ -3812,6 +3812,16 @@ void Spirv::FindConstants()
 			AddConstantUint(0xffu);
 			AddConstantUint(0xffffu);
 		}
+		// LDS-bit buffer loads address LDS like ds_*_addtid_b32 and store zero out of range.
+		if (inst.type == ShaderInstructionType::BufferLoadDword && (inst.buffer_flags & 1u) != 0 && m_cs_input_info != nullptr &&
+		    m_cs_input_info->lds_dwords > 0)
+		{
+			AddConstantUint(0xffffu);
+			AddConstantUint(63u);
+			AddConstantUint(inst.buffer_imm_offset);
+			AddConstantUint(m_cs_input_info->lds_dwords);
+			AddConstantFloat(0.0f);
+		}
 		// DS emitters resolve inst.ds_offset through GetConstantUint: the
 		// read2 pair is dword-scaled while single-offset DS ops carry bytes.
 		// Undeclared offsets would assemble into an orphan id that the driver
@@ -4034,6 +4044,11 @@ void Spirv::FindVariables()
 		for (int address = 0; address < inst.mimg_address_num; ++address)
 		{
 			AddVariable(inst.mimg_address[address]);
+		}
+		if (inst.type == ShaderInstructionType::BufferLoadDword && (inst.buffer_flags & 1u) != 0)
+		{
+			// LDS-bit loads address LDS through M0 without listing it as an operand.
+			AddVariable(ShaderOperandType::M0, 0, 1);
 		}
 		uint32_t m0 = 0;
 		if ((inst.type == ShaderInstructionType::VMovrelsB32 || inst.type == ShaderInstructionType::VMovreldB32 ||
