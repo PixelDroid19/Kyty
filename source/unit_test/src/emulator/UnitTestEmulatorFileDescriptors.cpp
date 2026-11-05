@@ -939,6 +939,8 @@ TEST_F(EmulatorFileDescriptors, TruncateByPathShortensFileAndRejectsBadTargets)
 	EXPECT_EQ(KernelTruncate("/descriptor-test/missing", 0), KERNEL_ERROR_ENOENT);
 	std::filesystem::create_directories(root / "dir");
 	EXPECT_EQ(KernelTruncate("/descriptor-test/dir", 0), KERNEL_ERROR_EISDIR);
+	EXPECT_EQ(KernelTruncate("/descriptor-test/a/child", 0), KERNEL_ERROR_ENOTDIR);
+	EXPECT_EQ(KernelTruncate("/descriptor-test/dir/missing/child", 0), KERNEL_ERROR_ENOENT);
 	EXPECT_EQ(Contents("a"), "ab");
 }
 
