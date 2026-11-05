@@ -55,6 +55,20 @@ public:
 	// Get the current native host thread id. This API is not signal-handler safe.
 	[[nodiscard]] static uint64_t GetHostThreadId();
 
+	// Windows-native code (CRT stack probes, exception dispatch) checks RSP against
+	// the stack range the host records for the current thread, so code that moves
+	// the thread onto another stack records that stack first. Other hosts keep no
+	// such record: the getters return an empty range and the setter does nothing.
+	struct StackRange
+	{
+		uint64_t low  = 0;
+		uint64_t high = 0;
+	};
+	[[nodiscard]] static StackRange GetStackRange();
+	static void                     SetStackRange(const StackRange& range);
+	// The committed stack memory that ends at `top`.
+	[[nodiscard]] static StackRange CommittedStackBelow(uint64_t top);
+
 	KYTY_CLASS_NO_COPY(Thread);
 
 private:

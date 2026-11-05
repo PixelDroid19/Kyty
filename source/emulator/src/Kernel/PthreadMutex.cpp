@@ -242,7 +242,7 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex)
 	{
 		KYTY_GUEST_WAIT(PthreadWaitKind::Mutex, mutex);
 		PthreadInterruptibleScope lock_wait(&private_mutex->p, sizeof(private_mutex->p));
-		result = pthread_mutex_lock(&private_mutex->p);
+		result = PthreadLockHostMutex(&private_mutex->p);
 	}
 
 	if (result == 0)

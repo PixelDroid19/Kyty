@@ -1,5 +1,6 @@
 #include "Emulator/Loader/GuestCall.h"
 
+#include "Kyty/Core/Threads.h"
 #include "Kyty/Core/VirtualMemory.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -90,6 +91,12 @@ uint64_t KYTY_SYSV_ABI InvokeOnStack(uint64_t target, uint64_t arg0, uint64_t ar
 	root[0]                   = 0;
 	root[1]                   = 0;
 
+	// Host code built with MSVC probes large frames from the recorded stack limit
+	// down to RSP; from a guest stack below the native one that walk would hit the
+	// native guard page (STATUS_STACK_OVERFLOW).
+	const auto host_stack = Core::Thread::GetStackRange();
+	Core::Thread::SetStackRange(Core::Thread::CommittedStackBelow(stack_end));
+
 	asm volatile("movq %[target], %%rax\n\t"
 	             "movq %[arg0], %%rdi\n\t"
 	             "movq %[arg1], %%rsi\n\t"
@@ -114,6 +121,7 @@ uint64_t KYTY_SYSV_ABI InvokeOnStack(uint64_t target, uint64_t arg0, uint64_t ar
 	               "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory",
 	               "cc");
 
+	Core::Thread::SetStackRange(host_stack);
 	return result;
 }
 

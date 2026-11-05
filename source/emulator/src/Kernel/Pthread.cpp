@@ -63,6 +63,19 @@ Pthread              g_pthread_main                   = nullptr;
 thread_local bool    g_pthread_key_destructors_active = false;
 PThreadContext*      g_pthread_context                = nullptr;
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+// winpthreads ends a thread with an SEH unwind, which cannot walk guest frames (they
+// have no unwind tables) and stops the process with STATUS_BAD_FUNCTION_TABLE. A guest
+// exit jumps back to the native frame that entered the thread's guest code instead.
+struct GuestThreadExit
+{
+	void*                     jump[5] {};
+	void*                     value = nullptr;
+	Core::Thread::StackRange host_stack;
+};
+static thread_local GuestThreadExit* g_guest_thread_exit = nullptr;
+#endif
+
 static Core::Mutex        g_thread_error_mutex;
 static std::map<int, int> g_thread_error_addresses;
 
@@ -343,6 +356,28 @@ static void cleanup_thread(void* arg)
 	thread->almost_done = true;
 }
 
+static void* InvokeThreadEntry(Pthread thread, void* stack_top)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	GuestThreadExit exit_point;
+	exit_point.host_stack = Core::Thread::GetStackRange();
+	g_guest_thread_exit   = &exit_point;
+	if (__builtin_setjmp(exit_point.jump) != 0)
+	{
+		// InvokeOnStack did not return, so its stack range is restored here.
+		g_guest_thread_exit = nullptr;
+		Core::Thread::SetStackRange(exit_point.host_stack);
+		return exit_point.value;
+	}
+#endif
+	auto* ret = reinterpret_cast<void*>(GuestRuntimePort::InvokeOnStack(reinterpret_cast<uint64_t>(thread->entry),
+	                                                                     reinterpret_cast<uint64_t>(thread->arg), 0, 0, stack_top));
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	g_guest_thread_exit = nullptr;
+#endif
+	return ret;
+}
+
 static void* run_thread(void* arg)
 {
 	auto* thread = static_cast<Pthread>(arg);
@@ -365,8 +400,7 @@ static void* run_thread(void* arg)
 	PthreadStartContext(thread);
 	{
 		const Emulator::Ports::ScopedProgress guest(Emulator::Ports::ProgressLane::GuestThread);
-		ret = reinterpret_cast<void*>(GuestRuntimePort::InvokeOnStack(reinterpret_cast<uint64_t>(thread->entry),
-		                                                               reinterpret_cast<uint64_t>(thread->arg), 0, 0, stack_top));
+		ret = InvokeThreadEntry(thread, stack_top);
 	}
 
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
@@ -722,7 +756,15 @@ void KYTY_SYSV_ABI PthreadExit(void* value)
 {
 	PRINT_NAME();
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// Only a thread inside its entry has a native frame to return to; the main thread
+	// and key destructors run outside it.
+	EXIT_NOT_IMPLEMENTED(g_guest_thread_exit == nullptr);
+	g_guest_thread_exit->value = value;
+	__builtin_longjmp(g_guest_thread_exit->jump, 1);
+#else
 	pthread_exit(value);
+#endif
 }
 
 int KYTY_SYSV_ABI PthreadEqual(Pthread thread1, Pthread thread2)

@@ -13,14 +13,17 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <pthread.h>
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#include <windows.h>
+#elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #include <asm/prctl.h>
 #include <csignal>
-#include <ctime>
 #include <sys/syscall.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -64,12 +67,6 @@ constexpr uint32_t kRetrySpreadMicros  = 64;
 
 std::mutex            g_context_mutex;
 std::atomic<uint64_t> g_context_handler {0};
-
-} // namespace
-
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-
-namespace {
 
 // Guest ucontext layout handed to the handler.
 struct SignalMcontext
@@ -128,6 +125,12 @@ static_assert(offsetof(SignalMcontext, mc_rip) == 0xa0);
 static_assert(offsetof(SignalMcontext, mc_rsp) == 0xb8);
 static_assert(offsetof(SignalMcontext, mc_fsbase) == 0x440);
 static_assert(offsetof(SignalMcontext, mc_gsbase) == 0x448);
+
+} // namespace
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+
+namespace {
 
 constexpr size_t kTrampolineStackSize = 1024 * 1024;
 
@@ -414,6 +417,380 @@ static int CurrentHostThreadId()
 	return static_cast<int>(::syscall(SYS_gettid));
 }
 
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+
+// Windows has no signal that interrupts a thread. A request is a special user
+// APC instead: it runs on the requested thread at its next return to user
+// mode, receives the interrupted context, and the APC dispatcher resumes that
+// context afterwards, extended state included. A helper thread (the raiser or
+// the retry timer) suspends the thread, decides whether it stopped at a safe
+// point, and queues the APC only then, so the APC lands on that stop.
+
+namespace {
+
+// The APC frame is built right below RSP. Guest code follows the SysV ABI and
+// may keep live data in the 128 bytes under RSP, so a stop in guest code lowers
+// RSP past that red zone before the APC, and the APC restores it.
+constexpr uint64_t kRedZoneSize = 128;
+
+constexpr DWORD kSpecialUserApc     = 0x00000001; // QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC
+constexpr DWORD kApcCallbackContext = 0x00010000; // QUEUE_USER_APC_CALLBACK_DATA_CONTEXT
+
+// APC_CALLBACK_DATA, which the headers declare only for newer SDK targets.
+struct ApcCallbackData
+{
+	ULONG_PTR parameter;
+	CONTEXT*  context_record;
+	ULONG_PTR reserved0;
+	ULONG_PTR reserved1;
+};
+
+using QueueUserApc2Func         = BOOL(WINAPI*)(PAPCFUNC, HANDLE, ULONG_PTR, DWORD);
+using AlertThreadByThreadIdFunc = LONG(NTAPI*)(HANDLE);
+
+QueueUserApc2Func         g_queue_user_apc2           = nullptr;
+AlertThreadByThreadIdFunc g_alert_thread_by_thread_id = nullptr;
+
+// The ntdll services a declared wait blocks in, found by the return address a
+// blocked thread reports, which lies in the service's stub. Critical sections,
+// SRW locks and condition variables wait by thread id, which an alert ends.
+// Sleeps wait in a delay, or on a timer with a timeout. A wait on a handle
+// without a timeout (winpthreads locks) may never return, so a request cannot
+// be delivered there.
+constexpr uint64_t kServiceStubSize       = 0x20;
+uint64_t           g_wait_by_thread_id    = 0;
+uint64_t           g_wait_for_one_object  = 0;
+uint64_t           g_delay_execution      = 0;
+
+enum class StopPoint
+{
+	None,
+	GuestCode,
+	AlertableWait,
+	BoundedWait,
+};
+
+// Called with g_context_mutex held.
+bool ResolveHostServices()
+{
+	HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
+	HMODULE ntdll    = GetModuleHandleA("ntdll.dll");
+	if (kernel32 == nullptr || ntdll == nullptr)
+	{
+		return false;
+	}
+	g_queue_user_apc2           = reinterpret_cast<QueueUserApc2Func>(GetProcAddress(kernel32, "QueueUserAPC2"));
+	g_alert_thread_by_thread_id = reinterpret_cast<AlertThreadByThreadIdFunc>(GetProcAddress(ntdll, "NtAlertThreadByThreadId"));
+	g_wait_by_thread_id         = reinterpret_cast<uint64_t>(GetProcAddress(ntdll, "NtWaitForAlertByThreadId"));
+	g_wait_for_one_object       = reinterpret_cast<uint64_t>(GetProcAddress(ntdll, "NtWaitForSingleObject"));
+	g_delay_execution           = reinterpret_cast<uint64_t>(GetProcAddress(ntdll, "NtDelayExecution"));
+	return g_queue_user_apc2 != nullptr && g_alert_thread_by_thread_id != nullptr && g_wait_by_thread_id != 0 && g_wait_for_one_object != 0 &&
+	       g_delay_execution != 0;
+}
+
+// A thread stopped in user mode is at a safe point while it runs guest code. A
+// thread stopped inside a system service is when the service is a wait that
+// will return, made inside a PthreadInterruptibleScope; the APC then runs as
+// the wait returns. Windows waits do not name the declared object (the lock
+// word lives in a separate allocation, or behind a handle), so the scope alone
+// stands for the object check made on Linux.
+StopPoint ClassifyStop(const PthreadPrivate* thread, const CONTEXT& context)
+{
+	EXIT_IF((context.ContextFlags & CONTEXT_EXCEPTION_REPORTING) == 0);
+	if ((context.ContextFlags & CONTEXT_EXCEPTION_ACTIVE) != 0)
+	{
+		return StopPoint::None;
+	}
+	if ((context.ContextFlags & CONTEXT_SERVICE_ACTIVE) == 0)
+	{
+		return (GuestCodeRanges::Contains(context.Rip) ? StopPoint::GuestCode : StopPoint::None);
+	}
+	if (thread->interruptible_end.load(std::memory_order_relaxed) == 0)
+	{
+		return StopPoint::None;
+	}
+	const uint64_t rip = context.Rip;
+	if (rip - g_wait_by_thread_id < kServiceStubSize)
+	{
+		return StopPoint::AlertableWait;
+	}
+	// NtWaitForSingleObject(handle, alertable, timeout) keeps the timeout in R8.
+	if (rip - g_delay_execution < kServiceStubSize || (rip - g_wait_for_one_object < kServiceStubSize && context.R8 != 0))
+	{
+		return StopPoint::BoundedWait;
+	}
+	return StopPoint::None;
+}
+
+void CopyGuestContext(SignalMcontext* guest, const CONTEXT& host)
+{
+	// Guest TLS is reached through patched loads, not through a segment base,
+	// so mc_fsbase and mc_gsbase stay zero.
+	guest->mc_len    = sizeof(SignalMcontext);
+	guest->mc_rdi    = host.Rdi;
+	guest->mc_rsi    = host.Rsi;
+	guest->mc_rdx    = host.Rdx;
+	guest->mc_rcx    = host.Rcx;
+	guest->mc_r8     = host.R8;
+	guest->mc_r9     = host.R9;
+	guest->mc_rax    = host.Rax;
+	guest->mc_rbx    = host.Rbx;
+	guest->mc_rbp    = host.Rbp;
+	guest->mc_r10    = host.R10;
+	guest->mc_r11    = host.R11;
+	guest->mc_r12    = host.R12;
+	guest->mc_r13    = host.R13;
+	guest->mc_r14    = host.R14;
+	guest->mc_r15    = host.R15;
+	guest->mc_rip    = host.Rip;
+	guest->mc_rflags = host.EFlags;
+	guest->mc_rsp    = host.Rsp;
+}
+
+} // namespace
+
+// Allocated on a thread's first request and kept with its pooled PthreadPrivate.
+struct PthreadContextDelivery
+{
+	SignalUcontext        guest_context {};
+	HANDLE                thread       = nullptr;
+	PTP_TIMER             retry_timer  = nullptr;
+	SRWLOCK               attempt_lock = SRWLOCK_INIT;
+	std::atomic<bool>     apc_queued {false};
+	uint64_t              apc_rip       = 0;
+	uint64_t              apc_rsp_shift = 0;
+	std::atomic<uint32_t> retry_count {0};
+};
+
+namespace {
+
+void ArmRetry(PthreadContextDelivery* delivery)
+{
+	// A fixed period equal to a guest's sleep length stays in phase with it: each
+	// retry lands as the sleep returns, never inside it, so the request starves.
+	const uint32_t micros = kRetryMicros + (delivery->retry_count.fetch_add(1, std::memory_order_relaxed) * kRetryStepMicros) % kRetrySpreadMicros;
+	// A negative due time is relative, in 100 ns units.
+	ULARGE_INTEGER due {};
+	due.QuadPart = static_cast<ULONGLONG>(-static_cast<LONGLONG>(micros) * 10);
+	FILETIME due_time {due.LowPart, due.HighPart};
+	SetThreadpoolTimer(delivery->retry_timer, &due_time, 0, 0);
+}
+
+void WINAPI ContextApc(ULONG_PTR data)
+{
+	const auto* callback = reinterpret_cast<const ApcCallbackData*>(data);
+	auto*       self     = reinterpret_cast<PthreadPrivate*>(callback->parameter);
+	auto*       delivery = self->context_delivery;
+	CONTEXT*    context  = callback->context_record;
+
+	// The APC runs at the thread's first return to user mode after the stop that
+	// queued it. A guest stop moved RSP, so it must be that stop.
+	if (context->Rip != delivery->apc_rip)
+	{
+		EXIT_IF(delivery->apc_rsp_shift != 0);
+		delivery->apc_queued.store(false, std::memory_order_release);
+		ArmRetry(delivery);
+		return;
+	}
+	context->Rsp += delivery->apc_rsp_shift;
+	delivery->apc_queued.store(false, std::memory_order_release);
+
+	const uint32_t state = self->context_state.load(std::memory_order_acquire);
+	if ((state & kContextPending) == 0 || (state & kContextRunning) != 0)
+	{
+		return;
+	}
+	// Requests raised up to here are answered by this delivery.
+	self->context_state.fetch_or(kContextRunning, std::memory_order_acq_rel);
+	self->context_state.fetch_and(~kContextPending, std::memory_order_acq_rel);
+	CopyGuestContext(&delivery->guest_context.uc_mcontext, *context);
+
+	const int   saved_errno = errno;
+	const DWORD saved_error = GetLastError();
+	(void)GuestRuntimePort::Invoke(g_context_handler.load(std::memory_order_acquire), kGuestContextSignal,
+	                               reinterpret_cast<uint64_t>(&delivery->guest_context), 0);
+	if ((self->context_state.fetch_and(~kContextRunning, std::memory_order_acq_rel) & kContextPending) != 0)
+	{
+		ArmRetry(delivery);
+	}
+	SetLastError(saved_error);
+	errno = saved_errno;
+}
+
+// Runs on the raiser or on a retry-timer thread. Between the suspension and the
+// resume it only reads and writes the context and queues the APC: the suspended
+// thread may hold any host lock, the heap's included.
+void AttemptDelivery(PthreadPrivate* thread)
+{
+	auto* delivery = thread->context_delivery;
+	AcquireSRWLockExclusive(&delivery->attempt_lock);
+	const uint32_t state = thread->context_state.load(std::memory_order_acquire);
+	if ((state & kContextPending) == 0 || (state & kContextRunning) != 0 || delivery->apc_queued.load(std::memory_order_acquire))
+	{
+		ReleaseSRWLockExclusive(&delivery->attempt_lock);
+		return;
+	}
+
+	EXIT_IF(SuspendThread(delivery->thread) == static_cast<DWORD>(-1));
+	alignas(16) CONTEXT context {};
+	context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_EXCEPTION_REQUEST;
+	EXIT_IF(GetThreadContext(delivery->thread, &context) == 0);
+	const StopPoint stop = ClassifyStop(thread, context);
+	if (stop == StopPoint::GuestCode)
+	{
+		context.ContextFlags = CONTEXT_CONTROL;
+		context.Rsp -= kRedZoneSize;
+		EXIT_IF(SetThreadContext(delivery->thread, &context) == 0);
+	}
+	if (stop != StopPoint::None)
+	{
+		delivery->apc_rip       = context.Rip;
+		delivery->apc_rsp_shift = (stop == StopPoint::GuestCode ? kRedZoneSize : 0);
+		delivery->apc_queued.store(true, std::memory_order_release);
+		EXIT_IF(g_queue_user_apc2(ContextApc, delivery->thread, reinterpret_cast<ULONG_PTR>(thread), kSpecialUserApc | kApcCallbackContext) ==
+		        0);
+	}
+	// A wait by thread id ends on an alert and its caller waits again, so the
+	// APC runs as the service returns. A bounded wait delivers it when it ends.
+	if (stop == StopPoint::AlertableWait)
+	{
+		(void)g_alert_thread_by_thread_id(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(thread->host_tid)));
+	}
+	EXIT_IF(ResumeThread(delivery->thread) == static_cast<DWORD>(-1));
+	ReleaseSRWLockExclusive(&delivery->attempt_lock);
+
+	if (stop == StopPoint::None)
+	{
+		thread->context_deferred_rip.store(context.Rip, std::memory_order_relaxed);
+		ArmRetry(delivery);
+	}
+}
+
+void CALLBACK RetryTimerCallback(PTP_CALLBACK_INSTANCE /*instance*/, PVOID thread, PTP_TIMER /*timer*/)
+{
+	AttemptDelivery(static_cast<PthreadPrivate*>(thread));
+}
+
+// Called with g_context_mutex held.
+int PrepareDelivery(PthreadPrivate* thread)
+{
+	if (thread->context_delivery == nullptr)
+	{
+		thread->context_delivery = new (std::nothrow) PthreadContextDelivery {};
+		if (thread->context_delivery == nullptr)
+		{
+			return KERNEL_ERROR_ENOMEM;
+		}
+	}
+	auto* delivery = thread->context_delivery;
+	if (delivery->thread == nullptr)
+	{
+		delivery->thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, static_cast<DWORD>(thread->host_tid));
+		if (delivery->thread == nullptr)
+		{
+			return KERNEL_ERROR_EAGAIN;
+		}
+	}
+	if (delivery->retry_timer == nullptr)
+	{
+		delivery->retry_timer = CreateThreadpoolTimer(RetryTimerCallback, thread, nullptr);
+		if (delivery->retry_timer == nullptr)
+		{
+			return KERNEL_ERROR_EAGAIN;
+		}
+	}
+	return OK;
+}
+
+} // namespace
+
+bool PthreadInstallContextHandler(uint64_t handler)
+{
+	EXIT_IF(handler == 0);
+
+	std::lock_guard lock(g_context_mutex);
+	if (!ResolveHostServices())
+	{
+		return false;
+	}
+	g_context_handler.store(handler, std::memory_order_release);
+	return true;
+}
+
+int PthreadRaiseContext(Pthread thread)
+{
+	EXIT_IF(thread == nullptr);
+
+	std::lock_guard lock(g_context_mutex);
+	if ((thread->context_state.load(std::memory_order_relaxed) & kContextOpen) == 0)
+	{
+		return KERNEL_ERROR_ESRCH;
+	}
+	if (g_context_handler.load(std::memory_order_acquire) == 0)
+	{
+		return OK;
+	}
+	// A created thread that has not started yet takes the request when it starts.
+	if (thread->host_tid == 0)
+	{
+		thread->context_state.fetch_or(kContextPending, std::memory_order_acq_rel);
+		return OK;
+	}
+	if (const int prepared = PrepareDelivery(thread); prepared != OK)
+	{
+		return prepared;
+	}
+	if ((thread->context_state.fetch_or(kContextPending, std::memory_order_acq_rel) & (kContextPending | kContextRunning)) != 0)
+	{
+		return OK;
+	}
+	AttemptDelivery(thread);
+	return OK;
+}
+
+// Called with g_context_mutex held by the starting thread. A request raised
+// before the start was already accepted, so a failure to deliver it is fatal.
+static void DeliverRequestRaisedBeforeStart(PthreadPrivate* thread)
+{
+	if ((thread->context_state.load(std::memory_order_acquire) & kContextPending) == 0)
+	{
+		return;
+	}
+	EXIT_IF(PrepareDelivery(thread) != OK);
+	ArmRetry(thread->context_delivery);
+}
+
+static void ReleaseRetryTimer(PthreadPrivate* thread)
+{
+	auto* delivery = thread->context_delivery;
+	if (delivery == nullptr)
+	{
+		return;
+	}
+	if (delivery->retry_timer != nullptr)
+	{
+		// A callback that ran before the close may have armed the timer again;
+		// no request is pending any more, so the second pass leaves it idle.
+		for (int pass = 0; pass < 2; pass++)
+		{
+			SetThreadpoolTimer(delivery->retry_timer, nullptr, 0, 0);
+			WaitForThreadpoolTimerCallbacks(delivery->retry_timer, TRUE);
+		}
+		CloseThreadpoolTimer(delivery->retry_timer);
+		delivery->retry_timer = nullptr;
+	}
+	if (delivery->thread != nullptr)
+	{
+		EXIT_IF(CloseHandle(delivery->thread) == 0);
+		delivery->thread = nullptr;
+	}
+}
+
+static int CurrentHostThreadId()
+{
+	return static_cast<int>(GetCurrentThreadId());
+}
+
 #else
 
 struct PthreadContextDelivery
@@ -440,6 +817,71 @@ static void ReleaseRetryTimer(PthreadPrivate* /*thread*/) {}
 static int CurrentHostThreadId()
 {
 	return 0;
+}
+
+#endif
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+
+namespace {
+
+constexpr long kLockSliceNanos = 1000000;
+
+// Repeats a timed lock until it ends for another reason than its slice running out.
+template <typename TimedLock>
+int LockInSlices(TimedLock timed_lock)
+{
+	for (;;)
+	{
+		timespec deadline {};
+		EXIT_IF(clock_gettime(CLOCK_REALTIME, &deadline) != 0);
+		deadline.tv_nsec += kLockSliceNanos;
+		if (deadline.tv_nsec >= 1000000000)
+		{
+			deadline.tv_sec++;
+			deadline.tv_nsec -= 1000000000;
+		}
+		if (const int result = timed_lock(&deadline); result != ETIMEDOUT)
+		{
+			return result;
+		}
+	}
+}
+
+} // namespace
+
+int PthreadLockHostMutex(pthread_mutex_t* mutex)
+{
+	return LockInSlices([mutex](const timespec* deadline) { return pthread_mutex_timedlock(mutex, deadline); });
+}
+
+int PthreadLockHostRwlockShared(std::shared_mutex::native_handle_type handle)
+{
+	auto* rwlock = static_cast<pthread_rwlock_t*>(handle);
+	return LockInSlices([rwlock](const timespec* deadline) { return pthread_rwlock_timedrdlock(rwlock, deadline); });
+}
+
+int PthreadLockHostRwlockExclusive(std::shared_mutex::native_handle_type handle)
+{
+	auto* rwlock = static_cast<pthread_rwlock_t*>(handle);
+	return LockInSlices([rwlock](const timespec* deadline) { return pthread_rwlock_timedwrlock(rwlock, deadline); });
+}
+
+#else
+
+int PthreadLockHostMutex(pthread_mutex_t* mutex)
+{
+	return pthread_mutex_lock(mutex);
+}
+
+int PthreadLockHostRwlockShared(std::shared_mutex::native_handle_type handle)
+{
+	return pthread_rwlock_rdlock(static_cast<pthread_rwlock_t*>(handle));
+}
+
+int PthreadLockHostRwlockExclusive(std::shared_mutex::native_handle_type handle)
+{
+	return pthread_rwlock_wrlock(static_cast<pthread_rwlock_t*>(handle));
 }
 
 #endif
