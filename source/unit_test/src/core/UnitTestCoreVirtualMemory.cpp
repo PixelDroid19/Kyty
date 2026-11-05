@@ -21,6 +21,8 @@
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
 #include <sys/mman.h>
+#elif defined(_WIN32)
+#include <windows.h> // IWYU pragma: keep
 #endif
 
 UT_BEGIN(CoreVirtualMemory);
@@ -171,6 +173,18 @@ bool NativeWritable(uint64_t address)
 	}
 	return false;
 }
+#elif defined(_WIN32)
+// Whether the host page containing `address` is writable, from the kernel's own view.
+bool NativeWritable(uint64_t address)
+{
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(address)), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT)
+	{
+		return false;
+	}
+	constexpr DWORD kWritable = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	return (info.Protect & kWritable) != 0;
+}
 #endif
 
 #if !defined(_WIN32)
@@ -204,6 +218,27 @@ TEST(CoreVirtualMemory, RemoveWriteCapturesAndRestoresMixedProtectionRuns)
 	bytes[page_size * 2u] = 0xc3;
 	EXPECT_TRUE(Free(address));
 }
+
+#if (KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)) || defined(_WIN32)
+// Removing write changes whole host pages, so a range that ends inside a page
+// must be recorded for that whole page too: a later restore of the enclosing
+// range would otherwise read the rest of the page as write-protected guest memory.
+TEST(CoreVirtualMemory, RestoreAfterRemoveWriteReturnsEveryTouchedPage)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size * 3u, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	ProtectionCapture capture;
+	ASSERT_TRUE(RemoveWriteAndCapture(address, page_size + page_size / 2u, &CaptureProtection, &capture).Succeeded());
+	EXPECT_FALSE(NativeWritable(address + page_size));
+	ASSERT_EQ(capture.size, 1u);
+	EXPECT_TRUE(RestoreProtection(address, page_size * 3u, capture.runs[0].restore_token));
+	EXPECT_TRUE(NativeWritable(address));
+	EXPECT_TRUE(NativeWritable(address + page_size));
+	EXPECT_TRUE(NativeWritable(address + page_size * 2u));
+	EXPECT_TRUE(Free(address));
+}
+#endif
 
 TEST(CoreVirtualMemory, UniformLargeRangeUsesOneProtectionTransition)
 {

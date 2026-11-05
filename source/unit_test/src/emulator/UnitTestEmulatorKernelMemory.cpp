@@ -1243,7 +1243,7 @@ TEST(EmulatorKernelMemory, InternalNamedFlexibleMemoryNidUsesOutPointerAbi)
 	auto**                             out_addr = reinterpret_cast<void**>(out_storage.data());
 	*out_addr                                  = nullptr;
 
-	using map_named_flexible_internal_fn_t = int (*)(void**, size_t, int, int, const char*);
+	using map_named_flexible_internal_fn_t = int(KYTY_SYSV_ABI*)(void**, size_t, int, int, const char*);
 	auto* map_named_flexible_internal = reinterpret_cast<map_named_flexible_internal_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(map_named_flexible_internal, nullptr);
 
@@ -1631,7 +1631,7 @@ TEST(EmulatorKernelMemory, AmprMeasureCommandSizesMatchRecordLayout)
 		query.type                 = Loader::SymbolType::Func;
 		const auto* rec            = symbols.Find(query);
 		ASSERT_NE(rec, nullptr) << c.nid;
-		using measure_fn_t = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+		using measure_fn_t = uint64_t(KYTY_SYSV_ABI*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 		auto* fn           = reinterpret_cast<measure_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 		ASSERT_NE(fn, nullptr);
 		EXPECT_EQ(fn(0, 0x100000, 0x1000, 0, 0, 0), c.size) << c.nid;
@@ -1647,7 +1647,7 @@ TEST(EmulatorKernelMemory, AmprMeasureCommandSizesMatchRecordLayout)
 	read_query.type                 = Loader::SymbolType::Func;
 	const auto* read_rec            = symbols.Find(read_query);
 	ASSERT_NE(read_rec, nullptr);
-	using read_measure_fn_t = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t);
+	using read_measure_fn_t = uint64_t(KYTY_SYSV_ABI*)(uint64_t, uint64_t, uint64_t, uint64_t);
 	auto* read_measure      = reinterpret_cast<read_measure_fn_t>(static_cast<uintptr_t>(read_rec->vaddr));
 	EXPECT_EQ(read_measure(0, 0x100000, 0x1000, UINT64_C(0x100000000)), 0x18u);
 }
@@ -1676,8 +1676,8 @@ TEST(EmulatorKernelMemory, AmprCommandBufferLifecycleUsesCompactHeader)
 	const auto* set_buffer_rec = symbols.Find(query);
 	ASSERT_NE(set_buffer_rec, nullptr);
 
-	using ctor_fn_t       = int (*)(void*);
-	using set_buffer_fn_t = int (*)(void*, void*, uint32_t);
+	using ctor_fn_t       = int(KYTY_SYSV_ABI*)(void*);
+	using set_buffer_fn_t = int(KYTY_SYSV_ABI*)(void*, void*, uint32_t);
 	auto* ctor            = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(ctor_rec->vaddr));
 	auto* set_buffer      = reinterpret_cast<set_buffer_fn_t>(static_cast<uintptr_t>(set_buffer_rec->vaddr));
 
@@ -1742,7 +1742,7 @@ TEST(EmulatorKernelMemory, ResolvesKernelNanosleepExport)
 	const auto* rec = symbols.Find(query);
 	ASSERT_NE(rec, nullptr);
 
-	using nanosleep_fn_t = int (*)(const Kernel::KernelTimespec*, Kernel::KernelTimespec*);
+	using nanosleep_fn_t = int(KYTY_SYSV_ABI*)(const Kernel::KernelTimespec*, Kernel::KernelTimespec*);
 	auto* nanosleep      = reinterpret_cast<nanosleep_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(nanosleep, nullptr);
 	EXPECT_EQ(nanosleep(nullptr, nullptr), LibKernel::KERNEL_ERROR_EFAULT);
@@ -1789,14 +1789,14 @@ TEST(EmulatorKernelMemory, ResolvesAudioOut2ContextLifecycle)
 	init_q.type                 = Loader::SymbolType::Func;
 	const auto* init_rec        = symbols.Find(init_q);
 	ASSERT_NE(init_rec, nullptr);
-	using init_fn_t = int (*)();
+	using init_fn_t = int(KYTY_SYSV_ABI*)();
 	EXPECT_EQ(reinterpret_cast<init_fn_t>(static_cast<uintptr_t>(init_rec->vaddr))(), 0);
 
 	Loader::SymbolResolve qmem_q = init_q;
 	qmem_q.name                  = U"pDmme7Bgm6E";
 	const auto* qmem_rec         = symbols.Find(qmem_q);
 	ASSERT_NE(qmem_rec, nullptr);
-	using qmem_fn_t = int (*)(const void*, uint64_t*);
+	using qmem_fn_t = int(KYTY_SYSV_ABI*)(const void*, uint64_t*);
 	GuestWritableBlock size_block(sizeof(uint64_t));
 	ASSERT_TRUE(size_block.IsValid());
 	auto* size = size_block.Data<uint64_t>();
@@ -1809,7 +1809,7 @@ TEST(EmulatorKernelMemory, ResolvesAudioOut2ContextLifecycle)
 	create_q.name                  = U"0x6o1VVAYSY";
 	const auto* create_rec         = symbols.Find(create_q);
 	ASSERT_NE(create_rec, nullptr);
-	using create_fn_t = int (*)(const void*, void*, uint64_t, int32_t*);
+	using create_fn_t = int(KYTY_SYSV_ABI*)(const void*, void*, uint64_t, int32_t*);
 	GuestWritableBlock workspace(64);
 	GuestWritableBlock handle_block(sizeof(int32_t));
 	ASSERT_TRUE(workspace.IsValid());
@@ -1862,7 +1862,7 @@ TEST(EmulatorKernelMemory, ResolvesLibcSincosfWithFloatResults)
 	const auto* record         = symbols.Find(query);
 	ASSERT_NE(record, nullptr);
 
-	using sincosf_fn_t = void (*)(float, float*, float*);
+	using sincosf_fn_t = void(KYTY_SYSV_ABI*)(float, float*, float*);
 	float sine          = 0.0f;
 	float cosine        = 0.0f;
 	reinterpret_cast<sincosf_fn_t>(static_cast<uintptr_t>(record->vaddr))(0.0f, &sine, &cosine);
@@ -1886,7 +1886,7 @@ TEST(EmulatorKernelMemory, ResolvesLibcExpfWithFloatResult)
 	const auto* record         = symbols.Find(query);
 	ASSERT_NE(record, nullptr);
 
-	using expf_fn_t = float (*)(float);
+	using expf_fn_t = float(KYTY_SYSV_ABI*)(float);
 	EXPECT_FLOAT_EQ(reinterpret_cast<expf_fn_t>(static_cast<uintptr_t>(record->vaddr))(0.0f), 1.0f);
 }
 
