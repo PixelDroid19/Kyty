@@ -2051,7 +2051,8 @@ void Spirv::WriteGlobalVariables()
 		}
 	}
 
-	if (m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
+	// The host stage, as for its types and the entry-point interface: a transported pixel shader runs as compute.
+	if (HostType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
 	{
 		vars.Add("%lds = OpVariable %_ptr_Workgroup_lds_array_uint Workgroup");
 	}
