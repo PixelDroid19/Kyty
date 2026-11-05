@@ -554,6 +554,7 @@ public:
 	void Done();
 	void WaitForIdle();
 	bool IsIdle();
+	void HoldParkedDecode(bool hold);
 
 	void SetCp(CommandProcessor* cp)
 	{
@@ -629,6 +630,8 @@ private:
 	Core::Mutex          m_mutex;
 	// Set while decode waits on a value no submitted GPU work produces.
 	bool                 m_decode_released = false;
+	// Set by a quiesce: decode parked on such a value counts as drained and does not resume until the hold ends.
+	bool                 m_parked_decode_hold = false;
 	// Only the ring thread touches it: a deferred completion it still pumps while idle.
 	bool                 m_async_completion_pending = false;
 	Core::CondVar        m_cond_var;
@@ -729,6 +732,7 @@ public:
 private:
 	void Init();
 	void WaitLocked();
+	void HoldParkedDecode(bool hold);
 
 	ComputeRing* GetRing(uint32_t ring_id);
 
