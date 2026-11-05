@@ -1906,6 +1906,10 @@ void Spirv::WriteConstants()
 	{
 		m_source += String8::FromPrintf("%%%s = OpConstant %%%s %s\n", c.id.c_str(), c.type_str.c_str(), c.literal_str.c_str());
 	}
+	if (SpirvUsesGen5BufferFormats(m_code))
+	{
+		m_source += SpirvGen5BufferFormatTable(*this);
+	}
 }
 
 void Spirv::WriteGlobalVariables()

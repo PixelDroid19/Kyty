@@ -4,6 +4,8 @@
 
 #include "ShaderSpirvInternal.h"
 
+#include <cstring>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -11,6 +13,23 @@ namespace Kyty::Libs::Graphics {
 namespace {
 
 constexpr uint32_t kFloatOneBits = 0x3f800000u;
+// Entries of the format table: one per value of the 7-bit V# FORMAT field.
+constexpr uint32_t kFormatTableSize = 128u;
+constexpr uint32_t kTableNumberShift = 24u;
+
+// A format's table word: the four channel widths in 6-bit fields from bit 0
+// and the number format at bit 24. Channel offsets are the prefix sums of the
+// widths in every format, and a word of zero marks a format that does not
+// decode.
+uint32_t FormatTableWord(const ShaderBufferFormat& format)
+{
+	uint32_t word = static_cast<uint32_t>(format.number) << kTableNumberShift;
+	for (uint32_t c = 0; c < format.channels; c++)
+	{
+		word |= static_cast<uint32_t>(format.layout[c].bits) << (6u * c);
+	}
+	return word;
+}
 
 // Writes the Gen5 BUFFER_LOAD_FORMAT and BUFFER_STORE_FORMAT functions. With a registrar it also
 // registers every constant it names, so FindConstants and WriteFunctions
@@ -38,6 +57,7 @@ public:
 		return "%" + m_spirv.GetConstantFloat(value);
 	}
 
+	String8 Table();
 	String8 Bytes();
 	String8 Align();
 	String8 LoadWords();
@@ -46,43 +66,66 @@ public:
 	String8 StoreWords();
 
 private:
-	String8 Channel(const ShaderBufferFormat& format, uint32_t channel, String8* source);
+	String8 Scale(ShaderBufferNumber number, uint32_t c);
+	String8 Channel(uint32_t c);
 	String8 Pack(const ShaderBufferFormat& format, uint32_t channel, String8* source);
 
 	const Spirv& m_spirv;
 	Spirv*       m_registrar;
 };
 
+// %gen5_buffer_format_table: the table words of every FORMAT value, read by
+// Bytes and Decode through a Function copy so the lookup indexes constant data
+// instead of branching per format.
+String8 FormatWriter::Table()
+{
+	uint32_t   count   = 0;
+	const auto formats = ShaderGen5BufferFormats(&count);
+	uint32_t   words[kFormatTableSize] {};
+	for (uint32_t i = 0; i < count; i++)
+	{
+		words[formats[i].format] = FormatTableWord(formats[i]);
+	}
+	String8 entries;
+	for (uint32_t word: words)
+	{
+		entries += " " + Uint(word);
+	}
+	return String8::FromPrintf(R"(
+%%gen5_buffer_format_table_type = OpTypeArray %%uint %s
+%%_ptr_Function_gen5_buffer_format_table = OpTypePointer Function %%gen5_buffer_format_table_type
+%%gen5_buffer_format_table = OpConstantComposite %%gen5_buffer_format_table_type%s
+)",
+	                           Uint(kFormatTableSize).c_str(), entries.c_str());
+}
+
 // uint gen5_buffer_format_bytes(uint format): the element size, 0 for a
 // format that does not decode.
 String8 FormatWriter::Bytes()
 {
-	uint32_t   count   = 0;
-	const auto formats = ShaderGen5BufferFormats(&count);
-	String8    cases;
-	String8    phi;
-	for (uint32_t size: {1u, 2u, 4u, 8u, 12u, 16u})
-	{
-		cases += String8::FromPrintf("%%gbfb_b%u = OpLabel\nOpBranch %%gbfb_merge\n", size);
-		phi += String8::FromPrintf(" %s %%gbfb_b%u", Uint(size).c_str(), size);
-	}
-	String8 targets;
-	for (uint32_t i = 0; i < count; i++)
-	{
-		targets += String8::FromPrintf(" %u %%gbfb_b%u", formats[i].format, formats[i].bytes);
-	}
 	return String8::FromPrintf(R"(
 %%gen5_buffer_format_bytes = OpFunction %%uint None %%function_gen5_buffer_format_bytes
 %%gbfb_format = OpFunctionParameter %%uint
 %%gbfb_entry = OpLabel
-OpSelectionMerge %%gbfb_merge None
-OpSwitch %%gbfb_format %%gbfb_merge%s
-%s%%gbfb_merge = OpLabel
-%%gbfb_bytes = OpPhi %%uint%s %s %%gbfb_entry
+%%gbfb_table = OpVariable %%_ptr_Function_gen5_buffer_format_table Function
+OpStore %%gbfb_table %%gen5_buffer_format_table
+%%gbfb_index = OpBitwiseAnd %%uint %%gbfb_format %s
+%%gbfb_ptr = OpAccessChain %%_ptr_Function_uint %%gbfb_table %%gbfb_index
+%%gbfb_word = OpLoad %%uint %%gbfb_ptr
+%%gbfb_w0 = OpBitFieldUExtract %%uint %%gbfb_word %s %s
+%%gbfb_w1 = OpBitFieldUExtract %%uint %%gbfb_word %s %s
+%%gbfb_w2 = OpBitFieldUExtract %%uint %%gbfb_word %s %s
+%%gbfb_w3 = OpBitFieldUExtract %%uint %%gbfb_word %s %s
+%%gbfb_s01 = OpIAdd %%uint %%gbfb_w0 %%gbfb_w1
+%%gbfb_s23 = OpIAdd %%uint %%gbfb_w2 %%gbfb_w3
+%%gbfb_bits = OpIAdd %%uint %%gbfb_s01 %%gbfb_s23
+%%gbfb_bytes = OpShiftRightLogical %%uint %%gbfb_bits %s
 OpReturnValue %%gbfb_bytes
 OpFunctionEnd
 )",
-	                           targets.c_str(), cases.c_str(), phi.c_str(), Uint(0).c_str());
+	                           Uint(kFormatTableSize - 1u).c_str(), Uint(0).c_str(), Uint(6).c_str(), Uint(6).c_str(),
+	                           Uint(6).c_str(), Uint(12).c_str(), Uint(6).c_str(), Uint(18).c_str(), Uint(6).c_str(),
+	                           Uint(3).c_str());
 }
 
 // v4uint gen5_buffer_align_words(v4uint words, uint next, uint lead): the four
@@ -165,66 +208,103 @@ OpBranch %%gblw_m%u
 	return source;
 }
 
-// Converts one channel of the element in %gbfd_e0..e3 to the 32-bit value
-// BUFFER_LOAD_FORMAT returns and names it %gbfd_<format>_<channel>.
-String8 FormatWriter::Channel(const ShaderBufferFormat& format, uint32_t channel, String8* source)
+// Names %gbfd_ur<c> (unorm) or %gbfd_sr<c> (snorm): the reciprocal of the
+// largest code of channel `c`, selected by its width %gbfd_w<c> among the
+// widths the table's unorm or snorm formats use. The reciprocals are uint
+// constants bitcast to float, so their ids are exact.
+String8 FormatWriter::Scale(ShaderBufferNumber number, uint32_t c)
 {
-	const auto     name   = String8::FromPrintf("gbfd_%u_%u", format.format, channel);
-	const auto     n      = name.c_str();
-	const auto     layout = format.layout[channel];
-	const uint32_t word   = layout.offset / 32u;
-	const uint32_t shift  = layout.offset % 32u;
-	const uint32_t bits   = layout.bits;
-	const auto     number = format.number;
-	const bool     is_signed = number == ShaderBufferNumber::Snorm || number == ShaderBufferNumber::Sscaled ||
-	                       number == ShaderBufferNumber::Sint;
-
-	if (bits == 32u && (number == ShaderBufferNumber::Uint || number == ShaderBufferNumber::Sint ||
-	                    number == ShaderBufferNumber::Float))
+	uint32_t   count   = 0;
+	const auto formats = ShaderGen5BufferFormats(&count);
+	const char kind    = number == ShaderBufferNumber::Unorm ? 'u' : 's';
+	bool       seen[33] {};
+	String8    source;
+	String8    previous = Uint(kFloatOneBits);
+	for (uint32_t i = 0; i < count; i++)
 	{
-		*source += String8::FromPrintf("%%%s = OpCopyObject %%uint %%gbfd_e%u\n", n, word);
-		return name;
-	}
-	if (is_signed)
-	{
-		*source += String8::FromPrintf("%%%s_i = OpBitcast %%int %%gbfd_e%u\n%%%s_s = OpBitFieldSExtract %%int %%%s_i %s %s\n", n, word, n,
-		                               n, Uint(shift).c_str(), Uint(bits).c_str());
-	} else
-	{
-		*source += String8::FromPrintf("%%%s_u = OpBitFieldUExtract %%uint %%gbfd_e%u %s %s\n", n, word, Uint(shift).c_str(),
-		                               Uint(bits).c_str());
-	}
-	switch (number)
-	{
-		case ShaderBufferNumber::Unorm:
-			*source += String8::FromPrintf("%%%s_f = OpConvertUToF %%float %%%s_u\n%%%s_n = OpFDiv %%float %%%s_f %s\n", n, n, n, n,
-			                               Float(static_cast<float>((1ull << bits) - 1u)).c_str());
-			break;
-		case ShaderBufferNumber::Snorm:
-			// The most negative code clamps to -1.
-			*source += String8::FromPrintf("%%%s_f = OpConvertSToF %%float %%%s_s\n%%%s_d = OpFDiv %%float %%%s_f %s\n"
-			                               "%%%s_n = OpExtInst %%float %%GLSL_std_450 FMax %%%s_d %s\n",
-			                               n, n, n, n, Float(static_cast<float>((1ull << (bits - 1u)) - 1u)).c_str(), n, n,
-			                               Float(-1.0f).c_str());
-			break;
-		case ShaderBufferNumber::Uscaled: *source += String8::FromPrintf("%%%s_n = OpConvertUToF %%float %%%s_u\n", n, n); break;
-		case ShaderBufferNumber::Sscaled: *source += String8::FromPrintf("%%%s_n = OpConvertSToF %%float %%%s_s\n", n, n); break;
-		case ShaderBufferNumber::Uint: *source += String8::FromPrintf("%%%s = OpCopyObject %%uint %%%s_u\n", n, n); return name;
-		case ShaderBufferNumber::Sint: *source += String8::FromPrintf("%%%s = OpBitcast %%uint %%%s_s\n", n, n); return name;
-		case ShaderBufferNumber::Float:
+		for (uint32_t k = 0; k < formats[i].channels && formats[i].number == number; k++)
 		{
-			// 16-, 11- and 10-bit floats share the half-float exponent: the
-			// narrow ones are halves without sign and low mantissa bits.
-			const uint32_t to_half = bits == 16u ? 0u : 15u - bits;
-			*source += String8::FromPrintf("%%%s_h = OpShiftLeftLogical %%uint %%%s_u %s\n"
-			                               "%%%s_v = OpExtInst %%v2float %%GLSL_std_450 UnpackHalf2x16 %%%s_h\n"
-			                               "%%%s_n = OpCompositeExtract %%float %%%s_v 0\n",
-			                               n, n, Uint(to_half).c_str(), n, n, n, n);
-			break;
+			const uint32_t bits = formats[i].layout[k].bits;
+			if (seen[bits])
+			{
+				continue;
+			}
+			seen[bits]             = true;
+			const uint64_t largest = number == ShaderBufferNumber::Unorm ? (1ull << bits) - 1u : (1ull << (bits - 1u)) - 1u;
+			const float    value   = 1.0f / static_cast<float>(largest);
+			uint32_t       scale   = 0;
+			std::memcpy(&scale, &value, sizeof(scale));
+			const auto     name    = String8::FromPrintf("%%gbfd_%cr%u_%u", kind, c, bits);
+			source += String8::FromPrintf("%s_is = OpIEqual %%bool %%gbfd_w%u %s\n%s = OpSelect %%uint %s_is %s %s\n", name.c_str(), c,
+			                              Uint(bits).c_str(), name.c_str(), name.c_str(), Uint(scale).c_str(), previous.c_str());
+			previous = name;
 		}
 	}
-	*source += String8::FromPrintf("%%%s = OpBitcast %%uint %%%s_n\n", n, n);
-	return name;
+	return source + String8::FromPrintf("%%gbfd_%cr%u = OpBitcast %%float %s\n", kind, c, previous.c_str());
+}
+
+// Converts channel `c` of the element in %gbfd_e0..e3 to the 32-bit value
+// BUFFER_LOAD_FORMAT returns, as %gbfd_<c>: every number format's conversion is
+// computed and the table word's number format selects one. %gbfd_off<c> is
+// the channel's bit offset; a channel of width 0 reads 0.
+String8 FormatWriter::Channel(uint32_t c)
+{
+	const auto number = [&](ShaderBufferNumber n) { return Uint(static_cast<uint32_t>(n)); };
+	// Unorm divides by 2^w - 1 and snorm by 2^(w-1) - 1, as a multiply by the
+	// reciprocal of the channel's width: drivers lowered the per-format constant
+	// division that way, so results stay bit-identical. 16-, 11- and
+	// 10-bit floats share the half-float exponent: the narrow ones are halves
+	// without sign and low mantissa bits. A 32-bit field reads as it is.
+	String8 source = String8::FromPrintf(R"(%%gbfd_w<c> = OpBitFieldUExtract %%uint %%gbfd_word <shift> %s
+%%gbfd_dw<c> = OpShiftRightLogical %%uint %%gbfd_off<c> %s
+%%gbfd_lo<c> = OpBitwiseAnd %%uint %%gbfd_off<c> %s
+%%gbfd_e<c>_ = OpVectorExtractDynamic %%uint %%gbfd_element %%gbfd_dw<c>
+%%gbfd_u<c> = OpBitFieldUExtract %%uint %%gbfd_e<c>_ %%gbfd_lo<c> %%gbfd_w<c>
+%%gbfd_i<c> = OpBitcast %%int %%gbfd_e<c>_
+%%gbfd_s<c> = OpBitFieldSExtract %%int %%gbfd_i<c> %%gbfd_lo<c> %%gbfd_w<c>
+%%gbfd_sb<c> = OpBitcast %%uint %%gbfd_s<c>
+%%gbfd_uf<c> = OpConvertUToF %%float %%gbfd_u<c>
+%%gbfd_sf<c> = OpConvertSToF %%float %%gbfd_s<c>
+<scales>%%gbfd_unorm<c> = OpFMul %%float %%gbfd_uf<c> %%gbfd_ur<c>
+%%gbfd_sd<c> = OpFMul %%float %%gbfd_sf<c> %%gbfd_sr<c>
+%%gbfd_snorm<c> = OpExtInst %%float %%GLSL_std_450 FMax %%gbfd_sd<c> %s
+%%gbfd_w16<c> = OpIEqual %%bool %%gbfd_w<c> %s
+%%gbfd_hr<c> = OpISub %%uint %s %%gbfd_w<c>
+%%gbfd_hs<c> = OpSelect %%uint %%gbfd_w16<c> %s %%gbfd_hr<c>
+%%gbfd_hb<c> = OpShiftLeftLogical %%uint %%gbfd_u<c> %%gbfd_hs<c>
+%%gbfd_hv<c> = OpExtInst %%v2float %%GLSL_std_450 UnpackHalf2x16 %%gbfd_hb<c>
+%%gbfd_hf<c> = OpCompositeExtract %%float %%gbfd_hv<c> 0
+%%gbfd_hu<c> = OpBitcast %%uint %%gbfd_hf<c>
+%%gbfd_w32<c> = OpIEqual %%bool %%gbfd_w<c> %s
+%%gbfd_float<c> = OpSelect %%uint %%gbfd_w32<c> %%gbfd_u<c> %%gbfd_hu<c>
+%%gbfd_unormu<c> = OpBitcast %%uint %%gbfd_unorm<c>
+%%gbfd_snormu<c> = OpBitcast %%uint %%gbfd_snorm<c>
+%%gbfd_uscu<c> = OpBitcast %%uint %%gbfd_uf<c>
+%%gbfd_sscu<c> = OpBitcast %%uint %%gbfd_sf<c>
+%%gbfd_k1<c> = OpIEqual %%bool %%gbfd_number %s
+%%gbfd_k2<c> = OpIEqual %%bool %%gbfd_number %s
+%%gbfd_k3<c> = OpIEqual %%bool %%gbfd_number %s
+%%gbfd_k4<c> = OpIEqual %%bool %%gbfd_number %s
+%%gbfd_k5<c> = OpIEqual %%bool %%gbfd_number %s
+%%gbfd_k6<c> = OpIEqual %%bool %%gbfd_number %s
+%%gbfd_c1<c> = OpSelect %%uint %%gbfd_k1<c> %%gbfd_snormu<c> %%gbfd_unormu<c>
+%%gbfd_c2<c> = OpSelect %%uint %%gbfd_k2<c> %%gbfd_uscu<c> %%gbfd_c1<c>
+%%gbfd_c3<c> = OpSelect %%uint %%gbfd_k3<c> %%gbfd_sscu<c> %%gbfd_c2<c>
+%%gbfd_c4<c> = OpSelect %%uint %%gbfd_k4<c> %%gbfd_u<c> %%gbfd_c3<c>
+%%gbfd_c5<c> = OpSelect %%uint %%gbfd_k5<c> %%gbfd_sb<c> %%gbfd_c4<c>
+%%gbfd_c6<c> = OpSelect %%uint %%gbfd_k6<c> %%gbfd_float<c> %%gbfd_c5<c>
+%%gbfd_has<c> = OpINotEqual %%bool %%gbfd_w<c> %s
+%%gbfd_<c> = OpSelect %%uint %%gbfd_has<c> %%gbfd_c6<c> %s
+%%gbfd_off<n> = OpIAdd %%uint %%gbfd_off<c> %%gbfd_w<c>
+)",
+	                                     Uint(6).c_str(), Uint(5).c_str(), Uint(31).c_str(), Float(-1.0f).c_str(), Uint(16).c_str(), Uint(15).c_str(), Uint(0).c_str(),
+	                                     Uint(32).c_str(), number(ShaderBufferNumber::Snorm).c_str(),
+	                                     number(ShaderBufferNumber::Uscaled).c_str(), number(ShaderBufferNumber::Sscaled).c_str(),
+	                                     number(ShaderBufferNumber::Uint).c_str(), number(ShaderBufferNumber::Sint).c_str(),
+	                                     number(ShaderBufferNumber::Float).c_str(), Uint(0).c_str(), Uint(0).c_str());
+	return source.ReplaceStr("<scales>", Scale(ShaderBufferNumber::Unorm, c) + Scale(ShaderBufferNumber::Snorm, c))
+	    .ReplaceStr("<shift>", Uint(6u * c)).ReplaceStr("<n>", String8::FromPrintf("%u", c + 1u))
+	    .ReplaceStr("<c>", String8::FromPrintf("%u", c));
 }
 
 // v4uint gen5_buffer_format_decode(v4uint element, uint format, uint desc3):
@@ -234,60 +314,51 @@ String8 FormatWriter::Channel(const ShaderBufferFormat& format, uint32_t channel
 // every format, which is what an out-of-range read returns.
 String8 FormatWriter::Decode()
 {
-	uint32_t   count   = 0;
-	const auto formats = ShaderGen5BufferFormats(&count);
-	String8    source  = R"(
-%gen5_buffer_format_decode = OpFunction %v4uint None %function_gen5_buffer_element
-%gbfd_element = OpFunctionParameter %v4uint
-%gbfd_format = OpFunctionParameter %uint
-%gbfd_desc3 = OpFunctionParameter %uint
-%gbfd_entry = OpLabel
-%gbfd_e0 = OpCompositeExtract %uint %gbfd_element 0
-%gbfd_e1 = OpCompositeExtract %uint %gbfd_element 1
-%gbfd_e2 = OpCompositeExtract %uint %gbfd_element 2
-%gbfd_e3 = OpCompositeExtract %uint %gbfd_element 3
-OpSelectionMerge %gbfd_merge None
-OpSwitch %gbfd_format %gbfd_unknown)";
-	for (uint32_t i = 0; i < count; i++)
-	{
-		source += String8::FromPrintf(" %u %%gbfd_f%u", formats[i].format, formats[i].format);
-	}
-	source += "\n";
-	const auto zero = Uint(0);
-	String8    phis[5];
-	for (uint32_t i = 0; i < count; i++)
-	{
-		const auto& format = formats[i];
-		source += String8::FromPrintf("%%gbfd_f%u = OpLabel\n", format.format);
-		for (uint32_t c = 0; c < 4; c++)
-		{
-			const auto value = c < format.channels ? "%" + Channel(format, c, &source) : zero;
-			phis[c] += String8::FromPrintf(" %s %%gbfd_f%u", value.c_str(), format.format);
-		}
-		const bool integer = format.number == ShaderBufferNumber::Uint || format.number == ShaderBufferNumber::Sint;
-		phis[4] += String8::FromPrintf(" %s %%gbfd_f%u", Uint(integer ? 1u : kFloatOneBits).c_str(), format.format);
-		source += "OpBranch %gbfd_merge\n";
-	}
-	source += "%gbfd_unknown = OpLabel\nOpBranch %gbfd_merge\n%gbfd_merge = OpLabel\n";
-	const char* names[5] = {"x", "y", "z", "w", "one"};
-	for (uint32_t c = 0; c < 5; c++)
-	{
-		const auto unknown = c < 4 ? zero : Uint(kFloatOneBits);
-		source += String8::FromPrintf("%%gbfd_%s = OpPhi %%uint%s %s %%gbfd_unknown\n", names[c], phis[c].c_str(), unknown.c_str());
-	}
+	String8 source = String8::FromPrintf(R"(
+%%gen5_buffer_format_decode = OpFunction %%v4uint None %%function_gen5_buffer_element
+%%gbfd_element = OpFunctionParameter %%v4uint
+%%gbfd_format = OpFunctionParameter %%uint
+%%gbfd_desc3 = OpFunctionParameter %%uint
+%%gbfd_entry = OpLabel
+%%gbfd_table = OpVariable %%_ptr_Function_gen5_buffer_format_table Function
+OpStore %%gbfd_table %%gen5_buffer_format_table
+%%gbfd_index = OpBitwiseAnd %%uint %%gbfd_format %s
+%%gbfd_ptr = OpAccessChain %%_ptr_Function_uint %%gbfd_table %%gbfd_index
+%%gbfd_word = OpLoad %%uint %%gbfd_ptr
+%%gbfd_number = OpShiftRightLogical %%uint %%gbfd_word %s
+%%gbfd_off0 = OpCopyObject %%uint %s
+)",
+	                                     Uint(kFormatTableSize - 1u).c_str(), Uint(kTableNumberShift).c_str(), Uint(0).c_str());
 	for (uint32_t c = 0; c < 4; c++)
 	{
-		source += String8::FromPrintf(R"(%%gbfd_s%u_r = OpShiftRightLogical %%uint %%gbfd_desc3 %s
-%%gbfd_s%u = OpBitwiseAnd %%uint %%gbfd_s%u_r %s
-%%gbfd_s%u_1 = OpIEqual %%bool %%gbfd_s%u %s
-%%gbfd_v%u_0 = OpSelect %%uint %%gbfd_s%u_1 %%gbfd_one %s
+		source += Channel(c);
+	}
+	// Integer formats read integer 1 for DST_SEL 1, every other format (and a
+	// format that does not decode) float 1.
+	source += String8::FromPrintf(R"(%%gbfd_iu = OpIEqual %%bool %%gbfd_number %s
+%%gbfd_is = OpIEqual %%bool %%gbfd_number %s
+%%gbfd_known = OpINotEqual %%bool %%gbfd_word %s
+%%gbfd_iany = OpLogicalOr %%bool %%gbfd_iu %%gbfd_is
+%%gbfd_int = OpLogicalAnd %%bool %%gbfd_iany %%gbfd_known
+%%gbfd_one = OpSelect %%uint %%gbfd_int %s %s
+)",
+	                              Uint(static_cast<uint32_t>(ShaderBufferNumber::Uint)).c_str(),
+	                              Uint(static_cast<uint32_t>(ShaderBufferNumber::Sint)).c_str(), Uint(0).c_str(), Uint(1).c_str(),
+	                              Uint(kFloatOneBits).c_str());
+	const auto zero = Uint(0);
+	for (uint32_t c = 0; c < 4; c++)
+	{
+		source += String8::FromPrintf(R"(%%gbfd_d%u_r = OpShiftRightLogical %%uint %%gbfd_desc3 %s
+%%gbfd_d%u = OpBitwiseAnd %%uint %%gbfd_d%u_r %s
+%%gbfd_d%u_1 = OpIEqual %%bool %%gbfd_d%u %s
+%%gbfd_v%u_0 = OpSelect %%uint %%gbfd_d%u_1 %%gbfd_one %s
 )",
 		                              c, Uint(3u * c).c_str(), c, c, Uint(7).c_str(), c, c, Uint(1).c_str(), c, c, zero.c_str());
 		for (uint32_t k = 0; k < 4; k++)
 		{
-			source += String8::FromPrintf("%%gbfd_s%u_%u = OpIEqual %%bool %%gbfd_s%u %s\n"
-			                              "%%gbfd_v%u_%u = OpSelect %%uint %%gbfd_s%u_%u %%gbfd_%s %%gbfd_v%u_%u\n",
-			                              c, k + 4, c, Uint(k + 4).c_str(), c, k + 1, c, k + 4, names[k], c, k);
+			source += String8::FromPrintf("%%gbfd_d%u_%u = OpIEqual %%bool %%gbfd_d%u %s\n"
+			                              "%%gbfd_v%u_%u = OpSelect %%uint %%gbfd_d%u_%u %%gbfd_%u %%gbfd_v%u_%u\n",
+			                              c, k + 4, c, Uint(k + 4).c_str(), c, k + 1, c, k + 4, k, c, k);
 		}
 	}
 	source += "%gbfd_result = OpCompositeConstruct %v4uint %gbfd_v0_4 %gbfd_v1_4 %gbfd_v2_4 %gbfd_v3_4\n"
@@ -581,12 +652,19 @@ bool SpirvUsesGen5BufferFormatStores(const ShaderCode& code)
 void SpirvAddGen5BufferFormatConstants(Spirv* spirv)
 {
 	FormatWriter writer(*spirv, spirv);
+	(void)writer.Table();
 	(void)writer.Bytes();
 	(void)writer.Align();
 	(void)writer.LoadWords();
 	(void)writer.Decode();
 	(void)writer.Encode();
 	(void)writer.StoreWords();
+}
+
+String8 SpirvGen5BufferFormatTable(const Spirv& spirv)
+{
+	FormatWriter writer(spirv, nullptr);
+	return writer.Table();
 }
 
 String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, const ShaderCode& code, bool bound_buffers)

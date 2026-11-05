@@ -631,6 +631,8 @@ bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0)
 bool    SpirvUsesGen5BufferFormats(const ShaderCode& code);
 bool    SpirvUsesGen5BufferFormatStores(const ShaderCode& code);
 void    SpirvAddGen5BufferFormatConstants(Spirv* spirv);
+// Declares the format table the format functions read; it follows the constants.
+String8 SpirvGen5BufferFormatTable(const Spirv& spirv);
 String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, const ShaderCode& code, bool bound_buffers);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
