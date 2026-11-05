@@ -1,3 +1,55 @@
+## Fragment transport clears and uncompressed exports, from `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition` (2026-11-05)
+
+The title (UE4, 01.007.000) runs a pixel shader whose scalar written under divergent control flow is read
+after the join (`pc=0x4ca4`). The native path refuses it, so it goes through fragment transport. Three general
+transport gaps stopped the run, in this order:
+
+- **A transported draw into a pass that clears on begin.** Transport begins the framebuffer pass once per
+  capture and once per resolve, per band. A clear on begin would erase the bands already resolved, so this
+  used to stop at `GraphicsRenderPipeline.cpp:1583`. An empty pass now applies the clear once, and the
+  transport passes use a framebuffer that loads the cleared targets. A depth target that clears on every
+  begin (depth clear enable) still stops, with its own message.
+- **Uncompressed exports in the compute shade.** The per-lane export emitter read every export as COMPR
+  half pairs, and `Target()` knew only the COMPR MRT formats. An uncompressed 32-bit export then fell back
+  to the graphics emitter, whose output-variable store is invalid in a compute shader: `spirv-val` reported
+  an undefined id, and pipeline creation failed with `VK_ERROR_UNKNOWN` (-13) on a 229k-word shade.
+  Uncompressed exports (EXP `COMPR` clear) now bitcast each source VGPR. The full-format MRT0-7 exports map
+  to their targets. An export the emitter refuses fails translation explicitly instead of producing invalid
+  SPIR-V. COMPR exports keep their old path, so titles that already ran through transport see no change.
+  Translator version 208.
+
+Frontier after these fixes (Linux, Arc A770, Mesa 26.2.5, strict runs of up to 118 s, 60 fps present
+limit, private shader cache, `reach_first_gameplay.pad`): the title boots, plays its intro and reaches the
+loading screen with the character artwork at about 30 fps. It then shows the same frame for tens of
+seconds. The guest is not waiting: draws keep going and presents stop, because the command processor is
+inside driver pipeline creation.
+- In one run, between 60 and 78 s there were 4272 draws and 1 present, and 8 new graphics pipelines took
+  14.0 s to create (about 1.75 s each).
+- In another, 10 pipelines took 22 s between 60 and 85 s (the slowest 5.6 s), and 10 of them needed new
+  SPIR-V. The private cache was still filling.
+
+This is the cost class of the large pinned kernels recorded for `PPSA05496 - Builder's Journey` and
+`PPSA21567 - Astro Bot`. Gameplay was not reached, so nothing is claimed about it.
+
+Open, not fixed: the render engine resets intermittently (`Timedout job`, `vkWaitForFences` -4 after about
+610-690 ms).
+- **Rate:** 4 of 9 runs, 2 of them under gdb, between about 45 and 100 s.
+- **Where it stops:** each devcoredump stops at the CS stall `PIPE_CONTROL` after an ordinary run of
+  draws, at a different draw each time.
+- **Kernel hashes:** the only kernel common to all three dumps compared is the first, depth-only draw of
+  every batch.
+- **Loops:** the only loops in the pending vertex kernels are the bounded GDA binary search (see the
+  `PPSA03969 - F.I.S.T.` hang record).
+- **No single culprit:** no shader loop or single draw explains it, and it matches that record's
+  unexplained reset.
+- **Ruled out:** the non-fatal `gfx_storage_frontier` (`code_unavailable`) warnings this title raises from
+  about 47 s. They report a descriptor policy that stays bound with robust access, not an unresolved
+  binding.
+
+Validation: `ctest` 108 tests, 107 passed, 1 skipped (`KytyShaderComputeIntegration.PairedWave64`, as on
+main). The regression set was not rerun. Before this change, every path it touches stopped the run
+(clearing transport pass, uncompressed or full-format exports), and COMPR exports keep their code.
+
 ## Bring-up contracts from `PPSA05496 - Builder's Journey`: formats, sample_l addresses, quiesce hold (2026-11-05)
 
 `PPSA05496 - Builder's Journey` (Unity 2021.2) is a local dump without `sce_sys/param.json` and without six of
@@ -383,9 +435,8 @@ next stop on the way to its title menu.
   view, a core SPIR-V storage format (no `StorageImageExtendedFormats`), and Vulkan requires
   storage support for `R16G16B16A16_UINT`. Covered by
   `EmulatorGraphicsResources.EmitsAndValidatesExactHomogeneousUintStorageFormats`. PPSA03524,
-  which is not in the Linux matrix, now stops later at `GraphicsRenderPipeline.cpp:1583`: the
-  fragment transport cannot begin a clearing pass for a pixel shader whose scalar written under
-  divergent control flow is read after the join (`pc=0x4ca4`).
+  which is not in the Linux matrix, then stopped at `GraphicsRenderPipeline.cpp:1583` (fragment
+  transport into a clearing pass), fixed since: see the 2026-11-05 transport record at the top.
 - **Open, `PPSA03355 - Hades`: a texture upload sometimes copies into a NULL base** (`memcpy` of
   0x2000 bytes, guest return `eboot+0x308059`). Failed in 3 of 4 strict Windows runs at Warn
   logging; one run at Debug logging reached 60 s with the save dialog drawn. The record
