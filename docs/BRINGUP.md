@@ -161,7 +161,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - [Tessellation design](bringup/tessellation-design.md): hull/domain mapping to Vulkan, staged plan, PATCH draws refused first (2026-10-29, design)
   - [GPU-indexed descriptor tables](bringup/bindless-tables-design.md): table-selected T#/S# and ray-tracing dispatch needs (2026-10-29, design)
   - [Temporal upscalers decision](bringup/temporal-upscalers-decision.md): no DLSS/XeSS now; temporal inputs first, FSR 2 before proprietary SDKs (2026-10-29, decided)
-  - Format stores, two-channel ALT targets and LDS loads fixed; PC clear-state defaults excluded; outside proposals reviewed (2026-11-05, fixed; excluded; open leads)
+  - Format stores, two-channel ALT targets, LDS loads and stencil logic ops fixed; PC clear-state defaults excluded; outside proposals reviewed (2026-11-05, fixed; excluded; open leads)
   - Truncate, munmap, setenv and DMA copy contracts; Windows cancel; three proposals excluded (2026-11-05, fixed; excluded; open lead)
   - Windows collector context requests, host lock waits, FFmpeg, SysV exports, scanf and reserves (2026-11-04, fixed; open items)
   - Windows strict sweep: thread exit, write leases, pipeline cache, host paths (2026-11-04, fixed; open items)

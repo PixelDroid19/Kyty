@@ -75,11 +75,6 @@ reproduced in a local title; none is a fix to ship without evidence.
   `VK_PRIMITIVE_TOPOLOGY_POINT_LIST`; `PointSize` is declared (`ShaderSpirvGenerator.cpp:1098`) but no stage
   stores it, so the host point size is undefined. The guest takes it from PA_SU_POINT_SIZE, or from the
   vertex export when PA_CL_VS_OUT_CNTL selects it. Direction: store that size in the last vertex stage.
-- Stencil ops 0x0a-0x0f (AND, OR, XOR, NAND, NOR, XNOR with STENCILOPVAL) fall through to
-  `VK_STENCIL_OP_KEEP` with a debug-only log (`GraphicsRenderDescriptor.cpp:1462-1468`). Vulkan has no logic
-  stencil ops. AND and OR are expressible as ZERO or a set with the write mask narrowed to the bits they
-  change; the rest need a refusal or another path. Direction: map the expressible ones and fail explicitly
-  on the others.
 - Without `VK_EXT_depth_range_unrestricted` the viewport depth range is clamped to [0,1]
   (`GraphicsState.cpp:241-245`). In GL clip space with ZSCALE 1 and ZOFFSET 0 the console writes the clamped
   raw z, while the host writes 0.5 z + 0.5. Depth order is kept, but stored values differ for anything that
@@ -93,12 +88,35 @@ reproduced in a local title; none is a fix to ship without evidence.
   under Linux.
 - `UnpackHalf2x16` paths outside native-half shaders get no `DenormPreserve 16`
   (`ShaderSpirvGenerator.cpp:753-760`). It matters only on a driver that flushes f16 denormals by default.
-- libkernel exports not registered: POSIX `truncate` (only `sceKernelTruncate` is), `pthread_condattr_setpshared`,
-  `fchown`, `nmount`. `select` on a regular file returns EOPNOTSUPP (`Network.cpp`, `NetSelect`). Each waits
-  for a title that imports or calls it.
-- Not applicable to Kyty: fused-EU sampler handle sharing on Intel Gfx12, because image and sampler indices
-  are resolved per draw or dispatch and are uniform across its workgroups. WRITE_DATA with DST_SEL 3 still
-  performs the write after its warning.
+- libkernel and libc exports not registered: POSIX `truncate` (only `sceKernelTruncate` is),
+  `pthread_condattr_setpshared`, `fchown`, `nmount`, `telldir`, `seekdir`. None of the 32 local titles imports
+  any of them (a byte search of every eboot and bundled module for each NID; a NID every title imports was
+  found in 30 as the positive control), so none was added. `select` on a regular file returns EOPNOTSUPP
+  (`Network.cpp`, `NetSelect`).
+- Colour targets in format 8_8 with NUMBER_UINT have no host format (`ResolveRenderTextureFormat`,
+  `RenderTexture.cpp`). The table entry is `VK_FORMAT_R8G8_UINT`, but how a UINT export narrows to 8 bits is
+  not sourced, and no local title is known to reach it.
+- Not applicable to Kyty: fused-EU sampler handle sharing on Intel Gfx12. Each image and sampler index
+  resolves to one slot per binding, either a user-data T# or a recorded dynamic `s_load`
+  (`ShaderFindImageSampledTextureDescriptor`, `ShaderResources.cpp:35-70`), so it is uniform across the
+  workgroups of a dispatch. WRITE_DATA with DST_SEL 3 still performs the write after its warning.
+
+#### Stencil logic ops (2026-11-05, fixed)
+
+DB_STENCIL_CONTROL ops 0x0a-0x0f (AND, OR, XOR, NAND, NOR, XNOR with STENCILOPVAL; AMD's published gfx10.3
+register set and its extended stencil-op extension) fell through to `VK_STENCIL_OP_KEEP` with a debug-only
+log. Vulkan has no logic stencil ops, so `get_stencil_op` (`GraphicsRenderDescriptor.cpp`) now picks the
+Vulkan op and the bits it may write: AND is ZERO on ~opval, OR is REPLACE on opval with reference
+testval | opval, XOR is INVERT on opval, XNOR is INVERT on ~opval. NAND and NOR are exact only when opval
+covers none or all of the write mask. `get_stencil_state` narrows the shared write mask, and returns false with a
+warning when a case is not exact:
+- NAND or NOR with a partial opval: the op is KEEP, as before;
+- ops of one face that need different masks: the narrowing ops become KEEP, so the others keep their mask;
+- an OR whose reference changes a compared bit.
+Ops 0x00-0x09 are unchanged. Tests: `EmulatorStencilLogicOps.*`, which compares the guest result with the
+host result for every stored value and opval under three write masks. It fails when the XOR mask is
+inverted. Strict run of `PPSA21567 - Astro Bot` to the warp, with a temporary logger on: no logic op was used, so
+no local title is known to change.
 
 ## Truncate, munmap, setenv and DMA copy contracts; Windows cancel; three proposals excluded (2026-11-05)
 
