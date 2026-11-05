@@ -236,7 +236,7 @@ std::string NewRunId()
 std::string MatrixSocketPath(const std::string& run_id, const std::string& case_id)
 {
 	const std::string identity = run_id + ":" + case_id;
-	return "/tmp/kyty_mx_" + Sha256Hex(identity.data(), identity.size()).substr(0, 20) + ".sock";
+	return LocalAgentEndpoint("kyty_mx_" + Sha256Hex(identity.data(), identity.size()).substr(0, 20));
 }
 
 MatrixCase FailedLaunch(const std::string& case_id, const std::string& frontier, bool attempted, std::vector<std::string> notes)
@@ -722,9 +722,11 @@ std::pair<std::string, std::string> MapMatrixOutcome(std::optional<int> process_
 	{
 		return {"unsupported", UsableLabel({frontier, error, "unsupported"})};
 	}
-	// Signal-style exits are host crashes. Exit 65 is also used by strict
-	// unsupported paths and therefore requires explicit crash evidence.
-	const bool crash_exit = process_exit.has_value() && std::set<int> {139, 132, 134, 136, 321}.count(*process_exit) != 0;
+	// Signal-style exits and Windows NTSTATUS error exits (0xCxxxxxxx: access violation,
+	// stack overflow, ...) are host crashes. Exit 65 is also used by strict unsupported
+	// paths and therefore requires explicit crash evidence.
+	const bool ntstatus_error = process_exit.has_value() && (static_cast<uint32_t>(*process_exit) >> 28u) == 0xCu;
+	const bool crash_exit = ntstatus_error || (process_exit.has_value() && std::set<int> {139, 132, 134, 136, 321}.count(*process_exit) != 0);
 	if (crash_exit || OneOf(error, {"host_crash", "host_fault"}))
 	{
 		return {"host_crash", UsableLabel({error, frontier, "host_crash"})};
@@ -856,6 +858,7 @@ MatrixCase RunMatrixCase(RunnerHost* host, const MatrixCaseOptions& options)
 	env_options.agent_endpoint    = socket;
 	env_options.optional_values   = {"KYTY_PRESENT_FPS_LIMIT"};
 	Environment env               = BuildChildEnvironment(options.base_environment, env_options);
+	env["KYTY_CRASH_REPORT"]      = (case_dir / "crash-context.json").string();
 	if (options.mode == "bringup")
 	{
 		for (const auto& [key, value]: DiagnosticBringupEnvironment())

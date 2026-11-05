@@ -32,6 +32,7 @@ add_library(kyty_agent_runner STATIC
 	src/runner/PlayableSession.cpp
 	src/runner/RunnerCli.cpp
 	src/runner/RunnerHostPosix.cpp
+	src/runner/RunnerHostWindows.cpp
 	src/runner/RunnerSupport.cpp
 	src/runner/SceneCheckpoint.cpp
 	src/runner/Sha256.cpp
@@ -44,6 +45,11 @@ target_include_directories(kyty_agent_runner PUBLIC
 target_include_directories(kyty_agent_runner PRIVATE
 	"${CMAKE_SOURCE_DIR}/3rdparty/stb"
 )
+
+if (WIN32)
+	# The Windows runner host talks to the child's agent over the shared named-pipe client.
+	target_link_libraries(kyty_agent_runner kyty_agent_transport)
+endif()
 
 if (NOT MSVC)
 	target_compile_options(kyty_agent_runner PRIVATE -fno-exceptions)

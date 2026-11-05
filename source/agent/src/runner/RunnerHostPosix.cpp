@@ -406,6 +406,11 @@ std::unique_ptr<RunnerHost> CreateSystemRunnerHost()
 	return std::make_unique<PosixRunnerHost>();
 }
 
+std::string LocalAgentEndpoint(const std::string& name)
+{
+	return "/tmp/" + name + ".sock";
+}
+
 void RemoveStaleUnixSocket(const std::string& path, std::vector<std::string>* notes)
 {
 	if (!IsStaleUnixSocket(path))
@@ -420,19 +425,6 @@ void RemoveStaleUnixSocket(const std::string& path, std::vector<std::string>* no
 		notes->emplace_back("stale_socket_unlink_failed:" + std::string(std::strerror(errno)));
 	}
 }
-
-} // namespace Kyty::Agent::Runner
-
-#else
-
-namespace Kyty::Agent::Runner {
-
-std::unique_ptr<RunnerHost> CreateSystemRunnerHost()
-{
-	return nullptr;
-}
-
-void RemoveStaleUnixSocket(const std::string& /*path*/, std::vector<std::string>* /*notes*/) {}
 
 } // namespace Kyty::Agent::Runner
 
