@@ -1,3 +1,65 @@
+## Layered depth passes, transport LDS, `image_sample_cd` over discard copies and textures over recycled depth slices (2026-11-05)
+
+Four general gaps stopped `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition` after its loading
+screen. With all four fixed, a warm strict run reaches the street with the player character (frame 769 of a 118 s
+run). This is a scene reached, not a playable claim: see "Still open" below.
+
+- **Layered depth-only passes.** A draw that exports a render-target index into a depth view of slices 0..5 used to
+  stop at `layered depth rendering is not implemented`. Each slice stays its own `DepthStencilVulkanImage`, as
+  before. A layered pass now renders into the slice array owned by slice 0 (`DepthStencilBufferGetSliceArray`).
+  - Before the pass, each layer is copied in from its slice when the slice's content stamp differs, or cleared to
+    `DB_DEPTH_CLEAR` when the slice was never written.
+  - `CommandBuffer::CloseRenderPass` copies every layer back to its slice and gives each slice a new content stamp.
+  - The framebuffer gets one layer per depth layer, with an n-layer dummy colour image.
+  - Only the shape seen so far is accepted: no HTILE, no stencil, no MSAA, SLICE_START 0, and no colour
+    attachments. Each other shape stops the run with its own message, as does a draw that samples the slices of
+    the layered pass that renders them.
+- **LDS of a transported pixel shader.** Fragment transport runs a pixel shader as compute. The LDS variable was
+  declared by the guest stage, so the transported shade listed an undeclared `%lds` in its `OpEntryPoint`. ANV
+  accepted the module, but the validation layer crashed on it. LDS is now declared by the host stage, as are the
+  shader's types and interface. Translator version 210.
+- **`image_sample_cd` proof over appended discard copies.** The SPIR-V generator appends one copy of a shared
+  discard block for each further branch to it, after the guest code and at the same PCs. The quad-uniform gradient
+  proof built its control-flow graph over the whole list and refused PCs that do not increase, so any coarse
+  sample in a pixel shader with such a block stopped the run (`shader emitter missing ... ImageSampleCd`). The
+  shader was a parallax ray march whose slopes come from quad broadcasts in WQM before the loop.
+  - The proof now reads the guest code alone, and only when every appended instruction copies the guest
+    instruction at its PC (same type and word).
+  - New unit test `EmulatorImageGradientProof.ReadsTheGuestCodeWithoutAppendedDiscardCopies`.
+- **A texture around recycled depth slices.** A 1024x1024 eleven-level BC texture (0xab000 bytes) was created over
+  five consecutive 256x256 16-bit depth slices, 0x20000 bytes apart, all inside its range.
+  The relation `DepthStencilBuffer IsContainedWithin Texture` stopped the run as unknown.
+  - `GpuMemoryAllowsTextureOverDepthRange` already linked a texture equal to or inside a depth range, for the same
+    reason: depth-tiled reads bind the depth image before any `Texture` is created, so a `Texture` there is a
+    colour view of recycled memory, uploaded from guest bytes.
+  - It now accepts a texture around a depth range as well, as the storage-texture rule already did. The unit test
+    that asserted the opposite was updated. No record excluded this relation.
+
+Still open in that title:
+- **Driver pipeline compiles.** One warm run stalled at frame 619 on new pipelines (up to 6.5 s each, 33 s by
+  108 s). The next run, with those pipelines in the Mesa cache, reached the street and presented about 3.5 frames
+  per second while it was still compiling.
+- **Severe visual corruption in the street.** The frame is dark and dithered blue, and the character's head is
+  green.
+  - Validation messages already present before these changes are the first leads:
+    - `VUID-vkCmdDrawIndexed-imageLayout-00344`: a colour image is sampled while it is in
+      `COLOR_ATTACHMENT_OPTIMAL`.
+    - `VUID-vkCmdDrawIndexed-format-07753`: a BC1 sRGB descriptor is read as UINT.
+  - These came from a 2-minute validation run that stopped during loading. Each layer message there was capped.
+  - The same run also reported `pushConstants-offset-01796`, `BindPipeline-pipeline-parameter` (a destroyed
+    descriptor set layout), `depthBoundsTestEnable-00598`, `pCode-08740` (demote to helper) and
+    `maintenance4-06817`.
+  - Not yet checked in the street scene.
+
+Verification: `ctest` 108 tests, 107 passed, 1 skipped (`PairedWave64`, as on main). Strict 110 s runs, with
+foreign CPU logged and no foreign load: Balatro 59.8, ANIMAL WELL 59.0, Dead Cells 59.9, GRIS 59.5, Hollow Knight
+59.9, Peppa Pig 59.3 fps. DREDGE 29.7 fps (32.4 on the previous record, same scene). Formula Retro Racing first gave
+50.9 fps with a cold translator 210 SPIR-V cache, then 59.9 warm. Astro Bot, warm, same scene after the save menu:
+18.8 and 19.1 fps on `74ca64882`, 18.9 on the LDS commit alone, against one run of 20.8 on `24d2e119f`.
+- Astro Bot draws no transported pixel shader (`transport=0` in all four logs), so the LDS change does not run
+  there. The other three changes reach it only through the translator version. The 8 % gap is unexplained and
+  rests on one base run; it is recorded, not attributed.
+
 ## Buffer format decode by table: driver compile cost cut; layered depth is the next stop (2026-11-05)
 
 Typed buffer loads (`BUFFER_LOAD_FORMAT_*`) of Gen5 shaders call `gen5_buffer_format_decode`, which used to be an
@@ -31,7 +93,7 @@ loading screen: draws continued, but each new graphics pipeline took 1.7-15 s in
 - **After the fix, same cold setup.** 391 pipelines in 25.8 s by 90 s, the slowest 0.94 s: 66 ms per pipeline
   instead of 183 ms.
 
-Next stop, not fixed: with the shader caches warm, the title gets past the pipelines it compiled before and stops
+Next stop (implemented in the record above): with the shader caches warm, the title gets past the pipelines it compiled before and stops
 at `layered depth rendering is not implemented: slices 0..5` (`GraphicsRenderAttachments.cpp:1485`).
 - The draw exports a render-target index (`PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX`) into a six-slice depth
   view. That is consistent with rendering a cube shadow map in one pass.
@@ -44,10 +106,12 @@ Validation: `ctest` 108 tests, 107 passed, 1 skipped (`KytyShaderComputeIntegrat
 Strict 110 s runs with translator 209 and `KYTY_PRESENT_FPS_LIMIT=60`, one title at a time, each in its usual state:
 Balatro 59.8, ANIMAL WELL 59.9, Dead Cells 59.9, GRIS 59.5, Hollow Knight 58.1, Peppa Pig 59.3 and Formula Retro
 Racing 59.8 fps.
-- In that set DREDGE gave 26.9 fps and Astro Bot 12.2, against 30.6 and 15.3 on translator 208. A foreign process
-  was loading the host then: one of them used about 365 % CPU during a DREDGE rerun, which gave 24.7 fps.
+- In that set DREDGE gave 26.9 fps and Astro Bot 12.2, against 30.6 and 15.3 on translator 208. Foreign CPU was
+  not logged during the set. During one DREDGE rerun a foreign process used about 365 % CPU, and that rerun gave
+  24.7 fps.
 - On a quiet host, with foreign CPU logged every 10 s and nothing above 5 %, the same warm runs gave DREDGE
-  32.4 fps and Astro Bot 21.4 fps. The table decode does not slow these titles.
+  32.4 fps and Astro Bot 21.4 fps. The drop did not reproduce there, so the table decode is not shown to slow
+  these titles.
 
 
 ## Fragment transport clears and uncompressed exports, from `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition` (2026-11-05)
