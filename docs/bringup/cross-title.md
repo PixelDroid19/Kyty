@@ -71,6 +71,34 @@ reproduced in a local title; none is a fix to ship without evidence.
   `ShaderParseSOPK.cpp:132`), VOP1 `v_frexp_exp_i32_f32`, `v_frexp_mant_f32`, `v_frexp_mant_f16`,
   `v_frexp_exp_i16_f16`, `v_sat_pk_u8_i16`, `v_cvt_norm_i16_f16`, `v_cvt_norm_u16_f16`
   (`ShaderParseVOP1.cpp:249-293`).
+- Point-list draws never write `PointSize`. `GraphicsRenderDraw.cpp:1060` maps prim type 1 to
+  `VK_PRIMITIVE_TOPOLOGY_POINT_LIST`; `PointSize` is declared (`ShaderSpirvGenerator.cpp:1098`) but no stage
+  stores it, so the host point size is undefined. The guest takes it from PA_SU_POINT_SIZE, or from the
+  vertex export when PA_CL_VS_OUT_CNTL selects it. Direction: store that size in the last vertex stage.
+- Stencil ops 0x0a-0x0f (AND, OR, XOR, NAND, NOR, XNOR with STENCILOPVAL) fall through to
+  `VK_STENCIL_OP_KEEP` with a debug-only log (`GraphicsRenderDescriptor.cpp:1462-1468`). Vulkan has no logic
+  stencil ops. AND and OR are expressible as ZERO or a set with the write mask narrowed to the bits they
+  change; the rest need a refusal or another path. Direction: map the expressible ones and fail explicitly
+  on the others.
+- Without `VK_EXT_depth_range_unrestricted` the viewport depth range is clamped to [0,1]
+  (`GraphicsState.cpp:241-245`). In GL clip space with ZSCALE 1 and ZOFFSET 0 the console writes the clamped
+  raw z, while the host writes 0.5 z + 0.5. Depth order is kept, but stored values differ for anything that
+  reads depth back. Direction: remap z in the vertex stage when the range does not fit.
+- The pixel ancillary VGPR carries only the render-target index (`ShaderSpirvInterpolation.cpp:101-115`); the
+  primitive type (bits 0-1) and sample index read zero.
+- Zero-stride V# fetches ignore OOB_SELECT: the unbound V# path checks them as raw bytes against NUM_RECORDS
+  (`ShaderSpirvBuffer.cpp:560-567`).
+- dma-buf imports are preferred whenever the import call succeeds (`GuestDeviceAddress.cpp:674-678`).
+  CPU/GPU coherence of the import is not probed, and an outside measurement reports stale CPU reads on Intel
+  under Linux.
+- `UnpackHalf2x16` paths outside native-half shaders get no `DenormPreserve 16`
+  (`ShaderSpirvGenerator.cpp:753-760`). It matters only on a driver that flushes f16 denormals by default.
+- libkernel exports not registered: POSIX `truncate` (only `sceKernelTruncate` is), `pthread_condattr_setpshared`,
+  `fchown`, `nmount`. `select` on a regular file returns EOPNOTSUPP (`Network.cpp`, `NetSelect`). Each waits
+  for a title that imports or calls it.
+- Not applicable to Kyty: fused-EU sampler handle sharing on Intel Gfx12, because image and sampler indices
+  are resolved per draw or dispatch and are uniform across its workgroups. WRITE_DATA with DST_SEL 3 still
+  performs the write after its warning.
 
 ## Truncate, munmap, setenv and DMA copy contracts; Windows cancel; three proposals excluded (2026-11-05)
 
