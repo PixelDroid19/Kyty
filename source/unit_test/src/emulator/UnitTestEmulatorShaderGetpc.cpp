@@ -413,6 +413,43 @@ TEST(EmulatorShaderGetpc, FormatStoresEncodeDescriptorFormat)
 	EXPECT_FALSE(binary.IsEmpty());
 }
 
+TEST(EmulatorShaderGetpc, NegatedAbsoluteSourcesKeepDistinctTemporaries)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// v_add_f32 v0, -|v1|, -|v2| lowers each source through its own FAbs result.
+	ShaderInstruction add {};
+	add.type      = ShaderInstructionType::VAddF32;
+	add.format    = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	add.dst       = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	add.src[0]    = {.type = ShaderOperandType::Vgpr, .register_id = 1, .size = 1};
+	add.src[1]    = {.type = ShaderOperandType::Vgpr, .register_id = 2, .size = 1};
+	add.src_num   = 2;
+	for (auto& src: {&add.src[0], &add.src[1]})
+	{
+		src->negate   = true;
+		src->absolute = true;
+	}
+	ShaderInstruction end {};
+	end.pc     = 8;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(add);
+	code.GetInstructions().Add(end);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = input.threads_num[1] = input.threads_num[2] = 1;
+	ShaderCalcBindingIndices(&input.bind);
+	const auto       source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	Vector<uint32_t> binary;
+	String8          error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+}
+
 TEST(EmulatorShaderGetpc, LdsLoadWritesWorkgroupMemoryNotVdata)
 {
 	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }

@@ -1344,25 +1344,25 @@ bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id
 		if (op.negate && op.absolute)
 		{
 			l     = uint_load + String8(' ', 10) +
-			        String8("%swf_<index> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
-			        String8("%abs_<index> = OpExtInst %float %GLSL_std_450 FAbs %swf_<index>\n") + String8(' ', 10) +
-			        String8("%<result> = OpFNegate %float %abs_<index>\n");
+			        String8("%swf_<result> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
+			        String8("%abs_<result> = OpExtInst %float %GLSL_std_450 FAbs %swf_<result>\n") + String8(' ', 10) +
+			        String8("%<result> = OpFNegate %float %abs_<result>\n");
 			*load = l.ReplaceStr("<index>", index).ReplaceStr("<result>", result_id);
 			return true;
 		}
 		if (op.absolute)
 		{
 			l     = uint_load + String8(' ', 10) +
-			        String8("%swf_<index> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
-			        String8("%<result> = OpExtInst %float %GLSL_std_450 FAbs %swf_<index>\n");
+			        String8("%swf_<result> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
+			        String8("%<result> = OpExtInst %float %GLSL_std_450 FAbs %swf_<result>\n");
 			*load = l.ReplaceStr("<index>", index).ReplaceStr("<result>", result_id);
 			return true;
 		}
 		if (op.negate)
 		{
 			l     = uint_load + String8(' ', 10) +
-			        String8("%swf_<index> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
-			        String8("%<result> = OpFNegate %float %swf_<index>\n");
+			        String8("%swf_<result> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
+			        String8("%<result> = OpFNegate %float %swf_<result>\n");
 			*load = l.ReplaceStr("<index>", index).ReplaceStr("<result>", result_id);
 			return true;
 		}
@@ -1400,8 +1400,8 @@ bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id
 
 	if (op.negate && op.absolute)
 	{
-		l += String8(' ', 10) + String8("%abs_<index> = OpExtInst %float %GLSL_std_450 FAbs %<result_id>\n") + String8(' ', 10) +
-		     String8("%<result> = OpFNegate %float %abs_<index>\n");
+		l += String8(' ', 10) + String8("%abs_<result> = OpExtInst %float %GLSL_std_450 FAbs %<result_id>\n") + String8(' ', 10) +
+		     String8("%<result> = OpFNegate %float %abs_<result>\n");
 
 		*load = l.ReplaceStr("<index>", index).ReplaceStr("<result_id>", "a" + result_id).ReplaceStr("<result>", result_id);
 
