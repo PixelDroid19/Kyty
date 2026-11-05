@@ -1412,11 +1412,20 @@ void DeleteDescriptor(RenderTextureVulkanImage* image)
 	g_render_ctx->GetDescriptorCache()->FreeDescriptor(image);
 }
 
-static bool get_stencil_op(VkStencilOp* f, uint32_t* ref, uint8_t op, uint8_t testval, uint8_t opval)
+// Logic ops (0x0a-0x0f) combine the stored value with STENCILOPVAL. Vulkan has no logic stencil ops, so each
+// becomes ZERO, INVERT or a set restricted to the bits the op changes (*write_bits, ANDed into the write mask);
+// returns false through *exact when one Vulkan op cannot produce the result.
+static bool get_stencil_op(VkStencilOp* f, uint32_t* ref, uint8_t* write_bits, bool* exact, uint8_t op, uint8_t testval,
+                           uint8_t writemask, uint8_t opval)
 {
 	VkStencilOp vk      = VK_STENCIL_OP_KEEP;
 	uint32_t    r       = opval;
 	bool        use_ref = true;
+	uint8_t     bits    = 0xffu;
+	// NAND and NOR are a single op only when STENCILOPVAL is all zeros or all ones within the write mask.
+	const bool opval_none = (opval & writemask) == 0u;
+	const bool opval_all  = (opval & writemask) == writemask;
+	*exact                = true;
 
 	switch (op)
 	{
@@ -1459,33 +1468,106 @@ static bool get_stencil_op(VkStencilOp* f, uint32_t* ref, uint8_t op, uint8_t te
 			vk      = VK_STENCIL_OP_DECREMENT_AND_WRAP;
 			use_ref = false;
 			break; /* SubWrap        */
-		case 0x0a:                                                /* And            */
-		case 0x0b:                                                /* Or             */
-		case 0x0c:                                                /* Xor            */
-		case 0x0d:                                                /* Nand           */
-		case 0x0e:                                                /* Nor            */
-		case 0x0f:                                                /* Xnor           */
+		case 0x0a:
+			vk      = VK_STENCIL_OP_ZERO;
+			bits    = static_cast<uint8_t>(~opval);
+			use_ref = false;
+			break; /* And            */
+		case 0x0b:
+			// The reference is also the compare value; keeping testval's bits leaves the compare intact
+			// unless opval sets a compared bit testval lacks (checked by the caller).
+			vk   = VK_STENCIL_OP_REPLACE;
+			r    = static_cast<uint32_t>(testval | opval);
+			bits = opval;
+			break; /* Or             */
+		case 0x0c:
+			vk      = VK_STENCIL_OP_INVERT;
+			bits    = opval;
+			use_ref = false;
+			break; /* Xor            */
+		case 0x0d:
+			if (opval_all)
+			{
+				vk      = VK_STENCIL_OP_INVERT;
+				use_ref = false;
+			} else if (opval_none)
+			{
+				vk = VK_STENCIL_OP_REPLACE;
+				r  = 0xFF;
+			} else
+			{
+				use_ref = false;
+				*exact  = false;
+			}
+			break; /* Nand           */
+		case 0x0e:
+			if (opval_all)
+			{
+				vk      = VK_STENCIL_OP_ZERO;
+				use_ref = false;
+			} else if (opval_none)
+			{
+				vk      = VK_STENCIL_OP_INVERT;
+				use_ref = false;
+			} else
+			{
+				use_ref = false;
+				*exact  = false;
+			}
+			break; /* Nor            */
+		case 0x0f:
+			vk      = VK_STENCIL_OP_INVERT;
+			bits    = static_cast<uint8_t>(~opval);
+			use_ref = false;
+			break; /* Xnor           */
 		default: KYTY_LOG_DEBUG("WARNING: invalid PM4 op (continuing)\n"); break;
 	}
-	*f   = vk;
-	*ref = r;
+	*f          = vk;
+	*ref        = r;
+	*write_bits = bits;
 	return use_ref;
 }
 
-void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
-                              uint8_t zfail, uint8_t testval, uint8_t mask, uint8_t writemask, uint8_t opval)
+bool get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
+                       uint8_t zfail, uint8_t testval, uint8_t mask, uint8_t writemask, uint8_t opval)
 {
 	EXIT_IF(s == nullptr || d == nullptr);
 
-	uint32_t ref[3]     = {};
-	bool     use_ref[3] = {};
+	uint32_t ref[3]        = {};
+	bool     use_ref[3]    = {};
+	uint8_t  write_bits[3] = {};
+	bool     op_exact[3]   = {};
 
-	use_ref[0]     = get_stencil_op(&s->failOp, ref + 0, fail, testval, opval);
-	use_ref[1]     = get_stencil_op(&s->passOp, ref + 1, zpass, testval, opval);
-	use_ref[2]     = get_stencil_op(&s->depthFailOp, ref + 2, zfail, testval, opval);
+	use_ref[0]     = get_stencil_op(&s->failOp, ref + 0, write_bits + 0, op_exact + 0, fail, testval, writemask, opval);
+	use_ref[1]     = get_stencil_op(&s->passOp, ref + 1, write_bits + 1, op_exact + 1, zpass, testval, writemask, opval);
+	use_ref[2]     = get_stencil_op(&s->depthFailOp, ref + 2, write_bits + 2, op_exact + 2, zfail, testval, writemask, opval);
 	s->compareOp   = static_cast<VkCompareOp>(func);
 	d->compareMask = mask;
-	d->writeMask   = writemask;
+	bool exact     = op_exact[0] && op_exact[1] && op_exact[2];
+
+	// The three ops share one write mask: the ops that write must agree on the bits a logic op narrows it to.
+	// When they do not, the narrowing ops are dropped (KEEP) so the other ops keep their full mask.
+	VkStencilOp* ops[3]     = {&s->failOp, &s->passOp, &s->depthFailOp};
+	uint8_t      narrow     = 0xffu;
+	bool         narrow_set = false;
+	bool         conflict   = false;
+	for (int i = 0; i < 3; i++)
+	{
+		if (*ops[i] == VK_STENCIL_OP_KEEP) { continue; }
+		conflict   = conflict || (narrow_set && write_bits[i] != narrow);
+		narrow     = write_bits[i];
+		narrow_set = true;
+	}
+	if (conflict)
+	{
+		exact  = false;
+		narrow = 0xffu;
+		for (int i = 0; i < 3; i++)
+		{
+			if (write_bits[i] != 0xffu) { *ops[i] = VK_STENCIL_OP_KEEP; }
+		}
+	}
+	d->writeMask = static_cast<uint8_t>(writemask & narrow);
 
 	if (use_ref[0])
 	{
@@ -1502,6 +1584,17 @@ void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicStat
 	{
 		d->reference = testval;
 	}
+
+	// A logic op that writes through the reference moves the compare value off testval.
+	const bool logic_op      = fail >= 0x0au || zpass >= 0x0au || zfail >= 0x0au;
+	const bool compare_reads = func != VK_COMPARE_OP_NEVER && func != VK_COMPARE_OP_ALWAYS;
+	if (logic_op && compare_reads && ((d->reference ^ testval) & mask) != 0u) { exact = false; }
+	if (logic_op && !exact)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: stencil logic op not expressible as one Vulkan op (fail=%u zpass=%u zfail=%u opval=0x%02x writemask=0x%02x)\n",
+		               fail, zpass, zfail, opval, writemask);
+	}
+	return exact;
 }
 
 Vector<RenderTextureVulkanImage*> FindRenderTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact)

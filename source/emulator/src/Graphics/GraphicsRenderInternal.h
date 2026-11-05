@@ -1783,7 +1783,8 @@ void hw_check(const HW::Context& hw, bool allow_depth_stencil_copy = false);
 void hw_print(const HW::Context& hw);
 
 // --- Descriptor / stencil / Find* ---
-void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
+// Returns false when a stencil logic op (0x0a-0x0f) cannot be expressed exactly with Vulkan stencil state.
+bool get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
                        uint8_t zfail, uint8_t testval, uint8_t mask, uint8_t writemask, uint8_t opval);
 Vector<RenderTextureVulkanImage*>  FindRenderTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 // A dispatch proven to store `words` to every 16-byte record of its only
