@@ -79,16 +79,16 @@ struct TestJsonObjectPair
 static_assert(sizeof(TestJsonObjectPair) == 40);
 static_assert(offsetof(TestJsonObjectPair, value) == 8);
 
-using ArrayBeginFn       = void* (*)(void*, const void*);
-using ArrayEndFn         = void* (*)(void*, const void*);
-using IteratorDerefFn    = const void* (*)(const void*);
-using IteratorIncrementFn = void* (*)(void*);
-using IteratorNotEqualFn = bool (*)(const void*, const void*);
-using IteratorDestroyFn  = void (*)(void*);
-using GetStringFn        = const void* (*)(const void*);
-using GetArrayFn         = const void* (*)(const void*);
-using GetObjectFn        = const void* (*)(const void*);
-using GetUIntegerFn      = const void* (*)(const void*);
+using ArrayBeginFn       = void*(KYTY_SYSV_ABI*)(void*, const void*);
+using ArrayEndFn         = void*(KYTY_SYSV_ABI*)(void*, const void*);
+using IteratorDerefFn    = const void*(KYTY_SYSV_ABI*)(const void*);
+using IteratorIncrementFn = void*(KYTY_SYSV_ABI*)(void*);
+using IteratorNotEqualFn = bool(KYTY_SYSV_ABI*)(const void*, const void*);
+using IteratorDestroyFn  = void(KYTY_SYSV_ABI*)(void*);
+using GetStringFn        = const void*(KYTY_SYSV_ABI*)(const void*);
+using GetArrayFn         = const void*(KYTY_SYSV_ABI*)(const void*);
+using GetObjectFn        = const void*(KYTY_SYSV_ABI*)(const void*);
+using GetUIntegerFn      = const void*(KYTY_SYSV_ABI*)(const void*);
 
 SymbolResolve JsonFunc(const char16_t* nid)
 {

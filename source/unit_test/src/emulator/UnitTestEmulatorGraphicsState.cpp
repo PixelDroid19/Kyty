@@ -5421,7 +5421,7 @@ TEST(EmulatorGraphicsState, ReportsNoSystemServiceEventWithoutFabricatingOne)
 	const auto* record = symbols.Find(query);
 	ASSERT_NE(record, nullptr);
 
-	using ReceiveEventFunc = int (*)(void*);
+	using ReceiveEventFunc = int(KYTY_SYSV_ABI*)(void*);
 	auto    receive_event  = reinterpret_cast<ReceiveEventFunc>(record->vaddr);
 	uint8_t event[64]      = {};
 	for (auto& value: event)
