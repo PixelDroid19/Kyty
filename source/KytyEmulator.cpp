@@ -237,7 +237,12 @@ KYTY_SCRIPT_FUNC(kyty_load_elf_func)
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
 
 	const auto real_path = Kernel::FileSystem::GetRealFilename(elf.ToString());
-	auto*      program   = Loader::ProgramLoader::Load(rt, real_path);
+	if (real_path.IsEmpty())
+	{
+		EXIT("%s does not resolve to a host file inside its mount (malformed path, or a link leaving the mount)\n",
+		     elf.ToString().C_Str());
+	}
+	auto* program = Loader::ProgramLoader::Load(rt, real_path);
 
 	// Thin orchestration: after the primary executable is loaded, the lifecycle
 	// coordinator may build a deterministic adjacent-module plan (feature-gated).
@@ -357,7 +362,9 @@ KYTY_SCRIPT_FUNC(kyty_load_param_json_func)
 
 // kyty_load_addcont(app0_root, packages_root): the title's installed add-on
 // content, from <app0_root>/dlc_emu.ini and <packages_root>/<TITLE_ID>/*.
-// Call after kyty_load_param_json; packages_root may be empty.
+// Call after kyty_load_param_json; packages_root may be empty. Without a title
+// id (no sce_sys/param.json) no add-on content can match the title, and a
+// source given for it is reported invalid.
 KYTY_SCRIPT_FUNC(kyty_load_addcont_func)
 {
 	if (Scripts::ArgGetVarCount() != 2)
@@ -367,10 +374,7 @@ KYTY_SCRIPT_FUNC(kyty_load_addcont_func)
 
 	String title_id;
 	String app_version;
-	if (!Loader::SystemContentGetMetadata(&title_id, &app_version) || title_id.IsEmpty())
-	{
-		EXIT("kyty_load_addcont needs the title id: call kyty_load_param_json first\n");
-	}
+	Loader::SystemContentGetMetadata(&title_id, &app_version);
 	Loader::AddcontInventoryLoad(Scripts::ArgGetVar(0).ToString().utf8_str().GetData(),
 	                             Scripts::ArgGetVar(1).ToString().utf8_str().GetData(), title_id.utf8_str().GetData());
 
