@@ -1191,7 +1191,9 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 	const auto     directory       = GuestDeviceAddressBuildDirectory(bases.data(), static_cast<uint32_t>(bases.size()));
 	const uint64_t entry_bytes     = registry->entries.size() * sizeof(TableEntry);
 	const uint64_t directory_bytes = directory.words.size() * sizeof(uint32_t);
-	const uint64_t bytes           = kGuestDeviceAddressNullBytes + entry_bytes + directory_bytes;
+	// The device clamps every entry index to the entry count, so one zeroed entry
+	// past the directory keeps a read at that index inside the table.
+	const uint64_t bytes = kGuestDeviceAddressNullBytes + entry_bytes + directory_bytes + sizeof(TableEntry);
 	Table          table;
 	table.buffer = CreateAddressBuffer(ctx, bytes, 0);
 	VkMemoryRequirements requirements {};
@@ -1234,6 +1236,7 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 		std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes, registry->entries.data(), entry_bytes);
 	}
 	std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes + entry_bytes, directory.words.data(), directory_bytes);
+	std::memset(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes + entry_bytes + directory_bytes, 0, sizeof(TableEntry));
 	vkUnmapMemory(ctx->device, table.memory);
 	table.device  = BufferDeviceAddress(ctx->device, table.buffer);
 	table.entries = static_cast<uint32_t>(registry->entries.size());

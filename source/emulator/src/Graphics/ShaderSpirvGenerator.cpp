@@ -1076,7 +1076,7 @@ void Spirv::WriteDebug()
 		int index = 0;
 		for (const auto& p: m_code.GetDebugPrintfs())
 		{
-			m_source += String8::FromPrintf("%%printf_str_%d = OpString \"%s\"", index, p.format.C_Str());
+			m_source += String8::FromPrintf("%%printf_str_%d = OpString \"%s\"\n", index, p.format.C_Str());
 			index++;
 		}
 	}
