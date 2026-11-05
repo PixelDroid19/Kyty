@@ -1,3 +1,25 @@
+## Defects found while reviewing outside proposals (2026-11-05, open)
+
+- **Narrow formatted buffer stores are dropped without a report.** `tbuffer_store_format_x/xy/xyzw`
+  (`source/emulator/src/Graphics/ShaderSpirvTemplates.cpp`, `tbuffer_format_scalar32` near line 874) store
+  only when the V# data format is 20, 22, 36 or 39. The format is read from the descriptor at run time
+  (`emit_gen5_mubuf_format_store`, `ShaderSpirvBuffer.cpp:1206`), so any other format (8- or 16-bit
+  channels, packed formats) writes nothing and nothing is logged. Trigger: a guest
+  `buffer_store_format_*` through a V# with such a format. Direction: convert and store each format the
+  load side already decodes, and report an unknown format instead of skipping it.
+- **Two-channel colour targets with an alternate swap stop the run.** `Objects/RenderTexture.cpp` maps
+  CB formats 3 (8_8) and 5 (16_16) only with channel order 0, so COMP_SWAP 1 reaches the
+  "unsupported render-target format" EXIT (`GraphicsRenderAttachments.cpp`). The X and W exports go to
+  the two channels in that swap; the export order has to be remapped, not only a table row added.
+- **`buffer_load_dword` with the LDS bit is refused.** The lowering preconditions reject the LDS flag
+  (`ShaderComputeWaveAnalysis.cpp:513`). RDNA2 ISA section 8.1.9 defines the form: the dword goes to LDS at
+  `M0[15:0] + OFFSET + 4 * lane` and no VGPR is written. Not seen in a local title yet.
+- **The context reset is all zeros.** `HW::Context::Reset()` (`HardwareContext.h:742`) runs on
+  `IT_CLEAR_STATE`. The gfx10 clear-state table AMD publishes in the amdgpu kernel driver sets non-zero
+  defaults, among them `CB_TARGET_MASK` and `CB_SHADER_MASK` 0xffffffff, `PA_CL_CLIP_CNTL` 0x00090000,
+  `PA_SU_SC_MODE_CNTL` 4 and the scissor bottom-right corners. A title that relies on a default after
+  CLEAR_STATE writes no colour. Not seen in a local title yet.
+
 ## Truncate, munmap, setenv and DMA copy contracts; Windows cancel; three proposals excluded (2026-11-05)
 
 Host: Linux, Intel Arc A770, Mesa 26.2.5 (ANV), strict runs at the 60 fps present limit. Each fix
