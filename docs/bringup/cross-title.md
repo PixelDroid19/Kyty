@@ -1,24 +1,76 @@
-## Defects found while reviewing outside proposals (2026-11-05, open)
+## Format stores, two-channel ALT targets and LDS loads fixed; PC clear-state defaults excluded (2026-11-05)
 
-- **Narrow formatted buffer stores are dropped without a report.** `tbuffer_store_format_x/xy/xyzw`
-  (`source/emulator/src/Graphics/ShaderSpirvTemplates.cpp`, `tbuffer_format_scalar32` near line 874) store
-  only when the V# data format is 20, 22, 36 or 39. The format is read from the descriptor at run time
-  (`emit_gen5_mubuf_format_store`, `ShaderSpirvBuffer.cpp:1206`), so any other format (8- or 16-bit
-  channels, packed formats) writes nothing and nothing is logged. Trigger: a guest
-  `buffer_store_format_*` through a V# with such a format. Direction: convert and store each format the
-  load side already decodes, and report an unknown format instead of skipping it.
-- **Two-channel colour targets with an alternate swap stop the run.** `Objects/RenderTexture.cpp` maps
-  CB formats 3 (8_8) and 5 (16_16) only with channel order 0, so COMP_SWAP 1 reaches the
-  "unsupported render-target format" EXIT (`GraphicsRenderAttachments.cpp`). The X and W exports go to
-  the two channels in that swap; the export order has to be remapped, not only a table row added.
-- **`buffer_load_dword` with the LDS bit is refused.** The lowering preconditions reject the LDS flag
-  (`ShaderComputeWaveAnalysis.cpp:513`). RDNA2 ISA section 8.1.9 defines the form: the dword goes to LDS at
-  `M0[15:0] + OFFSET + 4 * lane` and no VGPR is written. Not seen in a local title yet.
-- **The context reset is all zeros.** `HW::Context::Reset()` (`HardwareContext.h:742`) runs on
-  `IT_CLEAR_STATE`. The gfx10 clear-state table AMD publishes in the amdgpu kernel driver sets non-zero
-  defaults, among them `CB_TARGET_MASK` and `CB_SHADER_MASK` 0xffffffff, `PA_CL_CLIP_CNTL` 0x00090000,
-  `PA_SU_SC_MODE_CNTL` 4 and the scissor bottom-right corners. A title that relies on a default after
-  CLEAR_STATE writes no colour. Not seen in a local title yet.
+Contract defects found while reviewing outside proposals. Three are fixed in the general path; none was
+traced to a failure in a local title, and the strict set below shows they do not regress the working ones.
+The fourth proposal, the PC clear-state table, broke a working title and is excluded.
+
+- **Narrow formatted buffer stores were dropped without a report.** `buffer_store_format_x/xy/xyzw` on Gen5
+  matched only the legacy data-format numbers (20, 22, 36, 39), so every other V# format wrote nothing.
+  `ShaderSpirvBufferFormat.cpp` now encodes every format of the Gen5 buffer-format table (RDNA2 ISA table
+  47), applying the V# DST_SEL in reverse (ISA table 31), and writes the element through byte-masked
+  dwords: full dwords with a plain store, partial dwords with an atomic AND/OR pair so neighbouring bytes
+  owned by other lanes survive. NumRecords 0 and out-of-range writes store nothing (ISA table 35).
+  - Evidence for integer truncation: `BUFFER_STORE_BYTE` is defined as a store through format 8_UINT of
+    the low bits. Unsourced and open to falsification by a capture: round-to-nearest-even for UNORM/SNORM,
+    clamping for USCALED/SSCALED, 11/10-bit floats through a half-float conversion (double rounding, a
+    negative stores 0), and 0 for a memory channel no data component selects.
+  - Validated with `spirv-val` only (`EmulatorShaderGetpc.FormatStoresEncodeDescriptorFormat`); no host
+    test runs the encoder on a GPU.
+- **Two-channel colour targets with COMP_SWAP 1 stopped the run.** In the ALT swap an 8_8, 16_16 or 32_32
+  target stores export X in channel 0 and W in channel 1 (the published Linux AMD driver's colour-swap
+  table: `X__Y` selects SWAP_ALT for two channels). No host format orders channels that way, so
+  `HW::Context::SetColorInfo` marks the target with `kColorExportOrderTwoChannelAlt`; the pixel export
+  (`ShaderColorExportSourceComponent`) and the colour write mask move W into the second channel, and
+  `ResolveRenderTextureFormat` maps 8_8 UNORM and 16_16 FLOAT/UINT with order 1 to their plain two-channel
+  formats. Open: with blending enabled the host blends channel 1 with the colour equation, while the
+  guest blends W with the alpha equation; a target with distinct alpha blend state is not remapped.
+- **`buffer_load_dword` with LDS=1 was refused.** RDNA2 ISA 8.1.9: the dword goes to LDS at
+  `M0[15:0] + OFFSET + TIDinWave * 4` and VDATA is not written. The MUBUF decoder now gives that form a
+  null destination, the lowering preconditions admit it for `buffer_load_dword` only, and compute shaders
+  with an LDS allocation store the loaded value through the shared `%lds` array, exec- and bounds-gated
+  like `ds_*_addtid_b32`. Other opcodes with LDS set, legacy encodings and shaders without LDS still
+  refuse. Tests: `EmulatorShaderGetpc.LdsLoadWritesWorkgroupMemoryNotVdata` and the updated
+  `EmulatorShaderLdsBounds` parser and rejection contracts.
+- **Excluded: CLEAR_STATE feeding the gfx10 PC clear-state table.** `cp_op_clear_state` resets the context to
+  zero. Feeding it the non-zero values AMD publishes with the amdgpu kernel driver (CB_TARGET_MASK, scissors,
+  viewport ZMAX, PA_CL_CLIP_CNTL 0x00090000 and 33 more) removed every UI panel of `PPSA21402 - Balatro`
+  (button backgrounds, side panel, tooltips) while text and cards still drew. Skipping single registers
+  in strict runs pinned it on PA_CL_CLIP_CNTL: skipping that one register (DX_CLIP_SPACE_DEF and
+  DX_LINEAR_ATTR_CLIP_ENA set) brings the panels back, skipping only the 16 viewport ZMAX values does not. The console's own
+  clear-state values differ from the PC table in at least this register and have not been observed, so
+  no value of that table is applied. Direction: take defaults from a console trace of the context
+  right after CLEAR_STATE, not from the PC table.
+- Not a defect: on the blind-select screen of `PPSA21402 - Balatro` the "Upcoming" buttons are barely
+  legible. The game's Lua draws an inactive blind with a #666666 button, #888888 text at 60 % alpha and a
+  50 % dark overlay over the whole panel; the captures match that.
+
+Validation: Linux, Intel Arc A770, Mesa 26.2.5, strict 110 s runs with a 60 fps present limit, host shared
+with a foreign CPU-heavy process. With all four changes, `PPSA22520 - ANIMAL WELL`, `PPSA15552 - Dead Cells`,
+`PPSA09076 - DREDGE`, `PPSA17189 - Formula Retro Racing`, `PPSA09804 - GRIS`, `PPSA34971 - Hollow Knight` and
+`PPSA03706 - My Friend Peppa Pig` reached their usual states (52-60 fps; DREDGE 34 fps). `PPSA21567 - Astro Bot`
+only reached its warp with a cold shader cache (inconclusive). Balatro lost its panels, as above. With the clear-state change
+removed, Balatro draws its panels again at 59.8 fps. `ctest`: 108 tests, 107 passed, 1 skipped.
+
+### Outside proposals reviewed, not fixed (2026-11-05, open)
+
+Leads from reviewing outside proposals against Kyty. Each was checked against the current code but not
+reproduced in a local title; none is a fix to ship without evidence.
+
+- Audio, NGS2: `Ngs2PatchVoice` refuses `destination_input != 0` (`AudioNgs2.cpp:2411`); the submixer
+  routing parameters 0x20000006 and 0x20000002 are refused (`AudioNgs2.cpp:2316-2339`); sampler and custom
+  filter parameter ids outside the known set are refused (`AudioNgs2.cpp:2219-2246`). Direction: implement
+  each parameter from a guest trace of a title that sends it.
+- Video, AvPlayer: a looping stream rewinds without posting a looping-back event
+  (`AudioAvPlayer.cpp:748`); the event id is unknown.
+- Shaders: mixed interpolation modes across inputs of one pixel shader are not distinguished
+  (`ShaderSpirvOperands.cpp:445-514`); 32-bit UINT colour exports go through float outputs
+  (`ShaderSpirvVector.cpp:481-580`); a compressed export with mode 7 into a non-UINT target stops the run
+  (`ShaderSpirvVector.cpp:251`); `v_cvt_f32_f16` with a partial SDWA destination is refused
+  (`ShaderSpirvF16.h:289-296`).
+- Decoder gaps (RDNA2 ISA, not seen in a local title): SOPK 0x1B/0x1C (`s_subvector_loop_begin/end`,
+  `ShaderParseSOPK.cpp:132`), VOP1 `v_frexp_exp_i32_f32`, `v_frexp_mant_f32`, `v_frexp_mant_f16`,
+  `v_frexp_exp_i16_f16`, `v_sat_pk_u8_i16`, `v_cvt_norm_i16_f16`, `v_cvt_norm_u16_f16`
+  (`ShaderParseVOP1.cpp:249-293`).
 
 ## Truncate, munmap, setenv and DMA copy contracts; Windows cancel; three proposals excluded (2026-11-05)
 
