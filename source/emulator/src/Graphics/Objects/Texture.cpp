@@ -234,6 +234,43 @@ static void upload_depth_layers(GraphicContext* ctx, TextureVulkanImage* image, 
 	}
 }
 
+// Level L of a thin volume has max(1, depth >> L) slices; slice z of each level is read from
+// array layer z of the guest chain (Gen5GetVolumeTextureLayout).
+static void upload_thin_volume_levels(GraphicContext* ctx, TextureVulkanImage* image, const Gen5TextureArrayLayout& slices,
+                                      const void* guest, uint64_t guest_size, uint64_t vk_layout)
+{
+	const auto                                slice_bytes = static_cast<size_t>(slices.linear_slice_size);
+	std::vector<uint8_t>                      linear(slice_bytes * slices.layers);
+	std::vector<Gen5TextureArrayUploadRegion> levels(slices.levels);
+	Vector<BufferImageCopy>                   regions;
+	for (uint32_t z = 0; z < slices.layers; ++z)
+	{
+		uint32_t filled = slices.levels;
+		if (!Gen5DetileTextureArrayLayer(linear.data() + slice_bytes * z, slice_bytes, guest, guest_size, slices, z) ||
+		    !Gen5FillTextureArrayLayerUploadRegionsForLevels(slices, z, slices.levels, levels.data(), slices.levels, &filled) ||
+		    filled != slices.levels)
+		{
+			EXIT("Gen5 volume slice detile failed: slice=%u depth=%u levels=%u\n", z, slices.layers, slices.levels);
+		}
+		for (const auto& level: levels)
+		{
+			if (z >= std::max(1u, slices.layers >> level.dst_level))
+			{
+				continue;
+			}
+			BufferImageCopy region {};
+			region.offset    = static_cast<uint32_t>(slice_bytes * z + level.offset);
+			region.pitch     = level.pitch_texels;
+			region.width     = level.width;
+			region.height    = level.height;
+			region.dst_level = level.dst_level;
+			region.dst_z     = static_cast<int>(z);
+			regions.Add(region);
+		}
+	}
+	UtilFillImage(ctx, image, linear.data(), linear.size(), regions, vk_layout);
+}
+
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("TextureObject::update_func");
@@ -293,6 +330,12 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			EXIT("unsupported Gen5 volume upload: format=%u %ux%ux%u pitch=%u levels=%u tile=%u size=%" PRIu64 "\n",
 			     static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), depth,
 			     static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), *size);
+		}
+		if (volume_layout.thin && volume_layout.slices.levels > 1u)
+		{
+			upload_thin_volume_levels(ctx, vk_obj, volume_layout.slices, reinterpret_cast<const void*>(*vaddr), *size,
+			                          static_cast<uint64_t>(vk_layout));
+			return;
 		}
 		std::vector<uint8_t> linear(static_cast<size_t>(volume_layout.linear_size));
 		EXIT_IF(!Gen5DetileTextureVolume(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, volume_layout));

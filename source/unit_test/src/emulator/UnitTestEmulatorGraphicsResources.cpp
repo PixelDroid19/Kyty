@@ -1035,11 +1035,11 @@ TEST(EmulatorGraphicsResources, VolumeAdmissionNeverTurnsRejectedTilingIntoLinea
 					const bool admitted = Gen5GetVolumeTextureLayout(format, 8u, 16u, depth, 8u, levels, tile, &layout);
 					// SW mode 0 (linear) is a byte-for-byte layout and SW modes 5 and 9 the SW_4KB_S and
 					// SW_64KB_S volume patterns of every element size. SW mode 27 is a thin volume whose
-					// slices are 2D-array layers. Any other tile mode, or a mip chain, must stay rejected
-					// instead of being read as linear.
+					// slices are 2D-array layers, mip chain included. Any other tile mode, or a mip chain
+					// in another mode, must stay rejected instead of being read as linear.
 					Gen5TextureArrayLayout slices {};
-					const bool thin = tile == 27u && Gen5GetTextureArrayLayout(format, 8u, 16u, 8u, 1u, 27u, depth, &slices);
-					EXPECT_EQ(admitted, levels == 1u && (tile == 0u || tile == 5u || tile == 9u || thin));
+					const bool thin = tile == 27u && Gen5GetTextureArrayLayout(format, 8u, 16u, 8u, levels, 27u, depth, &slices);
+					EXPECT_EQ(admitted, thin || (levels == 1u && (tile == 0u || tile == 5u || tile == 9u)));
 					if (!admitted)
 					{
 						EXPECT_EQ(layout.tiled.size, 0u);

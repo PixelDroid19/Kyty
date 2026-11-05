@@ -167,7 +167,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		const bool              layout_valid = Gen5GetVolumeTextureLayout(
 		    static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
 		    static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), &volume_layout);
-		if (!layout_valid || !Gen5ValidateTextureVolumeUpload(volume_layout, *size))
+		if (!layout_valid || levels != 1u || !Gen5ValidateTextureVolumeUpload(volume_layout, *size))
 		{
 			EXIT("unsupported Gen5 storage volume upload: format=%u %ux%ux%u pitch=%u levels=%u tile=%u size=%" PRIu64 "\n",
 			     static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
