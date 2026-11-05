@@ -1,3 +1,376 @@
+## Windows collector context requests, host lock waits, FFmpeg, SysV exports, scanf and reserves (2026-11-04)
+
+Host: Windows 11, Intel Arc A770, driver 32.0.101.9150, MinGW UCRT build, strict runs at the
+60 fps present limit. `PPSA09804 - GRIS` stayed black at 2 presents; each item below was the
+next stop on the way to its title menu.
+
+- **Context requests were never delivered on Windows, fixed**
+  (`source/emulator/src/Kernel/PthreadContext.cpp`).
+  - Observed: GRIS stopped at present 2. The IL2CPP collector stops the world through
+    `KernelRaiseException(thread, 30)` (record "Collector context requests delivered only at safe
+    points") and waits on its suspend semaphore for each thread's answer. On Windows
+    `PthreadInstallContextHandler` returned false and `PthreadRaiseContext` returned OK without
+    delivering, so the collector waited forever.
+  - Fix: the Windows branch keeps the Linux contract (deliver only at a safe point, else retry
+    with the same jittered delay). A delivery suspends the target, reads its context with
+    `CONTEXT_EXCEPTION_REQUEST` and classifies the stop: guest code (`GuestCodeRanges`), or a
+    host service inside a `PthreadInterruptibleScope` that will return by itself
+    (`NtWaitForAlertByThreadId`, which `NtAlertThreadByThreadId` ends and its callers re-wait;
+    `NtDelayExecution`; `NtWaitForSingleObject` with a timeout). It then queues a special user
+    APC (`QueueUserAPC2`, `QUEUE_USER_APC_CALLBACK_DATA_CONTEXT`) that runs the guest handler
+    with a FreeBSD-layout `SignalUcontext`. Any other stop re-arms a threadpool retry timer.
+  - Probes behind the design (scratch programs, not committed): a special APC does not
+    interrupt a non-alertable wait, it runs when the wait returns; its `CONTEXT` is built right
+    below RSP, so in guest code it clobbered the SysV red zone on the 2nd delivery, and lowering
+    RSP by 128 before queuing and restoring it in the APC gave 137 deliveries with no clobber.
+    `NtWaitForSingleObject` keeps the timeout pointer in R8 (0 for an infinite wait).
+  - Verified: `EmulatorKernelProcess` context tests now build and run on Windows
+    (`ContextRequestsReachSleepingThreads`, `ContextRequestWaitsForSafePoint`,
+    `ContextRequestReachesLockWaiter`, `ContextRequestInterruptsGuestCode` and the two
+    `StoppedWaiter` tests, 6 of 6). GRIS passes present 2 and runs at 60 fps.
+  - Limits: no target object check as on Linux; the handler runs on the interrupted stack, not
+    on a separate trampoline stack; retries run at threadpool (millisecond) granularity.
+- **Sub-millisecond sleeps did not sleep, fixed** (`source/lib/Core/src/Threads.cpp`).
+  MinGW `std::this_thread::sleep_for(100us)` returns at once (1000 calls took 0.0 ms), so every
+  guest `usleep` below 1 ms was a busy loop and a sleeping thread was never in a host service a
+  context request could stop at. `SleepMicro`/`SleepNano` now wait on a thread-local
+  high-resolution waitable timer with a bounded `WaitForSingleObject`.
+- **Core mutexes on Windows use `CRITICAL_SECTION`/`CONDITION_VARIABLE` with GCC too**
+  (`KYTY_WIN_CS`, `Threads.cpp`). The define was clang-only since a 2022 third-party update with
+  no recorded reason; with GCC, Core locks went through winpthreads.
+- **Contended host pthread locks are taken in 1 ms slices on Windows** (`Pthread.h`,
+  `PthreadContext.cpp`, `PthreadMutex.cpp`, `PthreadRwlock.cpp`, `PthreadCond.cpp`). winpthreads
+  blocks a contended `pthread_mutex`/`pthread_rwlock` (and `std::mutex`, `std::shared_mutex`) on
+  an infinite event wait that nothing can interrupt. `PthreadLockHostMutex` and
+  `PthreadLockHostRwlock{Shared,Exclusive}` loop the timed variants with 1 ms deadlines there, so
+  a context request is delivered as a slice ends; other hosts lock directly.
+  `ContextRequestReachesLockWaiter` failed before and passes with it.
+- **FFmpeg was never linked on Windows, fixed** (`source/emulator/CMakeLists.txt`).
+  - Observed: after the context fix GRIS stopped at about 30 s with
+    `AJM batch rejected: Opus decoder is unavailable for the observed profile`
+    (`AudioAjm.cpp`); the backend reported "FFmpeg is not available".
+  - Cause: the FFmpeg `pkg_check_modules` block was inside `if (LINUX)`.
+  - Fix: the block runs on every platform. A host without the FFmpeg `.pc` files still builds
+    without it. Local setup used here: the FFmpeg 9.0.2 shared build from scoop
+    (`ffmpeg-shared`) with hand-written `.pc` files on `PKG_CONFIG_PATH`; its `bin` must be on
+    `PATH` when the emulator or the unit tests run.
+  - Verified: GRIS reaches its title menu ("NEW GAME"), scored `healthy` by `kyty_agent score`,
+    and ran a bounded 90 s strict run at 60 fps (4476 presents) without stopping.
+  - Open: release packaging does not ship the FFmpeg DLLs; a Windows package built with FFmpeg
+    must carry them and their license notice.
+- **Local runs loaded another toolchain's `libwinpthread-1.dll` (host setup, not a code
+  defect).** `fc_script.exe`, `kyty_unit_test.exe` and `kyty_agent.exe` import
+  `libwinpthread-1.dll` and `libatomic-1.dll`. A build directory has no copy, so the loader takes
+  the first one on `PATH`; from Git Bash that is Git's `/mingw64/bin`, not the toolchain the
+  binary was built with. Under the `games-matrix` runner started from Git Bash, GRIS stopped
+  every time (4 of 4) at present 2 with a guest read of `0x19` at the same guest RIP; started
+  from PowerShell, or from Git Bash with the toolchain's DLLs copied next to the executables, it
+  reached `interactive` (2 of 2). Environment, stdio, resolution and agent polling were each
+  ruled out by a standalone run that did not stop. Sweeps and unit-test runs started from Git
+  Bash before this point (including the earlier sweeps in these records) ran with Git's
+  winpthreads. Release packages copy the toolchain's DLLs next to the executables and are not
+  affected. Local setup: copy the toolchain's `libwinpthread-1.dll` and `libatomic-1.dll` into the
+  build directory and `agent/`.
+- **HLE exports without the SysV ABI, fixed** (`source/emulator/src/Libs/LibC.cpp`).
+  26 exports registered with `LIB_FUNC` were defined without `KYTY_SYSV_ABI`: `c16rtomb`,
+  `mbrtoc16`, the `std::filesystem` helpers (`c_fs_*`), `get_new_handler`, aligned and nothrow
+  `new`/`delete`, the exception destructors and the `throw_*` helpers. On Linux the host ABI is
+  SysV, so nothing showed; on Windows the guest's arguments arrived in the wrong registers (for
+  example `c16rtomb('A')` returned -1), and an MS-ABI callee may write 32 bytes of home space
+  above its return address, into guest frames. Found by
+  `EmulatorLibcString.ResolvedC16ConversionsMatchFirmwareStateMachine`, which now passes; the
+  unit tests' local declarations of these functions (`UnitTestEmulatorLibcString.cpp`,
+  `UnitTestEmulatorLibcFilesystem.cpp`, `UnitTestEmulatorLibcHeap.cpp`) carried the same
+  mismatch and now match the definitions. A scan of every `LIB_FUNC` target found no others.
+- **`__chkstk` zeroed live guest frames, fixed** (`Thread::CommittedStackBelow`,
+  `Threads.cpp`). MSVC-built host code writes a zero to every page from `NT_TIB.StackLimit` down
+  to the new RSP. `VirtualQuery` reports like pages only from the queried page upward, so the
+  recorded limit stopped at the top of the guest stack's committed run and the probe wrote into
+  live guest frames. The limit now comes from scanning each allocation from its base.
+- **Attribute copies dropped the stack on Windows, fixed** (`pthread_attr_copy`,
+  `PthreadAttr.cpp`). `PthreadAttrInit` takes its stack size from the host pthread default, which
+  is zero under winpthreads. The copy set the stack address before the size, and
+  `PthreadAttrSetstackaddr` rejects a destination whose size is zero, so `PthreadAttrGet`
+  returned EINVAL with a null address and a zero size. The IL2CPP collector reads its thread's
+  stack base from that query and aborts with "Bad stack base in GC_register_my_thread" through
+  the bundled libc's fatal stub, which then faults writing `fs:0x28`. Found in PPSA12544,
+  PPSA28997 - God of War Sons of Sparta and PPSA34971 - Hollow Knight Voidheart Edition (the
+  message resolved in each title's `Il2cppUserAssemblies.prx`). The copy now sets the size first.
+  With the fix those three and PPSA24643 - The Messenger reach `interactive` in a strict
+  `games-matrix` run. Still open: a fresh attribute reports a zero stack size on Windows and its
+  guest stack is about 1 MiB smaller than on Linux, because the default still comes from the host.
+- **Guest `scanf` destinations on Windows, fixed** (`c_sscanf`, `c_sscanf_s`, `c_fscanf`, `LibC.cpp`).
+  The HLE builds a SysV `va_list` from the guest arguments. On Linux that is the host `va_list`; the
+  Windows x64 `va_list` is a pointer to consecutive 8-byte slots, so the host `vsscanf` read the
+  SysV header words as destination pointers. Guest `long` is 64-bit and the Windows host `long` is
+  32-bit, so `%ld`/`%lx` also stored half of the value. On Windows the call now walks the format,
+  reads one destination pointer per stored conversion in format order, rewrites a single `l`
+  before an integer conversion to `ll`, and passes the pointers as an MS `va_list`; a positional
+  (`$`) format or more than 128 destinations returns `EOF`. Covered by
+  `EmulatorLibcString.ResolvedSscanfStoresGuestDestinationsInFormatOrder` (`%ld`, `%*s`, a `%[`
+  scanset starting with `]`, `%lx`, `%n`), which runs on every host.
+- **Reserving over a direct mapping failed on Windows, fixed** (`sys_virtual_decommit_guest_range`,
+  `SysWindowsVirtual.cpp`; `DecommitGuestRange`, `VirtualMemory.cpp`). `KernelReserveVirtualRange`
+  over part of a mapped direct range decommits that part first. `DecommitGuestRange` was Linux-only, so on Windows the reservation failed
+  inside the reservation root that holds the committed private view (PPSA17221, seen at
+  `0x23950000+0x2000000`). The Windows version decommits a range inside one private view under a
+  write lease, splits the view record around it and keeps the range guest-owned; a range inside a
+  section view is refused. With both fixes PPSA17221 and `PPSA02070 - Don't Starve Together`
+  reach `interactive` in a strict `games-matrix` run, and
+  `EmulatorKernelMemory.ReservingDirectMappingTailDecommitsIt` passes on Windows (50 of 53 in that
+  suite; the other three are listed in "Windows host memory queries, mappings and test build").
+- **Writable `16_16_16_16_UINT` images, fixed** (`VulkanImageFormat.cpp`, `ShaderSpirvImage.cpp`).
+  Gen5 format 69 had a sampled format (`R16G16B16A16_UINT`) and no storage format, so a shader
+  writing it stopped with "unsupported writable image format". It now has the exact `Rgba16ui`
+  view, a core SPIR-V storage format (no `StorageImageExtendedFormats`), and Vulkan requires
+  storage support for `R16G16B16A16_UINT`. Covered by
+  `EmulatorGraphicsResources.EmitsAndValidatesExactHomogeneousUintStorageFormats`. PPSA03524,
+  which is not in the Linux matrix, now stops later at `GraphicsRenderPipeline.cpp:1583`: the
+  fragment transport cannot begin a clearing pass for a pixel shader whose scalar written under
+  divergent control flow is read after the join (`pc=0x4ca4`).
+- **Open, `PPSA03355 - Hades`: a texture upload sometimes copies into a NULL base** (`memcpy` of
+  0x2000 bytes, guest return `eboot+0x308059`). Failed in 3 of 4 strict Windows runs at Warn
+  logging; one run at Debug logging reached 60 s with the save dialog drawn. The record
+  "Intermittent boot crashes on a NULL guest pointer" has the same copy failing intermittently on
+  Linux.
+  - From the disassembly only, not observed at run time: the destination comes from a texture
+    wrapper (`eboot+0x31a8e0`) that asks the engine's GPU allocator (`eboot+0x315e00`) for memory
+    from a pool chosen by size (below or above 128 KiB) and leaves the destination NULL when the
+    allocator returns non-zero. With a pool set, the allocator tail-calls `eboot+0x314600`; where
+    that pool takes its blocks (callbacks at `+0x598` and `+0x5a0` of the allocator object) was not
+    followed. At boot the title maps 4 GiB, 256 MiB, 3 GiB and 64 MiB of direct memory, all `[Ok]`.
+  - Excluded: a failed host commit or mapping (the matrix `child.log` captures the host
+    `VirtualAlloc* failed` messages, as PPSA17221's runs show, and the failing Hades run has none;
+    the Debug run has no `[Fail]` from the kernel memory calls), and coarse host sleeps
+    (`SleepMicro` uses a high-resolution timer; the label manager polls every 100 us).
+  - Not established: which allocator path returns the failure, and whether a pool fills because
+    frees that wait on GPU completion lag behind the loader.
+- **Open, `VK_ERROR_DEVICE_LOST` on Intel Windows still stops `PPSA22520 - ANIMAL WELL` (after
+  18 presents, `interactive`) and `PPSA21567 - Astro Bot` (0 presents)** at
+  `GraphicsRenderCommandBuffer.cpp:2776`. Disabling the host-pointer import is not a usable
+  experiment: the guest device address shader is then refused explicitly
+  (`GraphicsRenderDraw.cpp:1432`). Not tested: the extra descriptor set and per-draw rebind that
+  GPU-assisted validation adds (Kyty rebinds only its own sets per draw, which is not equivalent).
+  Not shipped: a memory barrier at the start of every command buffer that orders it after all earlier
+  submissions on its queue. It was not shown to prevent the device loss, and on Linux (Arc A770, Mesa ANV,
+  60 fps limit) it cut `PPSA21567 - Astro Bot` from 21.1 to 17.6 fps in the same scene after the save
+  menu (one bounded run each, 2026-11-05). The guest device address lookup now bounds every table read
+  by the entry count, and the table carries one zeroed entry past the directory; also not shown to
+  prevent the device loss.
+- **Open, order-dependent unit test:**
+  `EmulatorGraphicsState.StorageTextureArrayDescriptorsAreViewsOfTheLiveArray`
+  (`UnitTestEmulatorGraphicsState.cpp:6326`, `array.Equal(other_slice.params)`) fails when run alone
+  and passes in the whole suite, so its result depends on state an earlier test leaves behind.
+  Direction: find which global the storage texture comparison reads.
+- **Excluded:** the red zone as the cause of the GRIS stall. The instrumented run recorded no access
+  violation with a guest RIP; the stall was the undelivered context request above.
+- **Unit tests** (per-suite runs, one process each, without
+  `EmulatorTileDetile.GpuDiagnosticSubmissionLifecycleRetainsTimedOutSession`, which still stops
+  with exit 65): 2508 passed, 29 failed, 170 skipped after the scanf, reserve and format 69 fixes
+  (2503 passed and 33 failed before them). The failures are the suites already listed in "Windows
+  host memory queries, mappings and test build"; `EmulatorLibcString`, `EmulatorLibcFilesystem`,
+  `EmulatorFileSystemPath`, the `EmulatorLibcCxxLocale` thread tests and
+  `EmulatorKernelMemory.ReservingDirectMappingTailDecommitsIt` no longer fail. One order-dependent
+  test is listed above.
+- **Strict sweep after these fixes** (`games-matrix --mode strict`, four batches of the 29 valid
+  cases): 25 `interactive`. Not interactive: `PPSA22520 - ANIMAL WELL` and `PPSA21567 - Astro Bot`
+  (device lost above), `PPSA01341 - Demon's Souls` (`controlled_timeout` at `video_initialized`, as
+  on Linux) and PPSA03524 (fragment transport, above; not in the Linux matrix). `PPSA07393`, which
+  crashes at boot in the Linux baseline, reached `interactive`. Hades reached `interactive` with
+  3103 presents in this sweep after the 3 failing runs above. Gates:
+  `KytyHostShaders.CheckedInIncludes` and `KytyArchitectureBoundaryIntegration.Repository` pass;
+  `KytyArchiveDagIntegration.Repository` is not registered in this build. `kyty_agent
+  playable-regression` was not run. The sweep binary still held an inert diagnostic block (read
+  only under its own environment variable) that was then removed from the tree.
+
+## Windows strict sweep: thread exit, write leases, pipeline cache, host paths (2026-11-04)
+
+Host: Windows 11, Intel Arc A770, driver 32.0.101.9150, MinGW UCRT build, strict runs at the
+60 fps present limit. `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` is the title that reached
+each of the defects below in turn.
+
+- **Guest thread exit, fixed** (`source/emulator/src/Kernel/Pthread.cpp`).
+  - Observed: F.I.S.T. stopped with `0xC00000FF` (`STATUS_BAD_FUNCTION_TABLE`) when a guest
+    thread called `pthread_exit`.
+  - Cause: winpthreads ends a thread with an SEH unwind (`longjmp` through `RtlUnwindEx`). That
+    unwind walks the guest frames on the guest stack, which have no unwind tables.
+  - Fix: on Windows the thread entry records a `__builtin_setjmp` point on the native frame that
+    enters the guest code, and `PthreadExit` returns there with `__builtin_longjmp`, which does
+    not unwind. The entry restores the native stack record that `InvokeOnStack` did not restore
+    and returns the exit value, so join sees it. Other hosts keep `pthread_exit`.
+  - Verified: `EmulatorKernelLifetimes.PthreadExitEndsTheGuestThreadWithItsValue` (exit from a
+    nested guest call, join returns the value) passes; with the host `pthread_exit` restored, the
+    test process ends inside the test. F.I.S.T. no longer stops there.
+  - Limit: the main guest thread and key destructors have no such entry frame; a `PthreadExit`
+    there stops explicitly with `EXIT_NOT_IMPLEMENTED` on Windows.
+- **Write leases with sub-page bounds, fixed** (`source/lib/Sys/src/SysWindowsVirtual.cpp`).
+  - Observed: F.I.S.T. stopped with exit 139, a write access violation from guest code or a host
+    copy on a committed private page that the host held `PAGE_READONLY`. The guest protection of
+    the range was `0xf2` (CPU write allowed), the dirty-page tracker had no entry for the page and
+    no write lease covered it.
+  - Cause: the tracker removes write from ranges whose end lies inside a page. `VirtualProtect`
+    changes the whole page, but the Windows backend recorded the lease only up to the range end.
+    A later restore of an enclosing range read the rest of the page from the host, which was the
+    `PAGE_READONLY` set by the removal, as guest protection and applied it to the whole page. A
+    protection trace showed the sequence: removal of `[0x…53000, +0x1840)`, then a restore that
+    set the gap `[0x…54840, 0x…55000)` to `PAGE_READONLY`, then the fault in `0x…54000`.
+  - Fix: write removal, capture and restore round their range to whole host pages, as the Linux
+    backend does through page indices.
+  - Verified: `CoreVirtualMemory.RestoreAfterRemoveWriteReturnsEveryTouchedPage` fails without
+    the rounding and passes with it; `CoreVirtualMemory`, `EmulatorGraphicsDirtyTracking`,
+    `EmulatorGpuMemoryFault` and `EmulatorKernelLifetimes` pass (115 passed, 15 skipped). F.I.S.T.
+    runs about 2 minutes and then stops on the device loss below.
+  - Excluded: missing Windows demand paging (`TryDemandMap` is a stub there). `VirtualQuery` at
+    the fault reported `MEM_COMMIT`, `PAGE_READONLY`, not a reserved page.
+- **Pipeline cache read during pipeline creation, fixed** (`PipelineCacheStore.h`,
+  `GraphicsRenderPipeline.cpp`, `DepthStencilCopy.cpp`, `GraphicsRenderFragmentTransport*.cpp`).
+  - Observed: with compute recipes from earlier sessions present, F.I.S.T. stopped with a read
+    of address `0x190` inside `igvk64.dll`, called from `vkGetPipelineCacheData`
+    (`PipelineCacheStoreSave`, from `PipelineCache::SaveDriverCacheIfDue`), while the two
+    background precompile workers created compute pipelines with the same cache.
+  - The Vulkan specification allows this: `vkGetPipelineCacheData` has no host synchronization
+    requirement, and `vkCreate*Pipelines` needs external synchronization of the cache only when
+    it was created with `VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`. Kyty creates it
+    with no flags. The Intel Windows driver faults anyway.
+  - Fix: every pipeline creation that passes the shared cache holds `PipelineCacheAccess()`
+    shared, and the checkpoint save takes it exclusive with a try-lock, skipping the save while
+    a compile holds it.
+  - Verified: the driver fault did not occur in the six runs with the lock and the recipes
+    present (six of six runs before it faulted there). Five of them stopped earlier on the other
+    defects in this record; the longest ran about 2 minutes and still wrote the title's driver
+    cache file (46.8 MB) during the run.
+  - Excluded: the loaded pipeline blob. A run without the stored cache faulted the same way.
+- **Host paths with `\` and case-insensitive names, fixed** (`FileSystemPath.h`,
+  `Kernel/FileSystem.cpp`, `LibSaveData.cpp`, `PipelineCacheStore.cpp`, agent `CaptureRun.cpp`).
+  Host paths handed to Kyty used `u8string()`, which uses `\` on Windows, while Kyty splits host
+  filenames on `/`; they now use `generic_u8string()`. The exact-spelling lookup is skipped on
+  Windows, where any spelling opens the file, and a guest name is matched through
+  `FindEntryIgnoringCase` there. The capture runner names its endpoint with
+  `LocalAgentEndpoint` instead of a `/tmp` socket path.
+- **Open, found here:**
+  - F.I.S.T. stops after about 2 minutes with `VK_ERROR_DEVICE_LOST` from `vkGetFenceStatus`
+    (`GraphicsRenderCommandBuffer.cpp:2776`). Whether this is the PPSA22520 - ANIMAL WELL hang
+    (a guest device address translation vertex shader) is not yet established.
+  - `games-matrix` now gives every case a `KYTY_CRASH_REPORT` path, so a 139 in a sweep leaves
+    its `crash-context.json`.
+
+## Windows host memory queries, mappings and test build (2026-11-04)
+
+Host: Windows 11, Intel Arc A770, driver 32.0.101.9150, MinGW UCRT build, strict runs at the
+60 fps present limit. `PPSA21402 - Balatro` is the reference title.
+
+- **Frame rate, fixed** (`source/lib/Sys/src/SysWindowsVirtual.cpp`).
+  - Observed: Balatro rendered at about 18 fps natively against 60 fps on Linux on the same GPU;
+    the title's own log printed frame times of 0.05-0.1 s.
+  - Cause: every guest copy (`sys_virtual_copy_from_guest`/`copy_to_guest`, `is_range_*`) walked
+    host protections with `VirtualQuery` while holding the global `g_protection_transaction_mutex`.
+    `VirtualQuery` walks the resident pages of the whole run that shares the queried attributes:
+    9.4 ms on a 1 GB section view and 13 ms on a 2 GB private region, against 0.3 us near the
+    region end. The audio and graphics threads serialized behind that mutex.
+  - Fix: a resident page's protection comes from `QueryWorkingSetEx` (about 0.4 us per call,
+    64 pages per batch). For resident pages its `Win32Protection` equals the `Protect` that
+    `VirtualQuery` reports. A page that is not resident (no access, guard, untouched, decommitted
+    or only touched through another view) still goes through `VirtualQuery`.
+  - Verified: Balatro holds 60 fps, the configured limit, for the whole 95 s strict run, with
+    either sleep variant below.
+- **Open, not fixed.**
+  - MinGW winpthreads `std::this_thread::sleep_for` waits about 15.5 ms for any request of 1 ms or
+    more, even after `timeBeginPeriod(1)` (which `SDL_Init` already calls) and the
+    power-throttling timer opt-out; requests under 1 ms return at once. `Sleep(5)` takes 5.35 ms
+    and a `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` timer 5.26 ms. A draft that moved Kyty's sleeps
+    to the high-resolution timer did not change the frame rate before the fix above, froze once
+    at frame 902 with a thread waiting on the NGS2 mutex and exited early once, so it was
+    reverted. Affected waits include the present limiter (`Graphics/Window.cpp`, `sleep_until`),
+    audio (`Audio.cpp`) and fibers (`Kernel/Fiber.cpp`).
+  - `slot_trace_env` (`Kernel/PthreadCond.cpp:102`) parses the environment on every condition
+    wait and signal. It showed in the native profile; reading the variable once would remove it.
+- **Mappings, fixed** (`SysWindowsVirtual.cpp`). Windows cannot release part of a reservation or
+  a view, so an unmapped sub-range of a host reservation root stays reserved:
+  - `sys_virtual_alloc_fixed` over such a range failed with `ERROR_INVALID_ADDRESS` (0x1E7). It
+    now commits inside the root when the range is uncommitted, the path that
+    `sys_virtual_alloc_fixed_replacing_owned_reservation` already used.
+  - `sys_virtual_free_range` reported every unmap as unsupported, so `munmap` of a whole direct
+    mapping returned ENOENT. It now frees a mapping whose start and size match exactly; a range
+    that covers part of a mapping is still refused.
+  - `sys_virtual_discard_shared_backing_range` reported success without discarding, so reused
+    direct memory kept its old contents. A pagefile-backed section keeps committed pages while
+    it exists, so the committed pages of the range are now zeroed through a temporary view.
+- **Zero-size `operator new`, fixed** (`source/lib/Core/src/MemoryAlloc.cpp`). `mem_alloc(0)`
+  stopped the process on Windows only; C++ requires a unique pointer, so both hosts now allocate
+  one byte. gtest death tests reach it when they read empty captured output.
+- **Windows test build, fixed.** The `unit_test` target links `Vulkan::Headers`, `easy_profiler`
+  links `ws2_32`, the Linux-only AJM resample oracle in `UnitTestEmulatorAudio.cpp` is guarded,
+  and `c_fseek` is declared with `int64_t` as in `LibCInternal.h` (`long` is 32-bit on Windows).
+  Tests that call guest exports through `->vaddr`, `resolve()` or the catalog lookups now declare
+  their function pointers `KYTY_SYSV_ABI`; with the MS x64 ABI the export read its arguments
+  from the wrong registers, which showed as wrong AMPR sizes, crashes in `Json2` and `LibcString`
+  and a `nanosleep` hang.
+- **`kyty_agent` runner on Windows, added** (`source/agent/src/runner/RunnerHostWindows.cpp`).
+  `games-matrix`, `capture-run` and `playable-regression` refused to start ("not supported on
+  this host"). The Windows host starts the child suspended in a job object that ends its
+  processes on close, writes its output to the case log, calls the agent through the shared
+  named-pipe client with a deadline, and reports a crash as its NTSTATUS exit, which the matrix
+  classifies as `host_crash`. The child keeps the Windows system variables (`SystemRoot`,
+  `TEMP`, `LOCALAPPDATA`, ...), matched without regard to case. Verified with one strict
+  Balatro case: `interactive`, stability reached, stopped by the runner.
+- **Windows unit tests still failing** (full `kyty_unit_test` before the last ABI fixes: 2427
+  passed, 38 failed, 187 skipped):
+  - `EmulatorKernelMemory`: `MunmapSplitsReservedVirtualRange` needs a partial release of a
+    reservation or a view (`ReservingDirectMappingTailDecommitsIt` passes since the decommit fix in
+    the first record of this file);
+    `FixedDirectMapConsumesPrefixOfLargerReservation` and
+    `FixedFlexibleMapPreservesReservationSuffix` need demand mapping, which
+    `Kernel/VirtualMemory.cpp` implements only under `KYTY_HAS_SIGNAL_EXCEPTIONS`. Direction:
+    placeholders (`VirtualAlloc2` with `MEM_RESERVE_PLACEHOLDER`, `MEM_PRESERVE_PLACEHOLDER`,
+    `MapViewOfFile3`) for the first pair, and the demand registry plus a `MEM_COMMIT` from the
+    exception handler for the second.
+  - `EmulatorFileSystemPath` (case-insensitive name matching), `EmulatorFileDescriptors` (5),
+    `EmulatorNetwork` (`inet_pton`, literal resolver), `EmulatorLibcFilesystem` (`stat` of a
+    link), `EmulatorLibcCxxLocale` (pthread scheduling and key destructors),
+    `EmulatorKernelProcess` (the entropy device opens with ENOENT), `EmulatorSaveData`,
+    `EmulatorGraphicsOperationTrace` (4) and 14 death tests (`EmulatorGraphicsState`,
+    `EmulatorShaderArithmetic`, `CoreInputBounds`).
+  - `EmulatorTileDetile` stops with exit 65 in
+    `GpuDiagnosticSubmissionLifecycleRetainsTimedOutSession`.
+
+## Windows host code on guest stacks overflowed its native stack (2026-11-04, fixed)
+
+- **Observed:** on Windows 11 (Intel Arc A770, driver 32.0.101.9150), the v0.0.4-beta.1 Windows
+  package stopped `PPSA21402 - Balatro` about 4 s after launch with `0xC00000FD`
+  (`STATUS_STACK_OVERFLOW`) in `msvcrt.dll`, before the first frame. The same binary under Wine
+  ran, because Wine supplies its own `msvcrt`.
+- **Cause:** a guest thread wrote 702 bytes to its stdout descriptor: `KernelWrite` ->
+  `Host::File::Write` -> `msvcrt!_write` (`Kernel/HostFile.h:111`). The text-mode `_write` path
+  needs a frame over 4 KiB, and its `__chkstk` probes pages from the TEB stack limit (`gs:0x10`)
+  down to the new RSP. Guest code and the HLE calls it makes run on Kyty-allocated guest stacks
+  (`GuestCall::InvokeOnStack`, fiber contexts) that lie below the thread's native stack, while
+  the TEB still described the native stack. The probe walked down from the native limit into the
+  native guard region. Any MSVC-built callee with a large frame (CRT, system DLLs, drivers) can hit
+  the same probe, and Windows exception dispatch validates RSP against the same bounds.
+- **Fix:** `Core::Thread::SetStackRange` records a stack range in `NT_TIB.StackBase/StackLimit`
+  (no-op on other hosts). `InvokeOnStack` records the committed guest stack for the duration of
+  the call and restores the native range afterwards. Fiber switches record the target fiber's
+  context range and restore the thread's range on return to the thread. `FiberObject` is
+  guest-visible, so the range is not stored in it. `NT_TIB` is the only record updated:
+  `TEB.DeallocationStack`, and with it `GetCurrentThreadStackLimits`, still describe the native
+  stack.
+- **Verified:** with the fix, a Release build (MinGW UCRT) ran Balatro for the whole bounded
+  95 s strict run in both runs made. A scratch test calling `msvcrt!_write` in text mode with 702 bytes,
+  from `InvokeOnStack` on a stack below the native one, fails with `0xC00000FD` on the unfixed
+  tree and writes the data with the fix. The new unit tests
+  `EmulatorKernelGuestRuntime.HostStackRecordCoversGuestStackDuringCall` and
+  `EmulatorFiber.HostStackRecordFollowsTheRunningFiber` fail without the fix and pass with it.
+- **Not a reproduction on UCRT:** the locally built unfixed binary does not crash on Balatro,
+  because UCRT's `_write` does not need that frame. The published package links `msvcrt.dll`.
+- **Open, found here, not fixed:**
+  - A guest `pthread_exit` unwound host frames from the guest stack. Fixed by the next record's
+    guest thread exit entry.
+  - Guest descriptors duplicated from host stdio (`HostFile.h:281`, `DuplicateFromStream`) stay
+    in the CRT's text mode, so a guest `write()` of `\n` reaches the host as `\r\n`. POSIX has
+    no text mode; setting the duplicate to `_O_BINARY` would match the guest contract.
+  - The Windows test build and the 15-23 fps native frame rate seen here are covered by the next
+    record.
+
 ## Storage objects bound over imported guest pages (2026-10-30)
 
 - **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, Mesa 26.2.5, strict hub route):
