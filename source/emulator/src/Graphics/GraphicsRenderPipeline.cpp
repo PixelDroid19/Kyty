@@ -913,6 +913,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	EXIT_IF(pipeline->pipeline != nullptr);
 
 	const auto     vk_create_start = DebugStatsClock::now();
+	std::shared_lock cache_access(PipelineCacheAccess());
 	const VkResult create_result =
 	    vkCreateGraphicsPipelines(gctx->device, gctx->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline->pipeline);
 	const auto vk_create_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - vk_create_start).count();
@@ -1097,6 +1098,7 @@ static VkResult CreateComputePipelineFromRecipe(GraphicContext* gctx, const Comp
 		info.stage             = comp_shader_stage_info;
 		info.layout            = *layout;
 		info.basePipelineIndex = -1;
+		std::shared_lock cache_access(PipelineCacheAccess());
 		result                 = vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, pipeline);
 	}
 	vkDestroyShaderModule(gctx->device, comp_shader_module, nullptr);
@@ -1437,6 +1439,13 @@ void PipelineCache::SaveDriverCacheIfDue()
 	        ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now - m_last_driver_cache_attempt).count())
 	        : 0u;
 	if (!PipelineCacheStoreCheckpointDue(m_driver_cache_dirty, m_driver_cache_attempted_once, elapsed_seconds, m_driver_cache_bytes_attempted))
+	{
+		return;
+	}
+
+	// A background compile may hold the cache for seconds; the checkpoint waits for a later lookup instead.
+	std::unique_lock cache_access(PipelineCacheAccess(), std::try_to_lock);
+	if (!cache_access.owns_lock())
 	{
 		return;
 	}

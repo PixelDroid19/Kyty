@@ -8,6 +8,7 @@
 #include "Emulator/Graphics/FragmentTransportShade.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
@@ -290,6 +291,7 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 		pipeline_info.stage        = stage;
 		pipeline_info.layout       = *layout;
 		pipeline_info.basePipelineIndex = -1;
+		std::shared_lock cache_access(PipelineCacheAccess());
 		result                     = vkCreateComputePipelines(device, pipeline_cache, 1, &pipeline_info, nullptr, pipeline);
 		step                       = "vkCreateComputePipelines";
 	}

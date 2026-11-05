@@ -132,6 +132,12 @@ bool MatchesPersisted(const std::vector<uint8_t>& data)
 
 } // namespace
 
+std::shared_mutex& PipelineCacheAccess()
+{
+	static std::shared_mutex access;
+	return access;
+}
+
 std::vector<uint8_t> PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& properties)
 {
 	if (!Config::ShaderCacheEnabled())
