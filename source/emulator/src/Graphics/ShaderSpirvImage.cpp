@@ -3436,6 +3436,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleL_VdataVaddrStSsMimgDmask)
 	{
 		shape       = SampledImageShape::Array2d;
 		sampled_num = bind->textures2D.textures2d_array_sampled_num;
+	} else if (inst.mimg_dimension == 5u && descriptor_shape == ShaderGen5SampledTextureShape::TwoDimensional)
+	{
+		// A single-layer 2D-array view bound as 2D: its only slice is sampled as (x, y).
+		sampled_num = bind->textures2D.textures2d_sampled_num;
 	}
 	if (sampled_num <= 0)
 	{
@@ -3446,7 +3450,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleL_VdataVaddrStSsMimgDmask)
 
 	const auto texture = operand_variable_to_str(inst.src[1], 0);
 	const auto sampler = operand_variable_to_str(inst.src[2], 0);
-	const auto lod     = mimg_address_to_str(inst, coordinate_num);
+	// The LOD follows every DIM coordinate, the slice included (RDNA2 ISA table 43).
+	const auto lod     = mimg_address_to_str(inst, inst.mimg_dimension == 1u ? 2 : 3);
 	if (texture.type != SpirvType::Uint || sampler.type != SpirvType::Uint || lod.type != SpirvType::Float)
 	{
 		return false;
