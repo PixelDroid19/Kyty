@@ -3840,10 +3840,12 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			const int binding_register = descriptor.extended
 			                                 ? ShaderGen5EudOffsetBase(user_sgpr_num) + (descriptor.start_register - 16)
 			                                 : descriptor.start_register;
-			auto image = AnalyzeShaderDirectImageUse(*code, binding_register + user_data_register_base, nullptr, code_memo);
+			// Only reads through the registers still holding the bound T# describe it; a shader may
+			// reload the same SGPRs with other descriptors later.
+			auto image = AnalyzeShaderDirectImageUse(*code, binding_register + user_data_register_base, &entry_values, code_memo);
 			if (image.texture == ShaderTextureUsage::Unknown && user_data_register_base != 0)
 			{
-				image = AnalyzeShaderDirectImageUse(*code, binding_register, nullptr, code_memo);
+				image = AnalyzeShaderDirectImageUse(*code, binding_register, &entry_values, code_memo);
 			}
 			if (image.texture != ShaderTextureUsage::Unknown)
 			{
