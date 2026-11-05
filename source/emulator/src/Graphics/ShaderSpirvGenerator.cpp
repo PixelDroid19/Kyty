@@ -3123,6 +3123,10 @@ void Spirv::WriteInstructions()
 		{
 			// The per-lane fragment emitter has no packed D16 form.
 			ok = !inst.mimg_d16;
+		} else if (UsesFragmentCompute() && inst.type == ShaderInstructionType::Exp)
+		{
+			// A pixel export the per-lane emitter refuses has no compute form.
+			ok = false;
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::GeometryExport)
 		{
 			ok = EmitGeometryExport(inst, static_cast<uint32_t>(index), &dst);

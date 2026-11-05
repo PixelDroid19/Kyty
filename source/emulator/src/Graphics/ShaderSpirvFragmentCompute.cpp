@@ -39,6 +39,14 @@ uint32_t Target(const ShaderInstruction& instruction)
 		case ShaderInstructionFormat::Mrt5Vsrc0Vsrc1ComprVm: return 5u;
 		case ShaderInstructionFormat::Mrt6Vsrc0Vsrc1ComprVm: return 6u;
 		case ShaderInstructionFormat::Mrt7Vsrc0Vsrc1ComprVm: return 7u;
+		case ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone: return 0u;
+		case ShaderInstructionFormat::Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm: return 1u;
+		case ShaderInstructionFormat::Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm: return 2u;
+		case ShaderInstructionFormat::Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm: return 3u;
+		case ShaderInstructionFormat::Mrt4Vsrc0Vsrc1Vsrc2Vsrc3Vm: return 4u;
+		case ShaderInstructionFormat::Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm: return 5u;
+		case ShaderInstructionFormat::Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm: return 6u;
+		case ShaderInstructionFormat::Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm: return 7u;
 		default: return 8u;
 	}
 }
@@ -331,7 +339,9 @@ bool Spirv::EmitFragmentExport(const ShaderInstruction& instruction, uint32_t in
 	{
 		return true;
 	}
-	for (uint32_t pair = 0; pair < 2u; ++pair)
+	// COMPR packs two halves per VGPR; otherwise each channel is its own 32-bit VGPR.
+	const bool compressed = (instruction.exp_control & 4u) != 0u;
+	for (uint32_t pair = 0; compressed && pair < 2u; ++pair)
 	{
 		const auto id = tag + String8::FromPrintf("_pair%u", pair);
 		if (CanLoadPackedHalfForExport(static_cast<int>(index), instruction.src[pair]))
@@ -359,12 +369,24 @@ bool Spirv::EmitFragmentExport(const ShaderInstruction& instruction, uint32_t in
 		}
 		mask |= 1u << (target * 4u + component);
 		const auto id = tag + String8::FromPrintf("_component%u", component);
-		*output += String8::FromPrintf("%%%s_value = OpCompositeExtract %%float %%%s_pair%u %u\n"
-		                              "%%%s_old = OpLoad %%float %%fragment_color_%u\n"
+		if (compressed)
+		{
+			*output += String8::FromPrintf("%%%s_value = OpCompositeExtract %%float %%%s_pair%u %u\n", id.c_str(), tag.c_str(), selected / 2u,
+			                               selected % 2u);
+		} else
+		{
+			String8 load;
+			if (instruction.src_num != 4 || !operand_load_uint(this, instruction.src[selected], id + "_raw", String8(), &load))
+			{
+				return false;
+			}
+			*output += load + String8::FromPrintf("\n%%%s_value = OpBitcast %%float %%%s_raw\n", id.c_str(), id.c_str());
+		}
+		*output += String8::FromPrintf("%%%s_old = OpLoad %%float %%fragment_color_%u\n"
 		                              "%%%s = OpSelect %%float %%%s_write %%%s_value %%%s_old\n"
 		                              "OpStore %%fragment_color_%u %%%s\n",
-		                              id.c_str(), tag.c_str(), selected / 2u, selected % 2u, id.c_str(), target * 4u + component, id.c_str(),
-		                              tag.c_str(), id.c_str(), id.c_str(), target * 4u + component, id.c_str());
+		                              id.c_str(), target * 4u + component, id.c_str(), tag.c_str(), id.c_str(), id.c_str(),
+		                              target * 4u + component, id.c_str());
 	}
 	*output += String8::FromPrintf("%%%s_mask_old = OpLoad %%uint %%fragment_mask\n"
 	                               "%%%s_mask_bits = OpSelect %%uint %%%s_write %%%s %%uint_0\n"
