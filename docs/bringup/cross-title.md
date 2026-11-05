@@ -1,3 +1,55 @@
+## Buffer format decode by table: driver compile cost cut; layered depth is the next stop (2026-11-05)
+
+Typed buffer loads (`BUFFER_LOAD_FORMAT_*`) of Gen5 shaders call `gen5_buffer_format_decode`, which used to be an
+`OpSwitch` over the 61 decodable formats with a converted body per format: 745 SPIR-V instructions. Drivers inline
+every call. A vertex shader of `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition` makes 48 such
+calls, so about 35.8k of its 73.6k inlined instructions were this one switch. That is what kept the title on its
+loading screen: draws continued, but each new graphics pipeline took 1.7-15 s in the driver.
+
+- **Measurement before the fix.** Two cold runs, each with an empty Kyty pipeline cache, an empty private SPIR-V
+  cache and `MESA_SHADER_CACHE_DISABLE=true`. A temporary diagnostic emptied the switch for one arm, so that arm's
+  output was wrong; it served only to time the compiles.
+  - With the switch: 182 graphics pipelines in 33.3 s by 90 s, the slowest 1.85 s.
+  - Without it: 198 in 4.0 s by 60 s, the slowest 0.29 s.
+- **The fix.** Each format is now one word of a 128-entry constant table, indexed by the V# FORMAT field: the
+  four channel widths in 6-bit fields and the number format at bit 24. In every format, channel offsets are the
+  prefix sums of the widths, and a word of zero marks a format that does not decode.
+  - The decode extracts each channel with `OpBitFieldUExtract`/`OpBitFieldSExtract`, computes each number
+    format's conversion, and selects one. `gen5_buffer_format_bytes` reads its size from the same table.
+  - The table goes through a Function copy, so drivers lower it to constant data instead of a compare ladder.
+  - Unorm and snorm multiply by the reciprocal of the largest code, selected by width, as drivers lowered the
+    old constant division. 11- and 10-bit floats shift into a half, as before.
+  - Translator version 209.
+- **Equivalence on two drivers.** A scratch harness ran both decoders on the GPU over 143,360 records: all 128
+  FORMAT values (the 61 decodable ones and every gap) × 80 element patterns × 14 descriptor words.
+  - The patterns include zero, all ones, the 8- and 16-bit snorm minimum, half denormals, infinities and NaN,
+    11- and 10-bit float specials, and random words. The descriptor words cover all eight DST_SEL values on every
+    channel and random words.
+  - Arc A770 (ANV) and RADV (Raphael iGPU) both returned identical bits for all 716,800 values.
+  - A first version that divided at run time differed by 1-2 ulp on 8-bit unorm, which is why the reciprocal is
+    selected rather than computed.
+- **After the fix, same cold setup.** 391 pipelines in 25.8 s by 90 s, the slowest 0.94 s: 66 ms per pipeline
+  instead of 183 ms.
+
+Next stop, not fixed: with the shader caches warm, the title gets past the pipelines it compiled before and stops
+at `layered depth rendering is not implemented: slices 0..5` (`GraphicsRenderAttachments.cpp:1485`).
+- The draw exports a render-target index (`PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX`) into a six-slice depth
+  view. That is consistent with rendering a cube shadow map in one pass.
+- Kyty keeps each rendered depth slice as its own image, and assembles depth arrays only to sample them
+  (`GraphicsRenderDepthSliceArray`).
+- **Direction:** render a layered pass into such an array, copy the slices in before the pass, and copy them back
+  afterwards. HTILE and clear state need the same per-slice treatment.
+
+Validation: `ctest` 108 tests, 107 passed, 1 skipped (`KytyShaderComputeIntegration.PairedWave64`, as on main).
+Strict 110 s runs with translator 209 and `KYTY_PRESENT_FPS_LIMIT=60`, one title at a time, each in its usual state:
+Balatro 59.8, ANIMAL WELL 59.9, Dead Cells 59.9, GRIS 59.5, Hollow Knight 58.1, Peppa Pig 59.3 and Formula Retro
+Racing 59.8 fps.
+- In that set DREDGE gave 26.9 fps and Astro Bot 12.2, against 30.6 and 15.3 on translator 208. A foreign process
+  was loading the host then: one of them used about 365 % CPU during a DREDGE rerun, which gave 24.7 fps.
+- On a quiet host, with foreign CPU logged every 10 s and nothing above 5 %, the same warm runs gave DREDGE
+  32.4 fps and Astro Bot 21.4 fps. The table decode does not slow these titles.
+
+
 ## Fragment transport clears and uncompressed exports, from `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition` (2026-11-05)
 
 The title (UE4, 01.007.000) runs a pixel shader whose scalar written under divergent control flow is read

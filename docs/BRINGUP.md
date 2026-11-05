@@ -161,6 +161,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - [Tessellation design](bringup/tessellation-design.md): hull/domain mapping to Vulkan, staged plan, PATCH draws refused first (2026-10-29, design)
   - [GPU-indexed descriptor tables](bringup/bindless-tables-design.md): table-selected T#/S# and ray-tracing dispatch needs (2026-10-29, design)
   - [Temporal upscalers decision](bringup/temporal-upscalers-decision.md): no DLSS/XeSS now; temporal inputs first, FSR 2 before proprietary SDKs (2026-10-29, decided)
+  - Buffer format decode by constant table: driver compile cost cut, bit-identical on ANV and RADV; layered depth is the next stop (2026-11-05, fixed; open item)
   - Fragment transport clear-once and uncompressed exports; driver pipeline-compile frontier and intermittent render-engine reset (2026-11-05, fixed; open items)
   - Builder's Journey bring-up contracts: two-channel targets, sample_l 3D/array address, thin 3D mips, quiesce hold; shade-compile frontier (2026-11-05, fixed; open items)
   - Format stores, two-channel ALT targets, LDS loads and stencil logic ops fixed; PC clear-state defaults excluded; outside proposals reviewed (2026-11-05, fixed; excluded; open leads)
