@@ -368,10 +368,14 @@ TEST(EmulatorGraphicsResources, EmitsAndValidatesExactHomogeneousUintStorageForm
 	ASSERT_EXIT(
 	    {
 		    InitializeImageModuleTest();
-		    for (uint16_t format: {5u, 20u, 62u, 75u})
+		    for (uint16_t format: {5u, 20u, 62u, 69u, 75u})
 		    {
 			    const auto source = EmitValidatedImageModule(MakeImageModule(71u, format));
-			    const char* token = format == 5u ? "R8ui" : format == 20u ? "R32ui" : format == 62u ? "Rg32ui" : "Rgba32ui";
+			    const char* token = format == 5u    ? "R8ui"
+			                        : format == 20u ? "R32ui"
+			                        : format == 62u ? "Rg32ui"
+			                        : format == 69u ? "Rgba16ui"
+			                                        : "Rgba32ui";
 			    const auto declaration = Core::String8::FromPrintf("%%ImageL = OpTypeImage %%uint 2D 0 0 0 2 %s", token);
 			    RequireImageModule(source.ContainsStr(declaration), "exact typed storage format");
 			    RequireImageModule(source.ContainsStr("OpCapability StorageImageExtendedFormats") == (format == 5u || format == 62u),
