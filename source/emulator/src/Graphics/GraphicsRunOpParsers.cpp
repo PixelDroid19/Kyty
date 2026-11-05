@@ -332,7 +332,8 @@ KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
 	}
 
 	GpuMemoryNotifyHostWrite(dst, byte_count);
-	memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), byte_count);
+	// The ranges may overlap; memmove gives the result the IT_DMA_DATA path gives.
+	memmove(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), byte_count);
 	GraphicsRenderMemoryFlush(dst, byte_count);
 	GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaDataCustom, dst, byte_count, 0u, 0u, 0u);
 	return 7;
