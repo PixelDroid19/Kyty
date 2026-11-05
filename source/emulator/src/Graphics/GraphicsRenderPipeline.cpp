@@ -1557,10 +1557,6 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	{
 		EXIT("fragment transport needs single-sample rasterization: %s\n", requirement_facts.c_str());
 	}
-	if (!framebuffer->compatibility.begins_without_clear)
-	{
-		EXIT("fragment transport cannot begin a clearing pass yet: %s\n", requirement_facts.c_str());
-	}
 	if (!TransportColorTargetsWritable(color))
 	{
 		EXIT("fragment transport has no integer color export interface: %s\n", requirement_facts.c_str());
