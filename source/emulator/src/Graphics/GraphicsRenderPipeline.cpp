@@ -1860,6 +1860,12 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			p.static_params->color_mask[rt] = uint16_mrt_output
 			                                      ? State::ResolveColorWriteAgainstUint16Export(export_admitted_mask, export_enable)
 			                                      : export_admitted_mask;
+			if (ps_input_info->target_output_order[rt] == HW::kColorExportOrderTwoChannelAlt)
+			{
+				// The guest mask names export components; the attachment's second channel holds W.
+				const uint8_t mask              = p.static_params->color_mask[rt];
+				p.static_params->color_mask[rt] = static_cast<uint8_t>((mask & 1u) | ((mask >> 2u) & 2u));
+			}
 			p.static_params->color_srcblend[rt]       = blend.color_srcblend;
 			p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
 			p.static_params->color_destblend[rt]      = blend.color_destblend;

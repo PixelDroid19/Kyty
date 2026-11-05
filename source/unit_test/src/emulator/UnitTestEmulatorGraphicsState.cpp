@@ -3727,6 +3727,32 @@ TEST(EmulatorGraphicsState, KeepsColorExportsLogicalForPhysicalAttachmentOrder)
 	}
 }
 
+TEST(EmulatorGraphicsState, TwoChannelAltSwapExportsWIntoSecondChannel)
+{
+	// SWAP_ALT on 8_8/16_16/32_32 stores export X in channel 0 and W in channel 1.
+	for (uint32_t cb_format: {0x3u, 0x5u, 0xbu})
+	{
+		HW::Context ctx;
+		HW::ColorInfo info;
+		info.format        = cb_format;
+		info.channel_order = 1u;
+		ctx.SetColorInfo(2, info);
+		const uint32_t order = ctx.GetShaderRegisters().target_output_order[2];
+		EXPECT_EQ(ShaderColorExportSourceComponent(order, 0), 0u);
+		EXPECT_EQ(ShaderColorExportSourceComponent(order, 1), 3u);
+	}
+	// The same swap on a four-channel format stays a host format order.
+	HW::Context ctx;
+	HW::ColorInfo info;
+	info.format        = 0xau;
+	info.channel_order = 1u;
+	ctx.SetColorInfo(0, info);
+	EXPECT_EQ(ShaderColorExportSourceComponent(ctx.GetShaderRegisters().target_output_order[0], 1), 1u);
+	EXPECT_EQ(ResolveRenderTextureFormat(0x3u, 0x0u, 0x1u).format, RenderTextureFormat::R8G8Unorm);
+	EXPECT_EQ(ResolveRenderTextureFormat(0x5u, 0x7u, 0x1u).format, RenderTextureFormat::R16G16Sfloat);
+	EXPECT_EQ(ResolveRenderTextureFormat(0x5u, 0x4u, 0x1u).format, RenderTextureFormat::R16G16Uint);
+}
+
 TEST(EmulatorGraphicsState, ResolvesObservedTwoChannelFloatRenderTarget)
 {
 	const auto format = ResolveRenderTextureFormat(0x5u, 0x7u, 0x0u);
