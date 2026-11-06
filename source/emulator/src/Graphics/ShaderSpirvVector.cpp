@@ -350,10 +350,12 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 		        .ReplaceStr("<index>", index_str);
 		return true;
 	}
-	if (info->target_output_mode[mrt] != 4)
+	const uint8_t mode = info->target_output_mode[mrt];
+	if (mode != 4 && mode != 5 && mode != 6)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->target_output_mode[mrt] != 4 condition ignored (continuing)\n");
 	}
+	const char* unpack = ShaderCompressedColorExportUnpack(mode);
 
 	if (!operand_is_variable(inst.src[0]))
 	{
@@ -412,11 +414,11 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 		 %exp_old2_<index> = OpCompositeExtract %float %exp_old_<index> 2
 		 %exp_old3_<index> = OpCompositeExtract %float %exp_old_<index> 3
          <load_src0>
-         %t3_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t2_<index>
+         %t3_<index> = OpExtInst %v2float %GLSL_std_450 <unpack> %t2_<index>
          %t4_<index> = OpCompositeExtract %float %t3_<index> 0
          %t5_<index> = OpCompositeExtract %float %t3_<index> 1
          <load_src1>
-		 %t8_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t7_<index>
+		 %t8_<index> = OpExtInst %v2float %GLSL_std_450 <unpack> %t7_<index>
          %t9_<index> = OpCompositeExtract %float %t8_<index> 0
          %t10_<index> = OpCompositeExtract %float %t8_<index> 1
 		 <tap_load>
@@ -470,6 +472,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 	                   .ReplaceStr("<load_src0>", load_src0)
 	                   .ReplaceStr("<load_src1>", load_src1)
 	                   .ReplaceStr("<tap_load>", tap_load)
+	                   .ReplaceStr("<unpack>", unpack)
 	                   .ReplaceStr("<src0>", src0_value.value)
 	                   .ReplaceStr("<src1>", src1_value.value)
 	                   .ReplaceStr("<mrt>", param[0]);

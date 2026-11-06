@@ -357,7 +357,8 @@ bool Spirv::EmitFragmentExport(const ShaderInstruction& instruction, uint32_t in
 			}
 			*output += load + "\n";
 		}
-		*output += String8::FromPrintf("%%%s = OpExtInst %%v2float %%GLSL_std_450 UnpackHalf2x16 %%%s_raw\n", id.c_str(), id.c_str());
+		*output += String8::FromPrintf("%%%s = OpExtInst %%v2float %%GLSL_std_450 %s %%%s_raw\n", id.c_str(),
+		                               ShaderCompressedColorExportUnpack(m_ps_input_info->target_output_mode[target]), id.c_str());
 	}
 	uint32_t mask = 0u;
 	for (uint32_t component = 0; component < 4u; ++component)

@@ -58,6 +58,13 @@ constexpr uint8_t kShaderColorExportNumberUint     = 4u;
 	       input->target_output_number[target] == kShaderColorExportNumberUint && input->target_output_order[target] == 0u;
 }
 
+// GLSL.std.450 unpack of a COMPR color export pair, by SPI_SHADER_COL_FORMAT:
+// 5 UNORM16_ABGR and 6 SNORM16_ABGR are normalized; 4 FP16_ABGR is half.
+[[nodiscard]] constexpr const char* ShaderCompressedColorExportUnpack(uint8_t mode)
+{
+	return mode == 5u ? "UnpackUnorm2x16" : mode == 6u ? "UnpackSnorm2x16" : "UnpackHalf2x16";
+}
+
 // Function-local array backing ds_*_addtid_b32 spill slots in non-compute
 // stages: indexed by (M0[15:0] + offset) >> 2 and private to each invocation.
 constexpr uint32_t kDsAddtidSpillDwords = 1024u;
