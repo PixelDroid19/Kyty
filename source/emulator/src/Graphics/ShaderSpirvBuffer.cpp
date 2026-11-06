@@ -675,39 +675,28 @@ static bool emit_guest_typed_buffer_load(Spirv* spirv, const ShaderInstruction& 
 		return false;
 	}
 	// The covered dword count, at most four: an element of 32-bit channels is
-	// dword aligned.
+	// dword aligned. All four dwords load with one translation (a second only
+	// across a page, whose chunk is mapped whole), and the uncovered ones read
+	// zero. One load per covered count multiplied the inlined translations.
 	source += String8(R"(%<t>_lead = OpBitwiseAnd %uint %<t>_lo %<three>
 %<t>_alo = OpBitwiseAnd %uint %<t>_lo %<align>
 %<t>_span = OpIAdd %uint %<t>_lead %<t>_size
 %<t>_span_up = OpIAdd %uint %<t>_span %<three>
 %<t>_count = OpShiftRightLogical %uint %<t>_span_up %<two>
-OpSelectionMerge %<t>_wmerge None
-OpSwitch %<t>_count %<t>_w4 1 %<t>_w1 2 %<t>_w2 3 %<t>_w3
 )")
 	              .ReplaceStr("<t>", tag)
 	              .ReplaceStr("<three>", spirv->GetConstantUint(3u))
 	              .ReplaceStr("<two>", spirv->GetConstantUint(2u))
 	              .ReplaceStr("<align>", spirv->GetConstantUint(0xfffffffcu));
-	String8 phi[4];
-	for (uint32_t dwords = 1; dwords <= 4; dwords++)
+	if (!spirv->EmitGuestLoad(tag + "_alo", tag + "_hi", 4, tag + "_r", &source))
 	{
-		const auto prefix = String8::FromPrintf("%s_r%u", t, dwords);
-		source += String8::FromPrintf("%%%s_w%u = OpLabel\n", t, dwords);
-		if (!spirv->EmitGuestLoad(tag + "_alo", tag + "_hi", static_cast<int>(dwords), prefix, &source))
-		{
-			return false;
-		}
-		source += String8::FromPrintf("OpBranch %%%s_wend%u\n%%%s_wend%u = OpLabel\nOpBranch %%%s_wmerge\n", t, dwords, t, dwords, t);
-		for (uint32_t word = 0; word < 4; word++)
-		{
-			const auto value = word < dwords ? String8::FromPrintf("%%%s_d%u", prefix.c_str(), word) : "%" + zero;
-			phi[word] += String8::FromPrintf(" %s %%%s_wend%u", value.c_str(), t, dwords);
-		}
+		return false;
 	}
-	source += String8::FromPrintf("%%%s_wmerge = OpLabel\n", t);
 	for (uint32_t word = 0; word < 4; word++)
 	{
-		source += String8::FromPrintf("%%%s_raw%u = OpPhi %%uint%s\n", t, word, phi[word].c_str());
+		source += String8::FromPrintf("%%%s_covers%u = OpULessThan %%bool %%%s %%%s_count\n"
+		                              "%%%s_raw%u = OpSelect %%uint %%%s_covers%u %%%s_r_d%u %%%s\n",
+		                              t, word, spirv->GetConstantUint(word).c_str(), t, t, word, t, word, t, word, zero.c_str());
 	}
 	source += String8(R"(%<t>_raw = OpCompositeConstruct %v4uint %<t>_raw0 %<t>_raw1 %<t>_raw2 %<t>_raw3
 %<t>_words = OpFunctionCall %v4uint %gen5_buffer_align_words %<t>_raw %<zero> %<t>_lead

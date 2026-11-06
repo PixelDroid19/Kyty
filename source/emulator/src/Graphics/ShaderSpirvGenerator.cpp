@@ -767,6 +767,10 @@ void Spirv::WriteHeader()
 		capabilities.Add("OpCapability ShaderLayer");
 		vars.Add("%gl_Layer");
 	}
+	if (SpirvUsesGen5BufferFormats(m_code))
+	{
+		vars.Add("%gen5_buffer_format_words");
+	}
 	if (m_ps_input_info != nullptr && m_ps_input_info->AncillaryEnabled())
 	{
 		capabilities.Add("OpCapability Geometry");

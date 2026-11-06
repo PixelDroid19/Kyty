@@ -75,8 +75,9 @@ private:
 };
 
 // %gen5_buffer_format_table: the table words of every FORMAT value, read by
-// Bytes and Decode through a Function copy so the lookup indexes constant data
-// instead of branching per format.
+// Bytes and Decode through one Private variable so the lookup indexes constant
+// data instead of branching per format. A Function copy per call would be
+// inlined as one more table store at every typed buffer access.
 String8 FormatWriter::Table()
 {
 	uint32_t   count   = 0;
@@ -93,8 +94,10 @@ String8 FormatWriter::Table()
 	}
 	return String8::FromPrintf(R"(
 %%gen5_buffer_format_table_type = OpTypeArray %%uint %s
-%%_ptr_Function_gen5_buffer_format_table = OpTypePointer Function %%gen5_buffer_format_table_type
+%%_ptr_Private_gen5_buffer_format_table = OpTypePointer Private %%gen5_buffer_format_table_type
+%%_ptr_Private_gen5_buffer_format_word = OpTypePointer Private %%uint
 %%gen5_buffer_format_table = OpConstantComposite %%gen5_buffer_format_table_type%s
+%%gen5_buffer_format_words = OpVariable %%_ptr_Private_gen5_buffer_format_table Private %%gen5_buffer_format_table
 )",
 	                           Uint(kFormatTableSize).c_str(), entries.c_str());
 }
@@ -107,10 +110,8 @@ String8 FormatWriter::Bytes()
 %%gen5_buffer_format_bytes = OpFunction %%uint None %%function_gen5_buffer_format_bytes
 %%gbfb_format = OpFunctionParameter %%uint
 %%gbfb_entry = OpLabel
-%%gbfb_table = OpVariable %%_ptr_Function_gen5_buffer_format_table Function
-OpStore %%gbfb_table %%gen5_buffer_format_table
 %%gbfb_index = OpBitwiseAnd %%uint %%gbfb_format %s
-%%gbfb_ptr = OpAccessChain %%_ptr_Function_uint %%gbfb_table %%gbfb_index
+%%gbfb_ptr = OpAccessChain %%_ptr_Private_gen5_buffer_format_word %%gen5_buffer_format_words %%gbfb_index
 %%gbfb_word = OpLoad %%uint %%gbfb_ptr
 %%gbfb_w0 = OpBitFieldUExtract %%uint %%gbfb_word %s %s
 %%gbfb_w1 = OpBitFieldUExtract %%uint %%gbfb_word %s %s
@@ -320,10 +321,8 @@ String8 FormatWriter::Decode()
 %%gbfd_format = OpFunctionParameter %%uint
 %%gbfd_desc3 = OpFunctionParameter %%uint
 %%gbfd_entry = OpLabel
-%%gbfd_table = OpVariable %%_ptr_Function_gen5_buffer_format_table Function
-OpStore %%gbfd_table %%gen5_buffer_format_table
 %%gbfd_index = OpBitwiseAnd %%uint %%gbfd_format %s
-%%gbfd_ptr = OpAccessChain %%_ptr_Function_uint %%gbfd_table %%gbfd_index
+%%gbfd_ptr = OpAccessChain %%_ptr_Private_gen5_buffer_format_word %%gen5_buffer_format_words %%gbfd_index
 %%gbfd_word = OpLoad %%uint %%gbfd_ptr
 %%gbfd_number = OpShiftRightLogical %%uint %%gbfd_word %s
 %%gbfd_off0 = OpCopyObject %%uint %s
