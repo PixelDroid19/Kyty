@@ -570,8 +570,10 @@ inline bool GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType existing_type, 
 // SB/RT Crosses — link all surface directions rather than EXIT.
 // A later scene-load capture has a large VB crossing active depth and stencil
 // planes plus a co-located SB/RT pair, and a recycled range has a small VB
-// inside an active depth target. Link both observed DS forms; reclaiming the
-// active depth target would discard guest GPU state.
+// inside an active depth target. A recycled range can also hold a whole depth
+// target next to one that crosses its end (captured: VB 0x8abd0 over two 256x256
+// D16 targets, one inside and one crossing). Link every DS form that shares part
+// of the VB range; reclaiming the active depth target would discard guest GPU state.
 inline bool GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                     GpuMemoryObjectType incoming_type)
 {
@@ -581,7 +583,8 @@ inline bool GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType existing
 	}
 	if (existing_type == GpuMemoryObjectType::DepthStencilBuffer)
 	{
-		return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::Contains;
+		return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::Contains ||
+		       relation == GpuMemoryOverlapType::IsContainedWithin;
 	}
 	if (existing_type != GpuMemoryObjectType::StorageBuffer && existing_type != GpuMemoryObjectType::RenderTexture &&
 	    existing_type != GpuMemoryObjectType::Texture && existing_type != GpuMemoryObjectType::StorageTexture)

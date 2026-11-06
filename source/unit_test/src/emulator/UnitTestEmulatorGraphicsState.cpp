@@ -6747,6 +6747,8 @@ TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
 	                                                    GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
 	                                                    GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                    GpuMemoryObjectType::VertexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
 	                                                     GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
