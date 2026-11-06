@@ -1331,6 +1331,9 @@ struct ShaderVertexProgram
 	ShaderCode             code;
 	// EUD scans use the front stream even when the linked program adds a continuation.
 	std::shared_ptr<const ShaderScalarFlow> front_scalar_flow;
+	// Flow of `code`: the continuation branch keeps it resolvable where the
+	// front's terminal setpc does not.
+	std::shared_ptr<const ShaderScalarFlow> scalar_flow;
 	// Resource analyses of front_code (EUD scans) and of code (image reads).
 	ShaderCodeResourceMemo front_resource_memo;
 	ShaderCodeResourceMemo resource_memo;
@@ -2043,12 +2046,12 @@ static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program)
 		         static_cast<uint64_t>(code->GetDebugPrintfs().Capacity()) * sizeof(ShaderDebugPrintf);
 	}
 	bytes += static_cast<uint64_t>(program.gs_user_data_loads.capacity()) * sizeof(ShaderGsUserDataDescriptorLoad);
-	if (program.front_scalar_flow != nullptr)
+	for (const auto* flow: {program.front_scalar_flow.get(), program.scalar_flow.get()})
 	{
-		const auto& flow = *program.front_scalar_flow;
+		if (flow == nullptr) { continue; }
 		bytes += sizeof(ShaderScalarFlow) +
-		         static_cast<uint64_t>(flow.entry_sources.capacity()) * sizeof(ShaderSgprEntrySources) +
-		         static_cast<uint64_t>(flow.holding_entry_value.capacity()) *
+		         static_cast<uint64_t>(flow->entry_sources.capacity()) * sizeof(ShaderSgprEntrySources) +
+		         static_cast<uint64_t>(flow->holding_entry_value.capacity()) *
 		         sizeof(std::bitset<kShaderScalarLivenessSgprs>);
 	}
 	return bytes;
@@ -2110,6 +2113,7 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 		ShaderAppendContinuation(&program->code, back, key.continuation_addr);
 	}
 	ShaderCopyDebugPrintfsLocked(&program->code);
+	program->scalar_flow = ShaderScalarFlowOf(program->code);
 	if (gs_front)
 	{
 		program->gs_user_data_loads = ShaderFindGsUserDataDescriptorLoads(program->code);
@@ -4136,6 +4140,11 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		// are resolved separately from the rebased metadata sharp table.
 		ShaderParseUsage2(usage_user, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr, kGen5GsFrontUserDataBase,
 		                  true, vs_isa, nullptr, info->program->front_scalar_flow.get(), nullptr, &info->program->front_resource_memo);
+		// The program may reload a bound V# register with another descriptor (a
+		// vertex stream from a table); consumers after a reload on every path
+		// read through that runtime V#, the others keep the bound buffer.
+		ShaderCollectRedefinedBufferDescriptors(info->program->code, &info->bind, kGen5GsFrontUserDataBase, *info->program->scalar_flow,
+		                                        &info->program->resource_memo);
 		ShaderBindGsUserDataDescriptors(info->program->code, info->program->gs_user_data_loads, regs->gs_user_data_addr, user_sgpr,
 		                                &info->bind, &usage, &info->program->resource_memo);
 		if (vs_isa != nullptr)
@@ -4152,7 +4161,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			info->bind.program_base_used   = info->program->front_has_getpc;
 			info->bind.program_base        = info->bind.program_base_used ? shader_addr : 0u;
 			info->bind.device_address_used =
-			    info->program->front_has_global_memory_load || ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) ||
+			    info->program->front_has_global_memory_load || !info->bind.redefined_descriptor_consumers.IsEmpty() ||
+			    ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) ||
 			    ShaderHasComputedPointerScalarLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase, static_cast<int>(user_sgpr_num));
 		}
 	} else
