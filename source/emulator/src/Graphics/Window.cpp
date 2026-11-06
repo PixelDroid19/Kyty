@@ -2379,6 +2379,7 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features.depthBiasClamp    = supported_features.depthBiasClamp;
 	device_features.sampleRateShading = supported_features.sampleRateShading;
 	device_features.geometryShader = supported_features.geometryShader;
+	device_features.drawIndirectFirstInstance              = supported_features.drawIndirectFirstInstance;
 	device_features.depthClamp = supported_features.depthClamp;
 	device_features.shaderClipDistance = supported_features.shaderClipDistance;
 	device_features.shaderCullDistance = supported_features.shaderCullDistance;
@@ -3479,6 +3480,7 @@ static void VulkanCreate(WindowContext* ctx)
 	ctx->graphic_ctx.depth_bias_clamp_supported    = device_features.depthBiasClamp == VK_TRUE;
 	ctx->graphic_ctx.sample_rate_shading_supported = device_features.sampleRateShading == VK_TRUE;
 	ctx->graphic_ctx.geometry_shader_supported = device_features.geometryShader == VK_TRUE;
+	ctx->graphic_ctx.draw_indirect_first_instance_supported         = device_features.drawIndirectFirstInstance == VK_TRUE;
 	ctx->graphic_ctx.blend_capabilities.max_color_attachments = device_properties.limits.maxColorAttachments;
 	ctx->graphic_ctx.blend_capabilities.max_dual_source_attachments = device_properties.limits.maxFragmentDualSrcAttachments;
 

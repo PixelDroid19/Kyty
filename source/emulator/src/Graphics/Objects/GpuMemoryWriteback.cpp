@@ -780,7 +780,7 @@ void GpuMemory::CollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, Submis
 	}
 }
 
-bool GpuMemory::PendingStorageHasAliases()
+void GpuMemory::DeferPendingStorageAliases()
 {
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
@@ -800,10 +800,9 @@ bool GpuMemory::PendingStorageHasAliases()
 		                                         });
 		if (refreshes_alias && !m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()))
 		{
-			return true;
+			m_deferred_alias_storage.emplace(heap_id, object_id);
 		}
 	}
-	return false;
 }
 
 bool GpuMemory::PendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges)

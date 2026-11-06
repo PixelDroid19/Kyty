@@ -335,6 +335,7 @@ void GpuMemory::ForgetHeapStorageObjects(int removed_heap_id)
 	m_storage_objects    = shift(m_storage_objects);
 	m_writable_storage   = shift(m_writable_storage);
 	m_pending_write_back = shift(m_pending_write_back);
+	m_deferred_alias_storage = shift(m_deferred_alias_storage);
 	m_storage_scan_changes.clear();
 	GpuMemoryInvalidateStorageScans();
 }
@@ -392,6 +393,7 @@ void GpuMemory::SyncWriteBackIndexes(int heap_id, int object_id)
 	} else
 	{
 		m_writable_storage.erase(key);
+		m_deferred_alias_storage.erase(key);
 	}
 }
 
@@ -702,6 +704,7 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 	m_storage_objects.erase({heap_id, object_id});
 	m_writable_storage.erase({heap_id, object_id});
 	m_pending_write_back.erase({heap_id, object_id});
+	m_deferred_alias_storage.erase({heap_id, object_id});
 	h.free             = true;
 	h.next_free_id     = heap.first_free_id;
 	heap.first_free_id = object_id;
@@ -1051,10 +1054,10 @@ void GpuMemoryCollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, Submissi
 	g_gpu_memory->CollectStorageForGuestSeed(vaddr, size, reader, sources);
 }
 
-bool GpuMemoryPendingStorageHasAliases()
+void GpuMemoryDeferPendingStorageAliases()
 {
 	EXIT_IF(g_gpu_memory == nullptr);
-	return g_gpu_memory->PendingStorageHasAliases();
+	g_gpu_memory->DeferPendingStorageAliases();
 }
 
 bool GpuMemoryPendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges)

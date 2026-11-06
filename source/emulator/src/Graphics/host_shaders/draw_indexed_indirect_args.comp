@@ -1,0 +1,58 @@
+#version 450
+// Converts one guest DRAW_INDEX_INDIRECT record (five 32-bit words) that a storage
+// buffer of the current recording holds into host vkCmdDrawIndexedIndirect arguments,
+// as the processor does for a record it reads on the host:
+// - the index count is clamped to the INDEX_BUFFER_SIZE window past the start index;
+// - the host vertex offset is added to the guest base vertex, and a sum outside
+//   int32 draws nothing;
+// - a draw with primitives latches its instance count as NUM_INSTANCES. An empty
+//   draw keeps the previous value: the host one when given, else the latched one.
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// 0: guest storage buffer, 1: host draw arguments, 2: NUM_INSTANCES latch per queue.
+layout(std430, binding = 0) buffer IndirectBuffer
+{
+	uint words[];
+}
+buffers[3];
+
+layout(push_constant) uniform PushConstants
+{
+	uint source_word;
+	uint index_window;
+	int  vertex_offset;
+	uint latch_word;
+	// Zero keeps the latched value; NUM_INSTANCES itself is never zero.
+	uint previous_instances;
+}
+push;
+
+void main()
+{
+	const uint count          = buffers[0].words[push.source_word];
+	const uint instances      = buffers[0].words[push.source_word + 1u];
+	const uint start          = buffers[0].words[push.source_word + 2u];
+	const int  base_vertex    = int(buffers[0].words[push.source_word + 3u]);
+	const uint first_instance = buffers[0].words[push.source_word + 4u];
+
+	const uint available     = start >= push.index_window ? 0u : push.index_window - start;
+	const uint drawn         = min(count, available);
+	const int  vertex_offset = base_vertex + push.vertex_offset;
+	// Integer addition wraps: the sum left int32 when both operands share a sign it lacks.
+	const bool overflow = (base_vertex < 0) == (push.vertex_offset < 0) && (vertex_offset < 0) != (base_vertex < 0);
+
+	buffers[1].words[0] = overflow ? 0u : drawn;
+	buffers[1].words[1] = instances;
+	buffers[1].words[2] = start;
+	buffers[1].words[3] = uint(vertex_offset);
+	buffers[1].words[4] = first_instance;
+
+	if (drawn != 0u && instances != 0u)
+	{
+		buffers[2].words[push.latch_word] = instances;
+	} else if (push.previous_instances != 0u)
+	{
+		buffers[2].words[push.latch_word] = push.previous_instances;
+	}
+}

@@ -806,6 +806,17 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                              uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
                              SubmissionId* pending_submission);
+// A DRAW_INDEX_INDIRECT whose record at `args_address` the device reads in queue order, from the storage
+// buffer an earlier command of this queue writes. The host knows only the `index_window` indexes from
+// `index_base`. False when the draw needs the record on the host instead; nothing was recorded then.
+// A recorded draw latches NUM_INSTANCES for `latch_queue`, as described by
+// GraphicsRenderRecordDrawIndexedIndirectArgs, and GraphicsRenderReadDrawIndexedIndirectInstances
+// returns it once the recording completes.
+[[nodiscard]] bool     GraphicsRenderDrawIndexIndirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
+                                                       HW::Shader* sh_ctx, uint32_t index_type_and_size, uint32_t index_window,
+                                                       const void* index_base, uint64_t args_address, uint32_t latch_queue,
+                                                       uint32_t previous_instances, SubmissionId* pending_submission);
+[[nodiscard]] uint32_t GraphicsRenderReadDrawIndexedIndirectInstances(uint32_t latch_queue);
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
 	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count, int32_t vertex_offset_add,
 	                             uint32_t first_instance, SubmissionId* pending_submission);

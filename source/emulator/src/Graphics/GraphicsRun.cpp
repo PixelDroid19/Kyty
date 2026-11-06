@@ -1116,9 +1116,12 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	const auto effects                = static_cast<uint8_t>(dependency.effects);
 	const bool producer_on_this_queue = producer == GpuSubmissionResult::Success && OwnsSubmissionQueue(dependency.producer);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(
-	        producer_on_this_queue, effects, producer_on_this_queue && (effects & 2u) != 0u && GpuMemoryPendingStorageHasAliases()))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_on_this_queue, effects))
 	{
+		if ((effects & 2u) != 0u)
+		{
+			GpuMemoryDeferPendingStorageAliases();
+		}
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
 		m_consolidated_producer   = dependency.producer;
@@ -1201,9 +1204,12 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	const auto effects                = static_cast<uint8_t>(dependency.effects);
 	const bool producer_on_this_queue = producer == GpuSubmissionResult::Success && OwnsSubmissionQueue(dependency.producer);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(
-	        producer_on_this_queue, effects, producer_on_this_queue && (effects & 2u) != 0u && GpuMemoryPendingStorageHasAliases()))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_on_this_queue, effects))
 	{
+		if ((effects & 2u) != 0u)
+		{
+			GpuMemoryDeferPendingStorageAliases();
+		}
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
 		m_consolidated_producer   = dependency.producer;
@@ -2418,7 +2424,8 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances)
 		num_instances = 1;
 	}
 
-	m_num_instances = num_instances;
+	m_num_instances         = num_instances;
+	m_num_instances_latched = false;
 }
 
 // A dependency on another queue is ordered on the device first; one the draw still reports
@@ -2448,6 +2455,7 @@ static void RetryGuestDeviceAddressDraw(CommandProcessor* cp, const Callback& ca
 void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type)
 {
 	SubmitRecordedDispatchesBeforeDraw();
+	ResolveNumInstancesLatch();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	uint64_t submit_id = 0;
 	uint32_t index_type_and_size = 0;
@@ -2485,6 +2493,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags)
 {
 	SubmitRecordedDispatchesBeforeDraw();
+	ResolveNumInstancesLatch();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	uint64_t submit_id = 0;
 	uint32_t index_type_and_size = 0;
@@ -2520,6 +2529,62 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 	SubmitRecordedWorkIfGpuIdle();
 }
 
+// The device reads the record in queue order when the storage buffer an earlier command of this
+// queue writes holds it, so the host neither waits for nor reads it.
+bool CommandProcessor::DrawIndexIndirectOnDevice(uint64_t args_address)
+{
+	uint64_t submit_id = 0;
+	{
+		Core::LockGuard lock(m_mutex);
+		// The device draw binds the whole index window, so its size must be known.
+		if (m_index_base_addr == 0 || m_index_buffer_size == 0 || m_index_type_and_size > 1u)
+		{
+			return false;
+		}
+		submit_id = m_sumbit_id;
+	}
+	bool recorded = false;
+	RetryGuestDeviceAddressDraw(this,
+	                            [&](SubmissionId* pending)
+	                            {
+		                            Core::LockGuard lock(m_mutex);
+		                            EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM || m_queue < 0);
+		                            auto* buffer = m_buffer[m_current_buffer];
+		                            recorded     = GraphicsRenderDrawIndexIndirect(
+		                                submit_id, buffer, &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, m_index_buffer_size,
+		                                reinterpret_cast<const void*>(m_index_base_addr), args_address, static_cast<uint32_t>(m_queue),
+		                                m_num_instances_latched ? 0u : m_num_instances, pending);
+		                            if (recorded)
+		                            {
+			                            m_num_instances_latched = true;
+			                            EXIT_IF(!buffer->GetSubmissionId(&m_num_instances_latch));
+		                            }
+	                            });
+	return recorded;
+}
+
+// A direct draw after a device-side DRAW_INDEX_INDIRECT draws as many instances as that record
+// latched; the host reads the latch once the recording that holds the record completes.
+void CommandProcessor::ResolveNumInstancesLatch()
+{
+	SubmissionId latch;
+	{
+		Core::LockGuard lock(m_mutex);
+		if (!m_num_instances_latched)
+		{
+			return;
+		}
+		latch = m_num_instances_latch;
+	}
+	WaitSubmission(latch);
+	const uint32_t  instances = GraphicsRenderReadDrawIndexedIndirectInstances(static_cast<uint32_t>(m_queue));
+	Core::LockGuard lock(m_mutex);
+	// Every latch chain starts from a nonzero host value or record count.
+	EXIT_IF(instances == 0u);
+	m_num_instances         = instances;
+	m_num_instances_latched = false;
+}
+
 void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiator)
 {
 	SubmitRecordedDispatchesBeforeDraw();
@@ -2550,6 +2615,11 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 			EXIT("DRAW_INDEX_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
 			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
 		}
+	}
+	if (DrawIndexIndirectOnDevice(args_address))
+	{
+		SubmitRecordedWorkIfGpuIdle();
+		return;
 	}
 	// The arguments can be written by an earlier dispatch of this recording.
 	if (!ReadCurrentGuestBytes(args_address, &args, sizeof(args)))
@@ -2625,7 +2695,8 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 			}
 		}
 
-		m_num_instances = args.instance_count;
+		m_num_instances         = args.instance_count;
+		m_num_instances_latched = false;
 		submit_id = m_sumbit_id;
 		index_type_and_size = m_index_type_and_size;
 		instance_count = args.instance_count;
@@ -2688,7 +2759,8 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
 			     args.start_vertex_location);
 		}
 
-		m_num_instances = args.instance_count;
+		m_num_instances         = args.instance_count;
+		m_num_instances_latched = false;
 		submit_id       = m_sumbit_id;
 	}
 	RetryGuestDeviceAddressDraw(this, [&](SubmissionId* pending)
@@ -2833,6 +2905,7 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier)
 {
 	SubmitRecordedDispatchesBeforeDraw();
+	ResolveNumInstancesLatch();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	uint64_t submit_id = 0;
 	uint32_t instance_count = 1;

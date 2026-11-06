@@ -1666,10 +1666,61 @@ static VkExtent2D AttachmentlessDrawExtent(const HW::Context& ctx)
 	return {static_cast<uint32_t>(scissor.right), static_cast<uint32_t>(scissor.bottom)};
 }
 
-void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
-                             uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
-                             uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
-                             SubmissionId* pending_submission)
+namespace {
+
+// A DRAW_INDEX_INDIRECT record the device reads. The draw then covers the whole index
+// window, binds every declared vertex record, and takes its counts, base vertex and first
+// instance from the converted record.
+struct IndexedIndirectSource
+{
+	uint64_t args_address       = 0;
+	uint32_t latch_queue        = 0;
+	uint32_t previous_instances = 0;
+	bool     recorded           = false;
+};
+
+// Draws whose commands depend on the record's values only through the indirect arguments:
+// no geometry pass, chunked or rect primitive, or fixed-function color, depth or stencil
+// operation that the host path skips for an empty record.
+bool IndexedIndirectStateEligible(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx,
+                                  uint32_t index_type_and_size)
+{
+	constexpr uint32_t kColorEliminateFastClear = 2u;
+	constexpr uint32_t kColorResolve            = 3u;
+	constexpr uint32_t kColorDecompress         = 6u;
+	const uint32_t     color_mode               = ctx.GetColorControl().mode;
+	const uint32_t     prim_type                = ucfg.GetPrimType();
+	GeometryDrawPlan   geometry_probe;
+	// The smallest draw takes the geometry pass whenever any draw of this state can.
+	return g_render_ctx->GetGraphicCtx()->draw_indirect_first_instance_supported && index_type_and_size <= 1u && prim_type >= 1u &&
+	       prim_type <= 6u && color_mode != kColorEliminateFastClear && color_mode != kColorResolve && color_mode != kColorDecompress &&
+	       !ctx.GetRenderControl().depth_copy && !ctx.GetRenderControl().stencil_copy &&
+	       !ResolveGeometryDraw(ctx, ucfg, sh_ctx, 3u, 1u, &geometry_probe);
+}
+
+// A clear the pass applies whatever the record holds; the guest clears nothing for an empty draw.
+bool IndexedIndirectTargetsEligible(const RenderColorInfo& color, const RenderDepthInfo& depth)
+{
+	if (depth.depth_clear_enable || depth.stencil_clear_enable)
+	{
+		return false;
+	}
+	for (uint32_t slot = 0; slot < RenderColorInfo::TARGETS_MAX; ++slot)
+	{
+		if (RenderColorSlotActive(color, slot) && color.attachment[slot].cmask_fast_clear_enable)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+} // namespace
+
+static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
+                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
+                              uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
+                              SubmissionId* pending_submission, IndexedIndirectSource* indirect)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -1701,8 +1752,22 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 	DebugStatsRecordDrawRenderLockWait(DrawStageElapsedNs(render_lock_start));
 	const auto state_setup_start = DrawStageClock::now();
+	GpuMemoryGdsSource indirect_source {};
+	if (indirect != nullptr)
+	{
+		if (!IndexedIndirectStateEligible(*ctx, *ucfg, *sh_ctx, index_type_and_size))
+		{
+			return;
+		}
+		indirect_source = GpuMemoryAcquireGdsSource(g_render_ctx->GetGraphicCtx(), buffer, indirect->args_address, 5u * sizeof(uint32_t));
+		if (indirect_source.status != GpuMemoryGdsSourceStatus::DeviceBuffer)
+		{
+			return;
+		}
+	}
 	GeometryDrawPlan geometry_plan;
-	const bool       geometry_pass = ResolveGeometryDraw(*ctx, *ucfg, *sh_ctx, index_count, instance_count, &geometry_plan);
+	const bool       geometry_pass =
+	    indirect == nullptr && ResolveGeometryDraw(*ctx, *ucfg, *sh_ctx, index_count, instance_count, &geometry_plan);
 	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx, geometry_pass))
 	{
 		MaybeDumpIndexDrawSkip("invalid-vs-or-ge", index_count, draw_modifier, type);
@@ -1848,6 +1913,10 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	RenderColorInfo color_info;
 	DescribeRenderDepthInfo(*ctx, &depth_info);
 	DescribeRenderColorInfo(buffer, *ctx, &color_info);
+	if (indirect != nullptr && !IndexedIndirectTargetsEligible(color_info, depth_info))
+	{
+		return;
+	}
 	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters(), ctx->GetAlphaToMaskEnable());
 	// Without color or depth, the draw has an effect only through a pixel
 	// shader the DB executes for its memory writes (EXEC_ON_NOOP).
@@ -1865,7 +1934,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	MaybeReportNativeWaveInput(*ctx, *ucfg, *sh_ctx, vs_input_info,
 	                          {index_count, true, index_type_and_size, first_instance, instance_count,
 	                           reinterpret_cast<uint64_t>(index_addr), vertex_offset_add, draw_modifier});
-	if (ShaderVertexClipProbeEligible(Config::IsNextGen(), sh_ctx->GetVs().vs_embedded))
+	// Probes select draws by their guest count, which only the device knows for an indirect record.
+	if (indirect == nullptr && ShaderVertexClipProbeEligible(Config::IsNextGen(), sh_ctx->GetVs().vs_embedded))
 	{
 		vs_input_info.clip_probe = ShaderResolveVertexClipProbeConfig(sh_ctx->GetVs().gs_regs.chksum, true, index_count);
 	}
@@ -1902,8 +1972,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info, !ps_required);
-	ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count);
-	if (ShaderPixelInput0ProbeEligible(Config::IsNextGen(), sh_ctx->GetPs().ps_embedded))
+	if (indirect == nullptr)
+	{
+		ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count);
+	}
+	if (indirect == nullptr && ShaderPixelInput0ProbeEligible(Config::IsNextGen(), sh_ctx->GetPs().ps_embedded))
 	{
 		ps_input_info.input0_probe =
 		    ShaderResolvePixelProbeConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count, ps_input_info.stage_enabled);
@@ -1929,13 +2002,14 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		const auto index_upload_start = DrawStageClock::now();
 		index_snapshot  = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 		index_upload_ns = DrawStageElapsedNs(index_upload_start);
-		if (index_snapshot != nullptr)
+		// The base vertex of an indirect record is unknown here, so its window bounds no record.
+		if (index_snapshot != nullptr && indirect == nullptr)
 		{
 			vertex_requirement = ResolveSnapshotIndexedVertexRecords(buffer, index_snapshot, index_addr_u64, index_count, index_type, vertex_offset);
 		}
 	}
 	const VertexStreamDrawRange draw_range {vertex_requirement.first, vertex_requirement.records, true, first_instance, instance_count};
-	const bool                  draw_range_known = index_snapshot != nullptr && vertex_requirement.valid;
+	const bool                  draw_range_known = indirect == nullptr && index_snapshot != nullptr && vertex_requirement.valid;
 	if (!PrepareVertexStreamsForRead(buffer, vs_input_info, draw_range_known ? &draw_range : nullptr, pending_submission) ||
 	    PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front.bind : vs_input_info.bind, &ps_input_info.bind,
 	                                     &device_address_table, pending_submission) != GuestDeviceAddressReadPreparation::Ready)
@@ -1996,7 +2070,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	if (geometry_pass)
 	{
 		vertex_requirement = ResolveLinearVertexRecords(0u, primitive_plan.draw_count);
-	} else if (index_snapshot == nullptr)
+	} else if (index_snapshot == nullptr && indirect == nullptr)
 	{
 		vertex_requirement = ResolveIndexedVertexRecords(index_addr, index_count, index_type, vertex_offset);
 	}
@@ -2026,6 +2100,10 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
 
+	if (pipeline->transport != nullptr && indirect != nullptr)
+	{
+		return;
+	}
 	if (pipeline->transport != nullptr)
 	{
 		FragmentTransportGeometry geometry {};
@@ -2053,6 +2131,18 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
 
+	// The conversion closes the pass and binds its own compute state, so it precedes the draw's state.
+	VulkanBuffer* indirect_args = nullptr;
+	if (indirect != nullptr)
+	{
+		indirect_args = GraphicsRenderRecordDrawIndexedIndirectArgs(buffer, indirect_source.buffer, indirect_source.offset, index_count,
+		                                                            vertex_offset, indirect->latch_queue, indirect->previous_instances);
+		if (indirect_args == nullptr)
+		{
+			return;
+		}
+	}
+
 	const auto resource_binding_start = DrawStageClock::now();
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
 
@@ -2079,8 +2169,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	}
 
 	const auto     vertex_buffer_binding_start = DrawStageClock::now();
-	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records, indices_snapshotted,
-	                  first_instance, instance_count);
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records,
+	                  indirect == nullptr && indices_snapshotted, first_instance, instance_count);
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
@@ -2196,7 +2286,13 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		vertex_clip_probe->BeginDepthPassQuery(buffer);
 	}
 	uint32_t host_draws = 0;
-	if (geometry_pass)
+	if (indirect_args != nullptr)
+	{
+		vkCmdDrawIndexedIndirect(pass_buffer, indirect_args->buffer, 0, 1, sizeof(VkDrawIndexedIndirectCommand));
+		DebugStatsRecordDraw();
+		host_draws++;
+		indirect->recorded = true;
+	} else if (geometry_pass)
 	{
 		// The pull stage reads the pass output records; no index buffer applies.
 		vkCmdDraw(pass_buffer, primitive_plan.draw_count, instance_count, 0u, first_instance);
@@ -2236,6 +2332,26 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	InvalidateDrawnColorTargets(color_info, ps_input_info);
 	InvalidateMemoryObject(depth_info);
 	DebugStatsRecordDrawCommandEmission(DrawStageElapsedNs(command_emission_start));
+}
+
+void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
+                             uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
+                             uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
+                             SubmissionId* pending_submission)
+{
+	RecordIndexedDraw(submit_id, buffer, ctx, ucfg, sh_ctx, index_type_and_size, index_count, index_addr, draw_modifier, type,
+	                  instance_count, vertex_offset_add, first_instance, pending_submission, nullptr);
+}
+
+bool GraphicsRenderDrawIndexIndirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
+                                     uint32_t index_type_and_size, uint32_t index_window, const void* index_base, uint64_t args_address,
+                                     uint32_t latch_queue, uint32_t previous_instances, SubmissionId* pending_submission)
+{
+	IndexedIndirectSource indirect {.args_address = args_address, .latch_queue = latch_queue, .previous_instances = previous_instances};
+	// Instance count zero binds every declared record of per-instance streams.
+	RecordIndexedDraw(submit_id, buffer, ctx, ucfg, sh_ctx, index_type_and_size, index_window, index_base, 0, 1, 0, 0, 0,
+	                  pending_submission, &indirect);
+	return indirect.recorded;
 }
 
 static bool GraphicsRenderDepthStencilCopyClearSource(uint64_t submit_id, CommandBuffer* buffer, RenderDepthInfo* source,

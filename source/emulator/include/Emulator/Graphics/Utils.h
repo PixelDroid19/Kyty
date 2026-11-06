@@ -992,21 +992,20 @@ enum class LabelForceCompleteKind : uint8_t
 	return completion_callback_issued;
 }
 
-[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool same_queue, uint8_t producer_effects,
-                                                                          bool pending_storage_has_aliases)
+[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool same_queue, uint8_t producer_effects)
 {
 	// A label store relies on same-queue GPU ordering until its submission's
-	// fence publishes it. A write-back may join it only when no pending storage
-	// write has a GPU alias: guest-side readers (memory reads, device-address
-	// views) already wait for pending storage themselves, while aliases are
-	// refreshed only by the write-back. Notification callbacks stay synchronous.
+	// fence publishes it. A write-back may join it: guest-side readers (memory
+	// reads, device-address views) already wait for pending storage themselves,
+	// and GPU aliases of pending storage wait at their next use
+	// (GpuMemoryDeferPendingStorageAliases). Notification callbacks stay synchronous.
 	constexpr uint8_t guest_store = 1u;
 	constexpr uint8_t write_back  = 2u;
 	if (!same_queue)
 	{
 		return false;
 	}
-	return producer_effects == guest_store || (producer_effects == (guest_store | write_back) && !pending_storage_has_aliases);
+	return producer_effects == guest_store || producer_effects == (guest_store | write_back);
 }
 
 // Completion callbacks a command-processor batch can record.

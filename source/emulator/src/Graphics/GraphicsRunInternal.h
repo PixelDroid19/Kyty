@@ -421,6 +421,8 @@ public:
 
 private:
 	void DispatchIndirectAtAddress(uint64_t address, uint32_t mode);
+	bool                 DrawIndexIndirectOnDevice(uint64_t args_address);
+	void                 ResolveNumInstancesLatch();
 	static constexpr int VK_BUFFERS_NUM = static_cast<int>(CommandProcessorSubmissionSlots::SlotCount);
 	void                 CompleteSubmittedThroughLocked(SubmissionId target, SubmissionId* latest_completed);
 	void                 TryCompleteSubmittedLocked(SubmissionId* latest_completed);
@@ -450,6 +452,10 @@ private:
 	uint64_t         m_draw_indirect_args_base_addr     = 0;
 	uint64_t         m_dispatch_indirect_args_base_addr = 0;
 	uint32_t         m_num_instances       = 1;
+	// A device-side DRAW_INDEX_INDIRECT of this submission latched NUM_INSTANCES; m_num_instances
+	// holds it only once the host reads the latch after that submission completes.
+	bool         m_num_instances_latched = false;
+	SubmissionId m_num_instances_latch;
 
 	Core::Mutex m_mutex;
 	Core::Mutex m_run_mutex;

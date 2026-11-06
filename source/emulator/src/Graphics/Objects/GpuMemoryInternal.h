@@ -302,7 +302,7 @@ public:
 	[[nodiscard]] bool WriteBackStorageForGuestSeed(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuQueueId consumer,
 	                                                SubmissionId* dependency);
 	void CollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, SubmissionId reader, std::vector<GpuMemoryStorageSeedSource>* sources);
-	[[nodiscard]] bool PendingStorageHasAliases();
+	void DeferPendingStorageAliases();
 	[[nodiscard]] bool PendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges);
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
 	[[nodiscard]] bool FindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
@@ -566,6 +566,11 @@ private:
 	// of every heap on each completion.
 	std::set<std::pair<int, int>> m_pending_write_back;
 	void                          SyncWriteBackIndexes(int heap_id, int object_id);
+	// The m_writable_storage members a consolidated wait left with aliases
+	// (DeferPendingStorageAliases); they leave with the write-back.
+	std::set<std::pair<int, int>> m_deferred_alias_storage;
+	[[nodiscard]] bool            DeferredAliasUseConflicts(int heap_id, const Vector<OverlappedBlock>& links, GpuMemoryObjectType type,
+	                                                        const uint64_t* params);
 
 	// Advances whenever an object block enters or leaves a heap. Lookup results
 	// over the object graph stay valid while it is unchanged.

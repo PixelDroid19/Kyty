@@ -1360,11 +1360,11 @@ using GpuMemoryGuestRangeQuery = bool (*)(uint64_t vaddr, uint64_t size);
 // those whose writes are already published to the guest device-address view in
 // the consumer's queue order.
 void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer);
-// True when a writable StorageBuffer with an incomplete submission use shares
-// guest bytes with another GPU object whose write-back refresh reads them. The
-// write-back must refresh those aliases first, so a wait that publishes it must
-// stay synchronous.
-[[nodiscard]] bool GpuMemoryPendingStorageHasAliases();
+// A consolidated wait does not wait for the write-back of a writable StorageBuffer
+// with an incomplete submission use, yet only that write-back refreshes another GPU
+// object whose refresh reads the same guest bytes. Records every such storage: the
+// next draw or dispatch that uses one of its aliases waits for its submissions first.
+void GpuMemoryDeferPendingStorageAliases();
 // True when an object other than a writable StorageBuffer still owes guest bytes
 // over one of the ranges: only processor write-back carries its results there.
 [[nodiscard]] bool GpuMemoryPendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges);

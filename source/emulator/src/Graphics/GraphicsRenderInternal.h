@@ -1760,6 +1760,14 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 VulkanBuffer* GraphicsRenderRecordDispatchIndirectArgs(CommandBuffer* buffer, const VulkanBuffer* source, uint64_t offset,
                                                        const uint32_t* max_group_count);
 void          GraphicsRenderCheckDispatchIndirectLimits();
+// Records a conversion of the 20-byte DRAW_INDEX_INDIRECT record at `offset` of `source` into host
+// indexed-draw arguments, in queue order: the count is clamped to `index_window` indexes past the
+// record's start, `vertex_offset` is added to its base vertex, and a draw with primitives latches its
+// instance count for `latch_queue`; an empty one latches `previous_instances` unless that is zero.
+// Returns the argument buffer, or nullptr when the conversion is unavailable.
+VulkanBuffer* GraphicsRenderRecordDrawIndexedIndirectArgs(CommandBuffer* buffer, const VulkanBuffer* source, uint64_t offset,
+                                                          uint32_t index_window, int32_t vertex_offset, uint32_t latch_queue,
+                                                          uint32_t previous_instances);
 
 bool                            RenderColorSlotConfigured(const RenderColorInfo& color, uint32_t slot);
 bool                            RenderColorSlotActive(const RenderColorInfo& color, uint32_t slot);

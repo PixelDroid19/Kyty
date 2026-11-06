@@ -4586,3 +4586,46 @@ read 31-39 fps; the same code spreads about 2.5 fps between windows.
 - **Open.**
   - Device-side indirect draw arguments, if `ReadCurrentGuestBytes` turns out to dominate the remaining waits.
   - The WAIT_REG_MEM producer waits.
+
+## Device-side indexed indirect draws and lazy alias waits (2026-11-06)
+
+`PPSA21567 - Astro Bot`, dunes after the recorded user gameplay route, Intel Arc A770, ANV Mesa 26.2.5, xe, 60 fps limit.
+Every A/B below alternates the change on and off every 10 s inside one run and compares samples by draws per frame.
+
+- **Device `DRAW_INDEX_INDIRECT`.** When the record lies in a storage buffer that an earlier command of the same queue
+  writes, a one-invocation converter turns it into `vkCmdDrawIndexedIndirect` arguments in queue order: it clamps the
+  count to the `INDEX_BUFFER_SIZE` window, adds the host vertex offset (a sum outside int32 draws nothing) and latches
+  the instance count. A later direct draw waits for that recording and reads the latch. The host neither waits for
+  nor reads the record.
+  - Eligibility: no quad-list chunking, geometry pass or fragment transport, 16- or 32-bit indices, a known index
+    window. About 75 % of the dune records are geometry-pass draws and keep the host path, so about 25 % move.
+  - Alone it gains nothing: 14.11 fps off against 13.60 fps on (350-399 draws per frame). The argument wait moves
+    into `WAIT_REG_MEM` current-producer waits, about 137 per frame both ways, which double from 0.12 to 0.24 ms
+    each (18 to 35 ms per frame). Those are the waits the alias guard keeps synchronous.
+- **Lazy alias wait.** `WAIT_REG_MEM` now always consolidates a same-queue producer whose effects are a store or a
+  store with write-back. The writable storage buffers it leaves with pending uses and aliases whose refresh reads
+  guest bytes are recorded. The next draw or dispatch that creates or links such an alias waits for that storage's
+  submissions first (a mutation conflict, retried after the wait). Outside a draw or dispatch that use stops the
+  emulator.
+  - The unit test for the old guard lost its alias case, since the guard moved from the wait to the alias's use.
+
+| Draws per frame | Off (host path, synchronous guard) | On (device draws, lazy alias wait) |
+| --- | --- | --- |
+| 550-599 | 13.73 fps (56 s) | 14.66 fps (44 s), +6.8 % |
+| 600-649 | 13.09 fps | 13.61 fps, +4.0 % |
+
+  `WAIT_REG_MEM` time fell from 3.4 to 1.7 ms per frame. The on phases deferred 9,867 aliases and waited at 4,736
+  uses. The captures render correctly.
+- **Other titles.** `PPSA09076 - DREDGE` and `PPSA28311 - Absolum` on the generic route for 125 s stay interactive at
+  60, 90 and 115 s (27-31 and 40 fps), with no error, and the captures render correctly.
+- **Known limit.** A negative base vertex with indices small enough that a vertex index falls below zero: the host
+  path skips the whole draw, the device path draws it and lets robust buffer access bound the fetch. The host
+  cannot apply its predicate, since the drawn index range comes from the GPU-written record.
+- **Open: intermittent write-back stop.** 2 of 6 dune runs with waits consolidated over aliases stopped with
+  "GpuMemory write-back requested before exact resource dependencies completed"; about 15 runs with the synchronous
+  guard did not. A run on another branch hit it too, so it may predate this change. The static suspect is the
+  device-address read preparation (`GuestDeviceAddressWriteBack` → `WriteBackStorageRanges`), which writes back any
+  collected storage with incomplete uses that is neither in place nor held by an overlay. Not confirmed with a
+  backtrace.
+- **Unrelated stop seen once.** "unknown relation: DepthStencilBuffer - Contains - RenderTexture" also occurs on
+  builds without this change.

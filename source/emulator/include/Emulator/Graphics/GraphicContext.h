@@ -197,6 +197,8 @@ struct GraphicContext
 	// before a graphics pipeline can request sample shading.
 	bool sample_rate_shading_supported = false;
 	bool geometry_shader_supported = false;
+	// A nonzero firstInstance in indirect draw arguments requires drawIndirectFirstInstance.
+	bool draw_indirect_first_instance_supported = false;
 	bool compute_derivative_group_linear_supported = false;
 	bool compute_derivative_group_linear_enabled = false;
 	// VK_KHR_shader_maximal_reconvergence lets a fragment shader keep every

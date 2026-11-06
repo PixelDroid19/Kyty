@@ -306,6 +306,45 @@ static std::vector<GpuByteRun> ChangedPageRuns(const std::vector<uint64_t>& base
 	return runs;
 }
 
+// An object whose refresh reads the guest bytes of a deferred alias storage (see
+// GpuMemoryDeferPendingStorageAliases) waits for that storage's submissions: their
+// write-back refreshes it. The conflict makes the draw or dispatch retry after the
+// wait; links are the object's own, or the blocks a new object will link.
+bool GpuMemory::DeferredAliasUseConflicts(int heap_id, const Vector<OverlappedBlock>& links, GpuMemoryObjectType type,
+                                          const uint64_t* params)
+{
+	if (m_deferred_alias_storage.empty() || !GpuMemoryWriteBackRefreshReadsGuestBytes(type, params))
+	{
+		return false;
+	}
+	for (const auto& link: links)
+	{
+		const std::pair<int, int> key {heap_id, link.object_id};
+		if (m_deferred_alias_storage.count(key) == 0u)
+		{
+			continue;
+		}
+		const auto& dependencies = m_heaps[heap_id].objects[link.object_id].info.submission_uses.Dependencies();
+		const auto  pending      = std::find_if(dependencies.begin(), dependencies.end(), [this](const auto& dependency)
+		                                        { return !m_deferred_deletions.AreDependenciesComplete({dependency}); });
+		if (pending == dependencies.end())
+		{
+			// Its submissions completed: a wait for the storage would have ended here too.
+			m_deferred_alias_storage.erase(key);
+			continue;
+		}
+		if (g_mutation_conflict == nullptr)
+		{
+			EXIT("GpuMemory alias of a deferred write-back used outside a draw or dispatch: type=%s queue=%" PRIu32 " sequence=%" PRIu64
+			     "\n",
+			     Core::EnumName(type).C_Str(), pending->queue.Value(), pending->sequence);
+		}
+		*g_mutation_conflict = *pending;
+		return true;
+	}
+	return false;
+}
+
 void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int obj_id, Vector<Destructor>* destructors)
 {
 	KYTY_PROFILER_BLOCK("GpuMemory::Update");
@@ -1328,7 +1367,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		if (h.scenario == GpuMemoryScenario::Common && info.Equal(o.params))
 		{
 			finish_classification();
-			Update(submit_id, ctx, heap_id, fast_id, &destructors);
+			// A conflict keeps the stale submit id, so the retry updates it.
+			if (!DeferredAliasUseConflicts(heap_id, h.others, o.object.type, o.params))
+			{
+				Update(submit_id, ctx, heap_id, fast_id, &destructors);
+			}
 
 			o.use_num++;
 			o.use_last_frame              = m_current_frame;
@@ -1376,7 +1419,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 			finish_classification(others.Size(), relation_mask);
-			Update(submit_id, ctx, heap_id, existing_id, &destructors);
+			if (!DeferredAliasUseConflicts(heap_id, h.others, o.object.type, o.params))
+			{
+				Update(submit_id, ctx, heap_id, existing_id, &destructors);
+			}
 
 			o.use_num++;
 			o.use_last_frame              = m_current_frame;
@@ -1404,6 +1450,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		{
 			selective_reclaim_ids.Add(stale_reuse_id);
 		}
+		// The new object links the storage, so the write-back after the wait refreshes it.
+		(void)DeferredAliasUseConflicts(heap_id, others, info.type, info.params);
 
 		// A texture holds surface pixels when it was materialized from a render target or skipped its
 		// guest upload because a surface already owns those bytes.
