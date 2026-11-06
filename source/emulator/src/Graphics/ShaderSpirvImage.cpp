@@ -1009,7 +1009,12 @@ String8 GuardImageDestinationStores(const String8& source, const ShaderInstructi
 	}
 
 	uint32_t destination_count = inst.dst.size > 0 ? static_cast<uint32_t>(inst.dst.size) : 1u;
-	if (inst.mimg_dmask != 0)
+	// Gather4 returns four texels of the one channel its DMASK selects.
+	const bool gather = inst.type == ShaderInstructionType::ImageGather4 || inst.type == ShaderInstructionType::ImageGather4C;
+	if (gather)
+	{
+		destination_count = 4u;
+	} else if (inst.mimg_dmask != 0)
 	{
 		destination_count = 0;
 		for (uint32_t mask = inst.mimg_dmask; mask != 0; mask >>= 1u)
