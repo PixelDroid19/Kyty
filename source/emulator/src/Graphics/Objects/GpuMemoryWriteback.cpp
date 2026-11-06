@@ -425,10 +425,13 @@ void GpuMemory::PublishStorageSnapshotLocked(const GpuMemoryStorageSnapshot& sna
 	}
 	auto& h = m_heaps[identity.heap_id].objects[identity.object_id];
 	auto& o = h.info;
-	// Alias parents need the whole write-back to be invalidated or propagated.
+	// Alias parents need the whole write-back to be invalidated or propagated. Without the
+	// tracker, a guest write since the object last matched guest memory, newer than this
+	// result, could not be told apart from these bytes.
 	if (h.free || !o.in_use || o.read_only || o.object.type != GpuMemoryObjectType::StorageBuffer ||
 	    o.logical_generation != identity.logical_generation || o.object.obj != identity.buffer || o.depth_meta_bound ||
-	    h.block.vaddr_num != 1 || !h.others.IsEmpty())
+	    h.block.vaddr_num != 1 || !h.others.IsEmpty() || !o.check_hash || !o.dirty_registered ||
+	    GpuDirtyPageTracker::Instance().ChangedSince(snapshot.vaddr, snapshot.size, o.dirty_generation[0]))
 	{
 		return;
 	}
@@ -440,16 +443,18 @@ void GpuMemory::PublishStorageSnapshotLocked(const GpuMemoryStorageSnapshot& sna
 	}
 	DebugStatsRecordGpuMemoryWriteBack(GpuMemoryStatsTypeIndex(o.object.type), result.copied_bytes,
 	                                   static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - start).count()));
-	// As in WriteBackObjectLocked: the copy's own write notifications advanced the range's generation.
+	// As in WriteBackObjectLocked: the next use must not take these bytes for a guest write
+	// and upload them over the newer device content.
 	bool rebaselined = false;
-	if (result.content_changed && o.check_hash && o.dirty_registered)
+	if (result.content_changed)
 	{
 		const auto read = GpuDirtyPageTracker::Instance().BeginRead(snapshot.vaddr, snapshot.size);
-		if (read.tracked)
+		rebaselined     = read.tracked;
+		if (rebaselined)
 		{
 			o.dirty_generation[0] = read.generation;
-			rebaselined           = true;
 		}
+		o.hash[0] = rebaselined ? 0 : GpuMemoryCalcHash(o.object.type, reinterpret_cast<const uint8_t*>(snapshot.vaddr), snapshot.size);
 	}
 	GuestDeviceAddressOverlayWrittenBack(identity, snapshot.vaddr, snapshot.size, rebaselined, o.dirty_generation[0]);
 }
