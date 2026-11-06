@@ -6795,8 +6795,8 @@ TEST(EmulatorGraphicsState, AllowsRenderTargetMultiSurfaceParents)
 	                                                    GpuMemoryObjectType::RenderTexture));
 	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
 	                                                     GpuMemoryObjectType::RenderTexture));
-	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
-	                                                     GpuMemoryObjectType::RenderTexture));
+	EXPECT_TRUE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::RenderTexture));
 	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Equals,
 	                                                     GpuMemoryObjectType::Texture));
 	EXPECT_TRUE(GpuMemoryAllowsRenderTargetReclaimDepth(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
