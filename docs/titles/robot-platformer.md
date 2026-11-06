@@ -394,6 +394,9 @@ strict 60 fps-limited runs gw180 and gw181, `504361d49` plus temporary probes
     mark. Which clause is not yet measured.
   - Direction: count the failing clause per wait, then satisfy that case with
     a device-side copy in queue order.
+  - Measured and addressed on 2026-11-06: the failing step is the record
+    (`DeviceMayWriteGuestRange`). See "Device-address overlays for refused
+    storage publications" below.
 - CP cost alone is about 75 us/draw in the hub, near 11 fps at 1170 draws with
   no GPU cost at all, so the GPU work above is not the only limit.
 
@@ -4524,3 +4527,62 @@ read 31-39 fps; the same code spreads about 2.5 fps between windows.
   dispatch processing 5.8 ms.
 - Excluded: submitting recorded compute work as soon as the GPU is idle, as graphics work already
   does. 31.5, 39.3 and 32.6 fps against 31.4, 37.4 and 35.4 fps.
+
+## Device-address overlays for refused storage publications (2026-11-06)
+
+`PPSA21567 - Astro Bot`, dunes after the recorded user gameplay route, Intel Arc A770, ANV Mesa 26.2.5, xe, 60 fps limit.
+
+- **Cause measured on main.** Draw-time host waits in `RetryGuestDeviceAddressDraw` held 26.0 ms of 31.7 ms fence
+  time per frame (81.5 %, about 6 waits per frame, 585 draws per frame). 99 % of them came from
+  `GuestDeviceAddressRecordPublication` refusing a same-queue result that had passed `StorageIsWholeGuestContent`.
+  The refusal is `DeviceMayWriteGuestRange`: objects under 64 KiB that are not 64-byte aligned. That guard stays as
+  it is, since it prevents partial-cache-line device writes from reverting CPU stores.
+- **Change.** For such a refusal, `GuestDeviceAddressRecordOverlay` copies the object, in queue order, into a
+  device-local slot. The device-address table maps that slot over the object's guest range, so later
+  device-address reads on the same queue see the result without a host wait. Guest memory still gets the bytes
+  from the object's write-back.
+  - The same copy also goes to host-visible staging. Write-back completion publishes it if guest memory still
+    matches the dirty tracker.
+    - Why: `GpuMemoryCanWriteBackAtSubmission` defers the write-back of an object that a later submission uses.
+      Without the old host wait, objects rewritten every frame reached guest memory rarely: about 1,300 deferred
+      against 120 written per 2 s.
+    - One run of that build crashed on a null call while another session loaded the disk. Its cause was not
+      established.
+  - A slot is dropped when its guest range changes, when a device write lands over it, or when a reader on another
+    queue prepares. It is also dropped two flips after guest memory last matched the object. The refusal then falls
+    back to the old host wait.
+  - Snapshot publication compares every page against the last published bytes, and leaves the GPU's written-page
+    flags for the object's own write-back.
+- **Comparison method.** After the route ends (186 s), the scene varies from run to run whatever the build, so runs
+  are not aligned by time or frame number. Per-second samples are grouped by draws per frame, and captures confirm
+  the scene.
+
+| Content | Main | Overlays |
+| --- | --- | --- |
+| Cinematic, 350-410 draws/frame | 12.27 fps (120 s); fence 47.8 ms/frame; WAIT_REG_MEM 1.2 ms/frame | 13.67 fps (25 s); fence 42.6 ms/frame; WAIT_REG_MEM 19.6 ms/frame |
+| Heavier scene, 735-790 draws/frame | 11.01 fps (24 s); fence 39.0 ms/frame | 11.55 fps (27 s); fence 34.1 ms/frame |
+
+- **Gain.**
+  - In the cinematic, four overlay builds measured +11 to +13 %, which is consistent.
+  - The heavier scene shows +5 %, from samples under 30 s. That is not significant.
+  - The draw-time device-address wait is gone.
+- **Where the wait went.** Part of it returns as WAIT_REG_MEM producer waits, and as `CommandProcessor::WriteBack`
+  waits on host reads of GPU-written values (about 55-64 per second).
+  - Those reads come from `ReadCurrentGuestBytes` (indirect draw arguments read on the host) or from `WriteGds`.
+    Which of the two dominates is not yet measured.
+  - The other two callers are excluded. A tagged run counted no ACQUIRE_MEM L2 write-back in the window, so an
+    asynchronous L2 write-back would not help here. The dispatch caller records no time
+    (`dispatch_writeback` is zero in every run).
+- **Other titles sharing the path.** Both runs used the generic route for 125 s and stayed interactive at 60, 90
+  and 115 s. Neither had an error, and the captures render correctly.
+  - `PPSA09076 - DREDGE` reaches gameplay. It created 12 overlays during the run, and at most 3 were live at once.
+  - `PPSA28311 - Absolum` reaches gameplay (the campfire scene). It created 958 overlays in two bursts before
+    gameplay, at most 5 live at once.
+  - In Absolum gameplay, its device-address waits (about 40 per second) refuse earlier, in
+    `GuestDeviceAddressPendingWriteBack`, before any publication is recorded. The overlay does not cover that
+    path; it is a separate lever.
+- **Tests.** `EmulatorGuestDeviceAddress` covers the slicing of table entries by overlays. The CI suites and the
+  architecture-boundary and archive-DAG gates pass.
+- **Open.**
+  - Device-side indirect draw arguments, if `ReadCurrentGuestBytes` turns out to dominate the remaining waits.
+  - The WAIT_REG_MEM producer waits.
