@@ -2970,19 +2970,142 @@ int KYTY_SYSV_ABI NetGetsockopt(int id, int level, int option, void* value, int*
 	           : NET_ERROR_EFAULT;
 }
 
+// FreeBSD fd_set: 64-bit words, descriptor d at bit d % 64 of word d / 64.
+constexpr int kGuestFdSetSize = 1024;
+
+#if KYTY_NET_HOST_POSIX
+// select(2) on guest sockets: waits with host poll and rewrites each guest set to
+// its ready descriptors. Every watched descriptor must be an open socket.
+static int SelectSockets(int nfds, void* const guest_sets[3], int timeout_ms)
+{
+	constexpr short kWanted[3] = {POLLIN, POLLOUT, POLLPRI};
+	constexpr short kReady[3]  = {POLLIN | POLLHUP | POLLERR, POLLOUT | POLLERR, POLLPRI};
+	const size_t    set_size   = (static_cast<size_t>(nfds) + 63) / 64 * sizeof(uint64_t);
+
+	uint64_t sets[3][kGuestFdSetSize / 64] {};
+	for (int s = 0; s < 3; s++)
+	{
+		if (guest_sets[s] != nullptr &&
+		    (!IsGuestOutputRange(guest_sets[s], set_size) ||
+		     !Core::VirtualMemory::CopyFromGuest(sets[s], reinterpret_cast<uint64_t>(guest_sets[s]), set_size)))
+		{
+			return NET_ERROR_EFAULT;
+		}
+	}
+
+	std::vector<pollfd>         polled;
+	std::vector<int>            ids;
+	std::vector<SocketStatePtr> leases;
+	bool                        bad_descriptor = false;
+	for (int id = 0; id < nfds && !bad_descriptor; id++)
+	{
+		short events = 0;
+		for (int s = 0; s < 3; s++)
+		{
+			events |= ((sets[s][id / 64] >> (id % 64)) & 1u) != 0 ? kWanted[s] : 0;
+		}
+		if (events == 0)
+		{
+			continue;
+		}
+		auto state   = FindSocketState(id);
+		int  host_fd = -1;
+		bad_descriptor = !BeginSocketOperation(state, &host_fd);
+		if (!bad_descriptor)
+		{
+			leases.push_back(std::move(state));
+			ids.push_back(id);
+			polled.push_back(pollfd {host_fd, events, 0});
+		}
+	}
+
+	int ready      = 0;
+	int poll_errno = 0;
+	if (!bad_descriptor)
+	{
+		ready      = InterruptibleSocketCall([&] { return ::poll(polled.data(), polled.size(), timeout_ms); });
+		poll_errno = errno;
+	}
+	for (const auto& state: leases)
+	{
+		EndSocketOperation(state);
+	}
+	if (bad_descriptor)
+	{
+		return NET_ERROR_EBADF;
+	}
+	if (ready < 0)
+	{
+		return HostErrnoToNet(poll_errno);
+	}
+
+	uint64_t ready_sets[3][kGuestFdSetSize / 64] {};
+	int      count = 0;
+	for (size_t i = 0; i < polled.size(); i++)
+	{
+		for (int s = 0; s < 3; s++)
+		{
+			if ((polled[i].events & kWanted[s]) != 0 && (polled[i].revents & kReady[s]) != 0)
+			{
+				ready_sets[s][ids[i] / 64] |= uint64_t {1} << (ids[i] % 64);
+				count++;
+			}
+		}
+	}
+	for (int s = 0; s < 3; s++)
+	{
+		if (guest_sets[s] != nullptr && !Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(guest_sets[s]), ready_sets[s], set_size))
+		{
+			return NET_ERROR_EFAULT;
+		}
+	}
+	return count;
+}
+#endif
+
 int KYTY_SYSV_ABI NetSelect(int nfds, void* readfds, void* writefds, void* exceptfds, void* timeout)
 {
-	// select(0, nullptr, nullptr, nullptr, &timeout) is the POSIX sleep form.
-	// Returning immediately turns a timed wait into a hot loop in guest middleware.
 	if (nfds < 0)
 	{
 		return NET_ERROR_EINVAL;
 	}
-	if (nfds != 0 || readfds != nullptr || writefds != nullptr || exceptfds != nullptr)
+	// FreeBSD clamps nfds to the descriptor table instead of failing.
+	nfds = std::min(nfds, kGuestFdSetSize);
+
+	// PS5 timeval uses 64-bit time_t and suseconds_t on the x86-64 ABI.
+	int64_t tv[2] {};
+	if (timeout != nullptr && (!IsGuestReadableRange(timeout, sizeof(tv)) ||
+	                           !Core::VirtualMemory::CopyFromGuest(tv, reinterpret_cast<uint64_t>(timeout), sizeof(tv))))
 	{
+		return NET_ERROR_EFAULT;
+	}
+	const int64_t seconds      = tv[0];
+	const int64_t microseconds = tv[1];
+	if (seconds < 0 || microseconds < 0 || microseconds >= 1'000'000)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	const uint64_t seconds_u      = static_cast<uint64_t>(seconds);
+	const uint64_t microseconds_u = static_cast<uint64_t>(microseconds);
+	if (seconds_u > (UINT64_MAX - microseconds_u) / 1'000'000ull)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	uint64_t remaining = seconds_u * 1'000'000ull + microseconds_u;
+
+	if (nfds != 0 && (readfds != nullptr || writefds != nullptr || exceptfds != nullptr))
+	{
+#if KYTY_NET_HOST_POSIX
+		void* const sets[3]    = {readfds, writefds, exceptfds};
+		const int   timeout_ms = timeout == nullptr ? -1 : static_cast<int>(std::min<uint64_t>((remaining + 999) / 1000, INT32_MAX));
+		return SelectSockets(nfds, sets, timeout_ms);
+#else
 		return NET_ERROR_EOPNOTSUPP;
+#endif
 	}
 
+	// With no descriptor to watch, select is the POSIX sleep form. Returning
+	// immediately turns a timed wait into a hot loop in guest middleware.
 	if (timeout == nullptr)
 	{
 		// A null timeout blocks indefinitely. Use bounded sleeps so shutdown and signal
@@ -2994,22 +3117,6 @@ int KYTY_SYSV_ABI NetSelect(int nfds, void* readfds, void* writefds, void* excep
 		}
 	}
 
-	// PS5 timeval uses 64-bit time_t and suseconds_t on the x86-64 ABI.
-	const auto* tv             = static_cast<const int64_t*>(timeout);
-	const int64_t seconds      = tv[0];
-	const int64_t microseconds = tv[1];
-	if (seconds < 0 || microseconds < 0 || microseconds >= 1'000'000)
-	{
-		return NET_ERROR_EINVAL;
-	}
-
-	const uint64_t seconds_u      = static_cast<uint64_t>(seconds);
-	const uint64_t microseconds_u = static_cast<uint64_t>(microseconds);
-	if (seconds_u > (UINT64_MAX - microseconds_u) / 1'000'000ull)
-	{
-		return NET_ERROR_EINVAL;
-	}
-	uint64_t                          remaining = seconds_u * 1'000'000ull + microseconds_u;
 	Kernel::PthreadInterruptibleScope any_syscall;
 	while (remaining != 0)
 	{
