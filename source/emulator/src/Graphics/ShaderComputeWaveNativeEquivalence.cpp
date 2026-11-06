@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bitset>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -699,7 +700,8 @@ bool AccessesSharedLds(ShaderInstructionType type)
 // The LDS accesses of one guest wave complete in program order for all its lanes. One
 // invocation per lane keeps that order only across S_BARRIER, so an LDS read reachable
 // from an LDS write without a barrier between them may miss another lane's write.
-bool ReadsLdsAfterUnorderedWrite(const Vector<ShaderInstruction>& instructions, const std::vector<std::vector<uint32_t>>& successors)
+std::optional<uint32_t> FindLdsReadAfterUnorderedWrite(const Vector<ShaderInstruction>&          instructions,
+                                                       const std::vector<std::vector<uint32_t>>& successors)
 {
 	const auto        count = static_cast<uint32_t>(instructions.Size());
 	std::vector<bool> pending(count, false);
@@ -715,7 +717,7 @@ bool ReadsLdsAfterUnorderedWrite(const Vector<ShaderInstruction>& instructions, 
 		const auto name = magic_enum::enum_name(type);
 		if (lds && pending[index] && !NameStartsWith(name, "DsWrite"))
 		{
-			return true;
+			return instructions.At(index).pc;
 		}
 		const bool out = type != ShaderInstructionType::SBarrier && (pending[index] || (lds && !NameStartsWith(name, "DsRead")));
 		for (auto successor: successors[index])
@@ -726,7 +728,7 @@ bool ReadsLdsAfterUnorderedWrite(const Vector<ShaderInstruction>& instructions, 
 			work.push_back(successor);
 		}
 	}
-	return false;
+	return std::nullopt;
 }
 } // namespace
 
@@ -1016,9 +1018,12 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 			return Failure(instruction.pc, "a scalar value written inside a lane-conditional region is live at its join");
 		}
 	}
+	if (const auto read = FindLdsReadAfterUnorderedWrite(instructions, successors))
+	{
+		return Failure(*read, "LDS read may miss another lane's write with no S_BARRIER between them");
+	}
 	ShaderComputeWaveAnalysisResult result {true, 0, {}};
 	result.reads_quad_lanes = std::any_of(decoded.begin(), decoded.end(), [](const auto& entry) { return entry.reads_quad; });
-	result.reads_unordered_lds = ReadsLdsAfterUnorderedWrite(instructions, successors);
 	return result;
 }
 
