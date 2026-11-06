@@ -126,6 +126,40 @@ TEST(EmulatorComputeWaveNativeEquivalence, RejectsAddtidPlanesReachingAnotherLan
 	                        "lane-private plane");
 }
 
+// Exit 0 when a supported program reports whether an LDS read may miss another lane's write.
+static void ExpectUnorderedLds(std::initializer_list<uint32_t> words, bool unordered)
+{
+	ASSERT_EXIT(
+	    {
+		    InitializeShaderConfig();
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    if (!ShaderTryParseBounded(words.begin(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &code))
+		    {
+			    std::_Exit(2);
+		    }
+		    const auto result = ShaderAnalyzeComputeWaveNativeEquivalence(code);
+		    std::_Exit(result.supported && result.reads_unordered_lds == unordered ? 0 : 3);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+static constexpr uint32_t kLdsWrite    = 0xd8340000u; // ds_write_b32 v0, v1
+static constexpr uint32_t kLdsWriteOps = 0x00000100u;
+static constexpr uint32_t kLdsRead     = 0xd8d80000u; // ds_read_b32 v2, v0
+static constexpr uint32_t kLdsReadOps  = 0x02000000u;
+static constexpr uint32_t kBarrier     = 0xbf8a0000u; // s_barrier
+
+TEST(EmulatorComputeWaveNativeEquivalence, ReportsLdsReadAfterUnbarrieredWrite)
+{
+	ExpectUnorderedLds({kLdsWrite, kLdsWriteOps, kLdsRead, kLdsReadOps, kEnd}, true);
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, OrdersLdsReadAfterBarrier)
+{
+	ExpectUnorderedLds({kLdsWrite, kLdsWriteOps, kBarrier, kLdsRead, kLdsReadOps, kEnd}, false);
+}
+
 TEST(EmulatorComputeWaveNativeEquivalence, RejectsMaskReadAsData)
 {
 	ExpectNativeEquivalence({kCmpNeVcc, kMovV1VccLo, kEnd}, false, 0x4u, "read as uniform data");

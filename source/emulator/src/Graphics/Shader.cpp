@@ -4952,8 +4952,9 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		{
 			// A program proven wave-width independent runs one guest lane per
 			// invocation without exchanges between the halves of a guest wave.
+			// Unordered LDS traffic needs the split parts' rendezvous after each DS access.
 			const auto native = info->native_equivalent_valid ? program->NativeEquivalence() : ShaderComputeWaveAnalysisResult {};
-			if (NativeEquivalenceFitsWorkgroup(native, *info))
+			if (NativeEquivalenceFitsWorkgroup(native, *info) && !native.reads_unordered_lds)
 			{
 				info->wave_layout = info->native_equivalent_layout;
 			} else

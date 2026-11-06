@@ -71,6 +71,8 @@ struct ShaderComputeWaveAnalysisResult
 	Kyty::Core::String8 reason;
 	// A supported native-equivalent program reads quad neighbours through DPP.
 	bool reads_quad_lanes = false;
+	// An LDS read may follow another lane's LDS write with no S_BARRIER between them.
+	bool reads_unordered_lds = false;
 };
 
 [[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const ShaderInstruction& instruction);
