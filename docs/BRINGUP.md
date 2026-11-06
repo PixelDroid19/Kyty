@@ -161,6 +161,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - [Tessellation design](bringup/tessellation-design.md): hull/domain mapping to Vulkan, staged plan, PATCH draws refused first (2026-10-29, design)
   - [GPU-indexed descriptor tables](bringup/bindless-tables-design.md): table-selected T#/S# and ray-tracing dispatch needs (2026-10-29, design)
   - [Temporal upscalers decision](bringup/temporal-upscalers-decision.md): no DLSS/XeSS now; temporal inputs first, FSR 2 before proprietary SDKs (2026-10-29, decided)
+  - Street scene of GTA San Andreas DE: recycled-memory links, reloaded V#s, gather4 lanes, wave64 LDS order (dot grid); capture layout race, HUD and Arc device loss open (2026-11-05, fixed; open items)
   - Layered depth-only passes, transport LDS, sample_cd over discard copies, textures around depth slices; compile stalls and street corruption (2026-11-05, fixed; open items)
   - Buffer format decode by constant table: driver compile cost cut, bit-identical on ANV and RADV; layered depth is the next stop (2026-11-05, fixed; open item)
   - Fragment transport clear-once and uncompressed exports; driver pipeline-compile frontier and intermittent render-engine reset (2026-11-05, fixed; open items)

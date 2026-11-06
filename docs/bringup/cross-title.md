@@ -1,3 +1,92 @@
+## Street scene of `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition`: recycled-memory links, reloaded V#s, gather4 lanes and wave64 LDS order (2026-11-05)
+
+Eight general fixes took the title from the dark, dithered street of the previous record to a street frame in
+colour, without the dot grid that covered the whole image. Every run below used Arc A770 (ANV, Mesa 26.2.5),
+`KYTY_PRESENT_FPS_LIMIT=60`, `reach_first_gameplay.pad` and `INTEL_DEBUG=reemit`; see "Still open" for why.
+
+- **Populated-page queries.** `SEEK_HOLE` walks to the end of a data run however far past the queried span it
+  lies, so each of thousands of spans over a populated gigabyte rescanned the whole run: one guest-address
+  preparation took 8-41 s while the title loaded. Data is now stepped one page per `SEEK_DATA` query; holes are
+  still skipped in one query. A preparation over 1 GiB in 6.9k spans dropped from 12.3 s to 0.3 s.
+- **Depth and stencil plane copies.** A plane copy staged the whole plane in one transient buffer. A 10240x2048
+  16-bit plane (40 MiB) did not fit the 64 MiB per-command-buffer transient budget beside its other entries, which
+  stopped the run when a dispatch stored into that depth image. Planes now move in bands of rows through a scratch
+  of at most 16 MiB.
+- **Recycled ranges over depth targets.** Two relations of recycled memory stopped the run as unknown:
+  - a vertex buffer over two depth targets, one inside the buffer and one crossing its end. Every depth form that
+    shares part of the buffer range is now linked; reclaiming the active depth target would discard GPU state.
+  - a colour target at the base of a larger depth target that stays live. It is now a surface alias, like the
+    crossing form; a depth target the colour target fully covers is still reclaimed.
+- **Reinterpreted storage image behind a newer render target.** A dispatch bound the exact range of a render
+  target, and a sample in another format read the storage image of the range through a reinterpreting view.
+  Neither image was written back, so a raw copy of a filtered cube map read one constant every frame. The render
+  target is now copied into the storage image when its writes or content are newer, then reinterpreted.
+- **Reloaded V#s in a fused vertex front.** A fused ES/GS front reloaded a user-data V# register with a stream
+  descriptor from a table before a buffer load. The front never ran the redefined-descriptor analysis, so those
+  loads in the geometry compute pass read the bound constant buffer instead of the stream. The analysis now runs
+  on the linked program, whose continuation branch keeps the scalar flow resolvable.
+- **Gather4 under EXEC.** Gather4 returns four texels of the one channel DMASK selects, but the inactive-lane
+  guard counted DMASK bits and kept only the first destination VGPR, so lanes outside EXEC lost the other three.
+  All four are kept now.
+- **Wave64 LDS order on a 32-wide host.** The dot grid came from the temporal AA compute shader (`0x34df38ba`,
+  8x8 groups, one wave64 per group, no `S_BARRIER`). It fills a 12x12 depth tile and a 10x10 colour tile in LDS,
+  then reads its neighbours' entries. The program passed the wave-width independence proof, so it ran one
+  invocation per lane, and on ANV the halves of the wave raced: a lane could read LDS before another lane wrote
+  it. On hardware the LDS accesses of one wave complete in program order for all its lanes.
+  - Evidence: the TAA output already held the grid while its colour, depth and velocity inputs were clean. The
+    wrong pixels were the bottom-right 4x4 quadrant of each 8x8 group, holding content from elsewhere.
+  - The proof now reports an LDS read reachable from an LDS write with no `S_BARRIER` between them
+    (`reads_unordered_lds`; ADD_TID accesses stay excluded, they are proven lane-private). Such a program keeps the
+    split layout, whose parts rendezvous after every DS access.
+  - New unit tests `EmulatorComputeWaveNativeEquivalence.ReportsLdsReadAfterUnbarrieredWrite` and
+    `OrdersLdsReadAfterBarrier`. Translator version 215, geometry translator 99.
+  - After both changes a 3840x2160 capture of the street (frame 685) shows no grid; the run before them showed it
+    over the whole frame. Which of the two removed it was not isolated; the gather4 lanes were redefined before
+    use in this shader, so the LDS order is the likely cause.
+
+Excluded while localizing the grid: the motion-blur pass (tile velocities about 0), the flattened velocity target
+(clean inside the view rectangle), the scene colour input (clean), the LDS allocation (512 dwords, enough for both
+tiles), `V_CMPX` semantics (EXEC only, as in the ISA) and DS offsets (all offsets the shader uses are applied).
+
+Still open in that title:
+- **Device lost on Arc.** Without `INTEL_DEBUG=reemit`, 6 of 9 runs lost the device. The geometry pass records a
+  compute dispatch and then its draw in the same host command buffer (`RecordGeometryPass`,
+  `GraphicsRenderDraw.cpp`), which the rule of "A draw after a dispatch starts a new command buffer (2026-10-23)"
+  does not cover: that rule splits only at guest dispatches. `reemit` avoided the same defect there; here it is a
+  driver workaround used to reach the scene, not a fix. No change has been designed yet.
+- **HUD placement.** The minimap and other HUD elements sit off-screen at the top left. Leads, unverified:
+  `PA_SU_SC_MODE_CNTL.VTX_WINDOW_OFFSET_ENABLE` is ignored (`GraphicsRenderHwCheck.cpp` warns, but the warning did
+  not fire in this title's log), window scissor is not modelled, and `ResolveScissor` retries without the window
+  offset (`GraphicsState.cpp`).
+- **Sparse dark specks** remain along foliage edges after the grid fix. Not attributed; a directional-light pixel
+  shader (`0x7c3076`) that produces NaN is the first lead.
+- **Speed:** about 3 fps in the street with `reemit`.
+- **Known limits of the LDS fix:**
+  - When the split layout is rejected, `native_equivalence_required` (`Shader.cpp`) still admits such a program
+    one lane per invocation, so it still races. Direction: refuse it there, or give that route a rendezvous.
+  - A guest wave32 dispatch that is not native-wave sensitive gets no required subgroup size, so a driver may
+    compile it at SIMD16 and split one guest wave in two. Unverified lead.
+  - Two lanes writing the same LDS word with no barrier between the writes are not reported.
+
+Defect found in the regression set, not fixed (diagnostic path only): **native capture races the render thread over
+an image's tracked layout.** With all eight changes, ANIMAL WELL stopped twice at
+`EXIT_IF(... dst_image->layout != old_image_layout)` in `set_image_layout` (`Utils.cpp`).
+- A temporary backtrace put it in `NativeCaptureFrame` (`Window.cpp`) → `UtilFillBuffer` → `UtilImageToBuffer`, on a
+  3840x2160 video-out image. The tracked layout went from `TRANSFER_SRC_OPTIMAL`, set by the first transition, to
+  `COLOR_ATTACHMENT_OPTIMAL` before the second, with no code in between: another thread rendered into the image.
+- The same title ran 110 s without agent captures (49.8 fps), so the stop needs the capture. That path is
+  unchanged by this work; the eight changes only shift timing.
+- Direction: record the capture readback on the thread that owns the image's command recording, or hold that
+  thread's lock across both transitions.
+
+Verification: `kyty_unit_test` filters `EmulatorComputeWave*` (102 tests) and `*Image*:*Gather*:*Spirv*` (103 tests)
+pass. Strict 110 s runs, Arc A770, translator 215 with a cold private SPIR-V cache, `KYTY_PRESENT_FPS_LIMIT=60`, one
+title at a time, captures checked by eye: Balatro 59.9, Dead Cells 59.9, GRIS 59.1, Hollow Knight 59.9, Peppa Pig
+59.5, Formula Retro Racing 59.5, DREDGE 26.4, Astro Bot 21.2 (title screen) fps; ANIMAL WELL 49.8 without captures
+(see the defect above). The previous set (`cfefcbdfe`, before these eight changes) gave Balatro 59.9, ANIMAL WELL
+38.2, Dead Cells 59.9, GRIS 53.0, Hollow Knight 59.9, Peppa Pig 58.4 and Formula 52.9 fps; DREDGE and Astro Bot
+did not finish that run (exit 139 and 137). GTA itself has no same-settings base for speed.
+
 ## Layered depth passes, transport LDS, `image_sample_cd` over discard copies and textures over recycled depth slices (2026-11-05)
 
 Four general gaps stopped `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition` after its loading
