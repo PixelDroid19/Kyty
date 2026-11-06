@@ -28,21 +28,30 @@ colour, without the dot grid that covered the whole image. Every run below used 
 - **Gather4 under EXEC.** Gather4 returns four texels of the one channel DMASK selects, but the inactive-lane
   guard counted DMASK bits and kept only the first destination VGPR, so lanes outside EXEC lost the other three.
   All four are kept now.
-- **Wave64 LDS order on a 32-wide host.** The dot grid came from the temporal AA compute shader (`0x34df38ba`,
-  8x8 groups, one wave64 per group, no `S_BARRIER`). It fills a 12x12 depth tile and a 10x10 colour tile in LDS,
-  then reads its neighbours' entries. The program passed the wave-width independence proof, so it ran one
-  invocation per lane, and on ANV the halves of the wave raced: a lane could read LDS before another lane wrote
-  it. On hardware the LDS accesses of one wave complete in program order for all its lanes.
+- **Wave64 LDS order (the dot grid).** A grid of dark dots covered the whole street frame. It came from the
+  temporal AA compute shader (`0x34df38ba`): 8x8 threads per group, one wave64 per group, lane = 8 * y + x, and no
+  `S_BARRIER`. Each wave first stores a 12x12 depth tile and a 10x10 colour tile into LDS, then every lane reads
+  the entries around its own pixel, most of them stored by other lanes.
+  - Hardware contract: the LDS instructions of one wave execute in program order for all its active lanes, so
+    the reads see every store of that wave without a barrier. Only another wave needs `S_BARRIER`.
+  - Cause: the program passed the wave-width independence proof, so on the 32-wide host it ran one host
+    invocation per guest lane (`native_equivalent_layout`, no required subgroup size). Those invocations are not
+    ordered against each other, so a read could run before another lane's store and pick up a stale tile entry.
   - Evidence: the TAA output already held the grid while its colour, depth and velocity inputs were clean. The
-    wrong pixels were the bottom-right 4x4 quadrant of each 8x8 group, holding content from elsewhere.
-  - The proof now reports an LDS read reachable from an LDS write with no `S_BARRIER` between them
-    (`reads_unordered_lds`; ADD_TID accesses stay excluded, they are proven lane-private). Such a program keeps the
-    split layout, whose parts rendezvous after every DS access.
-  - New unit tests `EmulatorComputeWaveNativeEquivalence.ReportsLdsReadAfterUnbarrieredWrite` and
-    `OrdersLdsReadAfterBarrier`. Translator version 215, geometry translator 99.
-  - After both changes a 3840x2160 capture of the street (frame 685) shows no grid; the run before them showed it
-    over the whole frame. Which of the two removed it was not isolated; the gather4 lanes were redefined before
-    use in this shader, so the LDS order is the likely cause.
+    wrong pixels were the bottom-right 4x4 quadrant of each 8x8 group (lanes 36-39, 44-47, 52-55, 60-63), holding
+    content from elsewhere.
+  - Fix: the proof now rejects a program with an LDS read reachable from an LDS write with no `S_BARRIER` between
+    them, and names the read's PC. `ds_swizzle`, `ds_bpermute` and the ADD_TID forms are not counted: the first two
+    do not touch LDS, and ADD_TID accesses are already proven lane-private. Such a wave64 program keeps the split
+    layout, whose parts meet after every DS instruction. When no split layout fits the dispatch, the per-lane
+    route that remains (`native_equivalence_required`, `Shader.cpp`) now stops the run naming the shader and
+    the read, instead of racing silently.
+  - Isolated on 2026-11-06, two 120 s strict runs of the same build at frame 666-752 of the street: with the
+    rejection, no grid; with the rejection turned off by a temporary switch and the gather4 fix kept, the grid
+    over the whole frame again. The gather4 fix alone does not remove it. The run with the rejection reached the
+    street without stopping, so no dispatch of this route in that run is left without a layout.
+  - Unit tests `EmulatorComputeWaveNativeEquivalence.RejectsLdsReadAfterUnbarrieredWrite` (rejected at the read's
+    PC) and `OrdersLdsReadAfterBarrier` (admitted). Translator version 215, geometry translator 99.
 
 Excluded while localizing the grid: the motion-blur pass (tile velocities about 0), the flattened velocity target
 (clean inside the view rectangle), the scene colour input (clean), the LDS allocation (512 dwords, enough for both
@@ -62,11 +71,14 @@ Still open in that title:
   shader (`0x7c3076`) that produces NaN is the first lead.
 - **Speed:** about 3 fps in the street with `reemit`.
 - **Known limits of the LDS fix:**
-  - When the split layout is rejected, `native_equivalence_required` (`Shader.cpp`) still admits such a program
-    one lane per invocation, so it still races. Direction: refuse it there, or give that route a rendezvous.
   - A guest wave32 dispatch that is not native-wave sensitive gets no required subgroup size, so a driver may
     compile it at SIMD16 and split one guest wave in two. Unverified lead.
   - Two lanes writing the same LDS word with no barrier between the writes are not reported.
+- **Intermittent stop in the GPU memory tracker.** Three runs (two earlier ones and one on 2026-11-06) stopped while
+  the street loaded with `!create_all_the_same` (`GpuMemoryCreate.cpp`): a new 128 KiB `StorageTexture` at the
+  exact range of a live `RenderTexture` and covering a smaller, CPU-uploaded `Texture` that starts at the same
+  address. The next run with the same build passed. Not localized; the relation of three objects of different
+  types at one base is the lead.
 
 Defect found in the regression set, not fixed (diagnostic path only): **native capture races the render thread over
 an image's tracked layout.** With all eight changes, ANIMAL WELL stopped twice at
