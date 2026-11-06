@@ -63,10 +63,22 @@ Still open in that title:
   `GraphicsRenderDraw.cpp`), which the rule of "A draw after a dispatch starts a new command buffer (2026-10-23)"
   does not cover: that rule splits only at guest dispatches. `reemit` avoided the same defect there; here it is a
   driver workaround used to reach the scene, not a fix. No change has been designed yet.
-- **HUD placement.** The minimap and other HUD elements sit off-screen at the top left. Leads, unverified:
-  `PA_SU_SC_MODE_CNTL.VTX_WINDOW_OFFSET_ENABLE` is ignored (`GraphicsRenderHwCheck.cpp` warns, but the warning did
-  not fire in this title's log), window scissor is not modelled, and `ResolveScissor` retries without the window
-  offset (`GraphicsState.cpp`).
+- **HUD placement.** The radar is drawn whole but about a third of its size, centred on the top-left corner of the
+  3840x2160 video-out image, so three quarters of it are off-screen. Observed on 2026-11-06:
+  - The HUD sprites are drawn straight into the video-out buffer by vertex shader `0x02000470414c97fa`. Its
+    position is the constant-buffer matrix times one vertex attribute, and the matrix is a plain 3840x2160 pixel
+    ortho (`1/1920`, `-1/1080`, translation `-1, 1`). Viewport, scissor and window offset are full-screen and 0.
+  - The vertices themselves hold the radar around (0, 0): map tiles at (12, -42)-(60, 6), blips near (-33, -11),
+    in the same buffer as subtitle glyphs at absolute positions near (1792, 1967). The GPU draws what the guest CPU
+    wrote; the layout is wrong before any command reaches the GPU.
+  - Excluded: the window-offset and scissor leads (trace of every draw of one street frame); the host window size
+    (a run with `KYTY_SCREEN_WIDTH=3840 KYTY_SCREEN_HEIGHT=2160`); `sceVideoOutGetResolutionStatus` (the title does
+    not import it); `sceVideoOutGetOutputStatus` (a temporary override reporting 4K with the whole 0x30-byte status
+    zeroed changed nothing; the title's `attribute3` is 0, so a console reports 4K); the saved user settings
+    (ordinary defaults, `ClassicRadar=False`).
+  - Open lead: the title imports `sceSystemServiceGetDisplaySafeAreaInfo` (Kyty returns ratio 1.0) and the
+    whole libc is HLE, so float parsing and maths run on host implementations. A run with the package's own
+    libc did not change the HUD, but that libc was not confirmed loaded, so libc is not excluded.
 - **Sparse dark specks** remain along foliage edges after the grid fix. Not attributed; a directional-light pixel
   shader (`0x7c3076`) that produces NaN is the first lead.
 - **Speed:** about 3 fps in the street with `reemit`.
