@@ -76,12 +76,33 @@ Still open in that title:
     not import it); `sceVideoOutGetOutputStatus` (a temporary override reporting 4K with the whole 0x30-byte status
     zeroed changed nothing; the title's `attribute3` is 0, so a console reports 4K); the saved user settings
     (ordinary defaults, `ClassicRadar=False`).
-  - Open lead: the title imports `sceSystemServiceGetDisplaySafeAreaInfo` (Kyty returns ratio 1.0) and the
-    whole libc is HLE, so float parsing and maths run on host implementations. A run with the package's own
-    libc did not change the HUD, but that libc was not confirmed loaded, so libc is not excluded.
+  - Excluded as well: the HLE libc. A run with the package's own `sce_module/libc.prx` providing libc (only the
+    HLE heap and `__cxa_atexit` left, confirmed by the HLE call log of a separate 25 s boot of the same binary and
+    environment) reached the street with the radar still on the top-left corner.
+    `sceSystemServiceGetDisplaySafeAreaInfo` returns ratio 1.0, the full-screen value two other implementations
+    also return. No lead remains open; the next step is to find the guest code that writes the radar vertices and
+    read where it takes the radar origin from.
 - **Sparse dark specks** remain along foliage edges after the grid fix. Not attributed; a directional-light pixel
-  shader (`0x7c3076`) that produces NaN is the first lead.
-- **Speed:** about 3 fps in the street with `reemit`.
+  shader (`0x7c3076`) that produces NaN is the first lead. Excluded: the NaN rules of `V_MIN/V_MAX_F32` and of
+  the DX10 output clamp, which Kyty already follows (the non-NaN operand; NaN clamps to 0).
+- **Speed:** 3.5-3.9 fps in the street with `reemit`, limited by the command processor. Measured on 2026-11-06
+  (`perf-snapshot` over 20 s, and `perf record -e cycles:u` on the same window): about 4,800 draws per frame at
+  51-55 us of CP time each (`draw_processor` 926 ms per second), so a frame takes about 245 ms. The CP thread's
+  profile is flat: allocator calls about 8 %, mutexes about 7 %, the transient-buffer pool about 7 %, GPU memory
+  lookups about 7 %, descriptor-set index and unindex about 4 %, ANV about 11 %. There are 6 GPU memory object
+  creations and 3.7 uploads per draw, and 1,600 submits per second. 30 fps needs about 7 us per draw: no single
+  change reaches it.
+- **Guest `select` on sockets (fixed).** A guest thread called `select(129, readfds, ..., 1 s)` on socket 128.
+  Kyty returned `EOPNOTSUPP` at once for any descriptor set, so the thread spun and took 47 % of all user-mode
+  samples. `select` now polls the guest's sockets on the host with the timeout, and rewrites each FreeBSD `fd_set`
+  (64-bit words) to the ready descriptors; a descriptor that is no socket fails with `EBADF`. After the fix the
+  spinning thread is gone from the profile; the frame rate is unchanged, as the CP limits it. Without host
+  sockets (Windows) the call still returns `EOPNOTSUPP`.
+- **Windows host exceptions and the guest red zone (open risk).** Two other implementations rewrite guest
+  functions that keep live data below RSP, including slots addressed through RBP, because a Windows host
+  exception writes its frame under the guest RSP. Kyty has no such rewrite; on Linux the kernel skips the
+  128-byte red zone before a signal frame. Not observed in Kyty yet; a random crash on Windows with a stack slot
+  overwritten between two loads is the symptom to look for.
 - **Known limits of the LDS fix:**
   - A guest wave32 dispatch that is not native-wave sensitive gets no required subgroup size, so a driver may
     compile it at SIMD16 and split one guest wave in two. Unverified lead.
