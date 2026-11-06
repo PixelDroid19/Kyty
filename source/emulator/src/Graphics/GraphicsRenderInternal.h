@@ -600,7 +600,8 @@ public:
 	void               FreeFramebufferByDepth(DepthStencilVulkanImage* image);
 
 private:
-	VideoOutVulkanImage* CreateDummyBuffer(VkFormat format, uint32_t width, uint32_t height, VkSampleCountFlagBits samples);
+	VideoOutVulkanImage* CreateDummyBuffer(VkFormat format, uint32_t width, uint32_t height, uint32_t layers,
+	                                       VkSampleCountFlagBits samples);
 
 	struct Framebuffer
 	{
@@ -866,6 +867,9 @@ struct RenderDepthInfo
 	// DB_DEPTH_VIEW slice range; the depth image itself holds one slice.
 	uint32_t                    slice_start              = 0;
 	uint32_t                    slice_max                = 0;
+	// Slices a draw renders through the exported render-target index; above 1 it renders into the slice array of
+	// the first slice (MaterializeRenderDepthInfo).
+	uint32_t                    layers                   = 1;
 	bool                        htile                    = false;
 	bool                        neo                      = false;
 	uint64_t                    depth_buffer_size        = 0;
@@ -1745,6 +1749,9 @@ void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image
 VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVulkanImage* first, uint64_t addr, uint64_t slice_size,
                                            uint32_t width, uint32_t height, uint32_t layers, uint32_t fmt, uint32_t pitch,
                                            bool plain_guest_depth);
+// Copies each layer of a layered depth pass's slice array back to its slice image, at the end of the pass.
+void GraphicsRenderStoreLayeredDepth(VkCommandBuffer vk_buffer, DepthSliceArray* slice_array,
+                                     const std::vector<DepthStencilVulkanImage*>& slices);
 
 // --- Core (color / dump) ---
 
@@ -1783,7 +1790,8 @@ void hw_check(const HW::Context& hw, bool allow_depth_stencil_copy = false);
 void hw_print(const HW::Context& hw);
 
 // --- Descriptor / stencil / Find* ---
-void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
+// Returns false when a stencil logic op (0x0a-0x0f) cannot be expressed exactly with Vulkan stencil state.
+bool get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
                        uint8_t zfail, uint8_t testval, uint8_t mask, uint8_t writemask, uint8_t opval);
 Vector<RenderTextureVulkanImage*>  FindRenderTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 // A dispatch proven to store `words` to every 16-byte record of its only

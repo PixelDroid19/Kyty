@@ -275,10 +275,22 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x9F: KYTY_NI("v_cmpx_class_f16"); break;
 		case 0xA0: KYTY_NI("v_cmp_f_i64"); break;
 		case 0xA1: KYTY_NI("v_cmp_lt_i64"); break;
-		case 0xA2: KYTY_NI("v_cmp_eq_i64"); break;
+		case 0xA2:
+			// Equality of two 64-bit values does not depend on their sign.
+			inst.type        = ShaderInstructionType::VCmpEqU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
+			break;
 		case 0xA3: KYTY_NI("v_cmp_le_i64"); break;
 		case 0xA4: KYTY_NI("v_cmp_gt_i64"); break;
-		case 0xA5: KYTY_NI("v_cmp_ne_i64"); break;
+		case 0xA5:
+			// Equality of two 64-bit values does not depend on their sign.
+			inst.type        = ShaderInstructionType::VCmpNeU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
+			break;
 		case 0xA6: KYTY_NI("v_cmp_ge_i64"); break;
 		case 0xA7: KYTY_NI("v_cmp_t_i64"); break;
 		case 0xA8: KYTY_NI("v_cmp_class_f64"); break;
@@ -640,7 +652,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			};
 			break;
 		case 0x141: inst.type = ShaderInstructionType::VMadF32; break;
-		case 0x142: KYTY_NI("v_mad_i32_i24"); break;
+		case 0x142: inst.type = ShaderInstructionType::VMadI32I24; break;
 		case 0x143: inst.type = ShaderInstructionType::VMadU32U24; break;
 		case 0x144: inst.type = ShaderInstructionType::VCubeIdF32; break;
 		case 0x145: inst.type = ShaderInstructionType::VCubescF32; break;

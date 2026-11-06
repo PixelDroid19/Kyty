@@ -76,6 +76,17 @@ void* KYTY_SYSV_ABI SetGuestThreadErrno(void* arg)
 	return nullptr;
 }
 
+[[noreturn]] __attribute__((noinline)) void KYTY_SYSV_ABI ExitGuestThreadFromNestedCall(void* value)
+{
+	Kyty::Kernel::PthreadExit(value);
+	__builtin_unreachable();
+}
+
+void* KYTY_SYSV_ABI ExitGuestThread(void* arg)
+{
+	ExitGuestThreadFromNestedCall(arg);
+}
+
 } // namespace
 
 TEST(EmulatorKernelLifetimes, EventFlagCancelKeepsNewWaitersOutOfCanceledEpoch)
@@ -608,6 +619,25 @@ TEST(EmulatorKernelLifetimes, ErrnoAddressIsIsolatedAcrossGuestPthreads)
 	EXPECT_TRUE(context.separate_address.load(std::memory_order_acquire));
 	EXPECT_EQ(context.error_value.load(std::memory_order_acquire), 73);
 	EXPECT_EQ(*main_error_address, 19);
+}
+
+TEST(EmulatorKernelLifetimes, PthreadExitEndsTheGuestThreadWithItsValue)
+{
+	EnsureKernelLifetimesSubsystems();
+	ScopedGuestThreadEntryInvoker entry_invoker;
+
+	int   exit_marker = 0;
+	void* joined      = nullptr;
+	Kyty::Kernel::Pthread thread = nullptr;
+	ASSERT_EQ(Kyty::Kernel::PthreadCreate(&thread, nullptr, ExitGuestThread, &exit_marker, "lifetime-exit"), Kyty::Kernel::OK);
+	ASSERT_EQ(Kyty::Kernel::PthreadJoin(thread, &joined), Kyty::Kernel::OK);
+	EXPECT_EQ(joined, &exit_marker);
+
+	// The exited thread released its slot, so the next one starts and returns normally.
+	joined = &exit_marker;
+	ASSERT_EQ(Kyty::Kernel::PthreadCreate(&thread, nullptr, ReturnNull, nullptr, "lifetime-after-exit"), Kyty::Kernel::OK);
+	ASSERT_EQ(Kyty::Kernel::PthreadJoin(thread, &joined), Kyty::Kernel::OK);
+	EXPECT_EQ(joined, nullptr);
 }
 
 UT_END();

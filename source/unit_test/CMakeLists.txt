@@ -58,6 +58,8 @@ endif()
 target_link_libraries(unit_test math)
 target_link_libraries(unit_test kyty_devtools_core)
 target_link_libraries(unit_test kyty_agent_runner)
+# Graphics headers include Vulkan, whose headers are not on the default path on every host.
+target_link_libraries(unit_test Vulkan::Headers)
 target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/devtools/include")
 target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/emulator/include")
 

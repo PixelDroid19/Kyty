@@ -1,3 +1,935 @@
+## Street scene of `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition`: recycled-memory links, reloaded V#s, gather4 lanes and wave64 LDS order (2026-11-05)
+
+Eight general fixes took the title from the dark, dithered street of the previous record to a street frame in
+colour, without the dot grid that covered the whole image. Every run below used Arc A770 (ANV, Mesa 26.2.5),
+`KYTY_PRESENT_FPS_LIMIT=60`, `reach_first_gameplay.pad` and `INTEL_DEBUG=reemit`; see "Still open" for why.
+
+- **Populated-page queries.** `SEEK_HOLE` walks to the end of a data run however far past the queried span it
+  lies, so each of thousands of spans over a populated gigabyte rescanned the whole run: one guest-address
+  preparation took 8-41 s while the title loaded. Data is now stepped one page per `SEEK_DATA` query; holes are
+  still skipped in one query. A preparation over 1 GiB in 6.9k spans dropped from 12.3 s to 0.3 s.
+- **Depth and stencil plane copies.** A plane copy staged the whole plane in one transient buffer. A 10240x2048
+  16-bit plane (40 MiB) did not fit the 64 MiB per-command-buffer transient budget beside its other entries, which
+  stopped the run when a dispatch stored into that depth image. Planes now move in bands of rows through a scratch
+  of at most 16 MiB.
+- **Recycled ranges over depth targets.** Two relations of recycled memory stopped the run as unknown:
+  - a vertex buffer over two depth targets, one inside the buffer and one crossing its end. Every depth form that
+    shares part of the buffer range is now linked; reclaiming the active depth target would discard GPU state.
+  - a colour target at the base of a larger depth target that stays live. It is now a surface alias, like the
+    crossing form; a depth target the colour target fully covers is still reclaimed.
+- **Reinterpreted storage image behind a newer render target.** A dispatch bound the exact range of a render
+  target, and a sample in another format read the storage image of the range through a reinterpreting view.
+  Neither image was written back, so a raw copy of a filtered cube map read one constant every frame. The render
+  target is now copied into the storage image when its writes or content are newer, then reinterpreted.
+- **Reloaded V#s in a fused vertex front.** A fused ES/GS front reloaded a user-data V# register with a stream
+  descriptor from a table before a buffer load. The front never ran the redefined-descriptor analysis, so those
+  loads in the geometry compute pass read the bound constant buffer instead of the stream. The analysis now runs
+  on the linked program, whose continuation branch keeps the scalar flow resolvable.
+- **Gather4 under EXEC.** Gather4 returns four texels of the one channel DMASK selects, but the inactive-lane
+  guard counted DMASK bits and kept only the first destination VGPR, so lanes outside EXEC lost the other three.
+  All four are kept now.
+- **Wave64 LDS order (the dot grid).** A grid of dark dots covered the whole street frame. It came from the
+  temporal AA compute shader (`0x34df38ba`): 8x8 threads per group, one wave64 per group, lane = 8 * y + x, and no
+  `S_BARRIER`. Each wave first stores a 12x12 depth tile and a 10x10 colour tile into LDS, then every lane reads
+  the entries around its own pixel, most of them stored by other lanes.
+  - Hardware contract: the LDS instructions of one wave execute in program order for all its active lanes, so
+    the reads see every store of that wave without a barrier. Only another wave needs `S_BARRIER`.
+  - Cause: the program passed the wave-width independence proof, so on the 32-wide host it ran one host
+    invocation per guest lane (`native_equivalent_layout`, no required subgroup size). Those invocations are not
+    ordered against each other, so a read could run before another lane's store and pick up a stale tile entry.
+  - Evidence: the TAA output already held the grid while its colour, depth and velocity inputs were clean. The
+    wrong pixels were the bottom-right 4x4 quadrant of each 8x8 group (lanes 36-39, 44-47, 52-55, 60-63), holding
+    content from elsewhere.
+  - Fix: the proof now rejects a program with an LDS read reachable from an LDS write with no `S_BARRIER` between
+    them, and names the read's PC. `ds_swizzle`, `ds_bpermute` and the ADD_TID forms are not counted: the first two
+    do not touch LDS, and ADD_TID accesses are already proven lane-private. Such a wave64 program keeps the split
+    layout, whose parts meet after every DS instruction. When no split layout fits the dispatch, the per-lane
+    route that remains (`native_equivalence_required`, `Shader.cpp`) now stops the run naming the shader and
+    the read, instead of racing silently.
+  - Isolated on 2026-11-06, two 120 s strict runs of the same build at frame 666-752 of the street: with the
+    rejection, no grid; with the rejection turned off by a temporary switch and the gather4 fix kept, the grid
+    over the whole frame again. The gather4 fix alone does not remove it. The run with the rejection reached the
+    street without stopping, so no dispatch of this route in that run is left without a layout.
+  - Unit tests `EmulatorComputeWaveNativeEquivalence.RejectsLdsReadAfterUnbarrieredWrite` (rejected at the read's
+    PC) and `OrdersLdsReadAfterBarrier` (admitted). Translator version 215, geometry translator 99.
+
+Excluded while localizing the grid: the motion-blur pass (tile velocities about 0), the flattened velocity target
+(clean inside the view rectangle), the scene colour input (clean), the LDS allocation (512 dwords, enough for both
+tiles), `V_CMPX` semantics (EXEC only, as in the ISA) and DS offsets (all offsets the shader uses are applied).
+
+Still open in that title:
+- **Device lost on Arc.** Without `INTEL_DEBUG=reemit`, 6 of 9 runs lost the device. The geometry pass records a
+  compute dispatch and then its draw in the same host command buffer (`RecordGeometryPass`,
+  `GraphicsRenderDraw.cpp`), which the rule of "A draw after a dispatch starts a new command buffer (2026-10-23)"
+  does not cover: that rule splits only at guest dispatches. `reemit` avoided the same defect there; here it is a
+  driver workaround used to reach the scene, not a fix. No change has been designed yet.
+- **HUD placement.** The radar is drawn whole but about a third of its size, centred on the top-left corner of the
+  3840x2160 video-out image, so three quarters of it are off-screen. Observed on 2026-11-06:
+  - The HUD sprites are drawn straight into the video-out buffer by vertex shader `0x02000470414c97fa`. Its
+    position is the constant-buffer matrix times one vertex attribute, and the matrix is a plain 3840x2160 pixel
+    ortho (`1/1920`, `-1/1080`, translation `-1, 1`). Viewport, scissor and window offset are full-screen and 0.
+  - The vertices themselves hold the radar around (0, 0): map tiles at (12, -42)-(60, 6), blips near (-33, -11),
+    in the same buffer as subtitle glyphs at absolute positions near (1792, 1967). The GPU draws what the guest CPU
+    wrote; the layout is wrong before any command reaches the GPU.
+  - Excluded: the window-offset and scissor leads (trace of every draw of one street frame); the host window size
+    (a run with `KYTY_SCREEN_WIDTH=3840 KYTY_SCREEN_HEIGHT=2160`); `sceVideoOutGetResolutionStatus` (the title does
+    not import it); `sceVideoOutGetOutputStatus` (a temporary override reporting 4K with the whole 0x30-byte status
+    zeroed changed nothing; the title's `attribute3` is 0, so a console reports 4K); the saved user settings
+    (ordinary defaults, `ClassicRadar=False`).
+  - Excluded as well: the HLE libc. A run with the package's own `sce_module/libc.prx` providing libc (only the
+    HLE heap and `__cxa_atexit` left, confirmed by the HLE call log of a separate 25 s boot of the same binary and
+    environment) reached the street with the radar still on the top-left corner.
+    `sceSystemServiceGetDisplaySafeAreaInfo` returns ratio 1.0, the full-screen value two other implementations
+    also return. No lead remains open; the next step is to find the guest code that writes the radar vertices and
+    read where it takes the radar origin from.
+- **Sparse dark specks** remain along foliage edges after the grid fix. Not attributed; a directional-light pixel
+  shader (`0x7c3076`) that produces NaN is the first lead. Excluded: the NaN rules of `V_MIN/V_MAX_F32` and of
+  the DX10 output clamp, which Kyty already follows (the non-NaN operand; NaN clamps to 0).
+- **Speed:** 3.5-3.9 fps in the street with `reemit`, limited by the command processor. Measured on 2026-11-06
+  (`perf-snapshot` over 20 s, and `perf record -e cycles:u` on the same window): about 4,800 draws per frame at
+  51-55 us of CP time each (`draw_processor` 926 ms per second), so a frame takes about 245 ms. The CP thread's
+  profile is flat: allocator calls about 8 %, mutexes about 7 %, the transient-buffer pool about 7 %, GPU memory
+  lookups about 7 %, descriptor-set index and unindex about 4 %, ANV about 11 %. There are 6 GPU memory object
+  creations and 3.7 uploads per draw, and 1,600 submits per second. 30 fps needs about 7 us per draw: no single
+  change reaches it.
+- **Guest `select` on sockets (fixed).** A guest thread called `select(129, readfds, ..., 1 s)` on socket 128.
+  Kyty returned `EOPNOTSUPP` at once for any descriptor set, so the thread spun and took 47 % of all user-mode
+  samples. `select` now polls the guest's sockets on the host with the timeout, and rewrites each FreeBSD `fd_set`
+  (64-bit words) to the ready descriptors; a descriptor that is no socket fails with `EBADF`. After the fix the
+  spinning thread is gone from the profile; the frame rate is unchanged, as the CP limits it. Without host
+  sockets (Windows) the call still returns `EOPNOTSUPP`.
+- **Windows host exceptions and the guest red zone (open risk).** Two other implementations rewrite guest
+  functions that keep live data below RSP, including slots addressed through RBP, because a Windows host
+  exception writes its frame under the guest RSP. Kyty has no such rewrite; on Linux the kernel skips the
+  128-byte red zone before a signal frame. Not observed in Kyty yet; a random crash on Windows with a stack slot
+  overwritten between two loads is the symptom to look for.
+- **Known limits of the LDS fix:**
+  - A guest wave32 dispatch that is not native-wave sensitive gets no required subgroup size, so a driver may
+    compile it at SIMD16 and split one guest wave in two. Unverified lead.
+  - Two lanes writing the same LDS word with no barrier between the writes are not reported.
+- **Intermittent stop in the GPU memory tracker.** Three runs (two earlier ones and one on 2026-11-06) stopped while
+  the street loaded with `!create_all_the_same` (`GpuMemoryCreate.cpp`): a new 128 KiB `StorageTexture` at the
+  exact range of a live `RenderTexture` and covering a smaller, CPU-uploaded `Texture` that starts at the same
+  address. The next run with the same build passed. Not localized; the relation of three objects of different
+  types at one base is the lead.
+
+Defect found in the regression set, not fixed (diagnostic path only): **native capture races the render thread over
+an image's tracked layout.** With all eight changes, ANIMAL WELL stopped twice at
+`EXIT_IF(... dst_image->layout != old_image_layout)` in `set_image_layout` (`Utils.cpp`).
+- A temporary backtrace put it in `NativeCaptureFrame` (`Window.cpp`) → `UtilFillBuffer` → `UtilImageToBuffer`, on a
+  3840x2160 video-out image. The tracked layout went from `TRANSFER_SRC_OPTIMAL`, set by the first transition, to
+  `COLOR_ATTACHMENT_OPTIMAL` before the second, with no code in between: another thread rendered into the image.
+- The same title ran 110 s without agent captures (49.8 fps), so the stop needs the capture. That path is
+  unchanged by this work; the eight changes only shift timing.
+- Direction: record the capture readback on the thread that owns the image's command recording, or hold that
+  thread's lock across both transitions.
+
+Verification: `kyty_unit_test` filters `EmulatorComputeWave*` (102 tests) and `*Image*:*Gather*:*Spirv*` (103 tests)
+pass. Strict 110 s runs, Arc A770, translator 215 with a cold private SPIR-V cache, `KYTY_PRESENT_FPS_LIMIT=60`, one
+title at a time, captures checked by eye: Balatro 59.9, Dead Cells 59.9, GRIS 59.1, Hollow Knight 59.9, Peppa Pig
+59.5, Formula Retro Racing 59.5, DREDGE 26.4, Astro Bot 21.2 (title screen) fps; ANIMAL WELL 49.8 without captures
+(see the defect above). The previous set (`cfefcbdfe`, before these eight changes) gave Balatro 59.9, ANIMAL WELL
+38.2, Dead Cells 59.9, GRIS 53.0, Hollow Knight 59.9, Peppa Pig 58.4 and Formula 52.9 fps; DREDGE and Astro Bot
+did not finish that run (exit 139 and 137). GTA itself has no same-settings base for speed.
+
+## Layered depth passes, transport LDS, `image_sample_cd` over discard copies and textures over recycled depth slices (2026-11-05)
+
+Four general gaps stopped `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition` after its loading
+screen. With all four fixed, a warm strict run reaches the street with the player character (frame 769 of a 118 s
+run). This is a scene reached, not a playable claim: see "Still open" below.
+
+- **Layered depth-only passes.** A draw that exports a render-target index into a depth view of slices 0..5 used to
+  stop at `layered depth rendering is not implemented`. Each slice stays its own `DepthStencilVulkanImage`, as
+  before. A layered pass now renders into the slice array owned by slice 0 (`DepthStencilBufferGetSliceArray`).
+  - Before the pass, each layer is copied in from its slice when the slice's content stamp differs, or cleared to
+    `DB_DEPTH_CLEAR` when the slice was never written.
+  - `CommandBuffer::CloseRenderPass` copies every layer back to its slice and gives each slice a new content stamp.
+  - The framebuffer gets one layer per depth layer, with an n-layer dummy colour image.
+  - Only the shape seen so far is accepted: no HTILE, no stencil, no MSAA, SLICE_START 0, and no colour
+    attachments. Each other shape stops the run with its own message, as does a draw that samples the slices of
+    the layered pass that renders them.
+- **LDS of a transported pixel shader.** Fragment transport runs a pixel shader as compute. The LDS variable was
+  declared by the guest stage, so the transported shade listed an undeclared `%lds` in its `OpEntryPoint`. ANV
+  accepted the module, but the validation layer crashed on it. LDS is now declared by the host stage, as are the
+  shader's types and interface. Translator version 210.
+- **`image_sample_cd` proof over appended discard copies.** The SPIR-V generator appends one copy of a shared
+  discard block for each further branch to it, after the guest code and at the same PCs. The quad-uniform gradient
+  proof built its control-flow graph over the whole list and refused PCs that do not increase, so any coarse
+  sample in a pixel shader with such a block stopped the run (`shader emitter missing ... ImageSampleCd`). The
+  shader was a parallax ray march whose slopes come from quad broadcasts in WQM before the loop.
+  - The proof now reads the guest code alone, and only when every appended instruction copies the guest
+    instruction at its PC (same type and word).
+  - New unit test `EmulatorImageGradientProof.ReadsTheGuestCodeWithoutAppendedDiscardCopies`.
+- **A texture around recycled depth slices.** A 1024x1024 eleven-level BC texture (0xab000 bytes) was created over
+  five consecutive 256x256 16-bit depth slices, 0x20000 bytes apart, all inside its range.
+  The relation `DepthStencilBuffer IsContainedWithin Texture` stopped the run as unknown.
+  - `GpuMemoryAllowsTextureOverDepthRange` already linked a texture equal to or inside a depth range, for the same
+    reason: depth-tiled reads bind the depth image before any `Texture` is created, so a `Texture` there is a
+    colour view of recycled memory, uploaded from guest bytes.
+  - It now accepts a texture around a depth range as well, as the storage-texture rule already did. The unit test
+    that asserted the opposite was updated. No record excluded this relation.
+
+Still open in that title:
+- **Driver pipeline compiles.** One warm run stalled at frame 619 on new pipelines (up to 6.5 s each, 33 s by
+  108 s). The next run, with those pipelines in the Mesa cache, reached the street and presented about 3.5 frames
+  per second while it was still compiling.
+- **Severe visual corruption in the street.** The frame is dark and dithered blue, and the character's head is
+  green.
+  - Validation messages already present before these changes are the first leads:
+    - `VUID-vkCmdDrawIndexed-imageLayout-00344`: a colour image is sampled while it is in
+      `COLOR_ATTACHMENT_OPTIMAL`.
+    - `VUID-vkCmdDrawIndexed-format-07753`: a BC1 sRGB descriptor is read as UINT.
+  - These came from a 2-minute validation run that stopped during loading. Each layer message there was capped.
+  - The same run also reported `pushConstants-offset-01796`, `BindPipeline-pipeline-parameter` (a destroyed
+    descriptor set layout), `depthBoundsTestEnable-00598`, `pCode-08740` (demote to helper) and
+    `maintenance4-06817`.
+  - Not yet checked in the street scene.
+
+Verification: `ctest` 108 tests, 107 passed, 1 skipped (`PairedWave64`, as on main). Strict 110 s runs, with
+foreign CPU logged and no foreign load: Balatro 59.8, ANIMAL WELL 59.0, Dead Cells 59.9, GRIS 59.5, Hollow Knight
+59.9, Peppa Pig 59.3 fps. DREDGE 29.7 fps (32.4 on the previous record, same scene). Formula Retro Racing first gave
+50.9 fps with a cold translator 210 SPIR-V cache, then 59.9 warm. Astro Bot, warm, same scene after the save menu:
+18.8 and 19.1 fps on `74ca64882`, 18.9 on the LDS commit alone, against one run of 20.8 on `24d2e119f`.
+- Astro Bot draws no transported pixel shader (`transport=0` in all four logs), so the LDS change does not run
+  there. The other three changes reach it only through the translator version. The 8 % gap is unexplained and
+  rests on one base run; it is recorded, not attributed.
+
+## Buffer format decode by table: driver compile cost cut; layered depth is the next stop (2026-11-05)
+
+Typed buffer loads (`BUFFER_LOAD_FORMAT_*`) of Gen5 shaders call `gen5_buffer_format_decode`, which used to be an
+`OpSwitch` over the 61 decodable formats with a converted body per format: 745 SPIR-V instructions. Drivers inline
+every call. A vertex shader of `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition` makes 48 such
+calls, so about 35.8k of its 73.6k inlined instructions were this one switch. That is what kept the title on its
+loading screen: draws continued, but each new graphics pipeline took 1.7-15 s in the driver.
+
+- **Measurement before the fix.** Two cold runs, each with an empty Kyty pipeline cache, an empty private SPIR-V
+  cache and `MESA_SHADER_CACHE_DISABLE=true`. A temporary diagnostic emptied the switch for one arm, so that arm's
+  output was wrong; it served only to time the compiles.
+  - With the switch: 182 graphics pipelines in 33.3 s by 90 s, the slowest 1.85 s.
+  - Without it: 198 in 4.0 s by 60 s, the slowest 0.29 s.
+- **The fix.** Each format is now one word of a 128-entry constant table, indexed by the V# FORMAT field: the
+  four channel widths in 6-bit fields and the number format at bit 24. In every format, channel offsets are the
+  prefix sums of the widths, and a word of zero marks a format that does not decode.
+  - The decode extracts each channel with `OpBitFieldUExtract`/`OpBitFieldSExtract`, computes each number
+    format's conversion, and selects one. `gen5_buffer_format_bytes` reads its size from the same table.
+  - The table goes through a Function copy, so drivers lower it to constant data instead of a compare ladder.
+  - Unorm and snorm multiply by the reciprocal of the largest code, selected by width, as drivers lowered the
+    old constant division. 11- and 10-bit floats shift into a half, as before.
+  - Translator version 209.
+- **Equivalence on two drivers.** A scratch harness ran both decoders on the GPU over 143,360 records: all 128
+  FORMAT values (the 61 decodable ones and every gap) × 80 element patterns × 14 descriptor words.
+  - The patterns include zero, all ones, the 8- and 16-bit snorm minimum, half denormals, infinities and NaN,
+    11- and 10-bit float specials, and random words. The descriptor words cover all eight DST_SEL values on every
+    channel and random words.
+  - Arc A770 (ANV) and RADV (Raphael iGPU) both returned identical bits for all 716,800 values.
+  - A first version that divided at run time differed by 1-2 ulp on 8-bit unorm, which is why the reciprocal is
+    selected rather than computed.
+- **After the fix, same cold setup.** 391 pipelines in 25.8 s by 90 s, the slowest 0.94 s: 66 ms per pipeline
+  instead of 183 ms.
+
+Next stop (implemented in the record above): with the shader caches warm, the title gets past the pipelines it compiled before and stops
+at `layered depth rendering is not implemented: slices 0..5` (`GraphicsRenderAttachments.cpp:1485`).
+- The draw exports a render-target index (`PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX`) into a six-slice depth
+  view. That is consistent with rendering a cube shadow map in one pass.
+- Kyty keeps each rendered depth slice as its own image, and assembles depth arrays only to sample them
+  (`GraphicsRenderDepthSliceArray`).
+- **Direction:** render a layered pass into such an array, copy the slices in before the pass, and copy them back
+  afterwards. HTILE and clear state need the same per-slice treatment.
+
+Validation: `ctest` 108 tests, 107 passed, 1 skipped (`KytyShaderComputeIntegration.PairedWave64`, as on main).
+Strict 110 s runs with translator 209 and `KYTY_PRESENT_FPS_LIMIT=60`, one title at a time, each in its usual state:
+Balatro 59.8, ANIMAL WELL 59.9, Dead Cells 59.9, GRIS 59.5, Hollow Knight 58.1, Peppa Pig 59.3 and Formula Retro
+Racing 59.8 fps.
+- In that set DREDGE gave 26.9 fps and Astro Bot 12.2, against 30.6 and 15.3 on translator 208. Foreign CPU was
+  not logged during the set. During one DREDGE rerun a foreign process used about 365 % CPU, and that rerun gave
+  24.7 fps.
+- On a quiet host, with foreign CPU logged every 10 s and nothing above 5 %, the same warm runs gave DREDGE
+  32.4 fps and Astro Bot 21.4 fps. The drop did not reproduce there, so the table decode is not shown to slow
+  these titles.
+
+
+## Fragment transport clears and uncompressed exports, from `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition` (2026-11-05)
+
+The title (UE4, 01.007.000) runs a pixel shader whose scalar written under divergent control flow is read
+after the join (`pc=0x4ca4`). The native path refuses it, so it goes through fragment transport. Three general
+transport gaps stopped the run, in this order:
+
+- **A transported draw into a pass that clears on begin.** Transport begins the framebuffer pass once per
+  capture and once per resolve, per band. A clear on begin would erase the bands already resolved, so this
+  used to stop at `GraphicsRenderPipeline.cpp:1583`. An empty pass now applies the clear once, and the
+  transport passes use a framebuffer that loads the cleared targets. A depth target that clears on every
+  begin (depth clear enable) still stops, with its own message.
+- **Uncompressed exports in the compute shade.** The per-lane export emitter read every export as COMPR
+  half pairs, and `Target()` knew only the COMPR MRT formats. An uncompressed 32-bit export then fell back
+  to the graphics emitter, whose output-variable store is invalid in a compute shader: `spirv-val` reported
+  an undefined id, and pipeline creation failed with `VK_ERROR_UNKNOWN` (-13) on a 229k-word shade.
+  Uncompressed exports (EXP `COMPR` clear) now bitcast each source VGPR. The full-format MRT0-7 exports map
+  to their targets. An export the emitter refuses fails translation explicitly instead of producing invalid
+  SPIR-V. COMPR exports keep their old path, so titles that already ran through transport see no change.
+  Translator version 208.
+
+Frontier after these fixes (Linux, Arc A770, Mesa 26.2.5, strict runs of up to 118 s, 60 fps present
+limit, private shader cache, `reach_first_gameplay.pad`): the title boots, plays its intro and reaches the
+loading screen with the character artwork at about 30 fps. It then shows the same frame for tens of
+seconds. The guest is not waiting: draws keep going and presents stop, because the command processor is
+inside driver pipeline creation.
+- In one run, between 60 and 78 s there were 4272 draws and 1 present, and 8 new graphics pipelines took
+  14.0 s to create (about 1.75 s each).
+- In another, 10 pipelines took 22 s between 60 and 85 s (the slowest 5.6 s), and 10 of them needed new
+  SPIR-V. The private cache was still filling.
+
+This is the cost class of the large pinned kernels recorded for `PPSA05496 - Builder's Journey` and
+`PPSA21567 - Astro Bot`. Gameplay was not reached, so nothing is claimed about it.
+
+Open, not fixed: the render engine resets intermittently (`Timedout job`, `vkWaitForFences` -4 after about
+610-690 ms).
+- **Rate:** 4 of 9 runs, 2 of them under gdb, between about 45 and 100 s.
+- **Where it stops:** each devcoredump stops at the CS stall `PIPE_CONTROL` after an ordinary run of
+  draws, at a different draw each time.
+- **Kernel hashes:** the only kernel common to all three dumps compared is the first, depth-only draw of
+  every batch.
+- **Loops:** the only loops in the pending vertex kernels are the bounded GDA binary search (see the
+  `PPSA03969 - F.I.S.T.` hang record).
+- **No single culprit:** no shader loop or single draw explains it, and it matches that record's
+  unexplained reset.
+- **Ruled out:** the non-fatal `gfx_storage_frontier` (`code_unavailable`) warnings this title raises from
+  about 47 s. They report a descriptor policy that stays bound with robust access, not an unresolved
+  binding.
+
+Validation: `ctest` 108 tests, 107 passed, 1 skipped (`KytyShaderComputeIntegration.PairedWave64`, as on
+main). The regression set was not rerun. Before this change, every path it touches stopped the run
+(clearing transport pass, uncompressed or full-format exports), and COMPR exports keep their code.
+
+## Bring-up contracts from `PPSA05496 - Builder's Journey`: formats, sample_l addresses, quiesce hold (2026-11-05)
+
+`PPSA05496 - Builder's Journey` (Unity 2021.2) is a local dump without `sce_sys/param.json` and without six of
+its `sce_module` libraries; the run below borrowed them from another title's dump (a different SDK
+version), so its later failures are leads, not evidence about this title. Each stop was a general contract
+gap, fixed in the shared path:
+
+- **Loader.** `kyty_load_addcont` no longer stops a title that declares no title id: no add-on content can
+  match it, and a package source given for it is reported invalid. A program path that does not resolve to
+  a host file inside its mount (a malformed path, or a link leaving the mount) now names the path instead
+  of failing later as "guest path is empty".
+- **Render targets.** 32_32 FLOAT and 16_16 UNORM colour targets map to `R32G32_SFLOAT` and `R16G16_UNORM`,
+  with COMP_SWAP 0 and 1 like the other two-channel formats.
+- **`image_sample_l` on 3D and 2D-array T#.** RDNA2 ISA table 43 addresses DIM 2 (3D) and DIM 5 (2D array)
+  as x, y, z/slice, LOD for every DMASK. The decoder read three addresses for DMASK 0x7, 0xB and 0xF, so the
+  LOD came from the slice and an NSA fourth address was lost (an assert in the operand reader). Both DIMs now
+  use the 4-address DMASK form and its emitter, which samples the bound 3D or 2D-array view; a single-layer
+  2D-array view bound as 2D samples its only slice.
+- **Thin 3D mip chains.** A tile-27 volume with a mip chain is uploaded level by level from the 2D-array
+  layout of its slices; other volume tilings with mips stay refused.
+- **R_X 2D arrays with 2-byte elements** (16_FLOAT) use the 64 KB render-target layout like 1, 4 and 8 bytes.
+- **`tbuffer_load_format_x`** reads the first component of a wider float element (formats 64, 74, 77), as XY
+  and XYZ already did.
+- **`v_mad_i32_i24`** (VOP3 0x142) is decoded: sign-extended 24-bit operands, low 32 bits of the product plus
+  src2. **`v_cmp_eq_i64` / `v_cmp_ne_i64`** decode to the 64-bit equality compares: equality does not depend
+  on the sign. The ordered signed 64-bit compares stay refused.
+- **Duplicate SPIR-V ids from negated absolute sources.** With neg and abs on two operands of one instruction
+  the temporaries were named by instruction index, so both operands defined the same id and pipeline creation
+  failed (`VK_ERROR_UNKNOWN`). They are named per result now. Test:
+  `EmulatorShaderGetpc.NegatedAbsoluteSourcesKeepDistinctTemporaries`.
+- **Sampler operation of a bound T# merged reloaded descriptors.** The post-pass that classifies each bound
+  read-only texture (regular, depth reference or mixed) scanned every image instruction naming the T#'s
+  SGPRs, including ones after the shader had reloaded those SGPRs with other descriptors. A pixel shader
+  that reuses `s[0:7]` for many textures was classified "mixed" on its bound 3D texture and stopped the run.
+  The pass now counts only reads through registers still holding the bound value, as the binding pass
+  already did.
+- **Quiesce against a parked ring deadlocked.** `Gpu::RunQuiesced` drains the rings to idle while holding the
+  submission admission gate. A graphics or async ring parked on a wait whose producer is a submission or
+  host store behind that gate never goes idle, so the quiesce and the producer waited on each other. A
+  quiesce now counts a ring parked with its decode released as drained, and the ring does not resume decode
+  until the quiesce's action finishes (`GraphicsRing::HoldParkedDecode`).
+
+Open, recorded here:
+- The compute ring parks in `ComputeRing::ThreadRun` (`WaitForSuspendedRun`, `GraphicsRun.cpp`) and is
+  drained by `ComputeRing::WaitForIdle` without the hold; the same deadlock is possible there. Not observed.
+- The compute write-only storage-image pass (`AnalyzeShaderDirectImageUse` in the compute usage pass of
+  `Shader.cpp`) still scans without entry values; a reload can only make it report reads, which is the safe
+  direction.
+- Builder's Journey frontier: about 93 presents in the first 6 s, then the render thread spends more than
+  90 s in `vkCreateComputePipelines` for a fragment-transport shade pipeline of 341k SPIR-V words pinned to
+  `requiredSubgroupSize` 32 (Arc A770, Mesa 26.2.5); the run never finished it. A smaller shade pipeline of
+  the same title (255k words) was already in the driver cache. Same cost class as the pinned-32 kernels of
+  `PPSA21567 - Astro Bot` (SIMD32 spills); direction: let spanned waves run at the driver's width. No capture was taken
+  before the stall, so nothing is claimed about what renders.
+
+Validation: Linux, Intel Arc A770, Mesa 26.2.5, strict 110 s runs with a 60 fps present limit and a private
+shader cache, host shared with a foreign process. `PPSA21402 - Balatro` (59.8 fps), `PPSA22520 - ANIMAL WELL`
+(59.8), `PPSA15552 - Dead Cells` (59.9), `PPSA09804 - GRIS` (59.5), `PPSA34971 - Hollow Knight` (59.9),
+`PPSA03706 - My Friend Peppa Pig` (59.4) and `PPSA17189 - Formula Retro Racing` (59.6) reached their usual
+states. `PPSA09076 - DREDGE` held 30.6 fps docked at its first town: the title had saved there, and the scripted
+route does not undock, so the figure is not comparable with the 34 fps measured at sea. `PPSA21567 - Astro Bot`,
+same scene and host load, warm caches: 17.4 fps for the previous head and 18.1 fps with these changes. ANIMAL WELL
+stopped once on the intermittent image-layout tracker fatal recorded in the graphics handoff; the rerun was
+clean. `ctest`: 108 tests, 107 passed, 1 skipped.
+
+## Format stores, two-channel ALT targets and LDS loads fixed; PC clear-state defaults excluded (2026-11-05)
+
+Contract defects found while reviewing outside proposals. Three are fixed in the general path; none was
+traced to a failure in a local title, and the strict set below shows they do not regress the working ones.
+The fourth proposal, the PC clear-state table, broke a working title and is excluded.
+
+- **Narrow formatted buffer stores were dropped without a report.** `buffer_store_format_x/xy/xyzw` on Gen5
+  matched only the legacy data-format numbers (20, 22, 36, 39), so every other V# format wrote nothing.
+  `ShaderSpirvBufferFormat.cpp` now encodes every format of the Gen5 buffer-format table (RDNA2 ISA table
+  47), applying the V# DST_SEL in reverse (ISA table 31), and writes the element through byte-masked
+  dwords: full dwords with a plain store, partial dwords with an atomic AND/OR pair so neighbouring bytes
+  owned by other lanes survive. NumRecords 0 and out-of-range writes store nothing (ISA table 35).
+  - Evidence for integer truncation: `BUFFER_STORE_BYTE` is defined as a store through format 8_UINT of
+    the low bits. Unsourced and open to falsification by a capture: round-to-nearest-even for UNORM/SNORM,
+    clamping for USCALED/SSCALED, 11/10-bit floats through a half-float conversion (double rounding, a
+    negative stores 0), and 0 for a memory channel no data component selects.
+  - Validated with `spirv-val` only (`EmulatorShaderGetpc.FormatStoresEncodeDescriptorFormat`); no host
+    test runs the encoder on a GPU.
+- **Two-channel colour targets with COMP_SWAP 1 stopped the run.** In the ALT swap an 8_8, 16_16 or 32_32
+  target stores export X in channel 0 and W in channel 1 (the published Linux AMD driver's colour-swap
+  table: `X__Y` selects SWAP_ALT for two channels). No host format orders channels that way, so
+  `HW::Context::SetColorInfo` marks the target with `kColorExportOrderTwoChannelAlt`; the pixel export
+  (`ShaderColorExportSourceComponent`) and the colour write mask move W into the second channel, and
+  `ResolveRenderTextureFormat` maps 8_8 UNORM and 16_16 FLOAT/UINT with order 1 to their plain two-channel
+  formats. Open: with blending enabled the host blends channel 1 with the colour equation, while the
+  guest blends W with the alpha equation; a target with distinct alpha blend state is not remapped.
+- **`buffer_load_dword` with LDS=1 was refused.** RDNA2 ISA 8.1.9: the dword goes to LDS at
+  `M0[15:0] + OFFSET + TIDinWave * 4` and VDATA is not written. The MUBUF decoder now gives that form a
+  null destination, the lowering preconditions admit it for `buffer_load_dword` only, and compute shaders
+  with an LDS allocation store the loaded value through the shared `%lds` array, exec- and bounds-gated
+  like `ds_*_addtid_b32`. Other opcodes with LDS set, legacy encodings and shaders without LDS still
+  refuse. Tests: `EmulatorShaderGetpc.LdsLoadWritesWorkgroupMemoryNotVdata` and the updated
+  `EmulatorShaderLdsBounds` parser and rejection contracts.
+- **Excluded: CLEAR_STATE feeding the gfx10 PC clear-state table.** `cp_op_clear_state` resets the context to
+  zero. Feeding it the non-zero values AMD publishes with the amdgpu kernel driver (CB_TARGET_MASK, scissors,
+  viewport ZMAX, PA_CL_CLIP_CNTL 0x00090000 and 33 more) removed every UI panel of `PPSA21402 - Balatro`
+  (button backgrounds, side panel, tooltips) while text and cards still drew. Skipping single registers
+  in strict runs pinned it on PA_CL_CLIP_CNTL: skipping that one register (DX_CLIP_SPACE_DEF and
+  DX_LINEAR_ATTR_CLIP_ENA set) brings the panels back, skipping only the 16 viewport ZMAX values does not. The console's own
+  clear-state values differ from the PC table in at least this register and have not been observed, so
+  no value of that table is applied. Direction: take defaults from a console trace of the context
+  right after CLEAR_STATE, not from the PC table.
+- Not a defect: on the blind-select screen of `PPSA21402 - Balatro` the "Upcoming" buttons are barely
+  legible. The game's Lua draws an inactive blind with a #666666 button, #888888 text at 60 % alpha and a
+  50 % dark overlay over the whole panel; the captures match that.
+
+Validation: Linux, Intel Arc A770, Mesa 26.2.5, strict 110 s runs with a 60 fps present limit, host shared
+with a foreign CPU-heavy process. With all four changes, `PPSA22520 - ANIMAL WELL`, `PPSA15552 - Dead Cells`,
+`PPSA09076 - DREDGE`, `PPSA17189 - Formula Retro Racing`, `PPSA09804 - GRIS`, `PPSA34971 - Hollow Knight` and
+`PPSA03706 - My Friend Peppa Pig` reached their usual states (52-60 fps; DREDGE 34 fps). `PPSA21567 - Astro Bot`
+only reached its warp with a cold shader cache (inconclusive). Balatro lost its panels, as above. With the clear-state change
+removed, Balatro draws its panels again at 59.8 fps. `ctest`: 108 tests, 107 passed, 1 skipped.
+
+### Outside proposals reviewed, not fixed (2026-11-05, open)
+
+Leads from reviewing outside proposals against Kyty. Each was checked against the current code but not
+reproduced in a local title; none is a fix to ship without evidence.
+
+- Audio, NGS2: `Ngs2PatchVoice` refuses `destination_input != 0` (`AudioNgs2.cpp:2411`); the submixer
+  routing parameters 0x20000006 and 0x20000002 are refused (`AudioNgs2.cpp:2316-2339`); sampler and custom
+  filter parameter ids outside the known set are refused (`AudioNgs2.cpp:2219-2246`). Direction: implement
+  each parameter from a guest trace of a title that sends it.
+- Video, AvPlayer: a looping stream rewinds without posting a looping-back event
+  (`AudioAvPlayer.cpp:748`); the event id is unknown.
+- Shaders: mixed interpolation modes across inputs of one pixel shader are not distinguished
+  (`ShaderSpirvOperands.cpp:445-514`); 32-bit UINT colour exports go through float outputs
+  (`ShaderSpirvVector.cpp:481-580`); a compressed export with mode 7 into a non-UINT target stops the run
+  (`ShaderSpirvVector.cpp:251`); `v_cvt_f32_f16` with a partial SDWA destination is refused
+  (`ShaderSpirvF16.h:289-296`).
+- Decoder gaps (RDNA2 ISA, not seen in a local title): SOPK 0x1B/0x1C (`s_subvector_loop_begin/end`,
+  `ShaderParseSOPK.cpp:132`), VOP1 `v_frexp_exp_i32_f32`, `v_frexp_mant_f32`, `v_frexp_mant_f16`,
+  `v_frexp_exp_i16_f16`, `v_sat_pk_u8_i16`, `v_cvt_norm_i16_f16`, `v_cvt_norm_u16_f16`
+  (`ShaderParseVOP1.cpp:249-293`).
+- Point-list draws never write `PointSize`. `GraphicsRenderDraw.cpp:1060` maps prim type 1 to
+  `VK_PRIMITIVE_TOPOLOGY_POINT_LIST`; `PointSize` is declared (`ShaderSpirvGenerator.cpp:1098`) but no stage
+  stores it, so the host point size is undefined. The guest takes it from PA_SU_POINT_SIZE, or from the
+  vertex export when PA_CL_VS_OUT_CNTL selects it. Direction: store that size in the last vertex stage.
+- Without `VK_EXT_depth_range_unrestricted` the viewport depth range is clamped to [0,1]
+  (`GraphicsState.cpp:241-245`). In GL clip space with ZSCALE 1 and ZOFFSET 0 the console writes the clamped
+  raw z, while the host writes 0.5 z + 0.5. Depth order is kept, but stored values differ for anything that
+  reads depth back. Direction: remap z in the vertex stage when the range does not fit.
+- The pixel ancillary VGPR carries only the render-target index (`ShaderSpirvInterpolation.cpp:101-115`); the
+  primitive type (bits 0-1) and sample index read zero.
+- Zero-stride V# fetches ignore OOB_SELECT: the unbound V# path checks them as raw bytes against NUM_RECORDS
+  (`ShaderSpirvBuffer.cpp:560-567`).
+- dma-buf imports are preferred whenever the import call succeeds (`GuestDeviceAddress.cpp:674-678`).
+  CPU/GPU coherence of the import is not probed, and an outside measurement reports stale CPU reads on Intel
+  under Linux.
+- `UnpackHalf2x16` paths outside native-half shaders get no `DenormPreserve 16`
+  (`ShaderSpirvGenerator.cpp:753-760`). It matters only on a driver that flushes f16 denormals by default.
+- libkernel and libc exports not registered: POSIX `truncate` (only `sceKernelTruncate` is),
+  `pthread_condattr_setpshared`, `fchown`, `nmount`, `telldir`, `seekdir`. None of the 32 local titles imports
+  any of them (a byte search of every eboot and bundled module for each NID; a NID every title imports was
+  found in 30 as the positive control), so none was added. `select` on a regular file returns EOPNOTSUPP
+  (`Network.cpp`, `NetSelect`).
+- Colour targets in format 8_8 with NUMBER_UINT have no host format (`ResolveRenderTextureFormat`,
+  `RenderTexture.cpp`). The table entry is `VK_FORMAT_R8G8_UINT`, but how a UINT export narrows to 8 bits is
+  not sourced, and no local title is known to reach it.
+- Not applicable to Kyty: fused-EU sampler handle sharing on Intel Gfx12. Each image and sampler index
+  resolves to one slot per binding, either a user-data T# or a recorded dynamic `s_load`
+  (`ShaderFindImageSampledTextureDescriptor`, `ShaderResources.cpp:35-70`), so it is uniform across the
+  workgroups of a dispatch. WRITE_DATA with DST_SEL 3 still performs the write after its warning.
+
+#### Stencil logic ops (2026-11-05, fixed)
+
+DB_STENCIL_CONTROL ops 0x0a-0x0f (AND, OR, XOR, NAND, NOR, XNOR with STENCILOPVAL; AMD's published gfx10.3
+register set and its extended stencil-op extension) fell through to `VK_STENCIL_OP_KEEP` with a debug-only
+log. Vulkan has no logic stencil ops, so `get_stencil_op` (`GraphicsRenderDescriptor.cpp`) now picks the
+Vulkan op and the bits it may write: AND is ZERO on ~opval, OR is REPLACE on opval with reference
+testval | opval, XOR is INVERT on opval, XNOR is INVERT on ~opval. NAND and NOR are exact only when opval
+covers none or all of the write mask. `get_stencil_state` narrows the shared write mask, and returns false with a
+warning when a case is not exact:
+- NAND or NOR with a partial opval: the op is KEEP, as before;
+- ops of one face that need different masks: the narrowing ops become KEEP, so the others keep their mask;
+- an OR whose reference changes a compared bit.
+Ops 0x00-0x09 are unchanged. Tests: `EmulatorStencilLogicOps.*`, which compares the guest result with the
+host result for every stored value and opval under three write masks. It fails when the XOR mask is
+inverted. Strict run of `PPSA21567 - Astro Bot` to the warp, with a temporary logger on: no logic op was used, so
+no local title is known to change.
+
+## Truncate, munmap, setenv and DMA copy contracts; Windows cancel; three proposals excluded (2026-11-05)
+
+Host: Linux, Intel Arc A770, Mesa 26.2.5 (ANV), strict runs at the 60 fps present limit. Each fix
+below came from reviewing proposed changes against Kyty's own contract and evidence.
+
+- **Truncate through a regular file returned ENOENT, fixed** (`source/emulator/src/Kernel/FileSystemSync.cpp`).
+  A path whose parent is a regular file (`/dir/file/child`) is ENOTDIR under POSIX. The host name of
+  such a path resolved empty, and the empty name read as an existing directory, so `KernelTruncate`
+  returned EISDIR. It now walks the guest ancestors: the first one that exists decides ENOTDIR (a file)
+  or ENOENT (a directory). Unit test `TruncateByPathShortensFileAndRejectsBadTargets`.
+- **munmap of a length that is not a page multiple, fixed** (`source/emulator/src/Kernel/Memory.cpp`).
+  The length is rounded up to the 16 KiB guest page, as a BSD kernel does, and an overflow of
+  `vaddr + len` is EINVAL. The address check is unchanged. Unit test
+  `EmulatorKernelMemory.MunmapRoundsLengthUpToGuestPage`; it fails without the fix.
+- **Custom `R_DMA_DATA` copies used memcpy, fixed** (`source/emulator/src/Graphics/GraphicsRunOpParsers.cpp`).
+  The ranges may overlap; it now uses memmove, which `IT_DMA_DATA` already did.
+- **Guest `setenv` and host variables in `getenv`, fixed** (`source/emulator/src/Libs/LibCString.cpp`,
+  `source/emulator/src/Libs/ProcessEnvironment.cpp`). `setenv` (NID `M4YYbSFfJ8g`) was not exported,
+  so titles without their own libc resolved it to nothing; `getenv` fell back to the host process
+  environment, so host variables such as `PATH` reached the guest. `setenv` now stores guest values
+  (EINVAL for a null, empty or `=`-containing name, or a null value), and `getenv` reads only guest
+  values and the environment passed in the libc start parameters. The test that asserted host `PATH` in the
+  guest was removed: no documented contract backs it. Neither symbol is HLE-owned, so a title that ships
+  its own libc keeps its own pair. Every runnable local title ships one; the only local title that
+  imports `setenv` without it, `PPSA05496 - Builder's Journey`, is an incomplete dump with no
+  `sce_sys/param.json` and no libc. It now boots with another title's modules (section "Bring-up contracts
+  from `PPSA05496 - Builder's Journey`"), whose libc supplies `setenv`, so the new export is still covered
+  by unit tests only.
+- **Windows: acting on a thread cancel stopped the process, fixed** (`source/emulator/src/Kernel/Pthread.cpp`).
+  winpthreads acts on a cancel with an SEH unwind, which cannot walk guest frames. On Windows
+  `PthreadCancel` records the request and `PthreadTestcancel` leaves through `PthreadExit` when
+  cancellation is enabled, with the `PTHREAD_CANCELED` value of the Linux build. Limit: a thread
+  blocked in a host wait is not woken by the cancel. Linux keeps the host cancel. Not run on Windows
+  here; the Windows CI builds it.
+
+**Excluded:**
+
+- **Ordering V_MIN/V_MAX/V_MED3_F32 by raw bits.** The RDNA2 ISA defines these by value comparison,
+  and FP_DENORM single-precision mode 0 flushes input denormals; the common guest mode `0xc0` sets
+  it. On hardware `max(+0, +denormal)` is therefore +0, while a bit ordering returns the denormal.
+  The current lowering and its recorded limit stay ("Min and max", later in this file).
+- **Backing off failed event-flag polls with host yields and sleeps.** `PPSA28311 - Absolum`, the
+  only local title whose `eboot.bin` names the audio middleware the proposal targets (modules were not
+  searched), stayed under 262,144 failed zero-timeout polls in 100 s from boot to gameplay, under
+  2,700 per second against the hundreds of thousands per second the proposal addresses (temporary
+  counter that logged once per 262,144 failures, not committed). No spinning poll loop was measured,
+  so a host sleep would add latency with no measured gain.
+- **Synthetic unwind tables for guest modules on Windows.** One frame shape per module is invented:
+  guest code ships no unwind data and does not keep a frame pointer in every function. Kyty leaves
+  guest frames by jumping back to the native entry frame instead (record "Windows strict sweep").
+**Open lead, not ported and not measured:**
+
+- **Select-guarded buffer loads.** The proposal targets pipeline build time on another
+  vendor and is off by default there. On Arc, the heavy-shader build time measured earlier is
+  register allocation and spills, which depend on the subgroup size (record "Astro compile split").
+  Loads through a runtime descriptor read the guest address, not a robust binding, so running them
+  unconditionally could fault; a port must keep their branch. Open lead: it needs a cold-cache
+  build-time A/B on the same shaders before it ships.
+
+**Validation.** `ctest --no-tests=error`: 108 tests, 107 passed, 1 skipped
+(`KytyShaderComputeIntegration.PairedWave64`, skipped before as well), including the architecture,
+archive DAG and host-shader gates. Strict runs of about 110 s each: `PPSA28311 - Absolum` gameplay
+at 39 fps (binary with the env-gated poll counter; 37.3-40.3 fps recorded for that area on 2026-11-01), `PPSA15552 - Dead Cells` and `PPSA21402 - Balatro` gameplay at 59.9 fps,
+`PPSA34971 - Hollow Knight: Voidheart Edition` at the display-scale screen where its scripted route
+ends, as before these changes. No title in the local set exercises truncate through a file, an
+unaligned munmap length or an overlapping custom DMA copy, so those fixes are covered by unit tests only.
+
+**Linux impact of the Windows fixes on this branch.** Every line those commits compile on Linux was
+reviewed with the Windows-only blocks stripped. Those lines are equivalent (calling convention macro,
+`strtoll`, path conversion, stack-range checks that are no-ops on Linux, the lock helpers that call
+pthread directly) or extend support: storage format 69 used to stop the run, and the pipeline cache
+lock is held only around creation, with the checkpoint deferring on `try_lock`.
+
+## Windows collector context requests, host lock waits, FFmpeg, SysV exports, scanf and reserves (2026-11-04)
+
+Host: Windows 11, Intel Arc A770, driver 32.0.101.9150, MinGW UCRT build, strict runs at the
+60 fps present limit. `PPSA09804 - GRIS` stayed black at 2 presents; each item below was the
+next stop on the way to its title menu.
+
+- **Context requests were never delivered on Windows, fixed**
+  (`source/emulator/src/Kernel/PthreadContext.cpp`).
+  - Observed: GRIS stopped at present 2. The IL2CPP collector stops the world through
+    `KernelRaiseException(thread, 30)` (record "Collector context requests delivered only at safe
+    points") and waits on its suspend semaphore for each thread's answer. On Windows
+    `PthreadInstallContextHandler` returned false and `PthreadRaiseContext` returned OK without
+    delivering, so the collector waited forever.
+  - Fix: the Windows branch keeps the Linux contract (deliver only at a safe point, else retry
+    with the same jittered delay). A delivery suspends the target, reads its context with
+    `CONTEXT_EXCEPTION_REQUEST` and classifies the stop: guest code (`GuestCodeRanges`), or a
+    host service inside a `PthreadInterruptibleScope` that will return by itself
+    (`NtWaitForAlertByThreadId`, which `NtAlertThreadByThreadId` ends and its callers re-wait;
+    `NtDelayExecution`; `NtWaitForSingleObject` with a timeout). It then queues a special user
+    APC (`QueueUserAPC2`, `QUEUE_USER_APC_CALLBACK_DATA_CONTEXT`) that runs the guest handler
+    with a FreeBSD-layout `SignalUcontext`. Any other stop re-arms a threadpool retry timer.
+  - Probes behind the design (scratch programs, not committed): a special APC does not
+    interrupt a non-alertable wait, it runs when the wait returns; its `CONTEXT` is built right
+    below RSP, so in guest code it clobbered the SysV red zone on the 2nd delivery, and lowering
+    RSP by 128 before queuing and restoring it in the APC gave 137 deliveries with no clobber.
+    `NtWaitForSingleObject` keeps the timeout pointer in R8 (0 for an infinite wait).
+  - Verified: `EmulatorKernelProcess` context tests now build and run on Windows
+    (`ContextRequestsReachSleepingThreads`, `ContextRequestWaitsForSafePoint`,
+    `ContextRequestReachesLockWaiter`, `ContextRequestInterruptsGuestCode` and the two
+    `StoppedWaiter` tests, 6 of 6). GRIS passes present 2 and runs at 60 fps.
+  - Limits: no target object check as on Linux; the handler runs on the interrupted stack, not
+    on a separate trampoline stack; retries run at threadpool (millisecond) granularity.
+- **Sub-millisecond sleeps did not sleep, fixed** (`source/lib/Core/src/Threads.cpp`).
+  MinGW `std::this_thread::sleep_for(100us)` returns at once (1000 calls took 0.0 ms), so every
+  guest `usleep` below 1 ms was a busy loop and a sleeping thread was never in a host service a
+  context request could stop at. `SleepMicro`/`SleepNano` now wait on a thread-local
+  high-resolution waitable timer with a bounded `WaitForSingleObject`.
+- **Core mutexes on Windows use `CRITICAL_SECTION`/`CONDITION_VARIABLE` with GCC too**
+  (`KYTY_WIN_CS`, `Threads.cpp`). The define was clang-only since a 2022 third-party update with
+  no recorded reason; with GCC, Core locks went through winpthreads.
+- **Contended host pthread locks are taken in 1 ms slices on Windows** (`Pthread.h`,
+  `PthreadContext.cpp`, `PthreadMutex.cpp`, `PthreadRwlock.cpp`, `PthreadCond.cpp`). winpthreads
+  blocks a contended `pthread_mutex`/`pthread_rwlock` (and `std::mutex`, `std::shared_mutex`) on
+  an infinite event wait that nothing can interrupt. `PthreadLockHostMutex` and
+  `PthreadLockHostRwlock{Shared,Exclusive}` loop the timed variants with 1 ms deadlines there, so
+  a context request is delivered as a slice ends; other hosts lock directly.
+  `ContextRequestReachesLockWaiter` failed before and passes with it.
+- **FFmpeg was never linked on Windows, fixed** (`source/emulator/CMakeLists.txt`).
+  - Observed: after the context fix GRIS stopped at about 30 s with
+    `AJM batch rejected: Opus decoder is unavailable for the observed profile`
+    (`AudioAjm.cpp`); the backend reported "FFmpeg is not available".
+  - Cause: the FFmpeg `pkg_check_modules` block was inside `if (LINUX)`.
+  - Fix: the block runs on every platform. A host without the FFmpeg `.pc` files still builds
+    without it. Local setup used here: the FFmpeg 9.0.2 shared build from scoop
+    (`ffmpeg-shared`) with hand-written `.pc` files on `PKG_CONFIG_PATH`; its `bin` must be on
+    `PATH` when the emulator or the unit tests run.
+  - Verified: GRIS reaches its title menu ("NEW GAME"), scored `healthy` by `kyty_agent score`,
+    and ran a bounded 90 s strict run at 60 fps (4476 presents) without stopping.
+  - Open: release packaging does not ship the FFmpeg DLLs; a Windows package built with FFmpeg
+    must carry them and their license notice.
+- **Local runs loaded another toolchain's `libwinpthread-1.dll` (host setup, not a code
+  defect).** `fc_script.exe`, `kyty_unit_test.exe` and `kyty_agent.exe` import
+  `libwinpthread-1.dll` and `libatomic-1.dll`. A build directory has no copy, so the loader takes
+  the first one on `PATH`; from Git Bash that is Git's `/mingw64/bin`, not the toolchain the
+  binary was built with. Under the `games-matrix` runner started from Git Bash, GRIS stopped
+  every time (4 of 4) at present 2 with a guest read of `0x19` at the same guest RIP; started
+  from PowerShell, or from Git Bash with the toolchain's DLLs copied next to the executables, it
+  reached `interactive` (2 of 2). Environment, stdio, resolution and agent polling were each
+  ruled out by a standalone run that did not stop. Sweeps and unit-test runs started from Git
+  Bash before this point (including the earlier sweeps in these records) ran with Git's
+  winpthreads. Release packages copy the toolchain's DLLs next to the executables and are not
+  affected. Local setup: copy the toolchain's `libwinpthread-1.dll` and `libatomic-1.dll` into the
+  build directory and `agent/`.
+- **HLE exports without the SysV ABI, fixed** (`source/emulator/src/Libs/LibC.cpp`).
+  26 exports registered with `LIB_FUNC` were defined without `KYTY_SYSV_ABI`: `c16rtomb`,
+  `mbrtoc16`, the `std::filesystem` helpers (`c_fs_*`), `get_new_handler`, aligned and nothrow
+  `new`/`delete`, the exception destructors and the `throw_*` helpers. On Linux the host ABI is
+  SysV, so nothing showed; on Windows the guest's arguments arrived in the wrong registers (for
+  example `c16rtomb('A')` returned -1), and an MS-ABI callee may write 32 bytes of home space
+  above its return address, into guest frames. Found by
+  `EmulatorLibcString.ResolvedC16ConversionsMatchFirmwareStateMachine`, which now passes; the
+  unit tests' local declarations of these functions (`UnitTestEmulatorLibcString.cpp`,
+  `UnitTestEmulatorLibcFilesystem.cpp`, `UnitTestEmulatorLibcHeap.cpp`) carried the same
+  mismatch and now match the definitions. A scan of every `LIB_FUNC` target found no others.
+- **`__chkstk` zeroed live guest frames, fixed** (`Thread::CommittedStackBelow`,
+  `Threads.cpp`). MSVC-built host code writes a zero to every page from `NT_TIB.StackLimit` down
+  to the new RSP. `VirtualQuery` reports like pages only from the queried page upward, so the
+  recorded limit stopped at the top of the guest stack's committed run and the probe wrote into
+  live guest frames. The limit now comes from scanning each allocation from its base.
+- **Attribute copies dropped the stack on Windows, fixed** (`pthread_attr_copy`,
+  `PthreadAttr.cpp`). `PthreadAttrInit` takes its stack size from the host pthread default, which
+  is zero under winpthreads. The copy set the stack address before the size, and
+  `PthreadAttrSetstackaddr` rejects a destination whose size is zero, so `PthreadAttrGet`
+  returned EINVAL with a null address and a zero size. The IL2CPP collector reads its thread's
+  stack base from that query and aborts with "Bad stack base in GC_register_my_thread" through
+  the bundled libc's fatal stub, which then faults writing `fs:0x28`. Found in PPSA12544,
+  PPSA28997 - God of War Sons of Sparta and PPSA34971 - Hollow Knight Voidheart Edition (the
+  message resolved in each title's `Il2cppUserAssemblies.prx`). The copy now sets the size first.
+  With the fix those three and PPSA24643 - The Messenger reach `interactive` in a strict
+  `games-matrix` run. Still open: a fresh attribute reports a zero stack size on Windows and its
+  guest stack is about 1 MiB smaller than on Linux, because the default still comes from the host.
+- **Guest `scanf` destinations on Windows, fixed** (`c_sscanf`, `c_sscanf_s`, `c_fscanf`, `LibC.cpp`).
+  The HLE builds a SysV `va_list` from the guest arguments. On Linux that is the host `va_list`; the
+  Windows x64 `va_list` is a pointer to consecutive 8-byte slots, so the host `vsscanf` read the
+  SysV header words as destination pointers. Guest `long` is 64-bit and the Windows host `long` is
+  32-bit, so `%ld`/`%lx` also stored half of the value. On Windows the call now walks the format,
+  reads one destination pointer per stored conversion in format order, rewrites a single `l`
+  before an integer conversion to `ll`, and passes the pointers as an MS `va_list`; a positional
+  (`$`) format or more than 128 destinations returns `EOF`. Covered by
+  `EmulatorLibcString.ResolvedSscanfStoresGuestDestinationsInFormatOrder` (`%ld`, `%*s`, a `%[`
+  scanset starting with `]`, `%lx`, `%n`), which runs on every host.
+- **Reserving over a direct mapping failed on Windows, fixed** (`sys_virtual_decommit_guest_range`,
+  `SysWindowsVirtual.cpp`; `DecommitGuestRange`, `VirtualMemory.cpp`). `KernelReserveVirtualRange`
+  over part of a mapped direct range decommits that part first. `DecommitGuestRange` was Linux-only, so on Windows the reservation failed
+  inside the reservation root that holds the committed private view (PPSA17221, seen at
+  `0x23950000+0x2000000`). The Windows version decommits a range inside one private view under a
+  write lease, splits the view record around it and keeps the range guest-owned; a range inside a
+  section view is refused. With both fixes PPSA17221 and `PPSA02070 - Don't Starve Together`
+  reach `interactive` in a strict `games-matrix` run, and
+  `EmulatorKernelMemory.ReservingDirectMappingTailDecommitsIt` passes on Windows (50 of 53 in that
+  suite; the other three are listed in "Windows host memory queries, mappings and test build").
+- **Writable `16_16_16_16_UINT` images, fixed** (`VulkanImageFormat.cpp`, `ShaderSpirvImage.cpp`).
+  Gen5 format 69 had a sampled format (`R16G16B16A16_UINT`) and no storage format, so a shader
+  writing it stopped with "unsupported writable image format". It now has the exact `Rgba16ui`
+  view, a core SPIR-V storage format (no `StorageImageExtendedFormats`), and Vulkan requires
+  storage support for `R16G16B16A16_UINT`. Covered by
+  `EmulatorGraphicsResources.EmitsAndValidatesExactHomogeneousUintStorageFormats`. PPSA03524,
+  which is not in the Linux matrix, then stopped at `GraphicsRenderPipeline.cpp:1583` (fragment
+  transport into a clearing pass), fixed since: see the 2026-11-05 transport record at the top.
+- **Open, `PPSA03355 - Hades`: a texture upload sometimes copies into a NULL base** (`memcpy` of
+  0x2000 bytes, guest return `eboot+0x308059`). Failed in 3 of 4 strict Windows runs at Warn
+  logging; one run at Debug logging reached 60 s with the save dialog drawn. The record
+  "Intermittent boot crashes on a NULL guest pointer" has the same copy failing intermittently on
+  Linux.
+  - From the disassembly only, not observed at run time: the destination comes from a texture
+    wrapper (`eboot+0x31a8e0`) that asks the engine's GPU allocator (`eboot+0x315e00`) for memory
+    from a pool chosen by size (below or above 128 KiB) and leaves the destination NULL when the
+    allocator returns non-zero. With a pool set, the allocator tail-calls `eboot+0x314600`; where
+    that pool takes its blocks (callbacks at `+0x598` and `+0x5a0` of the allocator object) was not
+    followed. At boot the title maps 4 GiB, 256 MiB, 3 GiB and 64 MiB of direct memory, all `[Ok]`.
+  - Excluded: a failed host commit or mapping (the matrix `child.log` captures the host
+    `VirtualAlloc* failed` messages, as PPSA17221's runs show, and the failing Hades run has none;
+    the Debug run has no `[Fail]` from the kernel memory calls), and coarse host sleeps
+    (`SleepMicro` uses a high-resolution timer; the label manager polls every 100 us).
+  - Not established: which allocator path returns the failure, and whether a pool fills because
+    frees that wait on GPU completion lag behind the loader.
+- **Open, `VK_ERROR_DEVICE_LOST` on Intel Windows still stops `PPSA22520 - ANIMAL WELL` (after
+  18 presents, `interactive`) and `PPSA21567 - Astro Bot` (0 presents)** at
+  `GraphicsRenderCommandBuffer.cpp:2776`. Disabling the host-pointer import is not a usable
+  experiment: the guest device address shader is then refused explicitly
+  (`GraphicsRenderDraw.cpp:1432`). Not tested: the extra descriptor set and per-draw rebind that
+  GPU-assisted validation adds (Kyty rebinds only its own sets per draw, which is not equivalent).
+  Not shipped: a memory barrier at the start of every command buffer that orders it after all earlier
+  submissions on its queue. It was not shown to prevent the device loss, and on Linux (Arc A770, Mesa ANV,
+  60 fps limit) it cut `PPSA21567 - Astro Bot` from 21.1 to 17.6 fps in the same scene after the save
+  menu (one bounded run each, 2026-11-05). The guest device address lookup now bounds every table read
+  by the entry count, and the table carries one zeroed entry past the directory; also not shown to
+  prevent the device loss.
+- **Open, order-dependent unit test:**
+  `EmulatorGraphicsState.StorageTextureArrayDescriptorsAreViewsOfTheLiveArray`
+  (`UnitTestEmulatorGraphicsState.cpp:6326`, `array.Equal(other_slice.params)`) fails when run alone
+  and passes in the whole suite, so its result depends on state an earlier test leaves behind.
+  Direction: find which global the storage texture comparison reads.
+- **Excluded:** the red zone as the cause of the GRIS stall. The instrumented run recorded no access
+  violation with a guest RIP; the stall was the undelivered context request above.
+- **Unit tests** (per-suite runs, one process each, without
+  `EmulatorTileDetile.GpuDiagnosticSubmissionLifecycleRetainsTimedOutSession`, which still stops
+  with exit 65): 2508 passed, 29 failed, 170 skipped after the scanf, reserve and format 69 fixes
+  (2503 passed and 33 failed before them). The failures are the suites already listed in "Windows
+  host memory queries, mappings and test build"; `EmulatorLibcString`, `EmulatorLibcFilesystem`,
+  `EmulatorFileSystemPath`, the `EmulatorLibcCxxLocale` thread tests and
+  `EmulatorKernelMemory.ReservingDirectMappingTailDecommitsIt` no longer fail. One order-dependent
+  test is listed above.
+- **Strict sweep after these fixes** (`games-matrix --mode strict`, four batches of the 29 valid
+  cases): 25 `interactive`. Not interactive: `PPSA22520 - ANIMAL WELL` and `PPSA21567 - Astro Bot`
+  (device lost above), `PPSA01341 - Demon's Souls` (`controlled_timeout` at `video_initialized`, as
+  on Linux) and PPSA03524 (fragment transport, above; not in the Linux matrix). `PPSA07393`, which
+  crashes at boot in the Linux baseline, reached `interactive`. Hades reached `interactive` with
+  3103 presents in this sweep after the 3 failing runs above. Gates:
+  `KytyHostShaders.CheckedInIncludes` and `KytyArchitectureBoundaryIntegration.Repository` pass;
+  `KytyArchiveDagIntegration.Repository` is not registered in this build. `kyty_agent
+  playable-regression` was not run. The sweep binary still held an inert diagnostic block (read
+  only under its own environment variable) that was then removed from the tree.
+
+## Windows strict sweep: thread exit, write leases, pipeline cache, host paths (2026-11-04)
+
+Host: Windows 11, Intel Arc A770, driver 32.0.101.9150, MinGW UCRT build, strict runs at the
+60 fps present limit. `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` is the title that reached
+each of the defects below in turn.
+
+- **Guest thread exit, fixed** (`source/emulator/src/Kernel/Pthread.cpp`).
+  - Observed: F.I.S.T. stopped with `0xC00000FF` (`STATUS_BAD_FUNCTION_TABLE`) when a guest
+    thread called `pthread_exit`.
+  - Cause: winpthreads ends a thread with an SEH unwind (`longjmp` through `RtlUnwindEx`). That
+    unwind walks the guest frames on the guest stack, which have no unwind tables.
+  - Fix: on Windows the thread entry records a `__builtin_setjmp` point on the native frame that
+    enters the guest code, and `PthreadExit` returns there with `__builtin_longjmp`, which does
+    not unwind. The entry restores the native stack record that `InvokeOnStack` did not restore
+    and returns the exit value, so join sees it. Other hosts keep `pthread_exit`.
+  - Verified: `EmulatorKernelLifetimes.PthreadExitEndsTheGuestThreadWithItsValue` (exit from a
+    nested guest call, join returns the value) passes; with the host `pthread_exit` restored, the
+    test process ends inside the test. F.I.S.T. no longer stops there.
+  - Limit: the main guest thread and key destructors have no such entry frame; a `PthreadExit`
+    there stops explicitly with `EXIT_NOT_IMPLEMENTED` on Windows.
+- **Write leases with sub-page bounds, fixed** (`source/lib/Sys/src/SysWindowsVirtual.cpp`).
+  - Observed: F.I.S.T. stopped with exit 139, a write access violation from guest code or a host
+    copy on a committed private page that the host held `PAGE_READONLY`. The guest protection of
+    the range was `0xf2` (CPU write allowed), the dirty-page tracker had no entry for the page and
+    no write lease covered it.
+  - Cause: the tracker removes write from ranges whose end lies inside a page. `VirtualProtect`
+    changes the whole page, but the Windows backend recorded the lease only up to the range end.
+    A later restore of an enclosing range read the rest of the page from the host, which was the
+    `PAGE_READONLY` set by the removal, as guest protection and applied it to the whole page. A
+    protection trace showed the sequence: removal of `[0x…53000, +0x1840)`, then a restore that
+    set the gap `[0x…54840, 0x…55000)` to `PAGE_READONLY`, then the fault in `0x…54000`.
+  - Fix: write removal, capture and restore round their range to whole host pages, as the Linux
+    backend does through page indices.
+  - Verified: `CoreVirtualMemory.RestoreAfterRemoveWriteReturnsEveryTouchedPage` fails without
+    the rounding and passes with it; `CoreVirtualMemory`, `EmulatorGraphicsDirtyTracking`,
+    `EmulatorGpuMemoryFault` and `EmulatorKernelLifetimes` pass (115 passed, 15 skipped). F.I.S.T.
+    runs about 2 minutes and then stops on the device loss below.
+  - Excluded: missing Windows demand paging (`TryDemandMap` is a stub there). `VirtualQuery` at
+    the fault reported `MEM_COMMIT`, `PAGE_READONLY`, not a reserved page.
+- **Pipeline cache read during pipeline creation, fixed** (`PipelineCacheStore.h`,
+  `GraphicsRenderPipeline.cpp`, `DepthStencilCopy.cpp`, `GraphicsRenderFragmentTransport*.cpp`).
+  - Observed: with compute recipes from earlier sessions present, F.I.S.T. stopped with a read
+    of address `0x190` inside `igvk64.dll`, called from `vkGetPipelineCacheData`
+    (`PipelineCacheStoreSave`, from `PipelineCache::SaveDriverCacheIfDue`), while the two
+    background precompile workers created compute pipelines with the same cache.
+  - The Vulkan specification allows this: `vkGetPipelineCacheData` has no host synchronization
+    requirement, and `vkCreate*Pipelines` needs external synchronization of the cache only when
+    it was created with `VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`. Kyty creates it
+    with no flags. The Intel Windows driver faults anyway.
+  - Fix: every pipeline creation that passes the shared cache holds `PipelineCacheAccess()`
+    shared, and the checkpoint save takes it exclusive with a try-lock, skipping the save while
+    a compile holds it.
+  - Verified: the driver fault did not occur in the six runs with the lock and the recipes
+    present (six of six runs before it faulted there). Five of them stopped earlier on the other
+    defects in this record; the longest ran about 2 minutes and still wrote the title's driver
+    cache file (46.8 MB) during the run.
+  - Excluded: the loaded pipeline blob. A run without the stored cache faulted the same way.
+- **Host paths with `\` and case-insensitive names, fixed** (`FileSystemPath.h`,
+  `Kernel/FileSystem.cpp`, `LibSaveData.cpp`, `PipelineCacheStore.cpp`, agent `CaptureRun.cpp`).
+  Host paths handed to Kyty used `u8string()`, which uses `\` on Windows, while Kyty splits host
+  filenames on `/`; they now use `generic_u8string()`. The exact-spelling lookup is skipped on
+  Windows, where any spelling opens the file, and a guest name is matched through
+  `FindEntryIgnoringCase` there. The capture runner names its endpoint with
+  `LocalAgentEndpoint` instead of a `/tmp` socket path.
+- **Open, found here:**
+  - F.I.S.T. stops after about 2 minutes with `VK_ERROR_DEVICE_LOST` from `vkGetFenceStatus`
+    (`GraphicsRenderCommandBuffer.cpp:2776`). Whether this is the PPSA22520 - ANIMAL WELL hang
+    (a guest device address translation vertex shader) is not yet established.
+  - `games-matrix` now gives every case a `KYTY_CRASH_REPORT` path, so a 139 in a sweep leaves
+    its `crash-context.json`.
+
+## Windows host memory queries, mappings and test build (2026-11-04)
+
+Host: Windows 11, Intel Arc A770, driver 32.0.101.9150, MinGW UCRT build, strict runs at the
+60 fps present limit. `PPSA21402 - Balatro` is the reference title.
+
+- **Frame rate, fixed** (`source/lib/Sys/src/SysWindowsVirtual.cpp`).
+  - Observed: Balatro rendered at about 18 fps natively against 60 fps on Linux on the same GPU;
+    the title's own log printed frame times of 0.05-0.1 s.
+  - Cause: every guest copy (`sys_virtual_copy_from_guest`/`copy_to_guest`, `is_range_*`) walked
+    host protections with `VirtualQuery` while holding the global `g_protection_transaction_mutex`.
+    `VirtualQuery` walks the resident pages of the whole run that shares the queried attributes:
+    9.4 ms on a 1 GB section view and 13 ms on a 2 GB private region, against 0.3 us near the
+    region end. The audio and graphics threads serialized behind that mutex.
+  - Fix: a resident page's protection comes from `QueryWorkingSetEx` (about 0.4 us per call,
+    64 pages per batch). For resident pages its `Win32Protection` equals the `Protect` that
+    `VirtualQuery` reports. A page that is not resident (no access, guard, untouched, decommitted
+    or only touched through another view) still goes through `VirtualQuery`.
+  - Verified: Balatro holds 60 fps, the configured limit, for the whole 95 s strict run, with
+    either sleep variant below.
+- **Open, not fixed.**
+  - MinGW winpthreads `std::this_thread::sleep_for` waits about 15.5 ms for any request of 1 ms or
+    more, even after `timeBeginPeriod(1)` (which `SDL_Init` already calls) and the
+    power-throttling timer opt-out; requests under 1 ms return at once. `Sleep(5)` takes 5.35 ms
+    and a `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` timer 5.26 ms. A draft that moved Kyty's sleeps
+    to the high-resolution timer did not change the frame rate before the fix above, froze once
+    at frame 902 with a thread waiting on the NGS2 mutex and exited early once, so it was
+    reverted. Affected waits include the present limiter (`Graphics/Window.cpp`, `sleep_until`),
+    audio (`Audio.cpp`) and fibers (`Kernel/Fiber.cpp`).
+  - `slot_trace_env` (`Kernel/PthreadCond.cpp:102`) parses the environment on every condition
+    wait and signal. It showed in the native profile; reading the variable once would remove it.
+- **Mappings, fixed** (`SysWindowsVirtual.cpp`). Windows cannot release part of a reservation or
+  a view, so an unmapped sub-range of a host reservation root stays reserved:
+  - `sys_virtual_alloc_fixed` over such a range failed with `ERROR_INVALID_ADDRESS` (0x1E7). It
+    now commits inside the root when the range is uncommitted, the path that
+    `sys_virtual_alloc_fixed_replacing_owned_reservation` already used.
+  - `sys_virtual_free_range` reported every unmap as unsupported, so `munmap` of a whole direct
+    mapping returned ENOENT. It now frees a mapping whose start and size match exactly; a range
+    that covers part of a mapping is still refused.
+  - `sys_virtual_discard_shared_backing_range` reported success without discarding, so reused
+    direct memory kept its old contents. A pagefile-backed section keeps committed pages while
+    it exists, so the committed pages of the range are now zeroed through a temporary view.
+- **Zero-size `operator new`, fixed** (`source/lib/Core/src/MemoryAlloc.cpp`). `mem_alloc(0)`
+  stopped the process on Windows only; C++ requires a unique pointer, so both hosts now allocate
+  one byte. gtest death tests reach it when they read empty captured output.
+- **Windows test build, fixed.** The `unit_test` target links `Vulkan::Headers`, `easy_profiler`
+  links `ws2_32`, the Linux-only AJM resample oracle in `UnitTestEmulatorAudio.cpp` is guarded,
+  and `c_fseek` is declared with `int64_t` as in `LibCInternal.h` (`long` is 32-bit on Windows).
+  Tests that call guest exports through `->vaddr`, `resolve()` or the catalog lookups now declare
+  their function pointers `KYTY_SYSV_ABI`; with the MS x64 ABI the export read its arguments
+  from the wrong registers, which showed as wrong AMPR sizes, crashes in `Json2` and `LibcString`
+  and a `nanosleep` hang.
+- **`kyty_agent` runner on Windows, added** (`source/agent/src/runner/RunnerHostWindows.cpp`).
+  `games-matrix`, `capture-run` and `playable-regression` refused to start ("not supported on
+  this host"). The Windows host starts the child suspended in a job object that ends its
+  processes on close, writes its output to the case log, calls the agent through the shared
+  named-pipe client with a deadline, and reports a crash as its NTSTATUS exit, which the matrix
+  classifies as `host_crash`. The child keeps the Windows system variables (`SystemRoot`,
+  `TEMP`, `LOCALAPPDATA`, ...), matched without regard to case. Verified with one strict
+  Balatro case: `interactive`, stability reached, stopped by the runner.
+- **Windows unit tests still failing** (full `kyty_unit_test` before the last ABI fixes: 2427
+  passed, 38 failed, 187 skipped):
+  - `EmulatorKernelMemory`: `MunmapSplitsReservedVirtualRange` needs a partial release of a
+    reservation or a view (`ReservingDirectMappingTailDecommitsIt` passes since the decommit fix in
+    the first record of this file);
+    `FixedDirectMapConsumesPrefixOfLargerReservation` and
+    `FixedFlexibleMapPreservesReservationSuffix` need demand mapping, which
+    `Kernel/VirtualMemory.cpp` implements only under `KYTY_HAS_SIGNAL_EXCEPTIONS`. Direction:
+    placeholders (`VirtualAlloc2` with `MEM_RESERVE_PLACEHOLDER`, `MEM_PRESERVE_PLACEHOLDER`,
+    `MapViewOfFile3`) for the first pair, and the demand registry plus a `MEM_COMMIT` from the
+    exception handler for the second.
+  - `EmulatorFileSystemPath` (case-insensitive name matching), `EmulatorFileDescriptors` (5),
+    `EmulatorNetwork` (`inet_pton`, literal resolver), `EmulatorLibcFilesystem` (`stat` of a
+    link), `EmulatorLibcCxxLocale` (pthread scheduling and key destructors),
+    `EmulatorKernelProcess` (the entropy device opens with ENOENT), `EmulatorSaveData`,
+    `EmulatorGraphicsOperationTrace` (4) and 14 death tests (`EmulatorGraphicsState`,
+    `EmulatorShaderArithmetic`, `CoreInputBounds`).
+  - `EmulatorTileDetile` stops with exit 65 in
+    `GpuDiagnosticSubmissionLifecycleRetainsTimedOutSession`.
+
+## Windows host code on guest stacks overflowed its native stack (2026-11-04, fixed)
+
+- **Observed:** on Windows 11 (Intel Arc A770, driver 32.0.101.9150), the v0.0.4-beta.1 Windows
+  package stopped `PPSA21402 - Balatro` about 4 s after launch with `0xC00000FD`
+  (`STATUS_STACK_OVERFLOW`) in `msvcrt.dll`, before the first frame. The same binary under Wine
+  ran, because Wine supplies its own `msvcrt`.
+- **Cause:** a guest thread wrote 702 bytes to its stdout descriptor: `KernelWrite` ->
+  `Host::File::Write` -> `msvcrt!_write` (`Kernel/HostFile.h:111`). The text-mode `_write` path
+  needs a frame over 4 KiB, and its `__chkstk` probes pages from the TEB stack limit (`gs:0x10`)
+  down to the new RSP. Guest code and the HLE calls it makes run on Kyty-allocated guest stacks
+  (`GuestCall::InvokeOnStack`, fiber contexts) that lie below the thread's native stack, while
+  the TEB still described the native stack. The probe walked down from the native limit into the
+  native guard region. Any MSVC-built callee with a large frame (CRT, system DLLs, drivers) can hit
+  the same probe, and Windows exception dispatch validates RSP against the same bounds.
+- **Fix:** `Core::Thread::SetStackRange` records a stack range in `NT_TIB.StackBase/StackLimit`
+  (no-op on other hosts). `InvokeOnStack` records the committed guest stack for the duration of
+  the call and restores the native range afterwards. Fiber switches record the target fiber's
+  context range and restore the thread's range on return to the thread. `FiberObject` is
+  guest-visible, so the range is not stored in it. `NT_TIB` is the only record updated:
+  `TEB.DeallocationStack`, and with it `GetCurrentThreadStackLimits`, still describe the native
+  stack.
+- **Verified:** with the fix, a Release build (MinGW UCRT) ran Balatro for the whole bounded
+  95 s strict run in both runs made. A scratch test calling `msvcrt!_write` in text mode with 702 bytes,
+  from `InvokeOnStack` on a stack below the native one, fails with `0xC00000FD` on the unfixed
+  tree and writes the data with the fix. The new unit tests
+  `EmulatorKernelGuestRuntime.HostStackRecordCoversGuestStackDuringCall` and
+  `EmulatorFiber.HostStackRecordFollowsTheRunningFiber` fail without the fix and pass with it.
+- **Not a reproduction on UCRT:** the locally built unfixed binary does not crash on Balatro,
+  because UCRT's `_write` does not need that frame. The published package links `msvcrt.dll`.
+- **Open, found here, not fixed:**
+  - A guest `pthread_exit` unwound host frames from the guest stack. Fixed by the next record's
+    guest thread exit entry.
+  - Guest descriptors duplicated from host stdio (`HostFile.h:281`, `DuplicateFromStream`) stay
+    in the CRT's text mode, so a guest `write()` of `\n` reaches the host as `\r\n`. POSIX has
+    no text mode; setting the duplicate to `_O_BINARY` would match the guest contract.
+  - The Windows test build and the 15-23 fps native frame rate seen here are covered by the next
+    record.
+
 ## Storage objects bound over imported guest pages (2026-10-30)
 
 - **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, Mesa 26.2.5, strict hub route):

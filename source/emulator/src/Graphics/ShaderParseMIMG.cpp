@@ -346,6 +346,15 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 					}
 					break;
 				}
+				if ((dim == 2u || dim == 5u) && dmask != 0u)
+				{
+					// RDNA2 ISA table 43: 3D and 2D-array sample_l address (x, y, z/slice, lod)
+					// for every enabled-component set.
+					inst.src[0].size = 4;
+					inst.format      = ShaderInstructionFormat::VdataVaddr4StSsMimgDmask;
+					inst.dst.size    = MimgDmaskComponents(dmask);
+					break;
+				}
 			switch (dmask)
 			{
 					case 0x1:

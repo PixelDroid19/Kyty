@@ -27,6 +27,9 @@ struct Arguments
 [[nodiscard]] bool      Initialize(const InitParameters* parameters);
 [[nodiscard]] Arguments GetArguments();
 [[nodiscard]] const char* GetEnvironmentVariable(const char* name);
+// Guest setenv. Returns false for a name POSIX rejects (null, empty or holding '=') or a null value.
+// A new value invalidates the pointer an earlier lookup of the same name returned.
+[[nodiscard]] bool SetEnvironmentVariable(const char* name, const char* value, bool overwrite);
 
 } // namespace Kyty::Libs::ProcessEnvironment
 

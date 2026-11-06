@@ -4,6 +4,7 @@
 #include "Kyty/Core/DbgAssert.h"
 
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanVertexInputLayout.h"
 
@@ -631,7 +632,11 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	pipeline_info.subpass             = 0;
 
 	VkPipeline pipeline = nullptr;
-	const auto result = vkCreateGraphicsPipelines(m_device, context->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline);
+	VkResult   result   = VK_SUCCESS;
+	{
+		std::shared_lock cache_access(PipelineCacheAccess());
+		result = vkCreateGraphicsPipelines(m_device, context->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline);
+	}
 	if (fragment_module != nullptr)
 	{
 		vkDestroyShaderModule(m_device, fragment_module, nullptr);

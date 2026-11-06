@@ -92,7 +92,7 @@ bool CreateRunDirectory(const std::string& scratch, std::string* run_dir, std::s
 
 std::string AgentSocketPath(const std::string& run_name)
 {
-	return "/tmp/kyty_pr_" + Sha256Hex(run_name.data(), run_name.size()).substr(0, 12) + ".sock";
+	return LocalAgentEndpoint("kyty_pr_" + Sha256Hex(run_name.data(), run_name.size()).substr(0, 12));
 }
 
 class PlayableSession

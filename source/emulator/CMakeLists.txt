@@ -317,16 +317,14 @@ endif()
 
 # FFmpeg is optional at configure time. The AvPlayer keeps its synthetic
 # diagnostic stream when the host does not provide the demux/codec libraries.
-if (LINUX)
-	find_package(PkgConfig QUIET)
-	if (PkgConfig_FOUND)
-		pkg_check_modules(KYTY_FFMPEG QUIET IMPORTED_TARGET
-			libavformat libavcodec libavutil libswscale libswresample)
-	endif()
-	if (KYTY_FFMPEG_FOUND)
-		target_link_libraries(kyty_audio_video_backend PRIVATE PkgConfig::KYTY_FFMPEG)
-		target_compile_definitions(kyty_audio_video_backend PRIVATE KYTY_HAVE_FFMPEG=1)
-	endif()
+find_package(PkgConfig QUIET)
+if (PkgConfig_FOUND)
+	pkg_check_modules(KYTY_FFMPEG QUIET IMPORTED_TARGET
+		libavformat libavcodec libavutil libswscale libswresample)
+endif()
+if (KYTY_FFMPEG_FOUND)
+	target_link_libraries(kyty_audio_video_backend PRIVATE PkgConfig::KYTY_FFMPEG)
+	target_compile_definitions(kyty_audio_video_backend PRIVATE KYTY_HAVE_FFMPEG=1)
 endif()
 
 list(APPEND check_headers

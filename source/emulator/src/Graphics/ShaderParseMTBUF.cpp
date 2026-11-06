@@ -38,9 +38,10 @@ KYTY_SHADER_PARSER(shader_parse_mtbuf)
 	// legacy shaders use (4, 7), while Gen5 uses the packed BufferFormat value
 	// 0x16, split as dfmt=6/nfmt=1. Both feed the same Float1 IR contract.
 	const uint32_t encoded_format = (nfmt << 4u) | dfmt;
-	const bool float1_format = (!next_gen && dfmt == 4u && nfmt == 7u) || (next_gen && encoded_format == 22u);
-	// XY and XYZ return the leading components of a wider 32-bit float element
+	// X, XY and XYZ return the leading components of a wider 32-bit float element
 	// (RDNA2 ISA 8.1.4: the instruction's format defines the element).
+	const bool float1_format = (!next_gen && dfmt == 4u && nfmt == 7u) ||
+	                           (next_gen && (encoded_format == 22u || encoded_format == 64u || encoded_format == 74u || encoded_format == 77u));
 	const bool float2_format = (!next_gen && dfmt == 11u && nfmt == 7u) ||
 	                           (next_gen && (encoded_format == 64u || encoded_format == 74u || encoded_format == 77u));
 	const bool float3_format = next_gen && (encoded_format == 74u || encoded_format == 77u);

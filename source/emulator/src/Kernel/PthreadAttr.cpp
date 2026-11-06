@@ -133,13 +133,15 @@ int pthread_attr_copy(PthreadAttr* dst, const PthreadAttr* src)
 	result = (result == 0 ? PthreadAttrSetinheritsched(dst, inherit_sched) : result);
 	result = (result == 0 ? PthreadAttrSetschedparam(dst, &param) : result);
 	result = (result == 0 ? PthreadAttrSetschedpolicy(dst, policy) : result);
-	if (stack_addr != nullptr)
-	{
-		result = (result == 0 ? PthreadAttrSetstackaddr(dst, stack_addr) : result);
-	}
+	// The size goes first: setting an address validates it against the destination's size, which a fresh
+	// attribute takes from the host default (zero under winpthreads).
 	if (stack_size != 0)
 	{
 		result = (result == 0 ? PthreadAttrSetstacksize(dst, stack_size) : result);
+	}
+	if (stack_addr != nullptr)
+	{
+		result = (result == 0 ? PthreadAttrSetstackaddr(dst, stack_addr) : result);
 	}
 
 	return result;

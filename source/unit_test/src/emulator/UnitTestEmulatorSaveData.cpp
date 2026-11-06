@@ -28,16 +28,15 @@ UT_BEGIN(EmulatorSaveData);
 
 TEST(EmulatorSaveData, BuildsPortablePerTitleSaveRoots)
 {
-	const auto root = Libs::SaveData::SaveDataBuildTitleRoot(std::filesystem::path("/portable/user/savedata"), "ppsa-12345");
-	EXPECT_EQ(root, std::filesystem::path("/portable/user/savedata/PPSA-12345"));
-	EXPECT_EQ(Libs::SaveData::SaveDataBuildTitleRoot(std::filesystem::path("/portable/user/savedata"), nullptr),
-	          std::filesystem::path("/portable/user/savedata/UNKNOWN"));
-	EXPECT_EQ(Libs::SaveData::SaveDataBuildMemoryPath(root, 7, 3),
-	          std::filesystem::path("/portable/user/savedata/.kyty-memory/PPSA-12345/memory/user-7/slot-3.bin"));
+	// An absolute path of the host: on Windows "/portable" has no drive and is relative.
+	const auto base = std::filesystem::absolute("/portable/user/savedata");
+	const auto root = Libs::SaveData::SaveDataBuildTitleRoot(base, "ppsa-12345");
+	EXPECT_EQ(root, base / "PPSA-12345");
+	EXPECT_EQ(Libs::SaveData::SaveDataBuildTitleRoot(base, nullptr), base / "UNKNOWN");
+	EXPECT_EQ(Libs::SaveData::SaveDataBuildMemoryPath(root, 7, 3), base / ".kyty-memory/PPSA-12345/memory/user-7/slot-3.bin");
 	EXPECT_TRUE(Libs::SaveData::SaveDataBuildMemoryPath(root, -1, 3).empty());
 	EXPECT_TRUE(Libs::SaveData::SaveDataBuildMemoryPath(std::filesystem::path("relative"), 7, 3).empty());
-	EXPECT_EQ(Libs::SaveData::SaveDataBuildTrophyPath(root, 1),
-	          std::filesystem::path("/portable/user/savedata/.kyty-trophies/PPSA-12345/user-1.json"));
+	EXPECT_EQ(Libs::SaveData::SaveDataBuildTrophyPath(root, 1), base / ".kyty-trophies/PPSA-12345/user-1.json");
 	EXPECT_TRUE(Libs::SaveData::SaveDataBuildTrophyPath(root, -1).empty());
 	EXPECT_TRUE(Libs::SaveData::SaveDataBuildTrophyPath(std::filesystem::path("relative"), 1).empty());
 }

@@ -657,6 +657,7 @@ enum class ShaderInstructionType : uint32_t
 	VPkSubU16,
 	VPkMaxU16,
 	VPkMinU16,
+	VMadI32I24,
 
 	ZMax
 };
@@ -2660,6 +2661,8 @@ struct ShaderPixelInputInfo
 	uint8_t                target_output_mode[8]     = {};
 	uint8_t                target_output_order[8]    = {};
 	uint8_t                target_output_number[8]   = {};
+	// CB_SHADER_MASK targets when an export ordinal lands past a hole, else 0.
+	uint8_t                routed_color_targets      = 0;
 	RenderHostToGuestScale host_to_guest_scale;
 	bool                   ps_position               = false;
 	bool                   front_face_all_bits       = false;

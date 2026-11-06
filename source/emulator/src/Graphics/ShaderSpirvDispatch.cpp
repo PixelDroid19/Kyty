@@ -838,6 +838,10 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
                                                                                                                                   "%tu1_<index> = OpBitwiseAnd %uint %t1_<index> %uint_0x00ffffff",
                                                                                                                                   "%tm_<index> = OpFunctionCall %uint %mul_lo_uint %tu0_<index> %tu1_<index>",
                                                                                                                                   "%t_<index> = OpIAdd %uint %tm_<index> %t2_<index>"}},
+    {Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2,  ShaderInstructionType::VMadI32I24, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,  {"%ts0_<index> = OpBitFieldSExtract %uint %t0_<index> %uint_0 %uint_24",
+                                                                                                                                  "%ts1_<index> = OpBitFieldSExtract %uint %t1_<index> %uint_0 %uint_24",
+                                                                                                                                  "%tm_<index> = OpFunctionCall %uint %mul_lo_uint %ts0_<index> %ts1_<index>",
+                                                                                                                                  "%t_<index> = OpIAdd %uint %tm_<index> %t2_<index>"}},
 
 	    // clang-format on
 	};

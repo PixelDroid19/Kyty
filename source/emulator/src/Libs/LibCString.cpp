@@ -459,8 +459,17 @@ KYTY_SYSV_ABI char* c_strnstr(const char* haystack, const char* needle, size_t c
 }
 KYTY_SYSV_ABI char* c_getenv(const char* name)
 {
-	const char* value = ProcessEnvironment::GetEnvironmentVariable(name);
-	return const_cast<char*>(value != nullptr ? value : (name != nullptr ? ::getenv(name) : nullptr));
+	// The guest sees only its own environment, never the emulator's.
+	return const_cast<char*>(ProcessEnvironment::GetEnvironmentVariable(name));
+}
+KYTY_SYSV_ABI int c_setenv(const char* name, const char* value, int overwrite)
+{
+	if (!ProcessEnvironment::SetEnvironmentVariable(name, value, overwrite != 0))
+	{
+		*Posix::GetErrorAddr() = Posix::POSIX_EINVAL;
+		return -1;
+	}
+	return 0;
 }
 KYTY_SYSV_ABI char* c_setlocale(int category, const char* locale)
 {

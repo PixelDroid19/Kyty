@@ -527,7 +527,7 @@ static int wait_for_signal(std::shared_ptr<PthreadCondState> state, KernelClocki
 	{
 		// Another guest thread, possibly a stopped one, may hold the mutex.
 		PthreadInterruptibleScope lock_wait(&mutex->p, sizeof(mutex->p));
-		EXIT_IF(pthread_mutex_lock(&mutex->p) != 0);
+		EXIT_IF(PthreadLockHostMutex(&mutex->p) != 0);
 	}
 	pthread_cond_restore_mutex_state(mutex, recursion_count);
 	return result;

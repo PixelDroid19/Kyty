@@ -1,5 +1,7 @@
 #include "Emulator/Graphics/Shader.h"
 
+#include "Emulator/Graphics/HardwareContext.h"
+
 #include "Kyty/Core/DbgAssert.h"
 
 #include <algorithm>
@@ -282,13 +284,17 @@ bool ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format)
 
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component)
 {
-	if (channel_order > 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: channel_order > 3 condition ignored (continuing)\n"); }
+	if (channel_order > HW::kColorExportOrderTwoChannelAlt) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: channel_order > 4 condition ignored (continuing)\n"); }
 	if (output_component > 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: output_component > 3 condition ignored (continuing)\n"); }
 
 	// The attachment VkFormat and image view own physical component order.
 	// Shader exports remain logical RGBA; applying COMP_SWAP here as well would
 	// swap the same components twice in render-to-texture feedback passes.
-	(void)channel_order;
+	// Only the two-channel ALT swap has no host format: its second channel holds W.
+	if (channel_order == HW::kColorExportOrderTwoChannelAlt && output_component == 1u)
+	{
+		return 3u;
+	}
 	return output_component;
 }
 

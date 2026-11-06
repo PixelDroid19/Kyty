@@ -675,39 +675,28 @@ static bool emit_guest_typed_buffer_load(Spirv* spirv, const ShaderInstruction& 
 		return false;
 	}
 	// The covered dword count, at most four: an element of 32-bit channels is
-	// dword aligned.
+	// dword aligned. All four dwords load with one translation (a second only
+	// across a page, whose chunk is mapped whole), and the uncovered ones read
+	// zero. One load per covered count multiplied the inlined translations.
 	source += String8(R"(%<t>_lead = OpBitwiseAnd %uint %<t>_lo %<three>
 %<t>_alo = OpBitwiseAnd %uint %<t>_lo %<align>
 %<t>_span = OpIAdd %uint %<t>_lead %<t>_size
 %<t>_span_up = OpIAdd %uint %<t>_span %<three>
 %<t>_count = OpShiftRightLogical %uint %<t>_span_up %<two>
-OpSelectionMerge %<t>_wmerge None
-OpSwitch %<t>_count %<t>_w4 1 %<t>_w1 2 %<t>_w2 3 %<t>_w3
 )")
 	              .ReplaceStr("<t>", tag)
 	              .ReplaceStr("<three>", spirv->GetConstantUint(3u))
 	              .ReplaceStr("<two>", spirv->GetConstantUint(2u))
 	              .ReplaceStr("<align>", spirv->GetConstantUint(0xfffffffcu));
-	String8 phi[4];
-	for (uint32_t dwords = 1; dwords <= 4; dwords++)
+	if (!spirv->EmitGuestLoad(tag + "_alo", tag + "_hi", 4, tag + "_r", &source))
 	{
-		const auto prefix = String8::FromPrintf("%s_r%u", t, dwords);
-		source += String8::FromPrintf("%%%s_w%u = OpLabel\n", t, dwords);
-		if (!spirv->EmitGuestLoad(tag + "_alo", tag + "_hi", static_cast<int>(dwords), prefix, &source))
-		{
-			return false;
-		}
-		source += String8::FromPrintf("OpBranch %%%s_wend%u\n%%%s_wend%u = OpLabel\nOpBranch %%%s_wmerge\n", t, dwords, t, dwords, t);
-		for (uint32_t word = 0; word < 4; word++)
-		{
-			const auto value = word < dwords ? String8::FromPrintf("%%%s_d%u", prefix.c_str(), word) : "%" + zero;
-			phi[word] += String8::FromPrintf(" %s %%%s_wend%u", value.c_str(), t, dwords);
-		}
+		return false;
 	}
-	source += String8::FromPrintf("%%%s_wmerge = OpLabel\n", t);
 	for (uint32_t word = 0; word < 4; word++)
 	{
-		source += String8::FromPrintf("%%%s_raw%u = OpPhi %%uint%s\n", t, word, phi[word].c_str());
+		source += String8::FromPrintf("%%%s_covers%u = OpULessThan %%bool %%%s %%%s_count\n"
+		                              "%%%s_raw%u = OpSelect %%uint %%%s_covers%u %%%s_r_d%u %%%s\n",
+		                              t, word, spirv->GetConstantUint(word).c_str(), t, t, word, t, word, t, word, zero.c_str());
 	}
 	source += String8(R"(%<t>_raw = OpCompositeConstruct %v4uint %<t>_raw0 %<t>_raw1 %<t>_raw2 %<t>_raw3
 %<t>_words = OpFunctionCall %v4uint %gen5_buffer_align_words %<t>_raw %<zero> %<t>_lead
@@ -1203,32 +1192,44 @@ static bool emit_gen5_mubuf_format_load(Spirv* spirv, const ShaderInstruction& i
 	return true;
 }
 
-static bool emit_gen5_mubuf_format_store(Spirv* spirv, const ShaderInstruction& inst, int instruction_index,
-	                                       const char* function_name, uint32_t components, String8* dst_source)
+// BUFFER_STORE_FORMAT through a bound V#: the data, encoded in the V#'s
+// format, written as one element of that format's size.
+static bool emit_gen5_mubuf_format_store(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t components,
+                                         String8* dst_source)
 {
 	EXIT_IF(spirv == nullptr);
 	EXIT_IF(dst_source == nullptr);
 
-	String8 inputs;
-	for (uint32_t component = 0; component < components; component++)
+	const auto tag = String8::FromPrintf("%u_0", instruction_index);
+	String8    values;
+	String8    value_ids;
+	for (uint32_t component = 0; component < 4; component++)
 	{
+		if (component >= components)
+		{
+			value_ids += " %" + spirv->GetConstantUint(0u);
+			continue;
+		}
 		const auto value = operand_variable_to_str(inst.dst, static_cast<int>(component));
 		if (value.type != SpirvType::Float)
 		{
 			return false;
 		}
-		inputs += String8::FromPrintf(" %%%s", value.value.c_str());
+		values += String8::FromPrintf("%%gen5_mubuf_store_f%u_%s = OpLoad %%float %%%s\n"
+		                              "%%gen5_mubuf_store_u%u_%s = OpBitcast %%uint %%gen5_mubuf_store_f%u_%s\n",
+		                              component, tag.c_str(), value.value.c_str(), component, tag.c_str(), component, tag.c_str());
+		value_ids += String8::FromPrintf(" %%gen5_mubuf_store_u%u_%s", component, tag.c_str());
 	}
 
 	BufferAddressSetup address_setup;
-	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, components * 4u, BufferAddressRangeCheck::None,
-	                               &address_setup))
+	// A V# without records writes nothing (RDNA2 ISA 8.1.5).
+	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, components * 4u, BufferAddressRangeCheck::RawZeroRecord,
+	                               &address_setup, true))
 	{
 		return false;
 	}
-	const auto tag = String8::FromPrintf("%u_0", instruction_index);
-	String8    enable_source;
-	String8    enable_condition = String8::FromPrintf("%%gen5_mubuf_store_active_%s", tag.c_str());
+	String8 enable_source;
+	String8 enable_condition = String8::FromPrintf("%%gen5_mubuf_store_active_%s", tag.c_str());
 	if (!address_setup.access_enabled.IsEmpty())
 	{
 		enable_source = String8("        %gen5_mubuf_store_enabled_<tag> = OpLogicalAnd %bool %gen5_mubuf_store_active_<tag> <access_enabled>\n")
@@ -1246,19 +1247,28 @@ static bool emit_gen5_mubuf_format_store(Spirv* spirv, const ShaderInstruction& 
                OpBranchConditional <enable_condition> %gen5_mubuf_store_then_<tag> %gen5_mubuf_store_merge_<tag>
         %gen5_mubuf_store_then_<tag> = OpLabel
         %gen5_mubuf_store_format_u_<tag> = OpShiftRightLogical %uint %buf_addr_desc3_<tag> %uint_12
-        %gen5_mubuf_store_format_m_<tag> = OpBitwiseAnd %uint %gen5_mubuf_store_format_u_<tag> %uint_127
-        %gen5_mubuf_store_format_i_<tag> = OpBitcast %int %gen5_mubuf_store_format_m_<tag>
-               OpStore %temp_int_5 %gen5_mubuf_store_format_i_<tag>
-%gen5_mubuf_store_<tag> = OpFunctionCall %void %<function><inputs> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
+        %gen5_mubuf_store_format_<tag> = OpBitwiseAnd %uint %gen5_mubuf_store_format_u_<tag> %uint_127
+        %gen5_mubuf_store_index_<tag> = OpLoad %int %temp_int_1
+        %gen5_mubuf_store_offset_<tag> = OpLoad %int %temp_int_2
+        %gen5_mubuf_store_stride_<tag> = OpLoad %int %temp_int_3
+        %gen5_mubuf_store_buffer_i_<tag> = OpLoad %int %temp_int_4
+        %gen5_mubuf_store_record_<tag> = OpIMul %int %gen5_mubuf_store_index_<tag> %gen5_mubuf_store_stride_<tag>
+        %gen5_mubuf_store_address_i_<tag> = OpIAdd %int %gen5_mubuf_store_offset_<tag> %gen5_mubuf_store_record_<tag>
+        %gen5_mubuf_store_address_<tag> = OpBitcast %uint %gen5_mubuf_store_address_i_<tag>
+        %gen5_mubuf_store_buffer_<tag> = OpBitcast %uint %gen5_mubuf_store_buffer_i_<tag>
+<values>        %gen5_mubuf_store_values_<tag> = OpCompositeConstruct %v4uint<value_ids>
+        %gen5_mubuf_store_words_<tag> = OpFunctionCall %v4uint %gen5_buffer_format_encode %gen5_mubuf_store_values_<tag> %gen5_mubuf_store_format_<tag> %buf_addr_desc3_<tag>
+        %gen5_mubuf_store_bytes_<tag> = OpFunctionCall %uint %gen5_buffer_format_bytes %gen5_mubuf_store_format_<tag>
+        %gen5_mubuf_store_<tag> = OpFunctionCall %void %gen5_buffer_store_words %gen5_mubuf_store_buffer_<tag> %gen5_mubuf_store_address_<tag> %gen5_mubuf_store_bytes_<tag> %gen5_mubuf_store_words_<tag>
                OpBranch %gen5_mubuf_store_merge_<tag>
         %gen5_mubuf_store_merge_<tag> = OpLabel
 )")
 	                   .ReplaceStr("<address_setup>", address_setup.source)
 	                   .ReplaceStr("<enable_source>", enable_source)
 	                   .ReplaceStr("<enable_condition>", enable_condition)
-	                   .ReplaceStr("<tag>", tag)
-	                   .ReplaceStr("<function>", function_name)
-	                   .ReplaceStr("<inputs>", inputs);
+	                   .ReplaceStr("<values>", values)
+	                   .ReplaceStr("<value_ids>", value_ids)
+	                   .ReplaceStr("<tag>", tag);
 	return true;
 }
 
@@ -1359,9 +1369,15 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadUbyte_Vdata1VaddrSvSoffsIdxen)
 	return false;
 }
 
+static bool emit_gen5_buffer_load_lds(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, String8* dst_source);
+
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if ((inst.buffer_flags & 1u) != 0)
+	{
+		return emit_gen5_buffer_load_lds(spirv, inst, static_cast<int>(index), dst_source);
+	}
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
@@ -2152,7 +2168,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatX_Vdata1VaddrSvSoffsIdxen)
 	{
 		if (Config::IsNextGen())
 		{
-			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), "tbuffer_store_format_x", 1, dst_source);
+			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), 1, dst_source);
 		}
 
 		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
@@ -2227,7 +2243,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen)
 	{
 		if (Config::IsNextGen())
 		{
-			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), "tbuffer_store_format_xy", 2, dst_source);
+			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), 2, dst_source);
 		}
 
 		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
@@ -2304,7 +2320,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 	{
 		if (Config::IsNextGen())
 		{
-			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), "tbuffer_store_format_xyzw", 4, dst_source);
+			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), 4, dst_source);
 		}
 
 		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
@@ -3190,10 +3206,10 @@ void EmitDsAddtidActive(const String8& tag, String8* dst_source, String8* active
 // function-local spill array and capacity; these are lowering policy, not proof
 // of an architectural LDS allocation or general cross-lane spill equivalence.
 static bool EmitDsAddtidLdsStore(const SpirvValue& data, const String8& active, const String8& tag,
-                                 const String8& bound, const String8& tid, Spirv* spirv, const ShaderInstruction& inst,
+                                 const String8& bound, const String8& tid, Spirv* spirv, uint16_t offset,
                                  String8* dst_source)
 {
-	*dst_source += DsAddtidIndex(spirv, inst.ds_offset, bound, tid, active, tag);
+	*dst_source += DsAddtidIndex(spirv, offset, bound, tid, active, tag);
 	*dst_source += String8::FromPrintf(
 	    "               OpSelectionMerge %%addtid_merge_%s None\n"
 	    "               OpBranchConditional %%addtid_gate_%s %%addtid_then_%s %%addtid_merge_%s\n"
@@ -3207,6 +3223,56 @@ static bool EmitDsAddtidLdsStore(const SpirvValue& data, const String8& active, 
 	    tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(),
 	    data.value.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
 	return true;
+}
+
+// buffer_load_dword with LDS=1 writes the loaded dword to LDS at
+// M0[15:0] + OFFSET + TIDinWave*4 and leaves VDATA untouched (RDNA2 ISA 8.1.9).
+// Out-of-range buffer reads store zero, as a plain load would return.
+static bool emit_gen5_buffer_load_lds(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, String8* dst_source)
+{
+	const auto* bind_info = spirv->GetBindInfo();
+	const auto* cs_info   = spirv->GetCsInputInfo();
+	if (!Config::IsNextGen() || !ShaderInstructionLoweringPreconditions(inst) ||
+	    spirv->GetCode().GetType() != ShaderType::Compute || cs_info == nullptr || cs_info->lds_dwords == 0 ||
+	    bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0 || buffer_descriptor_is_runtime(spirv, inst))
+	{
+		return false;
+	}
+	const auto bound      = spirv->GetConstantUint(cs_info->lds_dwords);
+	const auto zero_float = spirv->GetConstantFloat(0.0f);
+	if (bound == "unknown_uint_constant" || zero_float == "unknown_float_constant")
+	{
+		return false;
+	}
+	BufferAddressSetup address_setup;
+	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, 4u, BufferAddressRangeCheck::RawZeroRecord, &address_setup) ||
+	    address_setup.access_enabled.IsEmpty())
+	{
+		return false;
+	}
+	const auto tag = String8::FromPrintf("bll%d", instruction_index);
+	*dst_source += String8(R"(
+<address_setup>
+               OpStore %temp_float %<zero>
+               OpSelectionMerge %<tag>_load_merge None
+               OpBranchConditional <access_enabled> %<tag>_load %<tag>_load_merge
+         %<tag>_load = OpLabel
+         %<tag>_call = OpFunctionCall %void %buffer_load_float1 %temp_float %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4
+               OpBranch %<tag>_load_merge
+   %<tag>_load_merge = OpLabel
+         %<tag>_lane = OpLoad %uint %gl_SubgroupInvocationID
+          %<tag>_tid = OpBitwiseAnd %uint %<tag>_lane %uint_63
+)")
+	                   .ReplaceStr("<address_setup>", address_setup.source)
+	                   .ReplaceStr("<access_enabled>", address_setup.access_enabled)
+	                   .ReplaceStr("<zero>", zero_float)
+	                   .ReplaceStr("<tag>", tag);
+	String8 active;
+	EmitDsAddtidActive(tag, dst_source, &active);
+	SpirvValue data;
+	data.type  = SpirvType::Float;
+	data.value = "temp_float";
+	return EmitDsAddtidLdsStore(data, active, tag, bound, tag + "_tid", spirv, inst.buffer_imm_offset, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset)
@@ -3235,7 +3301,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset)
 		{
 			return false;
 		}
-		return EmitDsAddtidLdsStore(data, active, index_str, bound, "addtid_tid_" + index_str, spirv, inst, dst_source);
+		return EmitDsAddtidLdsStore(data, active, index_str, bound, "addtid_tid_" + index_str, spirv, inst.ds_offset, dst_source);
 	}
 
 	// Private spill array: compute without an LDS allocation or any graphics
@@ -4332,7 +4398,9 @@ static bool TBufferFloatLoadSupported(const ShaderInstruction& inst, uint8_t com
 	// formats/component combinations need their own conversion/default rules.
 	switch (components)
 	{
-		case 1: return inst.mtbuf_format == (inst.mtbuf_format_is_gen5 ? 22u : 0x74u);
+		case 1: return inst.mtbuf_format_is_gen5 ? (inst.mtbuf_format == 22u || inst.mtbuf_format == 64u || inst.mtbuf_format == 74u ||
+		                                          inst.mtbuf_format == 77u)
+		                                       : inst.mtbuf_format == 0x74u;
 		case 2: return inst.mtbuf_format_is_gen5 ? (inst.mtbuf_format == 64u || inst.mtbuf_format == 74u || inst.mtbuf_format == 77u)
 		                                         : inst.mtbuf_format == 0x7bu;
 		case 3: return inst.mtbuf_format_is_gen5 && (inst.mtbuf_format == 74u || inst.mtbuf_format == 77u);

@@ -3727,6 +3727,32 @@ TEST(EmulatorGraphicsState, KeepsColorExportsLogicalForPhysicalAttachmentOrder)
 	}
 }
 
+TEST(EmulatorGraphicsState, TwoChannelAltSwapExportsWIntoSecondChannel)
+{
+	// SWAP_ALT on 8_8/16_16/32_32 stores export X in channel 0 and W in channel 1.
+	for (uint32_t cb_format: {0x3u, 0x5u, 0xbu})
+	{
+		HW::Context ctx;
+		HW::ColorInfo info;
+		info.format        = cb_format;
+		info.channel_order = 1u;
+		ctx.SetColorInfo(2, info);
+		const uint32_t order = ctx.GetShaderRegisters().target_output_order[2];
+		EXPECT_EQ(ShaderColorExportSourceComponent(order, 0), 0u);
+		EXPECT_EQ(ShaderColorExportSourceComponent(order, 1), 3u);
+	}
+	// The same swap on a four-channel format stays a host format order.
+	HW::Context ctx;
+	HW::ColorInfo info;
+	info.format        = 0xau;
+	info.channel_order = 1u;
+	ctx.SetColorInfo(0, info);
+	EXPECT_EQ(ShaderColorExportSourceComponent(ctx.GetShaderRegisters().target_output_order[0], 1), 1u);
+	EXPECT_EQ(ResolveRenderTextureFormat(0x3u, 0x0u, 0x1u).format, RenderTextureFormat::R8G8Unorm);
+	EXPECT_EQ(ResolveRenderTextureFormat(0x5u, 0x7u, 0x1u).format, RenderTextureFormat::R16G16Sfloat);
+	EXPECT_EQ(ResolveRenderTextureFormat(0x5u, 0x4u, 0x1u).format, RenderTextureFormat::R16G16Uint);
+}
+
 TEST(EmulatorGraphicsState, ResolvesObservedTwoChannelFloatRenderTarget)
 {
 	const auto format = ResolveRenderTextureFormat(0x5u, 0x7u, 0x0u);
@@ -4779,6 +4805,19 @@ TEST(EmulatorGraphicsState, DepthPassCanSuppressColorWrites)
 	EXPECT_EQ(State::ResolveColorWriteAgainstDepth(0x0fu, true, true), 0x0fu);
 }
 
+TEST(EmulatorGraphicsState, RoutesColorExportOrdinalsThroughShaderMaskTargets)
+{
+	// MRT1 and MRT2 used: COL_FORMAT 0x77 has no hole, CB_SHADER_MASK 0x770 does.
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x770u, 0u), 1u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x770u, 1u), 2u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x770u, 2u), 8u);
+	// Partial nibbles still enable their target and consume an ordinal.
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x10203001u, 1u), 3u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x10203001u, 3u), 7u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0xffffffffu, 7u), 7u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0u, 0u), 8u);
+}
+
 TEST(EmulatorGraphicsState, RequiresPixelShaderOnlyForObservableFragmentWork)
 {
 	HW::ShaderRegisters shader {};
@@ -5421,7 +5460,7 @@ TEST(EmulatorGraphicsState, ReportsNoSystemServiceEventWithoutFabricatingOne)
 	const auto* record = symbols.Find(query);
 	ASSERT_NE(record, nullptr);
 
-	using ReceiveEventFunc = int (*)(void*);
+	using ReceiveEventFunc = int(KYTY_SYSV_ABI*)(void*);
 	auto    receive_event  = reinterpret_cast<ReceiveEventFunc>(record->vaddr);
 	uint8_t event[64]      = {};
 	for (auto& value: event)
@@ -6708,6 +6747,8 @@ TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
 	                                                    GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
 	                                                    GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                    GpuMemoryObjectType::VertexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
 	                                                     GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
@@ -6754,8 +6795,8 @@ TEST(EmulatorGraphicsState, AllowsRenderTargetMultiSurfaceParents)
 	                                                    GpuMemoryObjectType::RenderTexture));
 	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
 	                                                     GpuMemoryObjectType::RenderTexture));
-	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
-	                                                     GpuMemoryObjectType::RenderTexture));
+	EXPECT_TRUE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::RenderTexture));
 	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Equals,
 	                                                     GpuMemoryObjectType::Texture));
 	EXPECT_TRUE(GpuMemoryAllowsRenderTargetReclaimDepth(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
@@ -6933,7 +6974,9 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	                                                 GpuMemoryObjectType::Texture));
 	EXPECT_TRUE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
 	                                                 GpuMemoryObjectType::Texture));
-	EXPECT_FALSE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	EXPECT_TRUE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                 GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
 	                                                  GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
 	                                                  GpuMemoryObjectType::StorageTexture));

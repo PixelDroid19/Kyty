@@ -13,17 +13,17 @@
 
 // HLE bodies live in LibC.cpp; declare the std::filesystem surface under test.
 namespace Kyty::Libs::LibC {
-int      c_fs_stat(const char* path, uint32_t* permissions, int* error);
-int      c_fs_lstat(const char* path, uint32_t* permissions, int* error);
-uint64_t c_fs_file_size(const char* path, int* error);
-int      c_fs_make_dir(const char* path, const char* permissions_source);
-bool     c_fs_remove_dir(const char* path);
-int      c_fs_rename(const char* from, const char* to);
-int      c_fs_unlink(const char* path);
-bool     c_fs_current_get(char* buffer);
-void*    c_fs_open_dir(char* buffer, const char* path, int* error, int* type);
-char*    c_fs_read_dir(char* buffer, void* stream, int* type);
-void     c_fs_close_dir(void* stream);
+KYTY_SYSV_ABI int      c_fs_stat(const char* path, uint32_t* permissions, int* error);
+KYTY_SYSV_ABI int      c_fs_lstat(const char* path, uint32_t* permissions, int* error);
+KYTY_SYSV_ABI uint64_t c_fs_file_size(const char* path, int* error);
+KYTY_SYSV_ABI int      c_fs_make_dir(const char* path, const char* permissions_source);
+KYTY_SYSV_ABI bool     c_fs_remove_dir(const char* path);
+KYTY_SYSV_ABI int      c_fs_rename(const char* from, const char* to);
+KYTY_SYSV_ABI int      c_fs_unlink(const char* path);
+KYTY_SYSV_ABI bool     c_fs_current_get(char* buffer);
+KYTY_SYSV_ABI void*    c_fs_open_dir(char* buffer, const char* path, int* error, int* type);
+KYTY_SYSV_ABI char*    c_fs_read_dir(char* buffer, void* stream, int* type);
+KYTY_SYSV_ABI void     c_fs_close_dir(void* stream);
 } // namespace Kyty::Libs::LibC
 
 UT_BEGIN(EmulatorLibcFilesystem);
@@ -71,6 +71,12 @@ TEST(EmulatorLibcFilesystem, StatReportsGuestTypesPermissionsAndErrors)
 	const auto link_path = directory.Path() / "link";
 	std::error_code link_error;
 	std::filesystem::create_symlink(file_path, link_path, link_error);
+#if defined(_WIN32)
+	if (link_error)
+	{
+		GTEST_SKIP() << "creating a symlink needs Developer Mode or an elevated process on Windows";
+	}
+#endif
 	ASSERT_FALSE(link_error);
 	const std::string link = link_path.string();
 	permissions            = 0;

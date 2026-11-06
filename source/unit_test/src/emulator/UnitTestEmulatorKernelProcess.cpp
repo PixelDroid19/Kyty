@@ -286,7 +286,7 @@ TEST(EmulatorKernelProcess, DeleteSemaphoreWakesBlockedWaiter)
 	EXPECT_EQ(Kernel::Semaphore::KernelDeleteSema(sem), LibKernel::KERNEL_ERROR_ESRCH);
 }
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX || KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 namespace {
 
 std::atomic<uint32_t> g_context_handler_calls {0};
@@ -586,11 +586,18 @@ TEST(EmulatorKernelProcess, ContextRequestInterruptsGuestCode)
 	constexpr size_t  kPageSize       = 4096;
 	// Guest code lives low in the address space, like the loader's programs.
 	constexpr uint64_t kGuestCodeAddress = 0x0000'0e00'0000'0000ull;
-	void*              code              = mmap(reinterpret_cast<void*>(kGuestCodeAddress), kPageSize, PROT_READ | PROT_WRITE,
-	                                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	void* code = mmap(reinterpret_cast<void*>(kGuestCodeAddress), kPageSize, PROT_READ | PROT_WRITE,
+	                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
 	ASSERT_EQ(code, reinterpret_cast<void*>(kGuestCodeAddress));
 	std::memcpy(code, kSpinUntilSet, sizeof(kSpinUntilSet));
 	ASSERT_EQ(mprotect(code, kPageSize, PROT_READ | PROT_EXEC), 0);
+#else
+	ASSERT_TRUE(Core::VirtualMemory::AllocFixed(kGuestCodeAddress, kPageSize, Core::VirtualMemory::Mode::ReadWrite));
+	void* code = reinterpret_cast<void*>(kGuestCodeAddress);
+	std::memcpy(code, kSpinUntilSet, sizeof(kSpinUntilSet));
+	ASSERT_TRUE(Core::VirtualMemory::Protect(kGuestCodeAddress, kPageSize, Core::VirtualMemory::Mode::ExecuteRead));
+#endif
 	const auto begin = reinterpret_cast<uint64_t>(code);
 	Emulator::GuestCodeRanges::Add(begin, begin + kPageSize);
 
@@ -608,7 +615,11 @@ TEST(EmulatorKernelProcess, ContextRequestInterruptsGuestCode)
 	EXPECT_EQ(reinterpret_cast<uint64_t>(value), 7u);
 
 	Emulator::GuestCodeRanges::Remove(begin, begin + kPageSize);
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	EXPECT_EQ(munmap(code, kPageSize), 0);
+#else
+	EXPECT_TRUE(Core::VirtualMemory::Free(kGuestCodeAddress));
+#endif
 }
 
 // A collector keeps a stopped thread inside its handler, here inside a
@@ -1023,7 +1034,7 @@ TEST(EmulatorKernelProcess, ConvertUtcToLocaltimeWritesUtcTimezoneOutputs)
 	const auto* rec = symbols.Find(KernelNativeFunc(u"-o5uEDpN+oY"));
 	ASSERT_NE(rec, nullptr);
 
-	using convert_utc_to_localtime_fn_t = int (*)(int64_t, int64_t*, Kernel::KernelTimesec*, uint64_t*);
+	using convert_utc_to_localtime_fn_t = int(KYTY_SYSV_ABI*)(int64_t, int64_t*, Kernel::KernelTimesec*, uint64_t*);
 	auto* convert_utc_to_localtime = reinterpret_cast<convert_utc_to_localtime_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(convert_utc_to_localtime, nullptr);
 
@@ -1052,7 +1063,7 @@ TEST(EmulatorKernelProcess, ConvertLocaltimeToUtcResolvesNidAndWritesTimezoneOut
 	const auto* rec = symbols.Find(KernelNativeFunc(u"0NTHN1NKONI"));
 	ASSERT_NE(rec, nullptr);
 
-	using convert_localtime_to_utc_fn_t = int (*)(int64_t, int64_t, int64_t*, Kernel::KernelTimezone*, int32_t*);
+	using convert_localtime_to_utc_fn_t = int(KYTY_SYSV_ABI*)(int64_t, int64_t, int64_t*, Kernel::KernelTimezone*, int32_t*);
 	auto* convert_localtime_to_utc = reinterpret_cast<convert_localtime_to_utc_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(convert_localtime_to_utc, nullptr);
 
@@ -1333,7 +1344,7 @@ TEST(EmulatorKernelProcess, ResolvesKernelGetEventId)
 	const auto* rec            = symbols.Find(query);
 	ASSERT_NE(rec, nullptr);
 
-	using get_event_id_fn_t = uintptr_t (*)(const KernelEvent*);
+	using get_event_id_fn_t = uintptr_t(KYTY_SYSV_ABI*)(const KernelEvent*);
 	auto* get_event_id      = reinterpret_cast<get_event_id_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(get_event_id, nullptr);
 
@@ -1382,10 +1393,10 @@ TEST(EmulatorKernelProcess, AprSubmitTriggersTheRecordIdOnCompletion)
 	const auto* reset_rec = symbols.Find(query);
 	ASSERT_NE(reset_rec, nullptr);
 
-	using ctor_fn_t   = int (*)(void*);
-	using set_buffer_fn_t = int (*)(void*, void*, uint32_t);
-	using event_fn_t  = int (*)(void*, void*, uint64_t, uint64_t, uint64_t);
-	using reset_fn_t  = int (*)(void*);
+	using ctor_fn_t   = int(KYTY_SYSV_ABI*)(void*);
+	using set_buffer_fn_t = int(KYTY_SYSV_ABI*)(void*, void*, uint32_t);
+	using event_fn_t  = int(KYTY_SYSV_ABI*)(void*, void*, uint64_t, uint64_t, uint64_t);
+	using reset_fn_t  = int(KYTY_SYSV_ABI*)(void*);
 	auto* ctor        = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(ctor_rec->vaddr));
 	auto* set_buffer  = reinterpret_cast<set_buffer_fn_t>(static_cast<uintptr_t>(set_buffer_rec->vaddr));
 	auto* add_event   = reinterpret_cast<event_fn_t>(static_cast<uintptr_t>(event_rec->vaddr));
@@ -1485,10 +1496,10 @@ TEST(EmulatorKernelProcess, AprReadAndCompletionExecuteAtSubmitInRecordOrder)
 		return rec != nullptr ? rec->vaddr : 0;
 	};
 
-	using ctor_fn_t       = int (*)(void*);
-	using set_buffer_fn_t = int (*)(void*, void*, uint32_t);
-	using read_fn_t       = int (*)(void*, uint64_t, uint64_t, uint32_t, void*, uint64_t, uint64_t);
-	using write_fn_t      = int (*)(void*, uint64_t*, uint64_t);
+	using ctor_fn_t       = int(KYTY_SYSV_ABI*)(void*);
+	using set_buffer_fn_t = int(KYTY_SYSV_ABI*)(void*, void*, uint32_t);
+	using read_fn_t       = int(KYTY_SYSV_ABI*)(void*, uint64_t, uint64_t, uint32_t, void*, uint64_t, uint64_t);
+	using write_fn_t      = int(KYTY_SYSV_ABI*)(void*, uint64_t*, uint64_t);
 	auto* ctor            = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(resolve("8aI7R7WaOlc")));
 	auto* set_buffer      = reinterpret_cast<set_buffer_fn_t>(static_cast<uintptr_t>(resolve("N-FSPA4S3nI")));
 	auto* read_file       = reinterpret_cast<read_fn_t>(static_cast<uintptr_t>(resolve("mQ16-QdKv7k")));

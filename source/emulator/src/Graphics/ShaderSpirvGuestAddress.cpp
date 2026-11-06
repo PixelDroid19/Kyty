@@ -50,6 +50,10 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 // entries of the address's region, a few dependent reads instead of one per
 // halving of the whole table. The midpoint cannot wrap, so the interval shrinks
 // on every step whatever the bounds hold and the loop cannot hang the GPU.
+// Every table read is bounded by the entry count independently of the loop
+// condition: a compiler may issue a load before the exit test, and a device
+// whose unmapped addresses fault rather than read a scratch page loses itself
+// on one stray read.
 String8 Spirv::GuestDeviceAddressFunction() const
 {
 	static const char* text = R"(
@@ -99,8 +103,12 @@ String8 Spirv::GuestDeviceAddressFunction() const
 %gda_dhi_a = OpIAdd %ulong %gda_dlo_a %gda_u64_4
 %gda_dlo_p = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %gda_dlo_a
 %gda_dhi_p = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %gda_dhi_a
-%gda_dlo = OpLoad %uint %gda_dlo_p Aligned 4
-%gda_dhi = OpLoad %uint %gda_dhi_p Aligned 4
+%gda_dlo_raw = OpLoad %uint %gda_dlo_p Aligned 4
+%gda_dhi_raw = OpLoad %uint %gda_dhi_p Aligned 4
+%gda_dlo_in = OpULessThan %bool %gda_dlo_raw %gda_count
+%gda_dlo = OpSelect %uint %gda_dlo_in %gda_dlo_raw %gda_count
+%gda_dhi_in = OpULessThan %bool %gda_dhi_raw %gda_count
+%gda_dhi = OpSelect %uint %gda_dhi_in %gda_dhi_raw %gda_count
 OpStore %gda_lo_v %gda_dlo
 OpStore %gda_hi_v %gda_dhi
 OpBranch %gda_header
@@ -116,7 +124,9 @@ OpBranchConditional %gda_more %gda_body %gda_merge
 %gda_gap = OpISub %uint %gda_hi %gda_lo
 %gda_half = OpShiftRightLogical %uint %gda_gap %uint_1
 %gda_mid = OpIAdd %uint %gda_lo %gda_half
-%gda_moff = OpIMul %uint %gda_mid %uint_32
+%gda_mid_in = OpULessThan %bool %gda_mid %gda_count
+%gda_mid_read = OpSelect %uint %gda_mid_in %gda_mid %gda_count
+%gda_moff = OpIMul %uint %gda_mid_read %uint_32
 %gda_moff64 = OpUConvert %ulong %gda_moff
 %gda_m = OpIAdd %ulong %gda_entries %gda_moff64
 <load64 mbase m 0>

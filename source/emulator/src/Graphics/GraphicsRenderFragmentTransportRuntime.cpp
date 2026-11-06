@@ -2,6 +2,7 @@
 
 #include "Emulator/Graphics/FragmentTransportShaders.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 
@@ -107,7 +108,11 @@ VkPipeline CreateKernelPipeline(VkDevice device, VkPipelineCache cache, VkPipeli
 	info.layout       = layout;
 	info.basePipelineIndex = -1;
 	VkPipeline pipeline = VK_NULL_HANDLE;
-	const auto result   = vkCreateComputePipelines(device, cache, 1, &info, nullptr, &pipeline);
+	VkResult   result   = VK_SUCCESS;
+	{
+		std::shared_lock cache_access(PipelineCacheAccess());
+		result = vkCreateComputePipelines(device, cache, 1, &info, nullptr, &pipeline);
+	}
 	vkDestroyShaderModule(device, module, nullptr);
 	return result == VK_SUCCESS ? pipeline : VK_NULL_HANDLE;
 }

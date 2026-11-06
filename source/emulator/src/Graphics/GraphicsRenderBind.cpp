@@ -3436,6 +3436,52 @@ static bool CopyNewerStoragePrefixLayers(CommandBuffer* buffer, VulkanImage* tex
 	return true;
 }
 
+// A dispatch writes the render target that covers the exact range of a storage
+// image, while a sample in another format of the same texels reads the mutable
+// storage image. Neither is written back, so copy the render target's newer
+// content into the storage image first. `targets` cover the storage image's
+// exact range. Colour draws stamp no image, so only storage writes and the
+// render target's own content establish that it is newer.
+static bool CopyNewerRenderTargetIntoStorage(CommandBuffer* buffer, const Vector<RenderTextureVulkanImage*>& targets,
+                                             StorageTextureVulkanImage* storage)
+{
+	const auto   written = [](const VulkanImage* image) { return std::max(image->storage_write_stamp, image->content_stamp); };
+	const auto   extent  = storage->GetGuestExtent();
+	VulkanImage* source  = nullptr;
+	for (auto* target: targets)
+	{
+		if (target->format != storage->format || target->samples != VK_SAMPLE_COUNT_1_BIT || target->IsResolutionScaled() ||
+		    !target->MatchesGuestExtent(extent.width, extent.height) || target->mip_levels < storage->mip_levels ||
+		    target->array_layers < storage->array_layers || written(target) <= written(storage))
+		{
+			continue;
+		}
+		if (source == nullptr || written(target) > written(source))
+		{
+			source = target;
+		}
+	}
+	if (source == nullptr)
+	{
+		return false;
+	}
+	Vector<ImageImageCopy> regions(storage->mip_levels);
+	for (uint32_t level = 0; level < storage->mip_levels; ++level)
+	{
+		auto& region       = regions[level];
+		region             = {};
+		region.src_image   = source;
+		region.src_level   = level;
+		region.dst_level   = level;
+		region.width       = std::max(extent.width >> level, 1u);
+		region.height      = std::max(extent.height >> level, 1u);
+		region.layer_count = storage->array_layers;
+	}
+	UtilImageToImage(buffer, regions, storage, static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+	storage->content_stamp = VulkanImageNextStamp();
+	return true;
+}
+
 // Sampled descriptors whose GPU-owned lookups (stencil plane, depth, render
 // and storage targets) found nothing to bind. That outcome changes only when an
 // object enters or leaves GPU memory, so while the object-graph generation is
@@ -4237,6 +4283,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 							storage_texture    = true;
 							reinterpret_format = sample_format;
 							materialize        = "st-reinterpret";
+							if (rt_exact && candidate->guest_vaddr == addr && candidate->guest_size == size.size &&
+							    CopyNewerRenderTargetIntoStorage(buffer, rtex, candidate))
+							{
+								materialize = "st-reinterpret-rt-copy";
+							}
 							break;
 						}
 					}

@@ -476,4 +476,20 @@ TEST(EmulatorImageGradientProof, RejectsBranchIntoTheRestoredInterval)
 	EXPECT_FALSE(Admitted(entered));
 }
 
+TEST(EmulatorImageGradientProof, ReadsTheGuestCodeWithoutAppendedDiscardCopies)
+{
+	auto program = Producers();
+	program.push_back(Sample());
+	program.push_back(End());
+	auto       code   = Build(program);
+	const auto sample = static_cast<uint32_t>(program.size() - 2u);
+	auto       copy   = code.GetInstructions().At(code.GetInstructions().Size() - 1u);
+	code.GetInstructions().Add(copy); // The translator's copy of a shared discard block: same PC and word.
+	EXPECT_TRUE(ShaderImageSampleCdHasQuadUniformGradients(code, sample));
+
+	copy.type = ShaderInstructionType::SBranch; // Same PC, but not a copy of the guest instruction there.
+	code.GetInstructions().Add(copy);
+	EXPECT_FALSE(ShaderImageSampleCdHasQuadUniformGradients(code, sample));
+}
+
 UT_END();

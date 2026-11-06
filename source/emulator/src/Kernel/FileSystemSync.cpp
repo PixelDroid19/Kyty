@@ -4,11 +4,13 @@
 #include "HostFile.h"
 
 #include "Emulator/Kernel/Errors.h"
+#include "Emulator/Kernel/FileSystemPath.h"
 #include "Emulator/Kernel/Trace.h"
 
 #include "Kyty/Core/File.h"
 
 #include <cerrno>
+#include <string>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -27,6 +29,31 @@ constexpr int kFirstRegularDescriptor = 3;
 
 // Guest O_WRONLY. Host::File::Open takes guest open flags.
 constexpr int kGuestOpenWriteOnly = 1;
+
+// True when the nearest existing ancestor of a missing guest path is a regular file, which POSIX
+// reports as ENOTDIR. The host either fails to resolve such a path or reports it as missing.
+bool GuestPathRunsThroughFile(const char* path)
+{
+	auto guest = Path::NormalizeGuest(path);
+	for (auto slash = guest.rfind('/'); slash != std::string::npos && slash != 0; slash = guest.rfind('/'))
+	{
+		guest.resize(slash);
+		const auto real = GetRealFilename(String::FromUtf8(guest.c_str()));
+		if (real.IsEmpty())
+		{
+			continue;
+		}
+		if (Core::File::IsFileExisting(real))
+		{
+			return true;
+		}
+		if (Core::File::IsDirectoryExisting(real))
+		{
+			return false;
+		}
+	}
+	return false;
+}
 
 } // namespace
 
@@ -59,7 +86,11 @@ int KYTY_SYSV_ABI KernelTruncate(const char* path, int64_t length)
 	const auto real_file_name = GetRealFilename(String::FromUtf8(path));
 	if (!Core::File::IsFileExisting(real_file_name))
 	{
-		return Core::File::IsDirectoryExisting(real_file_name) ? KERNEL_ERROR_EISDIR : KERNEL_ERROR_ENOENT;
+		if (!real_file_name.IsEmpty() && Core::File::IsDirectoryExisting(real_file_name))
+		{
+			return KERNEL_ERROR_EISDIR;
+		}
+		return GuestPathRunsThroughFile(path) ? KERNEL_ERROR_ENOTDIR : KERNEL_ERROR_ENOENT;
 	}
 
 	// Like POSIX truncate, this leaves the stdio buffers of open streams alone.

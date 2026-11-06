@@ -2201,6 +2201,8 @@ void CommandBuffer::Begin()
 {
 	EXIT_IF(IsInvalid());
 	m_open_render_pass.reset();
+	// End closes the pass, which stores every layered depth pass back.
+	EXIT_IF(!m_layered_depth_stores.empty());
 	{
 		std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
 		EXIT_IF(m_recording || m_resetting);
@@ -2455,6 +2457,12 @@ void CommandBuffer::DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth)
 	{
 		m_depth_plane_store_backs.push_back(depth);
 	}
+}
+
+void CommandBuffer::DeferLayeredDepthStore(DepthSliceArray* array, std::vector<DepthStencilVulkanImage*> slices)
+{
+	EXIT_IF(array == nullptr || slices.empty());
+	m_layered_depth_stores.push_back({array, std::move(slices)});
 }
 
 void CommandBuffer::DeferStencilPlaneStoreBack(DepthStencilVulkanImage* depth)
@@ -3193,6 +3201,12 @@ void CommandBuffer::CloseRenderPass()
 	                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
 	                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
 	                     0, 1, &memory_barrier, 0, nullptr, 0, nullptr);
+
+	for (const auto& store: m_layered_depth_stores)
+	{
+		GraphicsRenderStoreLayeredDepth(buffer, store.array, store.slices);
+	}
+	m_layered_depth_stores.clear();
 }
 
 VkCommandBuffer CommandBuffer::RecordOutsideRenderPass()

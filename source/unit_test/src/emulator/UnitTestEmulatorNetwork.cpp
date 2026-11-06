@@ -769,6 +769,64 @@ TEST(EmulatorNetwork, NetLoopbackDatagramAndPeerLifecycle)
 #endif
 }
 
+TEST(EmulatorNetwork, NetSelectReportsReadableSocketInGuestFdSet)
+{
+#if KYTY_PLATFORM != KYTY_PLATFORM_LINUX
+	GTEST_SKIP() << "host socket integration is Linux-specific";
+#else
+	using namespace Libs::Network::Net;
+
+	const uint64_t guest_storage = AllocateGuestPage();
+	ASSERT_NE(guest_storage, 0u);
+	auto* const guest_bytes = reinterpret_cast<uint8_t*>(guest_storage);
+
+	StoreGuestSockaddr(guest_bytes, 0);
+	const int receiver = NetSocket("network-select-receiver", 2, 2, 17);
+	ASSERT_GT(receiver, 0);
+	ASSERT_EQ(NetBind(receiver, guest_bytes, 8), 0);
+	auto* const receiver_name     = guest_bytes + 16;
+	auto* const receiver_name_len = reinterpret_cast<int*>(guest_bytes + 32);
+	*receiver_name_len            = 8;
+	ASSERT_EQ(NetGetsockname(receiver, receiver_name, receiver_name_len), 0);
+
+	// FreeBSD fd_set: 64-bit words, the descriptor's bit in word id / 64.
+	auto* const read_set = reinterpret_cast<uint64_t*>(guest_bytes + 256);
+	auto* const timeout  = reinterpret_cast<int64_t*>(guest_bytes + 512);
+	const auto  word     = static_cast<size_t>(receiver / 64);
+	const auto  bit      = uint64_t {1} << (receiver % 64);
+	timeout[0]           = 0;
+	timeout[1]           = 0;
+	std::memset(read_set, 0, 128);
+	read_set[word] = bit;
+	EXPECT_EQ(NetSelect(receiver + 1, read_set, nullptr, nullptr, timeout), 0);
+	EXPECT_EQ(read_set[word], 0u);
+
+	uint16_t  sender_port = 0;
+	const int sender      = CreateLoopbackSocket(SOCK_DGRAM, &sender_port);
+	ASSERT_GE(sender, 0);
+	sockaddr_in destination {};
+	destination.sin_family      = AF_INET;
+	destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	destination.sin_port        = htons(LoadGuestSockaddrPort(receiver_name));
+	constexpr char packet[]     = "ready";
+	ASSERT_EQ(::sendto(sender, packet, sizeof(packet), 0, reinterpret_cast<sockaddr*>(&destination), sizeof(destination)),
+	          static_cast<ssize_t>(sizeof(packet)));
+
+	timeout[0]     = 1;
+	read_set[word] = bit;
+	EXPECT_EQ(NetSelect(receiver + 1, read_set, nullptr, nullptr, timeout), 1);
+	EXPECT_EQ(read_set[word], bit);
+
+	// Descriptor 3 is no guest socket.
+	read_set[0] = uint64_t {1} << 3u;
+	EXPECT_EQ(NetSelect(4, read_set, nullptr, nullptr, timeout), Kyty::Libs::Network::NET_ERROR_EBADF);
+
+	EXPECT_EQ(NetSocketClose(receiver), 0);
+	EXPECT_EQ(::close(sender), 0);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
+#endif
+}
+
 TEST(EmulatorNetwork, NetInetPtonWritesNetworkOrder)
 {
 	using namespace Libs::Network::Net;

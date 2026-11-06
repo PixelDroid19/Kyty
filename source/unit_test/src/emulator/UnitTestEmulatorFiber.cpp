@@ -4,6 +4,8 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
+#include "Kyty/Core/Threads.h"
+#include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
 
 #include <cstdint>
@@ -44,6 +46,42 @@ static KYTY_SYSV_ABI void RoundTripFiberEntry(uint64_t arg_init, uint64_t arg_ru
 }
 
 } // namespace
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+static KYTY_SYSV_ABI void RecordHostStackEntry(uint64_t arg_init, uint64_t /*arg_run*/)
+{
+	const auto range = Core::Thread::GetStackRange();
+	const auto frame = reinterpret_cast<uint64_t>(__builtin_frame_address(0));
+	*reinterpret_cast<bool*>(arg_init) = range.low <= frame && frame < range.high;
+	uint64_t resumed_run_arg            = 0;
+	(void)FiberReturnToThread(0, &resumed_run_arg);
+}
+
+// Windows-native callees probe and validate RSP against the host's stack record.
+TEST(EmulatorFiber, HostStackRecordFollowsTheRunningFiber)
+{
+	EnsureLog();
+
+	constexpr uint64_t kStackSize = 16u * 1024u;
+	const uint64_t     stack      = Core::VirtualMemory::Alloc(0, kStackSize, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(stack, 0u);
+	FiberObject fiber {};
+	bool        frame_in_record = false;
+	ASSERT_EQ(FiberInitialize(&fiber, "stack-record", RecordHostStackEntry, reinterpret_cast<uint64_t>(&frame_in_record),
+	                          reinterpret_cast<void*>(stack), kStackSize, nullptr, 0x03500000u),
+	          OK);
+	const auto thread_stack = Core::Thread::GetStackRange();
+
+	EXPECT_EQ(FiberRun(&fiber, 0, nullptr), OK);
+	EXPECT_TRUE(frame_in_record);
+
+	const auto restored = Core::Thread::GetStackRange();
+	EXPECT_EQ(restored.low, thread_stack.low);
+	EXPECT_EQ(restored.high, thread_stack.high);
+	EXPECT_EQ(FiberFinalize(&fiber), OK);
+	EXPECT_TRUE(Core::VirtualMemory::Free(stack));
+}
+#endif
 
 TEST(EmulatorFiber, LayoutAndValidateArgs)
 {

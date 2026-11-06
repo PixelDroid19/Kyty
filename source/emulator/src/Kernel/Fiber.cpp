@@ -1,6 +1,7 @@
 #include "Emulator/Kernel/Fiber.h"
 
 #include "Kyty/Core/DbgAssert.h"
+#include "Kyty/Core/Threads.h"
 
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/FiberOwnership.h"
@@ -33,6 +34,8 @@ thread_local FiberObject*    g_thread_return_fiber = nullptr;
 thread_local FiberObject*    g_starting_fiber      = nullptr;
 thread_local FiberObject*    g_pending_idle_fiber  = nullptr;
 thread_local FiberCpuContext g_thread_fiber_context {};
+// Host stack record that goes with g_thread_fiber_context (see Core::Thread::SetStackRange).
+thread_local Core::Thread::StackRange g_thread_stack_range {};
 
 // HLE code keeps host locals on the running fiber's stack, like a thread
 // stack (see PthreadPrivate::stack_write_lease). A context stays host-written
@@ -107,6 +110,17 @@ bool FiberWaitAndEnterRunning(FiberObject* fiber)
 			std::this_thread::sleep_for(std::chrono::microseconds(100));
 		}
 	}
+}
+
+// A fiber runs on its context memory, so the host stack record follows it there.
+void FiberEnterStack(const FiberObject* fiber)
+{
+	if (fiber->addr_context == nullptr)
+	{
+		return;
+	}
+	const auto low = reinterpret_cast<uint64_t>(fiber->addr_context);
+	Core::Thread::SetStackRange({low, low + fiber->size_context});
 }
 
 void FiberSetContextValid(FiberObject* fiber, bool valid)
@@ -211,6 +225,7 @@ void FiberRestoreContext(FiberCpuContext* ctx, uint64_t ret)
 	g_thread_return_fiber = fiber;
 	FiberSetCurrentFiber(nullptr);
 
+	Core::Thread::SetStackRange(g_thread_stack_range);
 	FiberRestoreContext(&g_thread_fiber_context, 1);
 }
 
@@ -358,8 +373,10 @@ int32_t KYTY_SYSV_ABI FiberRun(FiberObject* fiber, uint64_t arg_on_run, uint64_t
 	fiber->arg_on_return  = 0;
 	g_thread_return_fiber = nullptr;
 
+	g_thread_stack_range = Core::Thread::GetStackRange();
 	if (FiberSaveContext(&g_thread_fiber_context) == 0)
 	{
+		FiberEnterStack(fiber);
 		if (fiber->context_valid)
 		{
 			FiberRestoreContext(&fiber->saved_context, 1);
@@ -407,6 +424,7 @@ int32_t KYTY_SYSV_ABI FiberSwitch(FiberObject* fiber, uint64_t arg_on_run, uint6
 	{
 		FiberSetContextValid(caller, true);
 		FiberDeferIdle(caller);
+		FiberEnterStack(fiber);
 		if (fiber->context_valid)
 		{
 			FiberRestoreContext(&fiber->saved_context, 1);
@@ -454,6 +472,7 @@ int32_t KYTY_SYSV_ABI FiberReturnToThread(uint64_t arg_on_return, uint64_t* arg_
 		FiberSetContextValid(fiber, true);
 		g_thread_return_fiber = fiber;
 		FiberDeferIdle(fiber);
+		Core::Thread::SetStackRange(g_thread_stack_range);
 		FiberRestoreContext(&g_thread_fiber_context, 1);
 	}
 

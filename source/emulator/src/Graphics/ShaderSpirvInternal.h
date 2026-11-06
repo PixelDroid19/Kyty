@@ -58,6 +58,13 @@ constexpr uint8_t kShaderColorExportNumberUint     = 4u;
 	       input->target_output_number[target] == kShaderColorExportNumberUint && input->target_output_order[target] == 0u;
 }
 
+// GLSL.std.450 unpack of a COMPR color export pair, by SPI_SHADER_COL_FORMAT:
+// 5 UNORM16_ABGR and 6 SNORM16_ABGR are normalized; 4 FP16_ABGR is half.
+[[nodiscard]] constexpr const char* ShaderCompressedColorExportUnpack(uint8_t mode)
+{
+	return mode == 5u ? "UnpackUnorm2x16" : mode == 6u ? "UnpackSnorm2x16" : "UnpackHalf2x16";
+}
+
 // Function-local array backing ds_*_addtid_b32 spill slots in non-compute
 // stages: indexed by (M0[15:0] + offset) >> 2 and private to each invocation.
 constexpr uint32_t kDsAddtidSpillDwords = 1024u;
@@ -625,12 +632,15 @@ bool UsesNativeLaneExchange(const ShaderCode& code);
 // M0-relative moves lower to a named register only when M0 is a proven literal
 // in the same basic block. Returns the literal through m0 on success.
 bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0);
-// Gen5 BUFFER_LOAD_FORMAT lowers through shared functions that decode the
-// V#'s format and apply its DST_SEL; `bound_buffers` adds the storage-buffer
-// element reader next to the decoder.
-bool    SpirvUsesGen5BufferFormatLoads(const ShaderCode& code);
+// Gen5 BUFFER_LOAD_FORMAT and BUFFER_STORE_FORMAT lower through shared
+// functions that decode or encode the V#'s format; `bound_buffers` adds the
+// storage-buffer element reader and, for stores, the element writer.
+bool    SpirvUsesGen5BufferFormats(const ShaderCode& code);
+bool    SpirvUsesGen5BufferFormatStores(const ShaderCode& code);
 void    SpirvAddGen5BufferFormatConstants(Spirv* spirv);
-String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, bool bound_buffers);
+// Declares the format table the format functions read; it follows the constants.
+String8 SpirvGen5BufferFormatTable(const Spirv& spirv);
+String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, const ShaderCode& code, bool bound_buffers);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_STORE_BARRIER_MEMORY;

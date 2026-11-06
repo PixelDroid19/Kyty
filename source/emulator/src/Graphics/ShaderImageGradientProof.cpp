@@ -650,9 +650,30 @@ bool QuadUniformAtSample(const ShaderCode& code, const StaticControlFlow& flow, 
 	return true;
 }
 
-} // namespace
+// The SPIR-V generator appends a copy of a shared discard block for each further branch to it, after the guest code
+// and at the same PCs. No guest label reaches a copy and each ends the program, so the proof reads the guest code alone.
+// Fails when the tail after the increasing PCs holds anything but such copies.
+bool GuestInstructionCount(const ShaderCode& code, uint32_t* count)
+{
+	const auto& instructions = code.GetInstructions();
+	uint32_t    guest        = instructions.IsEmpty() ? 0u : 1u;
+	while (guest < instructions.Size() && instructions.At(guest).pc > instructions.At(guest - 1u).pc) { ++guest; }
+	for (uint32_t index = guest; index < instructions.Size(); ++index)
+	{
+		const auto& copy     = instructions.At(index);
+		bool        original = false;
+		for (uint32_t source = 0; source < guest && !original; ++source)
+		{
+			const auto& candidate = instructions.At(source);
+			original = candidate.pc == copy.pc && candidate.type == copy.type && candidate.raw_word == copy.raw_word;
+		}
+		if (!original) { return false; }
+	}
+	*count = guest;
+	return true;
+}
 
-bool ShaderImageSampleCdHasQuadUniformGradients(const ShaderCode& code, uint32_t instruction_index)
+bool GuestCodeHasQuadUniformGradients(const ShaderCode& code, uint32_t instruction_index)
 {
 	std::array<unsigned, 4> gradients {};
 	if (!ImageSampleCdGradients(code, instruction_index, &gradients)) { return false; }
@@ -670,6 +691,18 @@ bool ShaderImageSampleCdHasQuadUniformGradients(const ShaderCode& code, uint32_t
 	}
 	const auto whole = WholeQuadIntervals(code, flow, wqm_index, boundary_index);
 	return QuadUniformAtSample(code, flow, whole, boundary_index, instruction_index, gradients, at_boundary);
+}
+
+} // namespace
+
+bool ShaderImageSampleCdHasQuadUniformGradients(const ShaderCode& code, uint32_t instruction_index)
+{
+	uint32_t guest_count = 0;
+	if (!GuestInstructionCount(code, &guest_count) || instruction_index >= guest_count) { return false; }
+	if (guest_count == code.GetInstructions().Size()) { return GuestCodeHasQuadUniformGradients(code, instruction_index); }
+	ShaderCode guest = code;
+	guest.GetInstructions().RemoveAt(guest_count, code.GetInstructions().Size() - guest_count);
+	return GuestCodeHasQuadUniformGradients(guest, instruction_index);
 }
 
 } // namespace Kyty::Libs::Graphics

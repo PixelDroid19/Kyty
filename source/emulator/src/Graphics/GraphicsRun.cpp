@@ -400,7 +400,32 @@ void Gpu::WaitSubmission(SubmissionId submission)
 bool Gpu::RunQuiesced(GraphicsRunQuiescedAction action, void* data)
 {
 	EXIT_IF(action == nullptr);
-	return m_submission_admission_gate.RunQuiesced([&] { WaitLocked(); }, [&] { return action(data); });
+	// The gate holds back the submission or host store a parked wait may need, so
+	// draining such a ring to idle would deadlock against its own producer.
+	return m_submission_admission_gate.RunQuiesced(
+	    [&]
+	    {
+		    HoldParkedDecode(true);
+		    WaitLocked();
+	    },
+	    [&]
+	    {
+		    const bool done = action(data);
+		    HoldParkedDecode(false);
+		    return done;
+	    });
+}
+
+void Gpu::HoldParkedDecode(bool hold)
+{
+	m_gfx_ring->HoldParkedDecode(hold);
+	for (auto* ring: m_agc_async_ring)
+	{
+		if (ring != nullptr)
+		{
+			ring->HoldParkedDecode(hold);
+		}
+	}
 }
 
 void Gpu::Init()
@@ -1623,10 +1648,17 @@ void GraphicsRing::Done()
 void GraphicsRing::WaitForIdle()
 {
 	Core::LockGuard lock(m_mutex);
-	while (!m_idle)
+	while (!m_idle && !(m_parked_decode_hold && m_decode_released))
 	{
 		Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
 	}
+}
+
+void GraphicsRing::HoldParkedDecode(bool hold)
+{
+	Core::LockGuard lock(m_mutex);
+	m_parked_decode_hold = hold;
+	m_idle_cond_var.SignalAll();
 }
 
 bool GraphicsRing::IsIdle()
@@ -1748,11 +1780,18 @@ void GraphicsRing::SetDecodeReleased(const CmdBatch* current, bool released)
 	EXIT_IF(current == nullptr);
 
 	Core::LockGuard lock(m_mutex);
-	m_decode_released = released;
 	if (!released)
 	{
+		// Decode resumes only after a quiesce that counted it as drained completes its action.
+		while (m_parked_decode_hold)
+		{
+			Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
+		}
+		m_decode_released = false;
 		return;
 	}
+	m_decode_released = true;
+	m_idle_cond_var.SignalAll();
 	// The suspended batch keeps waiting: its completion interrupt follows the
 	// packets after the wait, so the CP can only consume them once the value
 	// lands. Its submitter must not observe completion first, or the title can

@@ -616,10 +616,12 @@ static bool spirv_uses_dpp_row(const ShaderCode& code)
 	return false;
 }
 
+// Gen5 format stores merge partial dwords with atomics, through %buf_uint too.
 static bool spirv_uses_buffer_atomics(const ShaderCode& code)
 {
-	return Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd,
-	                                           ShaderInstructionType::BufferAtomicUmax});
+	return (Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd,
+	                                            ShaderInstructionType::BufferAtomicUmax})) ||
+	       SpirvUsesGen5BufferFormatStores(code);
 }
 
 static bool spirv_uses_buffer_descriptor_addressing(const ShaderCode& code)
@@ -764,6 +766,10 @@ void Spirv::WriteHeader()
 	{
 		capabilities.Add("OpCapability ShaderLayer");
 		vars.Add("%gl_Layer");
+	}
+	if (SpirvUsesGen5BufferFormats(m_code))
+	{
+		vars.Add("%gen5_buffer_format_words");
 	}
 	if (m_ps_input_info != nullptr && m_ps_input_info->AncillaryEnabled())
 	{
@@ -1076,7 +1082,7 @@ void Spirv::WriteDebug()
 		int index = 0;
 		for (const auto& p: m_code.GetDebugPrintfs())
 		{
-			m_source += String8::FromPrintf("%%printf_str_%d = OpString \"%s\"", index, p.format.C_Str());
+			m_source += String8::FromPrintf("%%printf_str_%d = OpString \"%s\"\n", index, p.format.C_Str());
 			index++;
 		}
 	}
@@ -1551,6 +1557,7 @@ void Spirv::WriteTypes()
 %function_gen5_buffer_format_bytes = OpTypeFunction %uint %uint
 %function_gen5_buffer_element = OpTypeFunction %v4uint %v4uint %uint %uint
 %function_gen5_buffer_load_words = OpTypeFunction %v4uint %uint %uint %uint
+%function_gen5_buffer_store_words = OpTypeFunction %void %uint %uint %uint %v4uint
           %function_sbuffer_load_dword = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_2 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_4 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
@@ -1903,6 +1910,10 @@ void Spirv::WriteConstants()
 	{
 		m_source += String8::FromPrintf("%%%s = OpConstant %%%s %s\n", c.id.c_str(), c.type_str.c_str(), c.literal_str.c_str());
 	}
+	if (SpirvUsesGen5BufferFormats(m_code))
+	{
+		m_source += SpirvGen5BufferFormatTable(*this);
+	}
 }
 
 void Spirv::WriteGlobalVariables()
@@ -2044,7 +2055,8 @@ void Spirv::WriteGlobalVariables()
 		}
 	}
 
-	if (m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
+	// The host stage, as for its types and the entry-point interface: a transported pixel shader runs as compute.
+	if (HostType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
 	{
 		vars.Add("%lds = OpVariable %_ptr_Workgroup_lds_array_uint Workgroup");
 	}
@@ -3120,6 +3132,10 @@ void Spirv::WriteInstructions()
 		{
 			// The per-lane fragment emitter has no packed D16 form.
 			ok = !inst.mimg_d16;
+		} else if (UsesFragmentCompute() && inst.type == ShaderInstructionType::Exp)
+		{
+			// A pixel export the per-lane emitter refuses has no compute form.
+			ok = false;
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::GeometryExport)
 		{
 			ok = EmitGeometryExport(inst, static_cast<uint32_t>(index), &dst);
@@ -3309,7 +3325,7 @@ void Spirv::WriteFunctions()
 	}
 
 	if (m_code.HasAnyOf({ShaderInstructionType::VMulHiI32, ShaderInstructionType::VMulLoI32, ShaderInstructionType::VMulLoU32, ShaderInstructionType::VMulHiU32,
-	                     ShaderInstructionType::VMadU32U24, ShaderInstructionType::VMulU32U24, ShaderInstructionType::VMulI32I24,
+	                     ShaderInstructionType::VMadU32U24, ShaderInstructionType::VMadI32I24, ShaderInstructionType::VMulU32U24, ShaderInstructionType::VMulI32I24,
 	                     ShaderInstructionType::SMulHiU32}))
 	{
 		m_source += FUNC_MUL_EXTENDED;
@@ -3339,14 +3355,15 @@ void Spirv::WriteFunctions()
 	    ShaderInstructionType::BufferLoadDwordx4, ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy,
 	    ShaderInstructionType::BufferLoadFormatXyz, ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionType::TBufferLoadFormatX,
 	    ShaderInstructionType::TBufferLoadFormatXy, ShaderInstructionType::TBufferLoadFormatXyz, ShaderInstructionType::TBufferLoadFormatXyzw});
-	// Gen5 BUFFER_LOAD_FORMAT decodes through the shared format functions;
-	// the format helpers serve typed TBUFFER loads and the legacy encoding.
-	const bool gen5_format_loads          = SpirvUsesGen5BufferFormatLoads(m_code);
+	// Gen5 BUFFER_LOAD_FORMAT and BUFFER_STORE_FORMAT go through the shared
+	// format functions; the format helpers serve typed TBUFFER loads and the
+	// legacy encoding.
+	const bool gen5_formats               = SpirvUsesGen5BufferFormats(m_code);
 	const bool needs_tbuffer_load_helpers = m_code.HasAnyOf({ShaderInstructionType::TBufferLoadFormatX,
 	                                                         ShaderInstructionType::TBufferLoadFormatXy,
 	                                                         ShaderInstructionType::TBufferLoadFormatXyz,
 	                                                         ShaderInstructionType::TBufferLoadFormatXyzw}) ||
-	                                        (!gen5_format_loads &&
+	                                        (!gen5_formats &&
 	                                         m_code.HasAnyOf({ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy,
 	                                                          ShaderInstructionType::BufferLoadFormatXyz,
 	                                                          ShaderInstructionType::BufferLoadFormatXyzw}));
@@ -3354,9 +3371,9 @@ void Spirv::WriteFunctions()
 	    ShaderInstructionType::BufferStoreDword, ShaderInstructionType::BufferStoreDwordx2, ShaderInstructionType::BufferStoreDwordx3,
 	    ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX, ShaderInstructionType::BufferStoreFormatXy,
 	    ShaderInstructionType::BufferStoreFormatXyzw});
-	const bool needs_tbuffer_store_helpers = m_code.HasAnyOf({ShaderInstructionType::BufferStoreFormatX,
-	                                                          ShaderInstructionType::BufferStoreFormatXy,
-	                                                          ShaderInstructionType::BufferStoreFormatXyzw});
+	const bool needs_tbuffer_store_helpers = !gen5_formats && m_code.HasAnyOf({ShaderInstructionType::BufferStoreFormatX,
+	                                                                           ShaderInstructionType::BufferStoreFormatXy,
+	                                                                           ShaderInstructionType::BufferStoreFormatXyzw});
 
 	// The scalar format predicate is a dependency of the typed buffer helper
 	// families only. Raw dword operations use the buffer helpers directly and
@@ -3366,9 +3383,9 @@ void Spirv::WriteFunctions()
 		m_source += TBUFFER_FORMAT_SCALAR32;
 	}
 
-	if (gen5_format_loads && (has_storage_buffers || UsesGuestDeviceAddress()))
+	if (gen5_formats && (has_storage_buffers || UsesGuestDeviceAddress()))
 	{
-		m_source += SpirvGen5BufferFormatFunctions(*this, has_storage_buffers);
+		m_source += SpirvGen5BufferFormatFunctions(*this, m_code, has_storage_buffers);
 	}
 
 	if (has_storage_buffers && needs_buffer_load_helpers)
@@ -3541,7 +3558,7 @@ void Spirv::FindConstants()
 			}
 		}
 	}
-	if (SpirvUsesGen5BufferFormatLoads(m_code))
+	if (SpirvUsesGen5BufferFormats(m_code))
 	{
 		SpirvAddGen5BufferFormatConstants(this);
 	}
@@ -3808,6 +3825,16 @@ void Spirv::FindConstants()
 			AddConstantUint(0xffu);
 			AddConstantUint(0xffffu);
 		}
+		// LDS-bit buffer loads address LDS like ds_*_addtid_b32 and store zero out of range.
+		if (inst.type == ShaderInstructionType::BufferLoadDword && (inst.buffer_flags & 1u) != 0 && m_cs_input_info != nullptr &&
+		    m_cs_input_info->lds_dwords > 0)
+		{
+			AddConstantUint(0xffffu);
+			AddConstantUint(63u);
+			AddConstantUint(inst.buffer_imm_offset);
+			AddConstantUint(m_cs_input_info->lds_dwords);
+			AddConstantFloat(0.0f);
+		}
 		// DS emitters resolve inst.ds_offset through GetConstantUint: the
 		// read2 pair is dword-scaled while single-offset DS ops carry bytes.
 		// Undeclared offsets would assemble into an orphan id that the driver
@@ -4030,6 +4057,11 @@ void Spirv::FindVariables()
 		for (int address = 0; address < inst.mimg_address_num; ++address)
 		{
 			AddVariable(inst.mimg_address[address]);
+		}
+		if (inst.type == ShaderInstructionType::BufferLoadDword && (inst.buffer_flags & 1u) != 0)
+		{
+			// LDS-bit loads address LDS through M0 without listing it as an operand.
+			AddVariable(ShaderOperandType::M0, 0, 1);
 		}
 		uint32_t m0 = 0;
 		if ((inst.type == ShaderInstructionType::VMovrelsB32 || inst.type == ShaderInstructionType::VMovreldB32 ||
