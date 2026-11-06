@@ -171,9 +171,9 @@ void               GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const G
                                                   GpuQueueId consumer);
 
 // The object's write-back left guest [vaddr, vaddr + size) holding this write; when
-// `rebaselined`, the range matches the tracker at `guest_generation`. An overlay holding
-// that same write keeps its slot, which now equals guest memory, instead of being dropped
-// as changed, and may be held for another flip. Called under the GPU-memory lock.
+// `rebaselined`, the range matches the tracker at `guest_generation`. An overlay of the
+// same object keeps its slot instead of being dropped as changed, and may be held for
+// another two flips. Called under the GPU-memory lock.
 void GuestDeviceAddressOverlayWrittenBack(const GpuMemoryStorageWriteIdentity& identity, uint64_t vaddr, uint64_t size,
                                           bool rebaselined, uint64_t guest_generation);
 

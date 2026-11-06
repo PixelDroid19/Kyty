@@ -1851,10 +1851,14 @@ static bool CreateOverlayArena(GraphicContext* ctx, OverlayArena* arena)
 	return true;
 }
 
+static bool SameObject(const GpuMemoryStorageWriteIdentity& a, const GpuMemoryStorageWriteIdentity& b)
+{
+	return a.heap_id == b.heap_id && a.object_id == b.object_id && a.logical_generation == b.logical_generation && a.buffer == b.buffer;
+}
+
 static bool SameWrite(const GpuMemoryStorageWriteIdentity& a, const GpuMemoryStorageWriteIdentity& b)
 {
-	return a.heap_id == b.heap_id && a.object_id == b.object_id && a.logical_generation == b.logical_generation &&
-	       a.write_uses == b.write_uses && a.buffer == b.buffer;
+	return SameObject(a, b) && a.write_uses == b.write_uses;
 }
 
 static uint64_t StagingBytes(uint64_t size)
@@ -1998,17 +2002,15 @@ void GuestDeviceAddressOverlayWrittenBack(const GpuMemoryStorageWriteIdentity& i
 	// Guest memory holds this write, newer than what earlier snapshots of the object took.
 	for (auto& snapshot: registry.snapshots)
 	{
-		const auto& taken = snapshot.identity;
-		if (taken.heap_id == identity.heap_id && taken.object_id == identity.object_id &&
-		    taken.logical_generation == identity.logical_generation && taken.buffer == identity.buffer &&
-		    taken.write_uses <= identity.write_uses)
+		if (SameObject(snapshot.identity, identity) && snapshot.identity.write_uses <= identity.write_uses)
 		{
 			snapshot.cancelled = true;
 		}
 	}
 	const auto found = registry.overlays.find(vaddr);
-	// Any other overlay over the range is dropped as changed by the next validation.
-	if (found == registry.overlays.end() || found->second.size != size || !SameWrite(found->second.identity, identity))
+	// Any other overlay over the range is dropped as changed by the next validation. A snapshot
+	// publishes an earlier write than the overlay's when later ones were recorded meanwhile.
+	if (found == registry.overlays.end() || found->second.size != size || !SameObject(found->second.identity, identity))
 	{
 		return;
 	}

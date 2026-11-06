@@ -215,7 +215,14 @@ bool StorageBufferWriteBackSnapshot(void* obj, uint64_t vaddr, uint64_t size, co
 	{
 		return false;
 	}
-	*result = LabelWriteBackCopy(reinterpret_cast<void*>(vaddr), data, size, &vk_obj->writeback_cache, &vk_obj->label_publication);
+	// The GPU's written-page flags stay for the object's own write-back, which may publish a
+	// later write: this copy compares every page against the last published bytes instead.
+	auto&                 cache = vk_obj->writeback_cache;
+	uint32_t* const       flags = cache.WrittenPages();
+	std::vector<uint32_t> every_page((size + GpuWritebackPageCache::kDefaultPageSize - 1u) / GpuWritebackPageCache::kDefaultPageSize, 1u);
+	cache.TrackWrittenPages(every_page.data());
+	*result = LabelWriteBackCopy(reinterpret_cast<void*>(vaddr), data, size, &cache, &vk_obj->label_publication);
+	cache.TrackWrittenPages(flags);
 	return true;
 }
 
