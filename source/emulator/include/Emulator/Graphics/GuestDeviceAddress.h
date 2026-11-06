@@ -17,6 +17,7 @@ struct GraphicContext;
 struct VulkanBuffer;
 struct GuestInPlaceWindow;
 struct GpuMemoryStoragePublication;
+struct GpuMemoryStorageWriteIdentity;
 
 // Guest GPU-visible mappings imported as host-pointer device memory, so a
 // shader can dereference a computed guest address. Guest and host virtual
@@ -50,6 +51,22 @@ struct GuestDeviceAddressDirectory
 };
 
 [[nodiscard]] GuestDeviceAddressDirectory GuestDeviceAddressBuildDirectory(const uint64_t* sorted_bases, uint32_t count);
+
+// One table entry as the device reads it.
+struct GuestDeviceAddressEntry
+{
+	uint64_t guest  = 0;
+	uint64_t size   = 0;
+	uint64_t device = 0;
+	uint64_t span   = 0;
+};
+
+// `entries` with the bytes of each of `overlays` cut out and translated by the
+// overlay instead. Inputs and result are sorted by guest base and disjoint; an
+// entry's remaining pieces keep translating from its own device range. A load
+// that starts before an overlay and runs into it still reads the entry.
+[[nodiscard]] std::vector<GuestDeviceAddressEntry> GuestDeviceAddressOverlayEntries(const std::vector<GuestDeviceAddressEntry>& entries,
+                                                                                   const std::vector<GuestDeviceAddressEntry>& overlays);
 
 struct GuestDeviceAddressTable
 {
@@ -129,6 +146,40 @@ void               GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const G
 // from stale guest bytes before the CPU write-back.
 [[nodiscard]] bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source,
                                                        uint64_t vaddr, uint64_t size);
+
+// For a result GuestDeviceAddressRecordPublication refuses (a device write over part
+// of a cache line), records into `cmd` a copy of the storage object into a
+// device-local slot that the table maps over the object's guest range. Device-address
+// reads recorded later on the queue of `recording` observe the result in GPU order;
+// guest memory still receives it from the object's write-back. The slot stays mapped
+// until the guest range changes (that write-back included), a device write lands
+// over it, or a reader of another queue prepares (GuestDeviceAddressValidateOverlays).
+// Refuses once a flip passed since guest memory last matched the object: completion
+// defers the write-back of an object rewritten every frame, so the guest CPU would
+// never see it; the caller's host wait then writes it back.
+[[nodiscard]] bool GuestDeviceAddressRecordOverlay(GraphicContext* ctx, VkCommandBuffer_T* cmd, SubmissionId recording,
+                                                   const GpuMemoryStoragePublication& publication);
+
+// Whether readers on `consumer` observe this exact write of the object at
+// [vaddr, vaddr + size) through an overlay, within the flip it may be held for.
+// GPU memory asks this under its lock.
+[[nodiscard]] bool GuestDeviceAddressOverlayHolds(const GpuMemoryStorageWriteIdentity& identity, uint64_t vaddr, uint64_t size,
+                                                  GpuQueueId consumer);
+
+// The object's write-back left guest [vaddr, vaddr + size) holding this write; when
+// `rebaselined`, the range matches the tracker at `guest_generation`. An overlay holding
+// that same write keeps its slot, which now equals guest memory, instead of being dropped
+// as changed, and may be held for another flip. Called under the GPU-memory lock.
+void GuestDeviceAddressOverlayWrittenBack(const GpuMemoryStorageWriteIdentity& identity, uint64_t vaddr, uint64_t size,
+                                          bool rebaselined, uint64_t guest_generation);
+
+// A frame was flipped: overlays held since an earlier flip stop deferring write-back.
+void GuestDeviceAddressFrameDone();
+
+// Unmaps the overlays a reader on `consumer` must not observe: those of other
+// queues and those whose guest range changed. Call before collecting the
+// consumer's pending storage results.
+void GuestDeviceAddressValidateOverlays(GpuQueueId consumer);
 
 // Records, with the same ordering and range rules as GuestDeviceAddressRecordPublication,
 // `word` repeated over the imported view of `size` bytes at guest address `vaddr`.

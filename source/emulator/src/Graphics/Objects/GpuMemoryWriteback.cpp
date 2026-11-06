@@ -17,6 +17,7 @@
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -239,6 +240,12 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	}
 	if (!writeback_result.content_changed)
 	{
+		if (o.object.type == GpuMemoryObjectType::StorageBuffer && block.vaddr_num == 1)
+		{
+			GuestDeviceAddressOverlayWrittenBack({heap_id, object_id, o.logical_generation, o.write_uses,
+			                                      static_cast<const VulkanBuffer*>(o.object.obj)},
+			                                     block.vaddr[0], block.size[0], false, 0);
+		}
 		o.in_use = false;
 		SyncWriteBackIndexes(heap_id, object_id);
 		return;
@@ -260,6 +267,12 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 				generation_baseline[vi] = true;
 			}
 		}
+	}
+	if (o.object.type == GpuMemoryObjectType::StorageBuffer && block.vaddr_num == 1)
+	{
+		GuestDeviceAddressOverlayWrittenBack({heap_id, object_id, o.logical_generation, o.write_uses,
+		                                      static_cast<const VulkanBuffer*>(o.object.obj)},
+		                                     block.vaddr[0], block.size[0], generation_baseline[0], o.dirty_generation[0]);
 	}
 	const uint64_t content_sequence = NextContentSequence();
 	o.cpu_update_time               = GpuMemoryGetCurrentTime();
@@ -590,17 +603,24 @@ bool GpuMemory::PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueu
 		{
 			continue;
 		}
+		const GpuMemoryStorageWriteIdentity identity {heap_id, object_id, object.info.logical_generation, object.info.write_uses,
+		                                              static_cast<const VulkanBuffer*>(object.info.object.obj)};
+		if (!in_place && object.block.vaddr_num == 1 &&
+		    GuestDeviceAddressOverlayHolds(identity, object.block.vaddr[0], object.block.size[0], consumer))
+		{
+			continue;
+		}
 		if (publishable == nullptr || (!in_place && (!consumer_ordered || !StorageIsWholeGuestContent(heap_id, object))))
 		{
 			*dependency = unawaited.sequence != 0 ? unawaited : pending;
 			return true;
 		}
 		GpuMemoryStoragePublication publication;
-		publication.identity   = {heap_id, object_id, object.info.logical_generation, object.info.write_uses,
-		                          static_cast<const VulkanBuffer*>(object.info.object.obj)};
-		publication.vaddr      = object.block.vaddr[0];
-		publication.size       = object.block.size[0];
-		publication.dependency = pending;
+		publication.identity         = identity;
+		publication.vaddr            = object.block.vaddr[0];
+		publication.size             = object.block.size[0];
+		publication.dependency       = pending;
+		publication.guest_generation = object.info.dirty_generation[0];
 		publishable->push_back(publication);
 	}
 	if (publishable == nullptr || publishable->empty())
@@ -757,10 +777,16 @@ void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQ
 	bool               nothing_written = true;
 	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges, consumer))
 	{
-		// Consumers do not wait for an in-place object; its completion writes it back.
-		const auto& info = m_heaps[heap_id].objects[object_id].info;
-		if (static_cast<const VulkanBuffer*>(info.object.obj)->guest_in_place &&
-		    !m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()))
+		// Consumers do not wait for an in-place object, or for one whose write they read
+		// through an overlay; its completion writes it back.
+		const auto& object = m_heaps[heap_id].objects[object_id];
+		const auto& info   = object.info;
+		const auto* buffer = static_cast<const VulkanBuffer*>(info.object.obj);
+		if (!m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()) &&
+		    (buffer->guest_in_place ||
+		     (object.block.vaddr_num == 1 &&
+		      GuestDeviceAddressOverlayHolds({heap_id, object_id, info.logical_generation, info.write_uses, buffer},
+		                                     object.block.vaddr[0], object.block.size[0], consumer))))
 		{
 			continue;
 		}

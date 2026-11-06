@@ -1767,6 +1767,66 @@ TEST(EmulatorGuestDeviceAddress, DirectoryRegionHoldsTheEntryOfEveryAddress)
 	EXPECT_EQ(empty.words, (std::vector<uint32_t> {0u, 0u}));
 }
 
+// Every guest byte an overlay covers translates into the overlay; every other
+// byte keeps its chunk's translation and the bytes imported after it.
+TEST(EmulatorGuestDeviceAddress, OverlaysReplaceTheBytesTheyCoverInTheTable)
+{
+	const std::vector<GuestDeviceAddressEntry> chunks = {
+	    {0x10000, 0x4000, 0xa0000, 0x5000}, {0x14000, 0x2000, 0xb0000, 0x2000}, {0x20000, 0x1000, 0xc0000, 0x1000}};
+	const std::vector<GuestDeviceAddressEntry> overlays = {
+	    {0x10100, 0x40, 0xf0000, 0xc0},  // inside the first chunk
+	    {0x10200, 0x10, 0xf1000, 0x90},  // a second one in the same chunk
+	    {0x13ff0, 0x20, 0xf2000, 0xa0},  // across the first two chunks
+	    {0x18000, 0x20, 0xf3000, 0xa0},  // in the gap
+	    {0x30000, 0x20, 0xf4000, 0xa0}}; // past the last chunk
+	const auto table = GuestDeviceAddressOverlayEntries(chunks, overlays);
+	for (std::size_t i = 1; i < table.size(); ++i)
+	{
+		EXPECT_LE(table[i - 1].guest + table[i - 1].size, table[i].guest) << i;
+	}
+	const auto translate = [&](uint64_t guest, uint64_t* device, uint64_t* span_left)
+	{
+		const auto entry = std::upper_bound(table.begin(), table.end(), guest,
+		                                    [](uint64_t value, const GuestDeviceAddressEntry& e) { return value < e.guest; });
+		if (entry == table.begin() || guest - std::prev(entry)->guest >= std::prev(entry)->size)
+		{
+			return false;
+		}
+		const auto& found = *std::prev(entry);
+		*device           = found.device + (guest - found.guest);
+		*span_left        = found.span - (guest - found.guest);
+		return true;
+	};
+	const auto expected = [&](uint64_t guest, uint64_t* device, uint64_t* span_left)
+	{
+		for (const auto* list: {&overlays, &chunks})
+		{
+			for (const auto& e: *list)
+			{
+				if (guest >= e.guest && guest - e.guest < e.size)
+				{
+					*device    = e.device + (guest - e.guest);
+					*span_left = e.span - (guest - e.guest);
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+	for (uint64_t guest = 0xf000; guest < 0x31000; guest += 0x10)
+	{
+		uint64_t device = 0, span = 0, want_device = 0, want_span = 0;
+		const bool found = translate(guest, &device, &span);
+		ASSERT_EQ(found, expected(guest, &want_device, &want_span)) << std::hex << guest;
+		if (found)
+		{
+			EXPECT_EQ(device, want_device) << std::hex << guest;
+			EXPECT_EQ(span, want_span) << std::hex << guest;
+		}
+	}
+	EXPECT_EQ(GuestDeviceAddressOverlayEntries(chunks, {}).size(), chunks.size());
+}
+
 TEST(EmulatorGuestDeviceAddress, RepeatedPrepareDoesNotImportUntouchedNeighbours) { RunIsolated(StableResidencyProbe); }
 TEST(EmulatorGuestDeviceAddress, VulkanLoadPreservesWordsAcrossImportedPageBoundary) { RunIsolated(PageBoundaryLoadProbe); }
 TEST(EmulatorGuestDeviceAddress, AnAnonymousRangeImportsATouchedPageOnTheNextPreparation) { RunIsolated(AnonymousResidencyProbe); }

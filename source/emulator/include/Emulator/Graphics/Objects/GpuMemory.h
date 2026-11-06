@@ -1393,6 +1393,7 @@ struct GpuMemoryStoragePublication
 	uint64_t                      vaddr = 0;
 	uint64_t                      size  = 0;
 	SubmissionId                  dependency;
+	uint64_t                      guest_generation = 0; // dirty-tracker generation the guest range last matched
 };
 // Reports one incomplete submission use of a writable StorageBuffer overlapping
 // any of the ranges, with the same publication exemption. With `publishable`,

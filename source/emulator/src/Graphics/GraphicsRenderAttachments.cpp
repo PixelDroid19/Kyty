@@ -422,6 +422,7 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 	EXIT_IF(buffer == nullptr || dependency == nullptr);
 	const GpuQueueId                         consumer(static_cast<uint32_t>(buffer->GetQueueIndex()));
 	std::vector<GpuMemoryStoragePublication> publishable;
+	GuestDeviceAddressValidateOverlays(consumer);
 	if (GuestDeviceAddressPendingWriteBack(consumer, buffer->DeviceAwaitedSubmissions(), &publishable, dependency))
 	{
 		return true;
@@ -437,11 +438,19 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 			GpuMemoryMarkInPlaceStorageOrdered(publication.identity, consumer);
 			continue;
 		}
-		if (!recorded || !GpuMemoryMarkStorageGuestPublished(publication.identity, recording, nullptr))
+		if (recorded && GpuMemoryMarkStorageGuestPublished(publication.identity, recording, nullptr))
 		{
-			*dependency = publication.dependency;
-			return true;
+			continue;
 		}
+		// The device may not write the result over guest memory: readers on this queue
+		// observe it through an overlay until its write-back.
+		if (!recorded && GuestDeviceAddressRecordOverlay(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(), recording,
+		                                                 publication))
+		{
+			continue;
+		}
+		*dependency = publication.dependency;
+		return true;
 	}
 	return false;
 }

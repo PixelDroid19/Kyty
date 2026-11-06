@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -997,6 +998,7 @@ void GpuMemoryFrameDone(GraphicContext* ctx)
 	EXIT_IF(ctx == nullptr);
 
 	g_gpu_memory->FrameDone(ctx);
+	GuestDeviceAddressFrameDone();
 }
 
 void GpuMemoryFrameDone()
