@@ -4805,6 +4805,19 @@ TEST(EmulatorGraphicsState, DepthPassCanSuppressColorWrites)
 	EXPECT_EQ(State::ResolveColorWriteAgainstDepth(0x0fu, true, true), 0x0fu);
 }
 
+TEST(EmulatorGraphicsState, RoutesColorExportOrdinalsThroughShaderMaskTargets)
+{
+	// MRT1 and MRT2 used: COL_FORMAT 0x77 has no hole, CB_SHADER_MASK 0x770 does.
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x770u, 0u), 1u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x770u, 1u), 2u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x770u, 2u), 8u);
+	// Partial nibbles still enable their target and consume an ordinal.
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x10203001u, 1u), 3u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x10203001u, 3u), 7u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0xffffffffu, 7u), 7u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0u, 0u), 8u);
+}
+
 TEST(EmulatorGraphicsState, RequiresPixelShaderOnlyForObservableFragmentWork)
 {
 	HW::ShaderRegisters shader {};

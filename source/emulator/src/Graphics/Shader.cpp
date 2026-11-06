@@ -4490,6 +4490,75 @@ bool ShaderScalarLoadIsZero(const ShaderBindResources& bind, const ShaderInstruc
 	return true;
 }
 
+static bool ShaderPixelMrtExportTarget(const ShaderInstruction& inst, uint32_t* target, bool* compressed);
+
+// Physical target of each color export ordinal under CB_SHADER_MASK. An ordinal
+// left without an enabled target goes to a target the mask disables, whose
+// export mode is ZERO, so it stores nothing. Returns false when every ordinal
+// already lands on its own index (no hole before an enabled target).
+static bool ShaderResolveColorExportRoute(uint32_t shader_mask, uint32_t route[8])
+{
+	uint32_t disabled_target = 8u;
+	bool     routed          = false;
+	for (uint32_t i = 0; i < 8u; i++)
+	{
+		const uint32_t target = State::ResolvePixelExportTarget(shader_mask, i);
+		route[i]              = target;
+		routed |= target < 8u && target != i;
+		if (disabled_target == 8u && ((shader_mask >> (i * 4u)) & 0xFu) == 0u)
+		{
+			disabled_target = i;
+		}
+	}
+	for (uint32_t i = 0; i < 8u; i++)
+	{
+		if (route[i] >= 8u)
+		{
+			route[i] = routed ? disabled_target : i;
+		}
+	}
+	return routed;
+}
+
+// Rewrites MRT export targets from ordinals to physical targets, so every later
+// stage indexes targets. Null exports are discard tails and keep their format.
+static void ShaderRouteColorExports(ShaderCode* code, const uint32_t route[8])
+{
+	using namespace ShaderInstructionFormat;
+	static const Format k_compr[8] = {Mrt0Vsrc0Vsrc1ComprVmDone, Mrt1Vsrc0Vsrc1ComprVm, Mrt2Vsrc0Vsrc1ComprVm,
+	                                  Mrt3Vsrc0Vsrc1ComprVm,     Mrt4Vsrc0Vsrc1ComprVm, Mrt5Vsrc0Vsrc1ComprVm,
+	                                  Mrt6Vsrc0Vsrc1ComprVm,     Mrt7Vsrc0Vsrc1ComprVm};
+	static const Format k_full[8]  = {Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone, Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm, Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm,
+	                                  Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm,     Mrt4Vsrc0Vsrc1Vsrc2Vsrc3Vm, Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm,
+	                                  Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm,     Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm};
+	auto& instructions = code->GetInstructions();
+	for (uint32_t i = 0; i < instructions.Size(); i++)
+	{
+		auto&    inst         = instructions[i];
+		uint32_t export_index = 0u;
+		bool     compressed   = false;
+		if (inst.type == ShaderInstructionType::Exp && ShaderPixelMrtExportTarget(inst, &export_index, &compressed))
+		{
+			inst.format = (compressed ? k_compr : k_full)[route[export_index]];
+		}
+	}
+}
+
+static ShaderPixelColorExports ShaderRouteColorExportSummary(const ShaderPixelColorExports& exports, const uint32_t route[8])
+{
+	ShaderPixelColorExports routed;
+	for (uint32_t i = 0; i < 8u; i++)
+	{
+		const auto from = static_cast<uint8_t>(1u << i);
+		const auto to   = static_cast<uint8_t>(1u << route[i]);
+		routed.enable[route[i]] |= exports.enable[i];
+		routed.packed |= (exports.packed & from) != 0u ? to : 0u;
+		routed.full |= (exports.full & from) != 0u ? to : 0u;
+		routed.partial_targets |= (exports.partial_targets & from) != 0u ? to : 0u;
+	}
+	return routed;
+}
+
 void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
                           uint32_t cb_target_mask, ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable)
 {
@@ -4541,10 +4610,19 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	// The CB writes a target only through the channels CB_TARGET_MASK and
 	// CB_SHADER_MASK both enable; an export to any other target is discarded,
 	// whatever SPI_SHADER_COL_FORMAT and the stale CB_COLOR*_INFO say.
+	// SPI_SHADER_COL_FORMAT is indexed by export ordinal, CB_COLOR*_INFO by target.
+	uint32_t   export_route[8] = {};
+	const bool exports_routed  = ShaderResolveColorExportRoute(sh->m_cbShaderMask, export_route);
+	ps_info->routed_color_targets = 0u;
 	for (int i = 0; i < 8; i++)
 	{
+		if (exports_routed && ((sh->m_cbShaderMask >> (i * 4)) & 0xFu) != 0u)
+		{
+			ps_info->routed_color_targets |= static_cast<uint8_t>(1u << i);
+		}
 		const bool written             = State::ResolveColorWriteMask(cb_target_mask, sh->m_cbShaderMask, static_cast<uint32_t>(i)) != 0u;
-		ps_info->target_output_mode[i] = written ? sh->target_output_mode[i] : 0u;
+		const auto export_index        = static_cast<uint32_t>(std::find(export_route, export_route + 8, static_cast<uint32_t>(i)) - export_route);
+		ps_info->target_output_mode[i] = written && export_index < 8u ? sh->target_output_mode[export_index] : 0u;
 		// A discarded target's order and type are stale registers. No emitter reads
 		// them, and in the shader identity they would split one program into variants
 		// the driver compiles again.
@@ -4609,7 +4687,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->native_wave = analysis.native_wave->Get(*analysis.code, ps_wave32 ? 32u : 64u);
 		ps_info->required_subgroup_size = analysis.pixel_analysis->uses_native_wave_state ? ps_info->native_wave.guest_wave_size : 0u;
 		ps_info->has_only_null_exports = analysis.pixel_analysis->has_only_null_exports;
-		ps_info->color_exports         = analysis.pixel_analysis->color_exports;
+		ps_info->color_exports         = exports_routed ? ShaderRouteColorExportSummary(analysis.pixel_analysis->color_exports, export_route)
+		                                                : analysis.pixel_analysis->color_exports;
 		// DB_SHADER_CONTROL decides whether an output-free shader runs; its memory
 		// writes stay unexecuted unless EXEC_ON_NOOP requests them.
 		if (allow_noop_stage_disable)
@@ -4639,7 +4718,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		code.SetType(ShaderType::Pixel);
 		ShaderParseMapped(regs->ps_regs.data_addr, &code);
 		ps_info->has_only_null_exports = ShaderHasOnlyNullPixelExports(code);
-		ps_info->color_exports         = ShaderSummarizePixelColorExports(code);
+		ps_info->color_exports         = exports_routed ? ShaderRouteColorExportSummary(ShaderSummarizePixelColorExports(code), export_route)
+		                                                : ShaderSummarizePixelColorExports(code);
 		ps_info->native_wave = ShaderAnalyzeNativeWave(code, 64u);
 		ps_info->required_subgroup_size = ShaderUsesNativeWaveState(code) ? 64u : 0u;
 	}
@@ -5519,6 +5599,10 @@ ShaderCode ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegist
 			DebugStatsScopedTimer timer(RecordShaderPipelineMissParse);
 			ShaderParseMapped(regs->ps_regs.data_addr, &code, ShaderContinuationMode::None, true);
 		}
+		if (uint32_t export_route[8] = {}; ShaderResolveColorExportRoute(sh->m_cbShaderMask, export_route))
+		{
+			ShaderRouteColorExports(&code, export_route);
+		}
 		if (Config::IsNextGen())
 		{
 			// GFX10 EXTRA_LDS_SIZE is encoded in blocks of 128 dwords. The
@@ -6234,6 +6318,11 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
 	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
 
+	if (input_info->routed_color_targets != 0u)
+	{
+		ids.Add(0x4d525431u); // MRT1: export ordinals routed past a CB_SHADER_MASK hole.
+		ids.Add(input_info->routed_color_targets);
+	}
 	// The export declarations, component order and channel type are part of the
 	// generated SPIR-V interface. They must distinguish pipelines that use the
 	// same guest shader with different render-target formats or COMP_SWAP values.
