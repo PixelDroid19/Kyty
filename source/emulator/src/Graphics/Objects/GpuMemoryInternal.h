@@ -449,6 +449,8 @@ private:
 	void RetireBuffersUnderPressureLocked(Vector<Destructor>* destructors);
 	void WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors,
 	                           const SubmissionId* publishing_submission = nullptr);
+	void PublishStorageSnapshotsLocked(SubmissionId submission);
+	void PublishStorageSnapshotLocked(const GpuMemoryStorageSnapshot& snapshot);
 	void RecordUse(ObjectInfo* object, SubmissionId submission);
 	void RecordUse(ObjectInfo* object, CommandBuffer* buffer);
 	void ScheduleDestructors(GraphicContext* ctx, Vector<Destructor>* destructors);

@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 struct VkCommandBuffer_T;
@@ -18,6 +19,7 @@ struct VulkanBuffer;
 struct GuestInPlaceWindow;
 struct GpuMemoryStoragePublication;
 struct GpuMemoryStorageWriteIdentity;
+struct GpuMemoryStorageSnapshot;
 
 // Guest GPU-visible mappings imported as host-pointer device memory, so a
 // shader can dereference a computed guest address. Guest and host virtual
@@ -154,9 +156,11 @@ void               GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const G
 // guest memory still receives it from the object's write-back. The slot stays mapped
 // until the guest range changes (that write-back included), a device write lands
 // over it, or a reader of another queue prepares (GuestDeviceAddressValidateOverlays).
-// Refuses once a flip passed since guest memory last matched the object: completion
-// defers the write-back of an object rewritten every frame, so the guest CPU would
-// never see it; the caller's host wait then writes it back.
+// Completion defers the write-back of an object rewritten every frame, so the copy
+// also goes to host-readable staging that write-back completion publishes
+// (GuestDeviceAddressTakeSnapshots). Refuses when staging is full, and once two flips
+// passed since guest memory last matched the object; the caller's host wait then
+// writes it back.
 [[nodiscard]] bool GuestDeviceAddressRecordOverlay(GraphicContext* ctx, VkCommandBuffer_T* cmd, SubmissionId recording,
                                                    const GpuMemoryStoragePublication& publication);
 
@@ -173,8 +177,14 @@ void               GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const G
 void GuestDeviceAddressOverlayWrittenBack(const GpuMemoryStorageWriteIdentity& identity, uint64_t vaddr, uint64_t size,
                                           bool rebaselined, uint64_t guest_generation);
 
-// A frame was flipped: overlays held since an earlier flip stop deferring write-back.
+// A frame was flipped: overlays held since two flips ago stop deferring write-back.
 void GuestDeviceAddressFrameDone();
+
+// Moves out, oldest first, the overlay snapshots whose recording `complete` reports
+// done. Their bytes stay readable until GuestDeviceAddressReleaseSnapshots. Called
+// under the GPU-memory lock.
+[[nodiscard]] std::vector<GpuMemoryStorageSnapshot> GuestDeviceAddressTakeSnapshots(const std::function<bool(SubmissionId)>& complete);
+void GuestDeviceAddressReleaseSnapshots(const std::vector<GpuMemoryStorageSnapshot>& snapshots);
 
 // Unmaps the overlays a reader on `consumer` must not observe: those of other
 // queues and those whose guest range changed. Call before collecting the

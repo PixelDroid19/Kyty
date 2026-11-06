@@ -1395,6 +1395,17 @@ struct GpuMemoryStoragePublication
 	SubmissionId                  dependency;
 	uint64_t                      guest_generation = 0; // dirty-tracker generation the guest range last matched
 };
+// The bytes a device copy took of one write of a storage object, in host-readable memory.
+struct GpuMemoryStorageSnapshot
+{
+	GpuMemoryStorageWriteIdentity identity;
+	uint64_t                      vaddr = 0;
+	uint64_t                      size  = 0;
+	SubmissionId                  recording;
+	uint64_t                      offset    = 0; // in the staging memory
+	const void*                   data      = nullptr;
+	bool                          cancelled = false; // a later write-back published newer bytes
+};
 // Reports one incomplete submission use of a writable StorageBuffer overlapping
 // any of the ranges, with the same publication exemption. With `publishable`,
 // results that qualify for publication in the consumer's queue order are listed

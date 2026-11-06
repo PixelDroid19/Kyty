@@ -393,12 +393,74 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	SyncWriteBackIndexes(heap_id, object_id);
 }
 
+// Results that completion keeps deferring (GpuMemoryCanWriteBackAtSubmission) reach guest
+// memory from the device copies taken when their overlays were recorded, oldest first.
+void GpuMemory::PublishStorageSnapshotsLocked(SubmissionId submission)
+{
+	const auto snapshots = GuestDeviceAddressTakeSnapshots(
+	    [this, submission](SubmissionId recording)
+	    {
+		    // A queue completes its submissions in order.
+		    return (recording.queue == submission.queue && recording.sequence <= submission.sequence) ||
+		           m_deferred_deletions.AreDependenciesComplete({recording});
+	    });
+	for (const auto& snapshot: snapshots)
+	{
+		if (!snapshot.cancelled)
+		{
+			PublishStorageSnapshotLocked(snapshot);
+		}
+	}
+	GuestDeviceAddressReleaseSnapshots(snapshots);
+}
+
+// Like the object's write-back, but the object stays pending: later submissions own newer writes.
+void GpuMemory::PublishStorageSnapshotLocked(const GpuMemoryStorageSnapshot& snapshot)
+{
+	const auto& identity = snapshot.identity;
+	if (identity.heap_id < 0 || static_cast<uint32_t>(identity.heap_id) >= m_heaps.Size() || identity.object_id < 0 ||
+	    static_cast<uint32_t>(identity.object_id) >= m_heaps[identity.heap_id].objects.Size())
+	{
+		return;
+	}
+	auto& h = m_heaps[identity.heap_id].objects[identity.object_id];
+	auto& o = h.info;
+	// Alias parents need the whole write-back to be invalidated or propagated.
+	if (h.free || !o.in_use || o.read_only || o.object.type != GpuMemoryObjectType::StorageBuffer ||
+	    o.logical_generation != identity.logical_generation || o.object.obj != identity.buffer || o.depth_meta_bound ||
+	    h.block.vaddr_num != 1 || !h.others.IsEmpty())
+	{
+		return;
+	}
+	GpuWritebackResult result;
+	const auto         start = DebugStatsClock::now();
+	if (!StorageBufferWriteBackSnapshot(o.object.obj, snapshot.vaddr, snapshot.size, snapshot.data, &result))
+	{
+		return;
+	}
+	DebugStatsRecordGpuMemoryWriteBack(GpuMemoryStatsTypeIndex(o.object.type), result.copied_bytes,
+	                                   static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - start).count()));
+	// As in WriteBackObjectLocked: the copy's own write notifications advanced the range's generation.
+	bool rebaselined = false;
+	if (result.content_changed && o.check_hash && o.dirty_registered)
+	{
+		const auto read = GpuDirtyPageTracker::Instance().BeginRead(snapshot.vaddr, snapshot.size);
+		if (read.tracked)
+		{
+			o.dirty_generation[0] = read.generation;
+			rebaselined           = true;
+		}
+	}
+	GuestDeviceAddressOverlayWrittenBack(identity, snapshot.vaddr, snapshot.size, rebaselined, o.dirty_generation[0]);
+}
+
 void GpuMemory::WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission)
 {
 	EXIT_IF(submission.sequence == 0);
 	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard    lock(m_mutex);
 	Vector<Destructor> destructors;
+	PublishStorageSnapshotsLocked(submission);
 
 	// Write-back changes the index; collect the candidates first.
 	std::vector<std::pair<int, int>> objects;
