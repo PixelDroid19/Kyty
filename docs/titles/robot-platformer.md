@@ -4629,3 +4629,51 @@ Every A/B below alternates the change on and off every 10 s inside one run and c
   backtrace.
 - **Unrelated stop seen once.** "unknown relation: DepthStencilBuffer - Contains - RenderTexture" also occurs on
   builds without this change.
+
+## Split part width in the dunes (2026-11-06, not committed)
+
+`PPSA21567 - Astro Bot`, dunes after the recorded user gameplay route, Intel Arc A770, ANV Mesa 26.2.5, xe, 60 fps
+limit, private module store. Question: does a narrower host part (more registers per guest lane) pay where a split or
+native program spills?
+
+- **Offline.** Recorded compute pipelines compiled on ANV report spills by width. At width 32 the native wave32
+  `0x874bd13f` has 2,918 spills and 10,021 fills. As 16-lane parts it has 1,578 and 6,220. `0xe1b1315d` drops
+  from 860:1,830 to 42:140. Wave64 programs split at 16 lanes spill when the module needs more than 128 registers
+  (`0x8723fe62`, `0x90c95e2d`, `0x108c4737`). `0xff2adfc8` and `0xc99976f9` do not spill.
+- **Exclusive GPU time per dispatch.** A diagnostic bracketed every guest dispatch with end-of-pipe timestamps. The
+  width rotated every 10 s inside one run, so each program ran at every width.
+
+| Program | Before | After | Change |
+| --- | --- | --- | --- |
+| `0x874bd13f` wave32 | native 9.71 ms | 16-lane parts 8.89 ms | -8 % |
+| `0xe1b1315d` wave32 | native 0.76 ms | 16-lane parts 0.31 ms | -60 % |
+| `0xfd1ee59c` wave32 | native 56 us | 16-lane parts 81 us | +45 % |
+| `0x2bcba9a2` wave32 | native 76 us | 16-lane parts 74 us | 0 |
+| `0x8723fe62` wave64 | 16 lanes 314 us | 8 lanes 221 us | -30 % |
+| `0x90c95e2d`, `0x108c4737` wave64 | 16 lanes | 8 lanes | -5 % |
+| `0xff2adfc8` wave64 | 16 lanes 1.37 ms | 8 lanes 2.07 ms | +51 % |
+| `0xc99976f9` wave64 | 16 lanes 85 us | 8 lanes 162 us | +90 % |
+
+  Narrower parts pay where the wider module spills, and cost rendezvous where it does not. The guest VGPR count does
+  not predict which case applies.
+- **Frame rate.** In the main bin (350-399 draws per frame) `0x3666fa39` runs twice and `0x874bd13f` once per frame.
+  The table compares means of 10 s samples, with standard errors.
+
+| A/B, alternated inside one run | Off | On | Change |
+| --- | --- | --- | --- |
+| Wave64 always 8 lanes and wave-sensitive wave32 in 16-lane parts | 14.15 ± 0.12 fps | 14.70 ± 0.19 fps | +3.9 % |
+| Wave-sensitive wave32 always in 16-lane parts | 14.52 ± 0.26 fps | 14.27 ± 0.15 fps | -1.7 % |
+| Three-way rotation: wave64 at 8 lanes / both rules | 14.27 ± 0.37 fps | 13.82 ± 0.25 / 14.48 ± 0.13 fps | -3 % / +1.5 % |
+
+  Only the first result reaches two standard errors, and the parts do not add up. The lever is at most 2-3 % of the
+  frame, below what 10 s alternation resolves. The exclusive savings do not reach the frame: the GPU is about 88 %
+  busy, these programs overlap the BVH dispatches, and frame time follows `0x3666fa39`. End-of-pipe timestamps also
+  serialize dispatches, so they overstate frame gains under overlap.
+- **Not committed.** No width rule changed. Removing the wave32 guard reaches every wave-sensitive wave32 program on
+  Intel. `PPSA03524 - GTA San Andreas Definitive Edition` could not be smoke-tested: this branch stops at boot
+  without the storage-image format support in the PR #65 fixes.
+  `PPSA09076 - DREDGE` and `PPSA28311 - Absolum` dispatch no wave32 programs.
+- **Open defect: wave32 in 8-lane parts.** With four 8-lane parts per wave32 the device was lost about 2 s after the
+  first dispatch of five dune programs: `0x874bd13f`, `0xe1b1315d`, `0x2bcba9a2`, `0xfd1ee59c`, `0xbf8ee9fc`.
+  Ten other wave32 programs ran correctly in 8-lane parts before that. The admission checks accept wave32 only in
+  16-lane parts, so the product never takes this layout.
