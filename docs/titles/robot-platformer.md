@@ -4677,3 +4677,41 @@ native program spills?
   first dispatch of five dune programs: `0x874bd13f`, `0xe1b1315d`, `0x2bcba9a2`, `0xfd1ee59c`, `0xbf8ee9fc`.
   Ten other wave32 programs ran correctly in 8-lane parts before that. The admission checks accept wave32 only in
   16-lane parts, so the product never takes this layout.
+
+## Depth targets no longer wait for deferred storage aliases (2026-11-07)
+
+`PPSA21567 - Astro Bot`, dunes after the recorded user gameplay route, Intel Arc A770, ANV Mesa 26.2.5, xe, 60 fps
+limit, 170-300 s after launch.
+
+- **Observed.** 16.7 fps, 319 draws per frame. The command processor took 60.5 ms per frame (151 us per draw) and
+  waited on fences 11.8 times per frame for 32.1 ms. The device-address draw retry (`RetryGuestDeviceAddressDraw`)
+  waited on the host 1.65 times per frame, 23.8 ms per frame, about 14 ms each.
+- **Cause** (temporary counters, removed). 1.52 of the 1.65 waits were the lazy alias wait of the record above. A
+  depth target linked to writable storage that a consolidated `WAIT_REG_MEM` left pending waited for that storage
+  at its next draw: 0.96 per frame in auto draws, 0.55 in geometry passes and 0.01 in indexed draws. The guard
+  covers aliases whose refresh reads guest bytes, but a depth target reads none. It keeps no guest hash
+  (`check_hash` is false) and its update does nothing, so the write-back changes only its metadata. A new depth
+  target over pending storage already relies on queue order (`GpuMemoryShouldLinkPendingDepthStencilStorage`).
+- **Fix** (`GpuMemoryWriteBackRefreshReadsGuestBytes`). A depth target no longer counts as an alias whose refresh
+  reads guest bytes, so storage linked only to depth targets is not deferred. The write-back walk still
+  invalidates the depth target's metadata at completion.
+- **Result.**
+
+| Per frame, 170-300 s | Before (counter build) | After (counter build) | After (product build) |
+| --- | --- | --- | --- |
+| Retry host waits | 1.65, 23.8 ms | 0.07, 0.09 ms | - |
+| Command processor | 60.5 ms, 151 us per draw | 49.9 ms, 110 us per draw | 52.2 ms, 114 us per draw |
+| Fence waits | 11.8, 32.1 ms | 10.7, 30.4 ms | 10.9, 30.1 ms |
+| Frame rate | 16.7 fps | 17.2 fps | 17.0 fps |
+
+  The fence time barely moves because the frame here follows the GPU: about 60 ms of GPU timestamps per frame
+  (record of 2026-11-02). The waits moved to other fences. The captures at 170 and 300 s match the earlier ones.
+  The capture at 190 s is the cinematic's fade to black, which earlier runs also caught.
+  - `PPSA09076 - DREDGE`, generic route, 40-120 s: 21.58 to 20.08 us per draw, 35.1 to 35.9 fps, picture correct.
+  - `PPSA28311 - Absolum`, generic route, 80-120 s: 58.4 to 59.4 fps at the 60 fps limit, fence 2.2 to 2.3 ms per
+    frame, picture correct.
+  - All 108 tests pass, one skipped as before.
+- **Open.**
+  - In the dunes the frame is bound by the GPU programs `0x3666fa39` and `0x874bd13f`.
+  - 0.95 `DRAW_INDEX_INDIRECT` records per frame are declined on the device and read on the host after a full
+    drain.
