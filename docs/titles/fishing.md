@@ -6,6 +6,38 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Fishing title: per-draw command-processor costs at the dock (2026-11-07, partly fixed)
+
+`PPSA09076 - DREDGE`, first-gameplay route, Intel Arc A770, ANV Mesa 26.2.5, 60 fps limit. The dock is CP-bound:
+about 1,170 draws and 27 ms of command-processor time per frame (about 23 us per draw), 34 fps, the GPU 45 % busy.
+A `cpu-clock:u` profile with call graphs is flat; no single item passes 6 %. Every A/B below alternates the change
+on and off every 10 s inside one run. It compares CP us per draw per window with matched draws per frame.
+
+- **Probe selectors read on every draw (c0a31996e).** The vertex clip, pixel input and fragment tap probe
+  resolvers read their environment selectors on every draw: `getenv` plus its `strncmp` cost 2.2 % of the CP thread.
+  The draw paths now check once whether any selector is set and skip the resolvers otherwise; with no selector they
+  returned their disabled configs anyway. The resolvers are unchanged and their tests call them directly. A/B
+  together with the pipeline index key below: 23.41 ± 0.06 to 22.77 ± 0.06 us per draw (-2.7 %), 33.3 to 34.1 fps,
+  10 windows per arm. The lookup statistics of the same run attribute about 0.2 % of that to the index key, so the
+  selector check is worth about 2.5 %.
+- **Pipeline index key over pass and static parameters (measured, not committed).** The pipeline index hashes only
+  the shader pair, so `Find` compares every pipeline of that pair. Adding the render pass and the static parameter
+  bytes to the key cut graphics lookups from 412 to 360 ns but raised compute lookups from 298 to 371 ns (hashing
+  the parameters). What remains is hashing and pointer chasing, not the candidate walk; about 0.2 % of the CP thread.
+- **Pixel usage memo (measured, not committed).** About half of the pixel `ShaderParseUsage2` calls repeat within a
+  frame with the same program, user SGPRs and descriptor words. A memo keyed on those inputs, revalidated by
+  re-reading every descriptor word the parse read, matched production output on 536,933 hits, but saved only
+  about 1.3 % (under two standard errors): copying the 7.2 KB bind resources and the reads log costs half of what
+  the parse saves.
+- **Descriptor set misses (handed to the transient pool owner).** About 25,000 descriptor set misses per second
+  against 37,000 hits. Of those misses, 97 % combine storage buffer ids that were all seen before. A recaptured
+  snapshot key takes another key's oldest released entry, so the combinations seldom recur. Taking the key's own
+  stale entry first changed nothing (no free stale entries exist in those chains).
+- **Remaining per-draw costs (same profile, before the change).** Pixel input info 14.7 % (its parse 10.1 %),
+  pipeline lookup 4.7 % (`Find` 1.8 %, shader ids 1.9 %), guest device address preparation 3.9 %, transient
+  read-only uploads 3.4 %, descriptor binding 3.2 %, allocation 4.9 % (empty Kyty vectors allocate) and zeroing
+  2.9 % (each input info clears about 7 KB of bind resources).
+
 ## Fishing title: gray rectangles behind the first dialogue portrait (2026-10-23, checked)
 
 - **Observation.** In the first character dialogue, a tan panel behind the
