@@ -1181,11 +1181,13 @@ public:
 		// range the guest rewrites every frame keeps its buffers. Snapshots
 		// still leased by recent recordings are recycled only when the pool
 		// cannot grow.
-		bool   created = false;
-		Entry* entry   = TakeFree(m_free, usage, capture_end);
+		bool           created   = false;
+		SnapshotChain* own_chain = nullptr;
+		Entry*         entry     = TakeFree(m_free, usage, capture_end);
 		if (entry == nullptr && previous != nullptr)
 		{
-			entry = TakeStale(chain, capture_end);
+			entry     = TakeStale(chain, capture_end);
+			own_chain = entry != nullptr ? chain : nullptr;
 		}
 		if (entry == nullptr)
 		{
@@ -1219,7 +1221,7 @@ public:
 		uint64_t copy_ns              = 0u;
 		// A refused capture may already have copied part of the range, so the
 		// entry's previous snapshot is dropped first.
-		UnindexSnapshot(entry);
+		UnindexSnapshot(entry, own_chain);
 		entry->snapshot_valid    = false;
 		entry->index_range_width = 0;
 		entry->nonzero_end       = std::max(entry->nonzero_end, capture_end);
@@ -1233,6 +1235,10 @@ public:
 			{
 				DiscardNew(ctx, entry);
 			}
+			if (own_chain != nullptr && own_chain->newest == nullptr)
+			{
+				m_snapshots.erase(KeyOf(entry));
+			}
 			return nullptr;
 		}
 		*validation_ns += atomic_validation_ns;
@@ -1242,7 +1248,7 @@ public:
 		entry->snapshot_vaddr    = vaddr;
 		entry->snapshot_size     = capture_end;
 		entry->snapshot_begin    = capture_begin;
-		IndexSnapshot(entry);
+		IndexSnapshot(entry, own_chain);
 		Commit(entry, capture_end, zero_tail);
 		Lease(entry, leases);
 		finish_upload_time();
@@ -1478,9 +1484,10 @@ private:
 		return {entry->snapshot_vaddr, entry->snapshot_covering ? kCoveringKeySize : entry->snapshot_size, entry->usage};
 	}
 
-	void IndexSnapshot(Entry* entry)
+	// A given chain is the one of the entry's key.
+	void IndexSnapshot(Entry* entry, SnapshotChain* own_chain = nullptr)
 	{
-		auto& chain           = m_snapshots[KeyOf(entry)];
+		auto& chain           = own_chain != nullptr ? *own_chain : m_snapshots[KeyOf(entry)];
 		entry->snapshot_older = chain.newest;
 		entry->snapshot_newer = nullptr;
 		if (chain.newest != nullptr)
@@ -1493,16 +1500,22 @@ private:
 		chain.newest = entry;
 	}
 
-	void UnindexSnapshot(Entry* entry)
+	// A given chain is the entry's own, and the caller indexes the entry into it
+	// again; it stays in the map while empty, which keeps its tracking backoff.
+	void UnindexSnapshot(Entry* entry, SnapshotChain* own_chain = nullptr)
 	{
 		if (!entry->snapshot_valid)
 		{
 			return;
 		}
 		Untrack(entry);
-		const auto it = m_snapshots.find(KeyOf(entry));
-		EXIT_IF(it == m_snapshots.end());
-		auto& chain = it->second;
+		auto it = m_snapshots.end();
+		if (own_chain == nullptr)
+		{
+			it = m_snapshots.find(KeyOf(entry));
+			EXIT_IF(it == m_snapshots.end());
+		}
+		auto& chain = own_chain != nullptr ? *own_chain : it->second;
 		if (entry->snapshot_older != nullptr)
 		{
 			entry->snapshot_older->snapshot_newer = entry->snapshot_newer;
@@ -1519,7 +1532,7 @@ private:
 		}
 		entry->snapshot_older = nullptr;
 		entry->snapshot_newer = nullptr;
-		if (chain.newest == nullptr)
+		if (chain.newest == nullptr && own_chain == nullptr)
 		{
 			m_snapshots.erase(it);
 		}
