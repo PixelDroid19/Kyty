@@ -2024,6 +2024,9 @@ void GuestDeviceAddressOverlayWrittenBack(const GpuMemoryStorageWriteIdentity& i
 void GuestDeviceAddressFrameDone()
 {
 	g_flipped_frames.fetch_add(1, std::memory_order_relaxed);
+	// An overlay stops holding its object once it is held too long, which changes
+	// only here: the pending-storage scans that skipped that object must see it again.
+	GpuMemoryInvalidateStorageScans();
 }
 
 std::vector<GpuMemoryStorageSnapshot> GuestDeviceAddressTakeSnapshots(const std::function<bool(SubmissionId)>& complete)
