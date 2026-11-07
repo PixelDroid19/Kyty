@@ -981,6 +981,14 @@ class TransientBufferPool
 	// another buffer and half of the descriptor lookups missed.
 	static constexpr uint64_t kRetainedRecordings = 1024u;
 	static constexpr uint64_t kExpiredRecordings  = 4u * kRetainedRecordings;
+	// Past half of the pool's byte budget, retention gives way. A title that
+	// streams hundreds of MB per second through the pool would otherwise fill
+	// it, and a capture the full pool refuses falls back to a fenced upload.
+	static constexpr uint64_t kRetainedBytes = kGpuMemoryTransientBufferPoolMaxBytes * kGpuMemoryTransientSnapshotPoolRecordings / 2u;
+	// A covering capture grows only into a snapshot leased this recently (under
+	// a frame). Older ones hold another frame's windows: growing into them
+	// tripled the bytes copied per draw in a streaming title.
+	static constexpr uint64_t kUnionRecordings = 64u;
 	// Snapshot sizes are never zero, so this size marks the key of covering snapshots.
 	static constexpr uint64_t kCoveringKeySize = 0u;
 
@@ -1149,12 +1157,13 @@ public:
 				return &previous->buffer;
 			}
 		}
-		// A covering capture grows to the union with the base's latest snapshot,
-		// so the next draws of the stream find their windows in it. A union the
-		// snapshot path refuses leaves the draw with its own window.
+		// A covering capture grows to the union with the base's latest snapshot
+		// when a recent recording leased it, so the next draws of the stream find
+		// their windows in it. A union the snapshot path refuses leaves the draw
+		// with its own window.
 		uint64_t capture_begin = read_begin;
 		uint64_t capture_end   = size;
-		if (covering && chain != nullptr)
+		if (covering && chain != nullptr && chain->newest->lease_generation + kUnionRecordings > m_lease_generation)
 		{
 			const uint64_t union_begin = std::min(capture_begin, chain->newest->snapshot_begin);
 			const uint64_t union_end   = std::max(capture_end, chain->newest->snapshot_size);
@@ -1732,11 +1741,14 @@ private:
 		return nullptr;
 	}
 
-	// The fitting free snapshot released longest ago, unless a recent recording leased it.
+	// The fitting free snapshot released longest ago, unless a recent recording
+	// leased it and the pool holds less than its retained bytes.
 	Entry* TakeAged(uint32_t usage, uint64_t size)
 	{
-		auto* entry = TakeFreeSnapshot(usage, size);
-		return entry != nullptr && entry->lease_generation + kRetainedRecordings <= m_lease_generation ? entry : nullptr;
+		auto*      entry = TakeFreeSnapshot(usage, size);
+		const bool aged =
+		    entry != nullptr && (entry->lease_generation + kRetainedRecordings <= m_lease_generation || m_total_bytes >= kRetainedBytes);
+		return aged ? entry : nullptr;
 	}
 
 	bool CanCreate(uint64_t size, uint32_t usage, GpuMemoryTransientBufferAllocationClass allocation_class)
