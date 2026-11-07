@@ -11,7 +11,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 `PPSA09076 - DREDGE`, first-gameplay route, Intel Arc A770, ANV Mesa 26.2.5, 60 fps limit. The dock is CP-bound:
 about 1,170 draws and 27 ms of command-processor time per frame (about 23 us per draw), 34 fps, the GPU 45 % busy.
 A `cpu-clock:u` profile with call graphs is flat; no single item passes 6 %. Every A/B below alternates the change
-on and off every 10 s inside one run. It compares CP us per draw per window with matched draws per frame.
+on and off every 10 s inside one run. It compares CP us per draw per window with matched draws per frame. The three
+commits below cut about 7 % of CP time per draw, each measured on its own.
 
 - **Probe selectors read on every draw (c0a31996e).** The vertex clip, pixel input and fragment tap probe
   resolvers read their environment selectors on every draw: `getenv` plus its `strncmp` cost 2.2 % of the CP thread.
@@ -20,6 +21,16 @@ on and off every 10 s inside one run. It compares CP us per draw per window with
   together with the pipeline index key below: 23.41 ± 0.06 to 22.77 ± 0.06 us per draw (-2.7 %), 33.3 to 34.1 fps,
   10 windows per arm. The lookup statistics of the same run attribute about 0.2 % of that to the index key, so the
   selector check is worth about 2.5 %.
+- **Per-draw allocations of input infos and pipeline parameters (321f64f2f).** A Kyty `Vector` allocates even when
+  empty, so every vertex input info and every heap copy of the pipeline parameters allocates and clears memory on
+  each draw. The draw paths now build the geometry-pass input info only for a geometry pass. Pipeline creation keeps
+  the lookup parameters on the stack and copies them to the heap only on a miss. A/B: 23.59 ± 0.14 to
+  22.92 ± 0.13 us per draw (-2.8 %), 33.0 to 33.9 fps. That is more than the profile share of the removed calls.
+- **Pixel input info reset (7fa9b12d2).** `ShaderGetInputInfoPS` began with `*ps_info = {}`, which builds, copies and
+  frees a whole temporary input info. Both draw paths now value-initialize a fresh one and the reset is gone. The
+  first A/B ran with load on the host: six of its 20 windows were 1 to 6 us slower, in both arms, and the means
+  showed no difference. In its clean windows the change was about 0.3 us faster. A repeat on a quiet host:
+  23.85 ± 0.17 to 23.41 ± 0.15 us per draw (-1.8 %), median -0.40 us, 8 of 10 adjacent window pairs faster.
 - **Pipeline index key over pass and static parameters (measured, not committed).** The pipeline index hashes only
   the shader pair, so `Find` compares every pipeline of that pair. Adding the render pass and the static parameter
   bytes to the key cut graphics lookups from 412 to 360 ns but raised compute lookups from 298 to 371 ns (hashing
@@ -36,7 +47,7 @@ on and off every 10 s inside one run. It compares CP us per draw per window with
 - **Remaining per-draw costs (same profile, before the change).** Pixel input info 14.7 % (its parse 10.1 %),
   pipeline lookup 4.7 % (`Find` 1.8 %, shader ids 1.9 %), guest device address preparation 3.9 %, transient
   read-only uploads 3.4 %, descriptor binding 3.2 %, allocation 4.9 % (empty Kyty vectors allocate) and zeroing
-  2.9 % (each input info clears about 7 KB of bind resources).
+  2.9 % (each input info clears about 7 KB of bind resources). The two commits above remove part of the last two.
 
 ## Fishing title: gray rectangles behind the first dialogue portrait (2026-10-23, checked)
 
