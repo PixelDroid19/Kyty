@@ -48,6 +48,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <set>
 #include <utility>
 
@@ -1964,7 +1965,8 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 		return;
 	}
 	// A geometry pass runs the guest program; the host vertex stage draws its output.
-	ShaderVertexInputInfo geometry_front;
+	// Built only for a geometry pass: an input info zeroes several kilobytes and allocates.
+	std::optional<ShaderVertexInputInfo> geometry_front;
 	if (geometry_pass)
 	{
 		geometry_front = MakeGeometryFrontInput(vs_input_info);
@@ -2003,7 +2005,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	ValidatePixelProbeSelection(sh_ctx->GetPs(), ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
 	GuestDeviceAddressTable device_address_table {};
 	int32_t vertex_offset = 0;
-	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), geometry_pass ? geometry_front : vs_input_info, &vertex_offset,
+	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), geometry_pass ? *geometry_front : vs_input_info, &vertex_offset,
 	                               vertex_offset_add))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indexed vertex offset is outside int32 range; draw skipped\n");
@@ -2030,7 +2032,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	const VertexStreamDrawRange draw_range {vertex_requirement.first, vertex_requirement.records, true, first_instance, instance_count};
 	const bool                  draw_range_known = indirect == nullptr && index_snapshot != nullptr && vertex_requirement.valid;
 	if (!PrepareVertexStreamsForRead(buffer, vs_input_info, draw_range_known ? &draw_range : nullptr, pending_submission) ||
-	    PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front.bind : vs_input_info.bind, &ps_input_info.bind,
+	    PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front->bind : vs_input_info.bind, &ps_input_info.bind,
 	                                     &device_address_table, pending_submission) != GuestDeviceAddressReadPreparation::Ready)
 	{
 		return;
@@ -2076,7 +2078,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	// pull stage then draws the output records without an index buffer.
 	if (geometry_pass)
 	{
-		RecordGeometryPass(submit_id, buffer, *ctx, *sh_ctx, &geometry_front, geometry_plan, vertex_offset, first_instance,
+		RecordGeometryPass(submit_id, buffer, *ctx, *sh_ctx, &*geometry_front, geometry_plan, vertex_offset, first_instance,
 		                   &device_address_table, &vs_input_info, reinterpret_cast<uint64_t>(index_addr), pending_submission);
 		if (pending_submission->sequence != 0)
 		{
@@ -3243,7 +3245,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		return;
 	}
 	// A geometry pass runs the guest program; the host vertex stage draws its output.
-	ShaderVertexInputInfo geometry_front;
+	// Built only for a geometry pass: an input info zeroes several kilobytes and allocates.
+	std::optional<ShaderVertexInputInfo> geometry_front;
 	if (geometry_pass)
 	{
 		geometry_front = MakeGeometryFrontInput(vs_input_info);
@@ -3282,7 +3285,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	ValidatePixelProbeSelection(pixel_shader_info, shader_regs, &vs_input_info, &ps_input_info);
 	GuestDeviceAddressTable device_address_table {};
 	if (!PrepareVertexStreamsForRead(buffer, vs_input_info, nullptr, pending_submission) ||
-	    PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front.bind : vs_input_info.bind, &ps_input_info.bind,
+	    PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front->bind : vs_input_info.bind, &ps_input_info.bind,
 	                                     &device_address_table, pending_submission) != GuestDeviceAddressReadPreparation::Ready)
 	{
 		return;
@@ -3327,7 +3330,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	// vertex of an indexed one; batches sharing one vertex buffer depend on it.
 	// An indirect draw adds its start vertex the same way.
 	int32_t resolved_first_vertex = 0;
-	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), geometry_pass ? geometry_front : vs_input_info, &resolved_first_vertex,
+	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), geometry_pass ? *geometry_front : vs_input_info, &resolved_first_vertex,
 	                               vertex_offset_add))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: auto-draw vertex offset is outside int32 range; draw skipped\n");
@@ -3335,7 +3338,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	}
 	if (geometry_pass)
 	{
-		RecordGeometryPass(submit_id, buffer, *ctx, *sh_ctx, &geometry_front, geometry_plan, resolved_first_vertex, first_instance,
+		RecordGeometryPass(submit_id, buffer, *ctx, *sh_ctx, &*geometry_front, geometry_plan, resolved_first_vertex, first_instance,
 		                   &device_address_table, &vs_input_info, 0u, pending_submission);
 		if (pending_submission->sequence != 0)
 		{

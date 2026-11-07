@@ -1723,8 +1723,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	p.render_pass    = framebuffer->compatibility;
 	p.ps_shader_id   = ps_id;
 	p.vs_shader_id   = vs_id;
-	p.static_params  = new PipelineStaticParameters {};
-	p.dynamic_params = new PipelineDynamicParameters {};
+	PipelineStaticParameters  lookup_static {};
+	PipelineDynamicParameters lookup_dynamic {};
+	p.static_params  = &lookup_static;
+	p.dynamic_params = &lookup_dynamic;
 
 	p.dynamic_params->vk_dynamic_state_line_width           = true;
 	p.dynamic_params->vk_dynamic_state_stencil_compare_mask = true;
@@ -1893,13 +1895,14 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 
 	if (found != nullptr)
 	{
-		*found->dynamic_params = *p.dynamic_params;
-		delete p.static_params;
-		delete p.dynamic_params;
+		*found->dynamic_params = lookup_dynamic;
 		AttachPipelineLease(recording_buffer, *found);
 		SaveDriverCacheIfDue();
 		return found->pipeline;
 	}
+	// A stored pipeline owns its parameters; only a miss needs heap copies.
+	p.static_params  = new PipelineStaticParameters(lookup_static);
+	p.dynamic_params = new PipelineDynamicParameters(lookup_dynamic);
 
 	const auto miss_start = DebugStatsClock::now();
 	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
@@ -2079,8 +2082,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	Pipeline p {};
 	p.cs_shader_id   = cs_id;
-	p.static_params  = new PipelineStaticParameters {};
-	p.dynamic_params = new PipelineDynamicParameters {};
+	PipelineStaticParameters  lookup_static {};
+	PipelineDynamicParameters lookup_dynamic {};
+	p.static_params  = &lookup_static;
+	p.dynamic_params = &lookup_dynamic;
 
 	p.dynamic_params->vk_dynamic_state_line_width           = true;
 	p.dynamic_params->vk_dynamic_state_stencil_compare_mask = true;
@@ -2095,13 +2100,14 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	if (found != nullptr)
 	{
-		*found->dynamic_params = *p.dynamic_params;
-		delete p.static_params;
-		delete p.dynamic_params;
+		*found->dynamic_params = lookup_dynamic;
 		AttachPipelineLease(recording_buffer, *found);
 		SaveDriverCacheIfDue();
 		return found->pipeline;
 	}
+	// A stored pipeline owns its parameters; only a miss needs heap copies.
+	p.static_params  = new PipelineStaticParameters(lookup_static);
+	p.dynamic_params = new PipelineDynamicParameters(lookup_dynamic);
 
 	const auto miss_start = DebugStatsClock::now();
 	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
