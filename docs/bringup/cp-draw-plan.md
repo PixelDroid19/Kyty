@@ -154,6 +154,21 @@ buffers without allocating a set or hashing anything.
   - Its cost is unchanged: a translator bump, one push set shared by VS and PS, the write-mask
     binding (missing from the list above), and the tests that pin binding numbers.
   - Stage 1 stays parked until stage 3 needs stable image sets.
+- **Excluded on Intel Arc (2026-11-07, PPSA09076 - DREDGE dock, 40-120 s).** A narrower
+  variant, with no translator change, created the whole vertex-stage set as a push set and pushed
+  it on every draw instead of looking it up. It needed at most 10 descriptors, well under the
+  guaranteed 32.
+  - Result: 32.30 us per draw and 24.4 fps, against 21.99 us and 34.5 fps without it. Descriptor
+    finalization rose from 2.71 to 11.68 us per draw.
+  - A DWARF call-graph profile of the command-processor thread puts 34 % of its samples in a
+    `memmove`. It sits under four frames of the Intel Vulkan driver (Mesa 26.2.5), called from
+    `vkCmdPushDescriptorSet`.
+  - Each push therefore costs about 9 us on this driver, more than the cache lookup it replaces
+    (478 ns per hit, 2537 ns per miss). Stage 1 as written pays the same per-push cost, so it does not
+    pay on this driver.
+  - Still unmeasured on this driver: dynamic offsets (sub-allocated snapshot buffers bound as
+    `*_BUFFER_DYNAMIC`, so a set's identity no longer depends on the entry) and
+    `VK_EXT_descriptor_buffer`.
 
 ### Stage 2: resource recipe per shader (replaces per-draw `ShaderParseUsage2`)
 

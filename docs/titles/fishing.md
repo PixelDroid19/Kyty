@@ -89,6 +89,15 @@ commits below cut about 11 % of CP time per draw, each measured on its own.
   - With the GPU 45 % busy and a 60 fps cap, the title can gain up to about 74 %, which needs about half the
     command-processor time per draw. No single subtree holds that: it takes the three largest ones together, or
     recording draws off the single command-processor thread.
+- **Excluded: push descriptors for the vertex-stage set.**
+  - Sizing (diagnostic build): vertex lookups 1141 per frame, 31.5 % misses, 478 ns per hit and 2537 ns per miss,
+    1.28 ms per frame; pixel lookups 1.38 ms per frame. No set holds more than 23 descriptors, within the 32 that
+    Vulkan 1.4 guarantees for a push set.
+  - Pushing the vertex set instead of looking it up (one run, 40-120 s): 32.30 us per draw and 24.4 fps against
+    21.99 and 34.5. Descriptor finalization rose from 2.71 to 11.68 us per draw.
+  - A call-graph profile puts 34 % of the command-processor thread in a `memmove` inside the Intel Vulkan driver
+    (Mesa 26.2.5), called from `vkCmdPushDescriptorSet`. The cost is in the driver, so push descriptors do not pay
+    on this driver.
 
 ## Fishing title: gray rectangles behind the first dialogue portrait (2026-10-23, checked)
 
