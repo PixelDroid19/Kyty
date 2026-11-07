@@ -78,6 +78,17 @@ commits below cut about 11 % of CP time per draw, each measured on its own.
   - Sets are keyed by buffer identity, so rotating snapshot entries keep producing new combinations. Pool
     retention cannot remove them; buffer binding that does not depend on the buffer's identity can.
   - The command-processor thread spends 6.5-6.8 % of its time in the kernel, so submissions are not the cost.
+- **Where the command-processor thread spends its time (diagnostic build, 40-120 s).**
+  - Timers at the batch loop's call sites: command processing 26.0 ms per frame (88 %), waiting for the next guest
+    batch 2.0 ms (6.7 %), the batch-end flush 1.3 ms (4.5 %). Suspended-run and submission-completion waits are
+    zero. Blocking outside command processing is not a lever.
+  - Inclusive profile shares on the build above: snapshot capture 13.4 %, pixel input info 13.6 % (its usage
+    parse 10.6 %), descriptor lookup 11.7 %, pipeline lookup 6.7 %, GPU object lookup 7.5 %. Allocator and memset
+    leaves total 12 %, spread over many callers; the empty-vector change above removed the default-constructed
+    ones without a gain.
+  - With the GPU 45 % busy and a 60 fps cap, the title can gain up to about 74 %, which needs about half the
+    command-processor time per draw. No single subtree holds that: it takes the three largest ones together, or
+    recording draws off the single command-processor thread.
 
 ## Fishing title: gray rectangles behind the first dialogue portrait (2026-10-23, checked)
 
