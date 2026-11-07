@@ -11,8 +11,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 `PPSA09076 - DREDGE`, first-gameplay route, Intel Arc A770, ANV Mesa 26.2.5, 60 fps limit. The dock is CP-bound:
 about 1,170 draws and 27 ms of command-processor time per frame (about 23 us per draw), 34 fps, the GPU 45 % busy.
 A `cpu-clock:u` profile with call graphs is flat; no single item passes 6 %. Every A/B below alternates the change
-on and off every 10 s inside one run. It compares CP us per draw per window with matched draws per frame. The three
-commits below cut about 7 % of CP time per draw, each measured on its own.
+on and off every 10 s inside one run. It compares CP us per draw per window with matched draws per frame. The four
+commits below cut about 11 % of CP time per draw, each measured on its own.
 
 - **Probe selectors read on every draw (c0a31996e).** The vertex clip, pixel input and fragment tap probe
   resolvers read their environment selectors on every draw: `getenv` plus its `strncmp` cost 2.2 % of the CP thread.
@@ -40,10 +40,16 @@ commits below cut about 7 % of CP time per draw, each measured on its own.
   re-reading every descriptor word the parse read, matched production output on 536,933 hits, but saved only
   about 1.3 % (under two standard errors): copying the 7.2 KB bind resources and the reads log costs half of what
   the parse saves.
-- **Descriptor set misses (handed to the transient pool owner).** About 25,000 descriptor set misses per second
-  against 37,000 hits. Of those misses, 97 % combine storage buffer ids that were all seen before. A recaptured
-  snapshot key takes another key's oldest released entry, so the combinations seldom recur. Taking the key's own
-  stale entry first changed nothing (no free stale entries exist in those chains).
+- **Snapshot retention (19a56a245).** About 25,000 descriptor set misses per second against 37,000 hits; 97 % of
+  the misses combine storage buffer ids that were all seen before. Most snapshot keys return 256 to 512 recordings
+  after their last capture (about 76 recordings per frame), and 37 % of those returning captures hold the same
+  bytes. Entries were recycled after 64 recordings, so no key found its snapshot or its stale entry again: each
+  recapture took another key's oldest buffer and the combinations seldom recurred. That is also why taking the
+  key's own stale entry first changed nothing. Snapshots now stay for 1024 recordings. A/B, steady windows:
+  25.08 ± 0.21 to 23.92 ± 0.20 us per draw (-4.6 %), 14 of 17 adjacent window pairs faster, 34.7 to 35.6 fps,
+  descriptor set misses 50 % to 40 %, snapshot pool peak 118 to 215 MB. The gain is specific to this title:
+  `PPSA28311 - Absolum` keeps 31 % misses with a pool under 1 MB, and `PPSA21567 - Astro Bot` keeps 70 % misses
+  with about 27,000 pool entries instead of 6,000 at the same 265 MB peak.
 - **Remaining per-draw costs (same profile, before the change).** Pixel input info 14.7 % (its parse 10.1 %),
   pipeline lookup 4.7 % (`Find` 1.8 %, shader ids 1.9 %), guest device address preparation 3.9 %, transient
   read-only uploads 3.4 %, descriptor binding 3.2 %, allocation 4.9 % (empty Kyty vectors allocate) and zeroing
