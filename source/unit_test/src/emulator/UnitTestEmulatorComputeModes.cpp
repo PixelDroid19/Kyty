@@ -101,7 +101,7 @@ ShaderPixelInputInfo PixelInputFromRegisters(const HW::PixelShaderInfo& regs)
 	const ScopedGeneration legacy(false);
 	HW::ShaderRegisters    sh;
 	ShaderVertexInputInfo  vs_info;
-	ShaderPixelInputInfo   info;
+	ShaderPixelInputInfo   info {};
 	ShaderGetInputInfoPS(&regs, &sh, &vs_info, 0xffffffffu, &info, false);
 	return info;
 }

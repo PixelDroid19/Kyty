@@ -2892,6 +2892,8 @@ ShaderStorageUsage    ShaderGetDirectStorageUsage(const ShaderCode& code, int st
 bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type);
 void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
                                           const GraphicsGeRawRegister* shader_stages = nullptr);
+// Fills a value-initialized ps_info ({}): callers build a fresh one per draw, and
+// resetting it again builds and frees a whole temporary input info.
 void             ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
                                       uint32_t cb_target_mask, ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
 void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, uint32_t dispatch_mode,

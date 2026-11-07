@@ -4498,7 +4498,6 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	EXIT_IF(regs == nullptr);
 	EXIT_IF(sh == nullptr);
 
-	*ps_info = {};
 	ps_info->float_mode = regs->ps_regs.rsrc1.float_mode;
 	ps_info->dx10_clamp = regs->ps_regs.rsrc1.dx10_clamp;
 	ps_info->ieee_mode  = regs->ps_regs.rsrc1.ieee_mode;
