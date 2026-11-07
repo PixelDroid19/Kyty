@@ -994,11 +994,12 @@ inline bool GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType parent_ty
 
 // True when a parent's write-back refresh reads the guest bytes the write-back
 // publishes, so it must run before the parent's next use. A skipped parent is
-// not refreshed, and a skip-guest Texture (TextureObject::PARAM_SKIP_GUEST_UPLOAD
-// = 8) refreshes to transparent black or from the device, never from guest bytes.
+// not refreshed, a skip-guest Texture (TextureObject::PARAM_SKIP_GUEST_UPLOAD
+// = 8) refreshes to transparent black or from the device, and a depth target
+// keeps no guest hash and has no upload, so neither reads guest bytes.
 inline bool GpuMemoryWriteBackRefreshReadsGuestBytes(GpuMemoryObjectType parent_type, const uint64_t* parent_params)
 {
-	if (GpuMemorySkipWriteBackParentInvalidate(parent_type, parent_params))
+	if (GpuMemorySkipWriteBackParentInvalidate(parent_type, parent_params) || parent_type == GpuMemoryObjectType::DepthStencilBuffer)
 	{
 		return false;
 	}

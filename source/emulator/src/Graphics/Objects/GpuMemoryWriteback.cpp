@@ -292,8 +292,8 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	// Invalidate or propagate each parent according to its relation.
 	// GPU-owned tiled RTs cannot be reconstructed from guest bytes.
 	// Linked DepthStencilBuffer parents of a pending StorageBuffer use the same
-	// walk: non-Equals relations zero hash/submit_id so the next depth bind
-	// reloads from the published guest bytes after this write-back.
+	// walk for their metadata only: a depth target keeps no guest hash and has
+	// no upload, so its image is never reloaded from guest bytes.
 	for (uint32_t oi = 0; oi < h.others.Size(); oi++)
 	{
 		const auto& other  = h.others.At(static_cast<int>(oi));
