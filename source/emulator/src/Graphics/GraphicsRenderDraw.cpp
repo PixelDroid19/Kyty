@@ -176,6 +176,25 @@ uint32_t ResolveVertexClipProbeDescriptorSet(const ShaderVertexInputInfo& vs_inp
 	return descriptor_set;
 }
 
+// The probe selectors are launch-time diagnostic variables. Without one, every
+// resolver returns its disabled config, so draws skip their getenv scans.
+bool DrawProbeSelectorSet()
+{
+	static const bool set = []
+	{
+		for (const char* name: {"KYTY_VS_CLIP_PROBE", "KYTY_FS_TAP", "KYTY_PS_INPUT0_PROBE", "KYTY_PS_SAMPLE_PROBE", "KYTY_PS_MRT_PROBE"})
+		{
+			const char* value = std::getenv(name);
+			if (value != nullptr && value[0] != '\0')
+			{
+				return true;
+			}
+		}
+		return false;
+	}();
+	return set;
+}
+
 void ValidatePixelProbeSelection(const HW::PixelShaderInfo& pixel_shader_info, const HW::ShaderRegisters& shader_regs,
 	                              ShaderVertexInputInfo* vs_input_info, ShaderPixelInputInfo* ps_input_info)
 {
@@ -1935,7 +1954,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	                          {index_count, true, index_type_and_size, first_instance, instance_count,
 	                           reinterpret_cast<uint64_t>(index_addr), vertex_offset_add, draw_modifier});
 	// Probes select draws by their guest count, which only the device knows for an indirect record.
-	if (indirect == nullptr && ShaderVertexClipProbeEligible(Config::IsNextGen(), sh_ctx->GetVs().vs_embedded))
+	if (indirect == nullptr && DrawProbeSelectorSet() && ShaderVertexClipProbeEligible(Config::IsNextGen(), sh_ctx->GetVs().vs_embedded))
 	{
 		vs_input_info.clip_probe = ShaderResolveVertexClipProbeConfig(sh_ctx->GetVs().gs_regs.chksum, true, index_count);
 	}
@@ -1972,11 +1991,11 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info, !ps_required);
-	if (indirect == nullptr)
+	if (indirect == nullptr && DrawProbeSelectorSet())
 	{
 		ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count);
 	}
-	if (indirect == nullptr && ShaderPixelInput0ProbeEligible(Config::IsNextGen(), sh_ctx->GetPs().ps_embedded))
+	if (indirect == nullptr && DrawProbeSelectorSet() && ShaderPixelInput0ProbeEligible(Config::IsNextGen(), sh_ctx->GetPs().ps_embedded))
 	{
 		ps_input_info.input0_probe =
 		    ShaderResolvePixelProbeConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count, ps_input_info.stage_enabled);
@@ -3214,7 +3233,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	ShaderGetInputInfoVS(&vertex_shader_info, &shader_regs, &vs_input_info, &ctx->GetShaderStagesRaw());
 	MaybeReportNativeWaveInput(*ctx, *ucfg, *sh_ctx, vs_input_info,
 	                          {index_count, false, std::nullopt, 0u, instance_count, std::nullopt, std::nullopt, draw_modifier});
-	if (ShaderVertexClipProbeEligible(Config::IsNextGen(), vertex_shader_info.vs_embedded))
+	if (DrawProbeSelectorSet() && ShaderVertexClipProbeEligible(Config::IsNextGen(), vertex_shader_info.vs_embedded))
 	{
 		vs_input_info.clip_probe = ShaderResolveVertexClipProbeConfig(vertex_shader_info.gs_regs.chksum, false, index_count);
 	}
@@ -3251,8 +3270,11 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	ShaderPixelInputInfo ps_input_info;
 	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info, !ps_required);
-	ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(pixel_shader_info.ps_regs.chksum, false, index_count);
-	if (ShaderPixelInput0ProbeEligible(Config::IsNextGen(), pixel_shader_info.ps_embedded))
+	if (DrawProbeSelectorSet())
+	{
+		ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(pixel_shader_info.ps_regs.chksum, false, index_count);
+	}
+	if (DrawProbeSelectorSet() && ShaderPixelInput0ProbeEligible(Config::IsNextGen(), pixel_shader_info.ps_embedded))
 	{
 		ps_input_info.input0_probe = ShaderResolvePixelProbeConfig(pixel_shader_info.ps_regs.chksum, false, index_count,
 		                                                          ps_input_info.stage_enabled);
