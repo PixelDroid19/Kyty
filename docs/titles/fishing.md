@@ -50,6 +50,12 @@ commits below cut about 11 % of CP time per draw, each measured on its own.
   descriptor set misses 50 % to 40 %, snapshot pool peak 118 to 215 MB. The gain is specific to this title:
   `PPSA28311 - Absolum` keeps 31 % misses with a pool under 1 MB, and `PPSA21567 - Astro Bot` keeps 70 % misses
   with about 27,000 pool entries instead of 6,000 at the same 265 MB peak.
+- **Retention side effects (967d9ce88).** With chains surviving across frames, covering captures grew into another
+  frame's windows: `PPSA21567 - Astro Bot` copied 35 KB per draw instead of 11 KB and spent 141 instead of 129 us
+  of CP per draw on its scripted route (12.2 instead of 13.7 fps). Unions now take only a snapshot leased in the
+  last 64 recordings: 130 us per draw, 13.7 fps. Past 256 MB (half the pool budget) an aged take ignores the
+  retention, so a title streaming hundreds of MB per second does not fill the pool. This title afterwards: 21.6 us
+  per draw at 35.2 fps on the dock (1,130 to 1,220 draws per frame).
 - **Remaining per-draw costs (same profile, before the change).** Pixel input info 14.7 % (its parse 10.1 %),
   pipeline lookup 4.7 % (`Find` 1.8 %, shader ids 1.9 %), guest device address preparation 3.9 %, transient
   read-only uploads 3.4 %, descriptor binding 3.2 %, allocation 4.9 % (empty Kyty vectors allocate) and zeroing
