@@ -4626,7 +4626,7 @@ Every A/B below alternates the change on and off every 10 s inside one run and c
   guard did not. A run on another branch hit it too, so it may predate this change. The static suspect is the
   device-address read preparation (`GuestDeviceAddressWriteBack` → `WriteBackStorageRanges`), which writes back any
   collected storage with incomplete uses that is neither in place nor held by an overlay. Not confirmed with a
-  backtrace.
+  backtrace. Fixed on 2026-11-07, see "Pending-storage scans missed overlays that aged out".
 - **Unrelated stop seen once.** "unknown relation: DepthStencilBuffer - Contains - RenderTexture" also occurs on
   builds without this change.
 
@@ -4715,3 +4715,49 @@ limit, 170-300 s after launch.
   - In the dunes the frame is bound by the GPU programs `0x3666fa39` and `0x874bd13f`.
   - 0.95 `DRAW_INDEX_INDIRECT` records per frame are declined on the device and read on the host after a full
     drain.
+
+## Pending-storage scans missed overlays that aged out (2026-11-07, fixed)
+
+`PPSA21567 - Astro Bot`, boot and the recorded user gameplay route, Intel Arc A770, ANV Mesa 26.2.5, xe.
+
+- **Observed.** 5 of 13 runs on this branch stopped 6-12 s after launch with "GpuMemory write-back requested before
+  exact resource dependencies completed". The rate rose after the depth-target record above, because its host waits
+  had been completing pending storage before the stop could occur.
+- **Cause** (temporary backtrace and object dump, removed). The stack was `DrawIndexIndirect` →
+  `RecordIndexedDraw` → `PrepareGuestDeviceAddressForRead` → `GuestDeviceAddressWriteBack` →
+  `WriteBackStorageRanges` → `WriteBackObjectLocked`. The object was an 8-byte storage buffer with no alias and one
+  incomplete use on the consumer's own queue. Its overlay was for the same write but had been held too long
+  (`OverlayHeldTooLong`).
+  - An earlier pending scan (`PendingStorageWriteBack`) had skipped the object while its overlay still held, and
+    memoized "nothing pending" for the scan generation.
+  - A frame flip then aged the overlay, but nothing changed the scan generation. The next pending scan took the
+    memo path, which only revisits objects recorded as changed, and never looked at the object.
+  - `WriteBackStorageRanges` keeps its own memo, which also ends at a completion, so it scanned everything. It found
+    the object no longer held by its overlay and wrote it back before its use completed.
+- **Fix** (`GuestDeviceAddressFrameDone`). A frame flip invalidates the storage scans. An overlay's hold only expires
+  at a flip, so the next pending scan sees the object again. It then waits for the host, as designed for a result
+  that cannot be published. The cost is one full scan per frame per consumer queue.
+- **Result.**
+  - 0 of 7 counter-build runs stopped: one full route of 330 s and six boots of 45 s.
+  - Product build, 170-300 s: 17.2 fps, 116.6 us per draw, GPU 85.5 % busy, against 17.0 fps, 114.0 us and 85.9 %
+    before. The captures at 170 and 300 s render correctly.
+  - `PPSA09076 - DREDGE`, generic route, 40-120 s: 20.08 to 19.96 us per draw, 35.9 to 36.0 fps, picture correct.
+  - `PPSA28311 - Absolum`, generic route, 80-120 s: 56.2 fps against 59.4. The 10 s windows read 53.7-60.1 fps, but
+    the per-draw costs are unchanged: draw processing 25-26 us, device-address preparation 0.68 against 0.67 us,
+    write-back 2.92 against 2.83 us. GPU work is 15.1 ms per frame in both runs, so the spread is host noise at the
+    60 fps limit. Picture correct.
+  - All 108 tests pass, one skipped as before.
+- **Excluded: a device path for geometry-pass indirect draws.** In the dunes 3052 `DRAW_INDEX_INDIRECT` records
+  declined the device path from 150 to 322 s, against 2344 that took it. 99.9 % of the declines need the geometry
+  compute pass, whose counts sit in push constants. A one-run ceiling read their arguments from guest memory without
+  the drain (temporary switch, removed). Over 158-178 s, with 554 draws per frame in both runs:
+
+| Per frame | Drain | No drain (ceiling) |
+| --- | --- | --- |
+| Frame rate | 15.41 fps | 15.62 fps |
+| GPU busy | 77.2 % | 78.3 % |
+| GPU work | 50.1 ms | 50.2 ms |
+| Fence waits | 10.7 | 7.9 |
+
+  The waits move to other fences and the frame follows GPU work, so the device path would gain about 1 %. The ceiling
+  run stopped at 180 s on "!create_all_the_same" for a storage texture, which is expected when draws use stale counts.
