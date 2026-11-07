@@ -98,6 +98,16 @@ commits below cut about 11 % of CP time per draw, each measured on its own.
   - A call-graph profile puts 34 % of the command-processor thread in a `memmove` inside the Intel Vulkan driver
     (Mesa 26.2.5), called from `vkCmdPushDescriptorSet`. The cost is in the driver, so push descriptors do not pay
     on this driver.
+- **Own-chain relink of a recaptured stale snapshot (5e80abc9e).** A capture that recycles its key's own stale
+  entry erased the key's chain from the snapshot map when the chain emptied, then inserted it again. The entry is now
+  unlinked and relinked in the chain it already holds, and a single-snapshot chain keeps its write-tracking backoff.
+  One run against the 21.99 us run above: 22.04 us per draw (within run noise), transient uploads -12 %, storage
+  descriptors -4 %. Its 33.5 fps include one 1.9 s swapchain acquire stall; without that second, 33.7 fps.
+- **Per-function work on this title is done.** The profile above stays flat after these changes: no subtree holds
+  more than about 14 % of the command-processor thread, and the last single-function changes moved it by less than
+  run noise. The remaining gain (up to about 74 % at 45 % GPU load) needs about half the CP time per draw, which only
+  descriptor binding that does not depend on buffer identity or recording draws off the single command-processor
+  thread can reach (`docs/bringup/cp-draw-plan.md`).
 
 ## Fishing title: gray rectangles behind the first dialogue portrait (2026-10-23, checked)
 
