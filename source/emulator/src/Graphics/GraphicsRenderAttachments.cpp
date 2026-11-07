@@ -43,6 +43,7 @@
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
+#include <array>
 #include <cinttypes>
 #include <cmath>
 #include <cstdlib>
@@ -58,6 +59,76 @@ namespace Kyty::Libs::Graphics {
 static ComputeColorFillEvents g_compute_color_fills;
 // Pending DCC and CMASK metadata clears, keyed by the metadata range the guest filled.
 static ComputeColorFillEvents g_color_meta_clears;
+
+// The last uniform fill transfer of an in-place storage range. Its guest bytes live in
+// host memory, which the device writes over the bus at a few tens of GB/s, so a
+// render-target clear repeated every frame costs about a millisecond per 4K target.
+// A repeat of the same word is a no-op while no writer has touched the bytes since:
+// the storage object kept its identity and only the fill's own dispatch wrote it, no
+// other storage bind or device-address publication covered the range, no writable
+// image was bound, and the CPU did not write it.
+struct InPlaceFill
+{
+	uint64_t                address            = 0;
+	uint64_t                size               = 0;
+	uint32_t                word               = 0;
+	int                     queue              = -1;
+	int                     heap_id            = -1;
+	int                     object_id          = -1;
+	uint64_t                logical_generation = 0;
+	uint64_t                write_uses         = 0;
+	const VulkanBuffer*     buffer             = nullptr;
+	GpuDirtyReadObservation cpu_observation;
+	// Storage binds over the range since the fill, and the serial of the latest one.
+	uint32_t binds     = 0;
+	uint64_t last_bind = 0;
+};
+static std::array<InPlaceFill, 64> g_in_place_fills;
+// Slots are taken in order, so only [0, used) ever held a fill.
+static uint32_t g_in_place_fills_used  = 0;
+static uint32_t g_in_place_fill_next   = 0;
+static uint64_t g_storage_bind_serial = 0;
+
+static bool Overlaps(const InPlaceFill& fill, uint64_t address, uint64_t size)
+{
+	return fill.size != 0 && address < fill.address + fill.size && fill.address < address + size;
+}
+
+static void DiscardInPlaceFills(uint64_t address, uint64_t size)
+{
+	for (uint32_t i = 0; i < g_in_place_fills_used; ++i)
+	{
+		if (Overlaps(g_in_place_fills[i], address, size)) { g_in_place_fills[i] = {}; }
+	}
+}
+
+// Records this fill and returns whether guest memory already holds it.
+static bool RepeatsInPlaceFill(int queue, const GpuMemoryStorageWriteIdentity& identity, uint64_t address, uint64_t size, uint32_t word)
+{
+	InPlaceFill* last = nullptr;
+	for (uint32_t i = 0; i < g_in_place_fills_used; ++i)
+	{
+		auto& fill = g_in_place_fills[i];
+		if (fill.size != 0 && fill.address == address && fill.size == size) { last = &fill; }
+	}
+	// The fill's own dispatch is the latest storage bind and the only one since the last fill.
+	// A writer of another queue recorded before the last fill is ordered by the guest, whose
+	// labels complete with their submissions, as for in-place storage in the write-back scan.
+	const bool repeats = last != nullptr && last->word == word && last->queue == queue && last->heap_id == identity.heap_id &&
+	                     last->object_id == identity.object_id && last->logical_generation == identity.logical_generation &&
+	                     last->buffer == identity.buffer && last->write_uses + 1u == identity.write_uses && last->binds == 1u &&
+	                     last->last_bind == g_storage_bind_serial && last->cpu_observation.tracked &&
+	                     GpuDirtyPageTracker::Instance().ReadObservationIsStable(address, size, last->cpu_observation);
+	if (last == nullptr)
+	{
+		last                 = &g_in_place_fills[g_in_place_fill_next];
+		g_in_place_fill_next  = (g_in_place_fill_next + 1u) % g_in_place_fills.size();
+		g_in_place_fills_used = std::min<uint32_t>(g_in_place_fills_used + 1u, g_in_place_fills.size());
+	}
+	*last = {address,         size, word, queue, identity.heap_id, identity.object_id, identity.logical_generation, identity.write_uses,
+	         identity.buffer, GpuDirtyPageTracker::Instance().BeginRead(address, size)};
+	return repeats;
+}
 
 static void TransitionColorImage(VkCommandBuffer vk_buffer, VulkanImage* image, VkImageLayout new_layout, VkAccessFlags dst_access,
                                  VkPipelineStageFlags dst_stage);
@@ -219,6 +290,26 @@ static bool ApplyComputeColorFillImages(CommandBuffer* buffer, const ComputeColo
 
 void InvalidateComputeColorFills(const ShaderBindResources& bind)
 {
+	g_storage_bind_serial++;
+	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	{
+		const auto&    resource = bind.storage_buffers.buffers[i];
+		const uint64_t size     = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
+		for (uint32_t f = 0; f < g_in_place_fills_used; ++f)
+		{
+			auto& fill = g_in_place_fills[f];
+			// A range that cannot be bounded counts as covering every fill.
+			if (resource.Base48() > UINT64_MAX - size || Overlaps(fill, resource.Base48(), size))
+			{
+				fill.binds++;
+				fill.last_bind = g_storage_bind_serial;
+			}
+		}
+	}
+	for (int i = 0; i < bind.textures2D.textures_num; ++i)
+	{
+		if (bind.textures2D.desc[i].usage != ShaderTextureUsage::ReadOnly) { DiscardInPlaceFills(0u, UINT64_MAX); }
+	}
 	if (g_compute_color_fills.Empty() && g_color_meta_clears.Empty())
 	{
 		return;
@@ -381,6 +472,11 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 	const auto& words     = fill.words;
 	const bool  one_word  = std::all_of(words.begin(), words.end(), [&](uint32_t word) { return word == words[0]; });
 	const bool  fill_copy = one_word && !identity.buffer->guest_in_place;
+	if (!identity.buffer->guest_in_place)
+	{
+		// Both calls below then write guest memory.
+		DiscardInPlaceFills(fill.address, fill.size);
+	}
 	if (!(fill_copy && GuestDeviceAddressRecordFill(ctx, cmd, words[0], fill.address, fill.size)) &&
 	    !GuestDeviceAddressRecordPublication(ctx, cmd, *identity.buffer, fill.address, fill.size))
 	{
@@ -409,7 +505,10 @@ bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUnifor
 	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
-	vkCmdFillBuffer(cmd, identity.buffer->buffer, identity.buffer->guest_offset, fill.size, words[0]);
+	if (!(identity.buffer->guest_in_place && RepeatsInPlaceFill(buffer->GetQueueIndex(), identity, fill.address, fill.size, words[0])))
+	{
+		vkCmdFillBuffer(cmd, identity.buffer->buffer, identity.buffer->guest_offset, fill.size, words[0]);
+	}
 	// Flag every page as the dispatch's stores would, for the write-back.
 	vkCmdFillBuffer(cmd, identity.buffer->write_mask->buffer, 0, VK_WHOLE_SIZE, 1u);
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -433,6 +532,11 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 	EXIT_IF(!buffer->GetSubmissionId(&recording));
 	for (const auto& publication: publishable)
 	{
+		if (!publication.identity.buffer->guest_in_place)
+		{
+			// The publication copies the result over guest memory.
+			DiscardInPlaceFills(publication.vaddr, publication.size);
+		}
 		const bool recorded = GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
 		                                                          *publication.identity.buffer, publication.vaddr, publication.size);
 		if (recorded && publication.identity.buffer->guest_in_place)

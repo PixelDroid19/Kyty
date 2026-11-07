@@ -4004,8 +4004,9 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 	GraphicsOperationTraceDispatch(input_info.bind);
 	// The buffer write always happens: as the dispatch, or for a proven fill of one repeated word as a
-	// transfer fill. A proven full uniform fill additionally updates its exact color-image aliases and depth
-	// and stencil planes in this recording; partial thread groups would leave the range uncovered.
+	// transfer fill, which an in-place range already holding that fill skips. A proven full uniform fill
+	// additionally updates its exact color-image aliases and depth and stencil planes in this recording;
+	// partial thread groups would leave the range uncovered.
 	constexpr uint32_t kDispatchComputeShaderEnable = 0x01u;
 	constexpr uint32_t kDispatchPartialThreadGroups = 0x02u;
 	ComputeUniformBufferFill fill;
