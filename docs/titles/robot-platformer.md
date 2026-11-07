@@ -4742,10 +4742,10 @@ limit, 170-300 s after launch.
   - Product build, 170-300 s: 17.2 fps, 116.6 us per draw, GPU 85.5 % busy, against 17.0 fps, 114.0 us and 85.9 %
     before. The captures at 170 and 300 s render correctly.
   - `PPSA09076 - DREDGE`, generic route, 40-120 s: 20.08 to 19.96 us per draw, 35.9 to 36.0 fps, picture correct.
-  - `PPSA28311 - Absolum`, generic route, 80-120 s: 56.2 fps against 59.4. The 10 s windows read 53.7-60.1 fps, but
-    the per-draw costs are unchanged: draw processing 25-26 us, device-address preparation 0.68 against 0.67 us,
-    write-back 2.92 against 2.83 us. GPU work is 15.1 ms per frame in both runs, so the spread is host noise at the
-    60 fps limit. Picture correct.
+  - `PPSA28311 - Absolum`, generic route, 80-120 s: flips per second stay at 58-61 in every sample, before and after,
+    in two runs after. Per draw: draw processing 25-26 us, device-address preparation 0.68 against 0.67 us,
+    write-back 2.92 against 2.83 us. GPU work is 15.1 ms per frame. An earlier reading of 56.2 against 59.4 fps
+    divided by the window length when a 1 s sample fell outside the window. Picture correct.
   - All 108 tests pass, one skipped as before.
 - **Excluded: a device path for geometry-pass indirect draws.** In the dunes 3052 `DRAW_INDEX_INDIRECT` records
   declined the device path from 150 to 322 s, against 2344 that took it. 99.9 % of the declines need the geometry

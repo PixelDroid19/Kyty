@@ -6,6 +6,63 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Survival title: GPU time in repeated render-target clears (2026-11-07, fixed)
+
+- **Observed** (Intel Arc A770, Mesa 26.2.5, strict run at the 60 fps
+  present limit, generic route, 40-115 s): the menus ran at 55.9 fps with
+  the render engine 95 % busy, 17.1 ms of GPU work per frame for 43 draws.
+- **Cause.** GPU timestamps put about 89 % of that time in the transfer of
+  proven uniform fills (`RecordComputeUniformFillTransfer`): about 15 fills
+  per frame of 3840x2160 render targets, about 440 MB per frame. The
+  storage objects are in place, so their guest bytes live in imported host
+  memory and the device writes them over the bus. The title clears the
+  same targets with the same word every frame, and nothing else writes
+  those bytes in between: the targets render into their images, not into
+  guest memory.
+- **Fix** (`RepeatsInPlaceFill` in `GraphicsRenderAttachments.cpp`): the
+  last fill of each in-place range is remembered with its word, queue,
+  storage identity and a dirty page observation. A repeat skips only the
+  buffer fill, and only when:
+  - the storage object kept its identity and only the fill's own dispatch
+    wrote it;
+  - no other storage bind covered the range and no writable image was
+    bound;
+  - no device-address fill or publication wrote the range;
+  - the CPU did not write it.
+
+  Image clears, plane propagation, meta clears and the publication still
+  run, so the images and the write bookkeeping are unchanged. A writer on
+  another queue recorded before the last fill is ordered by the guest,
+  whose labels complete with their submissions, as the write-back scan
+  already assumes for in-place storage.
+- **Result** (same route and window): GPU work fell from 17.1 to 5.2 ms per
+  frame and the render engine from 95 to 31 % busy. The menus now run at
+  59.9 fps, at the present limit, against 55.9. Captures render the same
+  menus.
+- Regression, same change:
+  - `PPSA28311 - Absolum`, generic route, 80-120 s: 15.1 to 12.1 ms of GPU
+    work per frame (86 to 72 % busy); flips stay at the 60 fps limit.
+  - `PPSA09076 - DREDGE`, generic route, 40-120 s: 34.0 fps, 21.1 us per
+    draw, against 36.0 fps and 19.96 us. The title records no in-place
+    uniform fill: a counter build saw no fills and no range checks, so the
+    new code does no work there. Picture correct.
+  - `PPSA21567 - Astro Bot`, user route, 170-300 s: GPU work 41.4 against
+    49.8 ms per frame, 70 against 86 % busy, 17.0 against 17.2 fps. The
+    route reached a later scene in the same window (the dunes walk instead
+    of the landing), at 461 against 310 draws per frame, so the GPU figure
+    is indicative. The captures at 170 and 300 s render correctly.
+  - Astro stops: 2 of 4 runs with this change stopped before 150 s. One
+    stopped on `!create_all_the_same` (a 0x280000-byte storage texture),
+    the other on `unknown relation: DepthStencilBuffer - Contains -
+    RenderTexture` (a 960x540 target). A run on the same base with an
+    unrelated experiment stopped on `!create_all_the_same`. About 18 older
+    runs across builds stopped with these messages. A run that sampled
+    guest words on every skipped fill found none that differed from the
+    fill word.
+  - All 108 tests pass, one skipped as before.
+- Open: in the world, day one ran at 11.8 fps at 3840x2160 before this
+  change; it has no named route yet, so it is not measured.
+
 ## Survival title: boot stop on a native display with a depth-only pass (2026-10-27, fixed)
 
 - **Observed** (Intel Arc A770, Mesa 26.2.5, strict run at the 60 fps
