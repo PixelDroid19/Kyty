@@ -60,6 +60,24 @@ commits below cut about 11 % of CP time per draw, each measured on its own.
   pipeline lookup 4.7 % (`Find` 1.8 %, shader ids 1.9 %), guest device address preparation 3.9 %, transient
   read-only uploads 3.4 %, descriptor binding 3.2 %, allocation 4.9 % (empty Kyty vectors allocate) and zeroing
   2.9 % (each input info clears about 7 KB of bind resources). The two commits above remove part of the last two.
+- **Measured and excluded (2026-11-07).** A run on the build above, on the same day as the runs below, gave 21.99 us
+  per draw and 34.5 fps. Single runs vary by about 2 %. Each change got one run:
+  - An exact memo of the pixel usage parse: 23.2 us per draw.
+  - Kyty vectors that start on one shared empty array and allocate on first write: 22.33 us. Every stage rose
+    evenly. The allocations it removes are under 1 % of CP, and every vector operation gains a static-init check.
+  - 65,536 live descriptor sets instead of 16,384: 22.90 us. Descriptor finalization fell 0.3 to 0.7 us per draw,
+    but index binding (+20 %), vertex binding (+10 %), storage descriptors (+8 %) and transient uploads (+14 %)
+    rose, in both runs at that limit.
+  - 4,096 retained recordings instead of 1,024: 22.47 us. Transient uploads -23 %, finalization +6 %.
+- **Where descriptor misses come from (diagnostic build, 16,384 live sets).**
+  - Lookups: 70,000 per second, 31.7 % of them misses.
+  - Misses: 32 % are sets trimmed at the live limit (trims run at 22,000 sets per second); 62 % are combinations
+    never built before, made only of buffer and image ids that earlier sets used; 6 % carry a new buffer id.
+  - Snapshot entries for captures that need one: 64 % are the key's own stale entry, 28 % are another key's aged
+    entry, 7 % are new; 2,400 keys per second were never captured before.
+  - Sets are keyed by buffer identity, so rotating snapshot entries keep producing new combinations. Pool
+    retention cannot remove them; buffer binding that does not depend on the buffer's identity can.
+  - The command-processor thread spends 6.5-6.8 % of its time in the kernel, so submissions are not the cost.
 
 ## Fishing title: gray rectangles behind the first dialogue portrait (2026-10-23, checked)
 
