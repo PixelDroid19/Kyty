@@ -6,6 +6,42 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Beat 'em up: every in-place uniform fill was written twice to guest memory (2026-11-07, fixed)
+
+- **Observed** (Intel Arc A770, Mesa 26.2.5 on Xe, first area, generic pad route,
+  60 fps limit, 80-120 s): 39.6 fps, GPU busy 94-95 %, about 10.7 ms of fence
+  wait per frame. Only about 5 ms per frame was guest draws and dispatches.
+- **Measured** with a DIAG that timestamps each pool command buffer at begin, around
+  every guest draw, dispatch and detile kernel, after every transfer, clear,
+  barrier and render pass end, and at end. These marks serialize the GPU, so
+  read the shares, not the absolute times. Of 26.2 ms of busy GPU time per frame:
+  - 7.8 ms went to the fill transfer of proven uniform fills
+    (`RecordComputeUniformFillTransfer`) plus the barrier after it;
+  - 7.8 ms went to the second fill of the same range in
+    `GuestDeviceAddressRecordFill` plus its after-barrier;
+  - 4.7 ms went to about 1650 guest memory barriers (`GraphicsRenderMemoryBarrier`),
+    an amount the marks inflate;
+  - 4.0 ms went to indexed draws, and 1.1 ms to dispatches.
+- **Cause**: about 480 fills per second, 7.3 GB/s, up to 33,423,360 bytes each.
+  Every fill targets an object bound in place: memory flags 0xe (host-visible,
+  coherent, cached, not device-local). The first fill already writes the guest
+  pages. The publication then filled the same pages again through the
+  publication pieces, which are a second import of the same physical memory.
+  That is about 180 MB per frame over PCIe, twice.
+- **Fix**: an in-place object skips the second fill and publishes through the in-place
+  branch of `GuestDeviceAddressRecordPublication`, which drops overlays and
+  records the barriers. The guest-published marking is unchanged.
+- **Result**: one product run each.
+  - PPSA28311 - Absolum: 39.6 to 58.4 fps (+47 %); p95 frame time 27.2 to
+    20.2 ms; fence wait 10.7 to 2.2 ms per frame; same 335 draws per frame.
+    Captures at 60, 90 and 115 s match the earlier ones.
+  - PPSA09076 - DREDGE: 22.04 to 21.76 us/draw, 33.5 to 34.8 fps (within noise).
+  - All 108 tests pass.
+- **Open**:
+  - The first fill still writes about 180 MB per frame to host memory.
+  - The guest memory barriers (ALL_COMMANDS to ALL_COMMANDS, about three per guest
+    event) are not sized yet without the DIAG.
+
 ## Beat 'em up: every draw scanned and copied a whole shared vertex pool (2026-10-31, fixed)
 
 - **Observed** (Intel Arc A770, Mesa 26.2.5, first area, generic pad route, 60 fps
