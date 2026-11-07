@@ -166,9 +166,41 @@ buffers without allocating a set or hashing anything.
   - Each push therefore costs about 9 us on this driver, more than the cache lookup it replaces
     (478 ns per hit, 2537 ns per miss). Stage 1 as written pays the same per-push cost, so it does not
     pay on this driver.
-  - Still unmeasured on this driver: dynamic offsets (sub-allocated snapshot buffers bound as
-    `*_BUFFER_DYNAMIC`, so a set's identity no longer depends on the entry) and
-    `VK_EXT_descriptor_buffer`.
+- **Dynamic offsets and descriptor buffers on Intel Arc (2026-11-07, measured, not built).**
+  - Shape on the PPSA09076 - DREDGE dock (diagnostic build, 40-120 s): 1141 vertex lookups per frame
+    with 3.18 storage buffers each (84 % have 3, 13 % have 4, 2.6 % have 5). 1008 pixel lookups per
+    frame with 3.42 storage buffers (60 % have 4, 29 % have 3), 3.55 sampled images, 3.53 samplers,
+    and a vsharp uniform buffer in 90 %. Every lookup also binds the write-mask array, one entry per
+    storage buffer (the shared sink for snapshots). Ranges: vertex up to 2112 bytes; pixel 65 % from
+    257 bytes to 4 KB, 19 % up to 24 KB.
+  - Limits on the A770 (Mesa 26.2.5): at most 8 dynamic storage buffers and 8 dynamic uniform
+    buffers per pipeline layout. `VK_EXT_descriptor_buffer` is exposed with 64-byte buffer and image
+    descriptors, 32-byte samplers, 64-byte offset alignment and 32 buffer bindings.
+  - Standalone microbenchmark with the same set shape (3 vertex and 4 pixel storage buffers with
+    their masks, 4 images, 4 samplers, 1 uniform buffer; samplers in a third set written once).
+    It measures recording time only, 1172 draws per command buffer, median of three runs. The
+    second figure binds a pipeline before every draw.
+
+    | Binding per draw | us per draw |
+    |---|---|
+    | Sets bound once, draws only | 0.06 / 0.16 |
+    | Prebuilt sets, all hits | 0.29 / 0.41 |
+    | Today's mix: 31.5 % new sets (allocate and update) | 0.54 / 0.68 |
+    | Every set new | 1.01 / 1.02 |
+    | Dynamic offsets (8 per draw) | 0.40 / 0.53 |
+    | Descriptor buffer, `vkGetDescriptorEXT` per buffer | 0.40 / 0.51 |
+    | Descriptor buffer, images written too | 0.41 / 0.53 |
+
+  - No driver `memmove` like the push path: no symbol passes 7 % in either profile.
+  - The driver side of today's binding is about 0.5 us of the 2.71 us of descriptor finalization.
+    Either alternative saves about 0.15 us per draw there, under 1 % of command-processor time.
+    The other 2.2 us are the emulator's own set cache: hashing, probing, trimming and creating sets.
+    Identity-free binding pays only by removing that cache: up to about 2 us per draw (about 9 %),
+    if gathering the descriptors costs little. It does not halve the time per draw.
+  - Dynamic offsets fit most draws (7 storage buffers), but about 2 % need 9 or 10 (estimated from
+    the two histograms) and would need a fallback. Only arena-backed snapshots can take offsets, and
+    a descriptor's range is fixed when its set is written, so bounds checks would follow the
+    largest range. Descriptor buffers cost the same without either limit.
 
 ### Stage 2: resource recipe per shader (replaces per-draw `ShaderParseUsage2`)
 
