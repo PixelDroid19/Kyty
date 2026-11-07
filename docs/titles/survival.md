@@ -60,8 +60,15 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     guest words on every skipped fill found none that differed from the
     fill word.
   - All 108 tests pass, one skipped as before.
-- Open: in the world, day one ran at 11.8 fps at 3840x2160 before this
-  change; it has no named route yet, so it is not measured.
+- World, same binary, driven from boot with the saved agent tap sequence of
+  the 2026-10-27 verification. Day one, 185-260 s: 45.8 fps against 10 to
+  11.8 fps in that verification, at 3840x2160. GPU work is 10.4 ms per
+  frame with the render engine 48 % busy. The command processor takes
+  18.4 ms per frame for 917 draws (18.7 us per draw), so the world is now
+  bound by the processor. The gain also includes the branch's earlier
+  changes since that verification. The world is generated anew each run;
+  the captures show day one with the HUD, the character and the props
+  rendered correctly.
 
 ## Survival title: boot stop on a native display with a depth-only pass (2026-10-27, fixed)
 
