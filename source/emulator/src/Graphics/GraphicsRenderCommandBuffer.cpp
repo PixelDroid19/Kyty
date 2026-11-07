@@ -972,11 +972,14 @@ class TransientBufferPool
 	// A matching snapshot this large is tracked for guest writes, so later probes
 	// skip the comparison. Smaller ones compare faster than page protection costs.
 	static constexpr uint64_t kMinTrackedSnapshotSize = 4096u;
-	// A 3D frame records tens of command buffers (about forty in the fishing
-	// title). Snapshots leased by the last frame or two are kept for the next
-	// probe while the pool can grow; ring constants that return later hold
-	// new bytes, so keeping them longer only costs memory.
-	static constexpr uint64_t kRetainedRecordings = 64u;
+	// A 3D frame records tens of command buffers (about seventy in the fishing
+	// title), and most snapshot keys return 256 to 512 recordings later, over
+	// a third of them with the same bytes. Snapshots are kept that long while
+	// the pool can grow: a returning key reuses its snapshot, or takes its own
+	// stale entry back, so draws bind the buffers their descriptor sets were
+	// built with. Recycled after 64 recordings, every returning key took
+	// another buffer and half of the descriptor lookups missed.
+	static constexpr uint64_t kRetainedRecordings = 1024u;
 	static constexpr uint64_t kExpiredRecordings  = 4u * kRetainedRecordings;
 	// Snapshot sizes are never zero, so this size marks the key of covering snapshots.
 	static constexpr uint64_t kCoveringKeySize = 0u;
