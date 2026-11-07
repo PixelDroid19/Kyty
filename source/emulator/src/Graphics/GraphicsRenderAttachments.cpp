@@ -374,12 +374,14 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 		return false;
 	}
 	// One repeated word is written in place; copying the storage object would
-	// also read the whole range back.
-	auto*       ctx      = g_render_ctx->GetGraphicCtx();
-	auto*       cmd      = buffer->RecordOutsideRenderPass();
-	const auto& words    = fill.words;
-	const bool  one_word = std::all_of(words.begin(), words.end(), [&](uint32_t word) { return word == words[0]; });
-	if (!(one_word && GuestDeviceAddressRecordFill(ctx, cmd, words[0], fill.address, fill.size)) &&
+	// also read the whole range back. An object bound in place already holds
+	// the fill in guest memory, so its publication only orders it.
+	auto*       ctx       = g_render_ctx->GetGraphicCtx();
+	auto*       cmd       = buffer->RecordOutsideRenderPass();
+	const auto& words     = fill.words;
+	const bool  one_word  = std::all_of(words.begin(), words.end(), [&](uint32_t word) { return word == words[0]; });
+	const bool  fill_copy = one_word && !identity.buffer->guest_in_place;
+	if (!(fill_copy && GuestDeviceAddressRecordFill(ctx, cmd, words[0], fill.address, fill.size)) &&
 	    !GuestDeviceAddressRecordPublication(ctx, cmd, *identity.buffer, fill.address, fill.size))
 	{
 		return false;
