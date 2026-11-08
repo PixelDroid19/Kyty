@@ -1240,7 +1240,7 @@ public:
 			}
 			if (own_chain != nullptr && own_chain->newest == nullptr)
 			{
-				m_snapshots.erase(KeyOf(entry));
+				m_snapshots.Erase(KeyOf(entry));
 			}
 			return nullptr;
 		}
@@ -1399,7 +1399,7 @@ public:
 			delete entry;
 		}
 		m_entries.clear();
-		m_snapshots.clear();
+		m_snapshots.Clear();
 		m_free.clear();
 		m_free_snapshots.clear();
 		m_released = {};
@@ -1447,16 +1447,138 @@ private:
 		uint32_t probes_until_track = 0;
 	};
 
+	// Snapshot chains by key in one open-addressed array: a probe reads one slot
+	// where a chained map walks nodes scattered over the heap. Linear probing,
+	// power-of-two capacity grown at half load, backward-shift erase. A returned
+	// chain stays valid until the next insert or erase.
+	class SnapshotIndex
+	{
+	public:
+		SnapshotChain* Find(const SnapshotKey& key)
+		{
+			const size_t index = SlotOf(key);
+			return index == kNone ? nullptr : &m_slots[index].chain;
+		}
+
+		SnapshotChain& FindOrInsert(const SnapshotKey& key)
+		{
+			if ((m_size + 1u) * 2u > m_slots.size())
+			{
+				Grow();
+			}
+			for (size_t i = Home(key);; i = Next(i))
+			{
+				auto& slot = m_slots[i];
+				if (!slot.used)
+				{
+					slot = Slot {key, {}, true};
+					m_size++;
+					return slot.chain;
+				}
+				if (slot.key == key)
+				{
+					return slot.chain;
+				}
+			}
+		}
+
+		void Erase(const SnapshotKey& key)
+		{
+			size_t hole = SlotOf(key);
+			EXIT_IF(hole == kNone);
+			// A later slot of the cluster moves back into the hole unless its home
+			// lies cyclically in (hole, slot]: probing from home must still reach it.
+			for (size_t i = Next(hole); m_slots[i].used; i = Next(i))
+			{
+				const size_t home    = Home(m_slots[i].key);
+				const bool   reached = hole < i ? (hole < home && home <= i) : (hole < home || home <= i);
+				if (!reached)
+				{
+					m_slots[hole] = m_slots[i];
+					hole          = i;
+				}
+			}
+			m_slots[hole].used = false;
+			m_size--;
+		}
+
+		void Clear()
+		{
+			m_slots.assign(m_slots.size(), Slot {});
+			m_size = 0;
+		}
+
+	private:
+		struct Slot
+		{
+			SnapshotKey   key;
+			SnapshotChain chain;
+			bool          used = false;
+		};
+
+		static constexpr size_t   kNone        = SIZE_MAX;
+		static constexpr uint32_t kInitialBits = 10;
+
+		size_t Home(const SnapshotKey& key) const
+		{
+			// Guest addresses are aligned, so the slot comes from the high bits of a final mix.
+			return static_cast<size_t>((SnapshotKeyHash {}(key) * 0x9e3779b97f4a7c15ull) >> m_shift);
+		}
+
+		size_t Next(size_t index) const { return (index + 1u) & (m_slots.size() - 1u); }
+
+		size_t SlotOf(const SnapshotKey& key) const
+		{
+			if (m_slots.empty())
+			{
+				return kNone;
+			}
+			for (size_t i = Home(key); m_slots[i].used; i = Next(i))
+			{
+				if (m_slots[i].key == key)
+				{
+					return i;
+				}
+			}
+			return kNone;
+		}
+
+		void Grow()
+		{
+			std::vector<Slot> old;
+			old.swap(m_slots);
+			m_slots.resize(old.empty() ? size_t {1} << kInitialBits : old.size() * 2u);
+			m_shift = old.empty() ? 64u - kInitialBits : m_shift - 1u;
+			for (const auto& slot: old)
+			{
+				if (!slot.used)
+				{
+					continue;
+				}
+				size_t i = Home(slot.key);
+				while (m_slots[i].used)
+				{
+					i = Next(i);
+				}
+				m_slots[i] = slot;
+			}
+		}
+
+		std::vector<Slot> m_slots;
+		size_t            m_size  = 0;
+		uint32_t          m_shift = 64;
+	};
+
 	// Latest committed entry first: the one most likely to still match guest memory.
 	Entry* FindSnapshot(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin, SnapshotChain** chain)
 	{
-		const auto it = m_snapshots.find(SnapshotKey {vaddr, size, usage});
-		if (it == m_snapshots.end())
+		auto* found = m_snapshots.Find(SnapshotKey {vaddr, size, usage});
+		if (found == nullptr)
 		{
 			return nullptr;
 		}
-		*chain = &it->second;
-		for (auto* entry = it->second.newest; entry != nullptr; entry = entry->snapshot_older)
+		*chain = found;
+		for (auto* entry = found->newest; entry != nullptr; entry = entry->snapshot_older)
 		{
 			if (entry->snapshot_begin <= read_begin)
 			{
@@ -1469,13 +1591,13 @@ private:
 	// Latest committed entry first that holds the whole read window.
 	Entry* FindCovering(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin, SnapshotChain** chain)
 	{
-		const auto it = m_snapshots.find(SnapshotKey {vaddr, kCoveringKeySize, usage});
-		if (it == m_snapshots.end())
+		auto* found = m_snapshots.Find(SnapshotKey {vaddr, kCoveringKeySize, usage});
+		if (found == nullptr)
 		{
 			return nullptr;
 		}
-		*chain = &it->second;
-		for (auto* entry = it->second.newest; entry != nullptr; entry = entry->snapshot_older)
+		*chain = found;
+		for (auto* entry = found->newest; entry != nullptr; entry = entry->snapshot_older)
 		{
 			if (entry->snapshot_begin <= read_begin && entry->snapshot_size >= size)
 			{
@@ -1493,7 +1615,7 @@ private:
 	// A given chain is the one of the entry's key.
 	void IndexSnapshot(Entry* entry, SnapshotChain* own_chain = nullptr)
 	{
-		auto& chain           = own_chain != nullptr ? *own_chain : m_snapshots[KeyOf(entry)];
+		auto& chain           = own_chain != nullptr ? *own_chain : m_snapshots.FindOrInsert(KeyOf(entry));
 		entry->snapshot_older = chain.newest;
 		entry->snapshot_newer = nullptr;
 		if (chain.newest != nullptr)
@@ -1515,13 +1637,13 @@ private:
 			return;
 		}
 		Untrack(entry);
-		auto it = m_snapshots.end();
-		if (own_chain == nullptr)
+		SnapshotChain* found = own_chain;
+		if (found == nullptr)
 		{
-			it = m_snapshots.find(KeyOf(entry));
-			EXIT_IF(it == m_snapshots.end());
+			found = m_snapshots.Find(KeyOf(entry));
+			EXIT_IF(found == nullptr);
 		}
-		auto& chain = own_chain != nullptr ? *own_chain : it->second;
+		auto& chain = *found;
 		if (entry->snapshot_older != nullptr)
 		{
 			entry->snapshot_older->snapshot_newer = entry->snapshot_newer;
@@ -1540,7 +1662,7 @@ private:
 		entry->snapshot_newer = nullptr;
 		if (chain.newest == nullptr && own_chain == nullptr)
 		{
-			m_snapshots.erase(it);
+			m_snapshots.Erase(KeyOf(entry));
 		}
 	}
 
@@ -2004,7 +2126,7 @@ private:
 
 	std::vector<Entry*> m_entries;
 	// Entries holding a valid snapshot, by the guest range and usage they hold.
-	std::unordered_map<SnapshotKey, SnapshotChain, SnapshotKeyHash> m_snapshots;
+	SnapshotIndex m_snapshots;
 	// Unused entries without a snapshot, by usage, size and creation order.
 	std::unordered_map<uint32_t, FreeIndex> m_free;
 	// Unused entries holding a snapshot, by usage, size and release order.
