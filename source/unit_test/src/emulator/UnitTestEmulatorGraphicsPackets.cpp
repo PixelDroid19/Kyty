@@ -6492,6 +6492,10 @@ TEST(EmulatorGraphicsPackets, MaterializesImageSampleBWithBias)
 	                              "%image_sample_lod_biased_0 %image_sample_lod_levels_f_0"),
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(lod_source.FindIndex("%fs_tap_value_0 = OpLoad"), Core::STRING8_INVALID_INDEX);
+	const std::string generated = lod_source.c_str();
+	const auto sampled = generated.find("OpStore %fs_tap_3 %float_1_000000");
+	ASSERT_NE(sampled, std::string::npos);
+	EXPECT_EQ(generated.find("OpStore %fs_tap_0 %float_0_000000", sampled), std::string::npos);
 	EXPECT_FALSE(ShaderRecompilePS(code, &lod_input).IsEmpty());
 }
 

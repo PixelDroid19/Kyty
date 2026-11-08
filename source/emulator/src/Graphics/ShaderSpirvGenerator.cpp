@@ -34,7 +34,8 @@ KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>
 
 namespace Kyty::Libs::Graphics {
 
-bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t* pc, int* first_register)
+bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t* pc, int* first_register,
+                          uint32_t* instruction_index)
 {
 	if (!config.enabled || pc == nullptr || first_register == nullptr || code.GetType() != ShaderType::Pixel)
 	{
@@ -55,6 +56,10 @@ bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig&
 			}
 			*pc             = inst.pc;
 			*first_register = inst.dst.register_id;
+			if (instruction_index != nullptr)
+			{
+				*instruction_index = ordinal;
+			}
 			return true;
 		}
 		ordinal++;
@@ -69,9 +74,9 @@ bool FragmentTapQueryLodSelection(const ShaderCode& code, const ShaderFragmentTa
 		return false;
 	}
 	uint32_t tap_pc       = 0;
+	uint32_t tap_index    = 0;
 	int      tap_register = 0;
-	return FragmentTapSelection(code, config, &tap_pc, &tap_register) &&
-	       code.GetInstructions().At(instruction_index).pc == tap_pc &&
+	return FragmentTapSelection(code, config, &tap_pc, &tap_register, &tap_index) && instruction_index == tap_index &&
 	       code.GetInstructions().At(instruction_index).type == ShaderInstructionType::ImageSampleB;
 }
 
@@ -3200,9 +3205,11 @@ void Spirv::WriteInstructions()
 		m_source += String8::FromPrintf("%s\n", dst.c_str());
 
 		uint32_t tap_pc = 0;
+		uint32_t tap_index = 0;
 		int      tap_register = 0;
 		if (m_ps_input_info != nullptr &&
-		    FragmentTapSelection(m_code, m_ps_input_info->fragment_tap, &tap_pc, &tap_register) && inst.pc == tap_pc)
+		    FragmentTapSelection(m_code, m_ps_input_info->fragment_tap, &tap_pc, &tap_register, &tap_index) &&
+		    static_cast<uint32_t>(index) == tap_index)
 		{
 			const bool query_lod_tap = FragmentTapQueryLodSelection(m_code, m_ps_input_info->fragment_tap,
 			                                                             static_cast<uint32_t>(index));

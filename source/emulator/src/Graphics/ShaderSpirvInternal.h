@@ -578,7 +578,8 @@ bool operand_is_constant(ShaderOperand op);
 bool operand_is_variable(ShaderOperand op);
 bool operand_covers_vgpr(ShaderOperand op, int reg);
 bool instruction_writes_vgpr(const ShaderInstruction& inst, int reg);
-bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t* pc, int* first_register);
+bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t* pc, int* first_register,
+                          uint32_t* instruction_index = nullptr);
 bool FragmentTapQueryLodSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t instruction_index);
 String8 packed_half_shadow_to_str(ShaderOperand op);
 SpirvValue operand_variable_to_str(ShaderOperand op);
