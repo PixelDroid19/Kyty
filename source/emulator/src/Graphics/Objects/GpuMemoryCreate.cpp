@@ -34,6 +34,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #define XXH_INLINE_ALL
@@ -2957,7 +2958,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	{
 		create_vaddr[vi] = vaddr[vi];
 	}
-	std::vector<uint8_t>    stable_create_source;
+	std::unique_ptr<uint8_t[]> stable_create_source;
 	GpuDirtyReadObservation stable_create_read {};
 	bool                    stable_create_registered = false;
 	bool                    stable_create_ready      = false;
@@ -2971,7 +2972,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		stable_create_registered = tracker.RegisterRange(vaddr[0], size[0]);
 		if (stable_create_registered)
 		{
-			stable_create_source.resize(static_cast<size_t>(size[0]));
+			// Left uninitialized: each read attempt copies the whole range into it before use.
+			stable_create_source.reset(new uint8_t[static_cast<size_t>(size[0])]);
 			for (uint32_t attempt = 0; attempt < 2u && !stable_create_ready; ++attempt)
 			{
 				stable_create_read = tracker.BeginRead(vaddr[0], size[0]);
@@ -2983,12 +2985,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					}
 					continue;
 				}
-				std::memcpy(stable_create_source.data(), reinterpret_cast<const void*>(vaddr[0]), stable_create_source.size());
+				std::memcpy(stable_create_source.get(), reinterpret_cast<const void*>(vaddr[0]), static_cast<size_t>(size[0]));
 				stable_create_ready = tracker.ReadObservationIsStable(vaddr[0], size[0], stable_create_read);
 			}
 			if (stable_create_ready)
 			{
-				create_vaddr[0] = reinterpret_cast<uint64_t>(stable_create_source.data());
+				create_vaddr[0] = reinterpret_cast<uint64_t>(stable_create_source.get());
 			} else
 			{
 				(void)tracker.UnregisterRange(vaddr[0], size[0]);
