@@ -1327,9 +1327,12 @@ PipelineCache::Pipeline* PipelineCache::Find(const Pipeline& p)
 	for (auto it = first; it != last; ++it)
 	{
 		auto& pn = m_pipelines[it->second];
-		if (pn.pipeline != nullptr && !pn.lifetime.RetirementRequested() && p.vs_shader_id == pn.vs_shader_id &&
-		    p.ps_shader_id == pn.ps_shader_id && p.cs_shader_id == pn.cs_shader_id && p.render_pass == pn.render_pass &&
-		    *p.static_params == *pn.static_params && *p.dynamic_params == *pn.dynamic_params)
+		// Pipelines of one key share their shaders' hashes and mostly differ in pass and
+		// state: compare those before walking the shader ids. Dynamic parameters stay last,
+		// their comparison requires pipelines of the same shaders.
+		if (pn.pipeline != nullptr && !pn.lifetime.RetirementRequested() && p.render_pass == pn.render_pass &&
+		    *p.static_params == *pn.static_params && p.vs_shader_id == pn.vs_shader_id && p.ps_shader_id == pn.ps_shader_id &&
+		    p.cs_shader_id == pn.cs_shader_id && *p.dynamic_params == *pn.dynamic_params)
 		{
 			pn.last_use = ++m_use_clock;
 			return &pn;

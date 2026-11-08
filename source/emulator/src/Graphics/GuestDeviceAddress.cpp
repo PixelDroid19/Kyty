@@ -195,20 +195,8 @@ bool ValidReader(SubmissionId reader)
 	return reader.sequence != 0 && reader.queue.Value() < GraphicContext::QUEUES_NUM;
 }
 
-SubmissionId PendingReaderForSnapshotRefresh(const Registry& registry)
+SubmissionId FirstActiveReader(const Registry& registry)
 {
-	bool changed = false;
-	for (const uint64_t base: registry.tracked)
-	{
-		for (const auto& chunk: registry.ranges.at(base).chunks)
-		{
-			changed = changed || (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.span,
-			                                                                                   chunk.generation));
-			if (changed) { break; }
-		}
-		if (changed) { break; }
-	}
-	if (!changed) { return {}; }
 	for (const auto& reader: registry.readers)
 	{
 		if (reader.active) { return reader.submission; }
@@ -216,11 +204,20 @@ SubmissionId PendingReaderForSnapshotRefresh(const Registry& registry)
 	return {};
 }
 
-SubmissionId FirstActiveReader(const Registry& registry)
+SubmissionId PendingReaderForSnapshotRefresh(const Registry& registry)
 {
-	for (const auto& reader: registry.readers)
+	// Without an active reader no refresh waits: skip the scan of tracked chunks.
+	const SubmissionId reader = FirstActiveReader(registry);
+	if (reader.sequence == 0) { return {}; }
+	for (const uint64_t base: registry.tracked)
 	{
-		if (reader.active) { return reader.submission; }
+		for (const auto& chunk: registry.ranges.at(base).chunks)
+		{
+			if (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.span, chunk.generation))
+			{
+				return reader;
+			}
+		}
 	}
 	return {};
 }
@@ -2082,9 +2079,12 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 	}
 	const DebugStatsScopedTimer prepare_timer(DebugStatsRecordGuestAddressPrepare);
 	// Query before scanning: a page populated during the scan changes the next query.
+	// Only partly imported physical ranges can gain pages; without one the backing is
+	// not queried and the scan is left unrecorded, so the next prepare with one scans.
+	const bool                                   partial = !registry->partial.empty();
 	Core::VirtualMemory::SharedBackingPopulation population;
-	const bool known    = Kernel::Memory::KernelQueryPhysicalPopulation(&population);
-	const bool physical = !known || !registry->population_scanned || population != registry->scanned_population;
+	const bool known    = partial && Kernel::Memory::KernelQueryPhysicalPopulation(&population);
+	const bool physical = partial && (!known || !registry->population_scanned || population != registry->scanned_population);
 	// Ranges number in the thousands for some titles: time each phase once
 	// per preparation, not once per range.
 	{
