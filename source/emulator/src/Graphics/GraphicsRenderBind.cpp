@@ -2702,16 +2702,25 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 			// declared stream, bound at the draw's record, serves them all instead of one per window.
 			const uint64_t declared     = ShaderBufferByteSize(buffer_info.stride, buffer_info.num_records);
 			const bool     whole_stream = declared != 0u && declared <= kGpuMemoryMaxTransientReadOnlyBytes;
-			const uint64_t object_addr  = whole_stream ? buffer_info.addr : address;
-			const uint64_t object_size  = whole_stream ? declared : size;
+			const uint64_t stream_addr  = whole_stream ? buffer_info.addr : address;
+			const uint64_t stream_size  = whole_stream ? declared : size;
+			// A pool drawn from an advancing V# base declares each draw's stream inside the previous one:
+			// bind into the object that holds it instead of replacing that object on every draw.
+			uint64_t object_addr = 0;
+			uint64_t object_size = 0;
+			if (!GpuMemoryFindVertexContaining(stream_addr, stream_size, &object_addr, &object_size))
+			{
+				object_addr = stream_addr;
+				object_size = stream_size;
+			}
 			vertices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, object_addr,
 			                                                            object_size, VertexBufferGpuObject()));
 			offset   = address - object_addr;
 			if (vertices != nullptr)
 			{
-				// With the fetch range unknown the draw can read anywhere in the object.
-				const uint64_t copy_addr = tail_fetched ? object_addr : address + read_begin;
-				const uint64_t copy_size = tail_fetched ? object_size : size - read_begin;
+				// With the fetch range unknown the draw can read anywhere in its stream.
+				const uint64_t copy_addr = tail_fetched ? stream_addr : address + read_begin;
+				const uint64_t copy_size = tail_fetched ? stream_size : size - read_begin;
 				if (copy_size != 0u)
 				{
 					CopyPendingStorageIntoVertices(buffer, vertices, object_addr, copy_addr, copy_size);

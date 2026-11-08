@@ -1384,6 +1384,9 @@ void GpuMemoryMarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& ide
 // The guest range of the only live StorageBuffer overlapping [vaddr, vaddr + size), read-only or
 // written by shaders, when that one object holds the whole range in a single block.
 [[nodiscard]] bool GpuMemoryFindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
+// The guest range of the only live VertexBuffer overlapping [vaddr, vaddr + size), when that one
+// object holds the whole range in a single block.
+[[nodiscard]] bool GpuMemoryFindVertexContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
 // A pending StorageBuffer result that is, as a whole object, the guest content of
 // its range: only the consumer's queue has incomplete uses, no other object shares
 // its bytes, no label fence or depth metadata lies in it, and the guest has not

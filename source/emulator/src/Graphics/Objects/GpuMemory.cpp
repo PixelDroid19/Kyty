@@ -1076,6 +1076,11 @@ bool GpuMemoryFindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* obj
 	return g_gpu_memory != nullptr && g_gpu_memory->FindStorageContaining(vaddr, size, object_vaddr, object_size);
 }
 
+bool GpuMemoryFindVertexContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size)
+{
+	return g_gpu_memory != nullptr && g_gpu_memory->FindVertexContaining(vaddr, size, object_vaddr, object_size);
+}
+
 void GpuMemoryMarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId consumer)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
