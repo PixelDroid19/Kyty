@@ -147,6 +147,8 @@ public:
 
 	static void AddCurrentPhase(DebugStatsGpuMemoryCreatePhase phase, uint64_t elapsed_ns, uint64_t bytes = 0);
 
+	[[nodiscard]] DebugStatsClock::time_point Start() const { return m_start; }
+
 private:
 	DebugStatsGpuMemorySlowCreateRecord* m_previous = nullptr;
 	DebugStatsGpuMemorySlowCreateRecord  m_record {};

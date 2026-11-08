@@ -1207,16 +1207,16 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		requested_bytes = size[vi] > UINT64_MAX - requested_bytes ? UINT64_MAX : requested_bytes + size[vi];
 	}
 	DebugStatsGpuMemoryCreateTrace create_stats(GpuMemoryStatsTypeIndex(info.type), requested_bytes, static_cast<uint32_t>(vaddr_num));
-	const auto                     backing_lock_start = DebugStatsClock::now();
+	// Each phase starts where the previous one ended: one clock read per boundary.
+	const auto                     backing_lock_start = create_stats.Start();
 	Core::LockGuard                backing_lock(m_backing_mutation_mutex);
-	const auto backing_lock_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - backing_lock_start).count();
-	create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::BackingLockWait, static_cast<uint64_t>(backing_lock_ns));
-	const auto      registry_lock_start = DebugStatsClock::now();
+	const auto                     registry_lock_start = DebugStatsClock::now();
+	create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::BackingLockWait,
+	                      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(registry_lock_start - backing_lock_start).count()));
 	Core::LockGuard lock(m_mutex);
-	const auto      registry_lock_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - registry_lock_start).count();
-	create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::RegistryLockWait, static_cast<uint64_t>(registry_lock_ns));
-	const auto classification_start = DebugStatsClock::now();
+	const auto      classification_start = DebugStatsClock::now();
+	create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::RegistryLockWait,
+	                      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(classification_start - registry_lock_start).count()));
 	bool       classification_done  = false;
 	const auto finish_classification =
 	    [&](uint32_t candidates = 0, uint32_t relation_mask = 0, uint32_t reclaimed = 0, bool from_objects = false)
@@ -3010,8 +3010,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	if (create_tracked)
 	{
 		auto&      tracker              = GpuDirtyPageTracker::Instance();
-		const auto dirty_track_start    = DebugStatsClock::now();
-		const auto dirty_register_start = DebugStatsClock::now();
+		const auto dirty_track_start = DebugStatsClock::now();
 		for (int vi = 0; create_tracked && vi < vaddr_num; vi++)
 		{
 			// The stable staging block already registered and observed vi 0.
@@ -3023,10 +3022,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			create_tracked         = tracker.RegisterRange(vaddr[vi], size[vi]);
 			create_dirty_owned[vi] = create_tracked;
 		}
-		const auto dirty_register_ns =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - dirty_register_start).count();
-		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyRegister, static_cast<uint64_t>(dirty_register_ns));
 		const auto dirty_prepare_start = DebugStatsClock::now();
+		const auto dirty_register_ns   = std::chrono::duration_cast<std::chrono::nanoseconds>(dirty_prepare_start - dirty_track_start).count();
+		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyRegister, static_cast<uint64_t>(dirty_register_ns));
 		if (stable_create_ready)
 		{
 			create_dirty_read[0] = stable_create_read;

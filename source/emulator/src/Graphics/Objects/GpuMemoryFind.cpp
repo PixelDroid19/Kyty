@@ -490,8 +490,12 @@ bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, con
 		finish_validation();
 		return false;
 	}
-	finish_validation();
+	// The validation end is the compare start: one clock read for both.
 	const auto compare_start = DebugStatsClock::now();
+	if (validation_ns != nullptr)
+	{
+		*validation_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(compare_start - validation_start).count());
+	}
 	// No page protection: a CPU store racing this comparison can make it match
 	// a state memory never held at one instant, the same race the console GPU
 	// has when the guest writes a buffer a pending draw reads. Guests order

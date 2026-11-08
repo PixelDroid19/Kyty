@@ -62,9 +62,14 @@ namespace {
 
 using DrawStageClock = DebugStatsClock;
 
+uint64_t DrawStageSpanNs(DrawStageClock::time_point start, DrawStageClock::time_point end)
+{
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
+}
+
 uint64_t DrawStageElapsedNs(DrawStageClock::time_point start)
 {
-	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DrawStageClock::now() - start).count());
+	return DrawStageSpanNs(start, DrawStageClock::now());
 }
 
 
@@ -1770,8 +1775,8 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 
 	const auto render_lock_start = DrawStageClock::now();
 	Core::LockGuard lock(g_render_ctx->GetMutex());
-	DebugStatsRecordDrawRenderLockWait(DrawStageElapsedNs(render_lock_start));
 	const auto state_setup_start = DrawStageClock::now();
+	DebugStatsRecordDrawRenderLockWait(DrawStageSpanNs(render_lock_start, state_setup_start));
 	GpuMemoryGdsSource indirect_source {};
 	if (indirect != nullptr)
 	{
@@ -2044,8 +2049,8 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	RequireSupportedRenderResolutionPlan(resolution);
 	const auto target_resolution = PrepareRenderTargetResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(target_resolution);
-	DebugStatsRecordDrawStateSetup(DrawStageElapsedNs(state_setup_start));
 	const auto materialization_start = DrawStageClock::now();
+	DebugStatsRecordDrawStateSetup(DrawStageSpanNs(state_setup_start, materialization_start));
 	const auto& materialization_resolution = SelectMaterializationResolution(color_info, depth_only_resolution, resolution,
 	                                                                         target_resolution);
 	MaterializeRenderDepthInfo(
@@ -2060,9 +2065,8 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	SanitizeRenderDepthAgainstColor(&color_info, &depth_info);
 	CollapseRenderColorLayersWithoutLayerExport(&color_info, ctx->GetShaderRegisters().m_paClVsOutCntl);
 	ps_input_info.dual_source_blend = ResolveDrawDualSourceBlend(ctx, sh_ctx->GetPs(), color_info, ps_input_info);
-	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
-
 	const auto pipeline_setup_start = DrawStageClock::now();
+	DebugStatsRecordDrawMaterialization(DrawStageSpanNs(materialization_start, pipeline_setup_start));
 	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind, *sh_ctx);
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access, attachmentless_extent);
 	const VulkanImage* stencil_attached_depth =
@@ -3095,8 +3099,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	const auto render_lock_start = DrawStageClock::now();
 	Core::LockGuard lock(g_render_ctx->GetMutex());
-	DebugStatsRecordDrawRenderLockWait(DrawStageElapsedNs(render_lock_start));
 	const auto state_setup_start = DrawStageClock::now();
+	DebugStatsRecordDrawRenderLockWait(DrawStageSpanNs(render_lock_start, state_setup_start));
 	GeometryDrawPlan geometry_plan;
 	const bool       geometry_pass = ResolveGeometryDraw(*ctx, *ucfg, *sh_ctx, index_count, instance_count, &geometry_plan);
 	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx, geometry_pass))
@@ -3298,8 +3302,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	RequireSupportedRenderResolutionPlan(resolution);
 	const auto target_resolution = PrepareRenderTargetResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(target_resolution);
-	DebugStatsRecordDrawStateSetup(DrawStageElapsedNs(state_setup_start));
 	const auto materialization_start = DrawStageClock::now();
+	DebugStatsRecordDrawStateSetup(DrawStageSpanNs(state_setup_start, materialization_start));
 	const auto& materialization_resolution = SelectMaterializationResolution(color_info, depth_only_resolution, resolution,
 	                                                                         target_resolution);
 	MaterializeRenderDepthInfo(
@@ -3314,9 +3318,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	SanitizeRenderDepthAgainstColor(&color_info, &depth_info);
 	CollapseRenderColorLayersWithoutLayerExport(&color_info, ctx->GetShaderRegisters().m_paClVsOutCntl);
 	ps_input_info.dual_source_blend = ResolveDrawDualSourceBlend(ctx, sh_ctx->GetPs(), color_info, ps_input_info);
-	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
-
 	const auto pipeline_setup_start = DrawStageClock::now();
+	DebugStatsRecordDrawMaterialization(DrawStageSpanNs(materialization_start, pipeline_setup_start));
 	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind, *sh_ctx);
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access, attachmentless_extent);
 	const VulkanImage* stencil_attached_depth =
