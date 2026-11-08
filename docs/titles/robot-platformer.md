@@ -46,6 +46,32 @@ branch for that checksum. Descriptor address and recorded dispatch alone do
 not identify which host image was bound or prove completion. This retry was
 stopped manually after 240 s without reproducing the refusal.
 
+A third diagnostic traced the selected host image and materialization route.
+The same compute shader and storage descriptor first bound a render target,
+then a different storage image over the same guest address. The run stopped
+at 149 s on another mixed-parent `!create_all_the_same`, this time at
+`0x53de40000` for a 3840x2160 storage view. The address-filtered trace did
+not identify that view's contents or the unaccepted parent, and cannot prove
+a safe alias policy. Its log is in `.../hd-storage-host-image-trace`.
+
+Replaying the captured parent metadata through the alias predicates in a
+diagnostic test found six copyable render targets. The oldest target's GPU
+timestamp was 33646, while a sampled parent uploaded from CPU memory at 44757;
+the current admission rule rejects that combination. The replay is a
+reconstruction, not a second live reproduction of the failure. A separate
+test checked each of the 204800 eight-byte texels in that parent's range:
+the plan for a later render target maps every texel to the same guest byte.
+
+That coverage does not establish that the later target contains newer data
+for every texel: a draw can update only part of an attachment, and a tiled
+GPU-owned target can start undefined. `device_write_time` is marked for a
+draw, not proof of a complete overwrite. A prototype that admitted the case
+on copy coverage and that timestamp was therefore discarded. Three further
+baseline diagnostics, an isolated prototype run and a clear-timing diagnostic
+did not reproduce this alias refusal; the prototype path did not activate.
+No runtime fix or performance gain is established. A safe admission needs
+proven per-range content provenance and ordering, including later CPU writes.
+
 ## Robot platformer: real gameplay frame rate, internal resolution and FSR 3.1 (2026-11-02)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5, Ryzen 5
