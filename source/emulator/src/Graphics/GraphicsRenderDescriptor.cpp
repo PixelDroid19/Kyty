@@ -479,12 +479,12 @@ bool DescriptorCache::SameBindings(const Set& a, const Set& b)
 
 int DescriptorCache::FindSet(const Set& s)
 {
-	const auto head = m_sets_by_hash.find(s.hash);
-	if (head == m_sets_by_hash.end())
+	const int* head = m_sets_by_hash.Find(s.hash);
+	if (head == nullptr)
 	{
 		return -1;
 	}
-	for (int index = head->second; index != -1; index = m_sets[index].next_same_hash)
+	for (int index = *head; index != -1; index = m_sets[index].next_same_hash)
 	{
 		const auto& set = m_sets[index];
 		if (set.set != nullptr && SameBindings(set, s))
@@ -1091,9 +1091,9 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		m_sets.Add(nset);
 	}
 
-	const auto [head, first] = m_sets_by_hash.try_emplace(nset.hash, index);
-	m_sets[index].next_same_hash = first ? -1 : head->second;
-	head->second                 = index;
+	int& head                    = m_sets_by_hash.FindOrInsert(nset.hash);
+	m_sets[index].next_same_hash = head;
+	head                         = index;
 	IndexSet(index);
 	m_live_sets++;
 	RecordSetUse(index, buffer);
@@ -1154,20 +1154,20 @@ VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 		}
 	}
 	auto* released = set.set;
-	auto  head     = m_sets_by_hash.find(set.hash);
-	EXIT_IF(head == m_sets_by_hash.end());
-	if (head->second == index)
+	int*  head     = m_sets_by_hash.Find(set.hash);
+	EXIT_IF(head == nullptr);
+	if (*head == index)
 	{
 		if (set.next_same_hash == -1)
 		{
-			m_sets_by_hash.erase(head);
+			m_sets_by_hash.Erase(set.hash);
 		} else
 		{
-			head->second = set.next_same_hash;
+			*head = set.next_same_hash;
 		}
 	} else
 	{
-		int previous = head->second;
+		int previous = *head;
 		while (m_sets[previous].next_same_hash != index)
 		{
 			previous = m_sets[previous].next_same_hash;
@@ -1431,7 +1431,7 @@ void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
 	}
 
 	m_descriptor_set_layouts.clear();
-	m_sets_by_hash.clear();
+	m_sets_by_hash.Clear();
 	m_sets_by_resource.clear();
 	m_sets.Clear();
 	m_pools.Clear();

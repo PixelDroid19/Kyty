@@ -509,8 +509,127 @@ private:
 	int          m_lru_oldest      = -1;
 	int          m_lru_newest      = -1;
 
+	// Chain heads by set hash in one open-addressed array: a lookup reads one
+	// slot where a chained map walks nodes scattered over the heap. Linear
+	// probing, power-of-two capacity grown at half load, backward-shift erase.
+	// A returned head stays valid until the next insert or erase.
+	class SetHeads
+	{
+	public:
+		int* Find(uint32_t hash)
+		{
+			const size_t index = SlotOf(hash);
+			return index == kNone ? nullptr : &m_slots[index].head;
+		}
+
+		// A new hash starts with head -1, an empty chain.
+		int& FindOrInsert(uint32_t hash)
+		{
+			if ((m_size + 1u) * 2u > m_slots.size())
+			{
+				Grow();
+			}
+			for (size_t i = Home(hash);; i = Next(i))
+			{
+				auto& slot = m_slots[i];
+				if (!slot.used)
+				{
+					slot = Slot {hash, -1, true};
+					m_size++;
+					return slot.head;
+				}
+				if (slot.hash == hash)
+				{
+					return slot.head;
+				}
+			}
+		}
+
+		void Erase(uint32_t hash)
+		{
+			size_t hole = SlotOf(hash);
+			EXIT_IF(hole == kNone);
+			// A later slot of the cluster moves back into the hole unless its home
+			// lies cyclically in (hole, slot]: probing from home must still reach it.
+			for (size_t i = Next(hole); m_slots[i].used; i = Next(i))
+			{
+				const size_t home    = Home(m_slots[i].hash);
+				const bool   reached = hole < i ? (hole < home && home <= i) : (hole < home || home <= i);
+				if (!reached)
+				{
+					m_slots[hole] = m_slots[i];
+					hole          = i;
+				}
+			}
+			m_slots[hole].used = false;
+			m_size--;
+		}
+
+		void Clear()
+		{
+			m_slots.assign(m_slots.size(), Slot {});
+			m_size = 0;
+		}
+
+	private:
+		struct Slot
+		{
+			uint32_t hash = 0;
+			int      head = -1;
+			bool     used = false;
+		};
+
+		static constexpr size_t   kNone        = SIZE_MAX;
+		static constexpr uint32_t kInitialBits = 12;
+
+		size_t Home(uint32_t hash) const { return static_cast<size_t>((hash * 0x9e3779b97f4a7c15ull) >> m_shift); }
+
+		size_t Next(size_t index) const { return (index + 1u) & (m_slots.size() - 1u); }
+
+		size_t SlotOf(uint32_t hash) const
+		{
+			if (m_slots.empty())
+			{
+				return kNone;
+			}
+			for (size_t i = Home(hash); m_slots[i].used; i = Next(i))
+			{
+				if (m_slots[i].hash == hash)
+				{
+					return i;
+				}
+			}
+			return kNone;
+		}
+
+		void Grow()
+		{
+			std::vector<Slot> old;
+			old.swap(m_slots);
+			m_slots.resize(old.empty() ? size_t {1} << kInitialBits : old.size() * 2u);
+			m_shift = old.empty() ? 64u - kInitialBits : m_shift - 1u;
+			for (const auto& slot: old)
+			{
+				if (!slot.used)
+				{
+					continue;
+				}
+				size_t i = Home(slot.hash);
+				while (m_slots[i].used)
+				{
+					i = Next(i);
+				}
+				m_slots[i] = slot;
+			}
+		}
+
+		std::vector<Slot> m_slots;
+		size_t            m_size  = 0;
+		uint32_t          m_shift = 64;
+	};
+
 	// The newest live set of each hash; the rest chain through next_same_hash.
-	std::unordered_map<uint32_t, int> m_sets_by_hash;
+	SetHeads m_sets_by_hash;
 	// Live sets by the unique id of each image or buffer they reference.
 	std::unordered_map<uint64_t, std::vector<SetReference>> m_sets_by_resource;
 	// IndexSet scratch, kept to avoid an allocation per created set.
