@@ -2704,11 +2704,13 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 			const bool     whole_stream = declared != 0u && declared <= kGpuMemoryMaxTransientReadOnlyBytes;
 			const uint64_t stream_addr  = whole_stream ? buffer_info.addr : address;
 			const uint64_t stream_size  = whole_stream ? declared : size;
-			// A pool drawn from an advancing V# base declares each draw's stream inside the previous one:
-			// bind into the object that holds it instead of replacing that object on every draw.
+			// A pool drawn from an advancing V# base declares each draw's stream inside the previous one,
+			// or across it: bind into the object that holds the stream, or else the draw's exact fetch
+			// window, instead of replacing that object on every draw.
 			uint64_t object_addr = 0;
 			uint64_t object_size = 0;
-			if (!GpuMemoryFindVertexContaining(stream_addr, stream_size, &object_addr, &object_size))
+			if (!GpuMemoryFindVertexContaining(stream_addr, stream_size, &object_addr, &object_size) &&
+			    (!whole_stream || tail_fetched || !GpuMemoryFindVertexContaining(address, size, &object_addr, &object_size)))
 			{
 				object_addr = stream_addr;
 				object_size = stream_size;
