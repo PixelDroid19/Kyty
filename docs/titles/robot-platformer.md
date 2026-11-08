@@ -6,6 +6,46 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: intermittent storage-view refusal (2026-11-08)
+
+On the Intel Arc A770, an isolated LTO executable with the same source as
+`fc39895dd` and no game patch stopped at 179.7 s with
+`!create_all_the_same` during the recorded route. The new 960x540,
+mode-27 storage image required its initial content. Of its six overlapping
+objects, an equal-range storage image had the same image parameters except
+that its creation was allowed to skip the guest seed; the other parents
+included a 3840x2160 render target with a recorded device write and storage
+images in other layouts. This reproduces the refusal without the six pending
+graphics changes in the worktree. It does not establish which parent owns all
+bytes needed by the incoming read.
+
+**Do not reuse on the timestamp alone.** A storage object's `write_time` is
+updated at binding, before the dispatch's mutation-conflict check. A binding
+can therefore advance it even if that attempt does not record the dispatch.
+Also, `skip_seed` currently affects both equality and the update callback;
+ignoring it in equality alone can leave a later guest update unuploaded.
+Establishing a recorded whole-image write, the intervening aliases and the
+required queue ordering is necessary before reusing that backing.
+
+An isolated, diagnostic-only binder trace filtered to the reported guest
+address reached 360 s without the refusal. It recorded repeated bindings of
+two different storage formats over the range and saw the exact mode-27 view
+once at startup; it did not capture the failing transition. The 245 s
+capture reached the dunes, with the previously documented visible haze; it
+is not evidence of correct graphics or successful movement. The instrumented
+run is not a performance comparison. The executable was stopped by its
+harness at the time limit. Artifacts are under
+`/home/monasterios/tmp-backup/kyty-gda-output-study/hd-depth-relation-trace-long`
+and `.../hd-storage-history-trace` on the test host.
+
+A second diagnostic in `.../hd-storage-dispatch-recorded` traced the actual
+`vkCmdDispatch`/`vkCmdDispatchIndirect` recording after the mutation-conflict
+check. It saw 4,951 recordings with shader checksum `0x05472e62` and a storage
+descriptor at that address, but only one entry through the traced creation
+branch for that checksum. Descriptor address and recorded dispatch alone do
+not identify which host image was bound or prove completion. This retry was
+stopped manually after 240 s without reproducing the refusal.
+
 ## Robot platformer: real gameplay frame rate, internal resolution and FSR 3.1 (2026-11-02)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5, Ryzen 5
