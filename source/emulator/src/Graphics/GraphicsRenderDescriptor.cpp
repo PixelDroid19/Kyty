@@ -417,10 +417,12 @@ void DescriptorCache::FreeOldestRecycled()
 
 uint32_t DescriptorCache::CalcHash(const Set& s)
 {
-	uint32_t hash = 0;
+	// FNV-1a over whole words: every lookup hashes the full layout key, and a
+	// per-byte mix of each word cost more than the rest of the lookup.
+	uint32_t hash = 2166136261u;
 	for (uint32_t word: s.layout_key)
 	{
-		hash = (hash * 33u) ^ Core::hash32(word);
+		hash = (hash ^ word) * 16777619u;
 	}
 	hash += Core::hash8(static_cast<uint8_t>(s.stage));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.storage_buffers.size()));
@@ -1154,8 +1156,19 @@ VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 		}
 		m_sets[previous].next_same_hash = set.next_same_hash;
 	}
-	// A free slot keeps no binding storage.
-	set               = Set {};
+	// A free slot keeps the capacity of its binding vectors: the set later copied
+	// into it then allocates nothing.
+	Set freed;
+	const auto keep = [](auto* from, auto* to)
+	{
+		from->clear();
+		std::swap(*from, *to);
+	};
+	keep(&set.storage_buffers, &freed.storage_buffers);
+	keep(&set.images, &freed.images);
+	keep(&set.samplers_id, &freed.samplers_id);
+	keep(&set.resources, &freed.resources);
+	set               = std::move(freed);
 	set.next_free_set = m_first_free_set;
 	m_first_free_set  = index;
 	EXIT_IF(m_live_sets == 0);
