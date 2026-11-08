@@ -1081,7 +1081,7 @@ String GpuMemory::create_dbg_parents(int heap_id, const Vector<OverlappedBlock>&
 	const auto params = [](const uint64_t* values)
 	{
 		String text;
-		for (int i = 0; i < 10; i++) { text += String::FromPrintf(" %" PRIu64, values[i]); }
+		for (int i = 0; i < GpuObject::PARAMS_MAX; i++) { text += String::FromPrintf(" %" PRIu64, values[i]); }
 		return text;
 	};
 	const auto ranges = [](const Block& block)
