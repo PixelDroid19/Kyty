@@ -61,6 +61,7 @@ namespace {
 // one set per draw tile, and tiles are bounded per draw.
 constexpr uint32_t kTransportBindingsMax = 5;
 constexpr uint32_t kTransportSetsMax     = 1024;
+constexpr uint32_t kDrawSeparationsPerPool = 1024;
 
 VulkanSubmitAttemptTrail g_submit_fault_trail;
 
@@ -2136,6 +2137,12 @@ void CommandBuffer::Free()
 		vkDestroyDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, nullptr);
 		m_transport_descriptor_pool = VK_NULL_HANDLE;
 	}
+	for (auto* query_pool: m_draw_separation_pools)
+	{
+		vkDestroyQueryPool(g_render_ctx->GetGraphicCtx()->device, query_pool, nullptr);
+	}
+	m_draw_separation_pools.clear();
+	m_draw_separations = 0;
 	DestroyRecordingUploads();
 
 	m_pool->busy[m_index] = false;
@@ -2255,6 +2262,12 @@ void CommandBuffer::Begin()
 	{
 		vkResetDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, 0);
 	}
+	for (uint32_t i = 0; i * kDrawSeparationsPerPool < m_draw_separations; i++)
+	{
+		vkResetQueryPool(g_render_ctx->GetGraphicCtx()->device, m_draw_separation_pools[i], 0, kDrawSeparationsPerPool);
+	}
+	m_draw_separations          = 0;
+	m_previous_draw_kills_depth = false;
 	DestroyRecordingUploads();
 	m_device_awaited.clear();
 	m_device_wait_semaphores.clear();
@@ -2415,6 +2428,38 @@ VulkanBuffer* CommandBuffer::GeometryOutput(uint64_t size)
 	VulkanCreateBuffer(g_render_ctx->GetGraphicCtx(), capacity, output);
 	output->descriptor_range = capacity;
 	return output;
+}
+
+void CommandBuffer::SeparateDepthKillDraw(bool kills_with_depth_write)
+{
+	EXIT_IF(IsInvalid());
+	const bool separate         = kills_with_depth_write || m_previous_draw_kills_depth;
+	m_previous_draw_kills_depth = kills_with_depth_write;
+	auto* gctx                  = g_render_ctx->GetGraphicCtx();
+	if (!separate || !gctx->separate_depth_kill_draws)
+	{
+		return;
+	}
+	const uint32_t pool_index = m_draw_separations / kDrawSeparationsPerPool;
+	if (pool_index == m_draw_separation_pools.size())
+	{
+		VkQueryPoolCreateInfo info {};
+		info.sType             = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+		info.queryType         = VK_QUERY_TYPE_TIMESTAMP;
+		info.queryCount        = kDrawSeparationsPerPool;
+		VkQueryPool query_pool = VK_NULL_HANDLE;
+		const auto  result     = vkCreateQueryPool(gctx->device, &info, nullptr, &query_pool);
+		if (result != VK_SUCCESS)
+		{
+			EXIT("vkCreateQueryPool failed: result=%d\n", static_cast<int>(result));
+		}
+		vkResetQueryPool(gctx->device, query_pool, 0, kDrawSeparationsPerPool);
+		m_draw_separation_pools.push_back(query_pool);
+	}
+	// Nothing reads the value: the pipelined write itself keeps the draws apart.
+	vkCmdWriteTimestamp(m_pool->buffers[m_index], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_draw_separation_pools[pool_index],
+	                    m_draw_separations % kDrawSeparationsPerPool);
+	m_draw_separations++;
 }
 
 VkDescriptorSet CommandBuffer::AllocateTransportDescriptorSet(VkDescriptorSetLayout layout)

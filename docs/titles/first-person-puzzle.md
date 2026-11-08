@@ -20,11 +20,15 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   quad is dead. Mesa turns that kill into a demote, and the native code ends in the usual predicated render-target
   write. Nothing points at the translation, so this is treated as a driver or hardware hazard whose cause is not
   known yet.
-- **Mitigation tried, not committed.** A bottom-of-pipe timestamp before and after every depth-writing kill draw
-  (valid Vulkan: per-recording query pools reset from the host).
-  - It lowers the hang rate about twentyfold but does not remove it: one hung batch had the marks around every kill
-    draw.
-  - Cost: 57.5 -> 54.1 fps; GPU 10.1 -> 13.7 ms per frame.
+- **Mitigation (Intel only).** `CommandBuffer::SeparateDepthKillDraw` writes a bottom-of-pipe timestamp before every
+  draw that kills pixels with depth writes on, and before the draw after it. Each recording has its own query pools,
+  reset from the host when it begins (`hostQueryReset`).
+  - It lowers the hang rate but does not remove it. Without it, 13 of 14 runs hung within 150 s. With it, one hang
+    in about 800 s of play over five runs. One event bounds the gain only loosely.
+  - The hung batch had the marks around every kill draw, so the hazard is not just the overlap of consecutive draws.
+  - Cost on this title: 57.5 -> 54.1 fps; GPU 10.1 -> 13.7 ms per frame.
+  - PPSA09076 - DREDGE, which is CPU-bound, is unchanged: 37.7 fps, GPU 12.9 ms per frame.
+  - A run with Vulkan validation on is clean.
 - **Translation gap found on the way (not the hang).** At the final `exp ... done vm`, exec only kills when the whole
   quad's exec is zero. Dead lanes of a partly live quad still write depth, so the dither works per 2x2 quad rather than
   per pixel.

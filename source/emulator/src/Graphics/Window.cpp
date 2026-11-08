@@ -2430,6 +2430,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	// Core since Vulkan 1.2 and mandatory there.
 	EXIT_IF(supported_12.timelineSemaphore == VK_FALSE);
 	device_features_12.timelineSemaphore = VK_TRUE;
+	EXIT_IF(supported_12.hostQueryReset == VK_FALSE);
+	device_features_12.hostQueryReset = VK_TRUE;
 	if (guest_device_address)
 	{
 		device_features.shaderInt64 = VK_TRUE;
@@ -3447,6 +3449,7 @@ static void VulkanCreate(WindowContext* ctx)
 	vkGetPhysicalDeviceProperties2(ctx->graphic_ctx.physical_device, &physical_device_properties);
 	ShaderSetNativeHalfConversion(DeviceHasExactHalfConversion(ctx->graphic_ctx.physical_device));
 	ctx->graphic_ctx.min_storage_buffer_offset_alignment = physical_device_properties.properties.limits.minStorageBufferOffsetAlignment;
+	ctx->graphic_ctx.separate_depth_kill_draws           = device_properties.vendorID == 0x8086u;
 	ctx->graphic_ctx.subgroup_size       = subgroup_properties.subgroupSize;
 	ctx->graphic_ctx.subgroup_stages     = subgroup_properties.supportedStages;
 	ctx->graphic_ctx.subgroup_operations = subgroup_properties.supportedOperations;

@@ -209,6 +209,9 @@ struct GraphicContext
 	// VK_EXT_image_view_min_lod clamps sampled LOD per view; it carries the
 	// guest T# MIN_LOD, which streaming titles raise above non-resident mips.
 	bool image_view_min_lod_supported = false;
+	// Intel parts lose the device (engine reset, fixed-function units busy, shader units idle) in depth passes that
+	// mix consecutive pixel-killing draws with depth writes, unless a pipelined timestamp separates those draws.
+	bool separate_depth_kill_draws = false;
 
 	// Vulkan subgroup limits used to validate shaders that require an exact guest
 	// wave width. A zero maximum means the physical-device query was unavailable.

@@ -2165,6 +2165,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	}
 
 	const auto resource_binding_start = DrawStageClock::now();
+	buffer->SeparateDepthKillDraw(ps_input_info.ps_pixel_kill_enable && depth_info.depth_write_enable && !depth_info.suppress_depth_write);
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
 
 	SetDynamicParams(vk_buffer, pipeline);
@@ -3411,6 +3412,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
 
 	const auto resource_binding_start = DrawStageClock::now();
+	buffer->SeparateDepthKillDraw(ps_input_info.ps_pixel_kill_enable && depth_info.depth_write_enable && !depth_info.suppress_depth_write);
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
 
 	SetDynamicParams(vk_buffer, pipeline);
