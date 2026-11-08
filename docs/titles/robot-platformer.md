@@ -4901,3 +4901,49 @@ as well. The additional object parameters distinguish a fully overwritten
 storage image from one that needs its earlier contents. The correct content
 source and synchronization for these overlaps remain unproven; the refusal
 must not be converted into an unconditional alias or reclamation rule.
+
+### Depth/color overlap investigation
+
+Three further HD diagnostic attempts based on `f4823fbe5` reproduced the
+`DepthStencilBuffer - Contains - RenderTexture` refusal at 103, 106 and
+150.6 seconds. The 150.6-second run recorded the immediately preceding
+color materialization: a 960x540, pitch-1024, single-sample tiled color image
+at the same base as a 1216x684 D32 depth image. The color allocation spans
+0x280000 bytes, while the depth allocation spans 0x3c0000 bytes. Color fast
+clear was disabled, but the color attachment had a nonzero DCC address. That
+fact alone does not establish that a pending DCC clear is absent.
+
+A fourth attempt instrumented the DCC clear tracker at color materialization
+and ran for 360 seconds without hitting this refusal; its earlier observations
+found no tracked event at the queried address. This is not evidence that the
+guest never wrote DCC metadata, nor evidence of the tracker state at the
+previous failures. Captures from this run show the introductory sequence;
+they do not demonstrate interactive gameplay or a 60 fps result. Logs are in
+`/home/monasterios/tmp-backup/kyty-gda-output-study/hd-clear-evidence-2`,
+`.../hd-depth-immediate-1`, `.../hd-color-probe-1` and
+`.../hd-color-dcc-probe-1` on the test host.
+
+A diagnostic model of Kyty's current 64 KiB depth and color tile-address
+formulas, using slice zero without an XOR swizzle, maps the 518,400 visible
+color texels to 493,824 represented depth texels and 24,576 depth-padding
+positions; only 30,720 map to the same coordinate. The model uses the
+color's pitch of 1024 and the depth allocation's aligned pitch of 1280. These
+are software-model results, not independently verified hardware addresses or
+proof that those texels were written. They do demonstrate why copying equal
+coordinates between the host depth and color images is not a valid general
+conversion under these assumptions. Reclaiming the larger depth allocation
+also risks discarding bytes outside the color allocation. A correct solution
+needs the actual content provenance, ordering, padding handling and any DCC
+semantics; the current refusal remains unresolved.
+
+A fifth diagnostic attempt, with depth-use logging filtered to writes and
+clears, stopped at 161.5 seconds on a different error: `GpuMemory write-back
+requested before exact resource dependencies completed`, for a storage
+buffer. Its depth trace recorded an arm event for the target, but no later
+matching write or clear; the sought depth/color failure did not occur in this
+attempt. The executable includes `9b0abb808`, the earlier aged-overlay fix.
+The message alone does not establish that the previously fixed cause has
+recurred; this new occurrence needs its own call stack and dependency state.
+The diagnostic artifacts are under
+`/home/monasterios/tmp-backup/kyty-gda-output-study/hd-depth-writes-1` on the
+test host.
