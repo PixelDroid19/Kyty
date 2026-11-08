@@ -4826,3 +4826,12 @@ established effect of the reported output. Both continued to report a
 The retry confirms that this initial dune view can be reached in each mode;
 it does not measure internal dune pass extents, GPU timestamps or input
 responsiveness. It also does not explain or fix the intermittent stops.
+
+Two later HD attempts to check pad input stopped before the dune view. One
+reported a mixed-parent storage-texture overlap; the other repeated the depth
+`Contains` color relationship: a 1216x684 depth image over a 960x540 color
+target at the same base. A preceding run stopped on that depth/color relation
+as well. The additional object parameters distinguish a fully overwritten
+storage image from one that needs its earlier contents. The correct content
+source and synchronization for these overlaps remain unproven; the refusal
+must not be converted into an unconditional alias or reclamation rule.
