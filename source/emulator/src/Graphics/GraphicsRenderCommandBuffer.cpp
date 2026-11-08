@@ -1029,6 +1029,7 @@ public:
 		entry->snapshot_valid = false;
 		entry->index_range_width = 0;
 		entry->nonzero_end    = std::max(entry->nonzero_end, size);
+		entry->buffer.uncached_descriptor_sets = false;
 		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
 		Commit(entry, size, true);
 		if (shares_contents)
@@ -1153,8 +1154,9 @@ public:
 					ClearTail(previous, size);
 				}
 				Lease(previous, leases);
-				previous->buffer.descriptor_range = previous->snapshot_size;
-				*reused                           = true;
+				previous->buffer.descriptor_range         = previous->snapshot_size;
+				previous->buffer.uncached_descriptor_sets = false;
+				*reused                                   = true;
 				return &previous->buffer;
 			}
 		}
@@ -1249,6 +1251,9 @@ public:
 		entry->snapshot_vaddr    = vaddr;
 		entry->snapshot_size     = capture_end;
 		entry->snapshot_begin    = capture_begin;
+		// Until the key is reused, only this draw binds the buffer, so its descriptor set skips
+		// the cache. The key's own stale entry keeps the buffer its cached sets bound.
+		entry->buffer.uncached_descriptor_sets = own_chain == nullptr;
 		IndexSnapshot(entry, own_chain);
 		Commit(entry, capture_end, zero_tail);
 		Lease(entry, leases);

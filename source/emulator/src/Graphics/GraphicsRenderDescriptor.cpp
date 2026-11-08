@@ -524,6 +524,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	KYTY_PROFILER_BLOCK("DescriptorCache::GetDescriptor::search");
 
 	TrimSets();
+	DeferUncachedSets(buffer);
 
 	int        storage_buffers_num    = bind.storage_buffers.buffers_num;
 	const int  sampled_total = bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_sampled_depth_num +
@@ -682,6 +683,14 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		RecordSetUse(found, buffer);
 		return m_sets[found].set;
 	}
+
+	// A set binding a buffer the snapshot pool just recaptured for another guest range
+	// is never looked up again: indexing it and trimming it later costs more than its
+	// creation. It returns to the recycled sets once its submission completes.
+	SubmissionId uncached_submission {};
+	const bool   uncached = std::any_of(storage_buffers, storage_buffers + storage_buffers_num,
+	                                    [](const VulkanBuffer* storage) { return storage != nullptr && storage->uncached_descriptor_sets; }) &&
+	                      buffer != nullptr && buffer->GetSubmissionId(&uncached_submission);
 
 	KYTY_PROFILER_END_BLOCK;
 
@@ -1056,6 +1065,16 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 
 	vkUpdateDescriptorSets(gctx->device, binding_num, descriptor_write, 0, nullptr);
 
+	if (uncached)
+	{
+		if (m_uncached_submissions.empty() || m_uncached_submissions.back() != uncached_submission)
+		{
+			m_uncached_submissions.push_back(uncached_submission);
+		}
+		m_uncached_sets.push_back(new_set);
+		return new_set;
+	}
+
 	nset.set = new_set;
 
 	int index = 0;
@@ -1268,6 +1287,8 @@ void DescriptorCache::TrimSets()
 		{
 			const int   index = m_lru_oldest;
 			const auto& uses  = m_sets.At(index).uses.Dependencies();
+			// Only a set with a recorded use joins the trim order.
+			EXIT_IF(uses.empty());
 			submissions.insert(submissions.end(), uses.begin(), uses.end());
 			sets.push_back(UnindexSet(index));
 		}
@@ -1280,6 +1301,33 @@ void DescriptorCache::TrimSets()
 	// waiting for the newest of their uses delays their recycling by little.
 	// The deletion queue may run a ready task synchronously, and resource deletion
 	// enters this cache under the GPU memory lock: enqueue without holding m_mutex.
+	GpuMemoryDeferUntilSubmissionsComplete(std::move(submissions), [this, sets = std::move(sets)]() {
+		for (auto* set: sets)
+		{
+			Recycle(set);
+		}
+	});
+}
+
+// A recording's uncached sets wait for its submission as one deferral, made when
+// another recording asks for a set. As in TrimSets, the deletion queue may run a
+// ready task synchronously: enqueue without holding m_mutex.
+void DescriptorCache::DeferUncachedSets(CommandBuffer* buffer)
+{
+	SubmissionId current {};
+	const bool   has_current = buffer != nullptr && buffer->GetSubmissionId(&current);
+
+	std::vector<SubmissionId>         submissions;
+	std::vector<VulkanDescriptorSet*> sets;
+	{
+		Core::LockGuard lock(m_mutex);
+		if (m_uncached_sets.empty() || (has_current && m_uncached_submissions.back() == current))
+		{
+			return;
+		}
+		submissions.swap(m_uncached_submissions);
+		sets.swap(m_uncached_sets);
+	}
 	GpuMemoryDeferUntilSubmissionsComplete(std::move(submissions), [this, sets = std::move(sets)]() {
 		for (auto* set: sets)
 		{

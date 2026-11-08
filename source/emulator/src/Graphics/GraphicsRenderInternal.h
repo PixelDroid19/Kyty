@@ -495,6 +495,7 @@ private:
 	void                 LruUnlink(int index);
 	void                 LruAppend(int index);
 	void                 TrimSets();
+	void                 DeferUncachedSets(CommandBuffer* buffer);
 	void                 FreeOldestRecycled();
 	template <typename References>
 	void FreeSetsReferencing(uint64_t unique_id, References references);
@@ -526,6 +527,10 @@ private:
 	std::unordered_map<VkDescriptorSetLayout, std::deque<RecycledOrder::iterator>> m_recycled_sets;
 	// Write-mask target of storage slots whose buffer is not written back.
 	VulkanBuffer m_write_mask_sink;
+	// Sets created outside the cache since the last deferral, and the submissions
+	// that recorded them; recycled once all of those complete.
+	std::vector<VulkanDescriptorSet*> m_uncached_sets;
+	std::vector<SubmissionId>         m_uncached_submissions;
 };
 
 class SamplerCache

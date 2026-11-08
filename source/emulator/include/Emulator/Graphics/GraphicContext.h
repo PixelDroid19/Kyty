@@ -508,6 +508,9 @@ struct VulkanBuffer
 	bool guest_in_place = false;
 	// Where the guest object starts inside `buffer`: memory binds are coarser than guest addresses.
 	uint64_t guest_offset = 0;
+	// The transient snapshot pool recaptured this buffer for another guest range: no
+	// lookup finds a descriptor set built with it again, so such sets skip the cache.
+	bool uncached_descriptor_sets = false;
 
 	[[nodiscard]] VulkanBufferDescriptorKey DescriptorKey() const { return {memory.unique_id, descriptor_range}; }
 };
