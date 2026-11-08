@@ -402,7 +402,7 @@ private:
 	using MaterializationCache = GpuMemoryMaterializationCache<Materialization, 2048>;
 	using AllocatedValidationCache = GpuMemoryRangeQueryCache<GpuMemoryRangeValidationStatus, 4096>;
 	using AllocatedPrefixCache     = GpuMemoryRangeQueryCache<uint64_t, 4096>;
-	using OverlapSnapshotCache     = GpuMemoryRangeQueryCache<GpuMemoryOverlapSnapshot, 4096>;
+	using OverlapSnapshotCache     = GpuMemoryRangeQueryCache<GpuMemoryOverlapSnapshot, 16384>;
 
 	struct Block
 	{

@@ -426,6 +426,8 @@ private:
 	{
 		VulkanDescriptorSet* set                                           = nullptr;
 		int                  next_free_set                                 = -1;
+		// The next live set with the same hash, newest first.
+		int                  next_same_hash                                = -1;
 		uint32_t             hash                                          = 0;
 		Stage                stage                                         = Stage::Unknown;
 		ShaderDescriptorLayoutPlan::Key layout_key = {};
@@ -506,7 +508,8 @@ private:
 	int          m_lru_oldest      = -1;
 	int          m_lru_newest      = -1;
 
-	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
+	// The newest live set of each hash; the rest chain through next_same_hash.
+	std::unordered_map<uint32_t, int> m_sets_by_hash;
 	// Live sets by the unique id of each image or buffer they reference.
 	std::unordered_map<uint64_t, std::vector<SetReference>> m_sets_by_resource;
 	// IndexSet scratch, kept to avoid an allocation per created set.

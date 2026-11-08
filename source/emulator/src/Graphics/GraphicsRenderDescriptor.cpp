@@ -477,12 +477,12 @@ bool DescriptorCache::SameBindings(const Set& a, const Set& b)
 
 int DescriptorCache::FindSet(const Set& s)
 {
-	const auto* list = m_sets_map.Find(s.hash);
-	if (list == nullptr)
+	const auto head = m_sets_by_hash.find(s.hash);
+	if (head == m_sets_by_hash.end())
 	{
 		return -1;
 	}
-	for (int index: *list)
+	for (int index = head->second; index != -1; index = m_sets[index].next_same_hash)
 	{
 		const auto& set = m_sets[index];
 		if (set.set != nullptr && SameBindings(set, s))
@@ -1070,11 +1070,9 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		m_sets.Add(nset);
 	}
 
-	auto& ids = m_sets_map[nset.hash];
-	if (!ids.Contains(index))
-	{
-		ids.Add(index);
-	}
+	const auto [head, first] = m_sets_by_hash.try_emplace(nset.hash, index);
+	m_sets[index].next_same_hash = first ? -1 : head->second;
+	head->second                 = index;
 	IndexSet(index);
 	m_live_sets++;
 	RecordSetUse(index, buffer);
@@ -1134,18 +1132,32 @@ VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 			m_sets_by_resource.erase(it);
 		}
 	}
-	auto*          released = set.set;
-	const uint32_t hash     = set.hash;
+	auto* released = set.set;
+	auto  head     = m_sets_by_hash.find(set.hash);
+	EXIT_IF(head == m_sets_by_hash.end());
+	if (head->second == index)
+	{
+		if (set.next_same_hash == -1)
+		{
+			m_sets_by_hash.erase(head);
+		} else
+		{
+			head->second = set.next_same_hash;
+		}
+	} else
+	{
+		int previous = head->second;
+		while (m_sets[previous].next_same_hash != index)
+		{
+			previous = m_sets[previous].next_same_hash;
+			EXIT_IF(previous == -1);
+		}
+		m_sets[previous].next_same_hash = set.next_same_hash;
+	}
 	// A free slot keeps no binding storage.
 	set               = Set {};
 	set.next_free_set = m_first_free_set;
 	m_first_free_set  = index;
-	auto& hash_ids    = m_sets_map[hash];
-	hash_ids.Remove(index);
-	if (hash_ids.IsEmpty())
-	{
-		m_sets_map.Remove(hash);
-	}
 	EXIT_IF(m_live_sets == 0);
 	m_live_sets--;
 	return released;
@@ -1352,7 +1364,7 @@ void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
 	}
 
 	m_descriptor_set_layouts.clear();
-	m_sets_map.Clear();
+	m_sets_by_hash.clear();
 	m_sets_by_resource.clear();
 	m_sets.Clear();
 	m_pools.Clear();
