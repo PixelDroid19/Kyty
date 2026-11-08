@@ -4803,3 +4803,26 @@ render resolution. Presentation filtering cannot remove work already done by
 the game's render and compute passes. A gameplay comparison still requires
 reaching the same interactive scene without memory-relationship stops and
 measuring its internal pass extents and GPU/CPU timings under both signals.
+
+### Dune-view retries
+
+One further run per signal used the same settings and seed copies. Both used
+the same `f4823fbe5`-based LTO executable with one diagnostic-only local change:
+the memory failure report prints all 13 object parameters instead of ten.
+This changes neither resource decisions nor rendering. Both runs were stopped
+by the harness at 330 s; neither reproduced a memory stop. Captures at about
+190, 235, 280 and 325 s show the same first-dune view, with the character
+remaining in approximately the same place and playing idle animations. They do
+not establish successful recorded movement or broader gameplay stability.
+
+For the 26 performance samples with endpoints between 195 and 325 s, the
+agent counted 1866 presents over 129.903 s in HD (14.36 fps) and 1983 over
+129.886 s in 4K (15.27 fps). Capture requests occur in the interval and can
+disturb timing. These are single, sequential runs with different window and
+swapchain sizes; their small difference is not an isolated or statistically
+established effect of the reported output. Both continued to report a
+3840x2160 present source, and the HD run presented it to 1920x1080.
+
+The retry confirms that this initial dune view can be reached in each mode;
+it does not measure internal dune pass extents, GPU timestamps or input
+responsiveness. It also does not explain or fix the intermittent stops.
