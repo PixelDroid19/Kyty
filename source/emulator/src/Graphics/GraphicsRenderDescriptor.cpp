@@ -1255,31 +1255,37 @@ void DescriptorCache::LruAppend(int index)
 // freed after every submission that recorded them completes.
 void DescriptorCache::TrimSets()
 {
-	struct Retired
-	{
-		std::vector<SubmissionId> submissions;
-		VulkanDescriptorSet*      set;
-	};
-	std::vector<Retired> retired;
+	std::vector<SubmissionId>         submissions;
+	std::vector<VulkanDescriptorSet*> sets;
 	{
 		Core::LockGuard lock(m_mutex);
 		if (m_live_sets < LIVE_SETS_MAX)
 		{
 			return;
 		}
+		sets.reserve(TRIM_SETS);
 		for (uint32_t i = 0; i < TRIM_SETS && m_lru_oldest != -1; i++)
 		{
-			const int index = m_lru_oldest;
-			retired.push_back({m_sets.At(index).uses.Dependencies(), UnindexSet(index)});
+			const int   index = m_lru_oldest;
+			const auto& uses  = m_sets.At(index).uses.Dependencies();
+			submissions.insert(submissions.end(), uses.begin(), uses.end());
+			sets.push_back(UnindexSet(index));
 		}
 	}
+	if (sets.empty())
+	{
+		return;
+	}
+	// One deferral for the whole trim: these are the least recently used sets, so
+	// waiting for the newest of their uses delays their recycling by little.
 	// The deletion queue may run a ready task synchronously, and resource deletion
 	// enters this cache under the GPU memory lock: enqueue without holding m_mutex.
-	for (auto& entry: retired)
-	{
-		auto* set = entry.set;
-		GpuMemoryDeferUntilSubmissionsComplete(std::move(entry.submissions), [this, set]() { Recycle(set); });
-	}
+	GpuMemoryDeferUntilSubmissionsComplete(std::move(submissions), [this, sets = std::move(sets)]() {
+		for (auto* set: sets)
+		{
+			Recycle(set);
+		}
+	});
 }
 
 // Candidates come from the reverse index; `references` keeps each caller's
