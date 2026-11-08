@@ -4761,3 +4761,45 @@ limit, 170-300 s after launch.
 
   The waits move to other fences and the frame follows GPU work, so the device path would gain about 1 %. The ceiling
   run stopped at 180 s on "!create_all_the_same" for a storage texture, which is expected when draws use stale counts.
+
+## Display signal versus render work (2026-11-08)
+
+`PPSA21567 - Astro Bot` 01.018.000, clean LTO build of `f4823fbe5`, Intel
+Arc A770, Mesa 26.2.6, 60 fps presentation cap. The executable used no game
+patch. HD and 4K runs started from separate copies of the same save, shader
+store and pipeline cache and used the same recorded input. The configured
+render target was Fixed 1280x720, Display scope, with linear presentation.
+The window and the guest-reported screen were 1920x1080 for HD and 3840x2160
+for 4K; they cannot be varied independently in this build.
+
+- A separate diagnostic run broke inside `VideoOutGetOutputStatus` after the
+  status fields were written: Astro called it and received resolution `1`
+  under HD and `2` under 4K. The debugger and dispatch logging were enabled
+  for those observations, not for performance measurement.
+- In both configurations, the first three logged compute dispatches selected
+  by a 1920x1080 texture had the same shader addresses and group counts:
+  `0x500793000` (120x68), `0x500732a00` (30x68), and `0x5007c3f00`
+  (120x68). Their recorded descriptors include 1920x1080, 960x540, and
+  480x270 textures. This is evidence for these startup dispatches, not a
+  census of all passes or of the dunes.
+- The normal runs reported a registered guest display and actual present
+  source of 3840x2160 in both configurations. The present destination was
+  1920x1080 in HD and 3840x2160 in 4K. The coordinator reported a 1280x720
+  candidate and `scaling_applied=false`; the candidate is not evidence that
+  the game's rendering was reduced to 720p. Both captures made at 100 seconds
+  showed a space cinematics sequence, not matched gameplay frames.
+- Neither uninstrumented case reached the dunes: HD stopped after 159 s at
+  `!create_all_the_same` for overlapping storage textures, and 4K after 151 s
+  at `DepthStencilBuffer - Contains - RenderTexture`. A second HD run stopped
+  at 141 s on `!create_all_the_same`. These are existing categories of strict
+  memory-relationship stops; the trials do not establish that either screen
+  mode caused them. There is no matched gameplay FPS comparison from these
+  runs.
+
+Conclusion: changing the reported output is effective at the VideoOut API
+boundary, but it did not change the observed startup dispatches or final
+guest surface. It is not evidence that Astro will choose a lower internal
+render resolution. Presentation filtering cannot remove work already done by
+the game's render and compute passes. A gameplay comparison still requires
+reaching the same interactive scene without memory-relationship stops and
+measuring its internal pass extents and GPU/CPU timings under both signals.
