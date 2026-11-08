@@ -699,7 +699,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	auto* new_set = Allocate(stage, layout_plan);
 	EXIT_IF(new_set == nullptr);
 
-	VkDescriptorBufferInfo buffer_info[BUFFERS_MAX] {};
+	VkDescriptorBufferInfo buffer_info[BUFFERS_MAX];
 	for (int i = 0; i < storage_buffers_num; i++)
 	{
 		// PrepareStorageBuffers must always materialize a carrier (including empty OOB
@@ -712,15 +712,16 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	}
 
 	const bool             write_mask = bind.storage_buffers.write_mask_binding_index >= 0;
-	VkDescriptorBufferInfo write_mask_info[BUFFERS_MAX] {};
+	VkDescriptorBufferInfo write_mask_info[BUFFERS_MAX];
 	for (int i = 0; write_mask && i < storage_buffers_num; i++)
 	{
 		const VulkanBuffer* mask  = storage_buffers[i]->write_mask != nullptr ? storage_buffers[i]->write_mask : WriteMaskSink(gctx);
 		write_mask_info[i].buffer = mask->buffer;
+		write_mask_info[i].offset = 0;
 		write_mask_info[i].range  = mask->descriptor_range;
 	}
 
-	VkDescriptorImageInfo texture2d_sampled_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture2d_sampled_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures2d_sampled_num; i++)
 	{
 		texture2d_sampled_info[i].sampler   = nullptr;
@@ -733,7 +734,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                    : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
-	VkDescriptorImageInfo texture2d_sampled_depth_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture2d_sampled_depth_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < nset.textures2d_sampled_depth_num; i++)
 	{
 		texture2d_sampled_depth_info[i].sampler     = nullptr;
@@ -742,7 +743,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		texture2d_sampled_depth_info[i].imageLayout = SampledDepthLayout(textures2d_sampled_depth_view[i]);
 	}
 
-	VkDescriptorImageInfo texture2d_array_sampled_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture2d_array_sampled_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures2d_array_sampled_num; i++)
 	{
 		texture2d_array_sampled_info[i].sampler   = nullptr;
@@ -756,7 +757,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                          : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
-	VkDescriptorImageInfo texture2d_storage_info[TEXTURES_STORAGE_MAX] {};
+	VkDescriptorImageInfo texture2d_storage_info[TEXTURES_STORAGE_MAX];
 	for (int i = 0; i < textures2d_storage_num; i++)
 	{
 		texture2d_storage_info[i].sampler     = nullptr;
@@ -764,7 +765,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		texture2d_storage_info[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 	}
 
-	VkDescriptorImageInfo sampler_info[SAMPLERS_MAX] {};
+	VkDescriptorImageInfo sampler_info[SAMPLERS_MAX];
 	for (int i = 0; i < samplers_num; i++)
 	{
 		sampler_info[i].sampler     = g_render_ctx->GetSamplerCache()->GetSampler(samplers[i]);
@@ -772,7 +773,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		sampler_info[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
 
-	VkDescriptorBufferInfo gds_buffer_info[GDS_BUFFER_MAX] {};
+	VkDescriptorBufferInfo gds_buffer_info[GDS_BUFFER_MAX];
 	for (int i = 0; i < gds_buffers_num; i++)
 	{
 		gds_buffer_info[i].buffer = gds_buffers[i]->buffer;
@@ -780,7 +781,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		gds_buffer_info[i].range  = VK_WHOLE_SIZE;
 	}
 
-	VkDescriptorImageInfo texture3d_sampled_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture3d_sampled_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures3d_sampled_num; i++)
 	{
 		texture3d_sampled_info[i].sampler     = nullptr;
@@ -791,7 +792,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                  : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
 
-	VkDescriptorImageInfo texture2d_sampled_uint_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture2d_sampled_uint_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures2d_sampled_uint_num; i++)
 	{
 		texture2d_sampled_uint_info[i].sampler   = nullptr;
@@ -805,7 +806,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                         : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
-	VkDescriptorImageInfo texture2d_array_sampled_uint_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture2d_array_sampled_uint_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures2d_array_sampled_uint_num; i++)
 	{
 		texture2d_array_sampled_uint_info[i].sampler   = nullptr;
@@ -820,7 +821,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                               : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
-	VkDescriptorImageInfo texture3d_sampled_uint_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture3d_sampled_uint_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures3d_sampled_uint_num; i++)
 	{
 		texture3d_sampled_uint_info[i].sampler     = nullptr;
@@ -853,7 +854,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 
 	constexpr uint32_t B_MAX = 13;
 
-	VkWriteDescriptorSet descriptor_write[B_MAX] = {};
+	VkWriteDescriptorSet descriptor_write[B_MAX];
 
 	if (storage_buffers_num > 0)
 	{

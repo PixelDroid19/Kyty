@@ -1372,8 +1372,15 @@ public:
 
 	void Reset()
 	{
-		m_zero_carriers.clear();
-		m_shared_contents.clear();
+		// clear() zero-fills the whole bucket array even when the map holds nothing.
+		if (!m_zero_carriers.empty())
+		{
+			m_zero_carriers.clear();
+		}
+		if (!m_shared_contents.empty())
+		{
+			m_shared_contents.clear();
+		}
 		for (auto* entry: m_entries)
 		{
 			entry->used = false;
