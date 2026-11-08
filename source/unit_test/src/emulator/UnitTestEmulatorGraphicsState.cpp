@@ -1897,16 +1897,14 @@ struct CoveredIndexTestGpuObject: public GpuObject
 
 void EnsureGpuMemoryForTests()
 {
-	static bool initialized = false;
 	if (!Config::IsInitialized())
 	{
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-	if (!initialized)
+	if (g_gpu_memory == nullptr)
 	{
 		GpuMemoryInit();
-		initialized = true;
 	}
 }
 
