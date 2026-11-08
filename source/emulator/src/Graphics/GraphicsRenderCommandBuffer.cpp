@@ -2054,14 +2054,9 @@ bool CommandBuffer::IsInvalid() const
 {
 	EXIT_IF(g_render_ctx == nullptr);
 
-	if (m_pool != nullptr)
-	{
-		Core::LockGuard lock(m_pool->mutex);
-
-		return (m_index == static_cast<uint32_t>(-1) || m_index >= m_pool->buffers_count);
-	}
-
-	return true;
+	// No pool lock: buffers_count is fixed when the pool is created, and only this
+	// buffer's Allocate and Free change m_index. Every draw checks this many times.
+	return m_pool == nullptr || m_index == static_cast<uint32_t>(-1) || m_index >= m_pool->buffers_count;
 }
 
 void CommandBuffer::Allocate()
