@@ -106,7 +106,14 @@ public:
 		}
 	}
 
-	[[nodiscard]] Vector<int> FindAll(uint64_t vaddr) const { return m_map.Get(vaddr); }
+	// Callers read the ids without changing the map. A returned copy allocated
+	// on every lookup and was copied again when the caller iterated it.
+	[[nodiscard]] const Vector<int>& FindAll(uint64_t vaddr) const
+	{
+		static const Vector<int> kNoIds;
+		const auto*              ids = m_map.Find(vaddr);
+		return ids != nullptr ? *ids : kNoIds;
+	}
 
 	[[nodiscard]] bool IsEmpty() const
 	{
