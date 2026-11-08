@@ -2267,6 +2267,8 @@ void CommandBuffer::Begin()
 	m_device_awaited.clear();
 	m_device_wait_semaphores.clear();
 	m_device_wait_values.clear();
+	// A barrier at the start of a recording still orders it after earlier submissions.
+	m_latest_full_barrier = false;
 
 	auto* buffer = m_pool->buffers[m_index];
 
@@ -2452,6 +2454,7 @@ void CommandBuffer::SeparateDepthKillDraw(bool kills_with_depth_write)
 		m_draw_separation_pools.push_back(query_pool);
 	}
 	// Nothing reads the value: the pipelined write itself keeps the draws apart.
+	m_latest_full_barrier = false;
 	vkCmdWriteTimestamp(m_pool->buffers[m_index], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_draw_separation_pools[pool_index],
 	                    m_draw_separations % kDrawSeparationsPerPool);
 	m_draw_separations++;
@@ -3018,6 +3021,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		PresentationFsr3NoteRenderPass(*color, *depth);
 	}
 	CloseRenderPass();
+	m_latest_full_barrier = false;
 
 	auto* buffer = m_pool->buffers[m_index];
 
@@ -3246,6 +3250,7 @@ void CommandBuffer::CloseRenderPass()
 		return;
 	}
 	m_open_render_pass.reset();
+	m_latest_full_barrier = false;
 
 	auto* buffer = m_pool->buffers[m_index];
 	vkCmdEndRenderPass(buffer);
@@ -3267,12 +3272,14 @@ VkCommandBuffer CommandBuffer::RecordOutsideRenderPass()
 {
 	EXIT_IF(IsInvalid());
 	CloseRenderPass();
+	m_latest_full_barrier = false;
 	return m_pool->buffers[m_index];
 }
 
 VkCommandBuffer CommandBuffer::RecordState() const
 {
 	EXIT_IF(IsInvalid());
+	m_latest_full_barrier = false;
 	return m_pool->buffers[m_index];
 }
 
@@ -3280,7 +3287,25 @@ VkCommandBuffer CommandBuffer::RecordInsideRenderPass() const
 {
 	EXIT_IF(IsInvalid());
 	EXIT_IF(!m_open_render_pass.has_value());
+	m_latest_full_barrier = false;
 	return m_pool->buffers[m_index];
+}
+
+void CommandBuffer::FullMemoryBarrier()
+{
+	EXIT_IF(IsInvalid());
+	if (m_latest_full_barrier)
+	{
+		return;
+	}
+	VkMemoryBarrier mem_barrier {};
+	mem_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	mem_barrier.pNext         = nullptr;
+	mem_barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+	mem_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+	vkCmdPipelineBarrier(RecordOutsideRenderPass(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1,
+	                     &mem_barrier, 0, nullptr, 0, nullptr);
+	m_latest_full_barrier = true;
 }
 
 

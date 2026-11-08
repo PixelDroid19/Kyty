@@ -1300,16 +1300,7 @@ void GraphicsRenderMemoryBarrier(CommandBuffer* buffer)
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	auto* vk_buffer = buffer->RecordOutsideRenderPass();
-
-	VkMemoryBarrier mem_barrier {};
-	mem_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-	mem_barrier.pNext         = nullptr;
-	mem_barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-	mem_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mem_barrier, 0, nullptr,
-	                     0, nullptr);
+	buffer->FullMemoryBarrier();
 }
 
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* image)

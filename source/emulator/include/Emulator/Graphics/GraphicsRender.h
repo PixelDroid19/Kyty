@@ -647,6 +647,10 @@ public:
 	[[nodiscard]] VkCommandBuffer RecordOutsideRenderPass();
 	[[nodiscard]] VkCommandBuffer RecordState() const;
 	[[nodiscard]] VkCommandBuffer RecordInsideRenderPass() const;
+	// Orders every earlier command of the queue before every later one, for all
+	// stages and memory accesses. Guest cache flushes often come several in a row;
+	// when the latest command already is such a barrier, another orders nothing more.
+	void FullMemoryBarrier();
 	void WaitForFence();
 	void WaitForFenceWithoutLabelCallbacks();
 	void WaitForFenceAndReset();
@@ -787,6 +791,8 @@ private:
 	mutable bool                 m_recording = false;
 	bool                         m_resetting = false;
 	std::optional<OpenRenderPass> m_open_render_pass;
+	// The latest command recorded is a full memory barrier. Every recording handle clears it.
+	mutable bool m_latest_full_barrier = false;
 	std::vector<DepthStencilVulkanImage*> m_depth_plane_store_backs;
 	std::vector<DepthStencilVulkanImage*> m_stencil_plane_store_backs;
 	std::vector<SubmissionId>             m_device_awaited;
