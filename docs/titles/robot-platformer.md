@@ -6,6 +6,79 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: paired kernel measurement, arena refusal fixed (2026-11-09)
+
+Applies to `PPSA21567 - ASTRO BOT` 01.018, Intel A770, Linux, Mesa 26.2.6,
+strict 60 fps-limited runs on the user route. Executables built from
+`b76f4a71e` plus temporary diagnostics only; the arena fix (`4cf83a445`) was
+added for the last run.
+
+- **Method: two translations in one run.** A temporary instrument (not
+  committed) translates one compute kernel twice, with a marker added to the
+  module key, and switches between the two each second of wall time. GPU
+  timestamps attribute each dispatch to its translation, and every 5 s dump
+  gives a pair measured in the same scene under the same host load. The
+  ratios of the compared dumps stayed within 1.026-1.062 and 0.911-0.947 in
+  the two runs below, while the kernel took 18.5-23.3 ms per call across separate runs, so
+  a few percent per kernel is measurable without repeated whole runs. Both arms compile fresh; the rest
+  of the shader store was warm from a run that held the uncommitted exchange
+  edit, so absolute times are not quoted as the tip's.
+- **Rendezvous changes, per kernel.** For the tile-lighting kernel
+  `0x3666fa39` (the largest BVH-family module), the translation of
+  `77dd4ce0c` against the same translator with part-local skips, compare
+  chains across side exits and conflict-ordered LDS turned off. In two
+  windows of the route (5 s dumps 38-42 and 43-52) it took 23.1 against
+  25.0 ms and 18.8 against 20.2 ms per call; median ratio 0.930 over 20 paired
+  dumps, every dump of both windows between 0.911 and 0.947. At about one call per frame this is
+  about 1.4 ms of a 65 ms frame, consistent with the frame rate staying within
+  the noise of separate runs (previous record).
+- **Excluded: loading a part's own word without a select.** Letting
+  `SplitWavePartWords` load every word, its own included, instead of
+  selecting its own value: 19.2 against 18.6 ms per call over the same part of
+  the route (dumps 37-51); median ratio 1.031 over 19 paired dumps, each of
+  those dumps slower (1.026-1.062).
+- **What bounds the frame, by window** (the arena run: GPU timestamps and
+  1 s performance samples, on a build with diagnostics):
+
+  | Per frame | 188-207 s | 215-262 s (dunes) |
+  | --- | --- | --- |
+  | Frame rate | 15.0 fps | 13.2 fps |
+  | GPU busy | 92 % of wall time | 46-50 ms, 15-32 ms idle |
+  | Command processor active (run minus waits) | 9.7 ms | 50.7 ms |
+  | Fence waits | 42.6 ms | 27.1 ms |
+  | Draws / dispatches | 360 / 86 | 639 / 83 |
+  | `0x3666fa39` / `0x874bd13f` | 24.1 / 12.4 ms | 19.6 ms / absent |
+
+  The first window is GPU-bound. In the dunes the processor's active time
+  alone (about 79 us per draw; state setup 13.0 and resource binding 12.75 ms
+  per frame lead) is as long as the GPU's busy time, and fence waits add
+  27 ms on top: the two run in series. A kernel cut there shortens the frame
+  only through shorter waits; overlapping them would bring the frame to about
+  50 ms. In dumps 47-50 the geometry kernel `0x360038d0f4cfb9a5` grew from 3.0
+  to 20.4 ms per frame; not traced.
+- **Where the kernel spends its time.** A temporary build that forces a miss
+  at every BVH node ran the kernel at 23.6 against 24.7 ms per call in the same
+  scene, so the traversal costs about 1-2 ms. The rest is straight-line
+  shading (about 1,550 VALU instructions), split-wave exchanges and register
+  spills (8 KB of scratch per thread); the kernel is latency-bound. At
+  960x540 internal resolution (game patch, not strict) it takes 6.45 ms.
+- **Arena refusal fixed (`4cf83a445`).** A run stopped at 150 s, in the pause
+  cinematic, with `!create_all_the_same`: a 3840x2160 RGBA16F (mode 27)
+  storage view of 0x3fc0000 bytes at 0x53de40000 over 40 parents. 39 were
+  render targets and storage views crossing or inside it, which the arena
+  rule links. The 40th was a 640-wide sampled texture inside it, uploaded by
+  the CPU and with no device write. The arena rule accepted only storage
+  buffers as guest-byte caches. It now also accepts the CPU-texture link the
+  single-parent and alias paths use: guest memory holds the content, no
+  device write followed the upload, and no write-back is pending. With the fix
+  the same route ran to its planned 265 s close. A temporary marker showed
+  the predicate true for CPU textures in 8 multi-parent creations (the cap),
+  one with 35 parents. It does not show that no other clause admitted them.
+  The `GpuMemory` and `GraphicsState` unit suites pass (332 tests).
+- **Open.** The user's pause-menu freeze was in the same scene. This refusal
+  is a candidate cause, not a proven one. The same route without the fix had
+  passed 150 s once, so the stop is intermittent.
+
 ## Robot platformer: fewer split-wave rendezvous, two refusals fixed (2026-11-09)
 
 Applies to `PPSA21567 - ASTRO BOT` 01.018, Intel A770, Linux, Mesa 26.2.6,
