@@ -6,6 +6,35 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: split-wave lane reads and compares share exchanges (2026-11-09)
+
+`ddc3664b6` (translator 205). The BVH traversal compute shader `0x3666fa39`
+runs as a guest wave64 split into 8-lane host subgroups on the Intel Arc
+A770. Each wave-wide value cost one cross-subgroup rendezvous. After each ray
+intersection it reads 2-4 lanes at one selector and evaluates runs of
+compares whose masks feed scalar arithmetic. Runs of `V_READLANE` at one
+selector now share one exchange: 44 reads form 32 groups, saving 12
+exchanges per pass through the two traversal loops. Runs of adjacent
+compares whose masks are not lane-local pack their votes and publish them
+together: up to 38 static compare exchanges before the lane-local and source
+filters.
+
+**Verification.** The device test
+`EmulatorPackedMipNative.SplitWaveGroupedLaneReadsAndComparesReturnWholeWaveWords`
+runs both groupings with a required subgroup size of 8 and checks every
+whole-wave word against its scalar value, with no validation errors. Forcing
+the ballot field shift to 0 makes it fail. It skips on devices whose minimum
+subgroup size is above 8.
+
+**Frame effect not isolated.** Two strict runs stopped with the intermittent
+`!create_all_the_same` refusal at 181 s and 137 s. The two that reached the
+dunes desynced from the time-based pad route: one stood idle at the start
+(13.29 fps, 54.6 GPU ms/f over 205-255 s), while the translator 203 baseline
+was moving among the rocks (10.88 fps, 79.4 GPU ms/f). The scenes differ, so
+no speedup is claimed. The route lands in different game states when load
+times vary; compare windows only when their captures show the same camera
+state.
+
 ## Robot platformer: intermittent storage-view refusal (2026-11-08)
 
 On the Intel Arc A770, an isolated LTO executable with the same source as
