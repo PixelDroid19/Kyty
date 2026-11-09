@@ -830,6 +830,14 @@ void Spirv::WriteHeader()
 			vars.Add("%split_host_lane");
 			vars.Add("%split_exchange");
 			vars.Add("%split_count");
+			vars.Add("%split_read_word1");
+			vars.Add("%split_read_word2");
+			vars.Add("%split_read_word3");
+			vars.Add("%split_ballot_packed");
+			for (uint32_t part = 0; part < 8u; ++part)
+			{
+				vars.Add(String8::FromPrintf("%%split_ballot_part%u", part));
+			}
 		}
 	}
 

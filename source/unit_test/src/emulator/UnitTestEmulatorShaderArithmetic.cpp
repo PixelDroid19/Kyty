@@ -132,7 +132,7 @@ void CheckDeclaredModuleIds(const ShaderCode& code, const Core::String8& source)
 }
 
 Core::String8 Emit(const ShaderCode& code, uint8_t float_mode = 0xc0u, bool ieee = false, bool dx10 = false, bool validate = false,
-                   Fp16Overflow overflow = Fp16Overflow::Disabled, bool split_wave = false)
+                   Fp16Overflow overflow = Fp16Overflow::Disabled, bool split_wave = false, uint32_t split_lanes = 32)
 {
 	// These are explicit synthetic initial controls, including known-disabled
 	// FP16_OVFL for the original fixtures. Production defaults remain unknown.
@@ -157,8 +157,8 @@ Core::String8 Emit(const ShaderCode& code, uint8_t float_mode = 0xc0u, bool ieee
 	if (split_wave)
 	{
 		compute.native_wave_sensitive  = true;
-		compute.required_subgroup_size = 32;
-		compute.wave_layout            = {ShaderComputeWaveStrategy::Split64On32, {1, 1, 1}, {64, 1, 1}, 64, 32, 1, 1, 0};
+		compute.required_subgroup_size = split_lanes;
+		compute.wave_layout            = {ShaderComputeWaveStrategy::Split64On32, {1, 1, 1}, {64, 1, 1}, 64, split_lanes, 1, 1, 0};
 	}
 	const bool cs = code.GetType() == ShaderType::Compute;
 	const auto source = SpirvGenerateSource(code, nullptr, cs ? nullptr : &input, cs ? &compute : nullptr);
@@ -986,6 +986,111 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	std::_Exit(0);
 }
 
+ShaderInstruction LaneInstruction(ShaderInstructionType type, ShaderOperandType dst_type, int dst, int source, int selector, uint32_t pc)
+{
+	ShaderInstruction inst {};
+	inst.pc                 = pc;
+	inst.type               = type;
+	inst.format             = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	inst.src_num            = 2;
+	inst.dst.type           = dst_type;
+	inst.dst.register_id    = dst;
+	inst.dst.size           = 1;
+	inst.src[0].type        = type == ShaderInstructionType::VReadlaneB32 ? ShaderOperandType::Vgpr : ShaderOperandType::Sgpr;
+	inst.src[0].register_id = source;
+	inst.src[0].size        = 1;
+	inst.src[1].type        = ShaderOperandType::Sgpr;
+	inst.src[1].register_id = selector;
+	inst.src[1].size        = 1;
+	return inst;
+}
+
+uint32_t CountOf(const Core::String8& text, const char* pattern)
+{
+	uint32_t count = 0;
+	for (uint32_t at = text.FindIndex(pattern); at != Core::STRING8_INVALID_INDEX; at = text.FindIndex(pattern, at + 1)) { ++count; }
+	return count;
+}
+
+// Split-wave V_READLANE at one selector share one exchange until an instruction between them rewrites a member's source.
+[[noreturn]] void RunSplitReadGroup()
+{
+	Initialize();
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	constexpr auto kRead  = ShaderInstructionType::VReadlaneB32;
+	constexpr auto kWrite = ShaderInstructionType::VWritelaneB32;
+	code.GetInstructions().Add(LaneInstruction(kRead, ShaderOperandType::Sgpr, 4, 0, 2, 0));
+	code.GetInstructions().Add(LaneInstruction(kRead, ShaderOperandType::Sgpr, 5, 1, 2, 8));
+	code.GetInstructions().Add(LaneInstruction(kWrite, ShaderOperandType::Vgpr, 3, 4, 6, 16));
+	code.GetInstructions().Add(LaneInstruction(kRead, ShaderOperandType::Sgpr, 7, 2, 2, 24));
+	code.GetInstructions().Add(LaneInstruction(kWrite, ShaderOperandType::Vgpr, 2, 5, 6, 32));
+	code.GetInstructions().Add(LaneInstruction(kRead, ShaderOperandType::Sgpr, 8, 2, 2, 40));
+	ShaderInstruction end {};
+	end.pc     = 48;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	code.GetInstructions().Add(end);
+	const auto source = Emit(code, 0xc0u, false, false, true, Fp16Overflow::Disabled, true);
+	if (CountOf(source, "OpFunctionCall %v4uint %split_read_group %rg0_0 %rg1_0 %rg2_0 %split_c0 %rgl_0") != 1u ||
+	    CountOf(source, "OpLoad %uint %split_read_word1") != 1u || CountOf(source, "OpLoad %uint %split_read_word2") != 1u ||
+	    CountOf(source, "OpFunctionCall %uint %split_read %") != 1u)
+	{
+		Fail("three reads at one selector must share one exchange, and a read of a rewritten source must exchange alone");
+	}
+	std::_Exit(0);
+}
+
+ShaderInstruction CompareInstruction(ShaderOperandType dst_type, int dst, int scalar, int vector, uint32_t pc)
+{
+	ShaderInstruction inst {};
+	inst.pc                 = pc;
+	inst.type               = ShaderInstructionType::VCmpNeU32;
+	inst.format             = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
+	inst.src_num            = 2;
+	inst.dst.type           = dst_type;
+	inst.dst.register_id    = dst;
+	inst.dst.size           = 2;
+	inst.src[0].type        = ShaderOperandType::Sgpr;
+	inst.src[0].register_id = scalar;
+	inst.src[0].size        = 1;
+	inst.src[1].type        = ShaderOperandType::Vgpr;
+	inst.src[1].register_id = vector;
+	inst.src[1].size        = 1;
+	return inst;
+}
+
+// Consecutive split-wave V_CMP whose masks leave the lane share one exchange; a compare that reads an earlier
+// member's mask exchanges alone.
+[[noreturn]] void RunSplitBallotGroup()
+{
+	Initialize();
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(CompareInstruction(ShaderOperandType::VccLo, 0, 28, 7, 0));
+	code.GetInstructions().Add(CompareInstruction(ShaderOperandType::Sgpr, 24, 30, 7, 8));
+	code.GetInstructions().Add(CompareInstruction(ShaderOperandType::Sgpr, 26, 29, 7, 16));
+	code.GetInstructions().Add(CompareInstruction(ShaderOperandType::Sgpr, 22, 24, 6, 24));
+	// Scalar reads make every mask wave-wide.
+	code.GetInstructions().Add(LaneInstruction(ShaderInstructionType::SAddU32, ShaderOperandType::Sgpr, 10, 24, 26, 32));
+	auto vcc_read      = LaneInstruction(ShaderInstructionType::SAddU32, ShaderOperandType::Sgpr, 11, 0, 22, 40);
+	vcc_read.src[0].type = ShaderOperandType::VccLo;
+	code.GetInstructions().Add(vcc_read);
+	ShaderInstruction end {};
+	end.pc     = 48;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	code.GetInstructions().Add(end);
+	const auto source = Emit(code, 0xc0u, false, false, true, Fp16Overflow::Disabled, true, 8);
+	if (CountOf(source, "OpFunctionCall %void %split_ballot_group %mask_out_packed_2") != 1u ||
+	    CountOf(source, "OpFunctionCall %v4uint %split_ballot_field") != 3u ||
+	    CountOf(source, "OpFunctionCall %v4uint %split_ballot %mask_out_active_3") != 1u)
+	{
+		Fail("three compares must share one exchange, and a compare of an earlier member's mask must exchange alone");
+	}
+	std::_Exit(0);
+}
+
 [[noreturn]] void RunDsBpermuteAssembly(bool split)
 {
 	Initialize();
@@ -1362,6 +1467,14 @@ TEST(EmulatorShaderArithmetic, DsBpermuteShuffleNamesTheSubgroupScope)
 TEST(EmulatorShaderArithmetic, DsBpermuteSplitWaveReadsGuestLanesThroughTheWaveExchange)
 {
 	ASSERT_EXIT(RunDsBpermuteAssembly(true), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, SplitWaveReadlanesAtOneSelectorShareOneExchange)
+{
+	ASSERT_EXIT(RunSplitReadGroup(), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, SplitWaveComparesShareOneBallotExchange)
+{
+	ASSERT_EXIT(RunSplitBallotGroup(), ::testing::ExitedWithCode(0), "");
 }
 TEST(EmulatorShaderArithmetic, BfeDefinedForEveryMaskedOffsetAndWidth) { ASSERT_EXIT(RunBfe(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, ComputeFp16EncodingsAssembleAndValidate)

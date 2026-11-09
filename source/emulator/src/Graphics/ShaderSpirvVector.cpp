@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -3717,6 +3718,55 @@ static bool RecompileLaneReductionRead(uint32_t index, const ShaderLaneReduction
 	return true;
 }
 
+// A run of V_READLANE at one selector in a split wave (Spirv::SplitReadGroup): the head reads every member's source
+// in one exchange and leaves word k in %split_read_word<k> until member k stores it at its own position.
+static bool RecompileSplitReadGroup(const ShaderCode& code, uint32_t index, const std::vector<uint32_t>& group, const String8& dst,
+                                    String8* dst_source, Spirv* spirv)
+{
+	const String8 index_str = String8::FromPrintf("%u", index);
+	if (group[0] != index)
+	{
+		const auto slot = static_cast<uint32_t>(std::find(group.begin(), group.end(), index) - group.begin());
+		EXIT_IF(slot == 0u || slot >= group.size());
+		*dst_source += String8::FromPrintf("%%readlane_%u = OpLoad %%uint %%split_read_word%u\nOpStore %%%s %%readlane_%u\n", index, slot,
+		                                   dst.c_str(), index);
+		return true;
+	}
+	String8 text;
+	String8 words;
+	for (uint32_t slot = 0; slot < 4u; ++slot)
+	{
+		if (slot >= group.size())
+		{
+			words += " %split_c0";
+			continue;
+		}
+		String8 load;
+		if (!operand_load_uint(spirv, code.GetInstructions().At(group[slot]).src[0], String8::FromPrintf("rg%u_<index>", slot), index_str,
+		                       &load))
+		{
+			return false;
+		}
+		text += load + "\n";
+		words += String8::FromPrintf(" %%rg%u_<index>", slot);
+	}
+	String8 lane;
+	if (!operand_load_uint(spirv, code.GetInstructions().At(index).src[1], "rgl_<index>", index_str, &lane))
+	{
+		return false;
+	}
+	text += lane + "\n%readgroup_<index> = OpFunctionCall %v4uint %split_read_group" + words + " %rgl_<index>\n" +
+	        "%readlane_<index> = OpCompositeExtract %uint %readgroup_<index> 0\nOpStore %<dst> %readlane_<index>\n";
+	for (uint32_t slot = 1; slot < group.size(); ++slot)
+	{
+		text += String8::FromPrintf("%%readgroup_<index>_%u = OpCompositeExtract %%uint %%readgroup_<index> %u\n"
+		                            "OpStore %%split_read_word%u %%readgroup_<index>_%u\n",
+		                            slot, slot, slot, slot);
+	}
+	*dst_source += text.ReplaceStr("<index>", index_str).ReplaceStr("<dst>", dst);
+	return true;
+}
+
 // v_readlane_b32 ignores EXEC and reads the requested physical wave lane.
 KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 {
@@ -3757,6 +3807,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 	    HasInvalidatedScalarSpill(code, index, spill_register, spill_lane))
 	{
 		return false;
+	}
+	if (const auto* group = spirv->SplitReadGroup(index); group != nullptr)
+	{
+		return RecompileSplitReadGroup(code, index, *group, dst_value.value, dst_source, spirv);
 	}
 
 	String8 index_str = String8::FromPrintf("%u", index);

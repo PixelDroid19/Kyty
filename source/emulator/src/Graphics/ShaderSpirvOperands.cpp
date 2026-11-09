@@ -9,6 +9,7 @@
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Log.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <string>
@@ -46,6 +47,46 @@ String8 ReplaceMaskToken(const String8& source, const String8& from, const Strin
 		}
 	}
 	return String8(text.c_str());
+}
+
+// A grouped compare adds its vote to %split_ballot_packed at its own position; the tail publishes every member's
+// vote in one exchange and then stores each member's mask in program order.
+String8 GroupedMaskVote(const ShaderCode& code, const std::vector<uint32_t>& group, uint32_t index, uint32_t lanes, bool wave32,
+                        const String8& tag)
+{
+	const auto position = static_cast<uint32_t>(std::find(group.begin(), group.end(), index) - group.begin());
+	EXIT_IF(position >= group.size());
+	String8 previous = "split_c0";
+	String8 text;
+	if (position > 0u)
+	{
+		previous = "mask_out_previous_" + tag;
+		text     = "%" + previous + " = OpLoad %uint %split_ballot_packed\n";
+	}
+	text += String8::FromPrintf("%%mask_out_packed_%s = OpFunctionCall %%uint %%split_ballot_pack %%%s %%mask_out_active_%s %%split_c%u\n",
+	                            tag.c_str(), previous.c_str(), tag.c_str(), position * lanes);
+	if (position + 1u < group.size())
+	{
+		return text + "OpStore %split_ballot_packed %mask_out_packed_" + tag + "\n";
+	}
+	text += "%mask_out_group_" + tag + " = OpFunctionCall %void %split_ballot_group %mask_out_packed_" + tag + "\n";
+	for (uint32_t member = 0; member < group.size(); ++member)
+	{
+		const auto& mask = code.GetInstructions().At(group[member]).dst;
+		const auto  lo   = mask.size == 1 ? operand_variable_to_str(mask) : operand_variable_to_str(mask, 0);
+		const auto  name = String8::FromPrintf("mask_out_member_%s_%u", tag.c_str(), member);
+		text += String8::FromPrintf("%%%s = OpFunctionCall %%v4uint %%split_ballot_field %%split_c%u\n"
+		                            "%%%s_lo = OpCompositeExtract %%uint %%%s 0\n"
+		                            "OpStore %%%s %%%s_lo\n",
+		                            name.c_str(), member * lanes, name.c_str(), name.c_str(), lo.value.c_str(), name.c_str());
+		if (mask.size == 2 && !wave32)
+		{
+			const auto hi = operand_variable_to_str(mask, 1);
+			text += String8::FromPrintf("%%%s_hi = OpCompositeExtract %%uint %%%s 1\nOpStore %%%s %%%s_hi\n", name.c_str(), name.c_str(),
+			                            hi.value.c_str(), name.c_str());
+		}
+	}
+	return text;
 }
 
 } // namespace
@@ -287,18 +328,22 @@ String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index
 			const auto value       = String8(text.substr(value_begin, end - value_begin).c_str());
 			// The collective stays outside software-EXEC control flow. Capture
 			// incoming EXEC before the first store, including EXEC destinations.
-			const auto packed =
-			    String8(R"(
+			const auto* group = SplitBallotGroup(index);
+			const auto  vote  = String8(R"(
 %mask_out_exec_<tag> = OpLoad %uint %exec_lane_lo
 %mask_out_live_<tag> = OpINotEqual %bool %mask_out_exec_<tag> %uint_0
 %mask_out_pred_<tag> = OpINotEqual %bool <value> %uint_0
 %mask_out_active_<tag> = OpLogicalAnd %bool %mask_out_live_<tag> %mask_out_pred_<tag>
-<ballot>
+)");
+			const auto  stores = group != nullptr ? GroupedMaskVote(m_code, *group, index, SplitWavePartLanes(), NativeWave32(), tag)
+			                                      : String8(R"(<ballot>
 %mask_out_lo_<tag> = OpCompositeExtract %uint %mask_out_ballot_<tag> 0
 %mask_out_hi_<tag> = OpCompositeExtract %uint %mask_out_ballot_<tag> 1
 OpStore %<lo> %mask_out_lo_<tag>
 <store_hi>
-)")
+)");
+			const auto packed =
+			    (vote + stores)
 			        .ReplaceStr("<ballot>", IsLaneLocalMaskResult(index) ? NativeOwnBitMask("mask_out_active_" + tag, "mask_out_ballot_" + tag)
 			                                                             : NativeMaskBallot("mask_out_active_" + tag, "mask_out_ballot_" + tag))
 			        .ReplaceStr("<store_hi>", !hi.value.IsEmpty() && !NativeWave32() ? "OpStore %<hi> %mask_out_hi_<tag>" : "")

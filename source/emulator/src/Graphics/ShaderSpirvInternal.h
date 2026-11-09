@@ -138,6 +138,13 @@ public:
 	// Split compute wave: pointwise mask algebra that gathers its own result
 	// from the lane-local masks it combines.
 	[[nodiscard]] bool IsLaneMaskGather(uint32_t index) const;
+	// Split compute wave: the run of V_READLANE instructions that shares one exchange with the one at index, head
+	// first; nullptr when it exchanges alone.
+	[[nodiscard]] const std::vector<uint32_t>* SplitReadGroup(uint32_t index) const;
+	// Split compute wave: the run of V_CMP instructions whose ballots share one exchange with the one at index,
+	// tail last; nullptr when it exchanges alone.
+	[[nodiscard]] const std::vector<uint32_t>* SplitBallotGroup(uint32_t index) const;
+	[[nodiscard]] uint32_t                     SplitBallotGroupLimit() const;
 	// Guest lanes per host subgroup of a split wave: 32 or 16.
 	[[nodiscard]] uint32_t SplitWavePartLanes() const;
 	// The SubgroupLocalInvocationId builtin. A split wave keeps the guest lane in %gl_SubgroupInvocationID.
@@ -553,6 +560,12 @@ private:
 	mutable std::vector<bool>     m_vertex_exec_full;
 	mutable bool                  m_lane_mask_plan_ready = false;
 	mutable ShaderLaneMaskPlan    m_lane_mask_plan;
+	mutable bool                  m_split_read_groups_ready = false;
+	mutable std::vector<uint32_t> m_split_read_group_of;
+	mutable std::vector<std::vector<uint32_t>> m_split_read_groups;
+	mutable bool                  m_split_ballot_groups_ready = false;
+	mutable std::vector<uint32_t> m_split_ballot_group_of;
+	mutable std::vector<std::vector<uint32_t>> m_split_ballot_groups;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;

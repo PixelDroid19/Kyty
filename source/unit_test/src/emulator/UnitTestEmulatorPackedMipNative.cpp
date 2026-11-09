@@ -273,8 +273,9 @@ public:
 				return NativeResult::Failure;
 			}
 
-			physical_device = candidate;
-			queue_family    = compute_family;
+			physical_device   = candidate;
+			queue_family      = compute_family;
+			min_subgroup_size = subgroup_size.minSubgroupSize;
 			vkGetDeviceQueue(device, queue_family, 0, &queue);
 			if (queue == VK_NULL_HANDLE)
 			{
@@ -307,11 +308,12 @@ public:
 		return true;
 	}
 
-	VkInstance       instance        = VK_NULL_HANDLE;
-	VkDevice         device          = VK_NULL_HANDLE;
-	VkPhysicalDevice physical_device = VK_NULL_HANDLE;
-	VkQueue          queue           = VK_NULL_HANDLE;
-	uint32_t         queue_family    = 0;
+	VkInstance       instance          = VK_NULL_HANDLE;
+	VkDevice         device            = VK_NULL_HANDLE;
+	VkPhysicalDevice physical_device   = VK_NULL_HANDLE;
+	VkQueue          queue             = VK_NULL_HANDLE;
+	uint32_t         queue_family      = 0;
+	uint32_t         min_subgroup_size = 0;
 
 private:
 	static VKAPI_ATTR VkBool32 VKAPI_CALL ValidationCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -573,7 +575,7 @@ public:
 	}
 
 	bool Initialize(const NativeVulkanContext& context, const ShaderBindResources& bind, const std::vector<uint32_t>& spirv,
-	                const NativeImageTarget& image, std::string* reason)
+	                uint32_t subgroup_size, const NativeImageTarget& image, std::string* reason)
 	{
 		device = context.device;
 		VkDescriptorSetLayoutBinding image_binding {};
@@ -651,7 +653,7 @@ public:
 
 		VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_size {};
 		required_size.sType                = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT;
-		required_size.requiredSubgroupSize = 32;
+		required_size.requiredSubgroupSize = subgroup_size;
 		VkPipelineShaderStageCreateInfo stage {};
 		stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 		stage.pNext  = &required_size;
@@ -844,6 +846,8 @@ void InitializeShaderHarness()
 	Config::Load(validation);
 }
 
+bool ConfigureStoreInput(ShaderComputeInputInfo* input, std::string* reason);
+
 bool BuildStoreShader(bool packed_mip, ShaderCode* code, ShaderComputeInputInfo* input, std::string* reason)
 {
 	if (code == nullptr || input == nullptr || reason == nullptr)
@@ -868,12 +872,17 @@ bool BuildStoreShader(bool packed_mip, ShaderCode* code, ShaderComputeInputInfo*
 		*reason = "the production parser rejected the native EXEC image-store program";
 		return false;
 	}
+	return ConfigureStoreInput(input, reason);
+}
 
-	input->dispatch_mode  = 0x8041u;
-	input->threads_num[0] = 64u;
-	input->threads_num[1] = 1u;
-	input->threads_num[2] = 1u;
-	input->thread_ids_num = 1;
+// A 64-invocation split dispatch with the T# of the R32_UINT target in s[32:39] and EXEC words in s4 and s5.
+bool ConfigureStoreInput(ShaderComputeInputInfo* input, std::string* reason)
+{
+	input->dispatch_mode          = 0x8041u;
+	input->threads_num[0]         = 64u;
+	input->threads_num[1]         = 1u;
+	input->threads_num[2]         = 1u;
+	input->thread_ids_num         = 1;
 	input->wave_layout            = {ShaderComputeWaveStrategy::Split64On32, {64u, 1u, 1u}, {64u, 1u, 1u}, 64u, 32u, 1u, 1u, 0u};
 	input->native_wave_sensitive  = true;
 	input->required_subgroup_size = 32u;
@@ -992,7 +1001,7 @@ bool RunNativeCases(const NativeVulkanContext& context, std::string* reason)
 			return false;
 		}
 		NativeComputePipeline pipeline;
-		if (!pipeline.Initialize(context, input.bind, binary, image, reason))
+		if (!pipeline.Initialize(context, input.bind, binary, input.required_subgroup_size, image, reason))
 		{
 			return false;
 		}
@@ -1007,6 +1016,137 @@ bool RunNativeCases(const NativeVulkanContext& context, std::string* reason)
 			}
 			first_run = false;
 			ExpectPixelsMatchMask(pixels, mask.low, mask.high, packed_mip ? "image_store_mip (LOD 0)" : "image_store", mask.name);
+		}
+	}
+	return true;
+}
+
+// One guest wave64 in 8-lane parts: three V_READLANE at one selector and four adjacent compares whose masks scalar
+// code reads, then every lane stores the scalar word in s<output> at its lane's pixel.
+bool BuildSplitCollectiveShader(uint32_t output, ShaderCode* code, ShaderComputeInputInfo* input, std::string* reason)
+{
+	auto v_mov     = [](uint32_t dst, uint32_t src) { return 0x7e000000u | (dst << 17u) | (0x01u << 9u) | src; };
+	auto s_add_u32 = [](uint32_t dst, uint32_t src0, uint32_t src1) { return 0x80000000u | (dst << 16u) | (src1 << 8u) | src0; };
+	auto v_lshlrev = [](uint32_t dst, uint32_t shift, uint32_t src) { return (0x1au << 25u) | (dst << 17u) | (src << 9u) | shift; };
+	auto vop3      = [](uint32_t op, uint32_t dst, uint32_t src0, uint32_t src1)
+	{ return std::array<uint32_t, 2> {(0x35u << 26u) | (op << 16u) | dst, src0 | (src1 << 9u)}; };
+	const auto                  lt     = vop3(0xc1u, 24u, 128u + 37u, 256u + 4u);                       // v_cmp_lt_u32 s[24:25], 37, v4
+	const auto                  ne     = vop3(0xc5u, 26u, 128u + 21u, 256u + 4u);                       // v_cmp_ne_u32 s[26:27], 21, v4
+	const auto                  gt     = vop3(0xc4u, 28u, 128u + 50u, 256u + 12u);                      // v_cmp_gt_u32 s[28:29], 50, v12
+	const auto                  read0  = vop3(0x360u, 14u, 256u + 4u, 12u);                             // v_readlane_b32 s14, v4, s12
+	const auto                  read1  = vop3(0x360u, 15u, 256u + 12u, 12u);                            // v_readlane_b32 s15, v12, s12
+	const auto                  read2  = vop3(0x360u, 16u, 256u + 13u, 12u);                            // v_readlane_b32 s16, v13, s12
+	const uint32_t              s_mov  = (0x17du << 23u) | (12u << 16u) | (0x03u << 8u) | (128u + 45u); // s_mov_b32 s12, 45
+	const uint32_t              cmp_gt = (0x3eu << 25u) | (0xc4u << 17u) | (4u << 9u) | (128u + 13u);   // v_cmp_gt_u32 vcc, 13, v4
+	const uint32_t              mimg0  = (0x3cu << 26u) | (0x08u << 18u) | (0xfu << 8u) | (1u << 3u);
+	const uint32_t              mimg1  = (8u << 16u) | (8u << 8u) | 4u; // T# s[32:39], vdata v[8:11], vaddr v[4:7].
+	const std::vector<uint32_t> words {
+	    v_mov(4u, 256u),
+	    v_mov(5u, 128u),
+	    v_mov(6u, 128u),
+	    v_mov(7u, 128u),
+	    v_lshlrev(12u, 128u + 1u, 4u),
+	    v_lshlrev(13u, 128u + 2u, 4u),
+	    s_mov,
+	    read0[0],
+	    read0[1],
+	    read1[0],
+	    read1[1],
+	    read2[0],
+	    read2[1],
+	    cmp_gt,
+	    lt[0],
+	    lt[1],
+	    ne[0],
+	    ne[1],
+	    gt[0],
+	    gt[1],
+	    s_add_u32(40u, 106u, 24u), // The store's unused channels read these sums: no mask is lane-local.
+	    s_add_u32(41u, 26u, 28u),
+	    v_mov(8u, output),
+	    v_mov(9u, 40u),
+	    v_mov(10u, 41u),
+	    v_mov(11u, output),
+	    mimg0,
+	    mimg1,
+	    0xbf810000u,
+	};
+	code->SetType(ShaderType::Compute);
+	if (!ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), code))
+	{
+		*reason = "the production parser rejected the split collective program";
+		return false;
+	}
+	if (!ConfigureStoreInput(input, reason))
+	{
+		return false;
+	}
+	input->wave_layout            = {ShaderComputeWaveStrategy::Split64On32, {64u, 1u, 1u}, {64u, 1u, 1u}, 64u, 8u, 1u, 1u, 0u};
+	input->required_subgroup_size = 8u;
+	return true;
+}
+
+struct SplitCollectiveCase
+{
+	const char* name;
+	uint32_t    output;
+	uint32_t    expected;
+};
+
+bool RunSplitCollectiveCases(const NativeVulkanContext& context, std::string* reason)
+{
+	NativeImageTarget   image;
+	ReadbackBuffer      readback;
+	NativeCommandBuffer command;
+	if (!image.Initialize(context, reason) || !readback.Initialize(context, reason) || !command.Initialize(context, reason))
+	{
+		return false;
+	}
+	// Lane x of v4 holds x and of v12 holds 2x; the selector picks lane 45, in part 5.
+	const std::array<SplitCollectiveCase, 11> cases {{
+	    {"readlane v4", 14u, 45u},
+	    {"readlane v12", 15u, 90u},
+	    {"readlane v13", 16u, 180u},
+	    {"x < 13, low", 106u, 0x00001fffu},
+	    {"x < 13, high", 107u, 0u},
+	    {"x > 37, low", 24u, 0u},
+	    {"x > 37, high", 25u, 0xffffffc0u},
+	    {"x != 21, low", 26u, 0xffdfffffu},
+	    {"x != 21, high", 27u, 0xffffffffu},
+	    {"2x < 50, low", 28u, 0x01ffffffu},
+	    {"2x < 50, high", 29u, 0u},
+	}};
+	bool                                      first_run = true;
+	for (const auto& test: cases)
+	{
+		ShaderCode             code;
+		ShaderComputeInputInfo input {};
+		if (!BuildSplitCollectiveShader(test.output, &code, &input, reason))
+		{
+			return false;
+		}
+		const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+		EXPECT_NE(std::string(source.c_str()).find("OpFunctionCall %void %split_ballot_group"), std::string::npos) << test.name;
+		EXPECT_NE(std::string(source.c_str()).find("OpFunctionCall %v4uint %split_read_group"), std::string::npos) << test.name;
+		std::vector<uint32_t> binary;
+		if (!CompileStoreShader(code, input, &binary, reason))
+		{
+			return false;
+		}
+		NativeComputePipeline pipeline;
+		if (!pipeline.Initialize(context, input.bind, binary, input.required_subgroup_size, image, reason))
+		{
+			return false;
+		}
+		std::array<uint32_t, kImageWidth> pixels {};
+		if (!RunImageCase(context, &image, readback, pipeline, &command, MakeMetadata(input.bind, ~0u, ~0u), first_run, &pixels, reason))
+		{
+			return false;
+		}
+		first_run = false;
+		for (uint32_t x = 0; x < kImageWidth; ++x)
+		{
+			EXPECT_EQ(pixels[x], test.expected) << test.name << " / x=" << x;
 		}
 	}
 	return true;
@@ -1028,6 +1168,26 @@ TEST(EmulatorPackedMipNative, ImageStoreMipAndOrdinaryStoreHonorBothExecWords)
 	ASSERT_TRUE(RunNativeCases(context, &reason)) << reason;
 	ASSERT_TRUE(context.ShutdownDevice(&reason)) << reason;
 	EXPECT_EQ(context.ValidationErrors(), 0u) << "Vulkan validation reported errors while tearing down the native image fixture";
+}
+
+TEST(EmulatorPackedMipNative, SplitWaveGroupedLaneReadsAndComparesReturnWholeWaveWords)
+{
+	InitializeShaderHarness();
+	NativeVulkanContext context;
+	std::string         reason;
+	const auto          initialized = context.Initialize(&reason);
+	if (initialized == NativeResult::Unavailable)
+	{
+		GTEST_SKIP() << reason;
+	}
+	ASSERT_EQ(initialized, NativeResult::Success) << reason;
+	if (context.min_subgroup_size > 8u)
+	{
+		GTEST_SKIP() << "the device cannot run 8-lane subgroups";
+	}
+	ASSERT_TRUE(RunSplitCollectiveCases(context, &reason)) << reason;
+	ASSERT_TRUE(context.ShutdownDevice(&reason)) << reason;
+	EXPECT_EQ(context.ValidationErrors(), 0u) << "Vulkan validation reported errors while running the split collective fixture";
 }
 
 UT_END();
