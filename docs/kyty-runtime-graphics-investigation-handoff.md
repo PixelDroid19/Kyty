@@ -3319,6 +3319,11 @@ against the same correct gameplay capture.
   ASTRO BOT, translator 207): adopted on one run per arm. The traversal tests
   one node per wave, so one layout runs per call; dune frame rate +4-7 %, GPU
   time per frame -2.7 ms. Record: `docs/titles/robot-platformer.md`.
+- Remembering the last two address-table entries per invocation (2026-11-09,
+  PPSA21567 - ASTRO BOT, translator 208): excluded. The dependent table walk
+  before each BVH node load was skipped, yet the kernel's dune time per call
+  and the GPU time per frame did not move. Translation latency is not the BVH
+  traversal's bottleneck. Record: `docs/titles/robot-platformer.md`.
 
 ## Validation gate for the next change
 

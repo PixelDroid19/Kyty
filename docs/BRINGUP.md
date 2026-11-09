@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: remembered address-table entries excluded (2026-11-09)
   - Robot platformer: BVH intersection runs only the node's layout (2026-11-09)
   - Robot platformer: relaxed split-wave exchange spins excluded (2026-11-09)
   - Robot platformer: split-wave lane reads and compares share exchanges (2026-11-09, frame effect not isolated)

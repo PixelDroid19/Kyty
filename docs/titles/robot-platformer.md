@@ -6,6 +6,45 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: remembered address-table entries excluded (2026-11-09)
+
+Hypothesis: the BVH traversal kernel `0x3666fa39` waits on guest address
+translation. Every node load first walks the device table (header, region
+directory, binary search, entry): four or more dependent reads before the
+node's own. Inside the traversal loop the only translated accesses are the
+intersection's node loads and the runtime-descriptor buffer loads that pick
+the next node, so two remembered entries per invocation should skip that
+walk on almost every call.
+
+- **Change tried.** `guest_device_address` kept the indices of the last two
+  entries that held a whole access in two Private variables. A call first
+  tested both remembered entries with the lookup's own fit test. An index of
+  at least the table's count read the table's zero prefix and never matched.
+  The header loads did not wait for that test. Entries are disjoint, so a hit
+  returns what the search would. The GPU load probe repeated its load to
+  exercise the hits; swapping the two remembered results failed four
+  device-address tests, so the probe covered them. Translator 208, patch kept
+  with the run evidence.
+- **Offline, same recipe at SIMD8 against translator 207.** Instructions
+  45,535 -> 47,355, loops 194 in both, spills:fills 626:2,668 -> 608:2,521.
+  The module passes `spirv-val`.
+- **Dunes, one run on a private store (the third after the version change).**
+  The BVH kernel took 25.3-26.3 ms per call over the dune dumps (24.9 ms on
+  translator 207's plateau). GPU time per frame was 61.8 ms against 62.3 ms,
+  and the frame rate was 13.6 fps against 14.9 fps. That run was the first to
+  compile the dune pipelines, and the GPU was 84 % busy against 91-93 %, so
+  the frame rate is not comparable; the GPU figures do not move. The ship
+  scene before the dunes ran 7.5-8.0 ms per call (8.3-8.7 ms before).
+- **Excluded.** Removing the walk from nearly every node load leaves the
+  kernel's time unchanged, so address translation is not what the BVH
+  traversal waits on in the dunes. Table chunks are 64 MB, so the BVH sits in
+  one or two entries and the remembered entries should hit. The hit rate was
+  not measured.
+- **Run notes.** On an empty private store, the first run stopped at the
+  save-card menu at 340 s. The second was still in the ship cinematic at
+  250 s and ended at 267 s on the known intermittent guest jump to address 0
+  (`rip 0x9004a0c3e`, seen since 2026-10-26). The third reached the dunes.
+
 ## Robot platformer: BVH intersection runs only the node's layout (2026-11-09)
 
 Applies to `PPSA21567 - ASTRO BOT` 01.018, Intel A770, Linux, Mesa 26.2.6,
