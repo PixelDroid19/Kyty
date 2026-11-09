@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: relaxed split-wave exchange spins excluded (2026-11-09)
   - Robot platformer: split-wave lane reads and compares share exchanges (2026-11-09, frame effect not isolated)
   - Robot platformer: real gameplay frame rate, internal resolution and FSR 3.1 (2026-11-02)
   - Robot platformer: green blocks in the crowd scene were MIMG D16 stores read as 32-bit (2026-10-31, fixed)

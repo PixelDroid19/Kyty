@@ -3310,6 +3310,11 @@ against the same correct gameplay capture.
   index, clip-space, visual, or stall evidence. Do not wait through this
   pre-gate degradation merely to collect a late trace; retain the bounded index
   peek for a future route that reaches the material checkpoint cheaply.
+- Split-wave exchange spins on relaxed loads (2026-11-09, PPSA21567 - ASTRO
+  BOT): excluded. When a ballot or lane read's result is dead, ANV removes a
+  spin made only of relaxed loads, so that part stops waiting and a later
+  publish can overwrite a bank another part still reads. Keep one acquiring
+  load per spin. Record: `docs/titles/robot-platformer.md`.
 
 ## Validation gate for the next change
 

@@ -6,6 +6,36 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: relaxed split-wave exchange spins excluded (2026-11-09)
+
+Hypothesis: the rendezvous behind ballots, lane reads and their groups could
+spin on relaxed sequence loads, since the acquire fence after the loop already
+orders the bank reads; only the plain synchronization would keep its acquiring
+last load. ANV emits one SLM fence per acquire load, so this removes one fence
+per spin iteration. Offline on `0x3666fa39` the loops stayed (188), SLM fences
+went from 520 to 406 and the block loads were unchanged.
+
+**Excluded.** Over the 39 split compute recipes the change produced in a
+strict run, ANV reported fewer loops than the inlined SPIR-V holds in 27 (by
+one in 26, by four in one). On one of them, making only the exchange spin's
+last load acquire again restored the loop (10 -> 11). A spin of relaxed loads
+whose returned sequence the caller never reads (a dead guest result) has no
+effect the compiler must keep, so it is removed and that part does not wait.
+With two banks, its next publish can then overwrite a bank that a slower part
+still reads. A spin needs an effect the compiler keeps even when its result
+is dead; translator 205 already has exactly one acquire per spin, so this
+fence axis is closed.
+
+**Run notes.** The strict run (diagnostic per-dispatch GPU timestamps) had no
+device loss. It was the first run of a new translator version, so every
+shader recompiled and the time-based route lagged by about 45 s; the BVH
+kernel ran only 33 times and no per-call figure was comparable. The reference
+band for that kernel, from an earlier timestamp run over the dunes, is a
+median of 23.8 ms per call (10th-90th percentile 23.2-24.0 ms, about one call
+per frame). Count the first run after a translator change as warm-up, and
+gate loops over every split recipe offline before a game run when the change
+can be simulated.
+
 ## Robot platformer: split-wave lane reads and compares share exchanges (2026-11-09)
 
 `ddc3664b6` (translator 205). The BVH traversal compute shader `0x3666fa39`
