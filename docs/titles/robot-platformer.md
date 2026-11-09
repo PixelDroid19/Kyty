@@ -6,6 +6,51 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: BVH intersection runs only the node's layout (2026-11-09)
+
+Applies to `PPSA21567 - ASTRO BOT` 01.018, Intel A770, Linux, Mesa 26.2.6,
+strict 60 fps-limited runs on the user route to the dunes. Both arms are
+`e82878229` with the same unrelated uncommitted GPU-memory edits and
+diagnostic per-dispatch GPU timestamps (5 s dumps); the change arm adds this
+lowering (translator 207 against 205). One run per arm.
+
+- **Observed.** The BVH traversal kernel `0x3666fa39` keeps the node pointer
+  in a scalar register and copies it to the address VGPR before each of its
+  three `image_bvh_intersect_ray`, so every lane of a wave tests the same node
+  and the node type is wave-uniform. The lowering computed the fp16 box, fp32
+  box, child sort and triangle test (three divides) on every call, loaded all
+  32 node words, and did so for lanes outside EXEC as well; only the result
+  store was EXEC-gated.
+- **Change.** Lanes outside EXEC skip the call. A switch on the node type
+  (out-of-range nodes folded into their own cases) runs one layout: triangles
+  load 16 words, boxes 28, out-of-range triangles return the miss constants,
+  and user or out-of-range box nodes return four invalid pointers, as before.
+- **Offline, same recipe at SIMD8.** Instructions 45,665 -> 45,535, loops
+  188 -> 194 in both SPIR-V and ANV (one more address lookup per layout),
+  spills:fills 596:3,055 -> 626:2,668, scratch messages inside the traversal
+  loops 2,012 -> 1,827. The 19 stored modules with the lowering pass
+  `spirv-val`.
+- **Dunes, one run per arm.** Sampled frame rate over the whole dune
+  window 13.95 -> 14.92 fps (+7 %), over its last 25 s 14.40 -> 14.96 fps
+  (+4 %); GPU time per frame 65.0 -> 62.3 ms with the GPU 91-93 % busy. The
+  BVH kernel's elapsed time per call, dump by dump from dune entry, fell from
+  27.4 to 24.9 ms on the plateau (-9 %); that figure includes overlap with
+  other queued work, and the 2026-10-30 records measured a run-to-run spread
+  of 18.5-23.3 ms per call, so it is a direction, not an isolated cost.
+- **Correctness.** Kept by construction (same arithmetic per layout, same
+  out-of-range results), `spirv-val`, and the loop gate: all 47 split
+  recipes of the run have as many ANV loops as inlined SPIR-V loops. The
+  stop-time captures of both arms score healthy and show the same frame, but
+  whether that frame depends on BVH results was not established (a build
+  forcing every intersection to miss left earlier captures unchanged).
+- **Run notes.** The first run of translator 207 lagged the time-based route
+  (still in the opening cinematic at 340 s); the measured run is the second,
+  on a warm store. A first build placed the result `OpPhi` after a store and
+  failed pipeline creation at start; `spirv-val` reports it.
+- **Not covered.** No test executes the lowering; the out-of-range and user
+  node cases are kept by construction and are not exercised by the route.
+  Each arm is one run.
+
 ## Robot platformer: relaxed split-wave exchange spins excluded (2026-11-09)
 
 Hypothesis: the rendezvous behind ballots, lane reads and their groups could

@@ -17,8 +17,10 @@ namespace Kyty::Libs::Graphics {
 // T#.size (nodes - 1) bounds the node index (pointer >> 3): an out-of-range
 // node returns four invalid children for a box or a miss for a triangle, which
 // is what ends traversal of an empty (all-zero) acceleration structure.
-// Every result is computed and the node type selects one, so the lowering has
-// no data-dependent control flow besides the EXEC-gated store.
+// Lanes outside EXEC neither load nor compute, and a switch on the node type
+// runs only the layout the node holds, loading only the words it reads. A
+// traversal that walks one node per wave keeps the type uniform, so the other
+// layouts cost no instructions.
 KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -70,16 +72,36 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 %<p>_size_big = OpINotEqual %bool %<p>_size_hi %uint_0
 %<p>_index_fits = OpULessThanEqual %bool %<p>_index %<p>_t2
 %<p>_in_bounds = OpLogicalOr %bool %<p>_size_big %<p>_index_fits
+%<p>_eps = OpConvertUToF %float %<p>_grow
+%<p>_ulp = OpBitcast %float %<ulp_bits>
+%<p>_grow_f = OpFMul %float %<p>_eps %<p>_ulp
+%<p>_grow_scale = OpFAdd %float %float_1_000000 %<p>_grow_f
+%<p>_inf = OpBitcast %float %<inf_bits>
+%<p>_ninf = OpBitcast %float %<ninf_bits>
+%<p>_exec = OpLoad %uint %exec_lo
+%<p>_active = OpINotEqual %bool %<p>_exec %uint_0
+%<p>_type_oob = OpBitwiseOr %uint %<p>_type %uint_8
+%<p>_kind = OpSelect %uint %<p>_in_bounds %<p>_type %<p>_type_oob
+OpSelectionMerge %<p>_merge None
+OpBranchConditional %<p>_active %<p>_work %<p>_merge
+%<p>_work = OpLabel
+OpSelectionMerge %<p>_kind_end None
+OpSwitch %<p>_kind %<p>_user 0 %<p>_tri 1 %<p>_tri 4 %<p>_box 5 %<p>_box 8 %<p>_tri_oob 9 %<p>_tri_oob
+%<p>_box = OpLabel
 )").ReplaceStr("<p>", i)
 	                                                        .ReplaceStr("<not7>", spirv->GetConstantUint(0xfffffff8u))
 	                                                        .ReplaceStr("<size_hi_mask>", spirv->GetConstantUint(0x3ffu))
-	                                                        .ReplaceStr("<three>", spirv->GetConstantUint(3u));
-	if (!spirv->EmitGuestLoad(i + "_addr_lo", i + "_addr_hi", 32, i + "_n", &s))
+	                                                        .ReplaceStr("<three>", spirv->GetConstantUint(3u))
+	                                                        .ReplaceStr("<inf_bits>", spirv->GetConstantUint(0x7f800000u))
+	                                                        .ReplaceStr("<ninf_bits>", spirv->GetConstantUint(0xff800000u))
+	                                                        .ReplaceStr("<ulp_bits>", spirv->GetConstantUint(0x33800000u));
+	// Box node: four child pointers, then 24 fp32 bounds or 12 words of fp16 pairs.
+	if (!spirv->EmitGuestLoad(i + "_addr_lo", i + "_addr_hi", 28, i + "_n", &s))
 	{
 		return false;
 	}
 	auto f = [&](int w) { return String8::FromPrintf("%s_f%d", p, w); };
-	for (int w = 0; w < 32; w++)
+	for (int w = 4; w < 28; w++)
 	{
 		line("%%%s_f%d = OpBitcast %%float %%%s_n_d%d\n", p, w, p, w);
 	}
@@ -103,14 +125,6 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 		}
 	}
 	// Slab tests: grown exit distance, entry distance used as sort key.
-	s += String8(R"(
-%<p>_eps = OpConvertUToF %float %<p>_grow
-%<p>_ulp = OpBitcast %float %<ulp_bits>
-%<p>_grow_f = OpFMul %float %<p>_eps %<p>_ulp
-%<p>_grow_scale = OpFAdd %float %float_1_000000 %<p>_grow_f
-%<p>_inf = OpBitcast %float %<inf_bits>
-%<p>_ninf = OpBitcast %float %<ninf_bits>
-)").ReplaceStr("<p>", i).ReplaceStr("<inf_bits>", spirv->GetConstantUint(0x7f800000u)).ReplaceStr("<ninf_bits>", spirv->GetConstantUint(0xff800000u)).ReplaceStr("<ulp_bits>", spirv->GetConstantUint(0x33800000u));
 	const char* axis[3] = {"2", "3", "4"};
 	const char* inv[3]  = {"8", "9", "10"};
 	for (int c = 0; c < 4; c++)
@@ -188,7 +202,19 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 		         .ReplaceStr("<invalid>", spirv->GetConstantUint(0xffffffffu));
 	}
 
-	// Triangle: pick vertices by type (0: V0,V1,V2; 1: V1,V3,V2).
+	line("OpBranch %%%s_box_end\n%%%s_box_end = OpLabel\nOpBranch %%%s_kind_end\n%%%s_tri = OpLabel\n", p, p, p, p);
+
+	// Triangle node: vertices in words 0-11, triangle id in word 15. Pick
+	// vertices by type (0: V0,V1,V2; 1: V1,V3,V2).
+	if (!spirv->EmitGuestLoad(i + "_addr_lo", i + "_addr_hi", 16, i + "_tn", &s))
+	{
+		return false;
+	}
+	auto g = [&](int w) { return String8::FromPrintf("%s_g%d", p, w); };
+	for (int w = 0; w < 12; w++)
+	{
+		line("%%%s_g%d = OpBitcast %%float %%%s_tn_d%d\n", p, w, p, w);
+	}
 	s += String8::FromPrintf("%%%s_tri1 = OpIEqual %%bool %%%s_type %%uint_1\n", p, p);
 	const int first0[3] = {0, 3, 6};
 	const int first1[3] = {3, 9, 6};
@@ -196,7 +222,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 	{
 		for (int k = 0; k < 3; k++)
 		{
-			line("%%%s_v%d%d = OpSelect %%float %%%s_tri1 %%%s %%%s\n", p, v, k, p, f(first1[v] + k).c_str(), f(first0[v] + k).c_str());
+			line("%%%s_v%d%d = OpSelect %%float %%%s_tri1 %%%s %%%s\n", p, v, k, p, g(first1[v] + k).c_str(), g(first0[v] + k).c_str());
 		}
 		line("%%%s_vec%d = OpCompositeConstruct %%v3float %%%s_v%d0 %%%s_v%d1 %%%s_v%d2\n", p, v, p, v, p, v, p, v);
 	}
@@ -229,7 +255,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 %<p>_tden = OpSelect %float %<p>_miss %float_1_000000 %<p>_ry
 %<p>_bc0 = OpFSub %float %<p>_ry %<p>_rz
 %<p>_bc0b = OpFSub %float %<p>_bc0 %<p>_rw
-%<p>_id = OpCopyObject %uint %<p>_n_d15
+%<p>_id = OpCopyObject %uint %<p>_tn_d15
 %<p>_shift = OpIMul %uint %<p>_type %uint_8
 %<p>_isel_raw = OpShiftRightLogical %uint %<p>_id %<p>_shift
 %<p>_isel = OpBitwiseAnd %uint %<p>_isel_raw %uint_3
@@ -251,31 +277,29 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 %<p>_jnum_u = OpBitcast %uint %<p>_jnum
 %<p>_tri_r2 = OpSelect %uint %<p>_mode1 %<p>_inum_u %<p>_id
 %<p>_tri_r3 = OpSelect %uint %<p>_mode1 %<p>_jnum_u %<p>_hit_u
-%<p>_is_tri = OpULessThan %bool %<p>_type %uint_2
-%<p>_is_box16 = OpIEqual %bool %<p>_type %uint_4
-%<p>_is_box32 = OpIEqual %bool %<p>_type %uint_5
-%<p>_is_box = OpLogicalOr %bool %<p>_is_box16 %<p>_is_box32
+OpBranch %<p>_tri_end
+%<p>_tri_end = OpLabel
+OpBranch %<p>_kind_end
+%<p>_tri_oob = OpLabel
+OpBranch %<p>_kind_end
+%<p>_user = OpLabel
+OpBranch %<p>_kind_end
+%<p>_kind_end = OpLabel
 )").ReplaceStr("<p>", i).ReplaceStr("<inf>", i + "_inf");
+	// Out-of-range triangles miss; boxes out of range and user nodes return
+	// four invalid pointers.
 	const auto    invalid          = spirv->GetConstantUint(0xffffffffu);
 	const String8 triangle_miss[4] = {spirv->GetConstantUint(0x7f800000u), spirv->GetConstantUint(0x3f800000u), spirv->GetConstantUint(0u),
 	                                  spirv->GetConstantUint(0u)};
 	for (int r = 0; r < 4; r++)
 	{
-		line("%%%s_rb%d = OpSelect %%uint %%%s_is_box %%%s_v%d_%d %%%s\n"
-		     "%%%s_rt%d = OpSelect %%uint %%%s_is_tri %%%s_tri_r%d %%%s_rb%d\n"
-		     "%%%s_ro%d = OpSelect %%uint %%%s_is_tri %%%s %%%s\n"
-		     "%%%s_r%d = OpSelect %%uint %%%s_in_bounds %%%s_rt%d %%%s_ro%d\n"
-		     "%%%s_r%d_f = OpBitcast %%float %%%s_r%d\n",
-		     p, r, p, p, r, version[r], invalid.c_str(), p, r, p, p, r, p, r, p, r, p, triangle_miss[r].c_str(), invalid.c_str(), p, r, p, p,
-		     r, p, r, p, r, p, r);
+		line("%%%s_r%d = OpPhi %%uint %%%s_tri_r%d %%%s_tri_end %%%s_v%d_%d %%%s_box_end %%%s %%%s_tri_oob %%%s %%%s_user\n", p, r, p, r, p,
+		     p, r, version[r], p, triangle_miss[r].c_str(), p, invalid.c_str(), p);
 	}
-	// EXEC-gated store of the four results.
-	line("%%%s_exec = OpLoad %%uint %%exec_lo\n%%%s_active = OpINotEqual %%bool %%%s_exec %%uint_0\n"
-	     "OpSelectionMerge %%%s_merge None\nOpBranchConditional %%%s_active %%%s_store %%%s_merge\n%%%s_store = OpLabel\n",
-	     p, p, p, p, p, p, p, p);
 	for (int r = 0; r < 4; r++)
 	{
-		line("OpStore %%%s %%%s_r%d_f\n", operand_variable_to_str(inst.dst, r).value.c_str(), p, r);
+		line("%%%s_r%d_f = OpBitcast %%float %%%s_r%d\nOpStore %%%s %%%s_r%d_f\n", p, r, p, r, operand_variable_to_str(inst.dst, r).value.c_str(),
+		     p, r);
 	}
 	line("OpBranch %%%s_merge\n%%%s_merge = OpLabel\n", p, p);
 	*dst_source += s;

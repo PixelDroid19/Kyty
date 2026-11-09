@@ -3315,6 +3315,10 @@ against the same correct gameplay capture.
   spin made only of relaxed loads, so that part stops waiting and a later
   publish can overwrite a bank another part still reads. Keep one acquiring
   load per spin. Record: `docs/titles/robot-platformer.md`.
+- BVH intersection branched on EXEC and node type (2026-11-09, PPSA21567 -
+  ASTRO BOT, translator 207): adopted on one run per arm. The traversal tests
+  one node per wave, so one layout runs per call; dune frame rate +4-7 %, GPU
+  time per frame -2.7 ms. Record: `docs/titles/robot-platformer.md`.
 
 ## Validation gate for the next change
 
