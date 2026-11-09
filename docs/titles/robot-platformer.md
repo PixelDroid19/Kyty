@@ -5029,3 +5029,31 @@ The color materialization that failed had the same submission and guest base.
 Consequently, a read-only depth image cannot be dismissed as inert in this
 draw: its comparison can affect color coverage. These are instrumented
 observations, not a verified fix or a gameplay performance measurement.
+
+The [Vulkan render-pass specification](https://docs.vulkan.org/spec/latest/chapters/renderpass.html)
+prohibits using multiple attachments that alias the same device memory in one
+subpass. Thus binding two host images to overlapping Vulkan memory is not, by
+itself, a correct implementation of this guest draw. Separate host images need
+an explicit, correctly ordered way to construct their contents and reconcile
+later accesses; whether a snapshot is sufficient for the guest draw requires
+further evidence about its guest memory ordering and overlapping texel writes.
+
+A further isolated provenance probe (`.../hd-depth-owners-1`) ran for its
+360-second limit without either reported refusal. At an earlier creation of
+this same depth view, Kyty found 15 overlapping tracked objects, including a
+960x540 color render target at the same base and larger render targets, and
+selected `delete_all` followed by ordinary depth creation rather than
+creation from those objects. Detachment checks still apply to objects with
+write-back callbacks. The usage timestamps do not establish which guest bytes
+were written or whether their contents remained needed, so this observation
+alone cannot justify changing reclamation or choosing a seed image.
+
+The diagnostic run reached the desert scene. Nine reset performance snapshots
+ending between 255 and 295 seconds counted 646 presents over 45.079 seconds
+(14.33 fps); this instrumented run and its route are not an A/B performance
+comparison. A later diagnostic left-stick input was followed by a changed
+character pose and camera framing; the axis was explicitly returned to its
+neutral value. That is a limited input observation, not sustained gameplay or
+visual-equivalence validation. The manual capture's automated color heuristic
+reported `hot_corruption`; its verdict alone cannot establish corruption in a
+sand-colored scene without a reference comparison.
