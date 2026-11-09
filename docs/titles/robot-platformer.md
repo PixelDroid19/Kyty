@@ -4982,3 +4982,19 @@ the 360-second harness limit without either failure. Its recorded input left
 the game at the new-game menu; a diagnostic controller tap advanced it to
 the opening sequence near the end of the run. It did not cover the same route
 as the failure and is not evidence that the error is fixed.
+
+A later attempt with the new write-back error diagnostic compiled into the
+isolated executable reproduced the depth/color refusal at 122.6 seconds
+(`.../hd-product-writeback-diagnostic-1`). The immediately preceding DCC
+tracker query again found no tracked clear. The write-back error did not
+occur, so its expanded message was not exercised by this run. The isolated
+build was based on `f4823fbe5` with the diagnostic source file matching
+`5c660ef7` and additional temporary tracing; it is not a clean build of the
+branch tip.
+
+A follow-up probe (`.../hd-depth-initialization-1`) instrumented the first
+materialization of the selected depth address, but stopped at 149.3 seconds
+on `!create_all_the_same` for a 3840x2160 storage texture with mixed parents
+at `0x53de40000`. The selected depth address was not materialized before the
+stop. This repeats the storage-view frontier described at the start of this
+record and supplies no evidence of the failing depth image's initialization.
