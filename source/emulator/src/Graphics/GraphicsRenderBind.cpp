@@ -4010,6 +4010,9 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		// surface); only guest memory would miss that content.
 		if (!depth_texture)
 		{
+			// Which storage image of a range was written last changes while the object graph stays: a miss that
+			// asked for it is not a property of the graph.
+			bool write_order_asked = false;
 			auto rtex      = lookups_missed ? decltype(FindRenderTexture(buffer, addr, size.size, true)) {}
 			                                : FindRenderTexture(buffer, addr, size.size, true);
 			render_texture = !rtex.IsEmpty();
@@ -4122,6 +4125,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					// chain: a write view of the chain belongs to it even when a color alias of one level was drawn more
 					// recently, and any other view reads the color alias only while that holds the newer writes.
 					const auto* chain = rt_exact ? nullptr : FindLatestStorageTexture(buffer, addr, size.size);
+					write_order_asked = chain != nullptr;
 					const bool chain_write = chain != nullptr && textures.desc[i].usage != ShaderTextureUsage::ReadOnly && chain->mip_levels > tex->mip_levels;
 					if (chain_write || (chain != nullptr && chain->storage_write_stamp > std::max(tex->storage_write_stamp, tex->content_stamp)))
 					{
@@ -4148,6 +4152,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					Vector<StorageTextureVulkanImage*> stex;
 					auto* latest_stex = FindLatestStorageTexture(buffer, addr, size.size);
 					const bool st_exact = latest_stex != nullptr;
+					write_order_asked   = write_order_asked || st_exact;
 					if (st_exact)
 					{
 						stex.Add(latest_stex);
@@ -4262,7 +4267,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					KYTY_LOG_DEBUG("WARNING: Gen5 sampled texture has no exact render-target backing and no guest-memory upload:  (continuing)\n");
 				}
 			}
-			if (!lookups_missed && !render_texture && tex == nullptr)
+			if (!lookups_missed && !render_texture && tex == nullptr && !write_order_asked)
 			{
 				lookup_memo->Store(lookup_key, lookup_generation);
 			}
