@@ -1945,7 +1945,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// also enclose the arena's smaller resources (captured: 3456x1944 over a mip chain, a 1728x972 target and
 			// CPU-uploaded buffers whose use can still write, which holds no device write yet). A view of another
 			// pitch inside a surface addresses other texels, even in its format (captured: 128x1 at the base of
-			// 3456x1944 and 3584-pitch views and of a CPU-uploaded buffer).
+			// 3456x1944 and 3584-pitch views and of a CPU-uploaded buffer). A sampled texture whose content guest
+			// memory holds caches guest bytes too (captured: a 3840x2160 view over 39 targets and storage views and
+			// a CPU-uploaded 640-wide texture with no device write).
 			bool multi_arena_storage_texture = info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
 			for (const auto& obj: others)
 			{
@@ -1953,10 +1955,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				{
 					break;
 				}
-				const auto& o              = heap.objects[obj.object_id].info;
+				const auto& h              = heap.objects[obj.object_id];
+				const auto& o              = h.info;
 				const bool  compare_layout = obj.relation != OverlapType::Contains;
 				multi_arena_storage_texture =
 				    (GpuMemoryAllowsStorageTextureContainedInRenderTarget(o.object.type, obj.relation, info.type) ||
+				     links_cpu_texture(h, obj) ||
 				     ((obj.relation == OverlapType::Crosses || obj.relation == OverlapType::IsContainedWithin) &&
 				      (o.object.type == GpuMemoryObjectType::StorageTexture || o.object.type == GpuMemoryObjectType::RenderTexture ||
 				       o.object.type == GpuMemoryObjectType::DepthStencilBuffer)) ||
