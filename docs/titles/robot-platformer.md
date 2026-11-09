@@ -6,6 +6,83 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: fewer split-wave rendezvous, two refusals fixed (2026-11-09)
+
+Applies to `PPSA21567 - ASTRO BOT` 01.018, Intel A770, Linux, Mesa 26.2.6,
+strict 60 fps-limited runs on the user route. Commits `3d0b733a2`
+(lookup memo), `91be7a38a` (depth link) and `77dd4ce0c` (split-wave
+rendezvous, translator 210). The measured executables also held unrelated
+uncommitted GPU-memory and split-wave exchange edits of the worktree.
+
+- **Part-local skips.** A forward `S_CBRANCH_EXECZ` needed a whole-wave EXEC
+  test, so every part met at each one. A part with no active lane now skips
+  the range alone when the range is entered only through the branch, holds no
+  rendezvous and defines no scalar word that is live at the target. Covered by
+  four `EmulatorShaderMaskAnalysis.PartLocalSkip*` tests.
+- **Conflict-ordered LDS.** Every LDS access had a rendezvous before and
+  after it. Accesses now order across parts only where two conflict: one
+  writes and their bytes may meet in different lanes, with addresses taken as
+  affine forms of the thread coordinates. Reads, disjoint ranges and each
+  lane's own slot keep no rendezvous; `S_BARRIER` orders everything across it.
+  Covered by the `EmulatorShaderSplitLdsOrder` tests.
+- **Compare chains across side exits.** The BVH traversal kernel tests up to
+  four child pointers with `V_CMP_NE_U32 vcc, -1, vN` separated by
+  `S_CMP_LG_U64 vcc, 0` and a branch that only leaves the program. Those
+  compares now vote in one exchange. Static rendezvous sites in the largest
+  BVH-family module went from 114 to 108 (single ballots 69 -> 61, two more
+  grouped exchanges); the other family members from 113, 111, 107 and 107 to
+  107, 105, 101 and 101. The device test
+  `EmulatorPackedMipNative.SplitWaveGroupedLaneReadsAndComparesReturnWholeWaveWords`
+  now places a side exit inside its compare run and checks that the four
+  compares share one exchange and return whole-wave words.
+- **Frame effect: small, single runs.** Part-local skips with LDS order
+  (translator 209, warm store) ran the dunes at 15.15 fps against earlier
+  baselines of 14.1-14.7 fps, within their spread. With compare chains and
+  both fixes (translator 210), the dunes window from 212 to 250 s ran at
+  15.50 fps in the same scene as the 15.15 fps run; per-frame CPU costs were
+  equal within noise (descriptor and texture binding 1.81 against 1.73 ms).
+  Fewer rendezvous barely move the frame, so their count is not what bounds
+  the dunes.
+
+**Lookup memo fix (`3d0b733a2`).** The intermittent `!create_all_the_same`
+stop of the 2026-11-08 record follows this sequence on the recorded object
+tables. The sampled-lookup miss memo
+stored misses that came from the write order of storage images
+("latest storage image has another format", "render target yields to the
+newer chain") as if they were properties of the object graph. Recorded
+sequence: a depth-format storage view B was created over the range; an
+A-layout request with seed skipping saw B as the latest, missed and stored
+the miss; its creation reused the equal storage image A, which became the
+latest by stamp (146 and 147 ticks after B's creation in two runs); a later
+A-layout request with the same key and a required seed hit the memo, skipped
+the lookup that would now find A, and created an object with mixed parents.
+A diagnostic counted lookups that the fix sends past the memo in a live run.
+A miss is no longer stored when the latest storage image of the range was
+consulted.
+
+**Depth link (`91be7a38a`).** The `DepthStencilBuffer - Contains -
+RenderTexture` refusal (a 960x540 colour target at the base of a 1216x684
+depth target, recorded below) stopped one pause run at 151 s. The relation
+now links like the `Crosses` form already did: both host images stay, the
+depth target is not reclaimed and no bytes are converted. This removes a
+fatal stop; it does not establish the content provenance the earlier record
+asks for. If the guest reads through one image what it wrote through the
+other, Kyty still does not convert it. The verification run did not reach
+the relation, so the linked path has not run live.
+
+**Still open.**
+
+- A pause run stopped at 162 s with `GpuMemory write-back requested before
+  exact resource dependencies completed` (storage buffer, pending queue 8).
+  The stack diagnostic was not hit again before it was removed; no cause.
+- A pause in the descent cinematic that froze the game for the user did not
+  reproduce in four bounded runs: the pause menu drew and resumed at 128 s,
+  a gameplay pause worked, and one press landed as the cinematic ended. The
+  guest threads of the frozen run matched a healthy paused run. Live input
+  over the time-based route is a hypothesis, not a cause.
+- The verification run is one run; captures show the scene, not correctness
+  of the BVH results.
+
 ## Robot platformer: remembered address-table entries excluded (2026-11-09)
 
 Hypothesis: the BVH traversal kernel `0x3666fa39` waits on guest address
@@ -5055,8 +5132,9 @@ reported a mixed-parent storage-texture overlap; the other repeated the depth
 target at the same base. A preceding run stopped on that depth/color relation
 as well. The additional object parameters distinguish a fully overwritten
 storage image from one that needs its earlier contents. The correct content
-source and synchronization for these overlaps remain unproven; the refusal
-must not be converted into an unconditional alias or reclamation rule.
+source and synchronization for these overlaps remain unproven. Since
+2026-11-09 the depth/color form links without reclaiming or converting
+(`91be7a38a`, top record); content provenance is still unproven.
 
 ### Depth/color overlap investigation
 
