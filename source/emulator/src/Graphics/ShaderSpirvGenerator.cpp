@@ -3113,6 +3113,14 @@ void Spirv::WriteInstructions()
 			m_source += String8::FromPrintf("; reduction step: %s\n", ShaderCode::DbgInstructionToStr(inst).c_str());
 			continue;
 		}
+		const auto* ballot_group = SplitBallotGroup(static_cast<uint32_t>(index));
+		if (ballot_group != nullptr && ballot_group->front() != static_cast<uint32_t>(index))
+		{
+			// Its vote went out in the head's exchange.
+			m_source += String8::FromPrintf("; %s\n%s\n", ShaderCode::DbgInstructionToStr(inst).c_str(),
+			                                SplitBallotGroupMask(*ballot_group, static_cast<uint32_t>(index)).c_str());
+			continue;
+		}
 
 		String8 dst = MaterializeAssembledDescriptors(inst);
 		String8 dst_debug;
@@ -3181,11 +3189,9 @@ void Spirv::WriteInstructions()
 		{
 			dst = GuardImageDestinationStores(dst, inst, static_cast<uint32_t>(index));
 		}
-		// ds_swizzle and ds_bpermute touch no LDS and rendezvous on their own.
-		if (UsesSplitComputeWave() && Core::EnumName8(inst.type).StartsWith("Ds") && inst.type != ShaderInstructionType::DsSwizzleB32 &&
-		    inst.type != ShaderInstructionType::DsBpermuteB32)
+		if (UsesSplitComputeWave())
 		{
-			dst += SplitWaveDsOrder(static_cast<uint32_t>(index));
+			dst = SplitWaveDsOrder(static_cast<uint32_t>(index), dst);
 		}
 		if (UsesVertexClipProbe() && ShaderInstructionIsScalarBufferLoad(inst))
 		{
@@ -3195,6 +3201,11 @@ void Spirv::WriteInstructions()
 		{
 			dst = ResolveMaskAccesses(inst, static_cast<uint32_t>(index), dst);
 		}
+		if (ballot_group != nullptr)
+		{
+			dst += SplitBallotGroupVotes(*ballot_group) + SplitBallotGroupMask(*ballot_group, static_cast<uint32_t>(index));
+		}
+		CheckSplitWavePartSkip(static_cast<uint32_t>(index), dst);
 		if (UsesFragmentCompute() && inst.type == ShaderInstructionType::SEndpgm)
 		{
 			// A kill tail (exec=0, null export, s_endpgm) leaves the program end

@@ -163,6 +163,7 @@ UT_LINK(EmulatorComputeWaveTernaryAlu);
 UT_LINK(EmulatorShaderScalarPack);
 UT_LINK(EmulatorShaderVectorPack);
 UT_LINK(EmulatorShaderMaskAnalysis);
+UT_LINK(EmulatorShaderSplitLdsOrder);
 UT_LINK(EmulatorShaderReverseBorrow);
 UT_LINK(EmulatorShaderLaneExec);
 UT_LINK(EmulatorShaderEmitterPreconditions);

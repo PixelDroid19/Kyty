@@ -37,7 +37,7 @@ const ShaderLaneMaskPlan* Spirv::LaneMaskPlan() const
 	if (!m_lane_mask_plan_ready)
 	{
 		m_lane_mask_plan_ready = true;
-		m_lane_mask_plan       = ShaderLaneMaskPlanOf(m_code);
+		m_lane_mask_plan       = ShaderLaneMaskPlanOf(m_code, split_compute && !NativeWave32());
 	}
 	return &m_lane_mask_plan;
 }
@@ -93,7 +93,8 @@ static bool WritesOperand(const ShaderOperand& dst, const ShaderOperand& operand
 	return (VccHalves(dst) & VccHalves(operand)) != 0u;
 }
 
-static std::vector<uint32_t> SortedBranchTargets(const ShaderCode& code)
+// `fall_through` keeps the instruction after a conditional branch, which control enters only through that branch.
+static std::vector<uint32_t> SortedBranchTargets(const ShaderCode& code, bool fall_through = true)
 {
 	std::vector<uint32_t> targets;
 	for (const auto& label: code.GetLabels())
@@ -102,7 +103,8 @@ static std::vector<uint32_t> SortedBranchTargets(const ShaderCode& code)
 	}
 	for (const auto& label: code.GetIndirectLabels())
 	{
-		if (!label.IsDisabled()) { targets.push_back(label.GetDst()); }
+		const bool follows_branch = label.GetDst() == label.GetSrc() + 4u;
+		if (!label.IsDisabled() && (fall_through || !follows_branch)) { targets.push_back(label.GetDst()); }
 	}
 	std::sort(targets.begin(), targets.end());
 	return targets;
@@ -184,14 +186,23 @@ static bool IsGroupableCompare(const ShaderInstruction& inst)
 	       (inst.dst.type == ShaderOperandType::Sgpr || inst.dst.type == ShaderOperandType::VccLo);
 }
 
-// Runs of consecutive V_CMP in one block whose masks leave the lane and whose sources no earlier member writes:
-// every member sees the EXEC and the sources it would see alone, so each votes at its own position and the
-// tail publishes all votes in one exchange, then writes every member's mask in program order.
+// Scalar tests and conditional branches, the side exits of a compare chain: they write no register a compare
+// reads and leave EXEC alone.
+static bool IsSideExit(ShaderInstructionType type)
+{
+	const auto name = ShaderInstructionTypeName(type);
+	return name.rfind("SCmp", 0) == 0 || name.rfind("SCbranch", 0) == 0;
+}
+
+// Runs of V_CMP in one block whose masks leave the lane and whose sources no earlier member writes; only side
+// exits may sit between members. Every member would see the EXEC and the sources the head sees, so the head
+// takes every member's vote and publishes them in one exchange, and each member writes its mask at its own
+// position.
 static void FindSplitBallotGroups(const ShaderCode& code, const std::vector<bool>* lane_local, uint32_t limit,
                                   std::vector<uint32_t>* group_of, std::vector<std::vector<uint32_t>>* groups)
 {
 	const auto& instructions = code.GetInstructions();
-	const auto  targets      = SortedBranchTargets(code);
+	const auto  targets      = SortedBranchTargets(code, false);
 
 	group_of->assign(instructions.Size(), UINT32_MAX);
 	std::vector<uint32_t> run;
@@ -202,7 +213,7 @@ static void FindSplitBallotGroups(const ShaderCode& code, const std::vector<bool
 		const bool local = lane_local != nullptr && index < lane_local->size() && (*lane_local)[index];
 		if (!IsGroupableCompare(inst) || local)
 		{
-			CloseSplitGroup(&run, group_of, groups);
+			if (!IsSideExit(inst.type)) { CloseSplitGroup(&run, group_of, groups); }
 			continue;
 		}
 		const auto reads_member = [&](uint32_t member)
@@ -362,14 +373,52 @@ OpControlBarrier %split_scope_workgroup %split_scope_workgroup %split_acq_rel
 )";
 }
 
+const ShaderSplitLdsOrder& Spirv::SplitLdsOrder() const
+{
+	if (!m_split_lds_order_ready)
+	{
+		m_split_lds_order_ready = true;
+		// Only a plain compute program enters with its thread coordinates in the first VGPRs.
+		const bool plain  = m_code.GetType() == ShaderType::Compute && !UsesGeometryCompute();
+		m_split_lds_order = ShaderSplitLdsOrderOf(m_code, m_cs_input_info->threads_num, plain ? m_cs_input_info->thread_ids_num : 0);
+	}
+	return m_split_lds_order;
+}
+
 // LDS accesses of one guest wave are ordered on hardware; the parts order
-// them with a rendezvous after each DS instruction.
-String8 Spirv::SplitWaveDsOrder(uint32_t index) const
+// the ones that may conflict with a rendezvous between them.
+String8 Spirv::SplitWaveDsOrder(uint32_t index, const String8& body) const
 {
 	// The subgroup barrier makes every lane's LDS access available before the elected lane publishes.
-	return String8::FromPrintf("OpControlBarrier %%split_scope_subgroup %%split_scope_workgroup %%split_acq_rel\n"
-	                           "%%split_ds_%u = OpFunctionCall %%uint %%split_sync\n",
-	                           index);
+	const auto rendezvous = [index](const char* side)
+	{
+		return String8::FromPrintf("OpControlBarrier %%split_scope_subgroup %%split_scope_workgroup %%split_acq_rel\n"
+		                           "%%split_ds_%s%u = OpFunctionCall %%uint %%split_sync\n",
+		                           side, index);
+	};
+	const auto& order = SplitLdsOrder();
+	return (order.before[index] ? rendezvous("before_") : String8()) + body + (order.after[index] ? rendezvous("") : String8());
+}
+
+void Spirv::CheckSplitWavePartSkip(uint32_t index, const String8& body) const
+{
+	const auto* plan = LaneMaskPlan();
+	if (plan == nullptr || index >= plan->part_skipped.size() || !plan->part_skipped[index])
+	{
+		return;
+	}
+	// %split_part_ballot is the one helper that exchanges nothing.
+	const String8 call = "OpFunctionCall ";
+	bool          rendezvous = body.ContainsStr("OpControlBarrier");
+	for (uint32_t at = body.FindIndex(call); at != Core::STRING8_INVALID_INDEX; at = body.FindIndex(call, at + 1))
+	{
+		const auto callee = body.Mid(body.FindIndex(' ', at + call.Size()) + 1, 20);
+		rendezvous        = rendezvous || (callee.StartsWith("%split_") && !callee.StartsWith("%split_part_ballot "));
+	}
+	if (rendezvous)
+	{
+		EXIT("split-wave rendezvous in a range one part skips alone: instruction=%u\n", index);
+	}
 }
 
 void Spirv::CheckSplitWaveCollectives(const String8& body) const
@@ -537,9 +586,9 @@ static String8 SplitWaveBallotFunction(uint32_t parts, uint32_t lanes)
 	return text;
 }
 
-// Grouped compares: member k adds its part's L-bit vote at bits k*L of one word (%split_ballot_pack), the tail
-// publishes that word in one exchange and keeps every part's word (%split_ballot_group), and %split_ballot_field
-// takes member k's wave mask out of the kept words.
+// Grouped compares: member k adds its part's L-bit vote at bits k*L of one word (%split_ballot_pack), the last
+// vote publishes that word in one exchange and keeps every part's word (%split_ballot_group), and
+// %split_ballot_field takes member k's wave mask out of the kept words.
 static String8 SplitWaveBallotGroupFunctions(uint32_t parts, uint32_t lanes)
 {
 	EXIT_IF(parts > 8u);

@@ -179,6 +179,54 @@ bool ShaderReverseBorrowMaskHasProvenance(const ShaderCode& code, uint32_t instr
 	return false;
 }
 
+bool ShaderInstructionSuccessors(const ShaderCode& code, std::vector<std::vector<uint32_t>>* successors)
+{
+	const auto&    instructions = code.GetInstructions();
+	const uint32_t count        = instructions.Size();
+	std::vector<uint32_t> pcs(count);
+	for (uint32_t i = 0; i < count; i++)
+	{
+		pcs[i] = instructions.At(i).pc;
+	}
+	successors->assign(count, {});
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const auto& inst = instructions.At(i);
+		if (inst.src_num < 0 || inst.src_num > 4)
+		{
+			return false;
+		}
+		if (inst.type == ShaderInstructionType::SEndpgm)
+		{
+			continue;
+		}
+		if (!ShaderInstructionHasStaticBranchTarget(inst.type))
+		{
+			if (LaneFlow::AnyPrefix(inst.type, {"SCbranch", "SBranch", "SSetpc", "SSwappc", "SCall", "SRfe"}))
+			{
+				return false;
+			}
+			if (i + 1 < count)
+			{
+				(*successors)[i].push_back(i + 1);
+			}
+			continue;
+		}
+		const auto target = static_cast<uint32_t>(static_cast<int64_t>(inst.pc) + 4 + inst.src[0].constant.i);
+		const auto it     = std::lower_bound(pcs.begin(), pcs.end(), target);
+		if (it == pcs.end() || *it != target)
+		{
+			return false;
+		}
+		(*successors)[i].push_back(static_cast<uint32_t>(it - pcs.begin()));
+		if (inst.type != ShaderInstructionType::SBranch && i + 1 < count)
+		{
+			(*successors)[i].push_back(i + 1);
+		}
+	}
+	return true;
+}
+
 namespace {
 
 using MaskWords = std::bitset<LaneFlow::kWords>;
@@ -305,54 +353,6 @@ MaskDemandStep MaskDemandOf(const ShaderInstruction& inst)
 	return step;
 }
 
-bool BuildMaskSuccessors(const ShaderCode& code, std::vector<std::vector<uint32_t>>* successors)
-{
-	const auto&    instructions = code.GetInstructions();
-	const uint32_t count        = instructions.Size();
-	std::vector<uint32_t> pcs(count);
-	for (uint32_t i = 0; i < count; i++)
-	{
-		pcs[i] = instructions.At(i).pc;
-	}
-	successors->assign(count, {});
-	for (uint32_t i = 0; i < count; i++)
-	{
-		const auto& inst = instructions.At(i);
-		if (inst.src_num < 0 || inst.src_num > 4)
-		{
-			return false;
-		}
-		if (inst.type == ShaderInstructionType::SEndpgm)
-		{
-			continue;
-		}
-		if (!ShaderInstructionHasStaticBranchTarget(inst.type))
-		{
-			if (LaneFlow::AnyPrefix(inst.type, {"SCbranch", "SBranch", "SSetpc", "SSwappc", "SCall", "SRfe"}))
-			{
-				return false;
-			}
-			if (i + 1 < count)
-			{
-				(*successors)[i].push_back(i + 1);
-			}
-			continue;
-		}
-		const auto target = static_cast<uint32_t>(static_cast<int64_t>(inst.pc) + 4 + inst.src[0].constant.i);
-		const auto it     = std::lower_bound(pcs.begin(), pcs.end(), target);
-		if (it == pcs.end() || *it != target)
-		{
-			return false;
-		}
-		(*successors)[i].push_back(static_cast<uint32_t>(it - pcs.begin()));
-		if (inst.type != ShaderInstructionType::SBranch && i + 1 < count)
-		{
-			(*successors)[i].push_back(i + 1);
-		}
-	}
-	return true;
-}
-
 
 bool IsGatherType(const ShaderInstruction& inst)
 {
@@ -436,28 +436,11 @@ void MarkGatherCandidates(const ShaderCode& code, std::vector<MaskDemandStep>* s
 	}
 }
 
-} // namespace
-
-ShaderLaneMaskPlan ShaderLaneMaskPlanOf(const ShaderCode& code)
+// Backward: the words some later reader needs with every lane's bit.
+void SolveMaskPlan(const std::vector<MaskDemandStep>& steps, const std::vector<std::vector<uint32_t>>& successors,
+                   const std::vector<std::vector<int64_t>>& tree_definitions, ShaderLaneMaskPlan* plan)
 {
-	const auto&                        instructions = code.GetInstructions();
-	const uint32_t                     count        = instructions.Size();
-	ShaderLaneMaskPlan                 plan;
-	plan.local.assign(count, false);
-	plan.gather.assign(count, false);
-	std::vector<std::vector<uint32_t>> successors;
-	if (!BuildMaskSuccessors(code, &successors))
-	{
-		return plan;
-	}
-	std::vector<MaskDemandStep> steps(count);
-	for (uint32_t i = 0; i < count; i++)
-	{
-		steps[i] = MaskDemandOf(instructions.At(i));
-	}
-	std::vector<std::vector<int64_t>> tree_definitions;
-	MarkGatherCandidates(code, &steps, &tree_definitions);
-	// Backward: the words some later reader needs with every lane's bit.
+	const auto             count = static_cast<uint32_t>(steps.size());
 	std::vector<MaskWords> demanded_in(count);
 	std::vector<MaskWords> demanded_out(count);
 	for (bool changed = true; changed;)
@@ -488,11 +471,248 @@ ShaderLaneMaskPlan ShaderLaneMaskPlanOf(const ShaderCode& code)
 	{
 		const auto& step = steps[i];
 		const bool  demanded = (demanded_out[i] & step.defs).any();
-		plan.local[i]        = step.producer && !demanded;
+		plan->local[i]       = step.producer && !demanded;
 		// A tree whose every leaf is complete anyway needs no gather.
 		const bool partial = std::any_of(tree_definitions[i].begin(), tree_definitions[i].end(),
-		                                 [&](int64_t d) { return plan.local[d] || (steps[d].gather_candidate && !plan.gather[d]); });
-		plan.gather[i] = step.gather_candidate && demanded && partial;
+		                                 [&](int64_t d) { return plan->local[d] || (steps[d].gather_candidate && !plan->gather[d]); });
+		plan->gather[i] = step.gather_candidate && demanded && partial;
+	}
+}
+
+MaskWords ExecWords()
+{
+	MaskWords words;
+	AddMaskPair(ShaderOperandType::ExecLo, &words);
+	return words;
+}
+
+// Over-approximates the scalar words an instruction reads. EXEC is left out: no skipped range defines it.
+MaskWords ScalarReadsOf(const ShaderInstruction& inst)
+{
+	MaskWords words;
+	for (int s = 0; s < inst.src_num; s++)
+	{
+		AddMaskWords(inst.src[s], &words);
+	}
+	// Forms that keep part of their destination, whether or not the decoder lists it as a source.
+	if (LaneFlow::AnyPrefix(inst.type, {"SCmov", "SBitset", "SAddk", "SMulk"}))
+	{
+		AddMaskWords(inst.dst, &words);
+	}
+	if (LaneFlow::ReadsSccImplicitly(inst.type) || LaneFlow::StartsWith(inst.type, "SCbranchScc"))
+	{
+		words.set(LaneFlow::kSccWord);
+	}
+	if (LaneFlow::MayReadVcc(inst.type))
+	{
+		AddMaskPair(ShaderOperandType::VccLo, &words);
+	}
+	if (LaneFlow::AnyPrefix(inst.type, {"Ds", "VInterp", "SSendmsg"}))
+	{
+		words.set(LaneFlow::kM0Word);
+	}
+	return words & ~ExecWords();
+}
+
+// Over-approximates the scalar words an instruction a part may skip writes.
+MaskWords ScalarWritesOf(const ShaderInstruction& inst)
+{
+	const auto name = ShaderInstructionTypeName(inst.type);
+	const auto has  = [&](std::string_view part) { return name.find(part) != std::string_view::npos; };
+	MaskWords  words;
+	AddMaskWords(inst.dst, &words);
+	AddMaskWords(inst.dst2, &words);
+	if (LaneFlow::IsScalarAlu(inst.type) && LaneFlow::WritesScc(inst.type))
+	{
+		words.set(LaneFlow::kSccWord);
+	}
+	if (LaneFlow::StartsWith(inst.type, "V") && (has("Cmp") || has("Class") || has("Co") || has("Div")))
+	{
+		AddMaskPair(ShaderOperandType::VccLo, &words);
+	}
+	return words & ~ExecWords();
+}
+
+// Scalar words live before each instruction. Only scalar ALU, scalar loads and lane-mask producers kill:
+// a missed definition keeps a word alive. A wave64 producer writes both words of its mask pair.
+std::vector<MaskWords> ScalarLiveIn(const ShaderCode& code, const std::vector<std::vector<uint32_t>>& successors,
+                                    const std::vector<MaskDemandStep>& steps)
+{
+	const auto&            instructions = code.GetInstructions();
+	const uint32_t         count        = instructions.Size();
+	std::vector<MaskWords> reads(count);
+	std::vector<MaskWords> kills(count);
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const auto type = instructions.At(i).type;
+		reads[i]        = ScalarReadsOf(instructions.At(i));
+		if (LaneFlow::IsScalarAlu(type) || LaneFlow::IsScalarLoad(type) || steps[i].producer)
+		{
+			kills[i] = steps[i].defs;
+		}
+	}
+	std::vector<MaskWords> live_in(count);
+	for (bool changed = true; changed;)
+	{
+		changed = false;
+		for (uint32_t i = count; i-- > 0;)
+		{
+			MaskWords out;
+			for (auto succ: successors[i])
+			{
+				out |= live_in[succ];
+			}
+			const auto in = (out & ~kills[i]) | reads[i];
+			changed       = changed || in != live_in[i];
+			live_in[i]    = in;
+		}
+	}
+	return live_in;
+}
+
+bool HasDppSource(const ShaderInstruction& inst)
+{
+	return std::any_of(inst.src, inst.src + inst.src_num, [](const ShaderOperand& source) { return source.dpp; });
+}
+
+// An instruction the active parts run without a rendezvous while a part with no active lane skips it:
+// its vector work is masked per lane and its scalar results are checked dead after the range. V_CMPX
+// only narrows EXEC; whether it stays lane-local is the plan's to say.
+bool PartMaySkip(const ShaderInstruction& inst, const MaskDemandStep& step)
+{
+	const auto type = inst.type;
+	if (HasDppSource(inst))
+	{
+		return false;
+	}
+	if (LaneFlow::StartsWith(type, "VCmpx"))
+	{
+		return true;
+	}
+	if ((step.defs & ExecWords()).any())
+	{
+		return false;
+	}
+	if (LaneFlow::StartsWith(type, "V"))
+	{
+		return !LaneFlow::IsLaneExchange(type);
+	}
+	if (LaneFlow::IsScalarAlu(type) || LaneFlow::IsScalarLoad(type) || LaneFlow::AnyPrefix(type, {"SWaitcnt", "SNop", "SInstPrefetch"}))
+	{
+		return true;
+	}
+	return (LaneFlow::StartsWith(type, "Image") || LaneFlow::IsBufferLoad(type)) && !LaneFlow::WritesMemory(type);
+}
+
+// Target index of each forward S_CBRANCH_EXECZ whose skipped range (branch, target) a part may skip alone
+// as far as the range itself tells; 0 for every other instruction. The range is entered only through the
+// branch, leaves only at the target, and defines no scalar word that is live there.
+std::vector<uint32_t> PartLocalSkipTargets(const ShaderCode& code, const std::vector<std::vector<uint32_t>>& successors,
+                                           const std::vector<MaskDemandStep>& steps)
+{
+	const auto&           instructions = code.GetInstructions();
+	const uint32_t        count        = instructions.Size();
+	std::vector<uint32_t> targets(count, 0);
+	// Branch sources of each target, as the range they span.
+	std::vector<uint32_t> first_source(count, count);
+	std::vector<uint32_t> last_source(count, 0);
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const auto type = instructions.At(i).type;
+		if (LaneFlow::AnyPrefix(type, {"SMovrel", "VMovrel"}))
+		{
+			return targets;
+		}
+		if (ShaderInstructionHasStaticBranchTarget(type))
+		{
+			const uint32_t target = successors[i][0];
+			first_source[target]  = std::min(first_source[target], i);
+			last_source[target]   = std::max(last_source[target], i);
+		}
+	}
+	const auto live_in = ScalarLiveIn(code, successors, steps);
+	for (uint32_t branch = 0; branch < count; branch++)
+	{
+		if (instructions.At(branch).type != ShaderInstructionType::SCbranchExecz || successors[branch][0] <= branch + 1)
+		{
+			continue;
+		}
+		const uint32_t target = successors[branch][0];
+		MaskWords      written;
+		bool           skippable = true;
+		for (uint32_t i = branch + 1; i < target && skippable; i++)
+		{
+			const auto& inst    = instructions.At(i);
+			const bool  entered = first_source[i] != count && (first_source[i] <= branch || last_source[i] >= target);
+			const bool  jumps   = ShaderInstructionHasStaticBranchTarget(inst.type);
+			skippable = !entered && (jumps ? successors[i][0] > i && successors[i][0] <= target : PartMaySkip(inst, steps[i]));
+			written |= ScalarWritesOf(inst);
+		}
+		if (skippable && (written & live_in[target]).none())
+		{
+			targets[branch] = target;
+		}
+	}
+	return targets;
+}
+
+} // namespace
+
+ShaderLaneMaskPlan ShaderLaneMaskPlanOf(const ShaderCode& code, bool part_local_skips)
+{
+	const auto&                        instructions = code.GetInstructions();
+	const uint32_t                     count        = instructions.Size();
+	ShaderLaneMaskPlan                 plan;
+	plan.local.assign(count, false);
+	plan.gather.assign(count, false);
+	plan.part_skipped.assign(count, false);
+	std::vector<std::vector<uint32_t>> successors;
+	if (!ShaderInstructionSuccessors(code, &successors))
+	{
+		return plan;
+	}
+	std::vector<MaskDemandStep> steps(count);
+	for (uint32_t i = 0; i < count; i++)
+	{
+		steps[i] = MaskDemandOf(instructions.At(i));
+	}
+	std::vector<std::vector<int64_t>> tree_definitions;
+	MarkGatherCandidates(code, &steps, &tree_definitions);
+	auto skip_targets = part_local_skips ? PartLocalSkipTargets(code, successors, steps) : std::vector<uint32_t>(count, 0);
+	for (uint32_t i = 0; i < count; i++)
+	{
+		if (skip_targets[i] != 0)
+		{
+			steps[i].uses &= ~ExecWords();
+		}
+	}
+	// A skip whose range still gathers a mask loses its exemption; that only adds demand, so this ends.
+	for (bool dropped = true; dropped;)
+	{
+		dropped = false;
+		SolveMaskPlan(steps, successors, tree_definitions, &plan);
+		for (uint32_t branch = 0; branch < count; branch++)
+		{
+			const auto gathers = [&](uint32_t i) { return (steps[i].producer && !plan.local[i]) || plan.gather[i]; };
+			bool       rendezvous = false;
+			for (uint32_t i = branch + 1; i < skip_targets[branch] && !rendezvous; i++)
+			{
+				rendezvous = gathers(i);
+			}
+			if (rendezvous)
+			{
+				skip_targets[branch] = 0;
+				steps[branch].uses |= ExecWords();
+				dropped = true;
+			}
+		}
+	}
+	for (uint32_t branch = 0; branch < count; branch++)
+	{
+		for (uint32_t i = branch + 1; i < skip_targets[branch]; i++)
+		{
+			plan.part_skipped[i] = true;
+		}
 	}
 	return plan;
 }

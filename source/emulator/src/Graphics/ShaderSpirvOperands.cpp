@@ -49,10 +49,9 @@ String8 ReplaceMaskToken(const String8& source, const String8& from, const Strin
 	return String8(text.c_str());
 }
 
-// A grouped compare adds its vote to %split_ballot_packed at its own position; the tail publishes every member's
-// vote in one exchange and then stores each member's mask in program order.
-String8 GroupedMaskVote(const ShaderCode& code, const std::vector<uint32_t>& group, uint32_t index, uint32_t lanes, bool wave32,
-                        const String8& tag)
+// A grouped compare adds its vote to %split_ballot_packed; the last member's vote publishes every vote in one
+// exchange.
+String8 GroupedMaskVote(const std::vector<uint32_t>& group, uint32_t index, uint32_t lanes, const String8& tag)
 {
 	const auto position = static_cast<uint32_t>(std::find(group.begin(), group.end(), index) - group.begin());
 	EXIT_IF(position >= group.size());
@@ -69,24 +68,7 @@ String8 GroupedMaskVote(const ShaderCode& code, const std::vector<uint32_t>& gro
 	{
 		return text + "OpStore %split_ballot_packed %mask_out_packed_" + tag + "\n";
 	}
-	text += "%mask_out_group_" + tag + " = OpFunctionCall %void %split_ballot_group %mask_out_packed_" + tag + "\n";
-	for (uint32_t member = 0; member < group.size(); ++member)
-	{
-		const auto& mask = code.GetInstructions().At(group[member]).dst;
-		const auto  lo   = mask.size == 1 ? operand_variable_to_str(mask) : operand_variable_to_str(mask, 0);
-		const auto  name = String8::FromPrintf("mask_out_member_%s_%u", tag.c_str(), member);
-		text += String8::FromPrintf("%%%s = OpFunctionCall %%v4uint %%split_ballot_field %%split_c%u\n"
-		                            "%%%s_lo = OpCompositeExtract %%uint %%%s 0\n"
-		                            "OpStore %%%s %%%s_lo\n",
-		                            name.c_str(), member * lanes, name.c_str(), name.c_str(), lo.value.c_str(), name.c_str());
-		if (mask.size == 2 && !wave32)
-		{
-			const auto hi = operand_variable_to_str(mask, 1);
-			text += String8::FromPrintf("%%%s_hi = OpCompositeExtract %%uint %%%s 1\nOpStore %%%s %%%s_hi\n", name.c_str(), name.c_str(),
-			                            hi.value.c_str(), name.c_str());
-		}
-	}
-	return text;
+	return text + "%mask_out_group_" + tag + " = OpFunctionCall %void %split_ballot_group %mask_out_packed_" + tag + "\n";
 }
 
 } // namespace
@@ -276,6 +258,43 @@ static bool WritesFullExec(const ShaderInstruction& inst, bool wave32)
 	        (source.type == ShaderOperandType::LiteralConstant && source.constant.u == 0xffffffffu));
 }
 
+// The later members of a grouped compare vote at the head: nothing between them changes their sources or EXEC.
+String8 Spirv::SplitBallotGroupVotes(const std::vector<uint32_t>& group)
+{
+	String8 text;
+	for (size_t member = 1; member < group.size(); ++member)
+	{
+		const auto& inst = m_code.GetInstructions().At(group[member]);
+		const auto* func = RecompFunc(inst.type, inst.format);
+		String8     vote;
+		EXIT_IF(func == nullptr || !func->func(group[member], m_code, &vote, this, func->param, func->scc_check));
+		text += ResolveMaskAccesses(inst, group[member], vote);
+	}
+	return text;
+}
+
+// Writes one grouped compare's mask out of the words its group published.
+String8 Spirv::SplitBallotGroupMask(const std::vector<uint32_t>& group, uint32_t index) const
+{
+	const auto member = static_cast<uint32_t>(std::find(group.begin(), group.end(), index) - group.begin());
+	EXIT_IF(member >= group.size());
+	const auto& mask = m_code.GetInstructions().At(index).dst;
+	const auto  lo   = mask.size == 1 ? operand_variable_to_str(mask) : operand_variable_to_str(mask, 0);
+	const auto  name = String8::FromPrintf("mask_out_member_%u", index);
+	auto        text = String8::FromPrintf("%%%s = OpFunctionCall %%v4uint %%split_ballot_field %%split_c%u\n"
+	                                       "%%%s_lo = OpCompositeExtract %%uint %%%s 0\n"
+	                                       "OpStore %%%s %%%s_lo\n",
+	                                       name.c_str(), member * SplitWavePartLanes(), name.c_str(), name.c_str(), lo.value.c_str(),
+	                                       name.c_str());
+	if (mask.size == 2 && !NativeWave32())
+	{
+		const auto hi = operand_variable_to_str(mask, 1);
+		text += String8::FromPrintf("%%%s_hi = OpCompositeExtract %%uint %%%s 1\nOpStore %%%s %%%s_hi\n", name.c_str(), name.c_str(),
+		                            hi.value.c_str(), name.c_str());
+	}
+	return text;
+}
+
 String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index, const String8& source) const
 {
 	String8 result = source;
@@ -335,7 +354,7 @@ String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index
 %mask_out_pred_<tag> = OpINotEqual %bool <value> %uint_0
 %mask_out_active_<tag> = OpLogicalAnd %bool %mask_out_live_<tag> %mask_out_pred_<tag>
 )");
-			const auto  stores = group != nullptr ? GroupedMaskVote(m_code, *group, index, SplitWavePartLanes(), NativeWave32(), tag)
+			const auto  stores = group != nullptr ? GroupedMaskVote(*group, index, SplitWavePartLanes(), tag)
 			                                      : String8(R"(<ballot>
 %mask_out_lo_<tag> = OpCompositeExtract %uint %mask_out_ballot_<tag> 0
 %mask_out_hi_<tag> = OpCompositeExtract %uint %mask_out_ballot_<tag> 1

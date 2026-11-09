@@ -44,6 +44,7 @@
 
 #include "ShaderControlFlowGraph.h"
 #include "ShaderMaskAnalysis.h"
+#include "ShaderSplitLdsOrder.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -144,6 +145,8 @@ public:
 	// Split compute wave: the run of V_CMP instructions whose ballots share one exchange with the one at index,
 	// tail last; nullptr when it exchanges alone.
 	[[nodiscard]] const std::vector<uint32_t>* SplitBallotGroup(uint32_t index) const;
+	[[nodiscard]] String8                      SplitBallotGroupVotes(const std::vector<uint32_t>& group);
+	[[nodiscard]] String8                      SplitBallotGroupMask(const std::vector<uint32_t>& group, uint32_t index) const;
 	[[nodiscard]] uint32_t                     SplitBallotGroupLimit() const;
 	// Guest lanes per host subgroup of a split wave: 32 or 16.
 	[[nodiscard]] uint32_t SplitWavePartLanes() const;
@@ -152,9 +155,13 @@ public:
 	[[nodiscard]] String8 SplitWaveTypes() const;
 	[[nodiscard]] String8 SplitWaveVariables() const;
 	[[nodiscard]] String8 SplitWaveProlog() const;
-	[[nodiscard]] String8 SplitWaveDsOrder(uint32_t index) const;
+	[[nodiscard]] const ShaderSplitLdsOrder& SplitLdsOrder() const;
+	// The instruction's text with the rendezvous that order its LDS access around it.
+	[[nodiscard]] String8 SplitWaveDsOrder(uint32_t index, const String8& body) const;
 	[[nodiscard]] String8 SplitWaveFunctions() const;
 	void                  CheckSplitWaveCollectives(const String8& body) const;
+	// An instruction one part may skip alone must not rendezvous with the others.
+	void                  CheckSplitWavePartSkip(uint32_t index, const String8& body) const;
 	void                  MarkStorageWrites(uint32_t annotations_end, uint32_t main_begin);
 	[[nodiscard]] bool NativeComputeWaveLayoutIsValid() const;
 	[[nodiscard]] bool EmitNativeComputeWaveProlog(String8* output) const;
@@ -560,6 +567,8 @@ private:
 	mutable std::vector<bool>     m_vertex_exec_full;
 	mutable bool                  m_lane_mask_plan_ready = false;
 	mutable ShaderLaneMaskPlan    m_lane_mask_plan;
+	mutable bool                  m_split_lds_order_ready = false;
+	mutable ShaderSplitLdsOrder   m_split_lds_order;
 	mutable bool                  m_split_read_groups_ready = false;
 	mutable std::vector<uint32_t> m_split_read_group_of;
 	mutable std::vector<std::vector<uint32_t>> m_split_read_groups;

@@ -1021,8 +1021,9 @@ bool RunNativeCases(const NativeVulkanContext& context, std::string* reason)
 	return true;
 }
 
-// One guest wave64 in 8-lane parts: three V_READLANE at one selector and four adjacent compares whose masks scalar
-// code reads, then every lane stores the scalar word in s<output> at its lane's pixel.
+// One guest wave64 in 8-lane parts: three V_READLANE at one selector and four compares whose masks scalar code
+// reads, the last three past a side exit on the first mask, then every lane stores the scalar word in s<output>
+// at its lane's pixel.
 bool BuildSplitCollectiveShader(uint32_t output, ShaderCode* code, ShaderComputeInputInfo* input, std::string* reason)
 {
 	auto v_mov     = [](uint32_t dst, uint32_t src) { return 0x7e000000u | (dst << 17u) | (0x01u << 9u) | src; };
@@ -1038,6 +1039,8 @@ bool BuildSplitCollectiveShader(uint32_t output, ShaderCode* code, ShaderCompute
 	const auto                  read2  = vop3(0x360u, 16u, 256u + 13u, 12u);                            // v_readlane_b32 s16, v13, s12
 	const uint32_t              s_mov  = (0x17du << 23u) | (12u << 16u) | (0x03u << 8u) | (128u + 45u); // s_mov_b32 s12, 45
 	const uint32_t              cmp_gt = (0x3eu << 25u) | (0xc4u << 17u) | (4u << 9u) | (128u + 13u);   // v_cmp_gt_u32 vcc, 13, v4
+	const uint32_t              s_test = (0x17eu << 23u) | (0x13u << 16u) | (128u << 8u) | 106u;        // s_cmp_lg_u64 vcc, 0
+	const uint32_t              s_exit = (0x17fu << 23u) | (0x04u << 16u) | 14u;                        // s_cbranch_scc0 s_endpgm
 	const uint32_t              mimg0  = (0x3cu << 26u) | (0x08u << 18u) | (0xfu << 8u) | (1u << 3u);
 	const uint32_t              mimg1  = (8u << 16u) | (8u << 8u) | 4u; // T# s[32:39], vdata v[8:11], vaddr v[4:7].
 	const std::vector<uint32_t> words {
@@ -1055,6 +1058,8 @@ bool BuildSplitCollectiveShader(uint32_t output, ShaderCode* code, ShaderCompute
 	    read2[0],
 	    read2[1],
 	    cmp_gt,
+	    s_test,
+	    s_exit,
 	    lt[0],
 	    lt[1],
 	    ne[0],
@@ -1126,7 +1131,13 @@ bool RunSplitCollectiveCases(const NativeVulkanContext& context, std::string* re
 			return false;
 		}
 		const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
-		EXPECT_NE(std::string(source.c_str()).find("OpFunctionCall %void %split_ballot_group"), std::string::npos) << test.name;
+		const std::string text(source.c_str());
+		const std::string exchange = "OpFunctionCall %void %split_ballot_group";
+		const auto        first    = text.find(exchange);
+		// The four compares vote in one exchange, across the side exit.
+		EXPECT_NE(first, std::string::npos) << test.name;
+		EXPECT_EQ(text.find(exchange, first + 1u), std::string::npos) << test.name;
+		EXPECT_EQ(text.find("OpFunctionCall %v4uint %split_ballot %mask_out_active"), std::string::npos) << test.name;
 		EXPECT_NE(std::string(source.c_str()).find("OpFunctionCall %v4uint %split_read_group"), std::string::npos) << test.name;
 		std::vector<uint32_t> binary;
 		if (!CompileStoreShader(code, input, &binary, reason))
