@@ -782,8 +782,10 @@ inline bool GpuMemoryAllowsTextureLinkIndexBuffer(GpuMemoryObjectType existing_t
 //   - RenderTexture Contains + StorageBuffer Contains + StorageBuffer Equals
 //   - VertexBuffer Contains + StorageBuffer/RenderTexture surface parents
 //   - DepthStencilBuffer Crosses + exact StorageBuffer/Texture peers
-// The depth surface remains live in the last form; link only the captured
-// partial overlap rather than reclaiming it or accepting broader DS relations.
+// A depth target that extends past the colour target stays live and linked,
+// whether the colour range crosses its end or lies inside it (captured: a
+// 960x540 colour target at the base of a 1216x684 depth target). Linking keeps
+// both host images; nothing is reclaimed.
 inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                     GpuMemoryObjectType incoming_type)
 {
@@ -793,7 +795,7 @@ inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing
 	}
 	if (existing_type == GpuMemoryObjectType::DepthStencilBuffer)
 	{
-		return relation == GpuMemoryOverlapType::Crosses;
+		return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::Contains;
 	}
 	if (existing_type == GpuMemoryObjectType::VideoOutBuffer)
 	{
