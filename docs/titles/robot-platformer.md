@@ -16,8 +16,21 @@ compares whose masks feed scalar arithmetic. Runs of `V_READLANE` at one
 selector now share one exchange: 44 reads form 32 groups, saving 12
 exchanges per pass through the two traversal loops. Runs of adjacent
 compares whose masks are not lane-local pack their votes and publish them
-together: up to 38 static compare exchanges before the lane-local and source
-filters.
+together. No such compare run forms in `0x3666fa39`; in the translator 205
+store, 7 other split compute recipes of this title hold one or two.
+
+**Same-translator ANV statistics** (offline, SIMD8, not a frame effect). The
+unfused arm was translated by a diagnostic build into a private copy of the
+store with only this kernel's entries removed:
+
+| `0x3666fa39` | Instructions | SENDs | Spin loops | Spills:fills | Max live |
+| --- | --- | --- | --- | --- | --- |
+| Without grouping | 44,573 | 1,695 | 200 | 593:2,684 | 365 |
+| With grouping | 45,665 | 1,623 | 188 | 596:3,055 | 347 |
+
+The 12 fewer spin loops are exactly the lane-read groups. The rise in fills
+is within this kernel's register allocation sensitivity: a probe-only change
+moved them from 2,225 to 2,864 (2026-10-30 record).
 
 **Verification.** The device test
 `EmulatorPackedMipNative.SplitWaveGroupedLaneReadsAndComparesReturnWholeWaveWords`
