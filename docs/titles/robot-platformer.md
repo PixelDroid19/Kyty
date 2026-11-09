@@ -6,6 +6,73 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: per-frame CPU read of indirect-draw records (2026-11-09)
+
+Same title, host, route and settings as the next record; executables built
+from `b76f4a71e` plus `4cf83a445` and temporary diagnostics only.
+
+- **The largest fence wait reads indirect-draw records.** A temporary
+  instrument logged the call stack of every fence wait of 5 ms or more. In the
+  GPU-bound scene (about 375 draws per frame), the top site was
+  `DrawIndexIndirect` reading its argument record from guest memory on the CPU
+  (`ReadCurrentGuestBytes`, then `BufferWait`), which drains the queue. It
+  happens about once per frame, waits about 18 ms, and follows the
+  tile-lighting kernel `0x3666fa39`.
+- **Why the device path refuses those draws.** Counters over a whole run:
+  7,125 indexed indirect draws. 1,235 were recorded with device-side arguments
+  and 5,888 were read on the CPU, 5,887 of them because the draw takes the
+  geometry pass. That pass sizes its output buffer and its dispatch from the
+  primitive and instance counts, so it needs the record on the CPU.
+- **Excluded in the GPU-bound scene: skipping the read.** A temporary build
+  switched every 5 s of wall time between the normal read and skipping the
+  draw. Skipping is valid only because every record read in the window was
+  empty: index count 1 and instance count 0, in 235 of 235. In that scene,
+  with the GPU busy 94-97 % of wall time, the skip arm ran at 16.29 fps
+  against 15.86 (+2.7 %), with fence waits of 37.7 against 38.8 ms per frame.
+  The wait moved to the command-buffer ring: the processor waits for a free
+  buffer of its eight while the GPU is busy. Geometry passes in that run used
+  at most 512 groups and 8.9 MB of output, with 4,353 dwords per group. That
+  build switched arms from boot. Before the window the normal arm read 174
+  records that were not empty, so the skip arm may have dropped real draws
+  there.
+- **The route does not control the scene after 150 s.** It has no gameplay
+  input: its last five presses are pause-menu inputs at 146-186 s, with
+  nothing after. The "dunes" figures in these records therefore come from an
+  idle scene: the robot standing in the open dunes, about 510-780 draws per
+  frame. Of seven runs, three were in that scene from 190 s or 212 s on. Four
+  were from 190 s to 250 s in an unidentified scene of about 375 draws per
+  frame, with the robot lying in the sand. Two of those four were sampled
+  earlier:
+  - both spent 16-18 unpaused seconds above 500 draws per frame;
+  - both spent about 10 s at 60 fps with under 100 draws per frame, between
+    the `options` presses at 175.9 and 186.2 s, probably the pause menu;
+  - in one, the 375-draw scene appeared just before that pause; in the
+    other, just after it. So the pause does not trigger it.
+
+  That scene is not the frame of the user's pause-menu freeze, which shows
+  the sky during a cinematic.
+- **Dunes: the same wait, the skip not measured there.** The read is also
+  the top wait site in the dunes. A run in the dunes (190-250 s) had 689 of its
+  691 waits of 5 ms or more with the same queue, the same preceding kernel and
+  the same lag after `0x3666fa39` (median 17.7 ms). The 1 s samples of the
+  three runs in the dunes bound the gain of removing every wait at 23-34 %.
+  A second skip run started skipping 155 s into the run. It reached only the
+  16 s span above 500 draws per frame, which a run without the skip also
+  shows; that span is not the idle dunes scene of the three runs. In that span:
+  - the read waited little (median 5.4 ms);
+  - draws fell and the frame rate rose throughout;
+  - adjacent windows, from five skip samples, gave about 0 % (skip at
+    164-166 s, 17.7-18.7 fps, against 18.4 fps normal at 168-171 s) and about
+    +8 % (skip at 173-174 s, 19.8-20.2 fps);
+  - fence waits per frame did not fall (about 22 ms normal, 26-34 ms
+    skipping).
+
+  The dunes scene remains unmeasured. Without that measurement the device
+  path for geometry-pass draws is not implemented. Measuring it needs a
+  route with gameplay input that walks into the open dunes and stays there
+  for 60 s or more without pausing, recorded on the executable and shader
+  caches of the measurement (`docs/input-replay.md`).
+
 ## Robot platformer: paired kernel measurement, arena refusal fixed (2026-11-09)
 
 Applies to `PPSA21567 - ASTRO BOT` 01.018, Intel A770, Linux, Mesa 26.2.6,
