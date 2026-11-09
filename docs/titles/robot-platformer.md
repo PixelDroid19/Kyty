@@ -4947,3 +4947,38 @@ recurred; this new occurrence needs its own call stack and dependency state.
 The diagnostic artifacts are under
 `/home/monasterios/tmp-backup/kyty-gda-output-study/hd-depth-writes-1` on the
 test host.
+
+A sixth attempt (`.../hd-writeback-stack-1`) reproduced the depth/color
+refusal at 94 seconds. The DCC tracker query immediately before the refused
+color creation found no tracked clear at that address. The filtered depth
+trace recorded two arms for host depth images at the same guest address and
+no subsequent matching draw write or clear. The trace starts after depth
+materialization and covers the traced draw path, so it neither proves initial
+contents nor excludes writes through other paths. The address and the absence
+of a tracker event are observations, not a general aliasing rule.
+
+The ordinary depth-image creation path starts with an undefined host image;
+its update callback does not upload guest bytes, and the first-use attachment
+logic can clear it. A separate creation path can seed depth from a storage
+image. The filtered trace does not establish which initialization produced
+the failing parent's contents. Consequently, read-only draws after the trace
+arms do not by themselves establish that guest memory is an authoritative
+copy of that depth image.
+
+To distinguish a recurrent write-back failure from the previously fixed
+aged-overlay issue, a diagnostic build was prepared to log the failing
+write-back's host stack and outstanding submission dependencies. The first
+attempt was the 94-second depth/color failure above; the second ran to 360
+seconds without either failure, so neither captured the requested stack.
+`GuestDeviceAddressFrameDone` advances overlay age on the flip path, while
+`PublishPendingStorageToGuestAddress` and the subsequent
+`GuestDeviceAddressWriteBack` are separate operations. An age transition
+between them is a concurrency hypothesis, not an established cause of the
+161.5-second failure. A fix must retain the required queue ordering and be
+tested against a reproduced pending-use transition.
+
+A third stack-instrumented attempt (`.../hd-writeback-stack-3`) also reached
+the 360-second harness limit without either failure. Its recorded input left
+the game at the new-game menu; a diagnostic controller tap advanced it to
+the opening sequence near the end of the run. It did not cover the same route
+as the failure and is not evidence that the error is fixed.
