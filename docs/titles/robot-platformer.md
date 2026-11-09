@@ -4998,3 +4998,34 @@ on `!create_all_the_same` for a 3840x2160 storage texture with mixed parents
 at `0x53de40000`. The selected depth address was not materialized before the
 stop. This repeats the storage-view frontier described at the start of this
 record and supplies no evidence of the failing depth image's initialization.
+
+A further depth-initialization probe (`.../hd-depth-initialization-2`) hit
+`DepthStencilBuffer - Contains - RenderTexture` at 125.8 seconds. The selected
+address had two distinct depth image materializations during the run. At the
+failing submission, the depth image was created with an undefined Vulkan layout
+and no requested depth write or clear; color materialization at the same guest
+address was attempted in that same submission. The failure occurred before
+framebuffer creation, so this does not prove that the new depth image was
+subsequently cleared or used. The earlier image also began undefined, but the
+filtered lifetime trace does not establish its first-use initialization. The
+color DCC tracker again had no matching pending event at the refusal. These
+observations do not establish the guest depth contents or exclude depth tests,
+stencil operations, other writers, or guest metadata writes.
+
+The normal draw path materializes depth and color before it sanitizes and
+creates the framebuffer. Simply deleting the depth object when the overlapping
+color object is created would risk invalidating the depth pointer already held
+by that draw, as well as discarding the depth allocation's uncovered bytes.
+Any safe fix must account for simultaneous attachment use and content ownership;
+this probe does not yet provide a correctness basis for such a change.
+
+A follow-up run (`.../hd-depth-state-1`) logged the depth state at
+materialization and reproduced the same refusal at 154.9 seconds. In the
+failing submission (`26369`), depth testing was enabled with Vulkan compare
+operation 3 (`LESS_OR_EQUAL`), depth writes and depth clear were disabled, and
+stencil testing was enabled. The depth image format at this frontier is D32,
+so the logged stencil enable alone does not establish an active stencil plane.
+The color materialization that failed had the same submission and guest base.
+Consequently, a read-only depth image cannot be dismissed as inert in this
+draw: its comparison can affect color coverage. These are instrumented
+observations, not a verified fix or a gameplay performance measurement.
