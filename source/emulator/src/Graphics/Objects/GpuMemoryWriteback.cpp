@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
@@ -182,8 +183,29 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	        : m_deferred_deletions.AreDependenciesCompleteForPublication(o.submission_uses.Dependencies(), *publishing_submission);
 	if (!dependencies_complete)
 	{
-		EXIT("GpuMemory write-back requested before exact resource dependencies completed: type=%s heap=%d id=%d\n",
-		     Core::EnumName(o.object.type).C_Str(), heap_id, object_id);
+		// A dependency may complete after the failed check above, so report this
+		// as a recheck instead of claiming it is the original blocking use.
+		SubmissionId pending {};
+		bool         pending_on_recheck = false;
+		for (const auto& use: o.submission_uses.Dependencies())
+		{
+			const bool complete = publishing_submission == nullptr
+			                          ? m_deferred_deletions.AreDependenciesComplete({use})
+			                          : m_deferred_deletions.AreDependenciesCompleteForPublication({use}, *publishing_submission);
+			if (!complete)
+			{
+				pending = use;
+				pending_on_recheck = true;
+				break;
+			}
+		}
+		EXIT("GpuMemory write-back requested before exact resource dependencies completed: type=%s heap=%d id=%d "
+		     "pending_on_recheck=%u pending_queue=%u pending_sequence=%" PRIu64
+		     " publishing=%u publishing_queue=%u publishing_sequence=%" PRIu64 "\n",
+		     Core::EnumName(o.object.type).C_Str(), heap_id, object_id, pending_on_recheck ? 1u : 0u,
+		     pending.queue.Value(), pending.sequence, publishing_submission != nullptr ? 1u : 0u,
+		     publishing_submission != nullptr ? publishing_submission->queue.Value() : 0u,
+		     publishing_submission != nullptr ? publishing_submission->sequence : uint64_t {0});
 	}
 
 	auto& block = h.block;
