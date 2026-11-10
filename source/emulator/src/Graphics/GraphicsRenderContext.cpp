@@ -621,6 +621,13 @@ void CommandPool::Create(int id)
 		EXIT("Can't allocate command buffers");
 	}
 
+	alloc_info.commandBufferCount = m_pool[id]->buffers_count * VulkanCommandPool::CHUNKS_PER_SLOT;
+	m_pool[id]->chunks            = new VkCommandBuffer[alloc_info.commandBufferCount];
+	if (vkAllocateCommandBuffers(ctx->device, &alloc_info, m_pool[id]->chunks) != VK_SUCCESS)
+	{
+		EXIT("Can't allocate command buffers");
+	}
+
 	for (uint32_t i = 0; i < m_pool[id]->buffers_count; i++)
 	{
 		m_pool[id]->busy[i] = false;
@@ -669,6 +676,7 @@ void CommandPool::DeleteAll()
 			}
 
 			vkFreeCommandBuffers(ctx->device, pool->pool, pool->buffers_count, pool->buffers);
+			vkFreeCommandBuffers(ctx->device, pool->pool, pool->buffers_count * VulkanCommandPool::CHUNKS_PER_SLOT, pool->chunks);
 
 			vkDestroyCommandPool(ctx->device, pool->pool, nullptr);
 
@@ -691,6 +699,7 @@ void CommandPool::DeleteAll()
 			delete[] pool->semaphores;
 			delete[] pool->fences;
 			delete[] pool->buffers;
+			delete[] pool->chunks;
 			delete[] pool->busy;
 
 			delete pool;

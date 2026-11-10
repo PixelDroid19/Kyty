@@ -2173,6 +2173,35 @@ bool ComputeRing::IsActive()
 	return m_active;
 }
 
+// Register state, draws and buffer chaining; any other packet may order guest
+// memory between the commands before it and the geometry passes after it.
+static bool Pm4KeepsGeometrySegment(uint32_t op)
+{
+	switch (op)
+	{
+		case Pm4::IT_DRAW_INDEX_2:
+		case Pm4::IT_DRAW_INDEX_AUTO:
+		case Pm4::IT_DRAW_INDEX_INDIRECT:
+		case Pm4::IT_DRAW_INDEX_OFFSET_2:
+		case Pm4::IT_DRAW_INDIRECT:
+		case Pm4::IT_SET_CONTEXT_REG:
+		case Pm4::IT_SET_SH_REG:
+		case Pm4::IT_SET_UCONFIG_REG:
+		case Pm4::IT_SET_UCONFIG_REG_INDEX:
+		case Pm4::IT_NOP:
+		case Pm4::IT_INDEX_BASE:
+		case Pm4::IT_INDEX_BUFFER_SIZE:
+		case Pm4::IT_INDEX_TYPE:
+		case Pm4::IT_NUM_INSTANCES:
+		case Pm4::IT_SET_BASE:
+		case Pm4::IT_INDIRECT_BUFFER:
+		case Pm4::IT_INDIRECT_BUFFER_END:
+		case Pm4::IT_CLEAR_STATE:
+		case Pm4::IT_ONE_REG_WRITE: return true;
+		default: return false;
+	}
+}
+
 void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data)
 {
 	KYTY_PROFILER_BLOCK("CommandProcessor::Run");
@@ -2292,6 +2321,12 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			m_last_pm4_op = op;
 			m_last_pm4_dw = num_dw - dw - 1u;
 			(void)VulkanRecentDrawSetPacket({true, op, m_last_pm4_dw});
+		}
+		if (!Pm4KeepsGeometrySegment(op))
+		{
+			Core::LockGuard lock(m_mutex);
+			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+			m_buffer[m_current_buffer]->BreakGeometrySegment();
 		}
 
 		auto pfunc = g_cp_op_func[op];

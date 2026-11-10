@@ -103,9 +103,15 @@ struct VulkanSwapchain
 
 struct VulkanCommandPool
 {
+	// Extra primaries of each slot for the geometry segments of its recording, two per segment; allocated with
+	// the pool, since other threads may record into its buffers at any later time.
+	static constexpr uint32_t CHUNKS_PER_SLOT = 8;
+
 	Core::Mutex      mutex;
 	VkCommandPool    pool          = nullptr;
 	VkCommandBuffer* buffers       = nullptr;
+	// CHUNKS_PER_SLOT per slot, in slot order.
+	VkCommandBuffer* chunks        = nullptr;
 	VkFence*         fences        = nullptr;
 	VkSemaphore*     semaphores    = nullptr;
 	bool*            busy          = nullptr;

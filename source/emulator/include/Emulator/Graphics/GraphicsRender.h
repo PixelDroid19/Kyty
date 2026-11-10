@@ -35,6 +35,7 @@ struct TransientSnapshotLeases;
 class DiagnosticDumpWriter;
 struct ShaderNativeWaveInfo;
 struct ShaderProgramSnapshot;
+struct VulkanImage;
 struct VideoOutVulkanImage;
 struct DepthStencilVulkanImage;
 struct TextureVulkanImage;
@@ -645,8 +646,24 @@ public:
 	// constants, dynamic state and query scopes are legal in both scopes
 	// (RecordState), draws only inside one (RecordInsideRenderPass).
 	[[nodiscard]] VkCommandBuffer RecordOutsideRenderPass();
-	[[nodiscard]] VkCommandBuffer RecordState() const;
+	[[nodiscard]] VkCommandBuffer RecordState();
 	[[nodiscard]] VkCommandBuffer RecordInsideRenderPass() const;
+	// Geometry passes run ahead of the draws recorded after them, which on some
+	// devices costs a pipeline drain per pass. A pass that only reads guest memory
+	// therefore joins a geometry segment: a compute-only command buffer submitted
+	// between the commands recorded before it opened and those after, whose passes
+	// overlap. Passes join while no command was recorded outside a render pass and
+	// no Break happened since the segment opened; any other pass opens a new one.
+	// Between Begin and End the pass binds its descriptors; the first RecordState
+	// places it, End returns its segment or nullptr when it is recorded inline.
+	void BeginGeometryPass(VulkanBuffer* output, uint64_t offset, uint64_t size);
+	[[nodiscard]] VkCommandBuffer EndGeometryPass();
+	// Later geometry passes run after every command recorded so far: guest packets
+	// that may order memory and draws that write it call this.
+	void BreakGeometrySegment() { m_geometry_hazards++; }
+	// A pending pass that reads an image a render pass wrote since the segment
+	// opened must run after that render pass, which follows the segment.
+	void ReadImage(const VulkanImage* image);
 	// Orders every earlier command of the queue before every later one, for all
 	// stages and memory accesses. Guest cache flushes often come several in a row;
 	// when the latest command already is such a barrier, another orders nothing more.
@@ -722,8 +739,9 @@ public:
 	// compute scratch cannot exhaust its budget. The same ordering and lifetime rules apply.
 	VulkanBuffer* AllocateTransientCopyBuffer(uint64_t size);
 	// Device-local intermediate written and read only by GPU commands of this recording (for example a
-	// geometry pass output), with its own budget. The same ordering and lifetime rules apply.
-	VulkanBuffer* GeometryOutput(uint64_t size);
+	// geometry pass output), with its own budget. The same ordering and lifetime rules apply. The passes of a
+	// recording take consecutive ranges at *offset.
+	VulkanBuffer* GeometryOutput(uint64_t size, uint64_t* offset);
 	// Storage-buffer set for one fragment-transport draw state. The pool is reset
 	// when the recording starts, so its sets live exactly as long as the commands
 	// that bind them.
@@ -761,7 +779,34 @@ private:
 		bool          continuable = false;
 	};
 
+	struct GeometrySegment
+	{
+		VkCommandBuffer passes = nullptr;
+		// Main chunk before the segment; it zeroes the segment's output when the segment closes.
+		VkCommandBuffer predecessor = nullptr;
+		VulkanBuffer*   output      = nullptr;
+		uint64_t        begin       = 0;
+		uint64_t        end         = 0;
+		uint64_t        hazards     = 0;
+	};
+	struct GeometryPass
+	{
+		bool            pending = false;
+		VulkanBuffer*   output  = nullptr;
+		uint64_t        offset  = 0;
+		uint64_t        end     = 0;
+		VkCommandBuffer segment = nullptr;
+		uint64_t        hazards = 0;
+	};
+
 	[[nodiscard]] bool AttachPipelineLease(VulkanPipeline* pipeline, bool* added);
+	[[nodiscard]] VkCommandBuffer PlaceGeometryPass();
+	void                          NoteSegmentAttachment(const VulkanImage* image);
+	void                          OpenGeometrySegment(VulkanBuffer* output, uint64_t offset);
+	void                          CloseGeometrySegment();
+	[[nodiscard]] VkCommandBuffer BeginChunk();
+	// Resets the slot's command buffer and the chunks the last recording used.
+	[[nodiscard]] VkResult ResetCommandBuffers();
 	void               MarkCommandBufferResetting();
 	void               ReleasePipelineLeases();
 	void               DestroyRecordingUploads();
@@ -793,6 +838,17 @@ private:
 	std::optional<OpenRenderPass> m_open_render_pass;
 	// The latest command recorded is a full memory barrier. Every recording handle clears it.
 	mutable bool m_latest_full_barrier = false;
+	// Command buffers of the recording in submission order: the slot's buffer, then a segment and the main chunk
+	// after it for each geometry segment. m_main receives every command but the segments' passes.
+	std::vector<VkCommandBuffer> m_chunks;
+	VkCommandBuffer              m_main = nullptr;
+	GeometrySegment              m_geometry_segment;
+	GeometryPass                 m_geometry_pass;
+	uint64_t                     m_geometry_hazards = 0;
+	VulkanBuffer*                m_geometry_output  = nullptr;
+	uint64_t                     m_geometry_offset  = 0;
+	// Images the render passes begun since the open segment opened write.
+	std::vector<const VulkanImage*> m_segment_attachments;
 	std::vector<DepthStencilVulkanImage*> m_depth_plane_store_backs;
 	std::vector<DepthStencilVulkanImage*> m_stencil_plane_store_backs;
 	std::vector<SubmissionId>             m_device_awaited;

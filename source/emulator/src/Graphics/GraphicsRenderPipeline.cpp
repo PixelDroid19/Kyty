@@ -3,6 +3,7 @@
 
 #include "GraphicsRenderInternal.h"
 #include "GraphicsRenderPipelineLimits.h"
+#include "ShaderSpirvInternal.h"
 #include "ShaderSpirvToolchain.h"
 
 #include "Kyty/Core/Common.h"
@@ -1978,9 +1979,16 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	DebugStatsRecordShaderTranslationCache(vs_translation.hit, vs_translation.evicted);
 
 
+	// A geometry pull reads only the records of its pass.
+	bool writes_guest_memory =
+	    ShaderGdsBufferBound(vs_input_info->bind.gds_pointers) ||
+	    (!vs_input_info->geometry_pull && ShaderCodeWritesStorage(ShaderParseVS(&vs_regs, &sh_regs, vs_input_info)));
+
 	if (ps_input_info->stage_enabled)
 	{
 		const auto ps_transport_code = ShaderParsePS(&ps_regs, &sh_regs);
+		writes_guest_memory          = writes_guest_memory || ShaderGdsBufferBound(ps_input_info->bind.gds_pointers) ||
+		                      ShaderCodeWritesStorage(ps_transport_code);
 		const auto requirement       = FragmentTransportRequire(ps_transport_code, *ps_input_info,
 		                                                        static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr), *p.static_params,
 		                                                        framebuffer->extent);
@@ -2003,6 +2011,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			p.transport                   = passes;
 			p.pipeline->transport         = passes;
 			p.pipeline->framebuffer_extent = framebuffer->extent;
+			p.pipeline->writes_guest_memory = writes_guest_memory;
 			StorePipeline(transport_slot, p);
 			AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(transport_slot)]);
 			m_driver_cache_dirty = true;
@@ -2052,7 +2061,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	                                    VK_NULL_HANDLE, false);
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
-	p.pipeline->framebuffer_extent = framebuffer->extent;
+	p.pipeline->framebuffer_extent  = framebuffer->extent;
+	p.pipeline->writes_guest_memory = writes_guest_memory;
 
 	StorePipeline(slot, p);
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
@@ -2195,6 +2205,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 
 	const uint32_t slot = FindAvailableSlot();
 	p.pipeline          = CreatePipelineInternal(&host, translation.binary, p.static_params, p.dynamic_params);
+	p.pipeline->writes_guest_memory = ShaderCodeWritesStorage(code) || ShaderGdsBufferBound(input_info->bind.gds_pointers);
 	StorePipeline(slot, p);
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));

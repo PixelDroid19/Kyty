@@ -2075,8 +2075,6 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
 	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
-	auto* vk_buffer = buffer->RecordState();
-
 	// The geometry pass reads the guest index buffer itself, through the
 	// device-address table, so GPU-written indexes are seen in queue order; the
 	// pull stage then draws the output records without an index buffer.
@@ -2092,6 +2090,8 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 		instance_count = 1;
 		first_instance = 0;
 	}
+	// After the pass, which may move the recording to a new command buffer.
+	auto* vk_buffer = buffer->RecordState();
 	if (geometry_pass)
 	{
 		vertex_requirement = ResolveLinearVertexRecords(0u, primitive_plan.draw_count);
@@ -2124,6 +2124,11 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(buffer, framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
+	// Later geometry passes may read what this draw writes.
+	if (pipeline->writes_guest_memory)
+	{
+		buffer->BreakGeometrySegment();
+	}
 
 	if (pipeline->transport != nullptr && indirect != nullptr)
 	{
@@ -3012,15 +3017,18 @@ static ShaderVertexInputInfo MakeGeometryPullInput(const ShaderVertexInputInfo& 
 	return input;
 }
 
-// Records the zeroed output, the pass and the barrier to its vertex-stage
-// readers outside the render pass; sets the output address in `pull`.
+// Records the pass into a geometry segment when it writes no guest memory
+// (see CommandBuffer::BeginGeometryPass), else the zeroed output, the pass and
+// the barrier to its vertex-stage readers outside the render pass; sets the
+// output address in `pull`.
 static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& ctx, const HW::Shader& sh_ctx,
                                ShaderVertexInputInfo* front, const GeometryDrawPlan& plan, int32_t first_vertex,
                                uint32_t first_instance, const GuestDeviceAddressTable* device_address_table,
                                ShaderVertexInputInfo* pull, uint64_t index_address, const SubmissionId* mutation_conflict)
 {
 	const uint64_t bytes  = static_cast<uint64_t>(plan.groups) * plan.info.GroupDwords() * 4u;
-	auto*          output = buffer->GeometryOutput(bytes);
+	uint64_t       offset = 0;
+	auto*          output = buffer->GeometryOutput(bytes, &offset);
 	if (output == nullptr)
 	{
 		EXIT("geometry pass output of %" PRIu64 " bytes exceeds the geometry output limit\n", bytes);
@@ -3028,7 +3036,7 @@ static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const 
 	VkBufferDeviceAddressInfo address_info {};
 	address_info.sType     = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
 	address_info.buffer    = output->buffer;
-	const uint64_t address = vkGetBufferDeviceAddress(g_render_ctx->GetGraphicCtx()->device, &address_info);
+	const uint64_t address = vkGetBufferDeviceAddress(g_render_ctx->GetGraphicCtx()->device, &address_info) + offset;
 	const uint32_t lo      = static_cast<uint32_t>(address);
 	const uint32_t hi      = static_cast<uint32_t>(address >> 32u);
 	// Row 1 carries the base vertex, the first instance and, for an indexed
@@ -3044,29 +3052,40 @@ static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const 
 	std::memcpy(front->bind.geometry_block, block, sizeof(block));
 	std::memcpy(pull->bind.geometry_block, block, sizeof(block));
 
+	const auto& vs       = sh_ctx.GetVs();
+	auto*       pipeline = g_render_ctx->GetPipelineCache()->CreateGeometryPipeline(buffer, front, plan.info, &vs,
+	                                                                                 &ctx.GetShaderRegisters());
+	const bool  batched  = !pipeline->writes_guest_memory;
+	if (batched)
+	{
+		buffer->BeginGeometryPass(output, offset, bytes);
+	}
+	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, front->bind, VK_SHADER_STAGE_COMPUTE_BIT,
+	                DescriptorCache::Stage::Compute, 0, nullptr, vs.gs_regs.chksum, nullptr, nullptr, device_address_table);
+	auto* segment = batched ? buffer->EndGeometryPass() : nullptr;
+	if (mutation_conflict->sequence != 0)
+	{
+		return;
+	}
+	if (segment != nullptr)
+	{
+		vkCmdBindPipeline(segment, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+		vkCmdDispatch(segment, plan.groups, 1u, 1u);
+		return;
+	}
+
+	// Binding may have recorded host commands, which the descriptor sets follow.
 	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 	// The output may be reused within this recording: earlier pulls finish first.
 	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0,
 	                     nullptr);
-	vkCmdFillBuffer(vk_buffer, output->buffer, 0, bytes, 0u);
+	vkCmdFillBuffer(vk_buffer, output->buffer, offset, bytes, 0u);
 	VkMemoryBarrier barrier {};
 	barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
 	                     nullptr);
-
-	const auto& vs       = sh_ctx.GetVs();
-	auto*       pipeline = g_render_ctx->GetPipelineCache()->CreateGeometryPipeline(buffer, front, plan.info, &vs,
-	                                                                                 &ctx.GetShaderRegisters());
-	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, front->bind, VK_SHADER_STAGE_COMPUTE_BIT,
-	                DescriptorCache::Stage::Compute, 0, nullptr, vs.gs_regs.chksum, nullptr, nullptr, device_address_table);
-	if (mutation_conflict->sequence != 0)
-	{
-		return;
-	}
-	// Binding may record host commands; restore the pass pipeline before dispatch.
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 	vkCmdDispatch(vk_buffer, plan.groups, 1u, 1u);
 	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -3328,8 +3347,6 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
 	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
-	auto* vk_buffer = buffer->RecordState();
-
 	// GE_INDX_OFFSET is the first vertex of an auto-index draw, as it is the base
 	// vertex of an indexed one; batches sharing one vertex buffer depend on it.
 	// An indirect draw adds its start vertex the same way.
@@ -3352,6 +3369,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		instance_count        = 1;
 		first_instance        = 0;
 	}
+	// After the pass, which may move the recording to a new command buffer.
+	auto* vk_buffer = buffer->RecordState();
 	const uint32_t actual_vertex_count = primitive_plan.chunked ? index_count : primitive_plan.draw_count;
 	const auto     vertex_requirement  = ResolveLinearVertexRecords(resolved_first_vertex, actual_vertex_count);
 	if (!vertex_requirement.valid)
@@ -3396,6 +3415,11 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(buffer, framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
+	// Later geometry passes may read what this draw writes.
+	if (pipeline->writes_guest_memory)
+	{
+		buffer->BreakGeometrySegment();
+	}
 
 	const uint32_t first_vertex = static_cast<uint32_t>(resolved_first_vertex);
 	if (pipeline->transport != nullptr && !clear_only)

@@ -4575,6 +4575,9 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				materialize = "continue-without-backing";
 			}
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tex == nullptr condition ignored (continuing)\n");
+		} else
+		{
+			buffer->ReadImage(tex);
 		}
 		if (!textures.desc[i].textures2d_without_sampler &&
 		    textures.desc[i].sample_operation != State::ImageSampleOperation::Regular)
@@ -5401,8 +5404,6 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			need_descriptor = true;
 		}
 
-		auto* vk_buffer = buffer->RecordState();
-
 		if (bind.textures2D.textures_num > 0)
 		{
 			for (int i = 0; i < bind.textures2D.textures2d_storage_num; i++)
@@ -5538,6 +5539,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			}
 		}
 
+		// After the barriers above: a geometry pass is placed here (see CommandBuffer::BeginGeometryPass).
+		auto* vk_buffer = buffer->RecordState();
 		if (need_descriptor)
 		{
 			auto* descriptor_set = g_render_ctx->GetDescriptorCache()->GetDescriptor(

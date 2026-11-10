@@ -2221,6 +2221,8 @@ void CommandBuffer::Allocate()
 			}
 			ReleasePipelineLeases();
 			m_index = i;
+			// Callers may take a recording handle before Begin.
+			m_main = m_pool->buffers[i];
 			break;
 		}
 	}
@@ -2276,7 +2278,7 @@ void CommandBuffer::Free()
 
 	m_pool->busy[m_index] = false;
 	MarkCommandBufferResetting();
-	const auto reset_result = vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+	const auto reset_result = ResetCommandBuffers();
 	if (reset_result != VK_SUCCESS)
 	{
 		VulkanSubmitFaultReport("command_buffer_free_reset", reset_result);
@@ -2285,6 +2287,7 @@ void CommandBuffer::Free()
 	}
 	ReleasePipelineLeases();
 	m_index = static_cast<uint32_t>(-1);
+	m_main  = nullptr;
 
 	if (!IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsInvalid() condition ignored (continuing)\n"); }
 }
@@ -2403,8 +2406,18 @@ void CommandBuffer::Begin()
 	m_device_wait_values.clear();
 	// A barrier at the start of a recording still orders it after earlier submissions.
 	m_latest_full_barrier = false;
+	// Chunks of an executed recording that was not reset are reset again when they begin.
+	m_chunks.clear();
+	m_geometry_segment = {};
+	m_geometry_pass    = {};
+	m_geometry_hazards = 0;
+	m_geometry_output  = nullptr;
+	m_geometry_offset  = 0;
+	m_segment_attachments.clear();
 
 	auto* buffer = m_pool->buffers[m_index];
+	m_chunks.push_back(buffer);
+	m_main = buffer;
 
 	VkCommandBufferBeginInfo begin_info {};
 	begin_info.sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -2525,13 +2538,22 @@ VulkanBuffer* CommandBuffer::TransportStorage(uint64_t size, uint32_t usage)
 	return size <= storage->descriptor_range ? storage : nullptr;
 }
 
+// Ranges start on the strictest storage-buffer offset alignment Vulkan allows.
+static uint64_t GeometryOutputSpan(uint64_t size)
+{
+	constexpr uint64_t kAlignment = 256u;
+	return (size + kAlignment - 1u) & ~(kAlignment - 1u);
+}
+
 // Shared like the transport storage: each geometry pass orders its fill after
-// the earlier pulls of the queue. Capacity grows by powers of two, so the
-// replaced buffers kept until the pool is destroyed stay below the current one.
-VulkanBuffer* CommandBuffer::GeometryOutput(uint64_t size)
+// the earlier pulls of the queue. Capacity grows by powers of two when one pass
+// needs more, so the replaced buffers kept until the pool is destroyed stay
+// below the current one. A range that does not fit after the earlier ones of
+// the recording starts over at 0, which the next fill orders the same way.
+VulkanBuffer* CommandBuffer::GeometryOutput(uint64_t size, uint64_t* offset)
 {
 	EXIT_IF(IsInvalid());
-	EXIT_IF(size == 0u);
+	EXIT_IF(size == 0u || offset == nullptr);
 	constexpr uint64_t kMinBytes = 16u * 1024u * 1024u;
 	constexpr uint64_t kMaxBytes = 1024u * 1024u * 1024u;
 	if (size > kMaxBytes)
@@ -2540,25 +2562,181 @@ VulkanBuffer* CommandBuffer::GeometryOutput(uint64_t size)
 	}
 	Core::LockGuard lock(m_pool->mutex);
 	auto*&          output = m_pool->geometry_output;
-	if (output != nullptr && size <= output->descriptor_range)
+	if (output == nullptr || size > output->descriptor_range)
 	{
-		return output;
+		uint64_t capacity = kMinBytes;
+		while (capacity < size)
+		{
+			capacity *= 2u;
+		}
+		if (output != nullptr)
+		{
+			m_pool->retired_geometry_outputs.push_back(output);
+		}
+		output        = new VulkanBuffer;
+		output->usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		output->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		VulkanCreateBuffer(g_render_ctx->GetGraphicCtx(), capacity, output);
+		output->descriptor_range = capacity;
 	}
-	uint64_t capacity = kMinBytes;
-	while (capacity < size)
+	if (output != m_geometry_output || m_geometry_offset + size > output->descriptor_range)
 	{
-		capacity *= 2u;
+		m_geometry_output = output;
+		m_geometry_offset = 0;
 	}
-	if (output != nullptr)
-	{
-		m_pool->retired_geometry_outputs.push_back(output);
-	}
-	output                  = new VulkanBuffer;
-	output->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-	output->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-	VulkanCreateBuffer(g_render_ctx->GetGraphicCtx(), capacity, output);
-	output->descriptor_range = capacity;
+	*offset = m_geometry_offset;
+	m_geometry_offset += GeometryOutputSpan(size);
 	return output;
+}
+
+void CommandBuffer::BeginGeometryPass(VulkanBuffer* output, uint64_t offset, uint64_t size)
+{
+	EXIT_IF(IsInvalid());
+	EXIT_IF(output == nullptr || m_geometry_pass.pending || m_geometry_pass.segment != nullptr);
+	m_geometry_pass         = {};
+	m_geometry_pass.pending = true;
+	m_geometry_pass.output  = output;
+	m_geometry_pass.offset  = offset;
+	m_geometry_pass.end     = offset + GeometryOutputSpan(size);
+}
+
+VkCommandBuffer CommandBuffer::EndGeometryPass()
+{
+	EXIT_IF(IsInvalid());
+	// A bind that took no state placed nothing: the pass is recorded inline.
+	auto* segment = m_geometry_pass.segment;
+	// Commands outside a render pass after the placement would run after the pass.
+	EXIT_IF(segment != nullptr && m_geometry_hazards != m_geometry_pass.hazards);
+	m_geometry_pass = {};
+	return segment;
+}
+
+// Joins the open segment when nothing it must follow was recorded since it
+// opened and the pass's output continues the segment's range; else opens one.
+VkCommandBuffer CommandBuffer::PlaceGeometryPass()
+{
+	auto&      pass    = m_geometry_pass;
+	auto&      segment = m_geometry_segment;
+	const bool joins   = segment.passes != nullptr && segment.hazards == m_geometry_hazards && segment.output == pass.output &&
+	                   segment.end == pass.offset;
+	pass.pending = false;
+	if (!joins)
+	{
+		if (m_chunks.size() + 2u > 1u + VulkanCommandPool::CHUNKS_PER_SLOT)
+		{
+			return nullptr;
+		}
+		CloseGeometrySegment();
+		OpenGeometrySegment(pass.output, pass.offset);
+	}
+	segment.end  = pass.end;
+	pass.segment = segment.passes;
+	pass.hazards = m_geometry_hazards;
+	return pass.segment;
+}
+
+VkCommandBuffer CommandBuffer::BeginChunk()
+{
+	const size_t used = m_chunks.size() - 1u;
+	EXIT_IF(used >= VulkanCommandPool::CHUNKS_PER_SLOT);
+	auto* chunk = m_pool->chunks[m_index * VulkanCommandPool::CHUNKS_PER_SLOT + used];
+	m_chunks.push_back(chunk);
+
+	VkCommandBufferBeginInfo begin_info {};
+	begin_info.sType  = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	const auto result = vkBeginCommandBuffer(chunk, &begin_info);
+	if (result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("command_buffer_begin", result);
+		EXIT("vkBeginCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(result), m_queue, m_index);
+	}
+	return chunk;
+}
+
+// The main chunk recorded so far stays open to receive the segment's fill on
+// close; later commands go to a new one after the segment.
+void CommandBuffer::OpenGeometrySegment(VulkanBuffer* output, uint64_t offset)
+{
+	CloseRenderPass();
+	m_latest_full_barrier = false;
+
+	auto& segment       = m_geometry_segment;
+	segment.predecessor = m_main;
+	segment.passes      = BeginChunk();
+	m_main              = BeginChunk();
+	segment.output      = output;
+	segment.begin       = offset;
+	segment.end         = offset;
+	segment.hazards     = m_geometry_hazards;
+}
+
+static void EndChunk(VkCommandBuffer chunk, int queue, uint32_t slot)
+{
+	const auto result = vkEndCommandBuffer(chunk);
+	if (result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("command_buffer_end", result);
+		EXIT("vkEndCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(result), queue, slot);
+	}
+}
+
+void CommandBuffer::CloseGeometrySegment()
+{
+	auto& segment = m_geometry_segment;
+	if (segment.passes == nullptr)
+	{
+		return;
+	}
+	// The pulls after the segment read its records.
+	VkMemoryBarrier barrier {};
+	barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier(segment.passes, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &barrier, 0,
+	                     nullptr, 0, nullptr);
+	EndChunk(segment.passes, m_queue, m_index);
+
+	// The zeroed output, after the pulls recorded before the segment that may still read the range.
+	auto* before = segment.predecessor;
+	vkCmdPipelineBarrier(before, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0,
+	                     nullptr);
+	vkCmdFillBuffer(before, segment.output->buffer, segment.begin, segment.end - segment.begin, 0u);
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	vkCmdPipelineBarrier(before, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+	                     nullptr);
+	EndChunk(before, m_queue, m_index);
+	segment = {};
+	m_segment_attachments.clear();
+}
+
+void CommandBuffer::NoteSegmentAttachment(const VulkanImage* image)
+{
+	if (image != nullptr && std::find(m_segment_attachments.begin(), m_segment_attachments.end(), image) == m_segment_attachments.end())
+	{
+		m_segment_attachments.push_back(image);
+	}
+}
+
+void CommandBuffer::ReadImage(const VulkanImage* image)
+{
+	EXIT_IF(IsInvalid());
+	if (m_geometry_pass.pending &&
+	    std::find(m_segment_attachments.begin(), m_segment_attachments.end(), image) != m_segment_attachments.end())
+	{
+		m_geometry_hazards++;
+	}
+}
+
+VkResult CommandBuffer::ResetCommandBuffers()
+{
+	auto result = vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+	for (size_t i = 1; i < m_chunks.size() && result == VK_SUCCESS; i++)
+	{
+		result = vkResetCommandBuffer(m_chunks[i], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+	}
+	m_chunks.clear();
+	return result;
 }
 
 void CommandBuffer::SeparateDepthKillDraw(bool kills_with_depth_write)
@@ -2589,7 +2767,7 @@ void CommandBuffer::SeparateDepthKillDraw(bool kills_with_depth_write)
 	}
 	// Nothing reads the value: the pipelined write itself keeps the draws apart.
 	m_latest_full_barrier = false;
-	vkCmdWriteTimestamp(m_pool->buffers[m_index], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_draw_separation_pools[pool_index],
+	vkCmdWriteTimestamp(m_main, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_draw_separation_pools[pool_index],
 	                    m_draw_separations % kDrawSeparationsPerPool);
 	m_draw_separations++;
 }
@@ -2700,6 +2878,7 @@ void CommandBuffer::End()
 	EXIT_IF(IsInvalid());
 
 	auto* buffer = RecordOutsideRenderPass();
+	CloseGeometrySegment();
 
 	const auto result = vkEndCommandBuffer(buffer);
 	if (result != VK_SUCCESS)
@@ -2874,8 +3053,7 @@ void CommandBuffer::Execute()
 	EXIT_IF(IsInvalid());
 	AwaitImageFills();
 
-	auto* buffer = m_pool->buffers[m_index];
-	auto* fence  = m_pool->fences[m_index];
+	auto* fence = m_pool->fences[m_index];
 
 	VkSubmitInfo submit_info {};
 	submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -2883,8 +3061,8 @@ void CommandBuffer::Execute()
 	submit_info.waitSemaphoreCount   = 0;
 	submit_info.pWaitSemaphores      = nullptr;
 	submit_info.pWaitDstStageMask    = nullptr;
-	submit_info.commandBufferCount   = 1;
-	submit_info.pCommandBuffers      = &buffer;
+	submit_info.commandBufferCount   = static_cast<uint32_t>(m_chunks.size());
+	submit_info.pCommandBuffers      = m_chunks.data();
 	submit_info.signalSemaphoreCount = 0;
 	submit_info.pSignalSemaphores    = nullptr;
 
@@ -2932,8 +3110,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 	EXIT_IF(signal_semaphore == nullptr);
 	AwaitImageFills();
 
-	auto* buffer = m_pool->buffers[m_index];
-	auto* fence  = m_pool->fences[m_index];
+	auto* fence = m_pool->fences[m_index];
 
 	VkSubmitInfo submit_info {};
 	submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -2941,8 +3118,8 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 	submit_info.waitSemaphoreCount   = 0;
 	submit_info.pWaitSemaphores      = nullptr;
 	submit_info.pWaitDstStageMask    = nullptr;
-	submit_info.commandBufferCount   = 1;
-	submit_info.pCommandBuffers      = &buffer;
+	submit_info.commandBufferCount   = static_cast<uint32_t>(m_chunks.size());
+	submit_info.pCommandBuffers      = m_chunks.data();
 	submit_info.signalSemaphoreCount = 0;
 	submit_info.pSignalSemaphores    = nullptr;
 
@@ -3029,8 +3206,7 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 			         m_index);
 		    }
 		    MarkCommandBufferResetting();
-		    const auto command_reset_result =
-		        vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+		    const auto command_reset_result = ResetCommandBuffers();
 		    if (command_reset_result != VK_SUCCESS)
 		    {
 			    ReportSubmitFault("fence_status_command_reset", command_reset_result);
@@ -3086,8 +3262,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 			    if (reset_command_buffer)
 			    {
 				    MarkCommandBufferResetting();
-				    const auto command_reset_result =
-				        vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+				    const auto command_reset_result = ResetCommandBuffers();
 				    if (command_reset_result != VK_SUCCESS)
 				    {
 					    ReportSubmitFault("fence_wait_command_reset", command_reset_result);
@@ -3140,6 +3315,16 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	EXIT_IF(IsInvalid());
 	EXIT_IF(framebuffer == nullptr);
 
+	if (m_geometry_segment.passes != nullptr)
+	{
+		for (const auto& target: color->attachment)
+		{
+			NoteSegmentAttachment(target.vulkan_buffer);
+			NoteSegmentAttachment(target.existing_video_image);
+		}
+		NoteSegmentAttachment(depth->vulkan_buffer);
+	}
+
 	bool       with_depth     = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	const bool with_color     = (RenderColorHasActiveTarget(*color) && RenderColorFirstActiveImage(*color) != nullptr);
 	const bool custom_samples = sample_locations != nullptr && VulkanSampleLocationsEnabled(*sample_locations);
@@ -3157,7 +3342,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	CloseRenderPass();
 	m_latest_full_barrier = false;
 
-	auto* buffer = m_pool->buffers[m_index];
+	auto* buffer = m_main;
 
 	if (!with_depth && !with_color) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !with_depth && !with_color condition ignored (continuing)\n"); }
 
@@ -3386,7 +3571,7 @@ void CommandBuffer::CloseRenderPass()
 	m_open_render_pass.reset();
 	m_latest_full_barrier = false;
 
-	auto* buffer = m_pool->buffers[m_index];
+	auto* buffer = m_main;
 	vkCmdEndRenderPass(buffer);
 
 	// Without this dependency hosts can hang when a later draw samples a color
@@ -3407,14 +3592,23 @@ VkCommandBuffer CommandBuffer::RecordOutsideRenderPass()
 	EXIT_IF(IsInvalid());
 	CloseRenderPass();
 	m_latest_full_barrier = false;
-	return m_pool->buffers[m_index];
+	m_geometry_hazards++;
+	return m_main;
 }
 
-VkCommandBuffer CommandBuffer::RecordState() const
+VkCommandBuffer CommandBuffer::RecordState()
 {
 	EXIT_IF(IsInvalid());
 	m_latest_full_barrier = false;
-	return m_pool->buffers[m_index];
+	if (m_geometry_pass.pending)
+	{
+		auto* segment = PlaceGeometryPass();
+		if (segment != nullptr)
+		{
+			return segment;
+		}
+	}
+	return m_main;
 }
 
 VkCommandBuffer CommandBuffer::RecordInsideRenderPass() const
@@ -3422,7 +3616,7 @@ VkCommandBuffer CommandBuffer::RecordInsideRenderPass() const
 	EXIT_IF(IsInvalid());
 	EXIT_IF(!m_open_render_pass.has_value());
 	m_latest_full_barrier = false;
-	return m_pool->buffers[m_index];
+	return m_main;
 }
 
 void CommandBuffer::FullMemoryBarrier()

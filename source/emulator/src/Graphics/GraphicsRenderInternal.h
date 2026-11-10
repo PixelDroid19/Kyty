@@ -219,6 +219,8 @@ struct VulkanPipeline
 	FragmentTransportPasses* transport = nullptr;
 	// Entry of the pipeline cache that owns this pipeline; lease release runs per recorded pipeline.
 	uint32_t cache_slot = 0;
+	// A shader stores to storage buffers or images, or binds GDS: geometry passes recorded later stay after it.
+	bool writes_guest_memory = true;
 };
 
 // A cache entry remains alive while a recorded executable command buffer can
