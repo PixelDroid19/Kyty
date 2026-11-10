@@ -172,7 +172,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Storage scans and image fills in `PPSA28311 - Absolum` (2026-11-01)
   - Render target aliased by a storage view of another format (2026-11-01)
   - [Per-draw plan design](bringup/cp-draw-plan.md): stage 3a lookup-miss memo, texture binding 19-23 -> 14 us/draw (2026-10-28); stage 2 first slice excluded, 14.5% hits (2026-10-29)
-  - [CP and GPU sync chain](bringup/cp-gpu-sync-chain.md): dune fence-wait links and device-side design (2026-10-29, design); link 2 reopened on an idle dune view, probe arms and `Reset` drain defect, then deferred (block form, output bound) with the geometry output cap defect (2026-11-10)
+  - [CP and GPU sync chain](bringup/cp-gpu-sync-chain.md): dune fence-wait links and device-side design (2026-10-29, design); link 2 reopened on an idle dune view, probe arms and `Reset` drain defect, then deferred (block form, output bound) with the geometry output cap defect, then built as a device converter and block-reading pass variant (2026-11-10)
   - Reimplemented feature leads: landed, refused and excluded; GLOBAL load alignment and EXEC defects open (2026-10-29)
   - [Tessellation design](bringup/tessellation-design.md): hull/domain mapping to Vulkan, staged plan, PATCH draws refused first (2026-10-29, design)
   - [GPU-indexed descriptor tables](bringup/bindless-tables-design.md): table-selected T#/S# and ray-tracing dispatch needs (2026-10-29, design)

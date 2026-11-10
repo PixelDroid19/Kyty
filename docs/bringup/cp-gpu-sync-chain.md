@@ -1,8 +1,9 @@
 # Command processor and GPU sync chain (design, 2026-10-29)
 
 Status: link 1 (`DISPATCH_INDIRECT`) is implemented (2026-10-29, see "Link 1 result"). Link 2
-(`DRAW_INDEX_INDIRECT`) was deprioritized on 2026-10-29, reopened on 2026-11-10 and deferred the
-same day (see "Link 2 reopened"); the other links are design and measurements only.
+(`DRAW_INDEX_INDIRECT`) was deprioritized on 2026-10-29 and reopened on 2026-11-10. Its
+geometry-pass form was deferred the same day and then built (see "Link 2 reopened"). The other
+links are design and measurements only.
 
 ## Why
 
@@ -152,25 +153,69 @@ Each link moves the wait to the next one:
          not a result.
        - Resident memory at 8 slots was 7.8 GB at 60 s and 9.3-9.8 GB at 80-116 s, the same as
          at 32 slots (7.8 GB, then 9.0-9.7 GB), one run each.
-     - **Deferred (2026-11-10).** The device-side `DRAW_INDEX_INDIRECT` for geometry-pass draws
-       (a GPU twin of the geometry plan) is deferred. Both reasons hold whatever the argument
-       source is:
-       - **Block form.** The host writes the geometry block into the push constants: output
-         address, primitives, groups per instance, base vertex, first instance and index address.
-         The group count is a host `vkCmdDispatch`. A device-fed draw needs a generated-SPIR-V
-         variant that reads the block from a buffer, with its own program key.
-       - **Output bound.** `CommandBuffer::GeometryOutput` sizes its capacity, and
-         `CloseGeometrySegment` sizes its zero fill, by the reserved span, not by what the pass
-         writes. Before the record is read, the only bound is the 65535-group limit of
+     - **Deferred, then built (2026-11-10): device-side geometry draw.** The device-side
+       `DRAW_INDEX_INDIRECT` for geometry-pass draws (a GPU twin of the geometry plan) was first
+       deferred for two reasons. Both are now resolved:
+       - **Block form.** The host wrote the geometry block into push constants (output address,
+         primitives, groups per instance, base vertex, first instance and index address) and the
+         group count into a host `vkCmdDispatch`. Now a one-invocation converter
+         (`host_shaders/geometry_indirect_args.comp`) reads the guest record in queue order. It
+         writes a 64-byte header: the block, the dispatch arguments and the pull draw. The pass
+         dispatches indirectly over that header, and the pull draws from it. The front program
+         has a variant (`ShaderGeometryComputeInfo::device_block`, with its own program key) that
+         loads the block from the address held in its first two push dwords.
+       - **Output bound.** Before the record is read, the only bound was the 65535-group limit of
          `ResolveGeometryDraw`. For this state that is 65535 x 4353 x 4 bytes, about 1.06 GiB,
-         over the 1 GiB output cap. Above 65535 groups the geometry pass is refused; a draw whose
-         GE shape is outside the passthrough path is then skipped by
-         `ShouldSkipUnsupportedGeShader` and counted as `UnsupportedGeState`, with its first
-         occurrence published. Only a narrowed bound could work, and that changes the contract.
-         The probe's upper bound (17.6 fps against 13.8 at the same host speed) does not justify
-         it.
-       - Not identified: a thread with about 14 ms of kernel time per frame, seen only in the arm
-         with both changes.
+         over the 1 GiB output cap. The device form reserves min(65535, 1 GiB / group bytes)
+         groups. A record above that draws nothing and counts one refusal, which the host reads
+         at fence completion and records as `UnsupportedGeState`. This is the host contract:
+         `ResolveGeometryDraw` admits only a nonzero `VGT_GS_MAX_VERT_OUT`, and
+         `ShouldSkipUnsupportedGeShader` skips every such draw once its geometry pass is refused.
+         The device refusal carries no GE-state census. Only the dispatched groups are zeroed
+         (`host_shaders/geometry_output_clear.comp`, with the same indirect group count).
+       - The converter follows the host rules: the index window past the start index, the
+         topology's primitive count, the int32 base-vertex sum and the `NUM_INSTANCES` latch.
+         The path requires `maxStorageBufferRange` of at least 1 GiB, because the clear binds
+         the whole output buffer. Records whose bytes are current on the host keep the CPU path.
+       - **Verified** with a temporary comparison in which the CPU path stayed authoritative and
+         each device header was compared with the host plan once its submission completed:
+         2792 records in 112 s, 0 mismatches. A run that flipped one expected word by hand
+         reported exactly that mismatch. Every compared record was empty (no index in the window
+         or no instance). The live path (primitives, index address, base vertex and the
+         variant's block loads) was therefore compared on no title.
+       - **Measured** in one strict run of the idle route that took the CPU path until 101 s and
+         the device path after it. Separate runs do not compare here: the 96-116 s window held
+         297 draws per frame in one run and 556 in another. The CPU arm still ran the comparison
+         harness (one converter dispatch per record and a lagged completion check); its cost was
+         not separated.
+
+         | Path | Window | fps | CP counters, ms/frame (fence) | Render engine | Host argument reads |
+         | --- | --- | --- | --- | --- | --- |
+         | CPU | 92-101 s | 11.9 | 86.9 (20.7) | 52 %, 43.4 ms/frame | about 291 ms per second |
+         | Device | 104-116 s | 15.1 | 68.5 (15.5) | 66 %, 43.4 ms/frame | none |
+
+         The CP counters are summed thread time of the graphics and compute processors (see
+         `docs/bringup/cross-title.md`). The render engine's work per frame did not change; the
+         GPU now idles less. The CP is still the limit, about 68 ms against 43 ms of GPU work
+         per frame.
+       - **Cross-title** (strict, 125 s each, generic first-gameplay route, captures at 60 and
+         115 s): `PPSA28311 - Absolum`, `PPSA09076 - DREDGE`,
+         `PPSA03969 - F.I.S.T.: Forged In Shadow Torch`, `PPSA09809 - OCTOPATH TRAVELER II` and
+         `PPSA21402 - Balatro` all exited cleanly with no device loss. None of them issued a
+         `DRAW_INDEX_INDIRECT` in those 125 s, so among the titles that use geometry passes only
+         `PPSA21567 - Astro Bot` reaches the device path. Three 60 s captures scored
+         `low_entropy` where the earlier run of these titles scored `healthy`: a loading screen, a
+         settings menu and a fade before a cinematic, reached at different frames. The
+         `gfx_storage_frontier` events of F.I.S.T. and OCTOPATH TRAVELER II also appear in earlier
+         runs.
+       - A strict 120 s run of the build without the comparison harness, on the same idle route,
+         had no error and a healthy capture at 110 s. That run was still in the crash-site
+         sequence at 104-116 s (700-900 draws per frame, rate climbing from 3 to 15 fps), so it
+         does not compare with the windows above.
+       - **Known imprecision.** When a descriptor mutation conflict retries the draw, the
+         converter is recorded again, so a refusal can be counted twice.
+       - Not identified: a thread with about 14 ms of kernel time per frame, seen only in the
+         probe arm with both changes.
      - **Frame rate moved without an intended change (cause open).** The baselines and probe arms
        above ran with the guest audio thread at 43-45 ms of CPU per wall second. Two later runs of
        one rebuilt binary, with and without the facts probe, had it at 36-37 ms/s and gave 16.5 and
@@ -192,6 +237,10 @@ Each link moves the wait to the next one:
        threshold. `ResolveGeometryDraw` now refuses a plan whose whole output passes
        `CommandBuffer::kGeometryOutputMaxBytes`, so the draw takes the counted refusal path above.
        No title run reached the cap, so the refusal itself was not observed.
+     - **Fixed (6d7969aad): geometry pass without a whole input primitive.** A triangle-list
+       draw of one or two indexes took the geometry pass with zero groups, and the zero-byte
+       output request then stopped the emulator. Such a draw has no input primitive and now
+       records nothing.
      - **Fixed (29a4a93c2): drain in `CommandProcessor::Reset`.** `Reset` (`GraphicsRun.cpp`)
        started with `BufferWait()`, a full drain of the processor's recordings. The `R_DRAW_RESET`
        and `R_DISPATCH_RESET` packets reach it; the `GraphicsDrawInitDefaultHardwareState*`,
