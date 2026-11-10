@@ -2699,7 +2699,7 @@ void CommandBuffer::CloseGeometrySegment()
 	auto* before = segment.predecessor;
 	vkCmdPipelineBarrier(before, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0,
 	                     nullptr);
-	vkCmdFillBuffer(before, segment.output->buffer, segment.begin, segment.end - segment.begin, 0u);
+	VulkanCmdFillBuffer(before, segment.output->buffer, segment.begin, segment.end - segment.begin, 0u);
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 	vkCmdPipelineBarrier(before, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,

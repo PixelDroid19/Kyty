@@ -3125,7 +3125,7 @@ static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const 
 	// The output may be reused within this recording: earlier pulls finish first.
 	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0,
 	                     nullptr);
-	vkCmdFillBuffer(vk_buffer, output->buffer, offset, bytes, 0u);
+	VulkanCmdFillBuffer(vk_buffer, output->buffer, offset, bytes, 0u);
 	VkMemoryBarrier barrier {};
 	barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;

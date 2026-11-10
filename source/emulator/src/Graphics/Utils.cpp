@@ -834,6 +834,26 @@ void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffe
 	VulkanBindBufferMemory(gctx, buffer, &buffer->memory);
 }
 
+// A driver may record a buffer fill as a 2D surface whose width it finds by
+// trying candidate divisors of the element count one at a time: a count with
+// a large prime factor costs milliseconds of host time. A body in whole
+// 64 KiB costs about one step per 64 KiB, and a tail of fewer than 16384
+// words fits one row.
+void VulkanCmdFillBuffer(VkCommandBuffer cmd, VkBuffer buffer, uint64_t offset, uint64_t size, uint32_t value)
+{
+	constexpr uint64_t kFillUnit = 64u * 1024u;
+
+	const uint64_t body = size - size % kFillUnit;
+	if (body != 0)
+	{
+		vkCmdFillBuffer(cmd, buffer, offset, body, value);
+	}
+	if (body != size)
+	{
+		vkCmdFillBuffer(cmd, buffer, offset + body, size - body, value);
+	}
+}
+
 void VulkanDeleteBuffer(GraphicContext* gctx, VulkanBuffer* buffer)
 {
 	KYTY_PROFILER_FUNCTION();

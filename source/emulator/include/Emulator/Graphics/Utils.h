@@ -922,6 +922,8 @@ void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffe
 // ordered by the host waits, so a barrier recorded there drops those access
 // types and waits on all of that queue's commands instead.
 [[nodiscard]] VkPipelineStageFlags VulkanQueueBarrierScope(const CommandBuffer* buffer, VkPipelineStageFlags stages, VkAccessFlags* access);
+// vkCmdFillBuffer of an explicit size, split so the driver's host cost stays bounded.
+void VulkanCmdFillBuffer(VkCommandBuffer cmd, VkBuffer buffer, uint64_t offset, uint64_t size, uint32_t value);
 void VulkanDeleteBuffer(GraphicContext* gctx, VulkanBuffer* buffer);
 
 inline std::pair<int, int> UtilCalcMipmapOffset(uint32_t lod, uint32_t width, uint32_t height)

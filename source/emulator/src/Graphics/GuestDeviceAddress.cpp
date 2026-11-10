@@ -7,6 +7,7 @@
 #include "Emulator/Kernel/Memory.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Utils.h"
 
 #include <algorithm>
 #include <array>
@@ -1802,7 +1803,7 @@ bool GuestDeviceAddressRecordFill(GraphicContext* ctx, VkCommandBuffer_T* cmd, u
 	RecordPublicationBarrierBefore(cmd);
 	for (const auto& piece: pieces)
 	{
-		vkCmdFillBuffer(cmd, piece.target, piece.target_offset, piece.size, word);
+		VulkanCmdFillBuffer(cmd, piece.target, piece.target_offset, piece.size, word);
 	}
 	RecordPublicationBarrierAfter(cmd);
 	return true;
@@ -1954,7 +1955,7 @@ bool GuestDeviceAddressRecordOverlay(GraphicContext* ctx, VkCommandBuffer_T* cmd
 	if (!reused)
 	{
 		const uint64_t copied = (size + 3u) & ~uint64_t {3u};
-		vkCmdFillBuffer(cmd, registry.arena.buffer, overlay.slot + copied, overlay.slot_bytes - copied, 0);
+		VulkanCmdFillBuffer(cmd, registry.arena.buffer, overlay.slot + copied, overlay.slot_bytes - copied, 0);
 	}
 	const VkBufferCopy copy {0, overlay.slot, size};
 	vkCmdCopyBuffer(cmd, source->buffer, registry.arena.buffer, 1, &copy);

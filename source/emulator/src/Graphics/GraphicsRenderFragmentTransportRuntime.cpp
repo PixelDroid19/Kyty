@@ -4,6 +4,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
+#include "Emulator/Graphics/Utils.h"
 
 #include "GraphicsRenderInternal.h"
 
@@ -336,8 +337,8 @@ void FragmentTransportBeginTile(CommandBuffer* buffer, const FragmentTransportRe
 	        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 
 	auto cmd = buffer->RecordOutsideRenderPass();
-	vkCmdFillBuffer(cmd, resources.control->buffer, resources.control_offset, resources.control_bytes, 0u);
-	vkCmdFillBuffer(cmd, resources.references->buffer, resources.references_offset, resources.references_bytes, 0xffffffffu);
+	VulkanCmdFillBuffer(cmd, resources.control->buffer, resources.control_offset, resources.control_bytes, 0u);
+	VulkanCmdFillBuffer(cmd, resources.references->buffer, resources.references_offset, resources.references_bytes, 0xffffffffu);
 
 	Barrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
