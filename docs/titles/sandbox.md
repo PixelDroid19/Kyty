@@ -112,8 +112,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   estimate, not a measurement.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
   now. None of the measured levers, alone or together, reaches that. In the clean profiled run the
-  command-processor thread was on a CPU about 73 of each 110 ms frame and no other thread above 14%;
-  about 23-28 ms per frame are attributed to no counter or thread.
+  command-processor thread was on a CPU about 73 of each 110 ms frame. The other 23-28 ms of the frame
+  are in no instrumented wait: per frame the fence waits took 14.9 ms, the flip-done wait 0.07 ms, the
+  render lock 0.04 ms and WAIT_REG_MEM 0.03 ms. No other thread was above 14%, but 13-14% is 15-19 ms
+  of a frame, and whether that time overlaps the command processor was not measured.
 
 ## Sandbox title: letters missing from the death message (2026-11-10, open)
 
@@ -124,10 +126,23 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   HUD prompts during play render whole.
 - Seen on the clean binary at 446e97dbf and on the excluded staging change above, so neither change
   caused it.
-- Not localized. Suggested direction: capture the death screen and check whether the missing letters'
-  quads are absent, empty or sample an empty part of the glyph texture. Then check whether those
-  glyphs come from a system font set, whose glyph queries report NO_SUPPORT_GLYPH
-  (`docs/bringup/cross-title.md`, font library record of 2026-10-14).
+- Not a system font: neither the executable nor the two user-interface modules at the game root
+  contain the system font library's name (string search), so the font library record of 2026-10-14
+  does not apply.
+- Glyph atlas (temporary probe on texture binds, one run that reached the death screen): the text
+  samples a 1024x1024 R8 texture, tile mode 9, at one fixed address. Its guest bytes never changed
+  (the same nonzero count in every dump), while the host copy gained six regions between presents
+  4033 and 4066, so the device fills it; which command writes it was not identified. Seven small R8
+  textures (36-48 x 40-45) were first sampled at present 4036, their guest bytes already holding the
+  glyph (host and guest contents equal); their nonzero counts match the six new regions (one region holds two), and
+  they are the glyphs that appeared (capital P, W, N, R, S and small p, g). No small source for E, K,
+  b or Z was sampled in presents 4000-4039, and the atlas did not change again up to present 4238;
+  presents 4040-4059 were not dumped.
+- A second run from the same saved world, dumping every new small source from present 3950, did not
+  reach the death screen (the player was alive at 160 s), so it gave no answer.
+- Direction: when the death screen is reached again, dump the small sources without gaps and log
+  every write to the atlas range, to tell whether the missing glyphs' sources are never produced,
+  produced empty, or produced and not copied.
 
 ## Sandbox title: snapshot comparisons in the world (2026-10-24, improved)
 
