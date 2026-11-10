@@ -962,6 +962,16 @@ bool GpuMemory::FindVertexContaining(uint64_t vaddr, uint64_t size, uint64_t* ob
 	{
 		return false;
 	}
+	// Draws of a pool bound from a fixed V# base find the object of their exact stream: bind into it without
+	// walking every block the stream overlaps, which cost more than the rest of the draw's recording.
+	int exact_id = -1;
+	if (FindFast(heap_id, &vaddr, &size, 1, GpuMemoryObjectType::VertexBuffer, false, &exact_id) &&
+	    m_heaps[heap_id].objects[exact_id].info.object.obj != nullptr)
+	{
+		*object_vaddr = vaddr;
+		*object_size  = size;
+		return true;
+	}
 	int found = -1;
 	for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1))
 	{
