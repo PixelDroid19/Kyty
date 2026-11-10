@@ -111,11 +111,13 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   about 48 ms. If that time scaled with the clock it would be about 13 ms at 2,400 MHz; this is an
   estimate, not a measurement.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
-  now. None of the measured levers, alone or together, reaches that. In the clean profiled run the
-  command-processor thread was on a CPU about 73 of each 110 ms frame. The other 23-28 ms of the frame
-  are in no instrumented wait: per frame the fence waits took 14.9 ms, the flip-done wait 0.07 ms, the
-  render lock 0.04 ms and WAIT_REG_MEM 0.03 ms. No other thread was above 14%, but 13-14% is 15-19 ms
-  of a frame, and whether that time overlaps the command processor was not measured.
+  now. None of the measured levers, alone or together, reaches that. In the profiled run (110 ms
+  frames) the command-processor thread was on a CPU about 73 ms of each frame. The fence waits are the
+  only instrumented wait above 0.1 ms per frame (12-16 ms in six other runs; in the clean control run
+  of 143 ms frames: fence 14.9 ms, flip-done 0.07 ms, render lock 0.04 ms, WAIT_REG_MEM 0.03 ms), so
+  roughly 20-25 ms of a frame are in no instrumented wait; this mixes runs and is an estimate. No other
+  thread was above 14%, but 13-14% is 15-19 ms of a frame, and whether that time overlaps the command
+  processor was not measured.
 
 ## Sandbox title: letters missing from the death message (2026-11-10, open)
 
@@ -126,16 +128,17 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   HUD prompts during play render whole.
 - Seen on the clean binary at 446e97dbf and on the excluded staging change above, so neither change
   caused it.
-- Not a system font: neither the executable nor the two user-interface modules at the game root
-  contain the system font library's name (string search), so the font library record of 2026-10-14
-  does not apply.
+- No reference to the system font library in the three binaries searched (the executable and the
+  two user-interface modules at the game root, string search), so the font library record of
+  2026-10-14 is not a lead; the title's other modules were not searched.
 - Glyph atlas (temporary probe on texture binds, one run that reached the death screen): the text
   samples a 1024x1024 R8 texture, tile mode 9, at one fixed address. Its guest bytes never changed
   (the same nonzero count in every dump), while the host copy gained six regions between presents
   4033 and 4066, so the device fills it; which command writes it was not identified. Seven small R8
   textures (36-48 x 40-45) were first sampled at present 4036, their guest bytes already holding the
   glyph (host and guest contents equal); their nonzero counts match the six new regions (one region holds two), and
-  they are the glyphs that appeared (capital P, W, N, R, S and small p, g). No small source for E, K,
+  they are the glyphs that appeared (capital P and G in a thin style, capital R, S, P, W and N in a
+  bold style). No small source for E, K,
   b or Z was sampled in presents 4000-4039, and the atlas did not change again up to present 4238;
   presents 4040-4059 were not dumped.
 - A second run from the same saved world, dumping every new small source from present 3950, did not
