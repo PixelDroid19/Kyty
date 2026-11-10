@@ -49,7 +49,18 @@ fence probe only.
   | Render engine busy, ms | 42.1 | 48.2 | 44.3 |
 
   The submit rate tracks the regime: about 15 more per frame with the alias
-  wait, three per alias wait; the mechanism is not separated.
+  wait, three per alias wait; the mechanism is not separated. A fourth run
+  (2026-11-10, no alias wait, 107-116 s) gave 44.4 per frame again; other
+  DRM clients used 1.7 % of the render engine's cycles over 90-116 s, with
+  no 3D renderer running on the host, so a busy one was not measured. By the
+  code, one wait submits at most two graphics recordings, both conditional:
+  the open recording at the same-queue wait (`WaitSubmission`) if the
+  awaited one is still recording, and the idle-GPU submit after the retried
+  draw (`SubmitRecordedWorkIfGpuIdle`, every 8 operations and 500 us). The
+  third submit is not on the wait's path; the idle-GPU rule firing more
+  often while the GPU drains during waits would fit, but it was not
+  measured. The alias itself is not identified: the run that took this wait
+  predates the probe that names it, and the probed run did not take it.
 
   The middle column ran a different workload through 116 s: 55-58 render
   pass begins and about 1470 uploads per frame against 69-91 and 1720-1830 in
