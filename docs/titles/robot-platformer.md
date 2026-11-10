@@ -14,7 +14,7 @@ optimisation) plus temporary diagnostics, not committed: a 40 us busy-wait
 after each draw in alternate wall-clock windows, and fence time per wait
 site.
 
-- **Causal spin on the title screen** (level `title_controller_ship`, 241-248
+- **Causal spin on the title screen** (the logo over the ship, 241-248
   draws and 83 dispatches per frame, alternate 4 s windows from 56 s). The
   two samples taken before the spin was armed are left out.
 
@@ -36,7 +36,7 @@ site.
     there rather than waits.
   - The same scene ran 38.5 ms per frame in the spin run, so one pair cannot
     show a change under about 6 ms per frame.
-- **Fence wait sites in the dunes** (level `hub_crashsite_tutorial`, 98-108 s,
+- **Fence wait sites in the dunes** (the crash-site dunes, 98-108 s,
   135 frames, 74.9 ms per frame, fence waits 15.9 ms per frame). The
   per-site dump does not align exactly with the per-second samples, so the
   sites are given as shares of the dumped fence time:
@@ -55,18 +55,42 @@ site.
 - **The steady dunes are mostly GPU-bound.** From 105 to 111 s the frame
   rate held 19 fps (53.2 ms per frame) at 526-571 draws per frame, with the
   render engine busy 84-88% (fdinfo cycles; the compute engine was idle).
-  - The command processor's own work was 25.2 ms per frame there: draw and
-    dispatch processing minus 17.8 ms of fence waits.
+  - Draw and dispatch processing minus the 17.8 ms of fence waits came to
+    25.2 ms per frame. That figure sums the graphics processor and the
+    compute-pipe processors, which run on their own threads (see the last
+    bullet), so it is not serial frame time.
   - Two earlier runs agree: seconds 112-115 of the 2026-11-10 vertex-search
-    run (18-20 fps, 87-88% busy, 24-28 ms of processor work) and second 191
-    of the GPU-timestamp run (88% busy).
+    run (18-20 fps, 87-88% busy, 24-28 ms of summed processor work) and
+    second 191 of the GPU-timestamp run (88% busy).
   - The command processor waits behind a nearly full GPU, so removing one
     wait site moves the wait.
   - This agrees with the exclusion of 2026-10-18, where allowing publication
     with older texture aliases moved the wait into `WaitRegMem32`.
 - **Scene.** The capture at 117 s is black, because the route then opens a
-  pause cinematic. The dunes are identified by the level name and by
-  counters that match the earlier dunes runs (500-780 draws per frame).
+  pause cinematic. The dunes are identified by the level the guest log
+  reports loading and by counters that match the earlier dunes runs (500-780
+  draws per frame).
+- **Two dune views reconcile the GPU records.** In the GPU-timestamp run
+  (`e82878229`, an earlier build), the 5 s dumps at 12.6-14.8 fps hold both
+  large compute programs every frame: the BVH kernel `0x3666fa39` 23-27 ms
+  per call, `0x874bd13f` 11-13 ms, and 25-27 ms of everything else, 93% of
+  wall time. That is the first column of the 2026-11-09 table ("where the
+  dunes frame goes"). The steady 19 fps view matches its dunes column
+  instead: GPU 46-50 ms with `0x3666fa39` about 20 ms and `0x874bd13f`
+  absent. Work outside the pair is 25-30 ms in all three measurements. No
+  timestamp run confirms the split on the current build.
+- **Ceiling at native resolution.** 60 fps needs, together, the BVH kernel
+  from about 20 ms to near zero, the rest of the GPU from about 26 to under
+  16 ms with no other program above about 2.4 ms per frame, and a command
+  processor that keeps up with a 16.7 ms frame; no serial measurement here
+  shows whether it can. With the BVH kernel gone entirely
+  the GPU would still take about 26 ms per frame.
+  The recorded levers on this program class are 8-14% each, and a native
+  lane mapping needs reconvergence guarantees that are not established, so
+  no wave64 lowering design is written. The one lever of that size is
+  internal resolution: at a 960x540 game patch the BVH kernel took 6.45
+  instead of 22.64 ms ("Internal resolution is the lever", measured then at
+  16.6-18.1 fps against 12-13; not re-measured since).
 - **Decision: no command-processor change for the dunes.**
   - At 84-88% busy the GPU idles about 7 ms per frame. Removing all of that
     idle time would take the steady dunes from 19 to about 22 fps at native
@@ -78,16 +102,25 @@ site.
   - Publication with a Texture alias is not built.
   - The remaining levers are GPU work.
 - **Not attributed.** The processor's counters exceed its user-mode samples
-  by 3.6-7.3 ms per frame (cpu-clock:u at 199 Hz, 66-72 s). Kernel stacks
-  need `kernel.perf_event_paranoid` at 1 or lower.
-- **Found, not fixed: `command_processor_run_ns` counts nested runs twice.**
-  - The timer is in `CommandProcessor::Run` (`GraphicsRun.cpp:2208`).
-  - `Run` re-enters on the same thread for `COND_INDIRECT_BUFFER` and
-    `INDIRECT_BUFFER` (`GraphicsRunOpParsers.cpp:804` and `:831`).
-  - In an earlier dunes run the counter exceeded the frame time (83.1
-    against 74.6 ms per frame).
-  - Shares of the processor quoted from this counter are upper bounds.
-  - Direction: time only the outermost run on the thread.
+  by 3.6-7.3 ms per frame (cpu-clock:u at 199 Hz, 66-72 s). The dispatch
+  counters include the compute-pipe threads, so part of that gap may be
+  theirs. Kernel stacks need `kernel.perf_event_paranoid` at 1 or lower.
+- **Processor counters are thread time summed over processors.**
+  - `88c21e1b9` times only the outermost `CommandProcessor::Run`. Before
+    it, the nested runs of `COND_INDIRECT_BUFFER` and `INDIRECT_BUFFER`
+    (`GraphicsRunOpParsers.cpp:804` and `:831`) were counted twice.
+  - That double count does not explain the excess seen in the dunes (83.1
+    against 74.6 ms per frame). No nested run occurs on this route: runs
+    per present stayed at 16.9-18.5 in every 10 s window from 60 to 116 s,
+    before and after the change. From 105 to 116 s the counter was 1.06
+    times wall time in both runs (17.0 and 17.3 fps).
+  - The change is verified by the build and by reading the code. No test
+    and no run on this route exercises a nested run.
+  - The excess has another source. The graphics ring and each compute pipe
+    have their own processor (`Gpu::GetRing`), and each runs on its own
+    thread (`ComputeRing::ThreadRun`) under its own run lock. The counter
+    adds them up, so it can exceed wall time. The dispatch and fence
+    counters read the same way.
 
 ## Robot platformer: geometry passes batched into compute segments (2026-11-09)
 
