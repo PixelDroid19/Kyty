@@ -442,8 +442,8 @@ ComputeRing* Gpu::GetRing(uint32_t ring_id)
 
 void CommandProcessor::Reset()
 {
-	BufferWait();
-
+	// No drain: the index buffers deleted below reach the delete list only after GpuMemory saw every
+	// submission that used them complete, and the rest is processor state no recording reads.
 	Core::LockGuard lock(m_mutex);
 
 	GraphicsRenderDeleteIndexBuffers();
