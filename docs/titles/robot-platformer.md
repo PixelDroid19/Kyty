@@ -242,11 +242,14 @@ scratch spills enough to save 3 ms per frame?
   variant passes every value stored to a guest scalar register (and to
   `exec`, `vcc`, `scc`) through `OpGroupNonUniformBroadcastFirst`, and a
   second one also every load: 561:2170 and 560:2188 spills:fills against
-  556:2138, 353 maximum live registers against 354. The baseline assembly
-  already reads these values as uniform (`<0>` source regions, no-mask SIMD8
-  writes) and writes each into a whole register, so the register cost is the
-  backend's SIMD8 allocation of uniform values, not missing uniformity in
-  the translation.
+  556:2138, 353 maximum live registers against 354. In the final NIR of the
+  stores variant one of the 1663 inserted broadcasts remains: the compiler
+  removed the rest because their sources were already convergent, and the
+  phis stay at 274 convergent and 1118 divergent as in the baseline. The
+  stored values were therefore already uniform where they are defined. That
+  the backend then gives each such value a whole SIMD8 register is a reading
+  of a few assembly lines (`<0>` source regions, no-mask SIMD8 writes), not
+  established for the scalar registers.
 - **Conclusion.** The spills follow from the guest program's live ranges at
   128 registers per thread. No variant tried gives a general translation
   rule that cuts them, so reworking the BVH translation is closed; the
