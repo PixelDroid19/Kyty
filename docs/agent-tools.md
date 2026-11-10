@@ -158,6 +158,19 @@ JSON report (at most 8 KiB). The runtime creates no directories and never
 overwrites an existing file. These settings are process-local opt-ins, not
 agent-supplied paths or commands.
 
+When the driver exposes `VK_EXT_device_fault` with the `deviceFault` feature,
+device creation enables it; the console line `Device fault reports enabled` or
+`unavailable` says which (RADV on an AMD Raphael iGPU: enabled; ANV on an Arc
+A770: unavailable, the extension is absent). The first device loss returned by
+a submit, a command-buffer fence wait or a queue-timeline wait then writes the
+driver's description to stderr once, without any opt-in and even with
+`PrintfDirection=Silent`: a `KYTY_DEVICE_FAULT` line with the description and
+the reported counts, then up to 32 `KYTY_DEVICE_FAULT_ADDRESS` lines (address
+type, reported address, precision mask) and up to 32 `KYTY_DEVICE_FAULT_VENDOR`
+lines (vendor fault code, data, description). Vendor binary dumps are not
+requested. The report never changes the fatal exit that follows. It has not yet
+been exercised by a real device loss.
+
 Use `events`, `last-error` or `wait-event --kind fatal --code device_lost` while
 the process is live. The event's `report` field distinguishes disabled, written
 and failed file output. The JSON preserves the failing command-buffer context

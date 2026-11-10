@@ -1249,6 +1249,7 @@ private:
 		const auto result   = vkWaitSemaphores(m_ctx->device, &info, UINT64_MAX);
 		if (result != VK_SUCCESS)
 		{
+			VulkanReportDeviceFault(result);
 			EXIT("vkWaitSemaphores (image fills) failed: result=%d\n", static_cast<int>(result));
 		}
 	}

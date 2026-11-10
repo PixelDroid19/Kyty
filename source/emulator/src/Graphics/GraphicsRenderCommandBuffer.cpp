@@ -794,9 +794,68 @@ bool VulkanLatchFaultSnapshot(VulkanSubmitAttemptTrail* submits, VulkanRecentDra
 	return true;
 }
 
+void VulkanReportDeviceFault(VkResult result)
+{
+	// Written to stderr like the fatal exit that follows, so silent runs keep it. Bounded:
+	// a hang usually reports a few addresses and vendor codes.
+	constexpr uint32_t kMaxFaultEntries = 32;
+	static std::atomic_flag reported = ATOMIC_FLAG_INIT;
+	if (result != VK_ERROR_DEVICE_LOST || g_render_ctx == nullptr)
+	{
+		return;
+	}
+	const auto* ctx = g_render_ctx->GetGraphicCtx();
+	if (ctx == nullptr || !ctx->device_fault_supported || reported.test_and_set())
+	{
+		return;
+	}
+	auto get_fault_info = reinterpret_cast<PFN_vkGetDeviceFaultInfoEXT>(vkGetDeviceProcAddr(ctx->device, "vkGetDeviceFaultInfoEXT"));
+	if (get_fault_info == nullptr)
+	{
+		return;
+	}
+	VkDeviceFaultCountsEXT counts {VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+	VkResult               query = get_fault_info(ctx->device, &counts, nullptr);
+	if (query != VK_SUCCESS)
+	{
+		std::fprintf(stderr, "KYTY_DEVICE_FAULT query failed: result=%d\n", static_cast<int>(query));
+		return;
+	}
+	const uint32_t total_addresses = counts.addressInfoCount;
+	const uint32_t total_vendor    = counts.vendorInfoCount;
+	counts.addressInfoCount        = std::min(counts.addressInfoCount, kMaxFaultEntries);
+	counts.vendorInfoCount         = std::min(counts.vendorInfoCount, kMaxFaultEntries);
+	counts.vendorBinarySize        = 0;
+	std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+	std::vector<VkDeviceFaultVendorInfoEXT>  vendor(counts.vendorInfoCount);
+	VkDeviceFaultInfoEXT                     info {VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
+	info.pAddressInfos = addresses.data();
+	info.pVendorInfos  = vendor.data();
+	query              = get_fault_info(ctx->device, &counts, &info);
+	if (query != VK_SUCCESS && query != VK_INCOMPLETE)
+	{
+		std::fprintf(stderr, "KYTY_DEVICE_FAULT query failed: result=%d\n", static_cast<int>(query));
+		return;
+	}
+	std::fprintf(stderr, "KYTY_DEVICE_FAULT description=\"%s\" addresses=%" PRIu32 " vendor=%" PRIu32 "\n", info.description, total_addresses,
+	               total_vendor);
+	for (uint32_t i = 0; i < counts.addressInfoCount; ++i)
+	{
+		std::fprintf(stderr, "KYTY_DEVICE_FAULT_ADDRESS type=%d address=0x%016" PRIx64 " precision=0x%" PRIx64 "\n",
+		               static_cast<int>(addresses[i].addressType), static_cast<uint64_t>(addresses[i].reportedAddress),
+		               static_cast<uint64_t>(addresses[i].addressPrecision));
+	}
+	for (uint32_t i = 0; i < counts.vendorInfoCount; ++i)
+	{
+		std::fprintf(stderr, "KYTY_DEVICE_FAULT_VENDOR code=0x%" PRIx64 " data=0x%" PRIx64 " description=\"%s\"\n", vendor[i].vendorFaultCode,
+		               vendor[i].vendorFaultData, vendor[i].description);
+	}
+}
+
 void VulkanSubmitFaultReport(const char* stage, VkResult result, const VulkanSubmitAttempt* immediate,
                              const VulkanSubmitAttempt* command_buffer_context)
 {
+	VulkanReportDeviceFault(result);
 	VulkanFaultSnapshot captured;
 	if (!VulkanLatchFaultSnapshot(VulkanSubmitFaultTraceTrail(), VulkanRecentDrawTraceTrail(), result, &captured))
 	{
@@ -2912,6 +2971,7 @@ VulkanSubmitAttempt CommandBuffer::MakeSubmitAttempt(VulkanSubmitKind kind, bool
 
 void CommandBuffer::ReportSubmitFault(const char* stage, VkResult result) const
 {
+	VulkanReportDeviceFault(result);
 	if (result != VK_ERROR_DEVICE_LOST || !VulkanSubmitFaultTraceEnabled())
 	{
 		return;

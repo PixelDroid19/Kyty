@@ -949,6 +949,7 @@ void SubmissionTimelineWaiter::ThreadRun(void* data)
 		const VkResult result    = vkWaitSemaphores(device, &wait_info, kWaitSliceNs);
 		if (result != VK_SUCCESS && result != VK_TIMEOUT)
 		{
+			VulkanReportDeviceFault(result);
 			EXIT("vkWaitSemaphores (queue timeline) failed: result=%d\n", static_cast<int>(result));
 		}
 

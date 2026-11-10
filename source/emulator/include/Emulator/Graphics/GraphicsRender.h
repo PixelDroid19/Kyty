@@ -613,6 +613,8 @@ VulkanRecentDrawPacket VulkanRecentDrawSetPacket(VulkanRecentDrawPacket packet);
 // or fence completion. Its kind/result/semaphore/completed fields are unused.
 void VulkanSubmitFaultReport(const char* stage, VkResult result, const VulkanSubmitAttempt* immediate = nullptr,
                              const VulkanSubmitAttempt* command_buffer_context = nullptr);
+// Logs the driver's description of the first device loss when VK_EXT_device_fault is enabled.
+void VulkanReportDeviceFault(VkResult result);
 
 class CommandBuffer
 {

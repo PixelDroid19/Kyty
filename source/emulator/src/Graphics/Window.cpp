@@ -2327,7 +2327,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
                                    bool depth_clip_control_supported,
                                    ShaderComputeWaveVulkanState* compute_wave_state, bool guest_device_address,
                                    bool compute_derivative_group_linear, bool maximal_reconvergence_supported,
-                                   bool image_view_min_lod_supported, VulkanBlendFeatures* enabled_blend_features, VulkanSamplerFeatures* enabled_sampler_features)
+                                   bool image_view_min_lod_supported, bool device_fault_supported,
+                                   VulkanBlendFeatures* enabled_blend_features, VulkanSamplerFeatures* enabled_sampler_features)
 {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(r == nullptr);
@@ -2457,6 +2458,13 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	{
 		image_view_min_lod.pNext = device_feature_chain;
 		device_feature_chain     = &image_view_min_lod;
+	}
+	VkPhysicalDeviceFaultFeaturesEXT device_fault {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+	device_fault.deviceFault = VK_TRUE;
+	if (device_fault_supported)
+	{
+		device_fault.pNext   = device_feature_chain;
+		device_feature_chain = &device_fault;
 	}
 	device_features_12.pNext = device_feature_chain;
 	device_feature_chain = &device_features_12;
@@ -3217,6 +3225,7 @@ static void VulkanCreate(WindowContext* ctx)
 		maximal_reconvergence.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR;
 		VkPhysicalDeviceImageViewMinLodFeaturesEXT image_view_min_lod {};
 		image_view_min_lod.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT;
+		VkPhysicalDeviceFaultFeaturesEXT device_fault {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
 
 		void* query_chain = &features_13;
 		if (has_ext(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME))
@@ -3249,6 +3258,11 @@ static void VulkanCreate(WindowContext* ctx)
 			image_view_min_lod.pNext = query_chain;
 			query_chain              = &image_view_min_lod;
 		}
+		if (has_ext(VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
+		{
+			device_fault.pNext = query_chain;
+			query_chain        = &device_fault;
+		}
 		VkPhysicalDeviceFeatures2 available_features {};
 		available_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 		available_features.pNext = query_chain;
@@ -3275,6 +3289,12 @@ static void VulkanCreate(WindowContext* ctx)
 		{
 			device_extensions.Add(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
 		}
+		ctx->graphic_ctx.device_fault_supported = has_ext(VK_EXT_DEVICE_FAULT_EXTENSION_NAME) && device_fault.deviceFault == VK_TRUE;
+		if (ctx->graphic_ctx.device_fault_supported)
+		{
+			device_extensions.Add(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+		}
+		KYTY_LOG_INFO("Device fault reports %s\n", ctx->graphic_ctx.device_fault_supported ? "enabled" : "unavailable");
 
 		ctx->graphic_ctx.color_write_enable_supported =
 		    has_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME) && color_write_enable.colorWriteEnable == VK_TRUE;
@@ -3499,7 +3519,7 @@ static void VulkanCreate(WindowContext* ctx)
 	                       &ctx->graphic_ctx.compute_wave_vulkan_state, ctx->graphic_ctx.guest_device_address_supported,
 	                       ctx->graphic_ctx.compute_derivative_group_linear_supported,
 	                       ctx->graphic_ctx.shader_maximal_reconvergence_supported,
-	                       ctx->graphic_ctx.image_view_min_lod_supported,
+	                       ctx->graphic_ctx.image_view_min_lod_supported, ctx->graphic_ctx.device_fault_supported,
 	                       &ctx->graphic_ctx.blend_capabilities.enabled, &ctx->graphic_ctx.enabled_sampler_features);
 	if (ctx->graphic_ctx.device == nullptr)
 	{
