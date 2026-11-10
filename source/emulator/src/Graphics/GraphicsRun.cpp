@@ -2205,9 +2205,14 @@ static bool Pm4KeepsGeometrySegment(uint32_t op)
 void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data)
 {
 	KYTY_PROFILER_BLOCK("CommandProcessor::Run");
-	const ScopedDebugStatsTimer run_timer(DebugStatsRecordCommandProcessorRun);
 	const uint32_t* const previous_run_begin = m_active_run_begin;
 	const uint32_t* const previous_run_end   = m_active_run_end;
+	// Indirect buffers run nested inside the enclosing run, which already counts their time.
+	std::optional<ScopedDebugStatsTimer> run_timer;
+	if (previous_run_begin == nullptr)
+	{
+		run_timer.emplace(DebugStatsRecordCommandProcessorRun);
+	}
 	m_active_run_begin                       = data;
 	m_active_run_end                         = data != nullptr ? data + num_dw : nullptr;
 	const bool submit_fault_trace            = VulkanSubmitFaultTraceEnabled();
