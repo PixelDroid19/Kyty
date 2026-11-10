@@ -6193,23 +6193,28 @@ us/draw). `spirv-opt` performance passes do not shrink `eb48c258`'s compile enou
 Host: Arc A770 (ANV, Mesa 26.2.6, xe) and the Ryzen 5 7600 Raphael iGPU (RADV, same Mesa); revision `bf43d7646`; strict
 runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not in the tree.
 
-- **Plain `NMin`/`NMax` cannot replace the exact f32 min/max lowering on either host (excluded).** A standalone compute
-  module evaluated the translator's exact pair (`FloatMinMaxPair`, non-IEEE text) next to plain GLSL `NMin`/`NMax`, and the
-  MIN3, MAX3, MED3 and clamp-to-[0, 1] compositions in both forms, over all 27,000 triples of 30 edge values (signed zeros,
-  infinities, extremes, denormals, quiet and signaling NaNs with payloads) plus 65,536 random triples. Ordinary operands,
-  one NaN, mixed-sign zeros and both clamp orders matched bit for bit on both drivers. Two classes differ on both: with
-  several NaN operands the plain form returns the canonical quiet NaN or the first payload (ANV also quiets a signaling
-  one), while the exact lowering keeps the second operand's payload; and denormal operands, which both drivers flush. So
-  the shorter form engages on no host we can test. The cost it would have saved is bounded: 5,174 cached modules carry
-  4-5 % extra operations in pixel and compute stages for the exact form, and ANV's estimate for the four heaviest compute
-  modules gave 14-30 % fewer instructions, but one of them got 22 % more estimated cycles with twice the spills.
-- **Defect, open: the signed-zero tie merges two denormals into a third value.** `FloatMinMaxPair`
+- **Plain `NMin`/`NMax` cannot replace the exact f32 min/max lowering in compute modules on either host (excluded for
+  the compute stage; pixel and vertex stages, where most uses are, were not probed).** A standalone compute module
+  evaluated the translator's exact pair (`FloatMinMaxPair`, non-IEEE text), plain GLSL `NMin`/`NMax`, and
+  `OpIsNan(a) ? b : NMin(a, b)`, each alone and in the MIN3, MAX3, MED3 and clamp-to-[0, 1] compositions, over all 29,791
+  triples of 31 edge values (signed zeros, infinities, extremes, denormals, quiet and signaling NaNs with payloads) plus
+  65,536 random triples. Ordinary operands, one NaN, mixed-sign zeros and both clamp orders matched the exact form bit for
+  bit everywhere. With two or more NaN operands the plain form differs: ANV only when a signaling NaN is involved (it
+  returns the second operand's payload with the quiet bit set, `0x7f800001` -> `0x7fc00001`), RADV also with quiet NaNs
+  (it returns the first operand's payload). Denormal operands differ on both because both drivers flush them. The cost
+  the plain form would save is bounded: 5,174 cached modules carry 4-5 % extra operations in pixel and compute stages
+  for the exact form, and ANV's estimate for the four heaviest compute modules gave 14-30 % fewer instructions, but one
+  of them got 22 % more estimated cycles with twice the spills.
+- **Open lead: `OpIsNan(a) ? b : NMin(a, b)` matches the exact form on every non-denormal class on both drivers** (three
+  operations instead of nine). It relies on the drivers ordering mixed-sign zeros like the guest, which the SPIR-V
+  definition leaves open, and its denormal results differ only where the exact form itself is wrong (next item). Not
+  built: it needs a device probe, a shader-cache key bit and a measured cycle gain first.
+- **Defect, open: the signed-zero tie merges flushed denormals into a value neither operand has.** `FloatMinMaxPair`
   (`source/emulator/src/Graphics/ShaderSpirvVector.cpp`, lines 75-78) takes the bitwise OR (minimum) or AND (maximum) of
   the operands whenever `OpFOrdEqual` holds. Both drivers flush f32 denormals in the compare, so `min(+0, 0x00000001)`
-  returns `0x00000001` and `min(0x00000001, 0x00000002)` returns `0x00000003`, a value neither operand has; the guest
-  returns zero under either denormal mode (flushed input, or the smaller operand of +0). Direction: merge only when both
-  operands are zeros, `((a | b) & 0x7fffffff) == 0`, and let the host result stand otherwise. No title has been seen to
-  depend on it; denormal operands of min/max are rare.
+  returns `0x00000001` (the guest returns `+0` under either denormal mode), and on ANV `min(0x00000001, 0x00000002)`
+  returns `0x00000003`. Direction: merge only when both operands are zeros, `((a | b) & 0x7fffffff) == 0`, and let the
+  host result stand otherwise. No title has been seen to depend on it; denormal operands of min/max are rare.
 - **Unmap and protect drains: no events in two titles (not an exclusion).** Every GPU-accessible unmap, protect or
   invalidate drains all rings and command processors (`Gpu::RunQuiesced`). Counters on the three lifecycle callbacks and
   on the drain itself read zero for 110 s of `PPSA21567 - Astro Bot` (boot, load, gameplay) and of `PPSA03355 - Hades`
