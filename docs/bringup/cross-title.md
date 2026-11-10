@@ -8492,3 +8492,25 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   loads and stores and the remaining atomics; MTBUF stores; DS `_rtn` atomics and sub-dword reads and writes;
   GLOBAL stores and atomics; MIMG `_c`, `_cl`, `_o`, `gather4`, `get_lod` and `msaa_load`; `s_getreg` and
   `s_setreg`; DPP wave shifts, `row_bcast`, `row_share` and DPP8.
+
+## Leads from another implementation's change list (2026-11-10)
+
+Commit `bf43d7646`, Ryzen 5 7600, Intel Arc A770, ANV Mesa 26.2.x, 60 fps limit, strict runs of 45 to 60 s from boot
+without input.
+
+- **Excluded: back-off after failed event-flag polls.** The lead: a guest that polls one flag in a loop spins a host core,
+  because a failed poll costs a system call on the console and almost nothing here. A temporary counter on
+  `KernelPollEventFlag` and on `KernelWaitEventFlag` with a zero timeout found no such call in
+  `PPSA03355 - Hades`, `PPSA21567 - Astro Bot`, `PPSA09076 - DREDGE`, `PPSA01341 - Demon's Souls` and
+  `PPSA15552 - Dead Cells`. The counter engaged: it counted 262,144 waits in DREDGE, 8,192 in Demon's Souls and 1,024 in
+  Dead Cells in the same runs, all with a non-zero or absent timeout. The runs stop at boot and menus; gameplay was not
+  sampled. Reopen only with a title that shows zero-timeout waits or polls at a high rate.
+- **Already covered: file reads into write-tracked guest pages.** `KernelRead` and `KernelPread` take a
+  `VideoFrameMemory::HostWriteLease` on the buffer, which restores write access to tracked pages before the host read.
+- **Already covered: repeated upload checks of an unchanged range.** `GpuMemory::Update` reuses the stored hash when
+  `ChangedSince` reports the object's dirty generation unchanged, and `Rearm` skips blocks already proven armed.
+- **Not applicable as stated: branch-free bounds-checked buffer loads.** The translator's buffer access guard tests for
+  a zero-record descriptor, not a per-offset bound, so there is no per-load range branch to replace.
+- **Open, not checked:** storage views of a mip past the descriptor's last level; batching of blocking GPU readbacks and
+  publication of GPU writes to pages the guest reads often; `userfaultfd` write tracking in place of `mprotect`; one
+  staging copy per synchronization and release of clean, unused buffers.
