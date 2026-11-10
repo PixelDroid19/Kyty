@@ -90,7 +90,9 @@ site.
   no wave64 lowering design is written. The one lever of that size is
   internal resolution: at a 960x540 game patch the BVH kernel took 6.45
   instead of 22.64 ms ("Internal resolution is the lever", measured then at
-  16.6-18.1 fps against 12-13; not re-measured since).
+  16.6-18.1 fps against 12-13; not re-measured since). The GPU sum there was
+  still 36.0 ms per frame, so lower resolution gains fps but does not reach
+  60 either.
 - **Decision: no command-processor change for the dunes.**
   - At 84-88% busy the GPU idles about 7 ms per frame. Removing all of that
     idle time would take the steady dunes from 19 to about 22 fps at native
@@ -110,8 +112,8 @@ site.
     it, the nested runs of `COND_INDIRECT_BUFFER` and `INDIRECT_BUFFER`
     (`GraphicsRunOpParsers.cpp:804` and `:831`) were counted twice.
   - That double count does not explain the excess seen in the dunes (83.1
-    against 74.6 ms per frame). No nested run occurs on this route: runs
-    per present stayed at 16.9-18.5 in every 10 s window from 60 to 116 s,
+    against 74.6 ms per frame). The route shows no measurable nested runs:
+    runs per present stayed at 16.9-18.5 in every 10 s window from 60 to 116 s,
     before and after the change. From 105 to 116 s the counter was 1.06
     times wall time in both runs (17.0 and 17.3 fps).
   - The change is verified by the build and by reading the code. No test

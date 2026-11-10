@@ -1,3 +1,14 @@
+## Command-processor counters are summed thread time (2026-11-10)
+
+The graphics ring and each compute pipe have their own `CommandProcessor`,
+and each runs on its own thread. The `kyty_agent` performance counters
+`command_processor_run_ns`, `dispatch_processor_ns` and `fence_wait_ns` add
+up all of them, so with compute pipes active they can exceed wall time. They
+are not serial frame time and do not show how much of a frame one processor
+takes. `88c21e1b9` stopped the run counter from counting nested indirect
+buffers twice; the evidence and the 1.06 ratio measured in the dunes are in
+`docs/titles/robot-platformer.md`.
+
 ## Geometry segments on other titles (2026-11-09)
 
 The change in `59e3640cf` (geometry passes batched into compute segments, see

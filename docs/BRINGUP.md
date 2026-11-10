@@ -161,6 +161,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Command-processor counters are summed thread time (2026-11-10)
   - Geometry segments on other titles (2026-11-09)
   - Large wave32 compute in `PPSA07393 - Gori: Cuddly Carnage`: split, per-lane exchange fix, min and max (2026-11-02)
   - Render engine hang evidence for `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` (2026-11-01)
