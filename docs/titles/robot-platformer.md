@@ -117,9 +117,40 @@ site.
     `docs/bringup/cp-gpu-sync-chain.md` ("Link 2 reopened"). The device-side
     draw is deferred: its geometry block is a host push constant, and its output
     has no bound under the 1 GiB cap before the record is read.
-  - Host speed moved during these runs: two later runs without either change
-    gave 16.5 and 17.3 fps with the audio thread about 15 % cheaper per second.
-    The 13.1-14.1 fps baseline is not current; re-measure before comparing.
+  - The frame rate moved without an intended change: two later runs of a
+    rebuilt binary gave 16.5 and 17.3 fps, with the audio thread about 15 %
+    cheaper per second. The cause is open (rebuild, time and host load are
+    confounded). The 13.1-14.1 fps baseline is not current; re-measure before
+    comparing. Render-engine time stayed at 42-44 ms per frame, which caps
+    this view near 23 fps whatever the processor does.
+- **GPU bill on the idle dune view (2026-11-10).** Same idle route, window
+  96-116 s, a temporary probe writing a bottom-of-pipe timestamp after every
+  draw and dispatch in every chunk of a recording. Each item takes the
+  interval since the previous mark in GPU time order, so it includes gaps and
+  unmarked work before it; "tail" is the mark at the end of each recording.
+  The run held 15.2 fps (the probe costs about 2-3 ms of engine time per
+  frame). The timestamps sum to 44.4 ms per frame against 44.7 ms of engine
+  time (busy x frame time) in the same run, so the bill accounts for the
+  engine time. Recordings never overlapped (span union = span sum).
+
+  | Per frame | Time | Count | Mean |
+  | --- | --- | --- | --- |
+  | Compute dispatches | 25.9 ms | 56 | 465 us |
+  | of which BVH traversal `0x3666fa39` | 19.7 ms | 1.0 | 19.7 ms |
+  | of which the next one, `0xff2adfc8` | 1.4 ms | 1.0 | 1.4 ms |
+  | Indexed draws | 10.1 ms | 508 | 20 us |
+  | of which the largest program pair | 3.0 ms | 61 | 49 us |
+  | Recording tails | 2.9 ms | 67 | 44 us |
+  | Non-indexed draws | 2.9 ms | 71 | 41 us |
+  | Geometry passes | 2.0 ms | 33 | 61 us |
+  | Device-fed dispatches | 0.6 ms | 5 | 112 us |
+
+  Outside the BVH kernel no single item reaches 5 ms per frame: the other
+  half of the GPU time is spread over about 740 marked items. 30 fps on this
+  view needs about 10 ms per frame off the GPU. The BVH levers in the records
+  do not reach that: the shared arrival counter and the eight dropped LDS
+  orderings are excluded below (about 0.2 and 0.5 ms per call), and keeping
+  cold guest registers in shared memory is untested with no estimate.
   - A run with the 960x540 patch on this date lost its timing on the moving
     route: the window held a load, not the dunes. It measured nothing, so the
     figures in the ceiling bullet above remain the last ones.

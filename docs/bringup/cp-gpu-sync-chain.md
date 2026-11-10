@@ -170,12 +170,15 @@ Each link moves the wait to the next one:
          it.
        - Not identified: a thread with about 14 ms of kernel time per frame, seen only in the arm
          with both changes.
-     - **Host speed moved during the session.** The baselines and probe arms above ran with the
-       guest audio thread at 43-45 ms of CPU per wall second; its work is constant. Two later runs
-       of one binary, with and without the facts probe, had it at 37-38.5 ms/s. They gave 16.5 and
-       17.3 fps with no change in either, the graphics CP thread at 31-32 ms per frame, and the
-       read still holding 92 % of fence time. The arm table holds within itself, but its absolute
-       rates are not a baseline: later work needs a fresh baseline at the same host speed.
+     - **Frame rate moved without an intended change (cause open).** The baselines and probe arms
+       above ran with the guest audio thread at 43-45 ms of CPU per wall second. Two later runs of
+       one rebuilt binary, with and without the facts probe, had it at 36-37 ms/s and gave 16.5 and
+       17.3 fps. The graphics CP thread was at 31-32 ms per frame and the read still held 92 % of
+       fence time. Per frame, the guest draw and worker threads fell only 5-9 %, so a uniformly
+       faster CPU does not explain it. The rebuild, the time of day and host load are confounded.
+       Render-engine time per frame stayed at 42-44 ms in every run. The arm table holds within
+       itself, but its absolute rates are not a baseline. Comparisons need a fresh baseline, plus
+       host CPU load outside the process and the CP thread's core and frequency as witnesses.
      - **Where the alias-mode wait sits.** `RecordIndexedDraw` clears its pending submission on
        entry and sets none before the state refusal. The `publish-host` waits at the retry in
        `DrawIndexIndirectOnDevice` therefore come from indexed-indirect draws that pass the
