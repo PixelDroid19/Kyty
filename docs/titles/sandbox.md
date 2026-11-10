@@ -22,7 +22,13 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     changes on every draw.
 - **The load is the title's own choice under Kyty.** Every save root, including fresh games-matrix
   roots nobody configured, holds `graphics_mode:2`, `deferred_viewdistance:20` and
-  `gfx_viewdistance:576`. What value 2 selects was not confirmed from a published source.
+  `gfx_viewdistance:576`. What value 2 selects was not confirmed from a published source, but the
+  publisher states that its deferred mode (Vibrant Visuals) is the default graphics mode on
+  compatible devices, PS5 among them (https://www.minecraft.net/en-us/vibrant-visuals-update), so a
+  console defaults to the same heavy mode.
+- **Reported direct memory does not choose the load (excluded).** Kyty reports 16 GiB of direct
+  memory to PS5 titles. A temporary override reporting 13.5 GiB on a fresh save root: the title read
+  the direct-memory size, never called the available-size query, and wrote the same six options.
 - **GPU clock.** The render engine is busy about 42% of the time at 600-700 MHz, the device minimum
   (maximum 2,400 MHz), which is about 50 ms of GPU time per frame at that clock. The GPU time at a
   higher clock, and what keeps the clock at its minimum, are open.
@@ -32,6 +38,25 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - The read-only snapshot family (capture, compare, upload) is in about 17% of samples.
   - `GpuMemory` frames are in at least 30% of samples (call stacks are truncated). While that work is
     serialized, recording draws on several threads is bounded to about 2x with four threads.
+- **Read-only binds (temporary census, two runs, 30 steady flips each, about 5,200 draws per frame).**
+  - Per flip: about 5,000 index, 5,000 vertex and 9,600 other read-only probes over about 12,000
+    distinct ranges in about 90 2-MiB windows of imported guest memory. Every probe lies in one
+    physical run inside a 64 MiB window, so that condition does not separate them.
+  - Cost per frame: index snapshots 5.7 ms (99.5% reused), other snapshots 8.2 ms (21% reused),
+    vertex binding about 12.6 ms (2.4 us per draw), together about 26 ms of the 104 ms the command
+    processor runs per frame.
+  - 99.8% of vertex snapshots are refused. The bind then uses a host copy of the guest bytes (94%) or
+    a storage object already bound in place (6%); only 750 of 140,530 host-copy binds had device
+    results not yet in guest memory.
+  - 54% of index addresses are only 2-byte aligned, which a per-object in-place buffer cannot hold;
+    one buffer per import window bound at an offset can. Other probes are all 16-byte aligned and the
+    device storage offset limit is 4.
+  - Snapshots live in host-visible cached memory, as the imported guest pages do, so reading in place
+    does not move device reads out of device-local memory.
+  - Reading in place sees bytes at host execution, a snapshot sees them at recording. Whether the
+    guest's reuse signal can fire before the reading submission executes is not established.
+  - Ceiling: about 1.25x alone. It also removes work done under the snapshot pool lock, which parallel
+    recording needs.
 - **Open.** None of the measured levers, alone or together, reaches 60 fps at this load; GPU time at
   full clock is unmeasured.
 
