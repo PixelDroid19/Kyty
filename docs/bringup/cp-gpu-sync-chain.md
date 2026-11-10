@@ -113,7 +113,8 @@ Each link moves the wait to the next one:
        time sat at this read. In the fourth, about the same total sat at a `publish-host` wait of
        ordinary draws: a storage buffer that a texture aliases fails `StorageIsWholeGuestContent`.
        Submits, write-backs and fence waits per draw matched within 10 %. Why the alias exists in
-       one run only is not explained.
+       one run only is not explained. With 32 slots it recurred in 1 of 3 probed runs, at 21.9 ms
+       per frame; its frame cost is not established (2026-11-10, `docs/titles/robot-platformer.md`).
      - **Probe (temporary, not shipped).** For geometry-refused records, the host path reused the
        last record read at the same address instead of waiting. Every 64th read was real and
        compared: 50 checks, 1 mismatch. Because the record stayed empty in the window, the probe

@@ -6,6 +6,64 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: the guest does not pace the still dune view (2026-11-10)
+
+Intel Arc A770 at 2400 MHz without throttling, Mesa 26.2.6 on Xe, Linux
+7.2.14; other processes used 0.7-1.6 % of the render engine. Idle dunes route,
+strict runs with the 60 fps cap. Two runs on `0b02f53a1` (32 slots) carry a
+temporary probe, not shipped: timers on each graphics ring thread around its
+wait for the next guest batch, the run lock, suspended label waits and the
+time it holds a batch, plus the per-site fence probe of the records below. The
+third run compared is the ring record's "after" run below, with the per-site
+fence probe only.
+
+- **Excluded: the guest paces the frame.** In the probed runs the main
+  graphics ring thread waited for a guest batch 2.9 ms per frame in the
+  alias-wait regime below (100-110 s, 556 draws per frame) and 3.8 ms per
+  frame without it (100-110 s, a window that also holds a 5 s hitch before the
+  still view). It held its batch 95-97 % of the frame, and its suspended label
+  waits took 0.3 and 1.1 ms per frame. An asynchronous graphics ring thread
+  spent 49-63 ms per frame suspended on a host-produced label. In the clean
+  windows without the alias wait, frame time minus the graphics CP thread's
+  CPU time, fence wait and render lock leaves 4.4 and 6.6 ms per frame, which
+  caps the batch wait there if the fence time is that thread's.
+- **The second wait regime recurs with 32 slots.** It is the `publish-host`
+  wait of `docs/bringup/cp-gpu-sync-chain.md` ("Attribution moves"): a draw
+  reads a storage buffer whose pending GPU write has a Texture alias, so
+  `StorageIsWholeGuestContent` fails and the draw waits on the host. One of
+  three probed 32-slot runs took it; a fourth 32-slot run of the view, under
+  a profiler, cannot show the site. It first fired at 80-90 s, 179 waits of
+  about 0.15 ms each; in the still view (100-110 s) it waited 4.9 times per
+  frame, about 4.5 ms each, 21.9 ms per frame. The wait's length follows how
+  far the GPU is behind, which fits the untested reading in the sync-chain
+  record that the first wait of a frame absorbs the GPU catch-up.
+
+  | Per frame | Ring record "after" run, 103-110 s | Probed, without the alias wait, 106-116 s | Probed, with it, 103-110 s |
+  | --- | --- | --- | --- |
+  | Frame time, ms | 52.0 | 60.4 | 62.8 |
+  | Graphics CP thread CPU, ms | 36.9 | 40.9 | 32.9 |
+  | Fence wait, ms | 8.7 | 10.8 | 24.1 |
+  | `WAIT_REG_MEM` wait, ms | 6.9 | 7.9 | 2.0 |
+  | Submits | 45.9 | 44.4 | 60.8 |
+  | Render engine busy, ms | 42.1 | 48.2 | 44.3 |
+
+  On the probe build the two regimes differ by about 2 ms per frame, while
+  about 13 ms of fence wait moved between sites and the CP thread's CPU time
+  fell by 8 ms. The frame cost of the alias wait is not established. Draws,
+  dispatches, uploads, hashed bytes and object creation per frame match
+  within 2 % between the first and third columns. Captures at 126 s (first
+  column) and 110 s (third) show the same view rendered correctly. The guest
+  thread that spins in a sleep loop (about 18 ms of CPU per frame) runs in the
+  first two columns only.
+- **Ceiling.** The render engine is busy 42-48 ms per frame in every run of
+  this view, so work on synchronization alone ends near 21-24 fps here, and
+  30 fps needs the GPU's work under 33 ms per frame. Why the GPU time varies
+  by 15 % between runs at the same clock and draw count is not explained.
+- **Open.** Which texture aliases the buffer is not identified: a capped probe
+  line in the failing branch (storage and alias ranges, alias parameters,
+  dependency queue) did not fire in the repeat run, which stayed in the
+  regime without the wait.
+
 ## Robot platformer: the still dune view waited on a full submission ring (2026-11-10, fixed)
 
 Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14. Idle dunes route, window
