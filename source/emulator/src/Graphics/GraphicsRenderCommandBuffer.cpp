@@ -982,10 +982,11 @@ class TransientBufferPool
 	// another buffer and half of the descriptor lookups missed.
 	static constexpr uint64_t kRetainedRecordings = 1024u;
 	static constexpr uint64_t kExpiredRecordings  = 4u * kRetainedRecordings;
-	// Past half of the pool's byte budget, retention gives way. A title that
-	// streams hundreds of MB per second through the pool would otherwise fill
-	// it, and a capture the full pool refuses falls back to a fenced upload.
-	static constexpr uint64_t kRetainedBytes = kGpuMemoryTransientBufferPoolMaxBytes * kGpuMemoryTransientSnapshotPoolRecordings / 2u;
+	// Past 256 MiB, retention gives way. A title that streams hundreds of MB
+	// per second through the pool would otherwise fill it, and a capture the
+	// full pool refuses falls back to a fenced upload. The rest of the budget
+	// holds the recordings in flight.
+	static constexpr uint64_t kRetainedBytes = kGpuMemoryTransientBufferPoolMaxBytes * 4u;
 	// A covering capture grows only into a snapshot leased this recently (under
 	// a frame). Older ones hold another frame's windows: growing into them
 	// tripled the bytes copied per draw in a streaming title.

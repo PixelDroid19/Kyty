@@ -531,9 +531,9 @@ TEST(EmulatorGpuSubmissionCoordinator, TransientLabelsLeaveNoOwnershipAfterExact
 	}
 }
 
-TEST(EmulatorGpuSubmissionCoordinator, CommandProcessorSubmissionSlotCountIsEight)
+TEST(EmulatorGpuSubmissionCoordinator, CommandProcessorSubmissionSlotCountIsThirtyTwo)
 {
-	EXPECT_EQ(CommandProcessorSubmissionSlots::SlotCount, 8u);
+	EXPECT_EQ(CommandProcessorSubmissionSlots::SlotCount, 32u);
 }
 
 UT_END();

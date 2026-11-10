@@ -14,7 +14,10 @@ namespace Kyty::Libs::Graphics {
 class CommandProcessorSubmissionSlots
 {
 public:
-	static constexpr uint32_t SlotCount = 8;
+	// A title can flush tens of submissions per frame; the ring must hold the ones
+	// recorded while one long submission runs, or the processor stalls on a slot
+	// and the GPU then idles while it catches up.
+	static constexpr uint32_t SlotCount = 32;
 
 	CommandProcessorSubmissionSlots(GpuSubmissionCoordinator* coordinator, GpuQueueId queue);
 	~CommandProcessorSubmissionSlots() = default;
