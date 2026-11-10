@@ -17,21 +17,27 @@ with captures at 60 and 115 s. Every run exited 0.
 | --- | --- | --- | --- |
 | `PPSA21567 - ASTRO BOT` | 111,128 by 110 s | 2,542 | the still dune view at 116 s, intact |
 | `PPSA09809 - OCTOPATH TRAVELER II` | 8,257 by 100 s, from the start | 0 | the traveler selection map at 60 s and the intro narration card at 115 s, intact |
-| `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` | 12,192 by 105 s, from about 20 s | 0 | a cutscene at 115 s, intact |
+| `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` | 12,192 by 105 s, from about 20 s | 0 | cutscenes at 60 and 115 s, intact |
 | `PPSA28311 - Absolum` | 0 | 0 | not reviewed |
 | `PPSA09076 - DREDGE` | 0 | 0 | not reviewed |
 | `PPSA21402 - Balatro` | 0 | 0 | not reviewed |
 
-- **Device-read geometry draws run only in ASTRO BOT on these routes.** No
-  other installed route exercises that path, so its cross-title retest has
-  no further title here. In the still dune view the counter gives about
-  26-30 host-read passes and about one device-read pass per frame at 14-17
-  fps; the counter's clock starts at the first indexed draw, so its 5 s
-  windows line up with the frame samples only to within a few seconds.
-- **OCTOPATH TRAVELER II and F.I.S.T. run the host-read geometry pass** and
-  kept a correct picture. Neither run reached gameplay: OCTOPATH TRAVELER II
-  stopped at the intro narration and F.I.S.T. at a cutscene. The F.I.S.T.
-  run did not hit the startup race of the 2026-11-09 record below.
+- **Device-read geometry draws run only in ASTRO BOT among these six
+  titles.** None of the other five reaches that path on these routes; the
+  other installed titles were not counted. In the still dune view the
+  counter gives about 26-30 host-read passes and about one device-read pass
+  per frame at 14-17 fps; the counter's clock starts at the first indexed
+  draw, so its 5 s windows line up with the frame samples only to within a
+  few seconds. Over 107-116 s this run took no alias wait and carried the
+  heavier guest work of the probed run without it in
+  `docs/titles/robot-platformer.md` (44.4 submits and 5.6 MB of uploads per
+  frame against 44.4 and 5.4 MB there; render engine 49 ms per frame;
+  16.3 fps).
+- **OCTOPATH TRAVELER II and F.I.S.T. run the host-read geometry pass**, and
+  their captures are intact. Nothing shows the passes draw into the captured
+  frames. Neither run reached gameplay: OCTOPATH TRAVELER II stopped at the
+  intro narration and F.I.S.T. at a cutscene. The F.I.S.T. run did not hit
+  the startup race of the 2026-11-09 record below.
 - **The output limit refusal is not observed.** Its count stayed 0 in every
   run, and no run showed the counter firing, so these runs do not show the
   refusal working in a title.
