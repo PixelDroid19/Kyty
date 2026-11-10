@@ -6,6 +6,72 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: a dunes route, and where the dunes frame goes (2026-11-09)
+
+Same title, host and settings as the next record. Executables built from
+`b76f4a71e` plus `4cf83a445` and temporary diagnostics only, compiled in but
+off unless stated.
+
+- **A route with gameplay input.** The user recorded a route in pad-record
+  mode (`docs/input-replay.md`). It walks from the crash site into the open
+  dunes at about 94 s and plays there until about 140 s. A replay reached the
+  dunes again at about 94 s. Over 103-140 s, with frames counted from
+  presented flips:
+
+  | 103-140 s | Recording, diagnostics off | Replay, GPU timestamps on |
+  | --- | --- | --- |
+  | Frame rate | 13.6 fps (73.3 ms) | 12.2 fps (82.0 ms) |
+  | Draws per frame | 628 | 693 |
+  | Render engine busy | 89 % (about 65.5 ms) | 84 % (about 68.7 ms) |
+  | Command processor running | 75.0 ms | 82.3 ms |
+  | of which fence waits | 33.1 ms | 31.7 ms |
+
+  The replay is not frame-identical to the recording (65 more draws per
+  frame), so the two columns bound the instrument cost only loosely: at most
+  about 3 ms of GPU time per frame. The frame is over budget on both sides.
+  The GPU needs about 65 ms per frame. The command processor's work outside
+  fence waits is 42-51 ms. 60 fps needs both cut by about 4x; removing either
+  bound alone leaves the other above 40 ms.
+- **GPU timestamps by kind, dunes only.** Replay, the 41 s of timestamp dumps
+  inside the dunes, per frame at 12.2 fps. A mark follows every draw and
+  dispatch, and each item includes the gap since the previous mark:
+
+  | Per frame | Time | Count | Mean |
+  | --- | --- | --- | --- |
+  | Compute dispatches | 25.1 ms | 57 | 443 us |
+  | of which BVH traversal `0x3666fa39` | 18.7 ms | 0.9 | 20.1 ms |
+  | Indexed draws | 16.8 ms | 539 | 31 us |
+  | Geometry passes | 12.8 ms | 63 | 203 us |
+  | of which `0xf4cfb9a5` | 10.8 ms | 47 | 231 us |
+  | Non-indexed draws | 4.8 ms | 98 | 49 us |
+  | Draw tails | 2.7 ms | 52 | 52 us |
+
+  `0x3666fa39` alone exceeds the 16.7 ms budget. The geometry program
+  `0xf4cfb9a5` costs about the same per frame in both scenes measured: 76
+  passes of about 145 us in the scene of the next record, 47 of about 231 us
+  here. Its cost follows the work per pass, not the number of passes.
+- **Excluded: the compute-after-draw transition.** Hypothesis: a compute
+  dispatch recorded after a draw pays a pipeline switch that a dispatch after
+  another dispatch does not, so grouping geometry dispatches would save it.
+  Prediction set before the run: the same compute program costs at least
+  twice as much after a draw as after a dispatch. The timestamp instrument
+  split each dispatch by what preceded it in the command buffer. No program
+  reached the ratio. Mean per call by predecessor:
+
+  | Program | Buffer start | After a dispatch | After a draw |
+  | --- | --- | --- | --- |
+  | `0x90c95e2d` | 694 us | 817 us | - |
+  | `0x108c4737` | 578 us | 573 us | - |
+  | `0x82990f59` | - | 288 us | 278 us |
+  | `0x8723fe62` | 346 us | 163 us | - |
+  | Geometry `0xf4cfb9a5` | 190 us | - | 139 us |
+  | Geometry `0x8e51dd94` | 110 us | - | 97 us |
+
+  `0xf4cfb9a5` never followed another dispatch, so its own case is untested.
+  The command processor reads of indirect-draw records that dominate the
+  fence waits were already excluded as a frame-rate lever on 2026-11-02
+  ("real gameplay frame rate" record: the waits move).
+
 ## Robot platformer: per-frame CPU read of indirect-draw records (2026-11-09)
 
 Same title, host, route and settings as the next record; executables built
@@ -17,7 +83,7 @@ from `b76f4a71e` plus `4cf83a445` and temporary diagnostics only.
   `DrawIndexIndirect` reading its argument record from guest memory on the CPU
   (`ReadCurrentGuestBytes`, then `BufferWait`), which drains the queue. It
   happens about once per frame, waits about 18 ms, and follows the
-  tile-lighting kernel `0x3666fa39`.
+  BVH traversal kernel `0x3666fa39`.
 - **Why the device path refuses those draws.** Counters over a whole run:
   7,125 indexed indirect draws. 1,235 were recorded with device-side arguments
   and 5,888 were read on the CPU, 5,887 of them because the draw takes the
