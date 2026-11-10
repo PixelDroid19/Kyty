@@ -47,18 +47,20 @@ fence probe only.
   | Submits | 45.9 | 44.4 | 60.8 |
   | Render engine busy, ms | 42.1 | 48.2 | 44.3 |
 
-  On the probe build the two regimes differ by about 2 ms per frame, while
-  about 13 ms of fence wait moved between sites and the CP thread's CPU time
-  fell by 8 ms. The frame cost of the alias wait is not established. Draws,
+  The middle column ran a different workload through 116 s: 55-58 render
+  pass begins and about 1470 uploads per frame against 69-91 and 1720-1830 in
+  the other two, and no object creation. The two probed runs therefore do not
+  isolate the alias wait, and its frame cost is not established. Draws,
   dispatches, uploads, hashed bytes and object creation per frame match
   within 2 % between the first and third columns. Captures at 126 s (first
   column) and 110 s (third) show the same view rendered correctly. The guest
   thread that spins in a sleep loop (about 18 ms of CPU per frame) runs in the
   first two columns only.
-- **Ceiling.** The render engine is busy 42-48 ms per frame in every run of
-  this view, so work on synchronization alone ends near 21-24 fps here, and
-  30 fps needs the GPU's work under 33 ms per frame. Why the GPU time varies
-  by 15 % between runs at the same clock and draw count is not explained.
+- **Ceiling.** The render engine is busy 42-45 ms per frame in the runs with
+  the usual workload (the first seconds of the view are not more expensive)
+  and 49 ms in the run with the different one, so work on synchronization
+  alone ends near 21-24 fps here, and 30 fps needs the GPU's work under 33 ms
+  per frame.
 - **Open.** Which texture aliases the buffer is not identified: a capped probe
   line in the failing branch (storage and alias ranges, alias parameters,
   dependency queue) did not fire in the repeat run, which stayed in the
