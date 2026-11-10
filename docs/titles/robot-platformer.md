@@ -407,11 +407,9 @@ once at startup; it did not capture the failing transition. The 245 s
 capture reached the dunes, with the previously documented visible haze; it
 is not evidence of correct graphics or successful movement. The instrumented
 run is not a performance comparison. The executable was stopped by its
-harness at the time limit. Artifacts are under
-`/home/monasterios/tmp-backup/kyty-gda-output-study/hd-depth-relation-trace-long`
-and `.../hd-storage-history-trace` on the test host.
+harness at the time limit.
 
-A second diagnostic in `.../hd-storage-dispatch-recorded` traced the actual
+A second diagnostic traced the actual
 `vkCmdDispatch`/`vkCmdDispatchIndirect` recording after the mutation-conflict
 check. It saw 4,951 recordings with shader checksum `0x05472e62` and a storage
 descriptor at that address, but only one entry through the traced creation
@@ -425,7 +423,7 @@ then a different storage image over the same guest address. The run stopped
 at 149 s on another mixed-parent `!create_all_the_same`, this time at
 `0x53de40000` for a 3840x2160 storage view. The address-filtered trace did
 not identify that view's contents or the unaccepted parent, and cannot prove
-a safe alias policy. Its log is in `.../hd-storage-host-image-trace`.
+a safe alias policy.
 
 Replaying the captured parent metadata through the alias predicates in a
 diagnostic test found six copyable render targets. The oldest target's GPU
@@ -5292,10 +5290,7 @@ and ran for 360 seconds without hitting this refusal; its earlier observations
 found no tracked event at the queried address. This is not evidence that the
 guest never wrote DCC metadata, nor evidence of the tracker state at the
 previous failures. Captures from this run show the introductory sequence;
-they do not demonstrate interactive gameplay or a 60 fps result. Logs are in
-`/home/monasterios/tmp-backup/kyty-gda-output-study/hd-clear-evidence-2`,
-`.../hd-depth-immediate-1`, `.../hd-color-probe-1` and
-`.../hd-color-dcc-probe-1` on the test host.
+they do not demonstrate interactive gameplay or a 60 fps result.
 
 A diagnostic model of Kyty's current 64 KiB depth and color tile-address
 formulas, using slice zero without an XOR swizzle, maps the 518,400 visible
@@ -5318,11 +5313,8 @@ matching write or clear; the sought depth/color failure did not occur in this
 attempt. The executable includes `9b0abb808`, the earlier aged-overlay fix.
 The message alone does not establish that the previously fixed cause has
 recurred; this new occurrence needs its own call stack and dependency state.
-The diagnostic artifacts are under
-`/home/monasterios/tmp-backup/kyty-gda-output-study/hd-depth-writes-1` on the
-test host.
 
-A sixth attempt (`.../hd-writeback-stack-1`) reproduced the depth/color
+A sixth attempt reproduced the depth/color
 refusal at 94 seconds. The DCC tracker query immediately before the refused
 color creation found no tracked clear at that address. The filtered depth
 trace recorded two arms for host depth images at the same guest address and
@@ -5351,29 +5343,29 @@ between them is a concurrency hypothesis, not an established cause of the
 161.5-second failure. A fix must retain the required queue ordering and be
 tested against a reproduced pending-use transition.
 
-A third stack-instrumented attempt (`.../hd-writeback-stack-3`) also reached
+A third stack-instrumented attempt also reached
 the 360-second harness limit without either failure. Its recorded input left
 the game at the new-game menu; a diagnostic controller tap advanced it to
 the opening sequence near the end of the run. It did not cover the same route
 as the failure and is not evidence that the error is fixed.
 
 A later attempt with the new write-back error diagnostic compiled into the
-isolated executable reproduced the depth/color refusal at 122.6 seconds
-(`.../hd-product-writeback-diagnostic-1`). The immediately preceding DCC
+isolated executable reproduced the depth/color refusal at 122.6 seconds.
+The immediately preceding DCC
 tracker query again found no tracked clear. The write-back error did not
 occur, so its expanded message was not exercised by this run. The isolated
 build was based on `f4823fbe5` with the diagnostic source file matching
 `5c660ef7` and additional temporary tracing; it is not a clean build of the
 branch tip.
 
-A follow-up probe (`.../hd-depth-initialization-1`) instrumented the first
+A follow-up probe instrumented the first
 materialization of the selected depth address, but stopped at 149.3 seconds
 on `!create_all_the_same` for a 3840x2160 storage texture with mixed parents
 at `0x53de40000`. The selected depth address was not materialized before the
 stop. This repeats the storage-view frontier described at the start of this
 record and supplies no evidence of the failing depth image's initialization.
 
-A further depth-initialization probe (`.../hd-depth-initialization-2`) hit
+A further depth-initialization probe hit
 `DepthStencilBuffer - Contains - RenderTexture` at 125.8 seconds. The selected
 address had two distinct depth image materializations during the run. At the
 failing submission, the depth image was created with an undefined Vulkan layout
@@ -5393,7 +5385,7 @@ by that draw, as well as discarding the depth allocation's uncovered bytes.
 Any safe fix must account for simultaneous attachment use and content ownership;
 this probe does not yet provide a correctness basis for such a change.
 
-A follow-up run (`.../hd-depth-state-1`) logged the depth state at
+A follow-up run logged the depth state at
 materialization and reproduced the same refusal at 154.9 seconds. In the
 failing submission (`26369`), depth testing was enabled with Vulkan compare
 operation 3 (`LESS_OR_EQUAL`), depth writes and depth clear were disabled, and
@@ -5412,7 +5404,7 @@ an explicit, correctly ordered way to construct their contents and reconcile
 later accesses; whether a snapshot is sufficient for the guest draw requires
 further evidence about its guest memory ordering and overlapping texel writes.
 
-A further isolated provenance probe (`.../hd-depth-owners-1`) ran for its
+A further isolated provenance probe ran for its
 360-second limit without either reported refusal. At an earlier creation of
 this same depth view, Kyty found 15 overlapping tracked objects, including a
 960x540 color render target at the same base and larger render targets, and
