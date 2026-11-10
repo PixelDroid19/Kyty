@@ -31,8 +31,8 @@ from `b76f4a71e` plus `4cf83a445` and temporary diagnostics only.
   fired on both branches, so it did not choose a lever. The next run did.
 - **Latency-bound.** GPU timestamps by group count, whole route: passes of
   2, 3, 4, 5, 9, 50 and 63 groups all cost 106-113 us; 128 groups cost
-  360 us. A pass of one wave runs for about as long as a pass of 63. In the
-  dunes a one-group pass costs 225 us.
+  360 us. A pass of 2 groups runs for about as long as a pass of 63.
+  One-group passes cost more, 165 us over the route and 225 us in the dunes.
 - **Consecutive passes overlap.** Prediction set before the run: two copies
   of the same dispatch, recorded back to back with no barrier, cost under
   1.3x one copy if passes can overlap and over 1.7x if they serialize. A
@@ -54,6 +54,22 @@ from `b76f4a71e` plus `4cf83a445` and temporary diagnostics only.
   73 ms frame), not counting the render pass breaks it would also remove.
   Not built yet; the hazards a design must respect are the guest's
   synchronization events that end each run.
+- **Passes per recording.** A batch cannot cross a host recording, so a
+  second counter closed its count at every command-buffer end. In 40 s of
+  dunes, 94 % of 38,895 passes were in recordings that held 8 or more
+  passes: 64 % in 8-15, 17 % in 16-31, 13 % in 32-63. Most recordings hold
+  none (29,758 of 34,000). The recordings that hold passes are closed by
+  the idle-GPU submit before a draw (passes of 20,450) and by the submit of
+  recorded dispatches before a draw (18,006).
+- **Upper bound by skipping the pass.** In alternate 5 s windows of the
+  dunes a temporary build skipped every geometry dispatch and kept the fill,
+  barriers and pull draw. A zero-filled group allocates no primitive, so
+  those draws drew nothing. Skip windows ran 15.00 against 12.31 fps (arm
+  medians); each skip window against the mean of its two neighbours gave
+  1.11-1.26, median 1.19. Fence waits were 22.3 against 31.0 ms per frame.
+  This also drops the draws' pixel work, so it bounds any geometry-pass
+  change from above; the prediction set beforehand was to exclude batching
+  below +8 %.
 
 ## Robot platformer: a dunes route, and where the dunes frame goes (2026-11-09)
 
