@@ -40,7 +40,8 @@ with captures at 60 and 115 s. Every run exited 0.
   the startup race of the 2026-11-09 record below.
 - **The output limit refusal is not observed.** Its count stayed 0 in every
   run, and no run showed the counter firing, so these runs do not show the
-  refusal working in a title.
+  refusal working in a title. A forced run with a lowered limit exercises
+  the branch (`docs/bringup/cp-gpu-sync-chain.md`, output cap record).
 
 ## Command-processor submission ring at 32 slots (2026-11-10)
 

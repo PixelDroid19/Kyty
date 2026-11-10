@@ -263,7 +263,18 @@ Each link moves the wait to the next one:
        draw of 61,667 groups or more was admitted and then exited; more parameters lower the
        threshold. `ResolveGeometryDraw` now refuses a plan whose whole output passes
        `CommandBuffer::kGeometryOutputMaxBytes`, so the draw takes the counted refusal path above.
-       No title run reached the cap, so the refusal itself was not observed.
+       No title run reached the cap. Both checks compare the same byte count with `>` against
+       the same constant: 61,666 groups of 17,412 bytes are 1,073,728,392 bytes and are
+       accepted, 61,667 are 1,073,745,804 and are refused.
+       - **Forced refusal (2026-11-10).** A temporary build lowered only this check's limit to
+         256 KiB (the indirect clamp, `GeometryOutput` and the 3-index eligibility probe kept
+         theirs). `PPSA21567 - ASTRO BOT`, strict, 45 s from boot: 5,850 geometry draws refused
+         against 15,633 recorded, no output-limit exit, flips continued to the end and the run
+         exited 0. By the code, a refused draw is skipped and counted as unsupported GE state
+         (`SkipGuestDrawForUnsupportedVertexState`, since its nonzero maximum vertex output is
+         not the passthrough shape); the 40 s capture of the boot logo shows only some letters.
+         This shows the branch and what its caller does; the real 1 GiB boundary rests on the
+         arithmetic above, since no title draw reaches it.
      - **Fixed (6d7969aad): geometry pass without a whole input primitive.** A triangle-list
        draw of one or two indexes took the geometry pass with zero groups, and the zero-byte
        output request then stopped the emulator. Such a draw has no input primitive and now
