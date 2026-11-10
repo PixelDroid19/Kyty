@@ -6,6 +6,35 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Sandbox title: frame load and command-processor ceiling in the world (2026-11-10, measured)
+
+- **Observation (Intel A770, Mesa 26.2.6, strict, 60 fps present limit, world route, build of
+  `562d7f7a4`).** In the world the title runs at 8-10 fps. Each frame carries 5,100-6,300 draws at
+  15.8 us of draw processing each, about 126 submits, and the command-processor thread is running
+  about 80% of the time (75% user, 5% kernel, from `/proc` per-thread counters). Throughput is about
+  60k draws per second, so 60 fps at this load needs about 3 us per draw.
+- **Frame structure (temporary census of every indexed draw, three frames at world entry, about
+  3,100-3,200 indexed draws each; steady frames have more):**
+  - 1,177 distinct meshes (index address, count, vertex offset) per frame and no exact repeat.
+  - 204 meshes are drawn in four passes on four target pairs. The depth-only shadow-cascade target
+    takes 1,348 draws, up to four per mesh.
+  - 53 shader and target states per frame in runs of 50 draws on average (360 at most); user data
+    changes on every draw.
+- **The load is the title's own choice under Kyty.** Every save root, including fresh games-matrix
+  roots nobody configured, holds `graphics_mode:2`, `deferred_viewdistance:20` and
+  `gfx_viewdistance:576`. What value 2 selects was not confirmed from a published source.
+- **GPU clock.** The render engine is busy about 42% of the time at 600-700 MHz, the device minimum
+  (maximum 2,400 MHz), which is about 50 ms of GPU time per frame at that clock. The GPU time at a
+  higher clock, and what keeps the clock at its minimum, are open.
+- **Measured ceilings (`perf` user-time profile of the command-processor thread, 10 s in the world):**
+  - Work that depends only on context state, plus per-draw shader input re-analysis, is 14.3% of the
+    thread (8.7% and 6.4%). A fast path for draws with unchanged state was therefore not built.
+  - The read-only snapshot family (capture, compare, upload) is in about 17% of samples.
+  - `GpuMemory` frames are in at least 30% of samples (call stacks are truncated). While that work is
+    serialized, recording draws on several threads is bounded to about 2x with four threads.
+- **Open.** None of the measured levers, alone or together, reaches 60 fps at this load; GPU time at
+  full clock is unmeasured.
+
 ## Sandbox title: snapshot comparisons in the world (2026-10-24, improved)
 
 - **Observation (Intel A770, strict, 60 fps present limit, world-entry route,
