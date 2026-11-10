@@ -48,6 +48,9 @@ fence probe only.
   | Submits | 45.9 | 44.4 | 60.8 |
   | Render engine busy, ms | 42.1 | 48.2 | 44.3 |
 
+  The submit rate tracks the regime: about 15 more per frame with the alias
+  wait, three per alias wait; the mechanism is not separated.
+
   The middle column ran a different workload through 116 s: 55-58 render
   pass begins and about 1470 uploads per frame against 69-91 and 1720-1830 in
   the other two, and no object creation. The two probed runs therefore do not
@@ -235,6 +238,15 @@ scratch spills enough to save 3 ms per frame?
   10% in dune windows).
 - **Allocator noise.** The relaxed variant moved fills by 33 with no
   register change, so differences of a few dozen fills are noise.
+- **Excluded: marking scalar registers uniform (2026-11-10).** A general
+  variant passes every value stored to a guest scalar register (and to
+  `exec`, `vcc`, `scc`) through `OpGroupNonUniformBroadcastFirst`, and a
+  second one also every load: 561:2170 and 560:2188 spills:fills against
+  556:2138, 353 maximum live registers against 354. The baseline assembly
+  already reads these values as uniform (`<0>` source regions, no-mask SIMD8
+  writes) and writes each into a whole register, so the register cost is the
+  backend's SIMD8 allocation of uniform values, not missing uniformity in
+  the translation.
 - **Conclusion.** The spills follow from the guest program's live ranges at
   128 registers per thread. No variant tried gives a general translation
   rule that cuts them, so reworking the BVH translation is closed; the
