@@ -25,8 +25,8 @@ the same build directory (Release, without link-time optimisation).
   before the segment zero-fills the segment's output range; the segment
   ends with a compute-to-vertex barrier. A pass is recorded inline as before
   when its pipeline writes guest memory or when the slot's chunk budget is
-  spent. A guest GLOBAL or FLAT store is not decoded (the parser stops on
-  it), so it cannot reach a pass unclassified.
+  spent. The parser decodes no GLOBAL or FLAT store: such an opcode ends
+  the run as unknown, so it cannot reach a pass unclassified.
 - **Segments over the route** (temporary counters, whole run): 120,938
   passes in 15,880 segments, 7.6 passes per segment. Segments of 1 pass:
   5,371; 2: 888; 3-4: 866; 5-8: 4,553; 9-16: 2,341; 17-32: 853; 33 or more:
@@ -77,7 +77,9 @@ the same build directory (Release, without link-time optimisation).
   | Dunes (samples from 60 s with 500 or more draws per frame, 24 each) | 11.42 fps | 13.19 fps |
 
   The skip-the-pass bound in the next record allows about +22 %. 60 fps is
-  still far away: the command processor stays above 50 ms per frame.
+  still far away: the command processor stays above 50 ms per frame in
+  this build without link-time optimisation. The gain on an optimised build
+  was not measured.
 - **Other titles**: `docs/bringup/cross-title.md`, "Geometry segments on
   other titles (2026-11-09)".
 
@@ -127,7 +129,8 @@ from `b76f4a71e` plus `4cf83a445` and temporary diagnostics only.
   would cost about one pass latency per run. That bounds the gain at about
   10-11 ms of GPU time per frame (about 13.6 to 15.8 fps at the recording's
   73 ms frame), not counting the render pass breaks it would also remove.
-  Not built yet; the hazards a design must respect are the guest's
+  Not built at the time (built since: see the record above); the hazards a
+  design must respect are the guest's
   synchronization events that end each run.
 - **Passes per recording.** A batch cannot cross a host recording, so a
   second counter closed its count at every command-buffer end. In 40 s of

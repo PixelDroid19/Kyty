@@ -14,7 +14,7 @@ window is reported.
 | `PPSA09076 - DREDGE` | 0 | sailing | 32.9 fps, 1,201 draws per frame |
 | `PPSA09809 - OCTOPATH TRAVELER II` | 0 | the traveler selection map | 59.9 fps |
 | `PPSA21402 - Balatro` | 0 | the run-info panel, as the reference run | 60.0 fps |
-| `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` | SIGSEGV at about 9 s | nothing presented | - |
+| `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` | SIGSEGV at about 9 s | 11 flips and 32 draws before the fault | - |
 
 - **Captures.** No corruption in any capture. Balatro matches a run of
   `26be1584d`, and DREDGE shows the same town as an earlier run.
@@ -47,10 +47,10 @@ window is reported.
   did not run in `PPSA21567 - Astro Bot` either.
 - **Playable gates.** `kyty_agent playable-regression` on
   `PPSA06084 - Superliminal` gave the same result in all 15 gates as the
-  2026-10-31 run: 11 pass, and `visual_compare` (no baseline),
-  `scene_checkpoint` (no external checkpoint), `input_sequence_complete` and
-  `input_delivered` (tap and clear sequence) fail as they did then. Exit 3
-  both times.
+  2026-10-31 run: 10 pass, and `visual_compare` (no baseline),
+  `scene_checkpoint` and `action_response` (no external checkpoint),
+  `input_sequence_complete` and `input_delivered` (tap and clear sequence)
+  fail as they did then. Exit 3 both times.
 
 ## Storage objects bound over imported guest pages (2026-10-30)
 
