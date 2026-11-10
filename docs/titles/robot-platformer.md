@@ -113,8 +113,13 @@ site.
     behind the BVH kernel. Removing it together with a deeper submission ring
     gave 17.6 fps in a probe that also skipped an empty draw, so that figure is
     an upper bound and not a gain.
-  - The record, the probe arms and the next step are in
-    `docs/bringup/cp-gpu-sync-chain.md` ("Link 2 reopened").
+  - The record, the probe arms and the deferral are in
+    `docs/bringup/cp-gpu-sync-chain.md` ("Link 2 reopened"). The device-side
+    draw is deferred: its geometry block is a host push constant, and its output
+    has no bound under the 1 GiB cap before the record is read.
+  - Host speed moved during these runs: two later runs without either change
+    gave 16.5 and 17.3 fps with the audio thread about 15 % cheaper per second.
+    The 13.1-14.1 fps baseline is not current; re-measure before comparing.
   - A run with the 960x540 patch on this date lost its timing on the moving
     route: the window held a load, not the dunes. It measured nothing, so the
     figures in the ceiling bullet above remain the last ones.

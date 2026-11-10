@@ -1,8 +1,8 @@
 # Command processor and GPU sync chain (design, 2026-10-29)
 
 Status: link 1 (`DISPATCH_INDIRECT`) is implemented (2026-10-29, see "Link 1 result"). Link 2
-(`DRAW_INDEX_INDIRECT`) was deprioritized on 2026-10-29 and reopened on 2026-11-10 (see "Link 2
-reopened"); the other links are design and measurements only.
+(`DRAW_INDEX_INDIRECT`) was deprioritized on 2026-10-29, reopened on 2026-11-10 and deferred the
+same day (see "Link 2 reopened"); the other links are design and measurements only.
 
 ## Why
 
@@ -137,11 +137,56 @@ Each link moves the wait to the next one:
        (56 %), the `CommandProcessor::Reset` drain (24 %) and untagged waits (16 %).
      - **Ceiling.** Perfect overlap at about 36 ms of CP work and 43 ms of GPU work gives about
        23 fps. This link and the ring depth alone do not reach 30 fps.
-     - **Next.** A device-side `DRAW_INDEX_INDIRECT` for geometry-pass draws: a GPU twin of the
-       geometry plan, built verify-only first as link 1 was. The ring depth comes in the same
-       piece, chosen with measured resident memory. At 32 slots without the probe it was
-       9.2-10.0 GB; there is no 8-slot figure yet. A thread with about 14 ms of kernel time per
-       frame appeared only in the probe arms and is not identified.
+     - **Facts run (temporary probe, not shipped).** A capped log of the host draw that follows
+       the refusal gave the same values in all 35 samples:
+       - 4 waves (256 lanes per group), 2 parameters and 1 primitive per instance, so 512 groups
+         of 4353 dwords: 8.9 MB of output.
+       - The front and pull programs take the geometry block as push constants (64 and 32 bytes),
+         not as the uniform-buffer spill.
+       - The targets were eligible. The draw pipeline had no fragment transport and did not write
+         guest memory; that flag is the draw pipeline's, not the geometry pipeline's.
+       - The probe also called `GpuMemoryAcquireGdsSource` at the refusal. That call publishes a
+         writer whose submissions have completed before it reports, so its answer
+         (`GuestBytesCurrent`) does not tell whether the argument bytes are device-sourced. It is
+         not a result.
+       - Resident memory at 8 slots was 7.8 GB at 60 s and 9.3-9.8 GB at 80-116 s, the same as
+         at 32 slots (7.8 GB, then 9.0-9.7 GB), one run each.
+     - **Deferred (2026-11-10).** The device-side `DRAW_INDEX_INDIRECT` for geometry-pass draws
+       (a GPU twin of the geometry plan) is deferred. Both reasons hold whatever the argument
+       source is:
+       - **Block form.** The host writes the geometry block into the push constants: output
+         address, primitives, groups per instance, base vertex, first instance and index address.
+         The group count is a host `vkCmdDispatch`. A device-fed draw needs a generated-SPIR-V
+         variant that reads the block from a buffer, with its own program key.
+       - **Output bound.** `CommandBuffer::GeometryOutput` sizes its capacity, and
+         `CloseGeometrySegment` sizes its zero fill, by the reserved span, not by what the pass
+         writes. Before the record is read, the only bound is the 65535-group limit of
+         `ResolveGeometryDraw`. For this state that is 65535 x 4353 x 4 bytes, about 1.06 GiB,
+         over the 1 GiB output cap. Above 65535 groups the geometry pass is refused; a draw whose
+         GE shape is outside the passthrough path is then skipped by
+         `ShouldSkipUnsupportedGeShader` and counted as `UnsupportedGeState`, with its first
+         occurrence published. Only a narrowed bound could work, and that changes the contract.
+         The probe's upper bound (17.6 fps against 13.8 at the same host speed) does not justify
+         it.
+       - Not identified: a thread with about 14 ms of kernel time per frame, seen only in the arm
+         with both changes.
+     - **Host speed moved during the session.** The baselines and probe arms above ran with the
+       guest audio thread at 43-45 ms of CPU per wall second; its work is constant. Two later runs
+       of one binary, with and without the facts probe, had it at 37-38.5 ms/s. They gave 16.5 and
+       17.3 fps with no change in either, the graphics CP thread at 31-32 ms per frame, and the
+       read still holding 92 % of fence time. The arm table holds within itself, but its absolute
+       rates are not a baseline: later work needs a fresh baseline at the same host speed.
+     - **Where the alias-mode wait sits.** `RecordIndexedDraw` clears its pending submission on
+       entry and sets none before the state refusal. The `publish-host` waits at the retry in
+       `DrawIndexIndirectOnDevice` therefore come from indexed-indirect draws that pass the
+       refusals, not from the refused geometry draw. One reading, not tested: whichever wait
+       comes first in the frame absorbs the GPU catch-up.
+     - **Defect found, not fixed: geometry output cap.** `ResolveGeometryDraw` admits up to 65535
+       groups, but `RecordGeometryPass` exits when the output passes the 1 GiB limit of
+       `CommandBuffer::GeometryOutput`. With 4 waves and 2 parameters (4353 dwords per group), a
+       draw of 61,667 groups or more is admitted and then exits; more parameters lower the
+       threshold. Direction: make `ResolveGeometryDraw` refuse a plan whose output passes the cap,
+       so the draw takes the refusal path above.
      - **Defect found, not fixed.** `CommandProcessor::Reset` (`GraphicsRun.cpp`) starts with
        `BufferWait()`, a full drain of the processor's recordings. The `R_DRAW_RESET` and
        `R_DISPATCH_RESET` packets reach it; the `GraphicsDrawInitDefaultHardwareState*`,
