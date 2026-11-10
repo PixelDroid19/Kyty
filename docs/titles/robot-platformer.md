@@ -128,10 +128,18 @@ site.
   draw and dispatch in every chunk of a recording. Each item takes the
   interval since the previous mark in GPU time order, so it includes gaps and
   unmarked work before it; "tail" is the mark at the end of each recording.
-  The run held 15.2 fps (the probe costs about 2-3 ms of engine time per
-  frame). The timestamps sum to 44.4 ms per frame against 44.7 ms of engine
-  time (busy x frame time) in the same run, so the bill accounts for the
-  engine time. Recordings never overlapped (span union = span sum).
+  The binary was built from 799fb76fd plus the command-processor counter fix
+  (88c21e1b9, the only code commit on the branch after it) and the temporary
+  probes. The run held 15.2 fps (the probe costs about 2-3 ms of engine time
+  per frame). The timestamps sum to 44.4 ms per frame against 44.7 ms of
+  render-engine time (busy x frame time) in the same run, so the bill
+  accounts for the engine time. The compute engine stayed idle, so every
+  queue's work ran on the render engine and that engine time covers all of
+  it. Recordings never overlapped (span union = span sum). The 67 recordings
+  per frame match the run's submit counter over a 10 s window: about 60
+  submits per frame on the graphics queue and 6.6 on three compute queues.
+  The "about 36" graphics submits quoted in `cp-gpu-sync-chain.md` come from
+  the earlier probe-arm runs; why the counts differ was not checked.
 
   | Per frame | Time | Count | Mean |
   | --- | --- | --- | --- |
