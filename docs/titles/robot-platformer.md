@@ -56,10 +56,14 @@ fence probe only.
   code, one wait submits at most two graphics recordings, both conditional:
   the open recording at the same-queue wait (`WaitSubmission`) if the
   awaited one is still recording, and the idle-GPU submit after the retried
-  draw (`SubmitRecordedWorkIfGpuIdle`, every 8 operations and 500 us). The
-  third submit is not on the wait's path; the idle-GPU rule firing more
-  often while the GPU drains during waits would fit, but it was not
-  measured. The alias itself is not identified: the run that took this wait
+  draw (`SubmitRecordedWorkIfGpuIdle`, every 8 operations and 500 us); the
+  wait itself blocks on the fences through the awaited submission
+  (`CompleteSubmittedThroughLocked`). The third submit is not on the wait's
+  path. The per-site counter of the GPU bill run below put its 56.5 submits
+  per flip mostly on the idle-GPU rule (29.3, against about 9 in the earlier
+  runs of about 36), so the extra submits are that rule's. Whether that run
+  took alias waits was not probed, so the link from the alias wait to the
+  idle-GPU flushes is inferred, not measured. The alias itself is not identified: the run that took this wait
   predates the probe that names it, and the probed run did not take it.
 
   The middle column ran a different workload through 116 s: 55-58 render

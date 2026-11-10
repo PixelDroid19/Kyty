@@ -272,7 +272,7 @@ Each link moves the wait to the next one:
          against 15,633 recorded, no output-limit exit, flips continued to the end and the run
          exited 0. By the code, a refused draw is skipped and counted as unsupported GE state
          (`SkipGuestDrawForUnsupportedVertexState`, since its nonzero maximum vertex output is
-         not the passthrough shape); the 40 s capture of the boot logo shows only some letters.
+         not the passthrough shape); the skip was read from the code, not seen in the capture.
          This shows the branch and what its caller does; the real 1 GiB boundary rests on the
          arithmetic above, since no title draw reaches it.
      - **Fixed (6d7969aad): geometry pass without a whole input primitive.** A triangle-list
