@@ -1,0 +1,103 @@
+#version 450
+// Converts one guest DRAW_INDEX_INDIRECT record (five 32-bit words) of a draw that runs as a
+// geometry pass into the pass block, the pass dispatch and the pull draw, as the host does for
+// a record it reads:
+// - the index count is clamped to the INDEX_BUFFER_SIZE window past the start index;
+// - the input primitives of an instance follow the topology, and every instance takes
+//   ceil(primitives / primitives per group) groups;
+// - a draw of more groups than the host output holds draws nothing and counts one refusal;
+// - the host vertex offset is added to the guest base vertex, and a sum outside int32 draws
+//   nothing;
+// - a draw with primitives latches its instance count as NUM_INSTANCES. An empty draw keeps
+//   the previous value: the host one when given, else the latched one.
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// 0: guest storage buffer, 1: pass header (block, dispatch, draw), 2: NUM_INSTANCES latch per
+// queue, then the refusal count.
+layout(std430, binding = 0) buffer IndirectBuffer
+{
+	uint words[];
+}
+buffers[3];
+
+layout(push_constant) uniform PushConstants
+{
+	uint source_word;
+	uint index_window;
+	int  vertex_offset;
+	uint latch_word;
+	// Zero keeps the latched value; NUM_INSTANCES itself is never zero.
+	uint previous_instances;
+	uint index_base_lo;
+	uint index_base_hi;
+	// log2 of the index size in bytes.
+	uint index_shift;
+	// 0: point list, 1: triangle list, 2: triangle strip.
+	uint topology;
+	uint primitives_per_group;
+	uint group_lanes;
+	uint max_groups;
+	uint output_lo;
+	uint output_hi;
+	uint refusal_word;
+}
+push;
+
+const uint kPointList     = 0u;
+const uint kTriangleStrip = 2u;
+
+void main()
+{
+	const uint count          = buffers[0].words[push.source_word];
+	const uint instances      = buffers[0].words[push.source_word + 1u];
+	const uint start          = buffers[0].words[push.source_word + 2u];
+	const int  base_vertex    = int(buffers[0].words[push.source_word + 3u]);
+	const uint first_instance = buffers[0].words[push.source_word + 4u];
+
+	const uint available = start >= push.index_window ? 0u : push.index_window - start;
+	const uint drawn     = min(count, available);
+	const uint primitives =
+	    push.topology == kPointList ? drawn : push.topology == kTriangleStrip ? (drawn >= 3u ? drawn - 2u : 0u) : drawn / 3u;
+	const uint groups_per_instance = (primitives + push.primitives_per_group - 1u) / push.primitives_per_group;
+	const bool live                = drawn != 0u && instances != 0u;
+	const bool refused             = live && groups_per_instance != 0u && instances > push.max_groups / groups_per_instance;
+	const int  vertex_offset       = base_vertex + push.vertex_offset;
+	// Integer addition wraps: the sum left int32 when both operands share a sign it lacks.
+	const bool overflow = (base_vertex < 0) == (push.vertex_offset < 0) && (vertex_offset < 0) != (base_vertex < 0);
+	const uint groups   = live && !refused && !overflow ? groups_per_instance * instances : 0u;
+
+	uint       carry    = 0u;
+	const uint index_lo = uaddCarry(push.index_base_lo, start << push.index_shift, carry);
+	const uint index_hi = push.index_base_hi + (start >> (32u - push.index_shift)) + carry;
+
+	buffers[1].words[0] = push.output_lo;
+	buffers[1].words[1] = push.output_hi;
+	buffers[1].words[2] = primitives;
+	buffers[1].words[3] = groups_per_instance;
+	buffers[1].words[4] = uint(vertex_offset);
+	buffers[1].words[5] = first_instance;
+	buffers[1].words[6] = index_lo;
+	buffers[1].words[7] = index_hi;
+
+	buffers[1].words[8]  = groups;
+	buffers[1].words[9]  = 1u;
+	buffers[1].words[10] = 1u;
+
+	buffers[1].words[12] = groups * push.group_lanes * 3u;
+	buffers[1].words[13] = 1u;
+	buffers[1].words[14] = 0u;
+	buffers[1].words[15] = 0u;
+
+	if (refused)
+	{
+		atomicAdd(buffers[2].words[push.refusal_word], 1u);
+	}
+	if (live)
+	{
+		buffers[2].words[push.latch_word] = instances;
+	} else if (push.previous_instances != 0u)
+	{
+		buffers[2].words[push.latch_word] = push.previous_instances;
+	}
+}

@@ -2173,6 +2173,10 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 	id.ids.Add(geometry.waves);
 	id.ids.Add(geometry.indexed ? geometry.index_format + 1u : 0u);
 	id.ids.Add(geometry.part_lanes);
+	if (geometry.device_block)
+	{
+		id.ids.Add(0x44424c4bu); // DBLK: block read from device memory.
+	}
 
 	Pipeline p {};
 	p.cs_shader_id   = id;

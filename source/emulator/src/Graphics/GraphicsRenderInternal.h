@@ -1897,6 +1897,39 @@ void          GraphicsRenderCheckDispatchIndirectLimits();
 VulkanBuffer* GraphicsRenderRecordDrawIndexedIndirectArgs(CommandBuffer* buffer, const VulkanBuffer* source, uint64_t offset,
                                                           uint32_t index_window, int32_t vertex_offset, uint32_t latch_queue,
                                                           uint32_t previous_instances);
+// The 64-byte header of a geometry pass whose DRAW_INDEX_INDIRECT record the device reads: the
+// pass block (ShaderGeometryComputeInfo), the group count dispatched by the clear and the pass,
+// and the VkDrawIndirectCommand of the pull.
+constexpr uint32_t kGeometryIndirectHeaderBytes    = 64u;
+constexpr uint32_t kGeometryIndirectDispatchOffset = 32u;
+constexpr uint32_t kGeometryIndirectDrawOffset     = 48u;
+// What the host knows of such a draw. topology: 0 point list, 1 triangle list, 2 triangle strip;
+// index_shift: log2 of the index size.
+struct GeometryIndirectShape
+{
+	uint32_t index_window         = 0;
+	int32_t  vertex_offset        = 0;
+	uint32_t latch_queue          = 0;
+	uint32_t previous_instances   = 0;
+	uint64_t index_base           = 0;
+	uint32_t index_shift          = 0;
+	uint32_t topology             = 0;
+	uint32_t primitives_per_group = 0;
+	uint32_t group_lanes          = 0;
+	uint32_t max_groups           = 0;
+	uint64_t output_address       = 0;
+};
+// Records a conversion of the 20-byte DRAW_INDEX_INDIRECT record at `offset` of `source` into a
+// geometry pass header, in queue order, as the host resolves a record it reads: the record latches
+// its instance count as GraphicsRenderRecordDrawIndexedIndirectArgs does, and a draw of more than
+// `max_groups` groups dispatches nothing and is counted as skipped at completion. Returns the
+// header, or nullptr when the conversion is unavailable.
+VulkanBuffer* GraphicsRenderRecordGeometryIndirectArgs(CommandBuffer* buffer, const VulkanBuffer* source, uint64_t offset,
+                                                       const GeometryIndirectShape& shape);
+// Zeroes the groups the header dispatches, of `group_dwords` each from `output_offset` of `output`.
+bool GraphicsRenderRecordGeometryOutputClear(CommandBuffer* buffer, const VulkanBuffer* header, VulkanBuffer* output,
+                                             uint64_t output_offset, uint32_t group_dwords);
+void GraphicsRenderCheckGeometryIndirectRefusals();
 
 bool                            RenderColorSlotConfigured(const RenderColorInfo& color, uint32_t slot);
 bool                            RenderColorSlotActive(const RenderColorInfo& color, uint32_t slot);

@@ -1668,8 +1668,12 @@ struct GeometryDrawPlan
 	uint32_t                  groups_per_instance = 0;
 	uint32_t                  groups              = 0;
 };
+// One dispatch of a pass takes at most this many groups.
+static constexpr uint32_t  kGeometryMaxGroups = 65535u;
 static bool                ResolveGeometryDraw(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx,
                                                uint32_t index_count, uint32_t instance_count, GeometryDrawPlan* plan);
+static bool                ResolveGeometryIndirectDraw(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx,
+                                                       GeometryDrawPlan* plan);
 static ShaderVertexInputInfo MakeGeometryFrontInput(const ShaderVertexInputInfo& front);
 static ShaderVertexInputInfo MakeGeometryPullInput(const ShaderVertexInputInfo& front, const GeometryDrawPlan& plan);
 static void                  RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& ctx,
@@ -1704,9 +1708,21 @@ struct IndexedIndirectSource
 	bool     recorded           = false;
 };
 
-// Draws whose commands depend on the record's values only through the indirect arguments:
-// no geometry pass, chunked or rect primitive, or fixed-function color, depth or stencil
-// operation that the host path skips for an empty record.
+// The clear of a device-read geometry pass binds the whole pass output.
+bool GeometryIndirectSupported()
+{
+	static const bool supported = []
+	{
+		VkPhysicalDeviceProperties properties {};
+		vkGetPhysicalDeviceProperties(g_render_ctx->GetGraphicCtx()->physical_device, &properties);
+		return properties.limits.maxStorageBufferRange >= CommandBuffer::kGeometryOutputMaxBytes;
+	}();
+	return supported;
+}
+
+// Draws whose commands depend on the record's values only through the indirect arguments: no
+// chunked or rect primitive, fixed-function color, depth or stencil operation that the host path
+// skips for an empty record, or geometry pass the device cannot size.
 bool IndexedIndirectStateEligible(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx,
                                   uint32_t index_type_and_size)
 {
@@ -1720,7 +1736,7 @@ bool IndexedIndirectStateEligible(const HW::Context& ctx, const HW::UserConfig& 
 	return g_render_ctx->GetGraphicCtx()->draw_indirect_first_instance_supported && index_type_and_size <= 1u && prim_type >= 1u &&
 	       prim_type <= 6u && color_mode != kColorEliminateFastClear && color_mode != kColorResolve && color_mode != kColorDecompress &&
 	       !ctx.GetRenderControl().depth_copy && !ctx.GetRenderControl().stencil_copy &&
-	       !ResolveGeometryDraw(ctx, ucfg, sh_ctx, 3u, 1u, &geometry_probe);
+	       (GeometryIndirectSupported() || !ResolveGeometryDraw(ctx, ucfg, sh_ctx, 3u, 1u, &geometry_probe));
 }
 
 // A clear the pass applies whatever the record holds; the guest clears nothing for an empty draw.
@@ -1741,6 +1757,13 @@ bool IndexedIndirectTargetsEligible(const RenderColorInfo& color, const RenderDe
 }
 
 } // namespace
+
+static VulkanBuffer* RecordGeometryIndirectPass(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& ctx,
+                                                const HW::Shader& sh_ctx, ShaderVertexInputInfo* front, const GeometryDrawPlan& plan,
+                                                const GpuMemoryGdsSource& source, const IndexedIndirectSource& indirect,
+                                                uint32_t index_window, int32_t vertex_offset, uint64_t index_base,
+                                                const GuestDeviceAddressTable* device_address_table, ShaderVertexInputInfo* pull,
+                                                const SubmissionId* mutation_conflict);
 
 static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                               uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
@@ -1791,8 +1814,9 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 		}
 	}
 	GeometryDrawPlan geometry_plan;
-	const bool       geometry_pass =
-	    indirect == nullptr && ResolveGeometryDraw(*ctx, *ucfg, *sh_ctx, index_count, instance_count, &geometry_plan);
+	const bool       geometry_pass = indirect == nullptr
+	                                     ? ResolveGeometryDraw(*ctx, *ucfg, *sh_ctx, index_count, instance_count, &geometry_plan)
+	                                     : ResolveGeometryIndirectDraw(*ctx, *ucfg, *sh_ctx, &geometry_plan);
 	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx, geometry_pass))
 	{
 		MaybeDumpIndexDrawSkip("invalid-vs-or-ge", index_count, draw_modifier, type);
@@ -2083,7 +2107,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	// The geometry pass reads the guest index buffer itself, through the
 	// device-address table, so GPU-written indexes are seen in queue order; the
 	// pull stage then draws the output records without an index buffer.
-	if (geometry_pass)
+	if (geometry_pass && indirect == nullptr)
 	{
 		RecordGeometryPass(submit_id, buffer, *ctx, *sh_ctx, &*geometry_front, geometry_plan, vertex_offset, first_instance,
 		                   &device_address_table, &vs_input_info, reinterpret_cast<uint64_t>(index_addr), pending_submission);
@@ -2168,7 +2192,18 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 
 	// The conversion closes the pass and binds its own compute state, so it precedes the draw's state.
 	VulkanBuffer* indirect_args = nullptr;
-	if (indirect != nullptr)
+	if (indirect != nullptr && geometry_pass)
+	{
+		indirect_args = RecordGeometryIndirectPass(submit_id, buffer, *ctx, *sh_ctx, &*geometry_front, geometry_plan, indirect_source,
+		                                           *indirect, index_count, vertex_offset, reinterpret_cast<uint64_t>(index_addr),
+		                                           &device_address_table, &vs_input_info, pending_submission);
+		if (indirect_args == nullptr)
+		{
+			return;
+		}
+		// After the pass, which may move the recording to a new command buffer.
+		vk_buffer = buffer->RecordState();
+	} else if (indirect != nullptr)
 	{
 		indirect_args = GraphicsRenderRecordDrawIndexedIndirectArgs(buffer, indirect_source.buffer, indirect_source.offset, index_count,
 		                                                            vertex_offset, indirect->latch_queue, indirect->previous_instances);
@@ -2322,7 +2357,13 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 		vertex_clip_probe->BeginDepthPassQuery(buffer);
 	}
 	uint32_t host_draws = 0;
-	if (indirect_args != nullptr)
+	if (indirect_args != nullptr && geometry_pass)
+	{
+		vkCmdDrawIndirect(pass_buffer, indirect_args->buffer, kGeometryIndirectDrawOffset, 1, sizeof(VkDrawIndirectCommand));
+		DebugStatsRecordDraw();
+		host_draws++;
+		indirect->recorded = true;
+	} else if (indirect_args != nullptr)
 	{
 		vkCmdDrawIndexedIndirect(pass_buffer, indirect_args->buffer, 0, 1, sizeof(VkDrawIndexedIndirectCommand));
 		DebugStatsRecordDraw();
@@ -2935,7 +2976,6 @@ static bool ResolveGeometryDraw(const HW::Context& ctx, const HW::UserConfig& uc
 	constexpr uint32_t kTriangleStripPrimType = 6u;
 	constexpr uint32_t kTriangleOutPrimType   = 2u;
 	constexpr uint32_t kLanes                 = ShaderGeometryComputeInfo::kLanes;
-	constexpr uint32_t kMaxGroups             = 65535u;
 
 	const auto& raw    = ctx.GetShaderStagesRaw();
 	const auto  stages = GraphicsDecodeGeStages(raw, GraphicsGeGeneration::Gfx103);
@@ -2981,7 +3021,7 @@ static bool ResolveGeometryDraw(const HW::Context& ctx, const HW::UserConfig& uc
 	plan->groups_per_instance = (plan->primitives + plan->info.primitives_per_group - 1u) / plan->info.primitives_per_group;
 	const uint64_t groups     = static_cast<uint64_t>(plan->groups_per_instance) * instance_count;
 	// RecordGeometryPass takes the whole output in one GeometryOutput range.
-	if (groups > kMaxGroups || groups * plan->info.GroupDwords() * 4u > CommandBuffer::kGeometryOutputMaxBytes)
+	if (groups > kGeometryMaxGroups || groups * plan->info.GroupDwords() * 4u > CommandBuffer::kGeometryOutputMaxBytes)
 	{
 		return false;
 	}
@@ -3098,6 +3138,98 @@ static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const 
 	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
 	                     nullptr);
+}
+
+// The pass of a DRAW_INDEX_INDIRECT record the device reads: the shape of the state's smallest
+// draw, the block in device memory, and as many groups as the host takes for one pass.
+static bool ResolveGeometryIndirectDraw(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx, GeometryDrawPlan* plan)
+{
+	if (!ResolveGeometryDraw(ctx, ucfg, sh_ctx, 3u, 1u, plan))
+	{
+		return false;
+	}
+	const uint64_t group_bytes = static_cast<uint64_t>(plan->info.GroupDwords()) * 4u;
+	plan->info.device_block    = true;
+	plan->primitives           = 0;
+	plan->groups_per_instance  = 0;
+	plan->groups = static_cast<uint32_t>(std::min<uint64_t>(kGeometryMaxGroups, CommandBuffer::kGeometryOutputMaxBytes / group_bytes));
+	return true;
+}
+
+static uint64_t GeometryBufferAddress(const VulkanBuffer& buffer)
+{
+	VkBufferDeviceAddressInfo address_info {};
+	address_info.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+	address_info.buffer = buffer.buffer;
+	return vkGetBufferDeviceAddress(g_render_ctx->GetGraphicCtx()->device, &address_info);
+}
+
+// Records the pass of a DRAW_INDEX_INDIRECT record the device reads: the record's conversion into
+// the pass header, the zeroed groups, and the pass over the header's group count, outside the
+// render pass and never batched, since the host knows neither the count nor the range written.
+// Sets the output address in `pull` and returns the header, whose draw the pull takes; nullptr
+// when the pass is unavailable or `mutation_conflict` is set.
+static VulkanBuffer* RecordGeometryIndirectPass(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& ctx,
+                                                const HW::Shader& sh_ctx, ShaderVertexInputInfo* front, const GeometryDrawPlan& plan,
+                                                const GpuMemoryGdsSource& source, const IndexedIndirectSource& indirect,
+                                                uint32_t index_window, int32_t vertex_offset, uint64_t index_base,
+                                                const GuestDeviceAddressTable* device_address_table, ShaderVertexInputInfo* pull,
+                                                const SubmissionId* mutation_conflict)
+{
+	const uint64_t bytes  = static_cast<uint64_t>(plan.groups) * plan.info.GroupDwords() * 4u;
+	uint64_t       offset = 0;
+	auto*          output = buffer->GeometryOutput(bytes, &offset);
+	// ResolveGeometryIndirectDraw keeps the groups within the limit.
+	EXIT_IF(output == nullptr);
+	const uint64_t output_address = GeometryBufferAddress(*output) + offset;
+
+	GeometryIndirectShape shape;
+	shape.index_window         = index_window;
+	shape.vertex_offset        = vertex_offset;
+	shape.latch_queue          = indirect.latch_queue;
+	shape.previous_instances   = indirect.previous_instances;
+	shape.index_base           = index_base;
+	shape.index_shift          = plan.info.index_format == 1u ? 1u : 2u;
+	shape.topology             = plan.info.topology == ShaderGeometryInputTopology::PointList       ? 0u
+	                             : plan.info.topology == ShaderGeometryInputTopology::TriangleStrip ? 2u
+	                                                                                                : 1u;
+	shape.primitives_per_group = plan.info.primitives_per_group;
+	shape.group_lanes          = plan.info.GroupLanes();
+	shape.max_groups           = plan.groups;
+	shape.output_address       = output_address;
+	auto* header               = GraphicsRenderRecordGeometryIndirectArgs(buffer, source.buffer, source.offset, shape);
+	if (header == nullptr || !GraphicsRenderRecordGeometryOutputClear(buffer, header, output, offset, plan.info.GroupDwords()))
+	{
+		return nullptr;
+	}
+
+	// The pass reads its block from the header; the pull reads only the output address.
+	const uint64_t header_address = GeometryBufferAddress(*header);
+	const uint32_t front_block[8] = {static_cast<uint32_t>(header_address), static_cast<uint32_t>(header_address >> 32u)};
+	const uint32_t pull_block[8]  = {static_cast<uint32_t>(output_address), static_cast<uint32_t>(output_address >> 32u)};
+	std::memcpy(front->bind.geometry_block, front_block, sizeof(front_block));
+	std::memcpy(pull->bind.geometry_block, pull_block, sizeof(pull_block));
+
+	const auto& vs       = sh_ctx.GetVs();
+	auto*       pipeline = g_render_ctx->GetPipelineCache()->CreateGeometryPipeline(buffer, front, plan.info, &vs,
+	                                                                                 &ctx.GetShaderRegisters());
+	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, front->bind, VK_SHADER_STAGE_COMPUTE_BIT,
+	                DescriptorCache::Stage::Compute, 0, nullptr, vs.gs_regs.chksum, nullptr, nullptr, device_address_table);
+	if (mutation_conflict->sequence != 0)
+	{
+		return nullptr;
+	}
+	// Binding may have recorded host commands, which the descriptor sets follow.
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
+	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+	vkCmdDispatchIndirect(vk_buffer, header->buffer, kGeometryIndirectDispatchOffset);
+	VkMemoryBarrier barrier {};
+	barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+	                     nullptr);
+	return header;
 }
 
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,

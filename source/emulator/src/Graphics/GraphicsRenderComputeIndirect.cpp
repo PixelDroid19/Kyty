@@ -18,6 +18,8 @@ namespace {
 
 #include "host_shaders/dispatch_indirect_args_comp.inc"
 #include "host_shaders/draw_indexed_indirect_args_comp.inc"
+#include "host_shaders/geometry_indirect_args_comp.inc"
+#include "host_shaders/geometry_output_clear_comp.inc"
 
 struct DispatchIndirectArgsPush
 {
@@ -36,6 +38,31 @@ struct DrawIndexedIndirectArgsPush
 	uint32_t previous_instances = 0;
 };
 
+struct GeometryIndirectArgsPush
+{
+	uint32_t source_word          = 0;
+	uint32_t index_window         = 0;
+	int32_t  vertex_offset        = 0;
+	uint32_t latch_word           = 0;
+	uint32_t previous_instances   = 0;
+	uint32_t index_base_lo        = 0;
+	uint32_t index_base_hi        = 0;
+	uint32_t index_shift          = 0;
+	uint32_t topology             = 0;
+	uint32_t primitives_per_group = 0;
+	uint32_t group_lanes          = 0;
+	uint32_t max_groups           = 0;
+	uint32_t output_lo            = 0;
+	uint32_t output_hi            = 0;
+	uint32_t refusal_word         = 0;
+};
+
+struct GeometryOutputClearPush
+{
+	uint32_t output_word  = 0;
+	uint32_t group_dwords = 0;
+};
+
 // A one-invocation kernel that converts a guest record into host indirect arguments, with
 // host-visible words it reports through. Created once per process; it runs under the render mutex.
 struct ArgumentConverter
@@ -51,8 +78,14 @@ struct ArgumentConverter
 
 // Host words: the sticky limit flag.
 ArgumentConverter g_dispatch_converter;
-// Host words: the NUM_INSTANCES latch of each queue.
+// Host words: the NUM_INSTANCES latch of each queue, then the count of geometry draws refused for
+// their output size.
 ArgumentConverter g_draw_converter;
+constexpr uint32_t kGeometryRefusalWord = static_cast<uint32_t>(GraphicContext::QUEUES_NUM);
+// Latches into g_draw_converter's words.
+ArgumentConverter g_geometry_converter;
+ArgumentConverter g_geometry_clear;
+std::atomic<uint32_t> g_geometry_refusals_seen {0};
 
 ShaderBindResources ConverterBindings()
 {
@@ -130,14 +163,13 @@ bool ConverterReady(const uint32_t* code, size_t code_bytes, uint32_t push_bytes
 	return converter->ready;
 }
 
-// Records the conversion outside the render pass. The guest record is read after every earlier
-// write of this queue, and the one argument scratch of a recording is rewritten only after its
-// last indirect read; the host words are read once the recording's fence completes.
-bool RecordConverter(CommandBuffer* buffer, const ArgumentConverter& converter, const VulkanBuffer* source, VulkanBuffer* args,
-                     const void* push, uint32_t push_bytes)
+// Binds `converter` with `bound` outside the render pass, after every earlier command of this
+// queue; VK_NULL_HANDLE when its descriptor set is unavailable.
+VkCommandBuffer BindConverter(CommandBuffer* buffer, const ArgumentConverter& converter, VulkanBuffer* (&bound)[3], const void* push,
+                              uint32_t push_bytes)
 {
 	const auto    bind                  = ConverterBindings();
-	VulkanBuffer* descriptor_buffers[3] = {const_cast<VulkanBuffer*>(source), args, const_cast<VulkanBuffer*>(&converter.host_words)};
+	VulkanBuffer* descriptor_buffers[3] = {bound[0], bound[1], bound[2]};
 	VulkanImage*  no_images[DescriptorCache::TEXTURES_SAMPLED_MAX]         = {};
 	int           no_views[DescriptorCache::TEXTURES_SAMPLED_MAX]          = {};
 	VulkanImage*  no_storage_images[DescriptorCache::TEXTURES_STORAGE_MAX] = {};
@@ -150,7 +182,7 @@ bool RecordConverter(CommandBuffer* buffer, const ArgumentConverter& converter, 
 	    no_samplers, no_gds, nullptr, bind);
 	if (descriptor == nullptr || descriptor->set == VK_NULL_HANDLE)
 	{
-		return false;
+		return VK_NULL_HANDLE;
 	}
 
 	auto*           vk_buffer = buffer->RecordOutsideRenderPass();
@@ -164,14 +196,31 @@ bool RecordConverter(CommandBuffer* buffer, const ArgumentConverter& converter, 
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, converter.pipeline);
 	vkCmdBindDescriptorSets(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, converter.pipeline_layout, 0, 1, &descriptor->set, 0, nullptr);
 	vkCmdPushConstants(vk_buffer, converter.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes, push);
+	return vk_buffer;
+}
+
+// Records the conversion outside the render pass. The guest record is read after every earlier
+// command of this queue, and the one argument scratch of a recording is rewritten only after its
+// last indirect read; later indirect commands and compute shaders read the arguments, and the
+// host words are read once the recording's fence completes.
+bool RecordConverter(CommandBuffer* buffer, const ArgumentConverter& converter, const VulkanBuffer* source, VulkanBuffer* args,
+                     const VulkanBuffer* host_words, const void* push, uint32_t push_bytes)
+{
+	VulkanBuffer* bound[3]  = {const_cast<VulkanBuffer*>(source), args, const_cast<VulkanBuffer*>(host_words)};
+	auto*         vk_buffer = BindConverter(buffer, converter, bound, push, push_bytes);
+	if (vk_buffer == VK_NULL_HANDLE)
+	{
+		return false;
+	}
 	vkCmdDispatch(vk_buffer, 1, 1, 1);
 
 	VkMemoryBarrier after {};
 	after.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-	after.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-	                     0, 1, &after, 0, nullptr, 0, nullptr);
+	after.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+	                     VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &after,
+	                     0, nullptr, 0, nullptr);
 	return true;
 }
 
@@ -205,7 +254,8 @@ VulkanBuffer* GraphicsRenderRecordDispatchIndirectArgs(CommandBuffer* buffer, co
 	push.max_x       = max_group_count[0];
 	push.max_y       = max_group_count[1];
 	push.max_z       = max_group_count[2];
-	return RecordConverter(buffer, g_dispatch_converter, source, args, &push, sizeof(push)) ? args : nullptr;
+	return RecordConverter(buffer, g_dispatch_converter, source, args, &g_dispatch_converter.host_words, &push, sizeof(push)) ? args
+	                                                                                                                         : nullptr;
 }
 
 void GraphicsRenderCheckDispatchIndirectLimits()
@@ -224,7 +274,7 @@ VulkanBuffer* GraphicsRenderRecordDrawIndexedIndirectArgs(CommandBuffer* buffer,
 	EXIT_IF(buffer == nullptr || source == nullptr || latch_queue >= static_cast<uint32_t>(GraphicContext::QUEUES_NUM));
 	if (!RecordRangeValid(source, offset, 5u) ||
 	    !ConverterReady(kDrawIndexedIndirectArgsSpirv, sizeof(kDrawIndexedIndirectArgsSpirv), sizeof(DrawIndexedIndirectArgsPush),
-	                    static_cast<uint32_t>(GraphicContext::QUEUES_NUM), &g_draw_converter))
+	                    kGeometryRefusalWord + 1u, &g_draw_converter))
 	{
 		return nullptr;
 	}
@@ -241,7 +291,102 @@ VulkanBuffer* GraphicsRenderRecordDrawIndexedIndirectArgs(CommandBuffer* buffer,
 	push.vertex_offset      = vertex_offset;
 	push.latch_word         = latch_queue;
 	push.previous_instances = previous_instances;
-	return RecordConverter(buffer, g_draw_converter, source, args, &push, sizeof(push)) ? args : nullptr;
+	return RecordConverter(buffer, g_draw_converter, source, args, &g_draw_converter.host_words, &push, sizeof(push)) ? args : nullptr;
+}
+
+VulkanBuffer* GraphicsRenderRecordGeometryIndirectArgs(CommandBuffer* buffer, const VulkanBuffer* source, uint64_t offset,
+                                                       const GeometryIndirectShape& shape)
+{
+	EXIT_IF(buffer == nullptr || source == nullptr || shape.latch_queue >= static_cast<uint32_t>(GraphicContext::QUEUES_NUM) ||
+	        shape.index_shift == 0u || shape.index_shift > 2u || shape.primitives_per_group == 0u);
+	// The latch and the refusal count are words of the draw converter.
+	if (!RecordRangeValid(source, offset, 5u) ||
+	    !ConverterReady(kDrawIndexedIndirectArgsSpirv, sizeof(kDrawIndexedIndirectArgsSpirv), sizeof(DrawIndexedIndirectArgsPush),
+	                    kGeometryRefusalWord + 1u, &g_draw_converter) ||
+	    !ConverterReady(kGeometryIndirectArgsSpirv, sizeof(kGeometryIndirectArgsSpirv), sizeof(GeometryIndirectArgsPush), 1u,
+	                    &g_geometry_converter))
+	{
+		return nullptr;
+	}
+	auto* header = buffer->AllocateTransientScratchBuffer(kGeometryIndirectHeaderBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+	                                                                                        VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+	                                                                                        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+	if (header == nullptr || header->buffer == VK_NULL_HANDLE)
+	{
+		return nullptr;
+	}
+
+	GeometryIndirectArgsPush push;
+	push.source_word          = static_cast<uint32_t>(offset / 4u);
+	push.index_window         = shape.index_window;
+	push.vertex_offset        = shape.vertex_offset;
+	push.latch_word           = shape.latch_queue;
+	push.previous_instances   = shape.previous_instances;
+	push.index_base_lo        = static_cast<uint32_t>(shape.index_base);
+	push.index_base_hi        = static_cast<uint32_t>(shape.index_base >> 32u);
+	push.index_shift          = shape.index_shift;
+	push.topology             = shape.topology;
+	push.primitives_per_group = shape.primitives_per_group;
+	push.group_lanes          = shape.group_lanes;
+	push.max_groups           = shape.max_groups;
+	push.output_lo            = static_cast<uint32_t>(shape.output_address);
+	push.output_hi            = static_cast<uint32_t>(shape.output_address >> 32u);
+	push.refusal_word         = kGeometryRefusalWord;
+	return RecordConverter(buffer, g_geometry_converter, source, header, &g_draw_converter.host_words, &push, sizeof(push)) ? header
+	                                                                                                                       : nullptr;
+}
+
+bool GraphicsRenderRecordGeometryOutputClear(CommandBuffer* buffer, const VulkanBuffer* header, VulkanBuffer* output,
+                                             uint64_t output_offset, uint32_t group_dwords)
+{
+	EXIT_IF(buffer == nullptr || header == nullptr || output == nullptr || (output_offset & 3u) != 0u || output_offset / 4u > UINT32_MAX);
+	if (!ConverterReady(kGeometryOutputClearSpirv, sizeof(kGeometryOutputClearSpirv), sizeof(GeometryOutputClearPush), 1u,
+	                    &g_geometry_clear))
+	{
+		return false;
+	}
+	GeometryOutputClearPush push;
+	push.output_word  = static_cast<uint32_t>(output_offset / 4u);
+	push.group_dwords = group_dwords;
+	VulkanBuffer* bound[3]  = {output, const_cast<VulkanBuffer*>(header), &g_geometry_clear.host_words};
+	auto*         vk_buffer = BindConverter(buffer, g_geometry_clear, bound, &push, sizeof(push));
+	if (vk_buffer == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	vkCmdDispatchIndirect(vk_buffer, header->buffer, kGeometryIndirectDispatchOffset);
+
+	// The pass writes the zeroed groups.
+	VkMemoryBarrier after {};
+	after.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	after.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &after, 0, nullptr, 0,
+	                     nullptr);
+	return true;
+}
+
+void GraphicsRenderCheckGeometryIndirectRefusals()
+{
+	const uint32_t* words = g_draw_converter.host_word.load(std::memory_order_acquire);
+	if (words == nullptr)
+	{
+		return;
+	}
+	// The count only grows, and wraps; completions of several queues may report it at once.
+	const uint32_t refused = __atomic_load_n(words + kGeometryRefusalWord, __ATOMIC_ACQUIRE);
+	uint32_t       seen    = g_geometry_refusals_seen.load(std::memory_order_relaxed);
+	while (static_cast<int32_t>(refused - seen) > 0)
+	{
+		if (g_geometry_refusals_seen.compare_exchange_weak(seen, refused, std::memory_order_relaxed))
+		{
+			for (uint32_t left = refused - seen; left != 0u; --left)
+			{
+				GraphicsRecordSkippedDraw(GraphicsSkippedDrawReason::UnsupportedGeState, "geometry pass output above the host limit");
+			}
+			return;
+		}
+	}
 }
 
 uint32_t GraphicsRenderReadDrawIndexedIndirectInstances(uint32_t latch_queue)

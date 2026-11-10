@@ -89,6 +89,8 @@ struct ShaderGeometryComputeInfo
 	uint32_t                    index_format         = 0;
 	// Host subgroup width of each guest wave's parts (ShaderSplitWavePartLanes).
 	uint32_t                    part_lanes           = 32;
+	// The device writes the 8-dword block: the push block's first two dwords hold its address.
+	bool                        device_block         = false;
 
 	static constexpr uint32_t kLanes                    = 64;
 	// An NGG subgroup holds at most 256 threads.

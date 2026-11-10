@@ -1,0 +1,29 @@
+#version 450
+// Zeroes the output group of one workgroup before a geometry pass dispatched with the same
+// group count writes it: the pull reads the words and records an allocated group does not
+// export as zero, as after the fill the host records for a pass of known size.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// 0: pass output; 1 and 2 are not read.
+layout(std430, binding = 0) buffer OutputBuffer
+{
+	uint words[];
+}
+buffers[3];
+
+layout(push_constant) uniform PushConstants
+{
+	uint output_word;
+	uint group_dwords;
+}
+push;
+
+void main()
+{
+	const uint base = push.output_word + gl_WorkGroupID.x * push.group_dwords;
+	for (uint word = gl_LocalInvocationID.x; word < push.group_dwords; word += 64u)
+	{
+		buffers[0].words[base + word] = 0u;
+	}
+}

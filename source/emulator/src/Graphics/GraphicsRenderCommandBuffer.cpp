@@ -3197,6 +3197,7 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 		    MarkRecentDrawsFenceCompleted();
 		    g_render_ctx->GetVertexClipProbeRenderer()->Complete(this);
 		    GraphicsRenderCheckDispatchIndirectLimits();
+		    GraphicsRenderCheckGeometryIndirectRefusals();
 		    const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
 		    if (fence_reset_result != VK_SUCCESS)
 		    {
@@ -3247,6 +3248,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 			    MarkRecentDrawsFenceCompleted();
 			    g_render_ctx->GetVertexClipProbeRenderer()->Complete(this);
 			    GraphicsRenderCheckDispatchIndirectLimits();
+			    GraphicsRenderCheckGeometryIndirectRefusals();
 			    if (drain_label_callbacks)
 			    {
 				    LabelDrainCompleted();
