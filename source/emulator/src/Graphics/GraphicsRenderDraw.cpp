@@ -2975,7 +2975,8 @@ static bool ResolveGeometryDraw(const HW::Context& ctx, const HW::UserConfig& uc
 	                                                                  : index_count / 3u;
 	plan->groups_per_instance = (plan->primitives + plan->info.primitives_per_group - 1u) / plan->info.primitives_per_group;
 	const uint64_t groups     = static_cast<uint64_t>(plan->groups_per_instance) * instance_count;
-	if (groups > kMaxGroups)
+	// RecordGeometryPass takes the whole output in one GeometryOutput range.
+	if (groups > kMaxGroups || groups * plan->info.GroupDwords() * 4u > CommandBuffer::kGeometryOutputMaxBytes)
 	{
 		return false;
 	}

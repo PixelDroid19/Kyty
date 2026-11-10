@@ -740,8 +740,9 @@ public:
 	VulkanBuffer* AllocateTransientCopyBuffer(uint64_t size);
 	// Device-local intermediate written and read only by GPU commands of this recording (for example a
 	// geometry pass output), with its own budget. The same ordering and lifetime rules apply. The passes of a
-	// recording take consecutive ranges at *offset.
+	// recording take consecutive ranges at *offset. A range above kGeometryOutputMaxBytes is refused.
 	VulkanBuffer* GeometryOutput(uint64_t size, uint64_t* offset);
+	static constexpr uint64_t kGeometryOutputMaxBytes = 1024u * 1024u * 1024u;
 	// Storage-buffer set for one fragment-transport draw state. The pool is reset
 	// when the recording starts, so its sets live exactly as long as the commands
 	// that bind them.

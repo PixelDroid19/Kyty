@@ -2555,8 +2555,7 @@ VulkanBuffer* CommandBuffer::GeometryOutput(uint64_t size, uint64_t* offset)
 	EXIT_IF(IsInvalid());
 	EXIT_IF(size == 0u || offset == nullptr);
 	constexpr uint64_t kMinBytes = 16u * 1024u * 1024u;
-	constexpr uint64_t kMaxBytes = 1024u * 1024u * 1024u;
-	if (size > kMaxBytes)
+	if (size > kGeometryOutputMaxBytes)
 	{
 		return nullptr;
 	}
