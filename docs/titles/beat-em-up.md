@@ -9,13 +9,14 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 ## Beat 'em up: the vertex container search walked every block of each stream (2026-11-10, fixed)
 
 - **Observed** (Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14, first area,
-  `scripts/input/reach_first_gameplay.pad`, 60 fps limit, 60-115 s window):
+  `scripts/input/reach_first_gameplay.pad`, 60 fps limit, 60-115 s window;
+  fps is flips per one-second sample, averaged over the window):
   - `40d8c109f` with `59e3640cf`, Release without link-time optimisation:
     39.4 fps; the command processor ran 23.9 ms per frame, 8.2 ms of it
     binding vertex buffers.
   - Both ends of the range with link-time optimisation, same host and driver:
-    `26be1584d` 48.2 fps with 0.56 ms of vertex buffer binding per frame,
-    `657613887` 36.1 fps with 9.43 ms. The command processor grew by 7.2 ms
+    `26be1584d` 48.6 fps with 0.56 ms of vertex buffer binding per frame,
+    `657613887` 36.4 fps with 9.43 ms. The command processor grew by 7.2 ms
     per frame.
 - **Localized** with a 5 s `perf` sample of on-CPU time at about 75 s:
   `GpuMemory::FindVertexContaining` held 29.6 % of all samples, 22.4 % in its
@@ -48,12 +49,18 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   to create. The other reached the dunes with correct captures. The replay
   follows wall clock, so the first run is recorded as a route desync, not
   attributed to the change.
-- **Verified:** `KytyUnitTest` and 7 focused tests pass.
+- **Verified:** the `KytyUnitTest` suite passes; no unit test reaches this
+  lookup.
+- **Other titles** (earlier runs of `59e3640cf`, same window): vertex buffer
+  binding is 0.92 ms per frame in `PPSA09076 - DREDGE`, 0.11 ms in
+  `PPSA09809 - OCTOPATH TRAVELER II` and 0.22 ms in `PPSA21402 - Balatro`, so
+  the remaining walk is not a bound there. The change was not run on them.
 - **Open:**
   - The advancing-V# pool that `51e107dbf` targets still walks the blocks.
     No record names its title or its gain.
-  - `26be1584d` ran 58.1 fps on 2026-11-07 (Mesa 26.2.5) and 48.2 fps here,
-    in a heavier cave scene. That gap is not attributed.
+  - `26be1584d` ran 58.6 fps on 2026-11-07 (Mesa 26.2.5) and 48.6 fps here.
+    The 58.6 and 58.7 fps runs stayed at the camp and the 48.6 fps run
+    reached a cave, so the gap looks like scene, not driver; not measured.
 
 ## Beat 'em up: every in-place uniform fill was written twice to guest memory (2026-11-07, fixed)
 

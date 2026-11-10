@@ -25,7 +25,7 @@ window is reported.
   It was at the camp at 115 s while the change's run was in a level, so the
   two windows cover different scenes. The 58.1 fps of an earlier
   `26be1584d` run was not the build configuration: with link-time
-  optimisation on both, `26be1584d` ran 48.2 fps and `657613887` 36.1 fps.
+  optimisation on both, `26be1584d` ran 48.6 fps and `657613887` 36.4 fps.
   Most of the gap was the vertex container search added in `51e107dbf`,
   fixed in `799fb76fd` (see `docs/titles/beat-em-up.md`).
 - **OCTOPATH TRAVELER II** reported one `gfx_storage_frontier` event at
