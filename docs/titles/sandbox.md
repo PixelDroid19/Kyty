@@ -60,7 +60,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Ceiling: about 1.25x alone. It also removes work done under the snapshot pool lock, which parallel
     recording needs.
 - **State setup split (temporary stage timers, one run, 1.4 million draws in the world, 4,945 draws
-  per frame, 6-9 fps).** The timed span costs 5.2 us per draw (25.7 ms per frame) and no stage
+  per frame, 7.6 fps mean, 131 ms frames).** The timed span costs 5.2 us per draw (25.7 ms per frame) and no stage
   dominates. The standing counter reads 6.4 us per draw over the same run; the gap is not attributed.
   - Vertex input analysis 1.25 us; primitive plan and pixel input analysis 0.88 us. Both rebuild a
     multi-kilobyte input description on every draw.
@@ -75,11 +75,16 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Shared caches, about 13 ms: pipeline setup and descriptor-set finalization.
   - Independent of other draws, about 22 ms: register-only state setup and command emission.
   - Not attributed by any counter, about 10 ms.
-  - With four recording threads the frame is bounded at 1.2x (only independent work in parallel) to
-    1.5x (caches and unattributed work in parallel too), about 11-14 fps. Parallel recording was not
-    built, and the in-place read-only binds above stay measured, not built.
-- **GPU estimate.** In the same run the render engine was busy 37% of 108 ms frames at 600-650 MHz,
-  about 40 ms. If that time scaled with the clock it would be about 11 ms at 2,400 MHz; this is an
+  - The 61 ms include 12.4 ms of waits for a command-buffer slot's fence. The census run above, on
+    the same code and at the same frame time, waited 1.1 ms per frame while its temporary counters
+    added CP work, so part of the CP time is set by GPU completion. The waits do not follow power-limit
+    throttle windows or other processes' GPU use. Whether the waits also lie inside a draw-stage span
+    was not checked; if they do, they are counted twice above.
+  - With four recording threads, command-processor time is bounded at 1.2x (only independent work in
+    parallel) to 1.7x (caches, unattributed work and the double-count case in parallel too). Parallel
+    recording was not built, and the in-place read-only binds above stay measured, not built.
+- **GPU estimate.** In the same run the render engine was busy 37% of 131 ms frames at 600-650 MHz,
+  about 48 ms. If that time scaled with the clock it would be about 13 ms at 2,400 MHz; this is an
   estimate, not a measurement.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
   now. None of the measured levers, alone or together, reaches that.
