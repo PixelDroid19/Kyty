@@ -6,6 +6,55 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: geometry passes are latency-bound and overlap (2026-11-09)
+
+Same title, host, route and settings as the next record. Executables built
+from `b76f4a71e` plus `4cf83a445` and temporary diagnostics only.
+
+- **Shape.** Geometry passes emulate the guest's merged ES+GS stage as a
+  compute dispatch before each pull draw. In the dunes, `0xf4cfb9a5` passes
+  all have one group: one guest wave of 64 lanes, eight 8-lane host
+  subgroups, at most 16 primitives. Across the whole route its passes have
+  1-128 groups.
+- **Compile statistics** (ANV through `VK_KHR_pipeline_executable_properties`,
+  a copy of each geometry pipeline created with statistics capture):
+
+  | Geometry program | Width | Instructions | SENDs | Loops | Spills:fills | Max live |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | `0xf4cfb9a5` | SIMD8 | 44,571 | 2,151 | 292 | 862:1,132 | 274 |
+  | `0x8e51dd94` | SIMD8 | 46,438 | 2,335 | 315 | 791:1,053 | 287 |
+  | `0x0e89d742` | SIMD8 | 18,069 | 490 | 35 | 367:975 | 242 |
+  | `0xfc3d1580` | SIMD16 | 18,195 | 953 | 123 | 311:1,067 | 286 |
+
+  The rule set before the run (at least 100 fills means register pressure;
+  under about 16k invocations per pass means the pass cannot fill the GPU)
+  fired on both branches, so it did not choose a lever. The next run did.
+- **Latency-bound.** GPU timestamps by group count, whole route: passes of
+  2, 3, 4, 5, 9, 50 and 63 groups all cost 106-113 us; 128 groups cost
+  360 us. A pass of one wave runs for about as long as a pass of 63. In the
+  dunes a one-group pass costs 225 us.
+- **Consecutive passes overlap.** Prediction set before the run: two copies
+  of the same dispatch, recorded back to back with no barrier, cost under
+  1.3x one copy if passes can overlap and over 1.7x if they serialize. A
+  temporary build issued every geometry dispatch twice in alternate 5 s
+  windows of the dunes, only for programs whose guest code has no memory
+  store, atomic or GDS instruction (all four above). `0xf4cfb9a5`: 233 us
+  doubled against 225 us single (1.04x, 10,470 and 13,903 passes);
+  `0x8e51dd94`: 97 against 98 us.
+- **Passes come in long runs.** A counter ended a run at every packet other
+  than draws, register writes, index state and buffer chaining. In 40 s of
+  dunes (494 frames): 65.6 geometry passes and 3.6 runs per frame, mean run
+  18.3 passes; 24,116 of 32,400 passes were in runs of 32-63. Every run ended
+  at `EVENT_WRITE`.
+- **What this bounds.** Today each pass is followed by its pull draw, with a
+  render pass break and barriers around it, so the GPU runs one wave for
+  about 225 us about 66 times a frame. Running the passes of a run together
+  would cost about one pass latency per run. That bounds the gain at about
+  10-11 ms of GPU time per frame (about 13.6 to 15.8 fps at the recording's
+  73 ms frame), not counting the render pass breaks it would also remove.
+  Not built yet; the hazards a design must respect are the guest's
+  synchronization events that end each run.
+
 ## Robot platformer: a dunes route, and where the dunes frame goes (2026-11-09)
 
 Same title, host and settings as the next record. Executables built from
@@ -29,9 +78,9 @@ off unless stated.
   The replay is not frame-identical to the recording (65 more draws per
   frame), so the two columns bound the instrument cost only loosely: at most
   about 3 ms of GPU time per frame. The frame is over budget on both sides.
-  The GPU needs about 65 ms per frame. The command processor's work outside
-  fence waits is 42-51 ms. 60 fps needs both cut by about 4x; removing either
-  bound alone leaves the other above 40 ms.
+  The GPU needs about 65 ms per frame. The command processor's time outside
+  fence waits is 42-51 ms. 60 fps needs the GPU cut by about 4x and that
+  time by 2.5-3x; removing either bound alone leaves the other above 40 ms.
 - **GPU timestamps by kind, dunes only.** Replay, the 41 s of timestamp dumps
   inside the dunes, per frame at 12.2 fps. A mark follows every draw and
   dispatch, and each item includes the gap since the previous mark:
@@ -47,9 +96,10 @@ off unless stated.
   | Draw tails | 2.7 ms | 52 | 52 us |
 
   `0x3666fa39` alone exceeds the 16.7 ms budget. The geometry program
-  `0xf4cfb9a5` costs about the same per frame in both scenes measured: 76
+  `0xf4cfb9a5` costs about 10-11 ms per frame in both scenes measured: 76
   passes of about 145 us in the scene of the next record, 47 of about 231 us
-  here. Its cost follows the work per pass, not the number of passes.
+  here. The record above shows that a pass costs the same at 2 and at 63
+  groups, so these totals do not mean the cost follows the work per pass.
 - **Excluded: the compute-after-draw transition.** Hypothesis: a compute
   dispatch recorded after a draw pays a pipeline switch that a dispatch after
   another dispatch does not, so grouping geometry dispatches would save it.
