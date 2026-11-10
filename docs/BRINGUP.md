@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: BVH kernel spills are the guest's live ranges, no translation lever (2026-11-10)
   - Robot platformer: the command processor is worth at most 3 fps in the dunes (2026-11-10)
   - Robot platformer: geometry passes batched into compute segments (2026-11-09)
   - Robot platformer: geometry passes are latency-bound and overlap (2026-11-09)

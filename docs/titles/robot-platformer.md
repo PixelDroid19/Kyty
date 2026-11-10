@@ -6,6 +6,65 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: BVH kernel spills are the guest's live ranges, no translation lever (2026-11-10)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14, translator 210, offline.
+The question: can a different translation of the BVH traversal kernel
+`0x3666fa39`, 19.7 of the 44.4 ms dunes GPU bill (record below), cut its
+scratch spills enough to save 3 ms per frame?
+
+- **Module.** A strict 211 s run of the dunes route on `aa282cbf4` with
+  temporary probes and a private copy of the shader store logged the
+  kernel's SPIR-V assembly through the shader probe. Assembled without
+  optimization (`spirv-as`, Vulkan 1.4) it is byte-identical to the module
+  the store holds for that program, so the pipeline compiles that text.
+- **Method.** Each variant is the logged text rewritten offline and
+  compiled by ANV at SIMD8, shader cache disabled, with the kernel's
+  descriptor layout; statistics and GEN assembly come from
+  `VK_KHR_pipeline_executable_properties`. Outer-loop fills are counted in
+  the assembly. Variants that break the exchange's semantics only bound
+  what a translation change could reach; none is a candidate fix.
+
+  | Variant | Instructions | Sends | Spills:fills | Outer-loop fills |
+  | --- | --- | --- | --- | --- |
+  | Baseline | 37,309 | 1219 | 556:2138 | 1072 |
+  | 19 cold scalars packed | 36,248 | 1223 | 520:1955 | 1012 |
+  | 26 cold scalars packed | 35,992 | 1226 | 488:1878 | 923 |
+  | 36 cold scalars packed | 38,132 | 1249 | 516:2123 | 1013 |
+  | 19 cold scalars in shared memory | 38,433 | 1294 | 547:2401 | 1299 |
+  | Relaxed exchange ordering (invalid) | 35,487 | 907 | 555:2171 | 1076 |
+
+- **Cold scalar registers.** The translation gives each guest scalar
+  register its own function variable, and ANV holds each in a whole register
+  at SIMD8. The packed variants keep the least-accessed scalar registers in
+  the lanes of a few per-lane variables: a read becomes a constant-lane
+  broadcast, a write a lane select. That assumes the packed values are
+  uniform in the subgroup, which was not checked. Packing all 172 declared
+  scalar registers gave no gain. The best set (26 registers) removes 149 of
+  the 1072 outer-loop fills, 89 of them in one loop at nesting depth 2 and 23
+  in the two deepest loops. Even if the outer loop's fills were the kernel's
+  whole cost, that projects under 3 ms. The saving is not monotonic in the
+  set (36 registers gives almost all of it back), so it yields no general
+  selection rule, and a hand-picked set per program would not be a general
+  translation. One workgroup-memory slot per subgroup instead of a lane is
+  worse.
+- **Rendezvous and ordering.** Removing the split-wave spin loops entirely
+  (invalid, a ceiling) still leaves 1740 fills, and the fills outside loops
+  do not move. Relaxed ordering on the exchange atomics without the acquire
+  barrier (invalid: acquire and release make the exchange defined) cuts
+  sends by 312 and SLM fences by 303 (318 to 15 in the assembly), but no
+  fills: ordering does not drive the spills. Plain loads in the spin loops,
+  and the acquire barrier moved after the loop, compiled to one identical
+  program; these and the relaxed variant have 128 loops instead of 137, for
+  a reason not established. Fence cost is bounded by the halving of the
+  rendezvous (record of 2026-10-29 below: 2399 to 1486 sends, at most about
+  10% in dune windows).
+- **Allocator noise.** The relaxed variant moved fills by 33 with no
+  register change, so differences of a few dozen fills are noise.
+- **Conclusion.** The spills follow from the guest program's live ranges at
+  128 registers per thread. No translation change tried reaches 3 ms, so
+  reworking the BVH translation is closed as a frame-rate lever.
+
 ## Robot platformer: the command processor is worth at most 3 fps in the dunes (2026-11-10)
 
 Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14, the user-recorded dunes
@@ -141,11 +200,24 @@ site.
   compute queues. Of the graphics ones, 29.3 come from
   `SubmitRecordedWorkIfGpuIdle` (it flushes when the queue has nothing
   pending, after at least 8 operations and 500 us), 19.5 from
-  `SubmitRecordedDispatchesBeforeDraw` and about 2 from other flush sites.
-  The "about 36" graphics submits quoted in `cp-gpu-sync-chain.md` came from
-  the earlier probe-arm runs, about 20 before draws and 9 idle-GPU flushes,
-  so the difference is the idle-GPU rule firing more often. Why the queue
-  drains more often in this run was not measured.
+  `SubmitRecordedDispatchesBeforeDraw` and 7.7 from the other flush sites
+  (5.0 of them at the end of each guest submission, 1.0 at the flip).
+  These are the run's last 10 s window. The "about 36" graphics submits
+  quoted in `cp-gpu-sync-chain.md` came from the earlier probe-arm runs,
+  about 20 before draws and 9 idle-GPU flushes, so the difference is the
+  idle-GPU rule firing more often.
+- **The idle-GPU flush count follows the window, not the build.** In this
+  run it was 6.9, 20.1 and 29.3 per flip in the last three windows, while
+  ring-full waits held the command processor 388, 5 and 0 ms of each 10 s.
+  A later strict run of the same route (`aa282cbf4` with temporary probes,
+  211 s) held about 15 fps in its idle-view windows (120-200 s) with 3.8-6.0
+  idle-GPU flushes, 17.9-18.0 before draws and 29.7-31.8 graphics submits
+  in all per flip, and ring-full waits of 1.5-1.8 s per 10 s. A full ring
+  keeps the GPU busy, so the rule finds the queue empty less often; this is
+  an observed correlation, the rule's trigger was not traced. Other DRM
+  clients on the GPU (12, read from the xe `fdinfo` cycle counters) used
+  1.9% of the render engine's cycles in those windows, so foreign GPU work
+  did not shape them.
 
   | Per frame | Time | Count | Mean |
   | --- | --- | --- | --- |
@@ -1736,7 +1808,7 @@ strict 60 fps-limited runs on the dune route (gw111-gw119).
   - Since the peak is mostly guest values, reshaping the module cannot cut
     it by the 30% that would remove most spills; only `spirv-opt` was tried.
     Keeping cold guest registers in shared memory, which has lower latency
-    than scratch, is untested.
+    than scratch, was worse when tried (2026-11-10 record above).
   - Excluded (2026-11-10, from the gw115 probe log of the guest program):
     running one guest wave per host workgroup, so that its parts could
     rendezvous with workgroup barriers. The program holds two `S_BARRIER`
