@@ -6,6 +6,68 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: the still dune view waited on a full submission ring (2026-11-10, fixed)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14. Idle dunes route, window
+96-126 s (the still view, 559-561 draws per frame), one strict run per arm on
+`1c707186c` with the temporary per-site wait probe of the record below; the
+second arm adds the ring change.
+
+- **Before.** 14.9 fps, 16.0 ms of fence wait per frame, render engine 66 %
+  busy (about 44.0 ms per frame). In a 20 s stretch the full submission ring
+  held 4333 of the 4739 ms of fence wait. A slot is reused only after its
+  submission completes, and in the GPU-bill run below the graphics queue
+  submitted 56.5 times per flip (99-109 s), so 8 slots fill while one long
+  submission runs.
+- **Change (`b7af968cb`).** `CommandProcessorSubmissionSlots::SlotCount` 8
+  to 32, with the transient snapshot pool at one recording per slot to match.
+  Retention stays at 256 MiB (`kRetainedBytes`, before half of the 8-slot
+  pool budget); pool entries are created on demand, so the larger budget is a
+  cap, not a reservation. The slot-count contract test now expects 32.
+- **After.** 18.6 fps, 7.7 ms of fence wait per frame, render engine 79 %
+  busy (about 42.6 ms per frame); full-ring waits 0. The largest remaining
+  waits are the `WAIT_REG_MEM` producer wait (1735 ms per 20 s) and the
+  window thread's present wait (1047 ms per 20 s). Resident memory peaked at
+  10.16 GB against 10.01 GB. With the render engine near 80 % busy at about
+  43 ms per frame, this view's GPU bound is about 23 fps.
+- **Earlier result reconciled.** The probe-arm table in
+  `docs/bringup/cp-gpu-sync-chain.md` found that 32 slots alone changed
+  nothing while the host read of the geometry record blocked; that read is
+  gone since the device-side geometry draw (`fdd43102c`), so the ring became
+  the wait.
+- **Other titles.** These runs are on `b7af968cb`, so they cover both
+  `b6b1acb58` (the fill split below) and the ring; the previous runs were on
+  `fdd43102c`. One strict 125 s run each of `PPSA28311 - Absolum`,
+  `PPSA09076 - DREDGE`, `PPSA03969 - F.I.S.T.: Forged In Shadow Torch`,
+  `PPSA09809 - OCTOPATH TRAVELER II` and `PPSA21402 - Balatro` on the
+  generic route: all exit 0 at the interactive frontier with both captures
+  healthy.
+
+  | Title | Frames in 60-116 s, before | After | Peak resident memory, before / after |
+  | --- | --- | --- | --- |
+  | Absolum | 2839 | 2854; repeat 3274 | 7.94 / 7.66 and 8.30 GB |
+  | DREDGE | 1723 | 1611 | 2.75 / 2.77 GB |
+  | F.I.S.T. | 312 | 412 | 4.71 / 4.87 GB |
+  | OCTOPATH TRAVELER II | 3182 | 3247 | 4.01 / 4.08 GB |
+  | Balatro | 3306 | 3230 | 0.75 / 0.79 GB |
+
+  - The first Absolum run reported 50.2 and 48.8 fps at the two captures
+    against 60.0 and 60.1. That status figure is a 0.25 s window at the
+    query instant; over the window the frame count was the same, and the
+    per-sample median frame time was 18.0 ms against 19.2 ms. The repeat
+    held 59.7 fps over the window.
+  - DREDGE has 6.5 % fewer frames in the window (29.9 against 38.9 fps at
+    the 60 s capture, 31.7 against 30.4 at 115 s), one run each; it was not
+    repeated.
+- **Playable regression.** `kyty_agent playable-regression` on
+  `PPSA06084 - Superliminal` exited 3. Its failed gates were
+  `visual_compare` (no baseline is recorded on this host, so there is no
+  visual comparison), `scene_checkpoint` and `action_response`; the input
+  gates passed. The previous reference run failed those three and two input
+  gates.
+- **Tests.** `ctest --no-tests=error`: 108 tests, 100 % passed
+  (`PairedWave64` skipped), exit 0.
+
 ## Robot platformer: geometry output fills ran a driver divisor search (2026-11-10, fixed)
 
 Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14. Strict runs of the idle

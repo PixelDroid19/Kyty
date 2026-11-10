@@ -139,6 +139,10 @@ Each link moves the wait to the next one:
        (56 %), the `CommandProcessor::Reset` drain (24 %) and untagged waits (16 %).
      - **Ceiling.** Perfect overlap at about 36 ms of CP work and 43 ms of GPU work gives about
        23 fps. This link and the ring depth alone do not reach 30 fps.
+     - **Shipped (2026-11-10): 32 slots.** Once the device-side geometry draw removed this read,
+       the full ring became the wait: 4333 of 4739 ms of fence wait in a 20 s still-view stretch.
+       `b7af968cb` raises the ring to 32 slots: 14.9 to 18.6 fps, render engine 66 % to 79 %
+       busy, one run per arm (`docs/titles/robot-platformer.md`).
      - **Facts run (temporary probe, not shipped).** A capped log of the host draw that follows
        the refusal gave the same values in all 35 samples:
        - 4 waves (256 lanes per group), 2 parameters and 1 primitive per instance, so 512 groups

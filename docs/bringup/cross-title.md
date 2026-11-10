@@ -1,3 +1,16 @@
+## Command-processor submission ring at 32 slots (2026-11-10)
+
+`b7af968cb` raises `CommandProcessorSubmissionSlots::SlotCount` from 8 to 32
+for every command processor, with the transient snapshot pool at one
+recording per slot and retention kept at 256 MiB. In `PPSA21567 - ASTRO
+BOT` 8 slots filled while one long submission ran. One run each of five
+other titles on the generic route, covering this change and `b6b1acb58`:
+all exit 0 at the interactive frontier with healthy captures; frames per
+window and peak resident memory are in `docs/titles/robot-platformer.md`
+(DREDGE 6.5 % fewer frames, not repeated). `PPSA06084 - Superliminal`
+playable-regression exited 3 (no visual baseline on this host, scene
+checkpoint and action response failed, input gates passed).
+
 ## Buffer fills with awkward sizes cost host time in the Intel driver (2026-11-10, fixed)
 
 Mesa 26.2.6 (Intel, Xe) records `vkCmdFillBuffer` as a 2D surface and finds
