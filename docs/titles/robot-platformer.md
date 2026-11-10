@@ -6,6 +6,54 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: geometry output fills ran a driver divisor search (2026-11-10, fixed)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14. Strict runs of the idle
+dunes route on `1323c0915`; the dune approach and crash-site cinematic
+(700-826 draws per frame, 6-10 fps) came before the still view in every run
+by 115 s, so these figures describe that stretch, not the still view.
+
+- **Before the fix, fence waits were not the lever there.** A temporary
+  per-site wait probe measured 1-12 ms of fence wait per frame against
+  106-157 ms of summed command-processor time, with the render engine
+  41-56 % busy. Per 10 s the largest sites were the full submission ring
+  (214-389 ms) and the `WAIT_REG_MEM` producer wait (116-333 ms); untagged
+  waits added 120-180 ms. After the fix the same stretch shows 16-24 ms of
+  fence wait per frame with the render engine 63-74 % busy: the wait moved
+  once the command processor got faster, and its sites are not yet split on
+  the fixed binary.
+- **Profile.** `perf` (user time, 199 Hz, 6 s from the first sample at
+  >= 500 draws per frame) on the graphics command-processor thread:
+  `CommandBuffer::CloseGeometrySegment` 16.2 % of its samples, all in the
+  driver below `vkCmdFillBuffer`, 130 of 131 samples in one two-instruction
+  loop of `isl_surf_from_mem` that increments a candidate and divides until
+  it divides the element count. The driver records the fill as a 2D surface
+  and searches for a width of at most 16384 elements; an element count with a
+  large prime factor costs one division per candidate.
+- **Fix (`b6b1acb58`).** `VulkanCmdFillBuffer` records explicit-size fills as a body in
+  whole 64 KiB (about one division per 64 KiB, about 16k at the 1 GiB
+  geometry output cap) plus a tail below 16384 words that fits one row; the
+  filled bytes are unchanged. Only the geometry segment call site was shown
+  exercised; the device-address, detile and fragment-transport sites use the
+  same helper without a measurement. Same route and profile window: `CloseGeometrySegment` 0 of 731
+  samples, `isl_surf_from_mem` 0 samples (130 before). Rendering at 116 s is
+  the same cinematic, scored healthy.
+- **Frame rate: indicative only.** At 737-799 draws per frame the summed
+  command-processor time fell from 90-138 to 75-106 ms per frame and the
+  frame rate rose from 7.5-11.7 to 10.0-14.3 fps, but the heavy stretch began
+  at 101 s in one run and 109 s in the other, so the windows are not the same
+  part of the cinematic.
+- **Remaining on that thread.** Transient snapshot capture (copy and compare
+  of read-only buffers) 15-17 %, `ShaderParseUsage2` under
+  `ShaderGetInputInfoPS` 10-12 %, `GpuMemory::CreateObject` 11 %.
+- **Not changed.** The GDS fill is at most `kGraphicsGdsDwords` (12288)
+  words and fits one row. The guest fill in `GraphicsRenderAttachments.cpp`
+  (`vkCmdFillBuffer(cmd, identity.buffer->buffer, ..., fill.size, ...)`) has
+  a guest-controlled size, so the driver search is still reachable there; it
+  was left because that file carries unrelated uncommitted work on the shared
+  branch. Direction: route it through `VulkanCmdFillBuffer` once that work
+  lands.
+
 ## Robot platformer: BVH kernel spills are the guest's live ranges, no translation lever (2026-11-10)
 
 Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14, translator 210, offline.

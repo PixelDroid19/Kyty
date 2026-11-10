@@ -1,3 +1,16 @@
+## Buffer fills with awkward sizes cost host time in the Intel driver (2026-11-10, fixed)
+
+Mesa 26.2.6 (Intel, Xe) records `vkCmdFillBuffer` as a 2D surface and finds
+its width by testing each candidate divisor of the element count in turn; a
+count with a large prime factor costs one division per candidate. In
+`PPSA21567 - ASTRO BOT` the geometry segment fill took 16.2 % of the
+graphics command-processor thread. Since `b6b1acb58` explicit-size fills go through
+`VulkanCmdFillBuffer` (body in whole 64 KiB, about one division per 64 KiB;
+tail below 16384 words, one row); the driver search then left the profile.
+The guest fill in `GraphicsRenderAttachments.cpp` still calls the driver
+directly with a guest-controlled size. Evidence is in
+`docs/titles/robot-platformer.md`.
+
 ## Command-processor counters are summed thread time (2026-11-10)
 
 The graphics ring and each compute pipe have their own `CommandProcessor`,
