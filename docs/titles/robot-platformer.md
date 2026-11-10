@@ -37,7 +37,8 @@ second arm adds the ring change.
   the wait.
 - **Other titles.** These runs are on `b7af968cb`, so they cover both
   `b6b1acb58` (the fill split below) and the ring; the previous runs were on
-  `fdd43102c`. One strict 125 s run each of `PPSA28311 - Absolum`,
+  `fdd43102c`. The binary was built from that tree before the commit, so
+  its embedded revision reads `1c707186c`. One strict 125 s run each of `PPSA28311 - Absolum`,
   `PPSA09076 - DREDGE`, `PPSA03969 - F.I.S.T.: Forged In Shadow Torch`,
   `PPSA09809 - OCTOPATH TRAVELER II` and `PPSA21402 - Balatro` on the
   generic route: all exit 0 at the interactive frontier with both captures
@@ -348,7 +349,21 @@ site.
 - **After about 116 s the route leaves the still view.** The robot lies
   down on the sand with the camera close (capture at 205 s), draws fall to
   about 370 per frame and render-engine time rises to 57-59 ms per frame.
-  Measurements of the still dune view must end by 116 s.
+  Measurements of the still dune view must end by 116 s. A capture shortly
+  after that cut can be entirely black (all channels 0): runs on seven
+  older binaries (`dc07a6bcb`, `f53efbf48`, `d7828ae27`, `ab946a887`,
+  `d4b3548bf`, `a90c9c906`, `7b2e91397`) show it at 340-430 draws per
+  frame, and later captures in the same scene show the image again. It is
+  the title's fade, not a rendering failure.
+- **Excluded: a fixed per-draw GPU overhead behind the 20 us mean of indexed
+  draws.** Same run, 100-116 s, split by program pair (the probe's top
+  list covers 98 % of indexed-draw time). The time follows the programs:
+  the largest pair takes 48.6 us per draw and 30 % of the indexed time,
+  others take 115 and 525 us, and frequent pairs take 4.5 and 7.9 us per
+  draw including the probe's own mark. With a per-draw floor that low,
+  indexed-draw time is shading work, not state or transition cost, so there
+  is no per-draw overhead to remove on the GPU. Which draw or dispatch
+  preceded each one is not in the probe's output.
 
   | Per frame | Time | Count | Mean |
   | --- | --- | --- | --- |
