@@ -103,6 +103,21 @@ site.
     `docs/bringup/cp-draw-plan.md`).
   - Publication with a Texture alias is not built.
   - The remaining levers are GPU work.
+- **Revisited on an idle dune view (2026-11-10).** The decision above holds for the
+  moving route at 19 fps; it does not hold where the view stands still.
+  - With the route's input cut at 90 s, the robot stays at the crash-site spawn
+    point. There a frame costs about 72 ms (13.1-14.1 fps over five runs), the
+    render engine is 58-62 % busy, and the graphics CP thread is blocked about
+    35 ms per frame.
+  - The block is the host read of one `DRAW_INDEX_INDIRECT` record per frame
+    behind the BVH kernel. Removing it together with a deeper submission ring
+    gave 17.6 fps in a probe that also skipped an empty draw, so that figure is
+    an upper bound and not a gain.
+  - The record, the probe arms and the next step are in
+    `docs/bringup/cp-gpu-sync-chain.md` ("Link 2 reopened").
+  - A run with the 960x540 patch on this date lost its timing on the moving
+    route: the window held a load, not the dunes. It measured nothing, so the
+    figures in the ceiling bullet above remain the last ones.
 - **Not attributed.** The processor's counters exceed its user-mode samples
   by 3.6-7.3 ms per frame (cpu-clock:u at 199 Hz, 66-72 s). The dispatch
   counters include the compute-pipe threads, so part of that gap may be

@@ -1,8 +1,8 @@
 # Command processor and GPU sync chain (design, 2026-10-29)
 
 Status: link 1 (`DISPATCH_INDIRECT`) is implemented (2026-10-29, see "Link 1 result"). Link 2
-(`DRAW_INDEX_INDIRECT`) is deprioritized (see its entry); the other links are design and
-measurements only.
+(`DRAW_INDEX_INDIRECT`) was deprioritized on 2026-10-29 and reopened on 2026-11-10 (see "Link 2
+reopened"); the other links are design and measurements only.
 
 ## Why
 
@@ -92,6 +92,63 @@ Each link moves the wait to the next one:
      same way, and it costs the GPU twin of the geometry and NGG plan above. It is parked until GPU
      frame time and CP work per draw are lower, where removing the waits can change the frame
      rate.
+   - **Link 2 reopened (2026-11-10).** The parking condition is met. On the idle dune scene below,
+     a frame costs about 72 ms: the graphics CP thread spends about 38 ms on the CPU and the GPU
+     about 44 ms. Run one after the other, the two can never fit a 33 ms frame, so overlap is a
+     precondition for 30 fps.
+     - **Scene.** The recorded dune route with its input cut at 90 s: the robot stands at the
+       crash-site spawn point and the view holds still. Window 96-116 s, 540-560 draws per frame,
+       strict runs with the 60 fps cap, Intel A770, Linux. Five baseline runs gave 13.1-14.1 fps.
+     - **Refusal.** `CommandProcessor::DrawIndexIndirectOnDevice` refuses in
+       `IndexedIndirectStateEligible` because the draw takes the geometry pass
+       (`ResolveGeometryDraw` is true). Later refusal points of `RecordIndexedDraw` were not
+       reached and are not measured.
+     - **The record.** It is one read per frame at one address, about 21 ms of the frame: the wait
+       under the long compute kernel described below. It is a point list with index window 1 and
+       count 1. Its instance count was 0 in 46 of 51 sampled reads and 512 in the other 5. The
+       "about 5.7 waits per frame" quoted in the working notes were fence waits inside that one
+       write-back, not separate reads.
+     - **Attribution moves.** In 3 of 4 runs without the probe below, about 91 % of summed fence
+       time sat at this read. In the fourth, about the same total sat at a `publish-host` wait of
+       ordinary draws: a storage buffer that a texture aliases fails `StorageIsWholeGuestContent`.
+       Submits, write-backs and fence waits per draw matched within 10 %. Why the alias exists in
+       one run only is not explained.
+     - **Probe (temporary, not shipped).** For geometry-refused records, the host path reused the
+       last record read at the same address instead of waiting. Every 64th read was real and
+       compared: 50 checks, 1 mismatch. Because the record stayed empty in the window, the probe
+       also skipped that draw, so its frame rates are an upper bound. The probe was combined with
+       a deeper submission ring (`CommandProcessorSubmissionSlots::SlotCount` 8 to 32, with the
+       transient snapshot pool raised to match). "Blocked" is frame time minus CPU time minus
+       run-queue wait of the graphics CP thread.
+
+       | Arm | fps | CP thread CPU, ms/frame | Blocked, ms/frame | Render engine busy |
+       | --- | --- | --- | --- | --- |
+       | Baseline (5 runs) | 13.1-14.1 | 38.6 | 35 | 58-62 % |
+       | 32 slots only | 13.8 | 38.0 | 34 | 61 % |
+       | Record reuse only | 15.0 | 37.8 | 28.5 | 66 % |
+       | Record reuse and 32 slots | 17.6 | 35.5 | 21 | 75 % |
+
+     - **Reading.** The ring depth alone changes nothing while the read blocks. Without the read,
+       the 8-slot ring becomes the wait. A ring slot is reused only after its submission completes,
+       and the graphics queue submits about 36 times per frame: about 20 of them from
+       `SubmitRecordedDispatchesBeforeDraw` and about 9 from `SubmitRecordedWorkIfGpuIdle`. So 8
+       slots hold about a quarter of a frame. With both changes, the largest remaining waits
+       (summed over all processors, queue not separated) are the `WaitRegMem64` producer wait
+       (56 %), the `CommandProcessor::Reset` drain (24 %) and untagged waits (16 %).
+     - **Ceiling.** Perfect overlap at about 36 ms of CP work and 43 ms of GPU work gives about
+       23 fps. This link and the ring depth alone do not reach 30 fps.
+     - **Next.** A device-side `DRAW_INDEX_INDIRECT` for geometry-pass draws: a GPU twin of the
+       geometry plan, built verify-only first as link 1 was. The ring depth comes in the same
+       piece, chosen with measured resident memory. At 32 slots without the probe it was
+       9.2-10.0 GB; there is no 8-slot figure yet. A thread with about 14 ms of kernel time per
+       frame appeared only in the probe arms and is not identified.
+     - **Defect found, not fixed.** `CommandProcessor::Reset` (`GraphicsRun.cpp`) starts with
+       `BufferWait()`, a full drain of the processor's recordings. The `R_DRAW_RESET` and
+       `R_DISPATCH_RESET` packets reach it; the `GraphicsDrawInitDefaultHardwareState*`,
+       `GraphicsDispatchInitDefaultHardwareState` and `GraphicsAcbResetQueue` writers emit them.
+       In the arm with both changes it cost about 0.8 waits per frame at 5.7 ms. Which host state
+       needs the drain is not established; `GraphicsRenderDeleteIndexBuffers` is a candidate.
+       Direction: find that state and defer only it.
    - **The wait under the long compute kernel (measured 2026-10-29, gw111-gw113).** A temporary
      probe wrote a host-visible word after `0x3666fa39`, a BVH traversal kernel. It runs once per
      frame on the graphics queue as 8156 workgroups of 256 invocations (corrected 2026-10-30;
