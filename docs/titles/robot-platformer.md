@@ -23,10 +23,11 @@ fence probe only.
   frame without it (100-110 s, a window that also holds a 5 s hitch before the
   still view). It held its batch 95-97 % of the frame, and its suspended label
   waits took 0.3 and 1.1 ms per frame. An asynchronous graphics ring thread
-  spent 49-63 ms per frame suspended on a host-produced label. In the clean
-  windows without the alias wait, frame time minus the graphics CP thread's
-  CPU time, fence wait and render lock leaves 4.4 and 6.6 ms per frame, which
-  caps the batch wait there if the fence time is that thread's.
+  spent 49-63 ms per frame suspended on a host-produced label. The fence
+  counter also holds the window thread's present wait (about 2.8 ms per frame
+  in the ring record's "after" run), so frame time minus the CP thread's CPU
+  time, fence wait and render lock does not bound the batch wait; the direct
+  timer above does.
 - **The second wait regime recurs with 32 slots.** It is the `publish-host`
   wait of `docs/bringup/cp-gpu-sync-chain.md` ("Attribution moves"): a draw
   reads a storage buffer whose pending GPU write has a Texture alias, so
