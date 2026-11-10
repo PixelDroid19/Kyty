@@ -36,8 +36,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Work that depends only on context state, plus per-draw shader input re-analysis, is 14.3% of the
     thread (8.7% and 6.4%). A fast path for draws with unchanged state was therefore not built.
   - The read-only snapshot family (capture, compare, upload) is in about 17% of samples.
-  - `GpuMemory` frames are in at least 30% of samples (call stacks are truncated). While that work is
-    serialized, recording draws on several threads is bounded to about 2x with four threads.
+  - `GpuMemory` frames are in at least 30% of samples (call stacks are truncated). The per-stage bound
+    on recording draws on several threads is in "Parallel recording ceiling" below.
 - **Read-only binds (temporary census, two runs, 30 steady flips each, about 5,200 draws per frame).**
   - Per flip: about 5,000 index, 5,000 vertex and 9,600 other read-only probes over about 12,000
     distinct ranges in about 90 2-MiB windows of imported guest memory. Every probe lies in one
@@ -53,12 +53,36 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     device storage offset limit is 4.
   - Snapshots live in host-visible cached memory, as the imported guest pages do, so reading in place
     does not move device reads out of device-local memory.
-  - Reading in place sees bytes at host execution, a snapshot sees them at recording. Whether the
-    guest's reuse signal can fire before the reading submission executes is not established.
+  - Reading in place sees bytes at host execution, a snapshot sees them at recording. End-of-pipe
+    label writes are recorded as events set at the bottom of the pipe, so they fire only after the
+    work recorded before them executes. The other ways the guest can signal reuse were not read, so
+    whether a reuse signal can fire before the reading submission executes is not established.
   - Ceiling: about 1.25x alone. It also removes work done under the snapshot pool lock, which parallel
     recording needs.
-- **Open.** None of the measured levers, alone or together, reaches 60 fps at this load; GPU time at
-  full clock is unmeasured.
+- **State setup split (temporary stage timers, one run, 1.4 million draws in the world, 4,945 draws
+  per frame, 6-9 fps).** The timed span costs 5.2 us per draw (25.7 ms per frame) and no stage
+  dominates. The standing counter reads 6.4 us per draw over the same run; the gap is not attributed.
+  - Vertex input analysis 1.25 us; primitive plan and pixel input analysis 0.88 us. Both rebuild a
+    multi-kilobyte input description on every draw.
+  - Index snapshot and vertex range 1.20 us; vertex stream write-back check 0.71 us; device-address
+    preparation 0.58 us.
+  - Target description and sample checks 0.28 us; everything else 0.3 us together.
+- **Parallel recording ceiling (measured, not built).** The same run's counters, per frame of 105 ms
+  of command processing, classed by whether the work depends on the order of draws:
+  - Order-dependent, about 61 ms: the index snapshot, the vertex write-back check, device-address
+    preparation and conflict scope, resource binding (it creates and registers memory objects and
+    records their use per submission), target materialization, fence waits and dispatches.
+  - Shared caches, about 13 ms: pipeline setup and descriptor-set finalization.
+  - Independent of other draws, about 22 ms: register-only state setup and command emission.
+  - Not attributed by any counter, about 10 ms.
+  - With four recording threads the frame is bounded at 1.2x (only independent work in parallel) to
+    1.5x (caches and unattributed work in parallel too), about 11-14 fps. Parallel recording was not
+    built, and the in-place read-only binds above stay measured, not built.
+- **GPU estimate.** In the same run the render engine was busy 37% of 108 ms frames at 600-650 MHz,
+  about 40 ms. If that time scaled with the clock it would be about 11 ms at 2,400 MHz; this is an
+  estimate, not a measurement.
+- **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
+  now. None of the measured levers, alone or together, reaches that.
 
 ## Sandbox title: snapshot comparisons in the world (2026-10-24, improved)
 
