@@ -41,12 +41,14 @@ scratch spills enough to save 3 ms per frame?
   broadcast, a write a lane select. That assumes the packed values are
   uniform in the subgroup, which was not checked. Packing all 172 declared
   scalar registers gave no gain. The best set (26 registers) removes 149 of
-  the 1072 outer-loop fills, 89 of them in one loop at nesting depth 2 and 23
-  in the two deepest loops. Even if the outer loop's fills were the kernel's
-  whole cost, that projects under 3 ms. The saving is not monotonic in the
-  set (36 registers gives almost all of it back), so it yields no general
-  selection rule, and a hand-picked set per program would not be a general
-  translation. One workgroup-memory slot per subgroup instead of a lane is
+  the 1072 outer-loop fills. 89 of them sit in the loop at nesting depth 2
+  that holds 264 of the outer loop's 318 global loads, by its loads the node
+  traversal: 28% of that loop's own fills. The frame effect was not
+  measured. The saving is not monotonic in the set (36 registers gives
+  almost all of it back), so it yields no general selection rule; a
+  hand-picked set per program would not be a general translation, and
+  packing is only valid for values proven uniform, which the translator does
+  not establish. One workgroup-memory slot per subgroup instead of a lane is
   worse.
 - **Rendezvous and ordering.** Removing the split-wave spin loops entirely
   (invalid, a ceiling) still leaves 1740 fills, and the fills outside loops
@@ -62,8 +64,9 @@ scratch spills enough to save 3 ms per frame?
 - **Allocator noise.** The relaxed variant moved fills by 33 with no
   register change, so differences of a few dozen fills are noise.
 - **Conclusion.** The spills follow from the guest program's live ranges at
-  128 registers per thread. No translation change tried reaches 3 ms, so
-  reworking the BVH translation is closed as a frame-rate lever.
+  128 registers per thread. No variant tried gives a general translation
+  rule that cuts them, so reworking the BVH translation is closed; the
+  frame effect of the best packed set was not measured.
 
 ## Robot platformer: the command processor is worth at most 3 fps in the dunes (2026-11-10)
 
@@ -202,22 +205,29 @@ site.
   pending, after at least 8 operations and 500 us), 19.5 from
   `SubmitRecordedDispatchesBeforeDraw` and 7.7 from the other flush sites
   (5.0 of them at the end of each guest submission, 1.0 at the flip).
-  These are the run's last 10 s window. The "about 36" graphics submits
+  These are the run's 99-109 s window. The "about 36" graphics submits
   quoted in `cp-gpu-sync-chain.md` came from the earlier probe-arm runs,
   about 20 before draws and 9 idle-GPU flushes, so the difference is the
-  idle-GPU rule firing more often.
-- **The idle-GPU flush count follows the window, not the build.** In this
-  run it was 6.9, 20.1 and 29.3 per flip in the last three windows, while
-  ring-full waits held the command processor 388, 5 and 0 ms of each 10 s.
-  A later strict run of the same route (`aa282cbf4` with temporary probes,
-  211 s) held about 15 fps in its idle-view windows (120-200 s) with 3.8-6.0
-  idle-GPU flushes, 17.9-18.0 before draws and 29.7-31.8 graphics submits
-  in all per flip, and ring-full waits of 1.5-1.8 s per 10 s. A full ring
-  keeps the GPU busy, so the rule finds the queue empty less often; this is
-  an observed correlation, the rule's trigger was not traced. Other DRM
-  clients on the GPU (12, read from the xe `fdinfo` cycle counters) used
-  1.9% of the render engine's cycles in those windows, so foreign GPU work
-  did not shape them.
+  idle-GPU rule firing more often. In this run that rule gave 6.9, 20.1 and
+  29.3 flushes per flip in the last three windows, while ring-full waits
+  held the command processor 388, 5 and 0 ms of each 10 s; the rule's
+  trigger was not traced.
+- **Same window on `aa282cbf4`** (strict, temporary probes, 2026-11-10,
+  97-116 s): 13.4 fps and 554 draws per frame (554-561 in the runs above),
+  but the guest's work differed: 121.7 guest dispatch packets per frame
+  against 103.1-103.5, 168 `WAIT_REG_MEM` against 152-153, new pipelines
+  in the window and 23 MB of uploads per frame against about 3 MB. The
+  graphics queue flushed 44.9 times per flip in the 99-109 s window against
+  56.5; the difference is the idle-GPU rule (19.5 against 28.2-29.3), and
+  no flush site disappeared. Render-engine time was about 50 ms per frame
+  against 42-45 ms; with different guest work, 1.5 against 0.5 CPUs of host
+  load outside the process and no GPU clock sampled, that is not a build
+  effect. Other DRM clients (read from the xe `fdinfo` cycle counters) used
+  0.6-1.6% of the render engine's cycles over the run.
+- **After about 116 s the route leaves the still view.** The robot lies
+  down on the sand with the camera close (capture at 205 s), draws fall to
+  about 370 per frame and render-engine time rises to 57-59 ms per frame.
+  Measurements of the still dune view must end by 116 s.
 
   | Per frame | Time | Count | Mean |
   | --- | --- | --- | --- |

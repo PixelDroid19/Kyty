@@ -130,8 +130,8 @@ Each link moves the wait to the next one:
 
      - **Reading.** The ring depth alone changes nothing while the read blocks. Without the read,
        the 8-slot ring becomes the wait. A ring slot is reused only after its submission completes,
-       and the graphics queue submits about 36 times per frame in those runs (30 to 57 in later
-       10 s windows, the spread being idle-GPU flushes; `docs/titles/robot-platformer.md`): about 20 of them from
+       and the graphics queue submits about 36 times per frame in those runs (45 to 57 in the
+       99-109 s window of later runs, the spread being idle-GPU flushes; `docs/titles/robot-platformer.md`): about 20 of them from
        `SubmitRecordedDispatchesBeforeDraw` and about 9 from `SubmitRecordedWorkIfGpuIdle`. So 8
        slots hold about a quarter of a frame. With both changes, the largest remaining waits
        (summed over all processors, queue not separated) are the `WaitRegMem64` producer wait
@@ -203,8 +203,8 @@ Each link moves the wait to the next one:
        copy synchronously on the utility queue, and the rest is processor state that no recorded
        command reads. The drain is removed. Measured with the per-site wait counter on the dunes
        idle route in runs without those two changes: before, the site appeared in the first 2-3 of 11 windows of 10 s (1-10 ms per
-       window, 10-16 ms per run, during boot); on `aa282cbf4` it is absent from all 20 windows of a
-       211 s run. Its whole cost was at most 0.1% of those windows, smaller than the run-to-run spread
+       window, 10-16 ms per run, during boot); on `aa282cbf4` it is absent from all windows of two
+       211 s runs, and no other `GraphicsRun.cpp` wait site appeared in the boot windows. Its whole cost was at most 0.1% of those windows, smaller than the run-to-run spread
        of the other wait sites, so whether another wait absorbed it cannot be resolved and the frame
        rate does not show it. Verified with the CTest suite (108 passed, 1 skipped) and a strict games
        matrix on the installed titles (2026-11-10): 26 of 29 packages interactive. The other three

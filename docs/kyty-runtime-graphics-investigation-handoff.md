@@ -3327,7 +3327,8 @@ against the same correct gameplay capture.
 - Reshaping the BVH kernel's translation to cut its spills (2026-11-10,
   PPSA21567 - ASTRO BOT, translator 210, offline ANV statistics): excluded.
   Packing cold scalar registers into lanes removes at most 149 of 1072
-  outer-loop fills, not monotonic in the register set; workgroup memory is
+  outer-loop fills (frame effect not measured), not monotonic in the
+  register set and valid only for values proven uniform; workgroup memory is
   worse; removing every rendezvous still leaves 1740 fills; relaxed exchange
   ordering removes fences but no fills. The spills are the guest's live
   ranges at 128 registers. Record: `docs/titles/robot-platformer.md`.
