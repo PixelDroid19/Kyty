@@ -83,10 +83,11 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     The waits do not follow power-limit throttle windows or other processes' GPU use. Temporary tags
     in three runs split them into two causes whose shares vary between runs:
     - 8-85%: the result may not be written over guest memory by the device (under 64 KiB and not
-      64-byte aligned), and the overlay that would serve readers on this queue is refused because the
-      16 MiB snapshot staging is full.
-    - 15-92%: the CPU changed part of the range since the device wrote it. Every such range is
-      smaller than a page.
+      64-byte aligned), and the overlay that would serve readers on this queue is refused at the
+      16 MiB snapshot staging (two runs tagged it; in the one that told the cases apart, the staging
+      was full).
+    - 15-92%: the CPU changed part of the range since the device wrote it. In the one run that
+      recorded sizes, every such range was smaller than a page.
   - With four recording threads, command-processor time is bounded at 1.2x (only independent work in
     parallel) to 1.7x (caches, unattributed work and the double-count case in parallel too). Parallel
     recording was not built, and the in-place read-only binds above stay measured, not built.
@@ -101,15 +102,18 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     overlay once. One run with the change and one clean control on the same route and save, both on
     the death screen at night at 130 s: waits fell from 23.4 to 8.7 per frame (14.9 to 6.3 ms), but
     allocations rose from 3.1 to 134 MB per frame, stable-buffer creation from 1.8 to 77 MB, uploads
-    from 44 to 170 MB and object creation from 7.5 to 28 ms per frame; frames were 148 ms against
-    143 ms. Why publishing earlier causes this churn is not established. The change was not kept.
+    from 44 to 170 MB and object creation from 7.5 to 28 ms per frame. Frames were 148 ms against
+    143 ms at 4,686 against 4,038 draws per frame, so the frame effect is not established; the churn
+    excludes the change. Why publishing earlier causes it is not established. The change was not kept.
   - Direction: find which readers recreate buffers after an early publication before freeing the
     staging outside end-of-pipe events. The best case recovers about 7 ms of 140 ms frames.
 - **GPU estimate.** In the same run the render engine was busy 37% of 131 ms frames at 600-650 MHz,
   about 48 ms. If that time scaled with the clock it would be about 13 ms at 2,400 MHz; this is an
   estimate, not a measurement.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
-  now. None of the measured levers, alone or together, reaches that.
+  now. None of the measured levers, alone or together, reaches that. In the clean profiled run the
+  command-processor thread was on a CPU about 73 of each 110 ms frame and no other thread above 14%;
+  about 23-28 ms per frame are attributed to no counter or thread.
 
 ## Sandbox title: letters missing from the death message (2026-11-10, open)
 
