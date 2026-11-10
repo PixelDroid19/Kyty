@@ -1524,6 +1524,7 @@ Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64
 // before exposing their raw Vulkan handles to the caller.
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,
                                                           bool exact, bool only_first);
+Vector<GpuMemoryObject> GpuMemoryFindIntersectingObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size);
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, const uint64_t* vaddr, const uint64_t* size,
                                                           int vaddr_num, GpuMemoryObjectType type, bool exact, bool only_first);
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,

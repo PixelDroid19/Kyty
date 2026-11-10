@@ -809,11 +809,15 @@ static DepthLayerBlockCopies PlanDepthLayerFromImages(const DepthStencilVulkanIm
 			{
 				continue;
 			}
+			if (source != nullptr && source != image)
+			{
+				EXIT("depth array layer %u at 0x%012" PRIx64 " has multiple depth images for block 0x%012" PRIx64 "\n", layer, addr,
+				     block_addr);
+			}
 			const uint64_t index = (block_addr - image->depth_vaddr) / k_block_bytes;
 			source               = image;
 			source_x             = static_cast<uint32_t>(index % (image_pitch / block_width)) * block_width;
 			source_y             = static_cast<uint32_t>(index / (image_pitch / block_width)) * k_block_height;
-			break;
 		}
 		if (source == nullptr)
 		{
@@ -920,7 +924,25 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 		{
 			// The layer's memory holds what the depth images over it wrote there; when none lies over it, it holds
 			// what guest memory holds, as an unrendered depth surface sampled alone does.
-			const auto images = FindDepthStencil(buffer, slice_addr, slice_size, false);
+			auto images = FindDepthStencil(buffer, slice_addr, slice_size, false);
+			if (images.IsEmpty() && plain_guest_depth)
+			{
+				SubmissionId submission;
+				EXIT_IF(!buffer->GetSubmissionId(&submission));
+				const auto objects = GpuMemoryFindIntersectingObjectsForSubmission(submission, slice_addr, slice_size);
+				bool depth_only = !objects.IsEmpty();
+				for (const auto& object: objects)
+				{
+					depth_only = depth_only && object.type == GpuMemoryObjectType::DepthStencilBuffer && object.obj != nullptr;
+				}
+				if (depth_only)
+				{
+					for (const auto& object: objects)
+					{
+						images.Add(static_cast<DepthStencilVulkanImage*>(object.obj));
+					}
+				}
+			}
 			if (!images.IsEmpty())
 			{
 				if (!plain_guest_depth)

@@ -861,6 +861,12 @@ Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submissio
 	return g_gpu_memory->FindObjects(&vaddr, &size, 1, type, exact, only_first, &submission);
 }
 
+Vector<GpuMemoryObject> GpuMemoryFindIntersectingObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	return g_gpu_memory->FindIntersectingObjects(vaddr, size, submission);
+}
+
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, const uint64_t* vaddr, const uint64_t* size,
                                                           int vaddr_num, GpuMemoryObjectType type, bool exact, bool only_first)
 {

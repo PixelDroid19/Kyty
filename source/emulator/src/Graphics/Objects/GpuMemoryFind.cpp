@@ -95,6 +95,27 @@ Vector<GpuMemoryObject> GpuMemory::FindObjects(const uint64_t* vaddr, const uint
 	return ret;
 }
 
+Vector<GpuMemoryObject> GpuMemory::FindIntersectingObjects(uint64_t vaddr, uint64_t size, const SubmissionId& submission)
+{
+	Core::LockGuard lock(m_mutex);
+	Vector<GpuMemoryObject> ret;
+	std::vector<int> heaps;
+	HeapsIntersecting(&vaddr, &size, 1, &heaps);
+	for (const int heap_id: heaps)
+	{
+		auto& heap = m_heaps[heap_id];
+		for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1))
+		{
+			auto& object = heap.objects[block.object_id];
+			EXIT_IF(object.free);
+			RecordUse(&object.info, submission);
+			object.info.use_last_frame = GpuMemoryAliasLookupUseFrame(m_current_frame, object.info.use_last_frame);
+			ret.Add(object.info.object);
+		}
+	}
+	return ret;
+}
+
 Vector<GpuMemoryObject> GpuMemory::FindEqualObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission)
 {
 	Core::LockGuard lock(m_mutex);

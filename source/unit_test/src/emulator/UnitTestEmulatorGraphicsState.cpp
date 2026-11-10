@@ -2446,6 +2446,26 @@ TEST(EmulatorGraphicsState, GpuMemoryFindForSubmissionDefersDeletionUntilComplet
 	EXPECT_EQ(g_test_gpu_object_deletes, 1);
 }
 
+TEST(EmulatorGraphicsState, GpuMemoryFindIntersectingRecordsPartialDepthOwners)
+{
+	EnsureGpuMemoryForTests();
+	GraphicContext ctx {};
+	const uint64_t base = 0x0000005120000000ull;
+	const uint64_t block = 0x10000ull;
+	const SubmissionId submission = NextGpuMemoryFixtureSubmission(GpuQueueId(97));
+	const ScopedGpuMemoryFixtureRange range(&ctx, base, block * 4u, submission);
+	g_test_gpu_object_deletes = 0;
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, base, block * 2u, TestGpuObject(GpuMemoryObjectType::DepthStencilBuffer)), nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, base + block * 2u, block * 2u,
+	                                TestGpuObject(GpuMemoryObjectType::DepthStencilBuffer)), nullptr);
+	const auto found = GpuMemoryFindIntersectingObjectsForSubmission(submission, base + block, block * 2u);
+	ASSERT_EQ(found.Size(), 2u);
+	GpuMemoryFree(&ctx, base, block * 4u);
+	EXPECT_EQ(g_test_gpu_object_deletes, 0);
+	GpuMemoryCompleteSubmission(submission);
+	EXPECT_EQ(g_test_gpu_object_deletes, 2);
+}
+
 TEST(EmulatorGraphicsState, GpuMemoryVersionsChangedBackingWithPendingUse)
 {
 	EnsureGpuMemoryForTests();
