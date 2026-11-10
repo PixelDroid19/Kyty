@@ -136,10 +136,16 @@ site.
   accounts for the engine time. The compute engine stayed idle, so every
   queue's work ran on the render engine and that engine time covers all of
   it. Recordings never overlapped (span union = span sum). The 67 recordings
-  per frame match the run's submit counter over a 10 s window: about 60
-  submits per frame on the graphics queue and 6.6 on three compute queues.
-  The "about 36" graphics submits quoted in `cp-gpu-sync-chain.md` come from
-  the earlier probe-arm runs; why the counts differ was not checked.
+  per frame match the run's per-site submit counter, normalized by the flip
+  flush count: 56.5 submits per flip on the graphics queue and 6.3 on three
+  compute queues. Of the graphics ones, 29.3 come from
+  `SubmitRecordedWorkIfGpuIdle` (it flushes when the queue has nothing
+  pending, after at least 8 operations and 500 us), 19.5 from
+  `SubmitRecordedDispatchesBeforeDraw` and about 2 from other flush sites.
+  The "about 36" graphics submits quoted in `cp-gpu-sync-chain.md` came from
+  the earlier probe-arm runs, about 20 before draws and 9 idle-GPU flushes,
+  so the difference is the idle-GPU rule firing more often. Why the queue
+  drains more often in this run was not measured.
 
   | Per frame | Time | Count | Mean |
   | --- | --- | --- | --- |
@@ -1731,6 +1737,11 @@ strict 60 fps-limited runs on the dune route (gw111-gw119).
     it by the 30% that would remove most spills; only `spirv-opt` was tried.
     Keeping cold guest registers in shared memory, which has lower latency
     than scratch, is untested.
+  - Excluded (2026-11-10, from the gw115 probe log of the guest program):
+    running one guest wave per host workgroup, so that its parts could
+    rendezvous with workgroup barriers. The program holds two `S_BARRIER`
+    and one `DS_ADD_RTN_U32` on a 1920-dword LDS array, so the four guest
+    waves of a workgroup share LDS and must stay in one host workgroup.
   - The guest's scalar state stays uniform after translation. In the final
     NIR, 175 of 183 loops and 400 of 712 registers are convergent. So
     scalar values made per-lane by the translation are not the source of

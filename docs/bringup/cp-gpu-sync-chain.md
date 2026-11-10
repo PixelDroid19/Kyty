@@ -184,19 +184,33 @@ Each link moves the wait to the next one:
        `DrawIndexIndirectOnDevice` therefore come from indexed-indirect draws that pass the
        refusals, not from the refused geometry draw. One reading, not tested: whichever wait
        comes first in the frame absorbs the GPU catch-up.
-     - **Defect found, not fixed: geometry output cap.** `ResolveGeometryDraw` admits up to 65535
-       groups, but `RecordGeometryPass` exits when the output passes the 1 GiB limit of
+     - **Fixed (ba77895f9): geometry output cap.** `ResolveGeometryDraw` admitted up to 65535
+       groups, but `RecordGeometryPass` exited when the output passed the 1 GiB limit of
        `CommandBuffer::GeometryOutput`. With 4 waves and 2 parameters (4353 dwords per group), a
-       draw of 61,667 groups or more is admitted and then exits; more parameters lower the
-       threshold. Direction: make `ResolveGeometryDraw` refuse a plan whose output passes the cap,
-       so the draw takes the refusal path above.
-     - **Defect found, not fixed.** `CommandProcessor::Reset` (`GraphicsRun.cpp`) starts with
-       `BufferWait()`, a full drain of the processor's recordings. The `R_DRAW_RESET` and
-       `R_DISPATCH_RESET` packets reach it; the `GraphicsDrawInitDefaultHardwareState*`,
+       draw of 61,667 groups or more was admitted and then exited; more parameters lower the
+       threshold. `ResolveGeometryDraw` now refuses a plan whose whole output passes
+       `CommandBuffer::kGeometryOutputMaxBytes`, so the draw takes the counted refusal path above.
+       No title run reached the cap, so the refusal itself was not observed.
+     - **Fixed (29a4a93c2): drain in `CommandProcessor::Reset`.** `Reset` (`GraphicsRun.cpp`)
+       started with `BufferWait()`, a full drain of the processor's recordings. The `R_DRAW_RESET`
+       and `R_DISPATCH_RESET` packets reach it; the `GraphicsDrawInitDefaultHardwareState*`,
        `GraphicsDispatchInitDefaultHardwareState` and `GraphicsAcbResetQueue` writers emit them.
-       In the arm with both changes it cost about 0.8 waits per frame at 5.7 ms. Which host state
-       needs the drain is not established; `GraphicsRenderDeleteIndexBuffers` is a candidate.
-       Direction: find that state and defer only it.
+       In the arm with both changes it cost about 0.8 waits per frame at 5.7 ms. No state it
+       resets needs the drain: an index buffer reaches the delete list that
+       `GraphicsRenderDeleteIndexBuffers` empties only through the delete callback that
+       `GpuMemory` runs after every submission that used the buffer completed, index uploads
+       copy synchronously on the utility queue, and the rest is processor state that no recorded
+       command reads. The drain is removed; the wait is gone by construction, its frame cost was
+       not re-measured. Verified with the CTest suite (108 passed, 1 skipped) and a strict games
+       matrix on the installed titles (2026-11-10): 26 of 29 packages interactive. The other three
+       match earlier matrices: `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` crashed once (as on
+       2026-11-02) and was interactive on a rerun, `PPSA01341 - Demon's Souls` stays at `presenting`, and
+       `PPSA03524 - GTA San Andreas Definitive Edition` stops at boot on a storage image format
+       this branch does not support (fixed by the PR #65 work).
+     - **Latent race, not changed.** A compute processor's `Reset` can call
+       `IndexBufferDeleteAll` while another thread holds an index staging lease; `DeleteAll` then
+       fails and the emulator exits. The removed drain did not cover it either (it drained only
+       the resetting processor). Not observed in a run.
    - **The wait under the long compute kernel (measured 2026-10-29, gw111-gw113).** A temporary
      probe wrote a host-visible word after `0x3666fa39`, a BVH traversal kernel. It runs once per
      frame on the graphics queue as 8156 workgroups of 256 invocations (corrected 2026-10-30;
