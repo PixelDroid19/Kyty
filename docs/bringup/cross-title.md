@@ -6187,3 +6187,40 @@ us/draw). `spirv-opt` performance passes do not shrink `eb48c258`'s compile enou
   an error. Found while reviewing the sign-in setting; no title has been seen to pass null.
 - **Direction.** Return the NP invalid-argument error for a null `state` once its code comes from a trace or a published
   contract; the file has no NP error constant to reuse yet.
+
+## Float min/max on the host, unmap drains and write-fault shape (2026-11-10)
+
+Host: Arc A770 (ANV, Mesa 26.2.6, xe) and the Ryzen 5 7600 Raphael iGPU (RADV, same Mesa); revision `bf43d7646`; strict
+runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not in the tree.
+
+- **Plain `NMin`/`NMax` cannot replace the exact f32 min/max lowering on either host (excluded).** A standalone compute
+  module evaluated the translator's exact pair (`FloatMinMaxPair`, non-IEEE text) next to plain GLSL `NMin`/`NMax`, and the
+  MIN3, MAX3, MED3 and clamp-to-[0, 1] compositions in both forms, over all 27,000 triples of 30 edge values (signed zeros,
+  infinities, extremes, denormals, quiet and signaling NaNs with payloads) plus 65,536 random triples. Ordinary operands,
+  one NaN, mixed-sign zeros and both clamp orders matched bit for bit on both drivers. Two classes differ on both: with
+  several NaN operands the plain form returns the canonical quiet NaN or the first payload (ANV also quiets a signaling
+  one), while the exact lowering keeps the second operand's payload; and denormal operands, which both drivers flush. So
+  the shorter form engages on no host we can test. The cost it would have saved is bounded: 5,174 cached modules carry
+  4-5 % extra operations in pixel and compute stages for the exact form, and ANV's estimate for the four heaviest compute
+  modules gave 14-30 % fewer instructions, but one of them got 22 % more estimated cycles with twice the spills.
+- **Defect, open: the signed-zero tie merges two denormals into a third value.** `FloatMinMaxPair`
+  (`source/emulator/src/Graphics/ShaderSpirvVector.cpp`, lines 75-78) takes the bitwise OR (minimum) or AND (maximum) of
+  the operands whenever `OpFOrdEqual` holds. Both drivers flush f32 denormals in the compare, so `min(+0, 0x00000001)`
+  returns `0x00000001` and `min(0x00000001, 0x00000002)` returns `0x00000003`, a value neither operand has; the guest
+  returns zero under either denormal mode (flushed input, or the smaller operand of +0). Direction: merge only when both
+  operands are zeros, `((a | b) & 0x7fffffff) == 0`, and let the host result stand otherwise. No title has been seen to
+  depend on it; denormal operands of min/max are rare.
+- **Unmap and protect drains: no events in two titles (not an exclusion).** Every GPU-accessible unmap, protect or
+  invalidate drains all rings and command processors (`Gpu::RunQuiesced`). Counters on the three lifecycle callbacks and
+  on the drain itself read zero for 110 s of `PPSA21567 - Astro Bot` (boot, load, gameplay) and of `PPSA03355 - Hades`
+  (boot to first gameplay). Engagement is shown by code reading only, so narrowing the drain stays unmeasured, not
+  disproven.
+- **Write faults: closed for Astro, a load-time lead for Hades.** Astro faults 233-309 times/s with 2.5-3.1 ms/s spent in
+  the handler: no fault scheme can return more than that. Hades faults 0.97-1.27 M times in 110 s, peaking at 34,000/s
+  and 115 ms/s of handler time during loading and ~7,000/s in gameplay, with RSS flat at 4.2-4.4 GiB, so the faults are
+  rewrites of existing memory per GPU epoch. 96 % land within 16 pages of one of the last eight faults, 98 % in the same
+  2 MiB, 24 % on an adjacent page. Opening a 64 KiB run per fault would cut most of them, but consumers ask whether a
+  whole registered range changed (`GpuDirtyPageTracker::ChangedSince`), so marking a page the guest did not write makes
+  every object over it re-read guest bytes. That is safe only when every record over the extra page also covers the
+  faulting page; the handler has no per-page record set, so the change is deferred. Outcome metric if resumed: Hades
+  frames at a fixed time, or time to gameplay.
