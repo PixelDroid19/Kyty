@@ -6,7 +6,7 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
-## Robot platformer: the command processor does not bound the dunes (2026-11-10)
+## Robot platformer: the command processor is worth at most 3 fps in the dunes (2026-11-10)
 
 Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14, the user-recorded dunes
 route, 60 fps limit. The binary is `799fb76fd` (Release, without link-time
@@ -14,7 +14,7 @@ optimisation) plus temporary diagnostics, not committed: a 40 us busy-wait
 after each draw in alternate wall-clock windows, and fence time per wait
 site.
 
-- **Causal spin on the title screen** (level `title_controller_ship`, 241-254
+- **Causal spin on the title screen** (level `title_controller_ship`, 241-248
   draws and 83 dispatches per frame, alternate 4 s windows from 56 s). The
   two samples taken before the spin was armed are left out.
 
@@ -27,31 +27,39 @@ site.
     The rest came out of fence waits and command-processor idle time.
   - The 2026-11-05 figure (k = 0.82) was taken in the space cinematic, a
     different scene, so the two are not a before and after.
-- **Fence wait sites on the title screen** (60-70 s, about 225 frames,
-  3.6-3.8 ms per frame in all): the wait inside `CommandProcessor::WriteBack`
-  1.8 ms, `WAIT_REG_MEM` on a producer submission 1.3 ms, waits outside the
-  tagged functions 0.75 ms, a full submission ring 0.3 ms.
+- **Fence wait sites on the title screen** (50-60 s, 243 frames, 4.0 ms per
+  frame in all): the wait inside `CommandProcessor::WriteBack` 1.7 ms,
+  `WAIT_REG_MEM` on a producer submission 1.2 ms, waits outside the tagged
+  functions 0.7 ms, a full submission ring 0.3 ms.
   - No site reaches 2 ms and the top two wait for GPU results.
   - The frame was 44.4 ms with the GPU busy 62%: the processor computes
     there rather than waits.
   - The same scene ran 38.5 ms per frame in the spin run, so one pair cannot
     show a change under about 6 ms per frame.
 - **Fence wait sites in the dunes** (level `hub_crashsite_tutorial`, 98-108 s,
-  135 frames, 74.9 ms per frame, fence waits 15.9 ms per frame):
+  135 frames, 74.9 ms per frame, fence waits 15.9 ms per frame). The
+  per-site dump does not align exactly with the per-second samples, so the
+  sites are given as shares of the dumped fence time:
 
-  | Site | ms per frame |
+  | Site | Share of fence time |
   | --- | --- |
-  | Device-address draw retry, storage publication refused: a Texture object aliases the storage bytes (`StorageIsWholeGuestContent`) | 9.1 (5.7 waits) |
-  | Full submission ring (`SubmitCurrentLocked`) | 3.7 |
-  | Outside the tagged functions | 2.7 |
-  | `WriteBack` after a guest read (`ProcessorWriteBackRequired`) | 1.6 |
-  | `WAIT_REG_MEM` on a producer submission | 1.3 |
+  | Device-address draw retry, storage publication refused: a Texture object aliases the storage bytes (`StorageIsWholeGuestContent`) | 49% (774 waits) |
+  | Full submission ring (`SubmitCurrentLocked`) | 20% |
+  | Outside the tagged functions | 15% |
+  | `WriteBack` after a guest read (`ProcessorWriteBackRequired`) | 9% |
+  | `WAIT_REG_MEM` on a producer submission | 7% |
 
-  - This window is the ramp after the level load (6 to 19 fps).
-- **The steady dunes are GPU-bound.** From 105 to 111 s the frame rate held
-  19 fps at 526-571 draws per frame, with the render engine busy 84-88%
-  (fdinfo cycles; the compute engine was idle) and fence waits 16-19 ms per
-  frame.
+  - This window is the ramp after the level load (6 to 19 fps). Its first
+    seconds upload 420-550 MB per second at 6-12 fps with the GPU 39-62%
+    busy, a load transient bound by the command processor.
+- **The steady dunes are mostly GPU-bound.** From 105 to 111 s the frame
+  rate held 19 fps (53.2 ms per frame) at 526-571 draws per frame, with the
+  render engine busy 84-88% (fdinfo cycles; the compute engine was idle).
+  - The command processor's own work was 25.2 ms per frame there: draw and
+    dispatch processing minus 17.8 ms of fence waits.
+  - Two earlier runs agree: seconds 112-115 of the 2026-11-10 vertex-search
+    run (18-20 fps, 87-88% busy, 24-28 ms of processor work) and second 191
+    of the GPU-timestamp run (88% busy).
   - The command processor waits behind a nearly full GPU, so removing one
     wait site moves the wait.
   - This agrees with the exclusion of 2026-10-18, where allowing publication
@@ -60,8 +68,12 @@ site.
   pause cinematic. The dunes are identified by the level name and by
   counters that match the earlier dunes runs (500-780 draws per frame).
 - **Decision: no command-processor change for the dunes.**
-  - CPU-side leaves are closed: at k = 0.5, every remaining leaf is under 2 ms
-    per frame, and the per-shader recipe is excluded (stage 2 in
+  - At 84-88% busy the GPU idles about 7 ms per frame. Removing all of that
+    idle time would take the steady dunes from 19 to about 22 fps at native
+    resolution and today's GPU cost. That is the most any command-processor
+    change can give there.
+  - On the title screen, k is 0.5 and every remaining CPU leaf is under 2 ms
+    per frame. The per-shader recipe stays excluded (stage 2 in
     `docs/bringup/cp-draw-plan.md`).
   - Publication with a Texture alias is not built.
   - The remaining levers are GPU work.
