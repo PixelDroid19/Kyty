@@ -6,6 +6,77 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: the command processor does not bound the dunes (2026-11-10)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14, the user-recorded dunes
+route, 60 fps limit. The binary is `799fb76fd` (Release, without link-time
+optimisation) plus temporary diagnostics, not committed: a 40 us busy-wait
+after each draw in alternate wall-clock windows, and fence time per wait
+site.
+
+- **Causal spin on the title screen** (level `title_controller_ship`, 241-254
+  draws and 83 dispatches per frame, alternate 4 s windows from 56 s). The
+  two samples taken before the spin was armed are left out.
+
+  | Arm | Frame | GPU busy | Fence waits |
+  | --- | --- | --- | --- |
+  | Off (6 s) | 38.5 ms | 75% | 11.5 ms |
+  | On (6 s) | 43.9 ms | 69% | 7.9 ms |
+
+  - The spin added 10.3 ms per frame and the frame grew 5.3 ms: k = 0.51.
+    The rest came out of fence waits and command-processor idle time.
+  - The 2026-11-05 figure (k = 0.82) was taken in the space cinematic, a
+    different scene, so the two are not a before and after.
+- **Fence wait sites on the title screen** (60-70 s, about 225 frames,
+  3.6-3.8 ms per frame in all): the wait inside `CommandProcessor::WriteBack`
+  1.8 ms, `WAIT_REG_MEM` on a producer submission 1.3 ms, waits outside the
+  tagged functions 0.75 ms, a full submission ring 0.3 ms.
+  - No site reaches 2 ms and the top two wait for GPU results.
+  - The frame was 44.4 ms with the GPU busy 62%: the processor computes
+    there rather than waits.
+  - The same scene ran 38.5 ms per frame in the spin run, so one pair cannot
+    show a change under about 6 ms per frame.
+- **Fence wait sites in the dunes** (level `hub_crashsite_tutorial`, 98-108 s,
+  135 frames, 74.9 ms per frame, fence waits 15.9 ms per frame):
+
+  | Site | ms per frame |
+  | --- | --- |
+  | Device-address draw retry, storage publication refused: a Texture object aliases the storage bytes (`StorageIsWholeGuestContent`) | 9.1 (5.7 waits) |
+  | Full submission ring (`SubmitCurrentLocked`) | 3.7 |
+  | Outside the tagged functions | 2.7 |
+  | `WriteBack` after a guest read (`ProcessorWriteBackRequired`) | 1.6 |
+  | `WAIT_REG_MEM` on a producer submission | 1.3 |
+
+  - This window is the ramp after the level load (6 to 19 fps).
+- **The steady dunes are GPU-bound.** From 105 to 111 s the frame rate held
+  19 fps at 526-571 draws per frame, with the render engine busy 84-88%
+  (fdinfo cycles; the compute engine was idle) and fence waits 16-19 ms per
+  frame.
+  - The command processor waits behind a nearly full GPU, so removing one
+    wait site moves the wait.
+  - This agrees with the exclusion of 2026-10-18, where allowing publication
+    with older texture aliases moved the wait into `WaitRegMem32`.
+- **Scene.** The capture at 117 s is black, because the route then opens a
+  pause cinematic. The dunes are identified by the level name and by
+  counters that match the earlier dunes runs (500-780 draws per frame).
+- **Decision: no command-processor change for the dunes.**
+  - CPU-side leaves are closed: at k = 0.5, every remaining leaf is under 2 ms
+    per frame, and the per-shader recipe is excluded (stage 2 in
+    `docs/bringup/cp-draw-plan.md`).
+  - Publication with a Texture alias is not built.
+  - The remaining levers are GPU work.
+- **Not attributed.** The processor's counters exceed its user-mode samples
+  by 3.6-7.3 ms per frame (cpu-clock:u at 199 Hz, 66-72 s). Kernel stacks
+  need `kernel.perf_event_paranoid` at 1 or lower.
+- **Found, not fixed: `command_processor_run_ns` counts nested runs twice.**
+  - The timer is in `CommandProcessor::Run` (`GraphicsRun.cpp:2208`).
+  - `Run` re-enters on the same thread for `COND_INDIRECT_BUFFER` and
+    `INDIRECT_BUFFER` (`GraphicsRunOpParsers.cpp:804` and `:831`).
+  - In an earlier dunes run the counter exceeded the frame time (83.1
+    against 74.6 ms per frame).
+  - Shares of the processor quoted from this counter are upper bounds.
+  - Direction: time only the outermost run on the thread.
+
 ## Robot platformer: geometry passes batched into compute segments (2026-11-09)
 
 Same title, host, route and settings as the next record. The change is
