@@ -1,3 +1,57 @@
+## Geometry segments on other titles (2026-11-09)
+
+The change in `59e3640cf` (geometry passes batched into compute segments, see
+`docs/titles/robot-platformer.md`) touches every command-buffer recording.
+Intel Arc A770, Mesa 26.2.6 (ANV, xe), Linux 7.2.14. Executable: `59e3640cf`
+on `40d8c109f`, Release without link-time optimisation. One strict 125 s run
+per title on `scripts/input/reach_first_gameplay.pad`, 60 fps cap,
+`PrintfDirection = Silent`, native captures at 60 and 115 s; the 60-115 s
+window is reported.
+
+| Title | Exit | Reached | Window |
+| --- | --- | --- | --- |
+| `PPSA28311 - Absolum` | 0 | a combat level | 39.1 fps, 346 draws per frame |
+| `PPSA09076 - DREDGE` | 0 | sailing | 32.9 fps, 1,201 draws per frame |
+| `PPSA09809 - OCTOPATH TRAVELER II` | 0 | the traveler selection map | 59.9 fps |
+| `PPSA21402 - Balatro` | 0 | the run-info panel, as the reference run | 60.0 fps |
+| `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` | SIGSEGV at about 9 s | nothing presented | - |
+
+- **Captures.** No corruption in any capture. Balatro matches a run of
+  `26be1584d`, and DREDGE shows the same town as an earlier run.
+  OCTOPATH TRAVELER II gets further than the `254ea0313` reference run,
+  which stopped on a black loading screen.
+- **Absolum against the base.** `40d8c109f` built clean in the same
+  directory ran 38.9 fps in the same window, against 39.1 with the change.
+  It was at the camp at 115 s while the change's run was in a level, so the
+  two windows cover different scenes. An earlier run of `26be1584d` ran 58.1
+  fps, but it was built with link-time optimisation (152 MB executable
+  against 415 MB). That gap is not attributed to any commit; building
+  `26be1584d` in the same configuration would settle it.
+- **OCTOPATH TRAVELER II** reported one `gfx_storage_frontier` event at
+  20.6 s (`src=metadata r=code_unavailable st=8 f=64 ds=22c`). Runs of the
+  same title at `38d8a8e53` on 2026-10-31 reported the identical message, so
+  it predates the change.
+- **F.I.S.T.** The fault has the signature of the recorded startup race
+  (`docs/titles/mechanical-fist-platformer.md`): the guest locks a mutex at
+  offset 0x58 of a null object, and the fault lands in `PthreadMutexLock` →
+  `PthreadStaticObjects::CreateObject`. The address was matched offline from
+  the crash report's return address. The record places that fault at 26-32 s;
+  this run hit it at about 9 s. It is not attributed by a base run. A rerun
+  under a debugger (which the record says passes more often) did not fault
+  and reached the title menu by 60 s, where it stayed, so F.I.S.T. is not
+  verified past the menu with this change.
+- **Limits.** Nothing shows that Absolum, DREDGE, OCTOPATH TRAVELER II or
+  Balatro recorded a geometry pass in these runs; the segment counters were
+  temporary and not built into this executable. The inline branches for a
+  geometry pipeline that writes guest memory and for a spent chunk budget
+  did not run in `PPSA21567 - Astro Bot` either.
+- **Playable gates.** `kyty_agent playable-regression` on
+  `PPSA06084 - Superliminal` gave the same result in all 15 gates as the
+  2026-10-31 run: 11 pass, and `visual_compare` (no baseline),
+  `scene_checkpoint` (no external checkpoint), `input_sequence_complete` and
+  `input_delivered` (tap and clear sequence) fail as they did then. Exit 3
+  both times.
+
 ## Storage objects bound over imported guest pages (2026-10-30)
 
 - **Observed** (`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, Mesa 26.2.5, strict hub route):

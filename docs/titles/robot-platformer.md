@@ -6,6 +6,81 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: geometry passes batched into compute segments (2026-11-09)
+
+Same title, host, route and settings as the next record. The change is
+`59e3640cf` on `40d8c109f`; the comparison arm is `40d8c109f` built clean in
+the same build directory (Release, without link-time optimisation).
+
+- **Change.** A geometry pass whose pipeline writes no guest memory (no
+  buffer or image store or atomic, no GDS buffer bound) is recorded into a
+  compute-only command buffer, a segment, that is submitted ahead of the
+  chunk holding its pull draw. The render pass is no longer split per pass.
+  Consecutive passes join one segment while they write contiguous ranges of
+  the same output buffer and no hazard was recorded between them. A hazard
+  is any command recorded outside a render pass, a command-processor packet
+  outside draws, register writes, index state and buffer chaining, a draw
+  whose pipeline writes guest memory, or a pending pass that samples an
+  image written by a render pass begun since the segment opened. The chunk
+  before the segment zero-fills the segment's output range; the segment
+  ends with a compute-to-vertex barrier. A pass is recorded inline as before
+  when its pipeline writes guest memory or when the slot's chunk budget is
+  spent. A guest GLOBAL or FLAT store is not decoded (the parser stops on
+  it), so it cannot reach a pass unclassified.
+- **Segments over the route** (temporary counters, whole run): 120,938
+  passes in 15,880 segments, 7.6 passes per segment. Segments of 1 pass:
+  5,371; 2: 888; 3-4: 866; 5-8: 4,553; 9-16: 2,341; 17-32: 853; 33 or more:
+  1,008. 4,175 draws broke a segment because their pipeline writes guest
+  memory. No geometry pipeline wrote guest memory and no pass hit the chunk
+  budget, so neither inline branch ran in this title. The sampled-image rule
+  found 0 hits in 108,182 checks against a non-empty attachment list; a
+  temporary build that seeded the list with each sampled image hit 1,691 of
+  1,691.
+- **Segment results equal inline results.** A temporary build (not
+  committed) re-ran sampled segment passes inline into a
+  scratch buffer and compared the bytes. Controls (the same pass with one
+  group fewer) were detected 40 of 40 times. In a bracket run, which
+  re-ran each sampled pass inline right before (P) and right after (A) its
+  segment execution (S), no row had P equal to A with S different (0 of
+  422). Every program except `360038d0f4cfb9a5` matched in every run.
+- **Open item: `360038d0f4cfb9a5` output depends on execution order.** It
+  binds one constant storage buffer and one sampled texture and is not
+  indexed. Under the compare instrument the first of its executions is the
+  one that differs most often, whether that is the segment or an inline
+  copy. One run executed the segment (S), then two inline copies (A, B):
+  S was the odd one out 44 times, A 11 and B 3. The bracket run executed P,
+  S, then A: P was odd 65 times, S 0 and A 4. This is independent of
+  batching. It was observed under the compare instrument only and was not
+  measured on the base build. Cause unknown.
+- **Validation.** One strict 105 s run of the route under the Khronos
+  validation layer, built before the sampled-image rule was added, ended
+  with exit status 0. It is not known whether that slower run reached the
+  dunes. The layer was loaded: it reported the recorded VUIDs 09600
+  (`docs/bringup/cross-title.md`) and 07753, 07752 and 02691 (this file).
+  Its only other message was
+  `VUID-VkPipelineDepthStencilStateCreateInfo-depthBoundsTestEnable-00598`
+  (12 times), from `GraphicsRenderPipeline.cpp:828`, which enables the
+  depth bounds test from guest state; this change does not touch that path,
+  and it was not checked on the base build. Suggested direction: enable the
+  `depthBounds` device feature where the host has it, and refuse explicitly
+  where it does not.
+- **Frame rate**, one matched pair on the user's dunes route. Settings:
+  60 fps cap, `PrintfDirection = Silent`, translator unchanged.
+  Independent runs of one build earlier ranged from 11 to 13.5 fps in the
+  same scene, so one pair does not separate a gain of this size from noise.
+
+  | Route window | `40d8c109f` | `59e3640cf` |
+  | --- | --- | --- |
+  | 60-118 s: render engine busy per frame | 38.7 ms | 34.6 ms |
+  | 60-118 s: command processor running per frame | 55.2 ms | 50.5 ms |
+  | 60-118 s: frame rate | 17.3 fps | 18.9 fps |
+  | Dunes (samples from 60 s with 500 or more draws per frame, 24 each) | 11.42 fps | 13.19 fps |
+
+  The skip-the-pass bound in the next record allows about +22 %. 60 fps is
+  still far away: the command processor stays above 50 ms per frame.
+- **Other titles**: `docs/bringup/cross-title.md`, "Geometry segments on
+  other titles (2026-11-09)".
+
 ## Robot platformer: geometry passes are latency-bound and overlap (2026-11-09)
 
 Same title, host, route and settings as the next record. Executables built
