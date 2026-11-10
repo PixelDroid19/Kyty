@@ -1798,6 +1798,11 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 		MaybeDumpIndexDrawSkip("invalid-vs-or-ge", index_count, draw_modifier, type);
 		return;
 	}
+	// Too few indexes for one input primitive: the draw produces nothing.
+	if (geometry_pass && geometry_plan.groups == 0u)
+	{
+		return;
+	}
 	// Diagnostic A/B: skip draws whose depth target is a 1x1 D/S surface while color is larger.
 	if (static const char* ab = std::getenv("KYTY_AB_SKIP_TINY_DEPTH"); ab != nullptr && ab[0] != '\0')
 	{
@@ -3124,6 +3129,11 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	GeometryDrawPlan geometry_plan;
 	const bool       geometry_pass = ResolveGeometryDraw(*ctx, *ucfg, *sh_ctx, index_count, instance_count, &geometry_plan);
 	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx, geometry_pass))
+	{
+		return;
+	}
+	// Too few vertices for one input primitive: the draw produces nothing.
+	if (geometry_pass && geometry_plan.groups == 0u)
 	{
 		return;
 	}
