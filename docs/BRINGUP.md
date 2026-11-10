@@ -165,6 +165,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Which titles record geometry passes (2026-11-10)
   - Command-processor submission ring at 32 slots (2026-11-10)
   - Buffer fills with awkward sizes cost host time in the Intel driver (2026-11-10, fixed)
   - Command-processor counters are summed thread time (2026-11-10)

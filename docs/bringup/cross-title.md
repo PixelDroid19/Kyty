@@ -1,3 +1,41 @@
+## Which titles record geometry passes (2026-11-10)
+
+Normal runs count no geometry passes, so the earlier cross-title runs could
+not show which titles exercise the geometry path. A temporary counter (not
+committed) counted, from the first indexed draw on: host-read geometry
+passes (`RecordGeometryPass`), passes whose draw arguments are read on the
+device (`RecordGeometryIndirectPass`, `fdd43102c`) and draws that
+`ResolveGeometryDraw` refuses at the geometry output limit.
+
+Intel Arc A770, Mesa 26.2.6 (ANV, xe), Linux 7.2.14. Executable
+`d7e28199d` plus the counter, Release. One strict run per title, 60 fps cap,
+`PrintfDirection = Silent`; `PPSA21567 - ASTRO BOT` on its still dune view
+route to 116 s, the others 125 s on `scripts/input/reach_first_gameplay.pad`
+with captures at 60 and 115 s. Every run exited 0.
+
+| Title | Host-read passes | Device-read passes | Captures |
+| --- | --- | --- | --- |
+| `PPSA21567 - ASTRO BOT` | 111,128 by 110 s | 2,542 | the still dune view at 116 s, intact |
+| `PPSA09809 - OCTOPATH TRAVELER II` | 8,257 by 100 s, from the start | 0 | the traveler selection map at 60 s and the intro narration card at 115 s, intact |
+| `PPSA03969 - F.I.S.T.: Forged In Shadow Torch` | 12,192 by 105 s, from about 20 s | 0 | a cutscene at 115 s, intact |
+| `PPSA28311 - Absolum` | 0 | 0 | not reviewed |
+| `PPSA09076 - DREDGE` | 0 | 0 | not reviewed |
+| `PPSA21402 - Balatro` | 0 | 0 | not reviewed |
+
+- **Device-read geometry draws run only in ASTRO BOT on these routes.** No
+  other installed route exercises that path, so its cross-title retest has
+  no further title here. In the still dune view the counter gives about
+  26-30 host-read passes and about one device-read pass per frame at 14-17
+  fps; the counter's clock starts at the first indexed draw, so its 5 s
+  windows line up with the frame samples only to within a few seconds.
+- **OCTOPATH TRAVELER II and F.I.S.T. run the host-read geometry pass** and
+  kept a correct picture. Neither run reached gameplay: OCTOPATH TRAVELER II
+  stopped at the intro narration and F.I.S.T. at a cutscene. The F.I.S.T.
+  run did not hit the startup race of the 2026-11-09 record below.
+- **The output limit refusal is not observed.** Its count stayed 0 in every
+  run, and no run showed the counter firing, so these runs do not show the
+  refusal working in a title.
+
 ## Command-processor submission ring at 32 slots (2026-11-10)
 
 `b7af968cb` raises `CommandProcessorSubmissionSlots::SlotCount` from 8 to 32
