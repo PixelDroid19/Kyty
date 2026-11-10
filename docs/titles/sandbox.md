@@ -75,19 +75,55 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Shared caches, about 13 ms: pipeline setup and descriptor-set finalization.
   - Independent of other draws, about 22 ms: register-only state setup and command emission.
   - Not attributed by any counter, about 10 ms.
-  - The 61 ms include 12.4 ms of waits for a command-buffer slot's fence. The census run above, on
-    the same code and at the same frame time, waited 1.1 ms per frame while its temporary counters
-    added CP work, so part of the CP time is set by GPU completion. The waits do not follow power-limit
-    throttle windows or other processes' GPU use. Whether the waits also lie inside a draw-stage span
-    was not checked; if they do, they are counted twice above.
+  - The 61 ms include 12-16 ms per frame of host waits for GPU completion (13-23 waits per frame in
+    six runs of the route; a seventh waited 1.3 ms per frame, not explained). Every wait comes from a
+    draw whose device-address preparation finds a storage result that has not reached guest memory:
+    the draw waits for the submission that writes it and retries (`RetryGuestDeviceAddressDraw`,
+    `GraphicsRun.cpp:2475`). The wait lies outside the draw-stage spans, so it is not counted twice.
+    The waits do not follow power-limit throttle windows or other processes' GPU use. Temporary tags
+    in three runs split them into two causes whose shares vary between runs:
+    - 8-85%: the result may not be written over guest memory by the device (under 64 KiB and not
+      64-byte aligned), and the overlay that would serve readers on this queue is refused because the
+      16 MiB snapshot staging is full.
+    - 15-92%: the CPU changed part of the range since the device wrote it. Every such range is
+      smaller than a page.
   - With four recording threads, command-processor time is bounded at 1.2x (only independent work in
     parallel) to 1.7x (caches, unattributed work and the double-count case in parallel too). Parallel
     recording was not built, and the in-place read-only binds above stay measured, not built.
+- **Snapshot staging is released only at end-of-pipe write-backs (found; one change excluded).**
+  Overlay snapshots free their staging only in `GpuMemory::PublishStorageSnapshotsLocked`
+  (`Objects/GpuMemoryWriteback.cpp:420`). It is reached only from `WriteBackCompletedSubmission`,
+  which only the end-of-pipe callbacks call (`GraphicsRenderEop.cpp:312`, `:339`, `:419`, `:527`);
+  the general completion path (`CommandProcessor::PublishCompletedSubmissions`, `GraphicsRun.cpp:694`)
+  only retires deferred deletions. Between end-of-pipe events the staging stays held by snapshots of
+  completed submissions, and later overlays are refused.
+  - Excluded: on any refused overlay, publish the snapshots of completed submissions and retry the
+    overlay once. One run with the change and one clean control on the same route and save, both on
+    the death screen at night at 130 s: waits fell from 23.4 to 8.7 per frame (14.9 to 6.3 ms), but
+    allocations rose from 3.1 to 134 MB per frame, stable-buffer creation from 1.8 to 77 MB, uploads
+    from 44 to 170 MB and object creation from 7.5 to 28 ms per frame; frames were 148 ms against
+    143 ms. Why publishing earlier causes this churn is not established. The change was not kept.
+  - Direction: find which readers recreate buffers after an early publication before freeing the
+    staging outside end-of-pipe events. The best case recovers about 7 ms of 140 ms frames.
 - **GPU estimate.** In the same run the render engine was busy 37% of 131 ms frames at 600-650 MHz,
   about 48 ms. If that time scaled with the clock it would be about 13 ms at 2,400 MHz; this is an
   estimate, not a measurement.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
   now. None of the measured levers, alone or together, reaches that.
+
+## Sandbox title: letters missing from the death message (2026-11-10, open)
+
+- Observed (Intel, strict, the world route of the frame-load record, world saved at night): at 130 s
+  the player has been killed and the death screen shows "yty was slain  y  om ie" for "Kyty was slain by
+  Zombie" and "R SPAWN" for "RESPAWN". The capital K, Z and E and the lowercase b are missing
+  in both runs; one run also drops the p of the "Respawn" prompt. The other text on the screen and the
+  HUD prompts during play render whole.
+- Seen on the clean binary at 446e97dbf and on the excluded staging change above, so neither change
+  caused it.
+- Not localized. Suggested direction: capture the death screen and check whether the missing letters'
+  quads are absent, empty or sample an empty part of the glyph texture. Then check whether those
+  glyphs come from a system font set, whose glyph queries report NO_SUPPORT_GLYPH
+  (`docs/bringup/cross-title.md`, font library record of 2026-10-14).
 
 ## Sandbox title: snapshot comparisons in the world (2026-10-24, improved)
 

@@ -118,6 +118,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Insect sequel: intermittent depth/index overlap (2026-10-16, open)
 - [Sandbox title](titles/sandbox.md)
   - Sandbox title: frame load and command-processor ceiling in the world (2026-11-10, measured)
+  - Sandbox title: letters missing from the death message (2026-11-10, open)
   - Sandbox title: snapshot comparisons in the world (2026-10-24, improved)
   - Sandbox title: GPU hang on the first world frame (2026-10-23, fixed)
   - Sandbox title: shadow cascades bound as slice ranges (2026-10-23, fixed)
