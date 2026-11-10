@@ -6,6 +6,32 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: banded frame in the intro cinematic (2026-11-10, open)
+
+- Observed (Intel Arc A770, ANV Mesa 26.2.6, strict, `6dab9a32e` plus the uncommitted
+  min/max change of the cross-title float min/max record, translator 211): from a save
+  that continues on the world map, the late part of the intro cinematic at 150 s
+  (frame 3881) showed the ship over dark horizontal bands, the symptom of the space
+  scene record of 2026-10-31. That record's clean captures are of the earlier shots
+  with the crew, not this one.
+- No run on clean `6dab9a32e` captured that shot. In two runs the route's presses
+  during the cinematic ended it early. In one run whose input stops after Continue,
+  the captures showed the space map at 125-130 s, a flat slate frame without bands
+  at 135 s and the ship falling to the dunes from 140 s; whether the slate frame is
+  the banded shot is not known. The run with the change and the same input missed
+  the cinematic: with a cold pipeline cache Continue was pressed before the title
+  accepted it.
+- So whether the bands come from the change, are intermittent, or are a regression
+  since 2026-10-31 is not known. The change was not committed.
+- One clean-HEAD run of the dunes route exited by itself with code 0 at 117 s, with
+  no error event and no crash report, resident memory 9.7 GB against the run's
+  16 GB limit, after the route's Options, Down and Cross presses during the
+  cinematic. Whether those presses chose an exit item was not checked; one
+  occurrence.
+- Direction: on clean HEAD, press Continue only once the title accepts input and
+  capture every 2-3 s between the space map and the falling ship; run the change
+  with the same input only if that shot is clean.
+
 ## Robot platformer: the guest does not pace the still dune view (2026-11-10)
 
 Intel Arc A770 at 2400 MHz without throttling, Mesa 26.2.6 on Xe, Linux

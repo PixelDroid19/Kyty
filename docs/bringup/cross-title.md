@@ -6215,6 +6215,14 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   returns `0x00000001` (the guest returns `+0` under either denormal mode), and on ANV `min(0x00000001, 0x00000002)`
   returns `0x00000003`. Direction: merge only when both operands are zeros, `((a | b) & 0x7fffffff) == 0`, and let the
   host result stand otherwise. No title has been seen to depend on it; denormal operands of min/max are rare.
+  A change in that direction was built on 2026-11-10 and not committed. The arithmetic contract test, with its
+  interpreter made to flush f32 denormals in float compares as both measured drivers do, failed before it
+  (`min(+0, 0x00000001)` returned `0x00000001`) and passed after; CTest 108 tests, 107 passed and 1 skipped. One
+  `PPSA21567 - Astro Bot` run with it showed a banded cinematic frame that no clean run has captured (robot platformer record of
+  2026-11-10), so it waits for that control. The device result for denormal operands was not re-measured, and the
+  f16 pair (`ShaderSpirvF16.h`, lines 491 and 506) has the same merge and was not checked. A translator change
+  also needs a private `KYTY_VULKAN_PIPELINE_CACHE` file: a new version deletes the title's shared pipeline blob
+  of other versions (`RemoveReplacedBlobs`, `PipelineCacheStore.cpp`).
 - **Unmap and protect drains: no events in two titles (not an exclusion).** Every GPU-accessible unmap, protect or
   invalidate drains all rings and command processors (`Gpu::RunQuiesced`). Counters on the three lifecycle callbacks and
   on the drain itself read zero for 110 s of `PPSA21567 - Astro Bot` (boot, load, gameplay) and of `PPSA03355 - Hades`
