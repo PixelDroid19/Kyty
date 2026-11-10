@@ -179,10 +179,25 @@ Each link moves the wait to the next one:
          the whole output buffer. Records whose bytes are current on the host keep the CPU path.
        - **Verified** with a temporary comparison in which the CPU path stayed authoritative and
          each device header was compared with the host plan once its submission completed:
-         2792 records in 112 s, 0 mismatches. A run that flipped one expected word by hand
-         reported exactly that mismatch. Every compared record was empty (no index in the window
-         or no instance). The live path (primitives, index address, base vertex and the
-         variant's block loads) was therefore compared on no title.
+         2792 records in 112 s, 0 mismatches, and 2607 records up to 100 s of the measured run
+         below, which covers its still view, 0 mismatches. A run that flipped one expected word
+         by hand reported exactly that mismatch. Every compared record was empty (no index in the
+         window or no instance), so every compared pass had zero groups. A 120 s run of the
+         recorded route with movement gave the same: 2426 records, all empty, 0 mismatches.
+       - **Records with work.** On the device path they appeared in no run. The host-current
+         geometry records with work all fall in the first 10 s of boot: 305 records of one index
+         and 512 instances, during the publisher logos. A temporary probe copied each such
+         record into a device buffer and sent it down the device path:
+         - With the comparison on, 191 of these records were compared over the whole header
+           (primitives, groups per instance, base vertex, first instance, index address,
+           dispatch and draw), with 0 mismatches.
+         - With the comparison off, 307 forced passes of 512 groups ran the block-reading
+           variant, the clear and the pull without a fault or device loss. Their 3, 6, 9 and
+           12 s captures are pixel-identical to an unforced run once the logo timing is aligned.
+           The logos do not show these draws, so the captures exclude only a broken frame, not a
+           wrong pass output.
+       - The classic kernel emits the same instructions in the same order as before the variant
+         was added, and its program key is unchanged.
        - **Measured** in one strict run of the idle route that took the CPU path until 101 s and
          the device path after it. Separate runs do not compare here: the 96-116 s window held
          297 draws per frame in one run and 556 in another. The CPU arm still ran the comparison
@@ -195,23 +210,30 @@ Each link moves the wait to the next one:
          | Device | 104-116 s | 15.1 | 68.5 (15.5) | 66 %, 43.4 ms/frame | none |
 
          The CP counters are summed thread time of the graphics and compute processors (see
-         `docs/bringup/cross-title.md`). The render engine's work per frame did not change; the
-         GPU now idles less. The CP is still the limit, about 68 ms against 43 ms of GPU work
-         per frame.
+         `docs/bringup/cross-title.md`). The firm result is that the host argument reads are
+         gone and the render engine idles less at the same work per frame. The frame rates are an
+         upper bound on the gain, because the CPU arm carried the harness.
+       - **Without the harness** the frame-rate gain is not established. A run with the device
+         path alone gave 16.1 fps at 96-116 s (557 draws per frame, CP 64.4 ms, render engine
+         69 % busy), inside the range of the earlier harness-free runs of this view (13.1-14.1
+         and 16.5-17.3 fps). The run noise is too large for 2-minute runs to settle it. With the
+         same path throughout, splitting that run's still-view samples into alternating
+         6-second halves gave 16.3 and 13.5 fps. Two other runs reached the still view about
+         12 s late, so their windows did not match.
        - **Cross-title** (strict, 125 s each, generic first-gameplay route, captures at 60 and
          115 s): `PPSA28311 - Absolum`, `PPSA09076 - DREDGE`,
          `PPSA03969 - F.I.S.T.: Forged In Shadow Torch`, `PPSA09809 - OCTOPATH TRAVELER II` and
          `PPSA21402 - Balatro` all exited cleanly with no device loss. None of them issued a
-         `DRAW_INDEX_INDIRECT` in those 125 s, so among the titles that use geometry passes only
-         `PPSA21567 - Astro Bot` reaches the device path. Three 60 s captures scored
+         `DRAW_INDEX_INDIRECT` in those 125 s, so these runs did not exercise the device path; they
+         only show that the changed draw path left their other draws intact. Three 60 s captures scored
          `low_entropy` where the earlier run of these titles scored `healthy`: a loading screen, a
          settings menu and a fade before a cinematic, reached at different frames. The
          `gfx_storage_frontier` events of F.I.S.T. and OCTOPATH TRAVELER II also appear in earlier
          runs.
-       - A strict 120 s run of the build without the comparison harness, on the same idle route,
-         had no error and a healthy capture at 110 s. That run was still in the crash-site
-         sequence at 104-116 s (700-900 draws per frame, rate climbing from 3 to 15 fps), so it
-         does not compare with the windows above.
+       - A strict 120 s run of the committed build on the same idle route had no error and a
+         healthy capture at 110 s, still in the crash-site sequence. In the device-path run
+         above, the still view rendered correctly at 100 and 112 s. The capture heuristic flagged
+         those frames `hot_corruption`, its known false positive on sand.
        - **Known imprecision.** When a descriptor mutation conflict retries the draw, the
          converter is recorded again, so a refusal can be counted twice.
        - Not identified: a thread with about 14 ms of kernel time per frame, seen only in the

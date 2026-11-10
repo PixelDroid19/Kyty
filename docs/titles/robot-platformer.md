@@ -180,11 +180,16 @@ site.
     draw was first deferred and then built: a device converter writes the
     geometry block and the group count, and the pass reserves only the groups
     that fit the 1 GiB output cap. In one run that switched from the CPU path
-    to the device path at 101 s, the view went from 11.9 to 15.1 fps and the
-    host argument reads disappeared. Render-engine time stayed at 43.4 ms per
-    frame, and the processor (about 68 ms per frame) is still the limit. Every
-    device-read record compared in this view was empty, so the live device
-    path is not yet compared on any title.
+    to the device path at 101 s, the host argument reads disappeared and the
+    view went from 11.9 to 15.1 fps. That rate change is an upper bound,
+    because the first arm carried the comparison harness. Without the harness
+    the device path gave 16.1 fps, inside the range of earlier runs, so the
+    frame-rate gain is not established. Render-engine time stayed at 43.4 ms
+    per frame, and the processor (64-68 ms per frame) is still the limit.
+  - Every device-read record in the dune runs was empty. Records with work
+    occur only during the boot logos and are host-current. Forced down the
+    device path, 191 of them matched the host header exactly, and 307 passes
+    of 512 groups ran without a fault.
   - The frame rate moved without an intended change: two later runs of a
     rebuilt binary gave 16.5 and 17.3 fps, with the audio thread about 15 %
     cheaper per second. The cause is open (rebuild, time and host load are
