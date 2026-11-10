@@ -355,15 +355,16 @@ site.
   `d4b3548bf`, `a90c9c906`, `7b2e91397`) show it at 340-430 draws per
   frame, and later captures in the same scene show the image again. It is
   the title's fade, not a rendering failure.
-- **Excluded: a fixed per-draw GPU overhead behind the 20 us mean of indexed
-  draws.** Same run, 100-116 s, split by program pair (the probe's top
-  list covers 98 % of indexed-draw time). The time follows the programs:
-  the largest pair takes 48.6 us per draw and 30 % of the indexed time,
-  others take 115 and 525 us, and frequent pairs take 4.5 and 7.9 us per
-  draw including the probe's own mark. With a per-draw floor that low,
-  indexed-draw time is shading work, not state or transition cost, so there
-  is no per-draw overhead to remove on the GPU. Which draw or dispatch
-  preceded each one is not in the probe's output.
+- **Excluded: a uniform per-draw GPU overhead behind the 20 us mean of
+  indexed draws.** Same run, 100-116 s, split by program pair (the probe's
+  top list covers 98 % of indexed-draw time). The time follows the
+  programs: the largest pair takes 48.6 us per draw and 30 % of the indexed
+  time, others take 115 and 525 us, and frequent pairs take 4.5 and 7.9 us
+  per draw including the probe's own mark. A floor that low excludes only a
+  cost every draw pays. A cost tied to pass begins or to dispatch-to-draw
+  switches would land on particular pairs and is not separated from their
+  shading, because the probe's output does not record which draw or
+  dispatch preceded each one.
 
   | Per frame | Time | Count | Mean |
   | --- | --- | --- | --- |
