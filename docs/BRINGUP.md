@@ -149,6 +149,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - First-person puzzle title: scalar-join sources per label (2026-10-22)
   - First-person puzzle title: cold shader compiles, not a GPU stall (2026-10-17)
 - [Beat 'em up](titles/beat-em-up.md)
+  - Beat 'em up: the vertex container search walked every block of each stream (2026-11-10, fixed)
   - Beat 'em up: every draw scanned and copied a whole shared vertex pool (2026-10-31, fixed)
   - Beat 'em up: black frames in logos, cinematic and loading screens (2026-10-27, fixed)
   - Beat 'em up: device-address write-back waits (2026-10-14, open, measured)

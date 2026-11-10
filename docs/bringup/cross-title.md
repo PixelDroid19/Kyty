@@ -23,10 +23,11 @@ window is reported.
 - **Absolum against the base.** `40d8c109f` built clean in the same
   directory ran 38.9 fps in the same window, against 39.1 with the change.
   It was at the camp at 115 s while the change's run was in a level, so the
-  two windows cover different scenes. An earlier run of `26be1584d` ran 58.1
-  fps, but it was built with link-time optimisation (152 MB executable
-  against 415 MB). That gap is not attributed to any commit; building
-  `26be1584d` in the same configuration would settle it.
+  two windows cover different scenes. The 58.1 fps of an earlier
+  `26be1584d` run was not the build configuration: with link-time
+  optimisation on both, `26be1584d` ran 48.2 fps and `657613887` 36.1 fps.
+  Most of the gap was the vertex container search added in `51e107dbf`,
+  fixed in `799fb76fd` (see `docs/titles/beat-em-up.md`).
 - **OCTOPATH TRAVELER II** reported one `gfx_storage_frontier` event at
   20.6 s (`src=metadata r=code_unavailable st=8 f=64 ds=22c`). Runs of the
   same title at `38d8a8e53` on 2026-10-31 reported the identical message, so
