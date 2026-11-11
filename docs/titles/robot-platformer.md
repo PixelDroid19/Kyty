@@ -9,28 +9,30 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 ## Robot platformer: banded frame in the intro cinematic (2026-11-10, open)
 
 - Observed (Intel Arc A770, ANV Mesa 26.2.6, strict, `6dab9a32e` plus the uncommitted
-  min/max change of the cross-title float min/max record, translator 211): from a save
-  that continues on the world map, the late part of the intro cinematic at 150 s
-  (frame 3881) showed the ship over dark horizontal bands, the symptom of the space
-  scene record of 2026-10-31. That record's clean captures are of the earlier shots
-  with the crew, not this one.
-- No run on clean `6dab9a32e` captured that shot. In two runs the route's presses
-  during the cinematic ended it early. In one run whose input stops after Continue,
-  the captures showed the space map at 125-130 s, a flat slate frame without bands
-  at 135 s and the ship falling to the dunes from 140 s; whether the slate frame is
-  the banded shot is not known. The run with the change and the same input missed
-  the cinematic: with a cold pipeline cache Continue was pressed before the title
-  accepted it.
+  min/max change of the cross-title float min/max record, translator 211): on the full
+  dunes route, from a save that continues on the world map, a capture at 150 s (frame
+  3881) showed the ship over dark horizontal bands, 38 s and about 800 frames after
+  that run's space-map capture. The row-mean luminance has a 42-43 px period (spectral
+  peak 61 times the median). The shot was not identified. The space scene record of
+  2026-10-31 had the same symptom; its clean captures are of earlier shots.
+- No clean `6dab9a32e` run is a replay of that run. One clean run of the same route
+  was on the dunes by 140 s; another exited at 117 s (below). Two clean runs whose
+  input stops after Continue showed, one, the space map at 125-130 s, a slate frame at
+  135 s and the ship falling to the dunes from 140 s, and the other the warp effect
+  from 128 to 142 s. The slate frame has no row pattern (row-to-row steps below 0.05
+  of 255). None of the 21 clean captures shows bands. The run with the change and
+  that input stayed on the title's press-any-button screen: its presses came before
+  the title accepted input.
 - So whether the bands come from the change, are intermittent, or are a regression
   since 2026-10-31 is not known. The change was not committed.
-- One clean-HEAD run of the dunes route exited by itself with code 0 at 117 s, with
-  no error event and no crash report, resident memory 9.7 GB against the run's
-  16 GB limit, after the route's Options, Down and Cross presses during the
-  cinematic. Whether those presses chose an exit item was not checked; one
-  occurrence.
-- Direction: on clean HEAD, press Continue only once the title accepts input and
-  capture every 2-3 s between the space map and the falling ship; run the change
-  with the same input only if that shot is clean.
+- One clean run of the dunes route exited by itself with code 0 at 117 s, with no
+  error event and no crash report, resident memory 9.7 GB against the run's 16 GB
+  limit, after the route's Options, Down and Cross presses during the cinematic.
+  Whether those presses chose an exit item was not checked; one occurrence.
+- Direction: same route and save as the banded run, clean HEAD first, captures every
+  3 s from 100 to 175 s, each file moved out of the capture directory as it lands
+  (native captures keep the newest eight), each scored by the row profile; run the
+  change the same way only if those captures are clean.
 
 ## Robot platformer: the guest does not pace the still dune view (2026-11-10)
 
