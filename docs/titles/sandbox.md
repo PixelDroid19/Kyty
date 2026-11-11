@@ -468,7 +468,9 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       frame; identities are built in a per-thread buffer, 9,644 per frame that each allocated and
       freed 2 KiB before. The allocator leaves went from 4.5 to 3.9 ms per frame at the same share
       of the thread's samples (4.7% and 4.6%) in a lighter scene: that saving is not separated
-      from the scene, at most about 0.6 ms;
+      from the scene, at most about 0.6 ms. On AMD (RADV, the host's integrated GPU, one run of
+      110 s, 2026-11-11) `PPSA21402 - Balatro` held gameplay at 60 fps with both changes, two
+      captures correct by inspection (not scored); this title was not run on AMD;
     - index snapshot reuse, up to 4.2 ms (two pool locks and one registry lock per reuse); dropped
       unbuilt: every mutex lock and unlock on the thread is about 2.7 ms per frame in the leaf
       profile, so three per reuse cannot remove half of it;
