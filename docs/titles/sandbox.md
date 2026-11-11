@@ -82,7 +82,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Target description and sample checks 0.28 us; everything else 0.3 us together.
 - **Per-draw cuts checked against a 4.5 ms per frame bar (2026-11-10, code reading plus the counters
   of two world runs; not built).** The bar is 5% of a 90 ms frame, about 1.25 us per draw at 3,600
-  draws. No cut is shown above it.
+  draws. No cut is shown above it, and the two stages left uncounted were counted on 2026-11-11 (one
+  world run with a temporary tag, 56 frames of 5,077 draws while the player walks) and close too.
   - Vertex binding: 2.2 us per draw (8.0 ms per frame) in a run with one temporary tag, 3.5 us in
     the run with stage timers and the read-only census. Per stream the object path takes the
     registry lock up to six times: the admission of a snapshot probe that is refused (94 of 158,141
@@ -99,15 +100,22 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     93% of scans and held at most 8 objects in 99.9%; `FindStorageContaining` took 1.11 ms per frame.
   - Shader input information: 2.1 us per draw with timers and no reuse path. The per-shader recipe is
     excluded (`docs/bringup/cp-draw-plan.md`, stage 2); reopening it needs a count of repeated input
-    structure in this title.
+    structure in this title. Counted: over about 249,000 indexed draws no stage input repeated. The
+    exact input of each stage (program address, stage and shader registers, and every descriptor
+    word the parse reads through its reader, none in this scene) never matched the previous input or
+    one of the last four of the same program (28 vertex and 53 pixel programs). A memo on exact inputs
+    cannot hit here; which register words change per draw was not recorded.
   - Index snapshots: 1.17 us per probe in the census run, 99.5% reused, about 4.2 ms per frame (the
     binding counter reads 4.0 ms per frame in the run with one tag). A reuse takes the
     snapshot pool lock twice and the registry lock once and runs cached admission lookups. Snapshots
     under 4 KiB (`kMinTrackedSnapshotSize`) are compared with guest memory instead of tracked; the
     average index probe is 3.6 KB, and the share below the limit was not counted.
   - Other read-only snapshots: 1.7 us per draw. 79% of probes are captured, not reused: each is the
-    first probe of its range in that frame (none was captured twice in one frame); why their ranges
-    are new was not counted.
+    first probe of its range in that frame (none was captured twice in one frame). Counted: all
+    7,619 captures per frame were of an address, size and read start that the previous frame did not
+    probe, none seen with equal or other bytes, and 86% found no pool entry at that base. Reused
+    probes were 94% seen in the previous frame with equal bytes, which checks the classifier. Reuse
+    across frames cannot remove these captures.
   - Admission checks over every probe: 6.1-6.9 ms per frame. At the average rate, reuses account for
     about 2.2-2.4 ms of it (an estimate).
 - **A lighter world frame is not a target (2026-11-11, offline reading, no run).** Another
@@ -115,12 +123,15 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   call that frame recognisable but not correct and no performance claim. A later entry there
   describes incomplete distant terrain at about 14 fps, with about 470 draws and 23-29 dispatches
   per frame at 60/121 us per draw (p50/p95). Here a world frame holds 3,600-4,500 draws (4,476
-  draws and 60.8 dispatches in one run), and the title's options file in that implementation's save
-  directory has the same graphics mode (2) and view distance (576) as ours. At 18.8 us per draw,
-  470 draws would cost about 9 ms of command processing. No guest-visible answer was found to
+  draws and 60.8 dispatches in one run). The title's options file in that implementation's save
+  directory has the same graphics mode (2) and view distance (576) as ours, but it looks freshly
+  created (onboarding not dismissed), so it shows the defaults, not the settings of those runs. At
+  18.8 us per draw, 470 draws would cost about 9 ms of command processing (command processing only;
+  the time outside it at that load is not measured). No guest-visible answer was found to
   explain the gap: the title's executable imports neither the game-presets query nor the Neo-mode
   query (its bundled modules were searched without a control), and the system-parameter answers
-  there are locale values with the same numbers. Excluded: taking that figure as a target at this
+  there are locale values with the same numbers except the language, which ours takes from the
+  configuration. Excluded: taking that figure as a target at this
   load; it carries no recording mechanism to reuse, and lowering the title's load is out of scope.
 - **Parallel recording ceiling (measured, not built).** The same run's counters, per frame of 105 ms
   of command processing, classed by whether the work depends on the order of draws:
