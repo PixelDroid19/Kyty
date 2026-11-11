@@ -1,3 +1,27 @@
+## Guest memory copies took a global lock to notify the tracker (2026-11-11, fixed)
+
+Guest memory copies and fills in the C-string handlers notify the dirty-page
+tracker before they write. The notifier copied its whole callback table
+under one process-wide mutex to call one pointer. In `PPSA17221 - Minecraft`
+while the player walks (one counted run) that was about 602,000
+notifications per frame on the submitting thread, 41 bytes each, and 182,000
+on the other guest threads; 99.4% of the page lookups behind them end at an
+empty slot.
+
+- **Fix.** The notifier pointer is published apart from the table when the
+  callbacks are installed and read with acquire ordering; installation and
+  the other dispatchers keep the lock.
+- **Measured.** One sampled world run afterwards: the submitting thread's
+  user time is 12.3 ms per frame against 16.7-18.6 ms in four runs before;
+  host mutex calls plus the notifier are 4.9% of its samples against 25%.
+  No frame-rate claim (`docs/titles/sandbox.md`).
+- **Verified.** The dirty-tracking unit suites, the callback contract test
+  and the three repository gates pass. `PPSA34971 - Hollow Knight:
+  Voidheart Edition` reaches its title menu and holds the 60 fps limit to
+  75 s (its intro videos did not play in that run).
+- **Open.** The dirty-page part of each notification still costs about
+  4.7 ms per frame on that thread, nearly all for untracked pages.
+
 ## A write-back on a shared page reads as a guest change (2026-11-10, fixed)
 
 Before a draw reads a storage result that has not reached guest memory, the

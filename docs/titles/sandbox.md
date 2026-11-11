@@ -195,6 +195,18 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     the dirty-page lookups run. Host mutex calls are 16% (2.9 ms); their callers were not sampled,
     and on the other guest threads mutex samples outnumber notifier samples five to eight times.
     That thread is off a CPU for 6-10 ms of the gap; what it waits on is not split.
+  - Fixed, the notifier lock (2026-11-11). A counted run (its counters slowed the frame from 134
+    to 154 ms, so only its counts are used) gave about 602,000 notifications per frame on the
+    submitting thread, 41 bytes each, and 182,000 on the other threads; 99.4% of the page lookups
+    end at an empty slot (3,467 hits per frame, no table walk). The notifier now reads its one
+    callback pointer without the lock; installation keeps it. In one sampled world run afterwards
+    (85 frames of 118 ms, about 5,100 draws per frame) the submitting thread spent 12.3 ms of each
+    frame in user code against 16.7-18.6 ms in the four runs before, and host mutex calls plus the
+    notifier fell from 25% to 4.9% of its samples, consistent with the lock being most of those
+    mutex calls. The dirty-page part of the path is unchanged at 4.7-4.9 ms per frame. No frame-rate
+    gain is claimed: the gap varies by 5 ms between runs. The counters' 20 ms slowdown of that
+    thread moved the command processor's wait for the next batch from 24-29 to 47 ms per frame (one
+    pair of runs), consistent with time on that thread landing in the gap.
   - A run with every draw skipped from boot (`KYTY_AB_SKIP_ALL_DRAWS`, a diagnostic switch) stayed
     at the 60 fps limit with 42-73 draw-processor calls and 22-35 dispatches per frame; world-level
     counts were not seen. The cause is not established, and it is not a floor.
