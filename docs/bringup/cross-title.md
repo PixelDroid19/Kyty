@@ -6373,3 +6373,15 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   every object over it re-read guest bytes. That is safe only when every record over the extra page also covers the
   faulting page; the handler has no per-page record set, so the change is deferred. Outcome metric if resumed: Hades
   frames at a fixed time, or time to gameplay.
+
+## Depth-copy pipelines destroyed at eviction while recorded (2026-11-11, open)
+
+- **Observed.** The depth-stencil copy renderer keeps at most 512 specialized pipelines. Above that,
+  `source/emulator/src/Graphics/DepthStencilCopy.cpp` (line 678) evicts one round-robin and destroys
+  it at once (`vkDestroyPipeline`, line 761), with no lease to the recording that bound it and no
+  deferral until its submissions complete. Found while checking the graphics pipeline bind sites;
+  no title has been seen to exceed 512 depth-copy pipelines.
+- **Trigger.** More than 512 distinct depth-copy pipelines while a recording or a pending submission
+  still references the evicted one: the destroy is then invalid Vulkan usage.
+- **Direction.** Lease the pipeline to the recording, as the draw pipeline cache does, or defer the
+  destroy until the submissions that used it have completed.

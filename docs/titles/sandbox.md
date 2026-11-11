@@ -450,7 +450,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       profile, so three per reuse cannot remove half of it;
     - the descriptor-set create path, up to 4.1 ms (allocation through write; the writes stay);
       the part a change removes is allocation, unindexing and list nodes, about 1.2-1.7 ms; the
-      lookups and hashes are paid by hits as well;
+      lookups and hashes are paid by hits as well; dropped unbuilt (2026-11-11): 1.2-1.7 ms is
+      those functions' whole share, and a cheaper recycler removes at most about 0.5-0.7 ms;
     - the vertex write-back walk and the bind's query, up to 3.2 ms (the in-use writable set was
       empty in 93% of scans); built, about 3.1 ms by the same timers (above);
     - refused vertex snapshot attempts, up to 2.5 ms; counted again 2026-11-11 (temporary
@@ -475,23 +476,59 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     not a result of the changes it measured. In that scene only, the thread called `fstat` about
     1 ms per frame (user time, spread over the whole window, absent from four other runs):
     `PrepareLocked` (`source/emulator/src/Graphics/GuestDeviceAddress.cpp`, line 2104) queries the
-    guest memory backing on every preparation while a partly imported physical range exists. Open:
-    price it with a call-graph run before changing when the population is queried.
+    guest memory backing on every preparation while a partly imported physical range exists. The
+    call-graph run below has no `fstat` sample, and the kernel half is not visible (the thread's
+    kernel time was 6.8 ms per frame in that scene against 8.3 ms in a run without the calls), so
+    it stays unpriced.
 
     Together up to about 28 ms as first summed. Re-priced 2026-11-11: about 3.1 ms delivered by the
     write-back walk, then about 1.7 ms of allocator time by the range lookups and 1.0 ms by the
     repeated pipeline bind; 0.9 ms measured and not kept, 8.8 ms out; the rest (context-only
     state, set creation, refused attempts, about 11-13 ms) are a function's whole share, not the
-    part a change removes, and the tracker delivered about a fifth of its share. Outside the ledger:
+    part a change removes, and the tracker delivered about a fifth of its share. What is left of A
+    is under 1 ms; the alias write-back below is a new line that needs a design. Outside the ledger:
     a driver division loop under buffer copies took 0-7.5 ms per frame depending on the run
     (`docs/bringup/cross-title.md`, buffer copies with awkward sizes).
-  - Needing a design, or changing when guest bytes are read (B): the shader input recipe, up to
-    7.1 ms; in-place storage reads, up to 7.6 ms; in-place vertex binds, up to 11.7 ms less the
-    refused attempts above, 9.2 ms (stale: priced on the 99.8% refusal census, not re-priced at 25%
-    accepted); parallel recording, 1.2-1.7x of what is left (estimate on the
-    older composition); submit overlap, not shown to engage. With A and the three per-draw items of
-    B about 44 ms of command processing is left, about 26-37 ms with parallel recording, and the
-    frame is that short only with the gap overlapped (27-38 fps). No combination reaches 16.7 ms.
+  - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
+    call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
+    per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
+    stacks reach the thread start in 70 of 921 samples, so shares of outer functions are lower
+    bounds; the same split gives an earlier run's vertex binding 8.9 ms against the 9.4 ms recorded.
+    - Behind a recorded exclusion or hazard, about 21.4 ms: the shader input recipe, 1.41 us per
+      draw or 7.2 ms before guards (excluded at its field set, above); in-place storage reads, up to
+      7.6 ms (their part of the read-only capture); in-place vertex binds, up to 6.6 ms (upload
+      2.9, object creation 2.4, pending storage copy 1.3; the lookups, 3.2 ms, stay), was 9.2 ms
+      on the older census. Both in-place entries read the bytes when the host GPU executes (the
+      rewrite-after-submit record under "Closed as well"). The read-only capture is 15.4 ms in all
+      (copy 4.9, compare 3.7, snapshot lookup 1.2, admission 0.9, pool bookkeeping about 3); index
+      snapshots take 4.9 ms of it (`GraphicsRenderDraw.cpp`, lines 2060 and 2172), owned by no entry.
+    - Needing a design, with nothing recorded against it: a reusable descriptor set, about 3.4 ms
+      (the creation side: allocation 1.3, driver writes 1.9, deferral 0.2, in an older clean run of
+      80.1 ms command-processor time; a reused set still pays hashing, lookup, trimming and use
+      recording), about 1.5 ms with a descriptor buffer, which keeps the writes. Both need a stable
+      buffer identity; push descriptors are excluded on this driver (`docs/bringup/cp-draw-plan.md`).
+      The alias write-back below, 3.0 ms. Parallel recording, at most about 14.5 ms (pipeline lookup
+      without the shader identities, which the draw record carries, 2.7; set lookup and creation
+      6.2; command emission 5.6), 1.07-1.21x of command processing, under the design's 2x gate.
+    - Descriptor-set misses (temporary counters in that run, per frame): 8,819 lookups, 1,488 hits,
+      7,331 misses, 6,537 of them for sets of a fresh snapshot, which skip the cache. The storage
+      buffer identities differ in every miss and the other fields in at most 416, so at least 94%
+      differ only in which snapshot buffer they bind. Those sets still pay the hash and the lookup.
+      Skipping both is exact only when a storage buffer has no cached set: pool entries are reused
+      with their identity, and their cached sets stay until the buffer is deleted, so a fresh
+      snapshot can hit a set from the entry's earlier use. That form saves at most about 0.6 ms,
+      the case of the recycler above; not built.
+    - Device-address write-back into aliases, a new lead: `GpuMemory::WriteBackStorageRanges`
+      (`source/emulator/src/Graphics/Objects/GpuMemoryWriteback.cpp`, line 926) runs before
+      device-address reads and spends 3.0 ms per frame (2.1 ms in the older run) in
+      `WriteBackObjectLocked` re-reading guest bytes into the written object's equal aliases
+      (`Update`, line 395: hash 1.7, copy 1.3, the object's update 1.1). It is not the walk built
+      above. Not priced as a change.
+    - Nothing in B is buildable without a design. Outside the exclusions about 6.4 ms are left,
+      plus parallel recording at most 14.5 ms that overlaps the set entry, of 82.5 ms of command
+      processing and a 107 ms frame. The earlier estimate: with A and the three per-draw items of
+      B about 44 ms of command processing is left, about 26-37 ms with parallel recording, and the
+      frame is that short only with the gap overlapped (27-38 fps). No combination reaches 16.7 ms.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
   then (2026-11-10; about 17 us at 5,342 draws on 2026-11-11, and the gap of about 19 ms between
   batches alone is longer than a 60 fps frame, so 60 fps also needs the gap cut). None of the
