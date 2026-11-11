@@ -158,6 +158,30 @@ shrink the gap"): with the guest allowed one batch ahead, the CP still waited 18
 for the next batch. What holds the guest is not identified (the probe counted no early returns), so
 the overlap rows above are unproven for this title, not excluded.
 
+Rechecked against an exclusive per-draw profile (2026-11-11, one full-stack profile, 5,017 draws per
+frame, 74.7 ms of CP processing, every draw-path sample in one row; `docs/titles/sandbox.md`, "The
+path behind the draw entry priced by unit of work"). Where the 66 ms under the draw entry sit,
+mapped onto the classes above (the profile shows where time is spent, not what depends on draw
+order): about 35 ms in the order-dependent classes (storage and index snapshots, vertex and storage
+objects, textures, device-address preparation, vertex uploads, targets, render-pass begins), about
+11-12 ms in the shared pipeline and descriptor-set caches, about 14-15 ms in per-draw work (shader
+input information, command emission, recorder) and about 5 ms unattributed. With about 35 ms serial
+plus the 8.4 ms outside the draw entry, no thread count reaches 2x of CP time (at most about 1.7x).
+The run that skipped the path behind the draw entry shows that path is over 90 % of the submit hold;
+it does not move the order-dependent share, so parallel recording alone stays under the gate.
+
+Combined with that redesign on paper, with four recording threads and the 24-29 ms between submits
+of this frame: with its countable rows at their ceilings the frame is about 51-62 ms (about 1.65-2x
+of 102 ms), with every row at its ceiling about 47-55 ms, and with its firm rows only about 71-83
+ms. Only the 16 ms between submits of the skip run, where the GPU work was removed too, would put
+the countable case at 43-58 ms. Stage A plus the time between submits stays at about 37-58 ms, above
+the 33 ms reopen condition at every ceiling, and no count of the redesign's rows measures that time:
+both stay closed, alone and combined. A bound over the designs priced, not a floor (the 8.4 ms
+outside the draw entry and the remaining order-dependent work were not redesigned): with every row
+at its ceiling, CP processing alone is about 23-26 ms, its serial part about 17-18 ms, already above
+16.7 ms before the time between submits and the GPU, so even complete submit overlap would not reach
+60 fps at this load.
+
 Three cases stay under the 2x gate and the fourth sits at it; neither change is built. 60 fps
 (16.7 ms) needs about 5.4x on this frame: the gap alone exceeds it, so any such path needs the
 overlap, and the CP would have to process a draw in about 4.6 us. No measured lever or design here

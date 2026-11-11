@@ -281,7 +281,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     in-place storage and index about 6 ms; with no guard evidence, in-place vertex about 9 ms; the
     masked recipe about 5 ms. The countable rows reach about 29-30 ms before the fence, under the
     30 ms build gate plus the noise; descriptor sets, targets and device-address preparation (up to
-    about 7 ms more) cannot be counted. Closed under the gate, not built.
+    about 7 ms more) cannot be counted. Closed under the gate, not built. Combined with
+    parallel recording it stays closed too (`docs/bringup/parallel-recording-design.md`, "Decision").
     - Found, not fixed: `GpuMemory::GetAllocatedRangePrefix` (`GpuMemory.cpp:249`) memoizes a
       heap-index search through a range-query cache, and in the profile the cache's lookups and
       stores outweigh the search, as on the validation path before it was answered from the heap
