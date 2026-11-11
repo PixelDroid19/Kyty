@@ -1,3 +1,20 @@
+## Device wait-idle races a queue submit under the validation layer (2026-11-11, fixed)
+
+One 63 s run of `PPSA21402 - Balatro` with the validation layer loaded stopped with exit 65 on a threading
+report: `vkDeviceWaitIdle` on one thread while another was in `vkQueueSubmit` on the same queue. The new storage
+read path was not engaged in that run (no buffer read by address); the next run of the same binary ended with
+exit 0 and no report. Vulkan requires external synchronization of every queue for `vkDeviceWaitIdle`. The
+three callers, `VulkanRecreateSwapchain` (`Window.cpp`), `DebugOverlayShutdown` and
+`DebugOverlayOnSwapchainRecreated` (`DebugOverlay.cpp`), hold at most the window mutex, which the command
+processors do not take to submit. The report has no stack, so which caller ran is not known.
+
+- **Fix.** The three callers wait for each queue with `vkQueueWaitIdle` under that queue's submit mutex
+  (`VulkanWaitQueuesIdle`, `GraphicContext.h`), the lock every submitter already takes. No device-wide wait is
+  left in the emulator.
+- **Verification.** Before the fix, 2 of 3 validation runs of `PPSA21402 - Balatro` stopped with exit 65; after
+  it, a validation run with the layer loaded ended with exit 0 and no report. One run after the fix is not proof
+  for an intermittent race; the change removes the unsynchronized call it reported.
+
 ## Vertex streams from guest pages: engagement by title and GPU (2026-11-11, built)
 
 A vertex stream inside one imported run of direct memory, with no live GPU

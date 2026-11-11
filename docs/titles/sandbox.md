@@ -37,7 +37,8 @@ descriptor-set binding to a per-draw copy.
   carrier, so set contents repeat. In-place reads rely on the same quiesce as the import windows: imports are
   destroyed only while every submitted batch has completed (`Gpu::RunQuiesced`). That a replaced range keeps its
   imports alive is recorded in `docs/bringup/cross-title.md`.
-- **Engagement (temporary counter, world run, 3,943 draws per frame).** Read-only buffers: 2,471,421 in place,
+- **Engagement (temporary counter, world run, 3,943 draws per frame, measured before the proven-flow and
+  redefined-row guards below narrowed eligibility).** Read-only buffers: 2,471,421 in place,
   2,635 snapshot copies, 57 buffer objects, 5,325,887 kept on the descriptor path; 172,463 writable.
 - **Price (one profiled world run, 10 s, 1,324 command-processor samples, a lighter view than the 5,012-draw
   profile it is compared with, so per-draw figures only).** Storage preparation 1.18 us per draw against 1.86,
@@ -54,8 +55,12 @@ descriptor-set binding to a per-draw copy.
   - Exit 0 and no error event new to this change: `PPSA21567 - Astro Bot` (interactive at frame 2548, intro
     capture correct), `PPSA17221 - Minecraft` (world, interactive at frame 6341), `PPSA21402 - Balatro`,
     `PPSA09076 - DREDGE`, `PPSA28311 - Absolum`, `PPSA09809 - OCTOPATH TRAVELER II` and
-    `PPSA34971 - Hollow Knight: Voidheart Edition`. The `gfx_storage_frontier` events of the last two also appear
-    in runs before this branch.
+    `PPSA34971 - Hollow Knight: Voidheart Edition`. The `gfx_storage_frontier` events of Astro Bot, OCTOPATH
+    TRAVELER II and Hollow Knight also appear in runs before this branch (Astro Bot's with identical fields on a
+    2026-11-09 binary).
+  - The path is live on the final translator: 457 of the 1,521 SPIR-V modules the matrix built on the A770 and 6
+    of 17 on RADV carry the by-address base (1,549 and 32 sites); a cache built with the reads switched off has
+    none.
   - `PPSA21402 - Balatro` on the AMD integrated GPU (RADV): exit 0. RADV hands out upper-half device addresses,
     which the sign extension of bit 47 is for.
   - `PPSA21402 - Balatro` with the validation layer: exit 0, no report, after the queue wait-idle fix

@@ -8,6 +8,24 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
 Later records: pipeline stalls and free-list corruption in `docs/bringup/cross-title.md` (2026-11-01).
 
+## Mechanical-fist platformer: stall at frame 665 with a cold shader cache (2026-11-11, open)
+
+- **Observation.** Strict runs on the generic first-gameplay route with an empty private SPIR-V and pipeline
+  cache stop presenting at frame 665 (about 18 s) and stay there; the runtime status reports `stalled` with the
+  graphics frontier, and no device loss is reported within 97 s. 5 of 5 runs with a cold or nearly cold cache:
+  two with the in-place reads and the storage reads by address, one with only the reads by address off, one
+  with both off, and one on a binary built on 2026-11-09, before either existed. With a warm cache, in-place
+  reads on and reads by address off passed frame 665 in 2 of 2 runs (gameplay loading at 40 s); one warm run
+  with both off lost the device at frame 692, unclassified. A sixth cold run stopped at 6 s on the read at
+  `0x58` recorded below. With the storage reads by address on and a cache warmed by one earlier run, a run
+  paused 18 s at frame 1216 and reached gameplay at frame 1529 within 115 s.
+- **Excluded.** The in-place vertex, index and storage reads and the storage reads by address: the stall
+  reproduces with all of them off and on the older binary.
+- **Open.** Which wait the stall is in: thread states, events and diagnostics were taken only in runs that did
+  not stall, and a profiled run (perf attached from launch) did not stall. Direction: one cold-cache run under
+  the stall supervisor (`docs/devtools/runtime-stall-snapshot.md`). A matrix that counts this title needs a warm
+  cache until then.
+
 ## Mechanical-fist platformer startup frontier (2026-10-08, not gameplay)
 
 These runs used the full local candidate, including changes held from publication. They used Silent logging,
