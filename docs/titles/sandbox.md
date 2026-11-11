@@ -415,9 +415,34 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     (`docs/bringup/cross-title.md`, "A graphics submit returns after its batch is decoded";
     descriptor tables, data buffers not observed).
 
-  This is the frontier for the command-processor run of this title as measured: no lever is open
-  and none is built, and no measured lever brings this scene to 30 fps. What holds the guest between
-  batches is not identified ("Command-processor idle between batches" below).
+  No single lever cleared the bar it was held to; the ledger below sums them. What holds the guest
+  between batches is not identified ("Command-processor idle between batches" below).
+- **Ledger of the levers under their bars (2026-11-11, offline, from the records above; ceilings
+  unless marked otherwise).** Frame of the clean run: 91.7 ms of command processing plus a gap of
+  about 19 ms, 111 ms.
+  - Narrow and contract-preserving (A), overlaps removed:
+    - the dirty-page tracker on the submitting thread, up to 4.7 ms (measured share; time on that
+      thread lands in the gap about one for one): the `PageStart` divides, or an early exit for an
+      untracked page;
+    - early-submission polls, about 4.6 ms (estimate: no polls inside the recorded
+      one-per-millisecond limit, about half the submissions);
+    - context-only state for draws whose state did not change, 4-6 ms (profile share: pipeline,
+      target and framebuffer lookups, viewport and color description; the target lookups counted
+      above sit inside it);
+    - index snapshot reuse, up to 4.2 ms (two pool locks and one registry lock per reuse);
+    - the descriptor-set create path, up to 4.1 ms (allocation through write; the writes stay);
+    - the vertex write-back walk and the bind's query, up to 3.2 ms (the in-use writable set was
+      empty in 93% of scans);
+    - refused vertex snapshot attempts, up to 2.5 ms.
+
+    Together up to about 28 ms, about 23 ms of command processing and 4.7 ms of the gap: frames of
+    about 83 ms (12 fps).
+  - Needing a design, or changing when guest bytes are read (B): the shader input recipe, up to
+    7.1 ms; in-place storage reads, up to 7.6 ms; in-place vertex binds, up to 11.7 ms less the
+    refused attempts above, 9.2 ms; parallel recording, 1.2-1.7x of what is left (estimate on the
+    older composition); submit overlap, not shown to engage. With A and the three per-draw items of
+    B about 44 ms of command processing is left, about 26-37 ms with parallel recording, and the
+    frame is that short only with the gap overlapped (27-38 fps). No combination reaches 16.7 ms.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
   then (2026-11-10; about 17 us at 5,342 draws on 2026-11-11, and the gap of about 19 ms between
   batches alone is longer than a 60 fps frame, so 60 fps also needs the gap cut). None of the
