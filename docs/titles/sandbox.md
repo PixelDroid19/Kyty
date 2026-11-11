@@ -640,17 +640,21 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
         it is the parallel-recording design (`docs/bringup/parallel-recording-design.md`); on
         this basis it moves at most the pipeline lookup (1.6), the sets (6.6) and the driver
         calls (8.3), about 16.5 ms, overlapping the repeat class on pipeline and sets.
-      - Absent elsewhere, unanswered: the other implementation's tree (a lead only) decodes on
-        one thread, returns from a submit once the batch is queued, copies vertex bytes per
-        draw, uses per-draw descriptor sets, and has no write notifications on guest copies, no
-        overlap admission and a sparse, probabilistic texture check. Whether those missing
-        steps explain its frame rate is open until its draws per frame in the measured scene
-        are known; its tree records none for this title so far.
+      - Absent elsewhere, a different load: the other implementation's tree (a lead only)
+        decodes on one thread, returns from a submit once the batch is queued, copies vertex
+        bytes per draw, uses per-draw descriptor sets, and has no write notifications on guest
+        copies, no overlap admission and a sparse, probabilistic texture check. Its profiled run
+        at 49.8 fps (another host) records a median of 101 us per draw on that one thread, so it
+        drew at most about 200 draws per frame (20.1 ms over 101 us), against 5,017-5,574 in
+        this world. Its only per-title draw counters, two sessions on this host that ended on
+        black frames, total 35,206 draws, at most seven frames of this world's load. Its frame
+        rate is not evidence that this load runs at 50-60 fps, and the steps it lacks are not
+        priced against it.
       - Bound: no single class reaches 30 ms. Outside recorded exclusions the union of the two
         classes is about 19.5 ms plus the unsplit register-state part, leaving at least about
-        55 ms of command processing less that part, and a frame of about 77 ms less that part
-        with the gap kept (about 13 fps). 60 fps would need about 3.3 us of command processing per draw, with
-        the gap overlapped, against about 14.9 us now.
+        55 ms of command processing less that part, and a frame of about 77 ms less that part with
+        the gap kept (about 13 fps). 60 fps would need about 3.3 us of command processing per
+        draw, with the gap overlapped, against about 14.9 us now.
   - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
     call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
     per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
