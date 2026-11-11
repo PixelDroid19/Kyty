@@ -2478,6 +2478,7 @@ void CommandBuffer::Begin()
 	auto* buffer = m_pool->buffers[m_index];
 	m_chunks.push_back(buffer);
 	m_main = buffer;
+	ForgetDrawPipeline();
 
 	VkCommandBufferBeginInfo begin_info {};
 	begin_info.sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -2694,12 +2695,26 @@ VkCommandBuffer CommandBuffer::PlaceGeometryPass()
 	return pass.segment;
 }
 
+void CommandBuffer::BindDrawPipeline(VkCommandBuffer vk_buffer, VkPipeline pipeline)
+{
+	EXIT_IF(vk_buffer == VK_NULL_HANDLE || pipeline == VK_NULL_HANDLE);
+
+	if (vk_buffer == m_draw_pipeline_buffer && pipeline == m_draw_pipeline)
+	{
+		return;
+	}
+	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+	m_draw_pipeline_buffer = vk_buffer;
+	m_draw_pipeline        = pipeline;
+}
+
 VkCommandBuffer CommandBuffer::BeginChunk()
 {
 	const size_t used = m_chunks.size() - 1u;
 	EXIT_IF(used >= VulkanCommandPool::CHUNKS_PER_SLOT);
 	auto* chunk = m_pool->chunks[m_index * VulkanCommandPool::CHUNKS_PER_SLOT + used];
 	m_chunks.push_back(chunk);
+	ForgetDrawPipeline();
 
 	VkCommandBufferBeginInfo begin_info {};
 	begin_info.sType  = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;

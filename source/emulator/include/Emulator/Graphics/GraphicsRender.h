@@ -650,6 +650,15 @@ public:
 	[[nodiscard]] VkCommandBuffer RecordOutsideRenderPass();
 	[[nodiscard]] VkCommandBuffer RecordState();
 	[[nodiscard]] VkCommandBuffer RecordInsideRenderPass() const;
+	// Binds a draw's graphics pipeline unless this recording bound it last on `vk_buffer`. Only pipelines
+	// the pipeline cache leases to this recording come here, so a remembered handle stays unique until reset.
+	void BindDrawPipeline(VkCommandBuffer vk_buffer, VkPipeline pipeline);
+	// Every other graphics pipeline bind replaces the remembered one.
+	void ForgetDrawPipeline()
+	{
+		m_draw_pipeline_buffer = VK_NULL_HANDLE;
+		m_draw_pipeline        = VK_NULL_HANDLE;
+	}
 	// Geometry passes run ahead of the draws recorded after them, which on some
 	// devices costs a pipeline drain per pass. A pass that only reads guest memory
 	// therefore joins a geometry segment: a compute-only command buffer submitted
@@ -841,6 +850,9 @@ private:
 	std::optional<OpenRenderPass> m_open_render_pass;
 	// The latest command recorded is a full memory barrier. Every recording handle clears it.
 	mutable bool m_latest_full_barrier = false;
+	// The graphics pipeline BindDrawPipeline bound last, and the command buffer it went to.
+	VkCommandBuffer m_draw_pipeline_buffer = VK_NULL_HANDLE;
+	VkPipeline      m_draw_pipeline        = VK_NULL_HANDLE;
 	// Command buffers of the recording in submission order: the slot's buffer, then a segment and the main chunk
 	// after it for each geometry segment. m_main receives every command but the segments' passes.
 	std::vector<VkCommandBuffer> m_chunks;

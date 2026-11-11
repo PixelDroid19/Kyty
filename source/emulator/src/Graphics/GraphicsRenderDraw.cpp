@@ -1612,6 +1612,7 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
 				FragmentTransportBeginTile(buffer, transport);
 
 				auto* vk = buffer->RecordState();
+				buffer->ForgetDrawPipeline();
 				vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline);
 				SetDynamicParams(vk, capture);
 				vkCmdSetScissor(vk, 0, 1, &band);
@@ -1633,6 +1634,7 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
 				FragmentTransportRecordShade(buffer, transport, *pipeline->transport, ps_input_info.bind, ps_input_info);
 
 				vk = buffer->RecordOutsideRenderPass();
+				buffer->ForgetDrawPipeline();
 				vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline);
 				SetDynamicParams(vk, resolve);
 				vkCmdSetScissor(vk, 0, 1, &band);
@@ -2215,7 +2217,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 
 	const auto resource_binding_start = DrawStageClock::now();
 	buffer->SeparateDepthKillDraw(ps_input_info.ps_pixel_kill_enable && depth_info.depth_write_enable && !depth_info.suppress_depth_write);
-	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
+	buffer->BindDrawPipeline(vk_buffer, pipeline->pipeline);
 
 	SetDynamicParams(vk_buffer, pipeline);
 
@@ -2573,6 +2575,7 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 	auto* vk_buffer = buffer->RecordState();
 	auto* depth_stencil_copy_renderer = g_render_ctx->GetDepthStencilCopyRenderer();
 	const auto draw = depth_stencil_copy_renderer->PrepareDraw(g_render_ctx->GetGraphicCtx(), request);
+	buffer->ForgetDrawPipeline();
 	depth_stencil_copy_renderer->BindPreparedDraw(vk_buffer, draw);
 	if (guest_geometry)
 	{
@@ -3583,7 +3586,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	const auto resource_binding_start = DrawStageClock::now();
 	buffer->SeparateDepthKillDraw(ps_input_info.ps_pixel_kill_enable && depth_info.depth_write_enable && !depth_info.suppress_depth_write);
-	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
+	buffer->BindDrawPipeline(vk_buffer, pipeline->pipeline);
 
 	SetDynamicParams(vk_buffer, pipeline);
 
