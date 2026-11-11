@@ -49,11 +49,11 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Cost per frame: index snapshots 5.7 ms (99.5% reused), other snapshots 8.2 ms (21% reused),
     vertex binding about 12.6 ms (2.4 us per draw), together about 26 ms of the 104 ms the command
     processor runs per frame.
-  - 99.8% of vertex snapshots are refused (this census; counted again on 2026-11-11 with later
-    fixes, 25% are accepted and every refusal is a writable storage buffer over the range: the
-    ledger below). The bind then uses a host copy of the guest bytes (94%) or
-    a storage object already bound in place (6%); only 750 of 140,530 host-copy binds had device
-    results not yet in guest memory.
+  - 99.8% of vertex snapshots are refused (this census; a count on 2026-11-11, on a later revision
+    and with the cause of the difference not identified, found 25% accepted, reuse included, and
+    every refusal made by a writable storage buffer over the range: the ledger below). The bind
+    then uses a host copy of the guest bytes (94%) or a storage object already bound in place (6%);
+    only 750 of 140,530 host-copy binds had device results not yet in guest memory.
   - 54% of index addresses are only 2-byte aligned, which a per-object in-place buffer cannot hold;
     one buffer per import window bound at an offset can. Other probes are all 16-byte aligned and the
     device storage offset limit is 4.
@@ -438,7 +438,13 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       pipeline their command buffer bound last (temporary counter, an upper bound: other graphics
       bind sites are not seen), and the driver's pipeline bind leaves are about 1.2 ms, so skipping
       the repeated bind is about 1.1 ms; the shader id copies of the pipeline lookup
-      (`PipelineCache::CreatePipeline`, `ShaderGetIdVS`/`PS`) allocate about 0.9-1.2 ms;
+      (`PipelineCache::CreatePipeline`, `ShaderGetIdVS`/`PS`) allocate about 0.9-1.2 ms. Built
+      (2026-11-11): a draw skips a pipeline bind that repeats the recording's last one, 96.2% of
+      5,149 draw binds per frame, and the driver's bind leaves went from 1.18 to 0.14 ms per
+      frame; identities are built in a per-thread buffer, 9,644 per frame that each allocated and
+      freed 2 KiB before. The allocator leaves went from 4.5 to 3.9 ms per frame at the same share
+      of the thread's samples (4.7% and 4.6%) in a lighter scene: that saving is not separated
+      from the scene, at most about 0.6 ms;
     - index snapshot reuse, up to 4.2 ms (two pool locks and one registry lock per reuse); dropped
       unbuilt: every mutex lock and unlock on the thread is about 2.7 ms per frame in the leaf
       profile, so three per reuse cannot remove half of it;
@@ -450,26 +456,39 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     - refused vertex snapshot attempts, up to 2.5 ms; counted again 2026-11-11 (temporary
       counters, 138 world frames): of 5,140 attempts per frame 1,288 are accepted and every one of
       the 3,853 refusals is made at the overlap check, by a writable storage buffer over the
-      range, which the bind then reads through `GpuMemoryFindStorageContaining`. The admission
-      leaves cover all probes and vertex attempts are about a quarter of them: about 1-1.5 ms.
+      range (the accepted ones include reuse). The admission leaves cover all probes and vertex
+      attempts are about a quarter of them: about 1-1.5 ms. Looking first for a storage object
+      that contains the range is not narrow: `GpuMemoryFindStorageContaining` also returns
+      read-only storage objects, whose ranges a snapshot admits today; in the call graph that
+      lookup is 1.6 ms of the bind's 9.4 ms per frame.
     - range lookups of the GPU object index, a new entry (2026-11-11): about 25,900 per frame,
       24% cache hits, 1.2 candidates per miss; every miss allocated and grew its candidate and
       result arrays, every hit allocated an unused result. Built: allocator leaf time on the
       command-processor thread 6.2-6.7 ms per frame in four runs, 4.5 ms after.
 
-    The run that measured the lookups (124 ms per frame, 5,237 draws) spent about 5 ms more than
-    the previous run in guest-data copies, hashing and object creation, which the change does not
-    touch; the driver division loop took no time in it.
+    The run that measured the lookups (124 ms per frame, 5,237 draws) carried a heavier scene than
+    the previous run, per frame 101 against 44 MB uploaded, 22 against 4 object creations (17.8
+    against 8.0 ms) and 127 against 77 MB hashed: about 5 ms more in guest-data copies, hashing and
+    object creation, which the change does not touch; the driver division loop took no time in it.
+    The run after it (106 ms per frame, 83.6 ms of command-processor CPU time) ended under water, a
+    lighter scene (41 MB uploaded, 1 object creation, 85 MB hashed per frame); its shorter frame is
+    not a result of the changes it measured. In that scene only, the thread called `fstat` about
+    1 ms per frame (user time, spread over the whole window, absent from four other runs):
+    `PrepareLocked` (`source/emulator/src/Graphics/GuestDeviceAddress.cpp`, line 2104) queries the
+    guest memory backing on every preparation while a partly imported physical range exists. Open:
+    price it with a call-graph run before changing when the population is queried.
 
-    Together up to about 28 ms as first summed. Re-priced 2026-11-11: about 3.1 ms delivered, 0.9 ms
-    measured and not kept, 8.8 ms out; the rest (context-only state, set creation, refused attempts,
-    about 11-13 ms) are a function's whole share, not the part a change removes, and the tracker
-    delivered about a fifth of its share. Outside the ledger: a driver division loop under buffer
-    copies took 0-7.5 ms per frame depending on the run (`docs/bringup/cross-title.md`, buffer
-    copies with awkward sizes).
+    Together up to about 28 ms as first summed. Re-priced 2026-11-11: about 3.1 ms delivered by the
+    write-back walk, then about 1.7 ms of allocator time by the range lookups and 1.0 ms by the
+    repeated pipeline bind; 0.9 ms measured and not kept, 8.8 ms out; the rest (context-only
+    state, set creation, refused attempts, about 11-13 ms) are a function's whole share, not the
+    part a change removes, and the tracker delivered about a fifth of its share. Outside the ledger:
+    a driver division loop under buffer copies took 0-7.5 ms per frame depending on the run
+    (`docs/bringup/cross-title.md`, buffer copies with awkward sizes).
   - Needing a design, or changing when guest bytes are read (B): the shader input recipe, up to
     7.1 ms; in-place storage reads, up to 7.6 ms; in-place vertex binds, up to 11.7 ms less the
-    refused attempts above, 9.2 ms; parallel recording, 1.2-1.7x of what is left (estimate on the
+    refused attempts above, 9.2 ms (stale: priced on the 99.8% refusal census, not re-priced at 25%
+    accepted); parallel recording, 1.2-1.7x of what is left (estimate on the
     older composition); submit overlap, not shown to engage. With A and the three per-draw items of
     B about 44 ms of command processing is left, about 26-37 ms with parallel recording, and the
     frame is that short only with the gap overlapped (27-38 fps). No combination reaches 16.7 ms.
