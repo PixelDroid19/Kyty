@@ -514,9 +514,21 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     repeated pipeline bind; 0.9 ms measured and not kept, 8.8 ms out; the rest (context-only
     state, set creation, refused attempts, about 11-13 ms) are a function's whole share, not the
     part a change removes, and the tracker delivered about a fifth of its share. What is left of A
-    is under 1 ms; the alias write-back below is a new line that needs a design. Outside the ledger:
-    a driver division loop under buffer copies took 0-7.5 ms per frame depending on the run
-    (`docs/bringup/cross-title.md`, buffer copies with awkward sizes).
+    is under 1 ms; the alias write-back below is a new line that needs a design. Outside the
+    ledger, a driver division loop under buffer copies took 0-7.5 ms per frame depending on the
+    run (`docs/bringup/cross-title.md`, buffer copies with awkward sizes). The guest-range checks
+    of the read-only binds, about 7.4 ms in the full-stack run below, were priced after
+    (2026-11-11) and leave A ended:
+    - Overlap test, 5.7 ms: cache misses 2.9 (storage 1.5, vertex 0.8, index 0.5), cache hits 1.7,
+      and the writable-storage test 0.9, all of it under index binds. Index keys repeat every frame
+      and miss for 0.5 ms only, so slot collisions are not what misses; the misses are keys first
+      seen, which a larger cache or a verdict kept on the snapshot does not remove. On the reused
+      path the hits take 0.5 ms.
+    - Allocated-range check, 1.7 ms, of which its own cache's lookup and store are 1.4. That cache
+      is invalidated only when a heap is added or removed, so a heap-generation stamp kept on a
+      reused snapshot could stand in for it: 0.46 ms on that path, about 0.4 ms after the stamp
+      compare. Fresh captures have no snapshot to hold it. Which titles add heaps during play was
+      not looked at.
   - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
     call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
     per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
@@ -564,8 +576,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     - Full-stack check on the pushed code (2026-11-11, 64 KB stacks, 1,444 of 1,459 samples reach
       the thread start, no lost samples; 98 world frames of 102 ms while profiling, 5,017 draws):
       74.7 ms of command-processor user CPU time per frame. The processor's own time counter reads
-      80.6 ms per frame there and 79.5 ms after, against 80.9 and 82.4 ms in two earlier clean runs,
-      so command processing did not fall. Inside draws 66.3 ms (56.4 was the lower bound). No entry
+      80.6 ms per frame there and 79.5 ms after. The run before the four A changes above read
+      80.9 ms: per draw that is 15.1 against 15.6 us, about 2.5 ms per frame, inside the counter's
+      80-85 ms spread between runs, so it neither confirms nor refutes the 5.8 ms that A credits
+      from function shares. Inside draws 66.3 ms (56.4 was the lower bound). No entry
       above is higher by more than 2 ms: read-only binds 16.1 (storage 8.2, index 5.2, vertex 2.7),
       vertex binding 8.9, descriptor sets 6.6, alias write-back 2.7, shader input 7.4, pipeline
       lookup without the identities 1.6 (building them, 3.0), driver calls 8.3 in all.
