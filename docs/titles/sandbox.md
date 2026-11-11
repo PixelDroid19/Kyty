@@ -96,12 +96,14 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     `CollectStorageForGuestSeed`. The write-back check before it (`PrepareVertexStreamsForRead` calls
     `WriteBackStorageForGuestSeed` per stream, about 0.8 us per draw with timers) and the last call
     both walk the in-use writable storage over the draw's fetch window (`CollectWritableStorageIn`);
-    the second walk found nothing for 99.6% of binds (636 of 145,718 did). Answering both from the
-    in-use writable set (`m_writable_storage`) instead was checked and not built: by code the set holds
-    every object the walk can return, but in one world run with temporary timers (4,476 draws and
-    108 ms per frame) the write-back check took 2.64 ms per frame (0.59 us per call) and the bind's
-    query 0.57 ms (0.15 us per call), together 3.0% of the frame, under the bar. The set was empty in
-    93% of scans and held at most 8 objects in 99.9%; `FindStorageContaining` took 1.11 ms per frame.
+    the second walk found nothing for 99.6% of binds (636 of 145,718 did). In one world run with
+    temporary timers (4,476 draws and 108 ms per frame) the write-back check took 2.64 ms per frame
+    (0.59 us per call) and the bind's query 0.57 ms (0.15 us per call). The set was empty in 93% of
+    scans and held at most 8 objects in 99.9%; `FindStorageContaining` took 1.11 ms per frame.
+    Built (2026-11-11): the walk returns at once while the in-use writable set (`m_writable_storage`)
+    is empty; the set holds every object the walk can return (only the storage-buffer class has that
+    type, and its write-back is never null). Same timers, one world run at 5,191 draws per frame: 0.09
+    and 0.04 us per call, about 3.1 ms per frame less; the set was empty in 93.6% of scans.
   - Shader input information: 2.1 us per draw with timers and no reuse path. The per-shader recipe is
     excluded (`docs/bringup/cp-draw-plan.md`, stage 2); reopening it needs a count of repeated input
     structure in this title. Counted so far, exact inputs only: over about 249,000 indexed draws the
@@ -423,20 +425,28 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Narrow and contract-preserving (A), overlaps removed:
     - the dirty-page tracker on the submitting thread, up to 4.7 ms (measured share; time on that
       thread lands in the gap about one for one): the `PageStart` divides, or an early exit for an
-      untracked page;
+      untracked page; measured 2026-11-11: the divides were 0.9 ms, not kept, and the rest is the
+      table probe both variants pay (`docs/bringup/cross-title.md`, the notifier record);
     - early-submission polls, about 4.6 ms (estimate: no polls inside the recorded
-      one-per-millisecond limit, about half the submissions);
+      one-per-millisecond limit, about half the submissions); out: that limit is excluded
+      (`docs/bringup/cross-title.md`, early submission);
     - context-only state for draws whose state did not change, 4-6 ms (profile share: pipeline,
       target and framebuffer lookups, viewport and color description; the target lookups counted
       above sit inside it);
-    - index snapshot reuse, up to 4.2 ms (two pool locks and one registry lock per reuse);
+    - index snapshot reuse, up to 4.2 ms (two pool locks and one registry lock per reuse); dropped
+      unbuilt: every mutex lock and unlock on the thread is about 2.7 ms per frame in the leaf
+      profile, so three per reuse cannot remove half of it;
     - the descriptor-set create path, up to 4.1 ms (allocation through write; the writes stay);
     - the vertex write-back walk and the bind's query, up to 3.2 ms (the in-use writable set was
-      empty in 93% of scans);
+      empty in 93% of scans); built, about 3.1 ms by the same timers (above);
     - refused vertex snapshot attempts, up to 2.5 ms.
 
-    Together up to about 28 ms, about 23 ms of command processing and 4.7 ms of the gap: frames of
-    about 83 ms (12 fps).
+    Together up to about 28 ms as first summed. Re-priced 2026-11-11: about 3.1 ms delivered, 0.9 ms
+    measured and not kept, 8.8 ms out; the rest (context-only state, set creation, refused attempts,
+    about 11-13 ms) are a function's whole share, not the part a change removes, and the tracker
+    delivered about a fifth of its share. Outside the ledger: a driver division loop under buffer
+    copies took 0-7.5 ms per frame depending on the run (`docs/bringup/cross-title.md`, buffer
+    copies with awkward sizes).
   - Needing a design, or changing when guest bytes are read (B): the shader input recipe, up to
     7.1 ms; in-place storage reads, up to 7.6 ms; in-place vertex binds, up to 11.7 ms less the
     refused attempts above, 9.2 ms; parallel recording, 1.2-1.7x of what is left (estimate on the

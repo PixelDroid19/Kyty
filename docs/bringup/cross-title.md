@@ -1,3 +1,39 @@
+## Buffer copies with awkward sizes cost host time in the Intel driver, intermittently (2026-11-11, open)
+
+Mesa 26.2.6 (Intel, Xe) records `vkCmdCopyBuffer` through the same surface
+helper as the buffer fill (`isl_surf_from_mem`, also used by fast clears).
+The element size comes from the lowest set bit of source offset, destination
+offset and size, so a copy can have 1-byte elements. Above 16384 elements
+the driver tries heights one division at a time; an element count with a
+large prime factor walks the whole count. Up to 16384 elements is free.
+
+- **Measured.** `PPSA17221 - Minecraft` while the player walks, leaf
+  profiles of the graphics command-processor thread, driver frames named from
+  its debug information. The loop took 8.1%, 3.1% and 2.9% of the thread in
+  three runs (about 7.5, 2.6 and 2.5 ms per frame) and none in four others.
+  Where present its samples come in steps of about 17 ms per second: single
+  calls of about 17 ms and equal cost, 0-6 per second. The vertex-binding
+  stage exceeds the run without the loop by about the loop's time per draw
+  (1.27 against 1.48 us, 0.65 against 0.50 us); the other stages stay within
+  0.1 us. The call sits inside the vertex-binding timer.
+- **Timed per call site, one run.** Eight copy sites, the fill helper, three
+  direct fills, six image clears and the render-pass begin. The loop did not
+  appear in that run and no call took more than 0.81 ms. Copies over 16 KiB
+  that are not a multiple of 16 KiB, per frame: pending storage results into
+  vertices (`GraphicsRenderBind.cpp:2616`) 3.0, the device-address arena and
+  staging copies (`GuestDeviceAddress.cpp:1961`, `:1965`) 3.3 each.
+- **Not identified.** Which site makes the 17 ms calls, and whether guest
+  address alignment is what varies between runs.
+- **Direction.** Record copies through a helper beside `VulkanCmdFillBuffer`:
+  a region over 16 KiB as a body in whole 16 KiB plus a tail below 16 KiB,
+  regions up to 16 KiB or in whole 16 KiB left as they are. Each split adds
+  one driver copy. The direct fills (`GraphicsRenderAttachments.cpp:510`,
+  `:513`, `GraphicsRenderContext.cpp:392`) still pass their own sizes. A
+  clean binary can show no loop at all, so verification needs a per-call
+  witness, not samples. Every profiled run of this title reports the loop's
+  ms per frame: it moved command-processing time by about 1 us per draw
+  between two runs.
+
 ## Guest memory copies took a global lock to notify the tracker (2026-11-11, fixed)
 
 Guest memory copies and fills in the C-string handlers notify the dirty-page
@@ -21,13 +57,14 @@ them end at an empty slot.
   and the three repository gates pass. `PPSA34971 - Hollow Knight:
   Voidheart Edition` reaches its title menu and holds the 60 fps limit to
   75 s (its intro videos did not play in that run).
-- **Open, under the bar.** The dirty-page part of each notification still
-  costs about 4.7 ms per frame on that thread (4.0% of a 118 ms frame),
-  nearly all for untracked pages. Candidate, not measured:
-  `GpuDirtyPageTracker.cpp:245` (`PageStart`) rounds by a runtime page size,
-  and `NotifyWrite` carries two divides per call. Direction: round with a
-  mask when the page size is a power of two, or reject an untracked
-  single-page write before the page-run setup.
+- **Closed, under the bar.** The dirty-page part of each notification costs
+  about 5.2 ms per frame on that thread (leaf share), nearly all for
+  untracked pages. Rounding with a mask instead of the two divides was built
+  and measured in one world run: 5.19 to 4.29 ms per frame, against the
+  2.35 ms it had to deliver, so it was not kept. `NotifyWrite` fell from
+  11.9% to 0.3% of the thread's samples while `FindWritePage` and `Instance`
+  rose from 9.7% to 21.1%: the cost is the table probe for an untracked
+  page, which an early exit for an untracked page still pays.
 
 ## A write-back on a shared page reads as a guest change (2026-11-10, fixed)
 
