@@ -120,6 +120,14 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     excludes the change. Why publishing earlier causes it is not established. The change was not kept.
   - Direction: find which readers recreate buffers after an early publication before freeing the
     staging outside end-of-pipe events. The best case recovers about 7 ms of 140 ms frames.
+  - Measured (two runs with temporary counters, same route and save): the staging level stays at
+    the cap. At 16 MiB it read the cap at every allocation from about 10 s on, and a counter on the
+    snapshot take (`GuestDeviceAddressTakeSnapshots`) stayed at zero for the 128 s run; that counter
+    has not been seen to fire on any title, so it is not proof that the take never runs. With the cap
+    raised to 64 MiB the level rose from boot at about 1.4-1.8 MiB/s, reached the cap at about 40 s
+    and no later allocation read it lower; all 481 allocations in the world were refused, and fence
+    waits read 16.3 ms per frame (12-16 ms at 16 MiB). Excluded: a larger cap only delays the full
+    state.
 - **GPU estimate.** In the same run the render engine was busy 37% of 131 ms frames at 600-650 MHz,
   about 48 ms. If that time scaled with the clock it would be about 13 ms at 2,400 MHz; this is an
   estimate, not a measurement.
@@ -151,25 +159,47 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     batch reads, as the contract record says; its scope and cost are not measured. The work between
     the batch's last guest read and the signal (graphics interrupt queueing, flush, flip,
     `GraphicsRun.cpp:1930-1949`) also holds the submitter and is not measured.
-- **Device-address residency (measured).** In the world the residency timer reads 8.1 and 9.1 ms per
-  frame in two runs without temporary code, and 1.46 ms in the run with temporary counters, whose world
-  is a lighter regime: the level of live mappings whose direct memory was released moved 0.72 per
-  frame there against 3.89 in the other two. In all three, residency per sample follows the change of
-  that level (correlation 0.61-0.62, 2.0-2.5 ms per unit of it). Command-processor system time follows
-  residency time (correlation 0.86 and 0.95 in the two runs; 0.75 in a run with read-only census code),
-  and seconds above 300 ms/s held 6 of 9 frames over 250 ms in them. Table rebuilds are about 0.2 ms
-  per frame in all three.
+- **Device-address residency (measured; populated-page query fixed in `67d6e9a95`).** Before the
+  fix, in the world the residency timer read 8.1 and 9.1 ms per frame in two runs without temporary
+  code, and 1.46 ms in the run with temporary counters, whose world is a lighter regime: the level of
+  live mappings whose direct memory was released moved 0.72 per frame there against 3.89 in the other
+  two. In all three, residency per sample follows the change of that level (correlation 0.61-0.62,
+  2.0-2.5 ms per unit of it). Command-processor system time follows residency time (correlation 0.86
+  and 0.95 in the two runs; 0.75 in a run with read-only census code), and seconds above 300 ms/s held
+  6 of 9 frames over 250 ms in them. Table rebuilds are about 0.2 ms per frame in all three.
   - Light regime (the run with counters, 43 s of world): 322 populated spans imported at about 1.1 ms
     each; spans of 16 pages cost 1.5-2.5 ms while the backing did not grow, so the cost is per call,
-    not per page. Which part of `ImportPhysicalSpan` costs it (physical resolve, the populated-page
-    query over the span, the run import) is not measured. The heavy regime has no split.
+    not per page.
   - Loading only, same run: for four seconds the check ran up to 1,916 sweeps per second, each over
     one unimported span, and imported no page in about 6,700 sweeps at up to 104 ms/s. Each sweep is
     one `SEEK_DATA` query from the span start (`FindUnpopulatedSharedBackingSpans`,
     `source/lib/Core/src/VirtualMemory.cpp`), 31-57 us there against about 3 us in quiet seconds, and
     is triggered by a population change anywhere in the shared backing (it grew 20-25 MB/s while
     discards rose 2,500-5,000 per second).
-  - Not built: no change is proposed until the heavy regime is split.
+  - Split (a later run with temporary counters, same route and save, 27 s of world, level +0.88 per
+    frame): the populated-page query (`sys_virtual_query_shared_backing_data_pages`,
+    `source/lib/Sys/src/SysLinuxVirtual.cpp`) cost 3.6 ms per import call over 0.56 MiB, 94% of import
+    time (37 of 39 ms/s); physical resolve 6 us and the run import 211 us per call. Each call issued
+    about one `SEEK_DATA` and one `SEEK_HOLE`, and the `SEEK_HOLE` walked on average 900 MiB of
+    populated backing past the span end before it reached a hole. On the host, a `SEEK_HOLE` over a
+    1 GiB memfd costs about 6 us per populated MiB it walks; a `SEEK_DATA` on a populated page costs
+    0.3-0.4 us and one across a 1 GiB hole 0.4 us.
+  - Fixed (`67d6e9a95`): the query issues one `SEEK_DATA` per page, so its cost follows the pages
+    inside the span and never the backing beyond it. One run with temporary counters on the same route
+    and save: 44 us per call (106 queries) in the world against 3,626 us, and 41 us against 921 us in
+    the rest of the run; import time 3.4 against 39 ms/s; residency 0.63 ms per frame against 4.18,
+    with the level moving 1.92 per frame (2.0-2.5 ms per unit of it before the fix, so 3.8-4.8 ms
+    expected). Pages imported per page queried were 1.00 against 0.99 in the world and 0.92 against
+    0.89 in the rest of the run; the unit test covers a span inside a longer populated run. The world
+    capture at 125 s rendered correctly; the player had died to a zombie, as in the clean control on
+    this save. The heavy regime (+3.89 per frame) was not run again. No frame-rate claim: residency
+    was 4-9 ms of 100-130 ms frames before the fix.
+  - Limit: the cost is now linear in the span's pages, about 0.1 ms per densely populated MiB, once
+    per import. It was cheaper than the old walk in both loading and world here; the largest spans
+    other titles import are not measured.
+  - `PPSA21567 - ASTRO BOT`, same session, old and new query, same save and route: the scripted route
+    missed the title screen on both binaries, and a diagnostic agent tap took both to the intro
+    cinematic; residency was 0.19 against 0.17 ms per frame.
 
 ## Sandbox title: letters missing from the death message (2026-11-10, open)
 

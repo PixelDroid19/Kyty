@@ -1,3 +1,22 @@
+## Populated-page query walked the backing past its range (2026-11-10, fixed)
+
+Importing a physical span asks which of its pages the shared memfd backing
+holds (`sys_virtual_query_shared_backing_data_pages`,
+`source/lib/Sys/src/SysLinuxVirtual.cpp`). The query found each populated
+extent with `SEEK_DATA` and its end with `SEEK_HOLE`; the kernel answers
+`SEEK_HOLE` by walking every populated page up to the next hole, and in a
+densely populated backing that hole lay far past the span. In
+`PPSA17221 - Minecraft` each import call queried 0.56 MiB and walked about
+900 MiB past it: 3.6 ms per call, 94% of import time. The query now issues
+one `SEEK_DATA` per page, which answers a populated page at once and skips a
+hole in one call, so its cost follows the span's pages (about 0.4 us each on
+the host). Same route and save: 44 us per call, residency 0.63 against 4.18
+ms per frame. The cost is now linear in the span's pages (about 0.1 ms per
+densely populated MiB, once per import); the largest spans other titles
+import are not measured. Fixed in `67d6e9a95`; the unit test covers a span
+inside a longer populated run. Evidence, the residency regimes and the
+`PPSA21567 - ASTRO BOT` check are in `docs/titles/sandbox.md`.
+
 ## Which titles record geometry passes (2026-11-10)
 
 Normal runs count no geometry passes, so the earlier cross-title runs could
@@ -729,7 +748,9 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   earlier run at another moment).
 - **Open:** each imported span still costs about 135 µs; the sorted table
   insert, the window import and the populated-page query have not been
-  measured apart.
+  measured apart. (2026-11-10: in the sandbox title the populated-page query
+  was 94% of import time, see "Populated-page query walked the backing past
+  its range".)
 
 ## Object range queries indexed by block size (2026-10-24)
 
