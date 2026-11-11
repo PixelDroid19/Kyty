@@ -243,6 +243,18 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - A run with every draw skipped from boot (`KYTY_AB_SKIP_ALL_DRAWS`, a diagnostic switch) stayed
     at the 60 fps limit with 42-73 draw-processor calls and 22-35 dispatches per frame; world-level
     counts were not seen. The cause is not established, and it is not a floor.
+  - A run that skipped the path behind the draw entry (preparation, recording and the GPU work it
+    queues; decode, waits, labels, dispatches, flips and completion kept) in alternate 4 s phases
+    once in the world (2026-11-11, one run, temporary probe, A770, 60 fps limit, +8 s route): the
+    submit hold fell from 114-142 ms to 3-5 ms at 5,300-5,500 draws entered per flip, and from
+    49-70 ms to about 2 ms at about 2,800 (16 intervals), with equal entered-draw counts in both
+    phases. At about 2,800 draws per flip the skip phases sat at the 60 fps limit (gap about
+    15 ms). The full-load number is void under the rule stated before the run (three intervals at
+    world entry, under the four required); the load fell at the same point of the route in a run
+    with nothing skipped (about 2,500 draws per flip). At full load the submitting thread's time
+    between submits was 25-28 ms in the two clean skip intervals against 15-25 ms with the draws
+    processed, longer than 16.7 ms on its own; guest code against calls into the emulator on that
+    thread is not measured.
   - The small cuts in this record together: polls 2.6 ms, half the early submissions 2.0 ms, set
     creation 4.1 ms, the vertex walks 3.2 ms, index snapshots 4.2 ms and admission reuse 2.3 ms,
     about 18 ms of a 120 ms frame, or about 10 fps.
@@ -654,11 +666,13 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
         is not evidence that this load runs at 50-60 fps, and the steps it lacks are not priced
         against it. At about 54 draws per flip (loading and menus) this build ran 49-51 flips
         per second in three runs, a different scene.
-      - Bound: no single class reaches 30 ms. Outside recorded exclusions the union of the two
-        classes is about 19.5 ms plus the unsplit register-state part, leaving at least about
-        55 ms of command processing less that part, and a frame of about 77 ms less that part with
-        the gap kept (about 13 fps). 60 fps would need about 3.3 us of command processing per
-        draw, with the gap overlapped, against about 14.9 us now.
+      - Bound over the priced items only, not a floor: no single class reaches 30 ms. Outside
+        recorded exclusions the union of the two classes is about 19.5 ms plus the unsplit
+        register-state part, which would leave about 55 ms of command processing less that part
+        and a frame of about 77 ms less that part with the gap kept (about 13 fps). 60 fps would
+        need about 3.3 us of command processing per draw, with the gap overlapped, against about
+        14.9 us now. The skip-phase run (above) shows that the per-item gate hid most of the
+        hold: the path behind the draw entry is over 90 % of it.
   - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
     call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
     per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
