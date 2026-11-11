@@ -82,7 +82,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Target description and sample checks 0.28 us; everything else 0.3 us together.
 - **Per-draw cuts checked against a 4.5 ms per frame bar (2026-11-10, code reading plus the counters
   of two world runs; not built).** The bar is 5% of a 90 ms frame, about 1.25 us per draw at 3,600
-  draws. No cut is shown above it; one candidate is open.
+  draws. No cut is shown above it.
   - Vertex binding: 2.2 us per draw (8.0 ms per frame) in a run with one temporary tag, 3.5 us in
     the run with stage timers and the read-only census. Per stream the object path takes the
     registry lock up to six times: the admission of a snapshot probe that is refused (94 of 158,141
@@ -91,10 +91,12 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     `CollectStorageForGuestSeed`. The write-back check before it (`PrepareVertexStreamsForRead` calls
     `WriteBackStorageForGuestSeed` per stream, about 0.8 us per draw with timers) and the last call
     both walk the in-use writable storage over the draw's fetch window (`CollectWritableStorageIn`);
-    the second walk found nothing for 99.6% of binds (636 of 145,718 did). Candidate, not built and
-    its counter gate not run: answer both walks from the in-use writable set that the device-address
-    scans already keep (`m_writable_storage`, with `g_storage_scan_generation` and its change list),
-    which is open on whether that set holds every object the walk can return.
+    the second walk found nothing for 99.6% of binds (636 of 145,718 did). Answering both from the
+    in-use writable set (`m_writable_storage`) instead was checked and not built: by code the set holds
+    every object the walk can return, but in one world run with temporary timers (4,476 draws and
+    108 ms per frame) the write-back check took 2.64 ms per frame (0.59 us per call) and the bind's
+    query 0.57 ms (0.15 us per call), together 3.0% of the frame, under the bar. The set was empty in
+    93% of scans and held at most 8 objects in 99.9%; `FindStorageContaining` took 1.11 ms per frame.
   - Shader input information: 2.1 us per draw with timers and no reuse path. The per-shader recipe is
     excluded (`docs/bringup/cp-draw-plan.md`, stage 2); reopening it needs a count of repeated input
     structure in this title.
