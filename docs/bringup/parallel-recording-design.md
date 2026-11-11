@@ -153,9 +153,10 @@ independent work about 16 and unattributed about 7.
   the submitting thread waits on during those 7 ms was not recorded: the temporary trace spent its
   line budget during loading.
 
-Submit overlap measured (2026-11-11, `docs/titles/sandbox.md`, "Measured, the guest does not run
-ahead"): with the guest allowed one batch ahead, the CP still waited 18.9 ms of each frame for the
-next batch, so the overlap rows above do not apply to this title.
+Submit overlap measured (2026-11-11, `docs/titles/sandbox.md`, "Measured, one batch ahead does not
+shrink the gap"): with the guest allowed one batch ahead, the CP still waited 18.9 ms of each frame
+for the next batch. What holds the guest is not identified (the probe counted no early returns), so
+the overlap rows above are unproven for this title, not excluded.
 
 Three cases stay under the 2x gate and the fourth sits at it; neither change is built. 60 fps
 (16.7 ms) needs about 5.4x on this frame: the gap alone exceeds it, so any such path needs the

@@ -183,8 +183,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   per draw). With draw processing free the frame would stay at about 26 + 4.4 = 31 ms (about 32
   fps). If the gap does not shrink, overlapping the two (the bound below) leaves it as the floor,
   24-29 ms (35-42 fps). 60 fps at this load needs all three: command processing under about 17 ms,
-  the submit overlapped with it, and the gap under about 17 ms. The overlap was measured below and
-  this guest does not run ahead, so the gap stays in the frame. In the lighter run below the
+  the submit overlapped with it, and the gap under about 17 ms. One batch of overlap was measured below
+  and did not shrink the gap; what holds the guest is not identified. In the lighter run below the
   submitting thread was on a CPU 11.5 ms of a 15.6 ms gap.
   - The submitting thread in the same three runs: 17.9-19.8 ms of each frame on a CPU (user
     16.7-18.6 ms), 0.1-1.1 ms waiting to run. A fourth run sampled its user time for 10 s (75
@@ -384,14 +384,19 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     batch reads, as the contract record says; its scope and cost are not measured. The work between
     the batch's last guest read and the signal (graphics interrupt queueing, flush, flip,
     `GraphicsRun.cpp:1930-1949`) also holds the submitter (measured in the next item).
-  - Measured, the guest does not run ahead (2026-11-11, one world run with temporary code and
-    private shader caches, 132 walking frames of 111 ms at 5,342 draws). Each submit waited for the
+  - Measured, one batch ahead does not shrink the gap (2026-11-11, one world run with temporary code
+    and private shader caches, 132 walking frames of 111 ms at 5,342 draws). Each submit waited for the
     previous batch's decode instead of its own, so the guest could run one batch ahead. The command
     processor still waited 18.9 ms of each frame for the next batch: 24-29 ms in three runs before
     the notifier fix, about 18-23 ms expected after it (time on the submitting thread lands in the
     gap about one for one), not near zero. The world drew normally and the run did not stop.
-    Overlap is closed for this title, with no snapshot work. The batch tail (interrupt queueing,
-    flush and flip between the batch's last guest read and the signal) took 0.04 ms per batch.
+    Excluded: more than one batch per frame (126 submits over 132 frames, all from one thread) and
+    a host flip wait taking the submit wait's place (0.07 ms per frame here and in the control run).
+    Not identified: what holds the guest. The probe counted no early returns, so either the early
+    return did not engage or the guest waits for an end-of-batch event of its own. Open: the next
+    world run adds an early-return count and a sync-wait snapshot. The batch tail (interrupt
+    queueing, flush and flip between the batch's last guest read and the signal) took 0.04 ms per
+    batch.
 - **Device-address residency (measured; populated-page query fixed in `67d6e9a95`).** Before the
   fix, in the world the residency timer read 8.1 and 9.1 ms per frame in two runs without temporary
   code, and 1.46 ms in the run with temporary counters, whose world is a lighter regime: the level of
