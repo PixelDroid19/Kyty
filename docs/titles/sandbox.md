@@ -68,10 +68,25 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     just before its submission's labels were published. Of 108,235 storage and 58,134 index binds
     checked, none had changed; a host array written by hand between the two hashes reported a change
     41 times of 41. Vertex binds were not covered (56 checked: they mostly bind GPU memory objects,
-    not snapshots). One title and one scene, and the windows mostly closed while the submitting
-    thread was still blocked in its submit, so this supports reading in place only under the
-    decode-wait contract, not with submit overlap. In-place storage and index binds are open for a
-    design, not built.
+    not snapshots). One title and one scene. Exposure after the submit returns was not separated
+    from exposure while the submitting thread was blocked, so this supports reading in place only
+    under the decode-wait contract, not with submit overlap.
+  - In-place storage and index binds, priced on paper (2026-11-11, the call-graph run of the B
+    ledger below, split by caller) and closed unbuilt: at most about 5 ms, under the 10 ms bar.
+    - Storage, 7.6 ms under the bind: the copy itself is 0.8 ms; the guest-range checks inside the
+      copy and compare calls, 3.4 ms (overlap admission 2.0, allocated range 1.4), stay. The copy,
+      snapshot lookup and pool bookkeeping, about 3.9 ms, go; a window lookup per bind, about 7,600
+      per frame at the 0.3-0.5 us a lookup costs here, adds 2.3-3.8 ms. Net 0.1-1.6 ms.
+    - Index, 4.9 ms: almost all are reused, so there is no copy. The checks stay (2.8 ms); compare,
+      lookup, lease and expiry, 1.7 ms, go; about 5,000 window lookups add 1.5-2.5 ms. Net about 0.
+    - Sets: a buffer bound at an offset needs the offset in the set key (`unique_id` and range
+      today), and window buffers lose the cache skip fresh snapshots take, so their sets are
+      indexed and trimmed. The creation side, 3.4 ms, is the bound only if every miss then hit;
+      whether the guest ranges repeat across frames was not counted.
+    - Guard: none exists to reuse. An in-place object's device reads guest memory when it executes
+      (`StorageBuffer.cpp`, `MapBacking`), so a read-only bind would rest on the open reuse-signal
+      question above. In-place objects also skip the overlay check (`GpuMemoryWriteback.cpp`,
+      line 761), which a read-only bind would have to keep.
   - Ceiling: about 1.25x alone. It also removes work done under the snapshot pool lock, which parallel
     recording needs.
   - Vertex slice checked against a 10 ms per frame bar (2026-11-10, code reading plus the same census;
@@ -509,9 +524,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       2.9, object creation 2.4, pending storage copy 1.3; the lookups, 3.2 ms, stay), was 9.2 ms
       on the older census. Both in-place entries read the bytes when the host GPU executes (the
       rewrite-after-submit record under "Closed as well"); a count then found no storage or index
-      source rewritten before completion ("Read-only binds", above), so in-place storage and index
-      binds are open for a design and the vertex entry stays. The read-only capture is 15.4 ms in all
-      (copy 4.9, compare 3.7, snapshot lookup 1.2, admission 0.9, pool bookkeeping about 3); index
+      source rewritten before completion ("Read-only binds", above). Priced on paper, in-place
+      storage and index binds net at most about 5 ms and are closed; the vertex entry stays. The
+      read-only capture is 15.4 ms in all (copy call 4.9, of which the copy is 0.8 and guest-range
+      checks 3.8; compare 3.7, snapshot lookup 1.2, admission 0.9, pool bookkeeping about 3); index
       snapshots take 4.9 ms of it (`GraphicsRenderDraw.cpp`, lines 2060 and 2172), owned by no entry.
     - Needing a design, with nothing recorded against it: a reusable descriptor set, about 3.4 ms
       (the creation side: allocation 1.3, driver writes 1.9, deferral 0.2, in an older clean run of
@@ -533,7 +549,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       (`source/emulator/src/Graphics/Objects/GpuMemoryWriteback.cpp`, line 926) runs before
       device-address reads and spends 3.0 ms per frame (2.1 ms in the older run) in
       `WriteBackObjectLocked` re-reading guest bytes into the written object's equal aliases
-      (`Update`, line 395: hash 1.7, copy 1.3, the object's update 1.1). It is not the walk built
+      (`Update`, line 395, through this caller only: copy 1.1, hash 0.8, the object's update 0.6,
+      vector resize 0.5). It is not the walk built
       above. Not priced as a change.
     - Nothing in B is buildable without a design. Outside the exclusions about 6.4 ms are left,
       plus parallel recording at most 14.5 ms that overlaps the set entry, of 82.5 ms of command
