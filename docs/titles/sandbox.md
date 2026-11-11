@@ -84,7 +84,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   of two world runs; not built).** The bar is 5% of a 90 ms frame, about 1.25 us per draw at 3,600
   draws. No cut is shown above it. Two stages left uncounted were counted on 2026-11-11 (one world
   run with a temporary tag, 56 frames of 5,077 draws while the player walks): the snapshot count
-  closes, the shader-input count does not yet.
+  closes; the shader-input structure repeats (second run below), which reopens the recipe here.
   - Vertex binding: 2.2 us per draw (8.0 ms per frame) in a run with one temporary tag, 3.5 us in
     the run with stage timers and the read-only census. Per stream the object path takes the
     registry lock up to six times: the admission of a snapshot probe that is refused (94 of 158,141
@@ -106,7 +106,15 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     the parse reads through its reader, none for that stage) never matched the previous input or one
     of the last four of the same program (28 vertex programs). The pixel key included the vertex
     key, so its result (53 programs, no repeat) follows from the vertex one. A memo on exact inputs
-    cannot hit; the structure count, without the user-data values, is still open.
+    cannot hit. Structure, counted in a second run (about 304,000 calls per stage over 64 walking
+    frames, pixel stage keyed on its own): with the user-data value words zeroed, the stage and shader
+    registers matched one of the last four inputs of the same program in 100% of calls for both
+    stages (99.7% and 100% the previous input; the program address alone, the control, 100%). Exact
+    keys matched 0% (vertex) and 47.5% (pixel). The words that change are user-data values only:
+    words 0, 4 and 6 of the vertex front's user data (every call, 99% and 99%), and words 16, 0, 28
+    and 12 of the pixel stage's (23%, 21%, 9% and 6% of calls). The vertex parse read no descriptor
+    words, the pixel parse 1.5 bytes per call. This is a ceiling: a recipe still needs guards on the
+    user-data values it reads, and what those words hold was not decoded.
   - Index snapshots: 1.17 us per probe in the census run, 99.5% reused, about 4.2 ms per frame (the
     binding counter reads 4.0 ms per frame in the run with one tag). A reuse takes the
     snapshot pool lock twice and the registry lock once and runs cached admission lookups. Snapshots
