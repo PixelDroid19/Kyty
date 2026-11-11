@@ -63,6 +63,15 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     label writes are recorded as events set at the bottom of the pipe, so they fire only after the
     work recorded before them executes. The other ways the guest can signal reuse were not read, so
     whether a reuse signal can fire before the reading submission executes is not established.
+  - Rewrites before completion, counted (2026-11-11, one world run with a temporary count, 93 frames
+    in the window): one in eight snapshot binds hashed the guest bytes it reads at capture and again
+    just before its submission's labels were published. Of 108,235 storage and 58,134 index binds
+    checked, none had changed; a host array written by hand between the two hashes reported a change
+    41 times of 41. Vertex binds were not covered (56 checked: they mostly bind GPU memory objects,
+    not snapshots). One title and one scene, and the windows mostly closed while the submitting
+    thread was still blocked in its submit, so this supports reading in place only under the
+    decode-wait contract, not with submit overlap. In-place storage and index binds are open for a
+    design, not built.
   - Ceiling: about 1.25x alone. It also removes work done under the snapshot pool lock, which parallel
     recording needs.
   - Vertex slice checked against a 10 ms per frame bar (2026-11-10, code reading plus the same census;
@@ -499,7 +508,9 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       7.6 ms (their part of the read-only capture); in-place vertex binds, up to 6.6 ms (upload
       2.9, object creation 2.4, pending storage copy 1.3; the lookups, 3.2 ms, stay), was 9.2 ms
       on the older census. Both in-place entries read the bytes when the host GPU executes (the
-      rewrite-after-submit record under "Closed as well"). The read-only capture is 15.4 ms in all
+      rewrite-after-submit record under "Closed as well"); a count then found no storage or index
+      source rewritten before completion ("Read-only binds", above), so in-place storage and index
+      binds are open for a design and the vertex entry stays. The read-only capture is 15.4 ms in all
       (copy 4.9, compare 3.7, snapshot lookup 1.2, admission 0.9, pool bookkeeping about 3); index
       snapshots take 4.9 ms of it (`GraphicsRenderDraw.cpp`, lines 2060 and 2172), owned by no entry.
     - Needing a design, with nothing recorded against it: a reusable descriptor set, about 3.4 ms

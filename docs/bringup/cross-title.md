@@ -1876,6 +1876,11 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 - **Consequence.** Overlapping guest work and decode needs a snapshot of the
   memory the commands reference, not a submit that returns early. The order
   gate is excluded; `docs/titles/anime-fighter.md` has its frame-rate result.
+- **Data buffers (2026-11-11, `PPSA17221 - Minecraft`, one world run).** No
+  storage or index range a draw read had changed when its submission
+  completed: about 166,000 checked, and a write made by hand was detected
+  every time (`docs/titles/sandbox.md`, "Read-only binds"). One title; the
+  descriptor-table reuse above still stands.
 
 ## Compute ring runs copied in bytes across the ring end (2026-10-23)
 
