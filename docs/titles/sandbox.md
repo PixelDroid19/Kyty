@@ -99,7 +99,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       recorded sizes, every such range was smaller than a page.
   - With four recording threads, command-processor time is bounded at 1.2x (only independent work in
     parallel) to 1.7x (caches, unattributed work and the double-count case in parallel too). Parallel
-    recording was not built, and the in-place read-only binds above stay measured, not built.
+    recording was not built (design and bounds: `docs/bringup/parallel-recording-design.md`), and the in-place read-only binds above stay measured, not built.
 - **Snapshot staging is released only at end-of-pipe write-backs (found; one change excluded).**
   Overlay snapshots free their staging only in `GpuMemory::PublishStorageSnapshotsLocked`
   (`Objects/GpuMemoryWriteback.cpp:420`). It is reached only from `WriteBackCompletedSubmission`,
