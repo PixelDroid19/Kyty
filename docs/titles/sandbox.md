@@ -84,7 +84,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   of two world runs; not built).** The bar is 5% of a 90 ms frame, about 1.25 us per draw at 3,600
   draws. No cut is shown above it. Two stages left uncounted were counted on 2026-11-11 (one world
   run with a temporary tag, 56 frames of 5,077 draws while the player walks): the snapshot count
-  closes; the shader-input structure repeats (second run below), which reopens the recipe here.
+  closes; the shader-input structure repeats (second run below), but a third run excludes the
+  recipe at the fields the built slice guards. The per-draw line is closed.
   - Vertex binding: 2.2 us per draw (8.0 ms per frame) in a run with one temporary tag, 3.5 us in
     the run with stage timers and the read-only census. Per stream the object path takes the
     registry lock up to six times: the admission of a snapshot probe that is refused (94 of 158,141
@@ -114,7 +115,20 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     words 0, 4 and 6 of the vertex front's user data (every call, 99% and 99%), and words 16, 0, 28
     and 12 of the pixel stage's (23%, 21%, 9% and 6% of calls). The vertex parse read no descriptor
     words, the pixel parse 1.5 bytes per call. This is a ceiling: a recipe still needs guards on the
-    user-data values it reads, and what those words hold was not decoded.
+    user-data values it reads.
+  - Recipe build gate (third run, 125 walking frames, about 604,000 calls per stage): the vertex
+    stage takes 1.07 us, of which the usage parse is 0.15 us, and the pixel stage 0.78 us, parse
+    0.49 us. A mock hit (program lookup, compare of the user-data values with the program's last
+    ones, copy of the produced information) takes 0.24 and 0.19 us, so a free-guard recipe would save
+    about 1.41 us per draw, above the bar. The changing words are not all buffer bases or record
+    counts, the only fields the built slice guards. Vertex word 0 and pixel words 12 and 28 hold
+    buffer descriptor bases. Vertex words 4 and 6 read as the low halves of two 64-bit guest
+    addresses (words 5 and 7 hold the same high half), not a base and record count. Pixel words 0
+    and 16 are image descriptor bases (type nibble 9), and for one program pixel word 2, the image
+    size, changes too. Excluded at that field set. A recipe that also masks image bases and the two
+    addresses would need guards on the image descriptor's control reads and on the null check of
+    those addresses; not designed. Where the 0.92 us of the vertex stage outside the parse goes was
+    not split.
   - Index snapshots: 1.17 us per probe in the census run, 99.5% reused, about 4.2 ms per frame (the
     binding counter reads 4.0 ms per frame in the run with one tag). A reuse takes the
     snapshot pool lock twice and the registry lock once and runs cached admission lookups. Snapshots
