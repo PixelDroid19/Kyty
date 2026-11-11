@@ -623,6 +623,30 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       21.8 ms budget per frame and substitute for the serial-submit lever rather than add to it.
       Even a zero gap leaves a frame of about 86 ms or more against 16.7 ms, so they stay
       cross-title CPU leads, not a route to the frame-time goal.
+    - Priced on paper for a lever of 30 ms or more of command processing (2026-11-11, no run;
+      shares from the full-stack check above, 74.7 ms per frame at 5,017 draws):
+      - Repeat across frames: draw keys repeat in 94-99 % of draws within two frames (four
+        titles, about 99 % in this world; `docs/bringup/cp-draw-plan.md`), but all descriptor
+        words match in under 1 % of hits, buffer bases change in 44-92 % and buffer sizes in
+        21-55 %, so a reused draw plan still captures bytes and binds objects. It could remove
+        the shader input information (7.4 ms, its recipe excluded at its field set), the pipeline
+        identities and lookup (4.6), descriptor sets with bindless indices (6.6) and part of the
+        register state: about 17-24 ms at most; read-only binds (16.1), vertex binding (8.9),
+        the alias write-back (2.7) and driver calls (8.3) stay.
+      - Independence: the title submits one command buffer per frame (1.01 submits per world
+        frame in the filter run), so there is nothing to decode side by side; splitting inside
+        it is the parallel-recording design (`docs/bringup/parallel-recording-design.md`):
+        16-32 ms, the upper end only if the shared caches and unattributed work leave the
+        processor thread, with the frame still at least stage A plus the gap, about 58 ms.
+      - Absent elsewhere (a lead only, from the other implementation's tree; it records no
+        draw counts for this title): it decodes on one thread, returns from a submit once the
+        batch is queued, copies vertex bytes per draw and uses per-draw descriptor sets, and
+        it has no write notifications on guest copies, no overlap admission and a sparse,
+        probabilistic texture check. Those missing steps are correctness guards here (about
+        13 ms of command processing plus the submitter's notifications), not removable work.
+      - Bound: no single class reaches 30 ms except parallel recording at its upper end, and
+        no combination brings the frame below about 58 ms (17 fps); 60 fps would need about
+        4.6 us of command processing per draw against about 15 us now.
   - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
     call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
     per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
