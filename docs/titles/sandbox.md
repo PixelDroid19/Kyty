@@ -251,10 +251,19 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     phases. At about 2,800 draws per flip the skip phases sat at the 60 fps limit (gap about
     15 ms). The full-load number is void under the rule stated before the run (three intervals at
     world entry, under the four required); the load fell at the same point of the route in a run
-    with nothing skipped (about 2,500 draws per flip). At full load the submitting thread's time
-    between submits was 25-28 ms in the two clean skip intervals against 15-25 ms with the draws
-    processed, longer than 16.7 ms on its own; guest code against calls into the emulator on that
-    thread is not measured.
+    with nothing skipped (about 2,500 draws per flip). Those normal phases ran 143-167 ms per flip
+    against 102-112 ms in clean runs (world entry, two foreign processes at about 30 % CPU), so
+    their hold is not the steady one.
+    - A second run held the skip for 16 s from world entry, with perf on every thread (10
+      intervals at 5,200-5,800 draws entered per flip). Six calm intervals ran 18-22 ms per flip
+      (19.6 ms over 307 flips: submit hold 3.1, time between submits 16.4) and three world-entry
+      spikes 27-40 ms. In the calm intervals the submitting thread spent 13.0 ms of that time in
+      user code, 3.6 ms in guest code and 9.4 ms in the emulator (about 4.9 ms of it the dirty-page
+      notification under the C-library copy; an attribution, not a saving: rejecting 94.7 % of
+      those calls recovered 0.7-1.35 ms), and 3.4 ms outside user code (kernel time and waits,
+      unclassified). With the path behind the draw entry at zero the full-load frame is about
+      20 ms, so 60 fps at this load also needs about 3 ms off the submitting thread. The skip
+      removed the GPU work too, so this is not an fps figure for a faster draw path.
   - The small cuts in this record together: polls 2.6 ms, half the early submissions 2.0 ms, set
     creation 4.1 ms, the vertex walks 3.2 ms, index snapshots 4.2 ms and admission reuse 2.3 ms,
     about 18 ms of a 120 ms frame, or about 10 fps.
