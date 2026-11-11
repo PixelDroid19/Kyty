@@ -361,9 +361,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   19 ms. 30 fps needs about 14 ms of command processing with the serial submit, or about 33 ms if
   the submit overlapped it, so a candidate has to remove at least half of the run (about 46 ms) at
   once. Grouped by what each stage follows, against the draw's counterpart in the previous frame
-  (Experiment 0 in `docs/bringup/cp-draw-plan.md` counted this title: the draw key repeated against
-  one of the previous two frames, the user-data values never did); state-setup parts are the stage
-  timers above scaled to this run:
+  (from the notes of Experiment 0 in `docs/bringup/cp-draw-plan.md`, 2026-10-27, whose record names
+  no titles and whose run evidence is gone: in this title the draw key repeated against one of the
+  previous two frames in 99.1% of draws, the user-data values never did); state-setup parts are the
+  stage timers above scaled to this run:
   - Repeats, about 28 ms: index buffer binding 5.1 ms (99.5% of index snapshots reused), texture
     descriptors 2.3 ms (image and sampler words change on 1-2% of key hits), pipeline setup
     4.8 ms, target materialization 2.5 ms, and in state setup the shader input recipe's ceiling
@@ -373,8 +374,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     differ only in the storage object; a push-descriptor set would remove its bookkeeping and keep
     the descriptor writes).
   - New every frame, about 34 ms: vertex buffer binding 15.5 ms (buffer bases move on most key hits
-    and sizes on 55% of this title's; 79% of read-only probes are first captures of a range the
-    previous frame did not probe), storage descriptors 10.0 ms (ring slots), command emission
+    and sizes on 55% of this title's, same notes; 79% of read-only probes are first captures of a range
+    the previous frame did not probe), storage descriptors 10.0 ms (ring slots), command emission
     6.1 ms (recorded against those sets each frame) and the recipe's guard, about 2.2 ms.
   - Not classified, about 23 ms: the rest of state setup (vertex write-back check, device-address
     preparation and the untimed part, about 12 ms), draw time outside the stage timers (about
@@ -382,11 +383,35 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     waits 1.5 ms).
 
   The rows that could follow a previous-frame match (repeats, finalization, not classified) are
-  about 58 ms, above half the run, so the gate is not settled on paper; the next step is a count of
-  the unclassified rows against their previous-frame counterparts. If all of them were skipped at
-  no cost, about 34 ms of command processing would remain: frames of about 53 ms with the serial
-  submit, at the 30 fps line with the submit overlapped. The other implementation's in-world entry
-  (above: 60 and 121 us per draw at p50 and p95, about 470 draws) adds no per-draw mechanism.
+  about 58 ms, above half the run, and still about 47 ms with every countable unclassified row
+  scored new: about 12 ms of them is time with no named input, so no count settles the threshold
+  and no run is planned. If all of them were skipped at no cost, about 34 ms of command processing
+  would remain: frames of about 53 ms with the serial submit, so skipping alone does not reach
+  30 fps there, and the 30 fps line with the submit overlapped. Most repeat rows are already hit
+  paths (index reuse, the texture memo, a pipeline lookup of 0.78 ms inside pipeline setup), so the
+  table overstates what a skip removes. The other implementation's in-world entry (above: 60 and
+  121 us per draw at p50 and p95, about 470 draws) adds no per-draw mechanism.
+  - Cross-cutting counters of the same run, placed by call site (they nest, so they are not summed):
+    object lookups 7.5 ms (16,000 per frame, nearly all reuses: about 5,750 render-target, 4,830
+    depth, 4,880 vertex, 320 texture and 260 storage lookups, about two target lookups per draw
+    against 53 target states per frame); snapshot validation 7.8 ms over 19,900 probes; capture
+    uploads 3.8 ms (7,900 per frame, 45.7 MB); hashing 2.9 ms (39 calls, 108 MB).
+  - Closed by records this table does not change: vertex binding (the vertex slice above: the
+    in-place saving is not shown to clear its bar), validation (the admission checks above, in
+    parts under the bar), object lookups (target lookups are context-only pieces, at most about
+    5 ms at the average cost per lookup; the vertex ones sit in vertex binding), finalization and
+    command emission (per-draw cuts above), and the time outside the stage timers (the
+    early-submission check above).
+  - Open, the one row of 5.5 ms or more without a measured exclusion: storage descriptors, 10.0 ms
+    (`PrepareStorageBuffers` into `TryUploadTransientReadOnlyBuffer`, `GraphicsRenderBind.cpp`),
+    which copy about 7,600-7,900 read-only ranges per frame that the previous frame did not probe.
+    Binding the imported window in place would drop the copies (these probes are 16-byte aligned,
+    the device offset limit is 4), but a read in place sees the bytes when the host GPU executes,
+    after the submit has returned, and a title is recorded rewriting memory its commands point to
+    as soon as the submit returns (`docs/bringup/cross-title.md`, "A graphics submit returns after
+    its batch is decoded"; that title rewrote descriptor tables, data buffers were not observed).
+    Whether this guest rewrites the captured ranges before the reading submission executes is the
+    question that blocks it; no code or run is planned before it is answered on paper.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
   then (2026-11-10; about 17 us at 5,342 draws on 2026-11-11, and the gap of about 19 ms between
   batches alone is longer than a 60 fps frame, so 60 fps also needs the gap cut). None of the
