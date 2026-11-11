@@ -80,6 +80,34 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Index snapshot and vertex range 1.20 us; vertex stream write-back check 0.71 us; device-address
     preparation 0.58 us.
   - Target description and sample checks 0.28 us; everything else 0.3 us together.
+- **Per-draw cuts checked against a 4.5 ms per frame bar (2026-11-10, code reading plus the counters
+  of two world runs; not built).** The bar is 5% of a 90 ms frame, about 1.25 us per draw at 3,600
+  draws. No cut is shown above it; one candidate is open.
+  - Vertex binding: 2.2 us per draw (8.0 ms per frame) in a run with one temporary tag, 3.5 us in
+    the run with stage timers and the read-only census. Per stream the object path takes the
+    registry lock up to six times: the admission of a snapshot probe that is refused (94 of 158,141
+    accepted in the census, about 0.5 us each; the refusal cause was not counted),
+    `GpuMemory::FindStorageContaining`, `FindVertexContaining` (once or twice), `CreateObject` and
+    `CollectStorageForGuestSeed`. The write-back check before it (`PrepareVertexStreamsForRead` calls
+    `WriteBackStorageForGuestSeed` per stream, about 0.8 us per draw with timers) and the last call
+    both walk the in-use writable storage over the draw's fetch window (`CollectWritableStorageIn`);
+    the second walk found nothing for 99.6% of binds (636 of 145,718 did). Candidate, not built and
+    its counter gate not run: answer both walks from the in-use writable set that the device-address
+    scans already keep (`m_writable_storage`, with `g_storage_scan_generation` and its change list),
+    which is open on whether that set holds every object the walk can return.
+  - Shader input information: 2.1 us per draw with timers and no reuse path. The per-shader recipe is
+    excluded (`docs/bringup/cp-draw-plan.md`, stage 2); reopening it needs a count of repeated input
+    structure in this title.
+  - Index snapshots: 1.17 us per probe in the census run, 99.5% reused, about 4.2 ms per frame (the
+    binding counter reads 4.0 ms per frame in the run with one tag). A reuse takes the
+    snapshot pool lock twice and the registry lock once and runs cached admission lookups. Snapshots
+    under 4 KiB (`kMinTrackedSnapshotSize`) are compared with guest memory instead of tracked; the
+    average index probe is 3.6 KB, and the share below the limit was not counted.
+  - Other read-only snapshots: 1.7 us per draw. 79% of probes are captured, not reused: each is the
+    first probe of its range in that frame (none was captured twice in one frame); why their ranges
+    are new was not counted.
+  - Admission checks over every probe: 6.1-6.9 ms per frame. At the average rate, reuses account for
+    about 2.2-2.4 ms of it (an estimate).
 - **Parallel recording ceiling (measured, not built).** The same run's counters, per frame of 105 ms
   of command processing, classed by whether the work depends on the order of draws:
   - Order-dependent, about 61 ms: the index snapshot, the vertex write-back check, device-address
