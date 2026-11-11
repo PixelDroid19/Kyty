@@ -129,6 +129,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Survival title: boot stop on a native display with a depth-only pass (2026-10-27, fixed)
   - Survival title: hosting an offline world (2026-10-15, open)
 - [Fishing title](titles/fishing.md)
+  - Fishing title: a write-back requested with an incomplete use stopped the run (2026-11-11, fixed)
   - Fishing title: per-draw command-processor costs at the dock (2026-11-07, partly fixed)
   - Fishing title: gray rectangles behind the first dialogue portrait (2026-10-23, checked)
   - Fishing title: command-processor CPU costs (2026-10-14, partly fixed)

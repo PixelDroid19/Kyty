@@ -321,7 +321,8 @@ public:
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 	void WriteBackAllCompleted(GraphicContext* ctx);
-	void               WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer);
+	[[nodiscard]] bool WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges,
+	                                          GpuQueueId consumer, SubmissionId* dependency);
 	[[nodiscard]] bool PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
 	                                           const std::vector<SubmissionId>&          device_awaited,
 	                                           std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);

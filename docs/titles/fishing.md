@@ -6,6 +6,37 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Fishing title: a write-back requested with an incomplete use stopped the run (2026-11-11, fixed)
+
+`PPSA09076 - DREDGE`, first-gameplay route, Intel Arc A770, ANV Mesa 26.2.6, strict, 60 fps limit.
+
+- **Observation.** Five of seven bounded runs stopped between 33 s and 90 s with "GpuMemory write-back requested
+  before exact resource dependencies completed", always `type=StorageBuffer`, pending on queue 8. The stop also
+  happened on the build before the in-place vertex streams, so it is not caused by them.
+- **Localized (temporary backtrace and object dump, two stops).** The request comes from an indexed draw:
+  the device-address read preparation writes back the storage ranges that the pending scan did not publish. One
+  thread did the pending mark, the pending scan and the write-back, so it is not a race between command
+  processors. The object is a 0x100-byte storage buffer, one block, no aliases, with one incomplete use on the
+  consumer's own queue. The pending scan, 51 us earlier, had ruled it publishable, and the publication step had
+  recorded an overlay for it 11 us before the write-back scan.
+- **Cause.** An overlay holds for one flip after guest memory last held its bytes. The flip counter advances on
+  the presenting thread. An overlay that the pending scan and the publication saw holding can therefore stop
+  holding before the write-back scan of the same preparation asks again; the scan then asked for a write-back
+  of an object whose use had not completed. The 2026-11-07 fix in `docs/titles/robot-platformer.md` ("Pending-
+  storage scans missed overlays that aged out") invalidated memoized scans at a flip; this is the window that
+  remained inside one preparation.
+- **Fix.** The write-back scan reports the first incomplete use as a dependency in place of requesting the
+  write-back. The preparation returns it as a pending write-back and the existing draw retry waits for that
+  submission (on the device when it can, else on the host) and prepares again.
+- **Verification.** One 110 s run with the fix and a temporary counter: exit 0, the new path taken 4 times, each
+  with an overlay two flips old and 20-386 us after the pending scan. Captures at 60 s and 100 s show the town
+  with intact geometry, HUD and text (material score healthy, 250-263 quantized colors, as in the run without
+  in-place streams). Two runs without the counter, the second on the final build, ran 104 s and 103 s to the
+  end with exit 0. The wait applies to the case that used to stop and no other: the scan collects only objects
+  in use, and the condition is the one that guarded the stop (an incomplete use on an object still in use).
+- **Limit.** The stop was intermittent (two of seven runs did not show it before the fix), so one passing run
+  with the path engaged is the evidence; the wait costs one submission wait on the rare draw that takes it.
+
 ## Fishing title: per-draw command-processor costs at the dock (2026-11-07, partly fixed)
 
 `PPSA09076 - DREDGE`, first-gameplay route, Intel Arc A770, ANV Mesa 26.2.5, 60 fps limit. The dock is CP-bound:

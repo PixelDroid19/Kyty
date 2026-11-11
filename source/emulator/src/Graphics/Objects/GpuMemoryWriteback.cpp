@@ -923,9 +923,10 @@ bool GpuMemory::PendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges)
 	return false;
 }
 
-void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer)
+bool GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges,
+                                       GpuQueueId consumer, SubmissionId* dependency)
 {
-	EXIT_IF(ctx == nullptr);
+	EXIT_IF(ctx == nullptr || dependency == nullptr);
 	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard    lock(m_mutex);
 	auto&          memo        = StorageScanMemoFor(consumer);
@@ -933,18 +934,22 @@ void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQ
 	const uint64_t completions = m_deferred_deletions.CompletionCount();
 	if (memo.write_back_generation == generation && memo.write_back_completions == completions)
 	{
-		return;
+		return false;
 	}
 	Vector<Destructor> destructors;
 	bool               nothing_written = true;
+	bool               waits           = false;
 	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges, consumer))
 	{
+		const auto& object  = m_heaps[heap_id].objects[object_id];
+		const auto& info    = object.info;
+		const auto* buffer  = static_cast<const VulkanBuffer*>(info.object.obj);
+		const auto& uses    = info.submission_uses.Dependencies();
+		const auto  pending = std::find_if(uses.begin(), uses.end(), [this](const SubmissionId& use)
+		                                   { return !m_deferred_deletions.AreDependenciesComplete({use}); });
 		// Consumers do not wait for an in-place object, or for one whose write they read
 		// through an overlay; its completion writes it back.
-		const auto& object = m_heaps[heap_id].objects[object_id];
-		const auto& info   = object.info;
-		const auto* buffer = static_cast<const VulkanBuffer*>(info.object.obj);
-		if (!m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()) &&
+		if (pending != uses.end() &&
 		    (buffer->guest_in_place ||
 		     (object.block.vaddr_num == 1 &&
 		      GuestDeviceAddressOverlayHolds({heap_id, object_id, info.logical_generation, info.write_uses, buffer},
@@ -953,6 +958,14 @@ void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQ
 			continue;
 		}
 		nothing_written = false;
+		if (pending != uses.end() && info.in_use)
+		{
+			// A frame flip on another thread ends an overlay's hold at any time, also after
+			// this preparation's pending scan saw it holding: the reader waits for the host.
+			*dependency = *pending;
+			waits       = true;
+			break;
+		}
 		WriteBackObjectLocked(ctx, heap_id, object_id, &destructors);
 	}
 	if (nothing_written)
@@ -961,6 +974,7 @@ void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQ
 		memo.write_back_completions = completions;
 	}
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
+	return waits;
 }
 
 bool GpuMemory::FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity)

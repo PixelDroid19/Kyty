@@ -114,7 +114,9 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 // registered range, so a shader dereferencing guest pointers reads the
 // current guest memory. Call before recording such a dispatch on `consumer`.
 // Results already published to the imported view on that queue are skipped.
-void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
+// True: the reader must first wait for `dependency` (GpuMemoryWriteBackStorageRanges).
+[[nodiscard]] bool GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer,
+                                               SubmissionId* dependency);
 
 // True when a registered range still waits for GPU results held outside storage
 // buffers (GpuMemoryPendingWriteBackOutsideStorage). Storage results reach

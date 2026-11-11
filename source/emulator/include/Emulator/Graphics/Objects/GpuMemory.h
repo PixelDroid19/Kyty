@@ -1361,8 +1361,10 @@ void  GpuMemoryCompleteSubmission(SubmissionId submission);
 using GpuMemoryGuestRangeQuery = bool (*)(uint64_t vaddr, uint64_t size);
 // GPU→CPU for the writable StorageBuffers overlapping any of the ranges, except
 // those whose writes are already published to the guest device-address view in
-// the consumer's queue order.
-void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer);
+// the consumer's queue order. True: a result that stopped being published since
+// the pending scan has an incomplete use, `dependency`, the reader must wait for.
+[[nodiscard]] bool GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges,
+                                                   GpuQueueId consumer, SubmissionId* dependency);
 // A consolidated wait does not wait for the write-back of a writable StorageBuffer
 // with an incomplete submission use, yet only that write-back refreshes another GPU
 // object whose refresh reads the same guest bytes. Records every such storage: the

@@ -1443,7 +1443,10 @@ static GuestDeviceAddressReadPreparation PrepareGuestDeviceAddressForRead(
 	const GpuQueueId consumer(static_cast<uint32_t>(buffer->GetQueueIndex()));
 	// Keep write-back before table preparation, but outside the GDA registry
 	// lock. The draw and both descriptor stages share this one publication.
-	GuestDeviceAddressWriteBack(g_render_ctx->GetGraphicCtx(), consumer);
+	if (GuestDeviceAddressWriteBack(g_render_ctx->GetGraphicCtx(), consumer, pending_submission))
+	{
+		return GuestDeviceAddressReadPreparation::PendingWriteBack;
+	}
 	SubmissionId reader;
 	EXIT_IF(!buffer->GetSubmissionId(&reader));
 	SubmissionId dependency;

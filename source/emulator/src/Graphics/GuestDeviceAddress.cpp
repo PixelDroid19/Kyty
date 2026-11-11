@@ -1553,9 +1553,9 @@ bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, const std::vector<S
 	return GpuMemoryPendingStorageWriteBack(OverlapsRegisteredRange, consumer, device_awaited, publishable, dependency);
 }
 
-void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer)
+bool GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer, SubmissionId* dependency)
 {
-	GpuMemoryWriteBackStorageRanges(ctx, OverlapsRegisteredRange, consumer);
+	return GpuMemoryWriteBackStorageRanges(ctx, OverlapsRegisteredRange, consumer, dependency);
 }
 
 bool GuestDeviceAddressPendingWriteBackOutsideStorage()
