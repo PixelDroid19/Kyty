@@ -1779,6 +1779,11 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   the lease release (about 1.1%). At 120-150 submissions per frame the
   submissions the idle check starts are about 10% of the fishing dock's CP
   thread.
+  In `PPSA17221 - Minecraft` while the player walks (2026-11-11, one run with
+  temporary timers, 120 ms frames) the check runs after every draw: 127
+  submissions per frame at 32 µs each (4.1 ms, 3.4% of the frame) and 939
+  completion polls at 2.8 µs each (2.6 ms), of which the fence-status call is
+  1.47 µs.
 - **Verification.** Unit tests (2447 passed, 11 skipped), the 74 graphics
   diagnostics integration tests and `check_emulator_boundaries.py` pass.
   Strict runs: the fishing title reaches the dock and its capture renders

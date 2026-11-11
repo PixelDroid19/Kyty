@@ -80,12 +80,14 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Index snapshot and vertex range 1.20 us; vertex stream write-back check 0.71 us; device-address
     preparation 0.58 us.
   - Target description and sample checks 0.28 us; everything else 0.3 us together.
-- **Per-draw cuts checked against a 4.5 ms per frame bar (2026-11-10, code reading plus the counters
-  of two world runs; not built).** The bar is 5% of a 90 ms frame, about 1.25 us per draw at 3,600
-  draws. No cut is shown above it. Two stages left uncounted were counted on 2026-11-11 (one world
-  run with a temporary tag, 56 frames of 5,077 draws while the player walks): the snapshot count
-  closes; the shader-input structure repeats (second run below), but a third run excludes the
-  recipe at the fields the built slice guards. The per-draw line is closed.
+- **Per-draw cuts checked against a bar of 5% of the frame (2026-11-10 to 2026-11-11, code reading
+  plus the counters of world runs; not built).** At 3,600 draws and 90 ms per frame the bar is about
+  1.25 us per draw; in a walking window of 5,000 draws and 116 ms, about 1.16 us. No cut is shown
+  above it, for the stages the counters split or for the time outside them (last two items). Two
+  stages left uncounted were counted on 2026-11-11 (one world run with a temporary tag, 56 frames
+  of 5,077 draws while the player walks): the snapshot count closes; the shader-input structure
+  repeats (second run below), but a third run excludes the recipe at the fields the built slice
+  guards.
   - Vertex binding: 2.2 us per draw (8.0 ms per frame) in a run with one temporary tag, 3.5 us in
     the run with stage timers and the read-only census. Per stream the object path takes the
     registry lock up to six times: the admission of a snapshot probe that is refused (94 of 158,141
@@ -114,16 +116,19 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     keys matched 0% (vertex) and 47.5% (pixel). The words that change are user-data values only:
     words 0, 4 and 6 of the vertex front's user data (every call, 99% and 99%), and words 16, 0, 28
     and 12 of the pixel stage's (23%, 21%, 9% and 6% of calls). The vertex parse read no descriptor
-    words, the pixel parse 1.5 bytes per call. This is a ceiling: a recipe still needs guards on the
-    user-data values it reads.
+    words, the pixel parse 1.5 bytes per call; the vertex stage still reads guest memory, the
+    attribute and buffer tables that two user-data address pairs point to. This is a ceiling: a
+    recipe still needs guards on the user-data values and the guest memory it reads.
   - Recipe build gate (third run, 125 walking frames, about 604,000 calls per stage): the vertex
     stage takes 1.07 us, of which the usage parse is 0.15 us, and the pixel stage 0.78 us, parse
     0.49 us. A mock hit (program lookup, compare of the user-data values with the program's last
     ones, copy of the produced information) takes 0.24 and 0.19 us, so a free-guard recipe would save
-    about 1.41 us per draw, above the bar. The changing words are not all buffer bases or record
-    counts, the only fields the built slice guards. Vertex word 0 and pixel words 12 and 28 hold
-    buffer descriptor bases. Vertex words 4 and 6 read as the low halves of two 64-bit guest
-    addresses (words 5 and 7 hold the same high half), not a base and record count. Pixel words 0
+    at most about 1.41 us per draw, above the bar; guarding the attribute and buffer tables it reads
+    would lower that. The changing words are not all buffer bases or record counts, the only fields
+    the built slice guards. Vertex word 0 and pixel words 12 and 28 hold buffer descriptor bases.
+    Vertex words 4 and 6 are consistent with the low halves of two 64-bit guest addresses (words 5
+    and 7 hold the same high half; the register indices the parse uses were not read), not a base
+    and record count. Pixel words 0
     and 16 are image descriptor bases (type nibble 9), and for one program pixel word 2, the image
     size, changes too. Excluded at that field set. A recipe that also masks image bases and the two
     addresses would need guards on the image descriptor's control reads and on the null check of
@@ -144,6 +149,30 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     about 2.2-2.4 ms of it (an estimate).
   - Dispatches: 2.5 ms per frame for 64-67 dispatches (about 38 us each) in two world runs, under the
     bar; the 18.8 us per draw above divides all command processing, dispatches included, by draws.
+  - Remaining stages, ranked offline on the walking window of an earlier world run (151 frames of
+    5,000 draws, 116 ms per frame, bar 5.8 ms): pipeline setup takes 5.0 ms per frame in all (lookup
+    0.8 ms, every draw a hit). Command emission takes 6.25 ms around the Vulkan draw call, which a
+    cut would have to remove almost whole. Descriptor-set finalize takes 7.4 ms; its set cache keys
+    on buffer identity, 79% of the read-only probes it binds are captures (above), and the first
+    capture of a snapshot key marks its buffer's sets uncached. Counted in the second run below: of
+    1.69 set lookups per draw, 16% hit, 70% are uncached and 14% miss; the create path (allocation
+    through write) takes 4.1 ms per frame (0.56 us per set), under the bar. The binding sub-counters
+    sum to 7.24 us per draw against 6.84 us because the index counter adds the index upload, which
+    is timed inside state setup.
+  - Time in the draw processor outside its five stage timers: 1.73 us per draw in that window.
+    Split in two world runs with temporary timers (2026-11-11, 83 and 134 walking frames of
+    5,000-5,200 draws, 120-122 ms per frame, bar about 6.0 ms): the early-submission check made
+    after each draw takes 1.50 us of the 1.80 us per draw outside the stages in the first run (the
+    timers sum to 86% of it) and 1.33 us in the second. Retried draw attempts and their waits take
+    0.01 us, and the span between pipeline setup and resource binding, fragment-transport bodies
+    included, 0.02 us. In the second run the check takes 6.96 ms per frame, above the bar: 939
+    completion polls at 2.8 us (2.6 ms; the fence-status call is 1.47 us of each) and 127
+    submissions at 32 us (4.1 ms). 86% of polls found the oldest submission still pending, 500 us or
+    more after the last submission; whether from GPU work or submission latency is not known.
+    Removing the check is excluded in `docs/bringup/cross-title.md` (another title needs it). The
+    largest cut short of that, no polls with the recorded one-per-millisecond limit, which about
+    halves the submissions, is about 4.6 ms, under the bar. The submission cost is the open item
+    there.
 - **A lighter world frame is not a target (2026-11-11, offline reading, no run).** Another
   implementation's record of about 56 fps in a world was not measured at this load. Its own notes
   call that frame recognisable but not correct and no performance claim. A later entry there
