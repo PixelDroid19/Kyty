@@ -86,8 +86,10 @@ which slow the CP):
   whole batch (`docs/bringup/cross-title.md`, "A graphics submit returns after its batch is decoded"),
   the title submits one batch per frame, and the CP then waits about 15.6 ms per frame for the next
   one (`docs/titles/sandbox.md`, "Command-processor idle between batches"). With the split, the
-  submitter can return once stage A has passed the batch's last guest read, so stage B overlaps the
-  guest's next frame; this overlap is not in the bounds above.
+  submitter can return once stage A has passed the batch's last guest read, so stage B could overlap
+  the guest's next frame. The frame is then at least stage A plus the guest's gap, about 61 + 16 of
+  131 ms, so at most about 1.7x, still under the build gate; whether the guest starts earlier when
+  released is not established (`docs/titles/anime-fighter.md`).
 - Moving work to stage B cannot reduce stage A. Stage A shrinks only by doing less ordered work per
   draw: the 12-16 ms of waits and the memory-object creation in binding are the two largest parts,
   and the two measured attempts on them are excluded (`docs/titles/sandbox.md`: staging drain and

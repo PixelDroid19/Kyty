@@ -125,8 +125,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   only instrumented wait above 0.1 ms per frame (12-16 ms in six other runs; in the clean control run
   of 143 ms frames: fence 14.9 ms, flip-done 0.07 ms, render lock 0.04 ms, WAIT_REG_MEM 0.03 ms), so
   roughly 20-25 ms of a frame are in no instrumented wait; this mixes runs and is an estimate. No other
-  thread was above 14%, but 13-14% is 15-19 ms of a frame, and whether that time overlaps the command
-  processor was not measured.
+  thread was above 14%, but 13-14% is 15-19 ms of a frame; the next item shows that the submitting
+  thread runs while the command processor waits.
 - **Command-processor idle between batches (measured; one run with temporary counters, 80.7 ms frames
   at 2,866 draws per frame; clean runs are 98-110 ms).** Among the graphics submit functions the title
   imports only the multi-DCB driver submit, and it submits one graphics batch per frame (12.6 per
@@ -135,26 +135,27 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   a CPU 11.5 ms of each frame; the command-processor thread 53.5 ms.
   - A graphics submit returns only after the command processor has run its whole batch:
     `GraphicsRing::Submit` waits on the decode completion, which `GraphicsRing::ThreadBatchRun`
-    signals after the batch, its flush and its flip (`GraphicsRun.cpp`), except while decode waits on
-    a value no submitted GPU work writes. This is a recorded guest-visible contract
-    (`docs/bringup/cross-title.md`, "A graphics submit returns after its batch is decoded"), so the
-    guest's work after a submit and the command processor's run of the batch are serial. That the
-    submitting thread waits there, and not in a guest wait, fits its CPU time but was not mapped: the
-    thread snapshots carry no host thread id.
-  - Bound: overlapping the two recovers at most this gap, about 1.24x (12 to 15 fps in that run). It
-    needs a snapshot, taken before the submit returns, of the guest memory the batch reads, as the
-    contract record says; its scope and cost are not measured. The work between the batch's last guest
-    read and the signal (graphics interrupt queueing, flush, flip) also holds the submitter and is not
-    measured.
+    signals after the batch, its flush and its flip (`GraphicsRun.cpp:1949`). The only earlier
+    release, while decode waits on a value no submitted GPU work writes, did not occur in that run (no
+    queued-producer waits). This is a recorded guest-visible contract (`docs/bringup/cross-title.md`,
+    "A graphics submit returns after its batch is decoded"), so the guest's work after a submit and
+    the command processor's run of the batch are serial.
+  - Bound: overlapping the two recovers at most this gap, about 1.24x (12 to 15 fps in that run). An
+    early return in the fighting title gained nothing because its guest then waited on an event flag
+    (`docs/titles/anime-fighter.md`), so whether this guest would start its next frame earlier is not
+    established. Overlap needs a snapshot, taken before the submit returns, of the guest memory the
+    batch reads, as the contract record says; its scope and cost are not measured. The work between
+    the batch's last guest read and the signal (graphics interrupt queueing, flush, flip,
+    `GraphicsRun.cpp:1930-1949`) also holds the submitter and is not measured.
 - **Residency sweeps (measured, same run).** In the world they cost 1.46 ms per frame. During loading,
   for four seconds, the per-draw residency check ran up to 1,916 sweeps per second, each over one
   unimported span, and imported no page in about 6,700 sweeps at up to 104 ms/s. Each sweep is one
   `SEEK_DATA` query from the span start (`FindUnpopulatedSharedBackingSpans`,
   `source/lib/Core/src/VirtualMemory.cpp`), 31-57 us there against about 3 us in quiet seconds, and is
   triggered by a population change anywhere in the shared backing (it grew 20-25 MB/s while discards
-  rose 2,500-5,000 per second). In three clean runs command-processor system time followed residency
-  time (correlation 0.75-0.95), and seconds above 300 ms/s held 6 of 9 frames over 250 ms in two of
-  them. Narrowing the sweep needs per-range population information that the backing counter does not
+  rose 2,500-5,000 per second). In two runs without temporary code, command-processor system time
+  followed residency time (correlation 0.86 and 0.95; 0.75 in a run with read-only census code),
+  residency averaged 80-86 ms/s, and seconds above 300 ms/s held 6 of 9 frames over 250 ms. Narrowing the sweep needs per-range population information that the backing counter does not
   give; not built.
 
 ## Sandbox title: letters missing from the death message (2026-11-10, open)
