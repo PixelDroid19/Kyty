@@ -2318,6 +2318,15 @@ TEST(EmulatorGraphicsState, GpuMemoryValidatesTheCompleteAllocatedGuestRangeRead
 	GpuMemorySetAllocatedRange(overlap_base + 0x8000ull, 0x18000ull);
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(overlap_base + 0xc000ull, 0x8000ull), GpuMemoryRangeValidationStatus::Valid);
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(overlap_base + 0x4000ull, 0x10000ull), GpuMemoryRangeValidationStatus::Unallocated);
+
+	// Two heaps with a gap between them: the gap is not allocated, nor is a range crossing it.
+	const uint64_t gap_base = 0x0000005105000000ull;
+	GpuMemorySetAllocatedRange(gap_base, 0x10000ull);
+	GpuMemorySetAllocatedRange(gap_base + 0x20000ull, 0x10000ull);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(gap_base + 0x18000ull, 8), GpuMemoryRangeValidationStatus::Unallocated);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(gap_base + 0xf000ull, 0x2000ull), GpuMemoryRangeValidationStatus::Unallocated);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(gap_base + 0xf000ull, 0x12000ull), GpuMemoryRangeValidationStatus::Unallocated);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(gap_base + 0x20000ull, 0x10000ull), GpuMemoryRangeValidationStatus::Valid);
 }
 
 namespace {
