@@ -218,11 +218,13 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     pair read different or had a changed interior page. The 102 other waits there failed a
     precondition of the tracked case (`GpuMemory::StorageContentTracked`); this run did not split
     them. Fence waits read 2.09 ms per frame, memory allocation 1.7 MB per frame, and the capture
-    showed the death screen with the known glyph defect, as on the clean binary. One run, no frame-rate claim. A first run missed the world on the route and was
-    discarded. In `PPSA21567 - ASTRO BOT` (intro cinematic, same tap) the check ran rarely: at least
-    one pass on a 16-byte range, 48 stale pairs; last error, allocations (0.55 against 0.62 MB per
-    frame) and draws matched the control (`2022c3607`, before `d2ff690bc`). Of four captures, the
-    title screen and the planet shot matched the control's; the other two fell at other points of
+    showed the death screen with the known glyph defect, as on the clean binary. One run, no
+    frame-rate claim. A first run missed the world on the route and was discarded. A later world run
+    on the same source with temporary timers and no induced waits (4,476 draws per frame) read
+    1.32 ms of fence waits per frame. In `PPSA21567 - ASTRO BOT` (intro cinematic, same tap) the
+    check ran rarely: at least one pass on a 16-byte range, 48 stale pairs; last error, allocations
+    (0.55 against 0.62 MB per frame) and draws matched the control (`2022c3607`, before
+    `d2ff690bc`). Of four captures, the title screen and the planet shot matched the control's; the other two fell at other points of
     the cinematic, with no defect seen. Command-processor time read 35.8 ms per frame, inside the
     30.8-41.6 ms of four earlier runs on the same tap; the added work is two sub-page hashes and one
     tracker query per write-back record, about 13 per frame there.
