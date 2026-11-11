@@ -177,13 +177,20 @@ public:
 	}
 
 	// Ids of the blocks overlapping [vaddr, vaddr + size), each once.
-	[[nodiscard]] Vector<int> FindAll(uint64_t vaddr, uint64_t size) const { return FindAll(&vaddr, &size, 1); }
+	[[nodiscard]] Vector<int> FindAll(uint64_t vaddr, uint64_t size) const
+	{
+		Vector<int> ret;
+		FindAll(&vaddr, &size, 1, &ret);
+		return ret;
+	}
 
-	[[nodiscard]] Vector<int> FindAll(const uint64_t* vaddr, const uint64_t* size, int vaddr_num) const
+	// The same into `ret`, which is cleared first; per-lookup callers reuse its capacity.
+	void FindAll(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, Vector<int>* ret) const
 	{
 		EXIT_IF(vaddr == nullptr);
 		EXIT_IF(size == nullptr);
-		Vector<int>             ret;
+		EXIT_IF(ret == nullptr);
+		ret->Clear();
 		std::unordered_set<int> seen;
 		for (int i = 0; i < vaddr_num; i++)
 		{
@@ -201,12 +208,11 @@ public:
 				{
 					if (block->vaddr + block->size > vaddr[i])
 					{
-						AddUnique(&ret, &seen, block->id);
+						AddUnique(ret, &seen, block->id);
 					}
 				}
 			}
 		}
-		return ret;
 	}
 
 	[[nodiscard]] bool IsEmpty() const
@@ -611,6 +617,8 @@ private:
 	AllocatedValidationCache m_allocated_validation_cache;
 	AllocatedPrefixCache     m_allocated_prefix_cache;
 	OverlapSnapshotCache     m_overlap_snapshot_cache;
+	// FindBlocks' candidate ids; reused under m_mutex so a lookup does not allocate them.
+	Vector<int> m_find_blocks_candidates;
 
 	GpuDeferredDeletionQueue m_deferred_deletions;
 

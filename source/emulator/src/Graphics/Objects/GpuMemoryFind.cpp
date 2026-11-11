@@ -667,7 +667,6 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 	EXIT_IF(vaddr == nullptr || size == nullptr);
 	EXIT_IF(only_first && vaddr_num != 1);
 
-	Vector<GpuMemory::OverlappedBlock> ret;
 	if (heap.overlap_cache == nullptr)
 	{
 		heap.overlap_cache = new OverlapQueryCache;
@@ -679,7 +678,7 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 		// range-query cache, whose keys intentionally reject zero-sized spans.
 		if (size[i] == 0)
 		{
-			return ret;
+			return {};
 		}
 	}
 	const auto query = GpuMemoryRangeQueryKey::Create(vaddr, size, vaddr_num, only_first);
@@ -689,8 +688,14 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 		return *cached;
 	}
 
-	const Vector<int> candidates =
-	    vaddr_num == 1 ? heap.objects_map2->FindAll(vaddr[0], size[0]) : heap.objects_map2->FindAll(vaddr, size, vaddr_num);
+	// Declared after the cache hit, which shares the cached array: a Vector allocates even empty.
+	Vector<GpuMemory::OverlappedBlock> ret;
+	auto&                              candidates = m_find_blocks_candidates;
+	heap.objects_map2->FindAll(vaddr, size, vaddr_num, &candidates);
+	if (!candidates.IsEmpty())
+	{
+		ret.Expand(candidates.Size());
+	}
 	for (int index: candidates)
 	{
 		const auto& object = heap.objects[index];
