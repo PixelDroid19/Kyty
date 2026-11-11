@@ -603,18 +603,26 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       ms per frame against a 1 ms rule, in a run whose window was a lighter scene (2,832 draws per
       frame), so a small gain is not excluded. That run was also the first of the pushed
       allocated-range change without the larger overlap table; it ended clean.
-    - Excluded, a region filter before the hashed probe (2026-11-11): one bit per 2 MiB of host
-      address space, set before a page key is published and never cleared, let a write whose
-      regions hold no tracked page return early. One run flipped it on and off each second (8 s of
-      world, 71.5 frames of 112 ms, 5,574 draws per frame, 36 submits per phase): 94.7 % of calls
-      were rejected, but the submitting thread's notification path fell only from 8.3 to 7.2 ns
-      per call, 0.7 ms per world frame (1.35 ms on the whole 20 s window, per call) against a
-      1.5 ms rule, so it was reverted. The check costs about a third of what it removes (the
-      skipped probes mostly hit the cache), and the rest, about 4.4 ms per frame, is the dispatch
-      chain from the C-string handler to the tracker, which a tracker-side filter cannot remove.
-      Hold plus gap per submit did not move within noise (111.6 against 109.9 ms).
+    - Reverted under the rule, a region filter before the hashed probe (2026-11-11): one bit per
+      2 MiB of host address space, set before a page key is published and never cleared, let a
+      write whose regions hold no tracked page return early. One run flipped it on and off each
+      second, with counters in both phases (8 s of world, 71.5 frames of 112 ms, 5,574 draws per
+      frame). 94.7 % of calls were rejected; the submitting thread's notification path fell from
+      8.3 to 7.2 ns per call, 0.7 +/- 1.2 ms per world frame (31 against 37 samples, 1 sigma), and
+      1.35 +/- 0.8 ms per call over the whole 20 s window (60 against 79 samples), against a
+      1.5 ms rule: the fall is not shown to reach 1.5 ms and could be up to about 3 ms. At equal
+      call counts over 20 s the probe-side samples fell from 61 to 8 and the check added 10, but
+      the caller-side samples rose from about 18 to 42 (`Instance` 1 to 12, `NotifyWrite` 9 to 19):
+      about half the probe's apparent cost reappeared in the callers, cause not established.
+      Caller-side samples with the filter on are about 4.7 ns per call, 2.9 ms per world frame, an
+      upper bound since `NotifyWrite` carried the counters. Hold plus gap per submit was 111.6
+      against 109.9 ms (36 submits per phase over four alternations, no spread computed).
+    - A lead, not built: a reject at the call site, before the callback hop into the tracker,
+      would be needed to recover the caller-side cost (2.9 ms per frame at most).
     - The gap levers (the drain, the notification path, other submitter CPU work) share one
       21.8 ms budget per frame and substitute for the serial-submit lever rather than add to it.
+      Even a zero gap leaves a frame of about 86 ms or more against 16.7 ms, so they stay
+      cross-title CPU leads, not a route to the frame-time goal.
   - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
     call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
     per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
