@@ -581,20 +581,29 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       so a release waits for the decode in flight; the releasing threads waited about 75 ms per
       frame in total, in parallel behind the decode, which is not a frame cost by itself.
     - Drain bound on the frame: the frame is the submitter's cycle, about 82 ms inside the submit
-      and a 21.8 ms gap. The submitting thread made 94 of about 97 submits and ran 1.31 drains per
-      frame, waiting 1.9 ms for the gate before them; its user CPU was 12.9 ms per frame, of which
-      the release path was 0.5 ms. That leaves 7.0 ms of the gap for its drains, kernel time and
-      any other wait, so the drains cost the frame between about 2 and 9 ms (1.31 drains at the
-      mean 1.54 ms give about 2 ms more than the wait). Admitted submits waited 0.005 ms per frame
-      at the gate, which is why the first reading, gate waits of submits only, missed it.
+      and a 21.8 ms gap (counter window, 103.7 ms world frames). The submitting thread made 94 of
+      about 97 submits and ran 1.31 drains per frame, waiting 1.9 ms for the gate before them. Its
+      user CPU, normalized per draw to a 5,271-draw world frame because the perf window held a
+      lighter scene for 4.1 of its 10 s, was 13.4 ms, of which the release path was 0.6 ms; guest
+      work may not scale with draws. That leaves about 6.5 ms of the gap for its drains, kernel
+      time and any other wait, so the drains cost the frame between about 2 and 8 ms (1.31 drains
+      at the mean 1.54 ms give about 2 ms more than the wait). Admitted submits waited 0.005 ms per
+      frame at the gate, which is why the first reading, gate waits of submits only, missed it.
     - Load-time lead: in the first 92 s the drains held the gate 22-64 % of each 15 s window and
       10,899 of 12,630 invalidations (86 %) found nothing (2,415 of 2,417 between 16 and 31 s).
-    - Write notifications on guest memory copies, a lead found in the same run: on the submitting
-      thread 76 of 238 samples, about 4.1 ms per frame inside the gap, are the dirty-page tracker
-      called from the guest `memcpy` (`LibCString.cpp`, `GpuDirtyPageTracker::NotifyWrite`); the
-      processor thread spends about 1.8 ms per frame there. Of the 76, 22 fall in `PageStart`, a
-      division by the page size, and 16 in the hashed page probe. Calls per frame were not
-      counted.
+    - Write notifications on guest memory copies, a lead: the guest's `memcpy`, `memset` and
+      `memmove` notify the dirty-page tracker before writing (`LibCString.cpp`,
+      `GpuDirtyPageTracker::NotifyWrite`), so a write to an armed page does not fault. A counter
+      run (2026-11-11) saw 4.5-6.4 million notifications per second in the world, about 615,000
+      per world frame, of which about 224 found a tracked page: more than 99.9 % find nothing. On
+      the submitting thread they cost about 4.1-4.3 ms per 5,017-draw frame in the two profiled
+      runs (32-33 % of its samples, inside the gap), about 6-8 ns per call; the processor thread's
+      1.8 ms in the tracker is queries, not notifications. A page shift instead of the runtime
+      division by the page size was built and reverted: tracker time on both threads fell 0.26-0.66
+      ms per frame against a 1 ms rule, in a run whose window was a lighter scene (2,832 draws per
+      frame), so a small gain is not excluded. That run was also the first of the pushed
+      allocated-range change without the larger overlap table; it ended clean. Next: a cheap
+      rejection of untracked pages before the hashed probe, priced on the call count.
   - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
     call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
     per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
