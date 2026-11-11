@@ -186,6 +186,10 @@ void GuestDeviceAddressFrameDone();
 [[nodiscard]] std::vector<GpuMemoryStorageSnapshot> GuestDeviceAddressTakeSnapshots(const std::function<bool(SubmissionId)>& complete);
 void GuestDeviceAddressReleaseSnapshots(const std::vector<GpuMemoryStorageSnapshot>& snapshots);
 
+// Frees the staging of snapshots that a write-back of their object superseded, once `complete`
+// reports their recording done: publication skips them and their copy has finished.
+void GuestDeviceAddressReleaseCancelledSnapshots(const std::function<bool(SubmissionId)>& complete);
+
 // Unmaps the overlays a reader on `consumer` must not observe: those of other
 // queues and those whose guest range changed. Call before collecting the
 // consumer's pending storage results.

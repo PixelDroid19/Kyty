@@ -2048,6 +2048,23 @@ void GuestDeviceAddressReleaseSnapshots(const std::vector<GpuMemoryStorageSnapsh
 	}
 }
 
+void GuestDeviceAddressReleaseCancelledSnapshots(const std::function<bool(SubmissionId)>& complete)
+{
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	auto&                       snapshots = registry.snapshots;
+	const auto                  release   = [&registry, &complete](const auto& snapshot)
+	{
+		if (!snapshot.cancelled || !complete(snapshot.recording))
+		{
+			return false;
+		}
+		FreeSlot(&registry.staging, snapshot.offset, StagingBytes(snapshot.size));
+		return true;
+	};
+	snapshots.erase(std::remove_if(snapshots.begin(), snapshots.end(), release), snapshots.end());
+}
+
 void GuestDeviceAddressValidateOverlays(GpuQueueId consumer)
 {
 	auto&                       registry = GetRegistry();

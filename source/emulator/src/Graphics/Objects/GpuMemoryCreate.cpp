@@ -14,6 +14,7 @@
 #include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
@@ -1190,6 +1191,9 @@ void GpuMemory::CompleteSubmission(SubmissionId submission)
 		               "WARNING: m_deferred_deletions.CompleteSubmission(submission) != GpuDeferredDeletionResult::Success condition "
 		               "ignored (continuing)\n");
 	}
+	// Superseded snapshots would otherwise hold staging until an end-of-pipe write-back.
+	GuestDeviceAddressReleaseCancelledSnapshots([this](SubmissionId recording)
+	                                            { return m_deferred_deletions.AreDependenciesComplete({recording}); });
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
