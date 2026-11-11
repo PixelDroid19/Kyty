@@ -104,13 +104,13 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - With four recording threads, command-processor time is bounded at 1.2x (only independent work in
     parallel) to 1.7x (caches, unattributed work and the double-count case in parallel too). Parallel
     recording was not built (design and bounds: `docs/bringup/parallel-recording-design.md`), and the in-place read-only binds above stay measured, not built.
-- **Snapshot staging is released only at end-of-pipe write-backs (found; one change excluded).**
-  Overlay snapshots free their staging only in `GpuMemory::PublishStorageSnapshotsLocked`
+- **Snapshot staging was released only at end-of-pipe write-backs (superseded snapshots fixed in
+  `d2ff690bc`; one change excluded).** Before the fix, overlay snapshots freed their staging only in `GpuMemory::PublishStorageSnapshotsLocked`
   (`Objects/GpuMemoryWriteback.cpp:420`). It is reached only from `WriteBackCompletedSubmission`,
   which only the end-of-pipe callbacks call (`GraphicsRenderEop.cpp:312`, `:339`, `:419`, `:527`);
   the general completion path (`CommandProcessor::PublishCompletedSubmissions`, `GraphicsRun.cpp:694`)
-  only retires deferred deletions. Between end-of-pipe events the staging stays held by snapshots of
-  completed submissions, and later overlays are refused.
+  only retires deferred deletions. Between end-of-pipe events the staging stayed held by snapshots of
+  completed submissions, and later overlays were refused.
   - Excluded: on any refused overlay, publish the snapshots of completed submissions and retry the
     overlay once. One run with the change and one clean control on the same route and save, both on
     the death screen at night at 130 s: waits fell from 23.4 to 8.7 per frame (14.9 to 6.3 ms), but
@@ -118,16 +118,33 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     from 44 to 170 MB and object creation from 7.5 to 28 ms per frame. Frames were 148 ms against
     143 ms at 4,686 against 4,038 draws per frame, so the frame effect is not established; the churn
     excludes the change. Why publishing earlier causes it is not established. The change was not kept.
-  - Direction: find which readers recreate buffers after an early publication before freeing the
-    staging outside end-of-pipe events. The best case recovers about 7 ms of 140 ms frames.
   - Measured (two runs with temporary counters, same route and save): the staging level stays at
     the cap. At 16 MiB it read the cap at every allocation from about 10 s on, and a counter on the
-    snapshot take (`GuestDeviceAddressTakeSnapshots`) stayed at zero for the 128 s run; that counter
-    has not been seen to fire on any title, so it is not proof that the take never runs. With the cap
+    snapshot take (`GuestDeviceAddressTakeSnapshots`) stayed at zero for the 128 s run; the same
+    counter fired on `PPSA21567 - ASTRO BOT` (below), so the take does not run here. With the cap
     raised to 64 MiB the level rose from boot at about 1.4-1.8 MiB/s, reached the cap at about 40 s
     and no later allocation read it lower; all 481 allocations in the world were refused, and fence
     waits read 16.3 ms per frame (12-16 ms at 16 MiB). Excluded: a larger cap only delays the full
     state.
+  - Fixed (`d2ff690bc`): submission completion (`GpuMemory::CompleteSubmission`) frees the snapshots
+    that their object's own write-back superseded, once their copy has finished. Publication and the
+    pending-snapshot check already skipped those snapshots, so guest memory receives the same bytes;
+    unlike the excluded change, nothing is published early. One run against the populated-page run
+    (`67d6e9a95`), same route and save, with temporary counters:
+    - Every pending snapshot here was superseded. With the fix the pending staging stayed under
+      0.01 MiB, and on all 110 counter lines the bytes of pending snapshots equalled the cap minus
+      the free space. In the world 594 snapshots were freed this way and none of 595 staging
+      allocations was refused (500 of 500 in the world of the reference run).
+    - Fence waits 11.8 against 13.0 ms per frame (13.6 against 18.3 waits), allocations 2.7 against
+      2.2 MB per frame. One pair, no frame-rate claim. The expected share of about 7 ms was not
+      reached; the waits the fix leaves are not attributed.
+    - The release scan costs 0.04 us per completed submission (at most 32 pending snapshots).
+    - `PPSA21567 - ASTRO BOT`, intro cinematic after a diagnostic tap, against a run of the
+      `67d6e9a95` code with the same tap: the snapshot take ran (242,271 calls, 4,844 snapshots
+      taken), 3,183 superseded snapshots were freed at completion, the staging sums matched on all
+      144 lines and no staging allocation was refused. The capture showed the same cinematic shot
+      as the control, the last error was the one the control reports, and allocations in the
+      cinematic read 0.00 against 0.01 MB per frame.
 - **GPU estimate.** In the same run the render engine was busy 37% of 131 ms frames at 600-650 MHz,
   about 48 ms. If that time scaled with the clock it would be about 13 ms at 2,400 MHz; this is an
   estimate, not a measurement.

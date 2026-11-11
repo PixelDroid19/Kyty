@@ -91,7 +91,8 @@ which slow the CP):
   131 ms, so at most about 1.7x, still under the build gate; whether the guest starts earlier when
   released is not established (`docs/titles/anime-fighter.md`).
 - Moving work to stage B cannot reduce stage A. Stage A shrinks only by doing less ordered work per
-  draw: the 12-16 ms of waits and the memory-object creation in binding are the two largest parts,
+  draw: the 12-16 ms of waits (11.8 ms in one run after `d2ff690bc`) and the memory-object creation in binding
+  are the two largest parts,
   and the two measured attempts on them are excluded (`docs/titles/sandbox.md`: staging drain and
   retry; in-place vertex binds).
 - 30 fps is a 33 ms frame. With 22-26 ms per frame outside CP processing unchanged, stage A would

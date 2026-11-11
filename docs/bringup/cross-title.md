@@ -1,3 +1,21 @@
+## Superseded overlay snapshots held the snapshot staging (2026-11-10, fixed)
+
+An overlay that serves device-address readers also copies the result to a
+16 MiB host-visible staging, which write-back completion publishes. Its slot
+was freed only when an end-of-pipe write-back took the snapshot
+(`GpuMemory::PublishStorageSnapshotsLocked`). A snapshot that its object's own
+write-back superseded is never published, yet it kept its slot until such an
+event; in `PPSA17221 - Minecraft`, which raises none, the staging filled about
+10 s after boot and every later overlay was refused, so the draw waited on
+the host. Submission completion (`GpuMemory::CompleteSubmission`) now frees
+superseded snapshots whose copy has finished; publication already skipped
+them, so guest memory receives the same bytes. In that title no staging
+allocation was refused in the world and fence waits read 11.8 against 13.0
+ms per frame in one pair of runs; in `PPSA21567 - ASTRO BOT` the take path
+still ran and 3,183 superseded snapshots were freed at completion, with the
+intro cinematic rendering as in the control. Fixed in `d2ff690bc`; evidence in
+`docs/titles/sandbox.md`.
+
 ## Populated-page query walked the backing past its range (2026-11-10, fixed)
 
 Importing a physical span asks which of its pages the shared memfd backing
