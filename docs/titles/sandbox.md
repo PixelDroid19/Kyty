@@ -640,16 +640,20 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
         it is the parallel-recording design (`docs/bringup/parallel-recording-design.md`); on
         this basis it moves at most the pipeline lookup (1.6), the sets (6.6) and the driver
         calls (8.3), about 16.5 ms, overlapping the repeat class on pipeline and sets.
-      - Absent elsewhere, a different load: the other implementation's tree (a lead only)
-        decodes on one thread, returns from a submit once the batch is queued, copies vertex
-        bytes per draw, uses per-draw descriptor sets, and has no write notifications on guest
-        copies, no overlap admission and a sparse, probabilistic texture check. Its profiled run
-        at 49.8 fps (another host) records a median of 101 us per draw on that one thread, so it
-        drew at most about 200 draws per frame (20.1 ms over 101 us), against 5,017-5,574 in
-        this world. Its only per-title draw counters, two sessions on this host that ended on
-        black frames, total 35,206 draws, at most seven frames of this world's load. Its frame
-        rate is not evidence that this load runs at 50-60 fps, and the steps it lacks are not
-        priced against it.
+      - Absent elsewhere, a different load (see "A lighter world frame is not a target" above):
+        the other implementation's tree (a lead only) decodes on one thread, returns from a
+        submit once the batch is queued, copies vertex bytes per draw, uses per-draw descriptor
+        sets, and has no write notifications on guest copies, no overlap admission and a sparse,
+        probabilistic texture check. One profiled run there (another host) records a median of
+        101 us per draw after the player connected, no mean, from a timer no longer in its
+        tree, so its scope is unverified: one thread at that cost handles at most about 10,000
+        draws per second, against about 50,000 here in the filter run (71.5 frames of 5,574
+        draws in 8 s, 14.9 us per draw). Its only draw counters for this title come from one
+        session on this host that logged black-frame and shader-refusal events (35,206 draws in
+        all, at most seven frames of this world's load; another session, 4,847). Its frame rate
+        is not evidence that this load runs at 50-60 fps, and the steps it lacks are not priced
+        against it. At about 54 draws per flip (loading and menus) this build ran 49-51 flips
+        per second in three runs, a different scene.
       - Bound: no single class reaches 30 ms. Outside recorded exclusions the union of the two
         classes is about 19.5 ms plus the unsplit register-state part, leaving at least about
         55 ms of command processing less that part, and a frame of about 77 ms less that part with
