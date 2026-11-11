@@ -530,8 +530,30 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       compare. Fresh captures have no snapshot to hold it. The cache has 4,096 slots against about
       12,000 distinct read-only ranges per frame, so most lookups may miss: 1.4 ms of cache for a
       search that shows as about 0.3 ms. Which titles add heaps during play was not looked at.
-    - Open: at most about 3.7 ms (the miss walk 2.9, the allocated-range store and search 0.8); a
-      count of misses by cause decides it.
+    - Counted (2026-11-11, one 165 s run with temporary counters; 191 world frames of 115 ms,
+      5,187 draws per frame; lookups matched the bind probes and index lookups the draws). Per
+      frame, overlap test outside index binds: 17,028 lookups, of which 7,099 hit, 164 found an
+      empty slot, 3,462 a slot left by a whole invalidation and 6,303 another key; under index
+      binds 5,209 (3,321, 60, 613, 1,214); allocated-range check 23,061 (8,077, 0, 1,616,
+      13,368). Range invalidations cleared 78 live overlap entries per frame. Whole invalidations
+      come only from adding or removing a heap and ran 0.83 times per frame. The count tests the
+      generation before the key, so a slot left by a whole invalidation may also hold another key:
+      among the other lookups 47 % did (26 % under index binds, 62 % in the allocated-range check).
+    - Priced at about 0.25 us per overlap miss and 0.05 us per allocated-range miss, from the
+      full-stack run, which had the same bind probes per frame (20,407 against 20,487). Another
+      key costs about 2.3 ms in the overlap test, counting its share of the invalidated slots;
+      invalidating only the heap's range instead of the whole caches would save about 0.6 ms. The
+      allocated-range cache costs its lookup and store, 1.4 ms, around a search of about 0.3 ms
+      (about six samples). These prices overlap and do not add.
+    - Heap-range invalidation is a lead, not built: it is under 1 ms, and a stale entry would reach
+      every title. The argument for it: a heap is added empty and removed after its objects are
+      freed, overlap results depend on objects only, and allocation validity changes only for
+      queries that overlap the heap. Lines 312-340 of `QueryOverlapsLocked`
+      (`GpuMemoryFind.cpp`) were not read.
+    - The heap events themselves: in the full-stack run no sample of any thread (3,001 samples)
+      fell in adding or removing a heap, the heap index rebuild or the queue drain, so their CPU
+      time is under about 0.15 ms per frame. Time spent waiting in a drain is not seen by those
+      samples, and which of the two sites the events come from was not separated.
   - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
     call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
     per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
