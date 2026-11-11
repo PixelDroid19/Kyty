@@ -119,6 +119,12 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	if (!GuestDeviceAddressBindInPlace(ctx, *vaddr, *size, vk_obj->usage, vk_obj, &vk_obj->in_place_window))
 	{
+		// Read-only shaders may read the object by its device address
+		// (ShaderStorageResources::by_address); window buffers already have one.
+		if (ctx->guest_device_address_supported)
+		{
+			vk_obj->usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+		}
 		VulkanCreateBuffer(ctx, *size, vk_obj);
 	}
 	if (vk_obj->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->buffer == nullptr condition ignored (continuing)\n"); }

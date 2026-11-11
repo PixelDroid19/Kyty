@@ -2977,6 +2977,7 @@ void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindR
 	{
 		return;
 	}
+	bind->descriptor_flow_proven = true;
 	const ShaderInstructionIndices direct  = memo == nullptr ? ShaderIndexInstructions(code) : ShaderInstructionIndices {};
 	const auto&                    indices = memo != nullptr ? memo->InstructionIndices(code) : direct;
 	for (const uint32_t index: indices.buffer_accesses)
@@ -2997,12 +2998,22 @@ void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindR
 		// The binding replaces the base dword with the descriptor slot; only a
 		// base still holding it addresses the bound buffer.
 		const int base = scalar ? inst.src[0].register_id : vector->register_id;
-		if (base < 0 || base >= kShaderScalarLivenessSgprs || holding[index].test(static_cast<size_t>(base)) ||
-		    !ShaderBufferRegisterNamesBinding(*bind, inst, user_data_register_base))
+		if (base < 0 || base >= kShaderScalarLivenessSgprs || !ShaderBufferRegisterNamesBinding(*bind, inst, user_data_register_base))
 		{
 			continue;
 		}
-		bind->redefined_descriptor_consumers.Add(inst.pc);
+		if (!holding[index].test(static_cast<size_t>(base)))
+		{
+			bind->redefined_descriptor_consumers.Add(inst.pc);
+			continue;
+		}
+		// A read by address also takes words 1 (high address) and 2 (size) from the row.
+		const int bound = ShaderStorageBufferBoundIndex(*bind, scalar ? inst.src[0] : *vector, user_data_register_base);
+		if (bound >= 0 && (base + 2 >= kShaderScalarLivenessSgprs || !holding[index].test(static_cast<size_t>(base + 1)) ||
+		                   !holding[index].test(static_cast<size_t>(base + 2))))
+		{
+			bind->storage_buffers.row_redefined[bound] = true;
+		}
 	}
 }
 

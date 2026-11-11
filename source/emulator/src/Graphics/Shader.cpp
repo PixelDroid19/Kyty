@@ -2646,8 +2646,39 @@ static void ShaderGetDirectSgpr(ShaderDirectSgprsResources* info, int start_inde
 	info->sgprs_num++;
 }
 
+namespace {
+
+std::atomic<bool> g_storage_address_reads {false};
+
+// A read-only V# from user data whose every consumer is a raw dword load the
+// translator can issue from a device address; anything the slot path or the
+// SGPR words carry beyond that keeps the slot.
+bool ShaderStorageBufferReadsByAddress(const ShaderStorageResources& storage, int i)
+{
+	return Config::IsNextGen() && g_storage_address_reads.load(std::memory_order_relaxed) && storage.dword_loads_only[i] &&
+	       storage.start_register[i] >= 0 && storage.sources[i] != ShaderStorageBindingSource::DynamicScalarLoad &&
+	       storage.accesses[i] == ShaderStorageAccess::Raw && ShaderStorageUsageIsReadOnly(storage.usages[i]) &&
+	       storage.exact_matches[i] && !storage.decoded_unknown[i] && !storage.indirect_descriptor_use[i] &&
+	       !storage.dynamic_sload[i] && !storage.unread_stream[i] && !storage.extended[i] && !storage.raw_tbuffer_use[i] &&
+	       !storage.row_redefined[i];
+}
+
+} // namespace
+
+void ShaderSetStorageAddressReads(bool supported)
+{
+	g_storage_address_reads.store(supported, std::memory_order_relaxed);
+}
+
 void ShaderCalcBindingIndices(ShaderBindResources* bind)
 {
+	bind->storage_address_used = false;
+	for (int i = 0; i < bind->storage_buffers.buffers_num; i++)
+	{
+		bind->storage_buffers.by_address[i] =
+		    bind->descriptor_flow_proven && ShaderStorageBufferReadsByAddress(bind->storage_buffers, i);
+		bind->storage_address_used          = bind->storage_address_used || bind->storage_buffers.by_address[i];
+	}
 	KYTY_PROFILER_FUNCTION();
 
 	int binding_index = 0;
@@ -3789,6 +3820,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		bind->storage_buffers.raw_vmem_oob_guarded[i]    = matched_evidence.raw_vmem_oob_guarded;
 		bind->storage_buffers.raw_smem_use[i]            = matched_evidence.raw_smem_use;
 		bind->storage_buffers.raw_tbuffer_use[i]         = matched_evidence.raw_tbuffer_use;
+		bind->storage_buffers.dword_loads_only[i]        = evidence.exact_match && exact_evidence.dword_loads_only;
 		bind->storage_buffers.raw_smem_required_bytes[i] = matched_evidence.raw_smem_required_bytes;
 		bind->storage_buffers.raw_smem_dynamic_offset[i] = matched_evidence.raw_smem_dynamic_offset;
 
@@ -5813,6 +5845,16 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 	if (bind.device_address_used)
 	{
 		ids->Add(bind.device_address_offset_dw);
+	}
+	ids->Add(static_cast<uint32_t>(bind.storage_address_used));
+	if (bind.storage_address_used)
+	{
+		uint32_t by_address = 0;
+		for (int i = 0; i < bind.storage_buffers.buffers_num; i++)
+		{
+			by_address |= static_cast<uint32_t>(bind.storage_buffers.by_address[i]) << static_cast<uint32_t>(i);
+		}
+		ids->Add(by_address);
 	}
 	ids->Add(static_cast<uint32_t>(bind.thread_limits_used));
 	if (bind.thread_limits_used)

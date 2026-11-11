@@ -19,6 +19,11 @@ bool Spirv::UsesGuestDeviceAddress() const
 	return m_bind != nullptr && m_bind->device_address_used;
 }
 
+bool Spirv::UsesPhysicalStorageBuffer() const
+{
+	return m_bind != nullptr && (m_bind->device_address_used || m_bind->storage_address_used);
+}
+
 String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 {
 	String8 types = ulong_declared ? "" : "\n %ulong = OpTypeInt 64 0\n %slong = OpTypeInt 64 1\n";

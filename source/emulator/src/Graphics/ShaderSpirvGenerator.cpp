@@ -849,7 +849,7 @@ void Spirv::WriteHeader()
 		// by the generated OpBitcast instructions.
 		capabilities.Add("OpCapability Int64");
 	}
-	if (UsesGuestDeviceAddress())
+	if (UsesPhysicalStorageBuffer())
 	{
 		if (!spirv_uses_f64(m_code))
 		{
@@ -1079,7 +1079,8 @@ void Spirv::WriteHeader()
 	                .ReplaceStr("<Imports>", imports.Concat("\n" + String8(' ', 15)))
 	                .ReplaceStr("<Extensions>", extensions.Concat("\n" + String8(' ', 15)))
 	                .ReplaceStr("OpMemoryModel Logical GLSL450",
-	                            UsesGuestDeviceAddress() ? "OpMemoryModel PhysicalStorageBuffer64 GLSL450" : "OpMemoryModel Logical GLSL450");
+	                            UsesPhysicalStorageBuffer() ? "OpMemoryModel PhysicalStorageBuffer64 GLSL450"
+	                                                        : "OpMemoryModel Logical GLSL450");
 }
 
 void Spirv::WriteDebug()
@@ -1614,7 +1615,7 @@ static const char* compute_types = R"(
 	m_source += optional_types;
 	m_source += types;
 	// Guest addressing types build on %uint from the base types.
-	if (UsesGuestDeviceAddress())
+	if (UsesPhysicalStorageBuffer())
 	{
 		m_source += GuestDeviceAddressTypes(spirv_uses_f64(m_code));
 	}
@@ -3534,6 +3535,18 @@ void Spirv::FindConstants()
 		}
 		AddConstantInt(static_cast<int>(m_bind->geometry_offset_dw / 4u));
 		AddConstantInt(static_cast<int>(m_bind->geometry_offset_dw / 4u + 1u));
+	}
+	if (m_bind != nullptr && m_bind->storage_address_used)
+	{
+		// Loads by device address: address mask and shift, dword alignment and access sizes.
+		for (uint32_t value: {0xffffu, 0xfffffffcu, 32u})
+		{
+			AddConstantUint(value);
+		}
+		for (uint32_t bytes = 4u; bytes <= 64u; bytes += 4u)
+		{
+			AddConstantUint(bytes);
+		}
 	}
 	if (UsesGuestDeviceAddress())
 	{

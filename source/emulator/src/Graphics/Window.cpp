@@ -3428,6 +3428,7 @@ static void VulkanCreate(WindowContext* ctx)
 			// Flexible memory is snapshotted either way; direct memory needs one of the imports.
 			ctx->graphic_ctx.guest_device_address_supported =
 			    ctx->graphic_ctx.guest_host_pointer_import_supported || ctx->graphic_ctx.guest_dma_buf_import_supported;
+			ShaderSetStorageAddressReads(ctx->graphic_ctx.guest_device_address_supported);
 			for (const char* extension: {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME})
 			{
 				if (ctx->graphic_ctx.guest_dma_buf_import_supported &&

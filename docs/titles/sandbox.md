@@ -6,6 +6,68 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Sandbox title: storage buffers read by device address (2026-11-11, built, command-processor time only)
+
+Second slice of the rework ("What comes next" in the record below). A read-only storage buffer whose every
+consumer is a dword load is read by the shader through a device address held in its V# row, instead of a
+descriptor-set binding to a per-draw copy.
+
+- **Decision, at translation.** A buffer is read by address only if it is read-only, raw, bound from a user-data
+  or table register, every instruction that consumes its V# is `BUFFER_LOAD_DWORD[x2..x4]` or
+  `S_BUFFER_LOAD_DWORD[x2..x16]`, it is not loaded from a dynamic scalar address, not indirect, not a stream
+  row read by a typed load, not extended, and the device has buffer device addresses. Any other buffer keeps the
+  descriptor path. The program's scalar flow must be resolved, and every consumer whose register still holds
+  the bound V#'s word 0 must also hold words 1 and 2 on every path; a consumer whose word 0 was redefined reads
+  its own V# and keeps its path. The per-buffer decision is part of the shader id (translator version 214).
+  The address emitters choose by the V# register; an emitter that would resolve a stream of a buffer marked for
+  address reads stops translation.
+  - Found on the way: the storage compaction that drops unused metadata buffers did not move the dword-load
+    evidence with the buffer it belongs to, so a compacted buffer could carry another one's. It moves it now.
+  - Found by the first matrix: `PPSA21567 - Astro Bot` stopped at translation on a `BUFFER_STORE_DWORD` whose
+    register had been redefined, which the register lookup had matched to a read-only buffer; and on the AMD
+    driver a device address in the upper canonical half (`0xffff8001...`) did not fit 48 bits. The emitters now
+    skip redefined and dynamic consumers, the row holds the low 48 bits, and the shader sign-extends bit 47.
+- **Row contract.** The CPU writes the 48-bit device address into words 0 and 1 of the row (stride bits kept)
+  and the bytes the address backs into word 2. A word loads only if its byte offset plus 4 fits in word 2;
+  otherwise it reads zero, as robust descriptor access does. An address that does not fit 48 bits or is not
+  dword aligned stops the run.
+- **Address source.** A range inside one imported run of guest memory is read in place at the import's device
+  address. Every other range keeps its copy (snapshot pool, buffer object or scalar-memory copy), created with the
+  device-address usage, and is read at that copy's address. The descriptor slot then holds one fixed zero
+  carrier, so set contents repeat. In-place reads rely on the same quiesce as the import windows: imports are
+  destroyed only while every submitted batch has completed (`Gpu::RunQuiesced`). That a replaced range keeps its
+  imports alive is recorded in `docs/bringup/cross-title.md`.
+- **Engagement (temporary counter, world run, 3,943 draws per frame).** Read-only buffers: 2,471,421 in place,
+  2,635 snapshot copies, 57 buffer objects, 5,325,887 kept on the descriptor path; 172,463 writable.
+- **Price (one profiled world run, 10 s, 1,324 command-processor samples, a lighter view than the 5,012-draw
+  profile it is compared with, so per-draw figures only).** Storage preparation 1.18 us per draw against 1.86,
+  its copy path 0.75 against 1.24, descriptor lookup 1.02 against 1.43, the indexed-draw recording 9.27 against
+  9.98. This is command-processor time inside the spread between runs; no frame-rate gain is claimed.
+- **What is still copied.** The copies left under storage preparation take 2.94 ms per frame in that profile
+  (93 samples), the ceiling for every refusal class together. In a run that stayed outside the world the
+  largest refused class was table V#s of the fused vertex front with no instruction evidence: that stage parses
+  its resources without the program code on purpose (its general analysis zeroed a reused constant buffer), so
+  a later slice must derive load evidence separately and refuse any V# register defined more than once. Its
+  share in the world is not counted. Buffers loaded from a dynamic scalar address stay excluded.
+- **Verification.** Strict 115 s runs on the generic first-gameplay routes, Intel A770 (ANV), private shader
+  caches, 60 fps limit, translator 214:
+  - Exit 0 and no error event new to this change: `PPSA21567 - Astro Bot` (interactive at frame 2548, intro
+    capture correct), `PPSA17221 - Minecraft` (world, interactive at frame 6341), `PPSA21402 - Balatro`,
+    `PPSA09076 - DREDGE`, `PPSA28311 - Absolum`, `PPSA09809 - OCTOPATH TRAVELER II` and
+    `PPSA34971 - Hollow Knight: Voidheart Edition`. The `gfx_storage_frontier` events of the last two also appear
+    in runs before this branch.
+  - `PPSA21402 - Balatro` on the AMD integrated GPU (RADV): exit 0. RADV hands out upper-half device addresses,
+    which the sign extension of bit 47 is for.
+  - `PPSA21402 - Balatro` with the validation layer: exit 0, no report, after the queue wait-idle fix
+    (`docs/bringup/cross-title.md`); before it, 2 of 3 runs stopped on that unrelated race.
+  - The mechanical-fist platformer reaches gameplay (frame 1529) on a warm cache; its cold-cache stall at frame
+    665 predates this change (`docs/titles/mechanical-fist-platformer.md`).
+  - `kyty_agent playable-regression` fails the same gates as a run on 2026-11-09, before this branch, including
+    the intermittent `input_sequence_complete` / `input_delivered` tap failure.
+  - 2,648 unit tests and the four repository gates pass.
+- **Open.** The snapshot and buffer-object address paths ran in this title only (2,692 binds) and not under the
+  validation layer. The early-returning submit is still last.
+
 ## Sandbox title: vertex streams fetched from the imported guest pages (2026-11-11, built, frame time unchanged)
 
 First slice of the rework of how draws reach guest memory (stages in "What comes next" below). It removes the

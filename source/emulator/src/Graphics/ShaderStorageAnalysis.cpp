@@ -1345,6 +1345,8 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 	bool     raw_tbuffer_use         = false;
 	uint64_t raw_smem_required_bytes = 0;
 	bool     raw_smem_dynamic_offset = false;
+	bool     dword_load              = false;
+	bool     other_consumer          = false;
 
 	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
 	{
@@ -1437,6 +1439,17 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 			}
 			if (matches)
 			{
+				const bool is_dword_load = inst.type == ShaderInstructionType::BufferLoadDword ||
+				                           inst.type == ShaderInstructionType::BufferLoadDwordx2 ||
+				                           inst.type == ShaderInstructionType::BufferLoadDwordx3 ||
+				                           inst.type == ShaderInstructionType::BufferLoadDwordx4 ||
+				                           inst.type == ShaderInstructionType::SBufferLoadDword ||
+				                           inst.type == ShaderInstructionType::SBufferLoadDwordx2 ||
+				                           inst.type == ShaderInstructionType::SBufferLoadDwordx4 ||
+				                           inst.type == ShaderInstructionType::SBufferLoadDwordx8 ||
+				                           inst.type == ShaderInstructionType::SBufferLoadDwordx16;
+				dword_load       = dword_load || is_dword_load;
+				other_consumer   = other_consumer || !is_dword_load;
 				raw              = raw || candidate_raw;
 				typed            = typed || candidate_typed;
 				guarded_raw_vmem = guarded_raw_vmem || candidate_raw_vmem;
@@ -1470,13 +1483,13 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 	{
 		return {ShaderStorageAccess::Mixed, decoded_unknown,        indirect_descriptor_use,
 		        guarded_raw_vmem,           raw_smem_use,           raw_tbuffer_use,
-		        raw_smem_required_bytes,    raw_smem_dynamic_offset};
+		        raw_smem_required_bytes,    raw_smem_dynamic_offset, dword_load && !other_consumer};
 	}
 	if (typed)
 	{
 		return {ShaderStorageAccess::Typed, decoded_unknown,        indirect_descriptor_use,
 		        guarded_raw_vmem,           raw_smem_use,           raw_tbuffer_use,
-		        raw_smem_required_bytes,    raw_smem_dynamic_offset};
+		        raw_smem_required_bytes,    raw_smem_dynamic_offset, dword_load && !other_consumer};
 	}
 	return {raw ? ShaderStorageAccess::Raw : ShaderStorageAccess::Unknown,
 	        decoded_unknown,
@@ -1485,7 +1498,8 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 	        raw_smem_use,
 	        raw_tbuffer_use,
 	        raw_smem_required_bytes,
-	        raw_smem_dynamic_offset};
+	        raw_smem_dynamic_offset,
+	        dword_load && !other_consumer};
 }
 
 bool ShaderGen5SampledTextureShapeForMimgDimension(uint8_t dimension, ShaderGen5SampledTextureShape* shape)

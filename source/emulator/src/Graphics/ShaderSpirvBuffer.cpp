@@ -70,13 +70,30 @@ struct BufferAddressSetup
 	String8 byte_offset;
 };
 
+// True when the instruction's V# row holds a device address and the bytes it
+// backs (ShaderStorageResources::by_address) instead of a binding slot.
+static bool buffer_reads_by_address(const Spirv* spirv, const ShaderInstruction& inst, int resource_operand = 1)
+{
+	const auto* bind   = spirv->GetBindInfo();
+	const auto* vertex = spirv->GetVsInputInfo();
+	// A consumer whose register no longer holds the bound V# reads its own V#.
+	if (bind == nullptr || !bind->storage_address_used || ShaderBufferConsumerRedefinesDescriptor(*bind, inst) ||
+	    ShaderIsDynamicVectorStorageConsumer(*bind, inst) || ShaderIsDynamicScalarStorageConsumer(*bind, inst))
+	{
+		return false;
+	}
+	const int bound =
+	    ShaderStorageBufferBoundIndex(*bind, inst.src[resource_operand], vertex != nullptr && vertex->gs_prolog ? 8 : 0);
+	return bound >= 0 && bind->storage_buffers.by_address[bound];
+}
+
 // Materialize a descriptor-driven byte address into the legacy buffer helper
 // scratch arguments. All MUBUF/MTBUF users share this so index/offset ordering
 // and the Gen5 swizzle equation cannot drift between loads and stores.
 static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& inst, int instruction_index,
                                       uint32_t component_byte_offset, uint32_t access_size_bytes,
                                       BufferAddressRangeCheck range_check, BufferAddressSetup* setup,
-                                      bool dynamic_format_width = false)
+                                      bool dynamic_format_width = false, bool resolve_streams = true)
 {
 	EXIT_IF(spirv == nullptr);
 	EXIT_IF(setup == nullptr);
@@ -84,6 +101,13 @@ static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& ins
 	if (inst.src_num < 3 || inst.src[1].size < 4 || access_size_bytes == 0)
 	{
 		return false;
+	}
+	// Only the by-address raw load reads such a row; any other lowering would
+	// index the slot array with a device address.
+	if (resolve_streams && buffer_reads_by_address(spirv, inst))
+	{
+		EXIT("instruction %d (type %d) reads a V# row that holds a device address\n", instruction_index,
+		     static_cast<int>(inst.type));
 	}
 
 	const auto descriptor0 = operand_variable_to_str(inst.src[1], 0);
@@ -197,7 +221,8 @@ static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& ins
 	String8     slot_value = String8::FromPrintf("%%buf_addr_desc0_%s", tag.c_str());
 	const auto* vs_input   = spirv->GetVsInputInfo();
 	const auto* bind_info  = spirv->GetBindInfo();
-	if (vs_input != nullptr && vs_input->fetch_embedded && bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
+	if (resolve_streams && vs_input != nullptr && vs_input->fetch_embedded && bind_info != nullptr &&
+	    bind_info->storage_buffers.buffers_num > 0)
 	{
 		const auto bound_id = spirv->GetConstantUint(static_cast<uint32_t>(bind_info->storage_buffers.buffers_num));
 		const auto access_size_id = spirv->GetConstantUint(access_size_bytes);
@@ -429,6 +454,122 @@ static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& ins
 	return true;
 }
 
+// Loads `dwords` words at the device address `base` (ulong) plus the dword
+// aligned byte offset `off` (uint) into the instruction's destination. `bytes`
+// (uint, V# word 2 of a by-address row) is how many bytes back the address; a
+// word not wholly inside them reads zero, as a robust slot access would.
+static bool emit_address_words(Spirv* spirv, const ShaderInstruction& inst, const String8& tag, const String8& base,
+                               const String8& off, const String8& bytes, uint32_t dwords, SpirvType type, String8* body)
+{
+	const auto all  = spirv->GetConstantUint(dwords * 4u);
+	const auto zero = type == SpirvType::Float ? spirv->GetConstantFloat(0.0f) : spirv->GetConstantUint(0u);
+	if (dwords == 0u || dwords > 16u || all == "unknown_uint_constant" || zero == "unknown_float_constant" ||
+	    zero == "unknown_uint_constant")
+	{
+		return false;
+	}
+	const char* value_type = type == SpirvType::Float ? "float" : "uint";
+	const auto  t          = tag.c_str();
+	*body += String8(R"(
+%<t>_off64 = OpUConvert %ulong <off>
+%<t>_addr = OpIAdd %ulong <base> %<t>_off64
+%<t>_room = OpUGreaterThanEqual %bool <bytes> %<all>
+%<t>_last = OpISub %uint <bytes> %<all>
+%<t>_fits = OpULessThanEqual %bool <off> %<t>_last
+%<t>_in = OpLogicalAnd %bool %<t>_room %<t>_fits
+OpSelectionMerge %<t>_merge None
+OpBranchConditional %<t>_in %<t>_whole %<t>_part
+%<t>_whole = OpLabel
+)")
+	             .ReplaceStr("<t>", tag)
+	             .ReplaceStr("<base>", base)
+	             .ReplaceStr("<off>", off)
+	             .ReplaceStr("<bytes>", bytes)
+	             .ReplaceStr("<all>", all);
+	String8 part;
+	for (uint32_t word = 0; word < dwords; word++)
+	{
+		const auto dst  = operand_variable_to_str(inst.dst, static_cast<int>(word));
+		const auto need = spirv->GetConstantUint(word * 4u + 4u);
+		if (dst.type != type || need == "unknown_uint_constant")
+		{
+			return false;
+		}
+		const auto load = [&](const char* name)
+		{
+			return String8(R"(%<t>_<n>a<w> = OpIAdd %ulong %<t>_addr %gda_u64_<bytes>
+%<t>_<n>p<w> = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %<t>_<n>a<w>
+%<t>_<n>w<w> = OpLoad %uint %<t>_<n>p<w> Aligned 4
+%<t>_<n>v<w> = OpBitcast %<type> %<t>_<n>w<w>
+OpStore %<dst> %<t>_<n>v<w>
+)")
+			    .ReplaceStr("<t>", tag)
+			    .ReplaceStr("<n>", name)
+			    .ReplaceStr("<w>", String8::FromPrintf("%u", word))
+			    .ReplaceStr("<bytes>", String8::FromPrintf("%u", word * 4u))
+			    .ReplaceStr("<type>", value_type)
+			    .ReplaceStr("<dst>", dst.value);
+		};
+		*body += load("");
+		// A partly backed access: the backed leading words load one at a time.
+		part += String8(R"(%<t>_room<w> = OpUGreaterThanEqual %bool <bytes> %<need>
+%<t>_last<w> = OpISub %uint <bytes> %<need>
+%<t>_fits<w> = OpULessThanEqual %bool <off> %<t>_last<w>
+%<t>_in<w> = OpLogicalAnd %bool %<t>_room<w> %<t>_fits<w>
+OpSelectionMerge %<t>_pmerge<w> None
+OpBranchConditional %<t>_in<w> %<t>_pload<w> %<t>_pzero<w>
+%<t>_pload<w> = OpLabel
+)")
+		            .ReplaceStr("<t>", tag)
+		            .ReplaceStr("<w>", String8::FromPrintf("%u", word))
+		            .ReplaceStr("<bytes>", bytes)
+		            .ReplaceStr("<off>", off)
+		            .ReplaceStr("<need>", need);
+		part += load("p");
+		part += String8::FromPrintf("OpBranch %%%s_pmerge%u\n%%%s_pzero%u = OpLabel\nOpStore %%%s %%%s\nOpBranch %%%s_pmerge%u\n"
+		                            "%%%s_pmerge%u = OpLabel\n",
+		                            t, word, t, word, dst.value.c_str(), zero.c_str(), t, word, t, word);
+	}
+	*body += String8::FromPrintf("OpBranch %%%s_merge\n%%%s_part = OpLabel\n%sOpBranch %%%s_merge\n%%%s_merge = OpLabel\n", t, t,
+	                             part.c_str(), t, t);
+	return true;
+}
+
+// Raw dword loads through a by-address row: the address is V# words 0-1.
+static bool emit_buffer_address_words(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t dwords,
+                                      const String8& address_tag, const String8& byte_offset, String8* body)
+{
+	const auto mask16  = spirv->GetConstantUint(0xffffu);
+	const auto align4  = spirv->GetConstantUint(0xfffffffcu);
+	const auto shift32 = spirv->GetConstantUint(32u);
+	const auto shift16 = spirv->GetConstantUint(16u);
+	if (mask16 == "unknown_uint_constant" || align4 == "unknown_uint_constant" || shift32 == "unknown_uint_constant" ||
+	    shift16 == "unknown_uint_constant")
+	{
+		return false;
+	}
+	const auto tag = String8::FromPrintf("gra_%d", instruction_index);
+	*body += String8(R"(
+%<t>_off = OpBitwiseAnd %uint <byte_offset> %<align4>
+%<t>_hi = OpBitwiseAnd %uint %buf_addr_desc1_<a> %<mask16>
+%<t>_lo64 = OpUConvert %ulong %buf_addr_desc0_<a>
+%<t>_hi64 = OpUConvert %ulong %<t>_hi
+%<t>_his = OpShiftLeftLogical %ulong %<t>_hi64 %<shift32>
+%<t>_b48 = OpBitwiseOr %ulong %<t>_his %<t>_lo64
+%<t>_bsh = OpShiftLeftLogical %ulong %<t>_b48 %<shift16>
+%<t>_base = OpShiftRightArithmetic %ulong %<t>_bsh %<shift16>
+)")
+	             .ReplaceStr("<t>", tag)
+	             .ReplaceStr("<a>", address_tag)
+	             .ReplaceStr("<byte_offset>", byte_offset)
+	             .ReplaceStr("<align4>", align4)
+	             .ReplaceStr("<mask16>", mask16)
+	             .ReplaceStr("<shift32>", shift32)
+	             .ReplaceStr("<shift16>", shift16);
+	return emit_address_words(spirv, inst, tag, "%" + tag + "_base", "%" + tag + "_off",
+	                          String8::FromPrintf("%%buf_addr_desc2_%s", address_tag.c_str()), dwords, SpirvType::Float, body);
+}
+
 static bool emit_gen5_raw_buffer_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index,
                                       uint32_t dwords, String8* dst_source)
 {
@@ -477,15 +618,24 @@ static bool emit_gen5_raw_buffer_load(Spirv* spirv, const ShaderInstruction& ins
 		zero_body += String8::FromPrintf("               OpStore %%%s %%%s\n", values[component].value.c_str(), zero_float_id.c_str());
 	}
 
+	const bool         by_address = buffer_reads_by_address(spirv, inst);
 	BufferAddressSetup address_setup;
 	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, dwords * 4u, BufferAddressRangeCheck::RawZeroRecord,
-	                               &address_setup) ||
+	                               &address_setup, false, !by_address) ||
 	    address_setup.access_enabled.IsEmpty())
 	{
 		return false;
 	}
-	body = body.ReplaceStr("<byte_offset>", address_setup.byte_offset);
 	const auto tag = String8::FromPrintf("%u_0", instruction_index);
+	if (by_address)
+	{
+		body = "";
+		if (!emit_buffer_address_words(spirv, inst, instruction_index, dwords, tag, address_setup.byte_offset, &body))
+		{
+			return false;
+		}
+	}
+	body = body.ReplaceStr("<byte_offset>", address_setup.byte_offset);
 	*dst_source += String8(R"(
 <address_setup>
                OpSelectionMerge %gen5_raw_load_merge_<tag> None
@@ -3489,6 +3639,64 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
 	return true;
 }
 
+// S_BUFFER_LOAD through a by-address row (ShaderStorageResources::by_address):
+// SOFFSET + OFFSET (RDNA2 ISA, SMEM) from the device address in words 0-1.
+static bool EmitAddressScalarBufferLoad(Spirv* spirv, const ShaderInstruction& inst, uint32_t index, uint32_t components,
+                                        String8* dst_source)
+{
+	if (inst.smem_flags != 0u || inst.src_num != 2 || inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].size != 4 ||
+	    inst.src[1].dpp || inst.src[1].absolute || inst.src[1].negate || inst.src[1].swizzle != 6u)
+	{
+		return false;
+	}
+	const auto imm     = spirv->GetConstantUint(static_cast<uint32_t>(inst.smem_imm_offset));
+	const auto mask16  = spirv->GetConstantUint(0xffffu);
+	const auto align4  = spirv->GetConstantUint(0xfffffffcu);
+	const auto shift32 = spirv->GetConstantUint(32u);
+	const auto shift16 = spirv->GetConstantUint(16u);
+	if (imm == "unknown_uint_constant" || mask16 == "unknown_uint_constant" || align4 == "unknown_uint_constant" ||
+	    shift32 == "unknown_uint_constant" || shift16 == "unknown_uint_constant")
+	{
+		return false;
+	}
+	const auto tag = String8::FromPrintf("asb_%u", index);
+	String8    source;
+	if (!operand_load_uint(spirv, inst.src[1], tag + "_soffset", tag, &source))
+	{
+		return false;
+	}
+	source += String8(R"(
+%<t>_offset = OpIAdd %uint %<t>_soffset %<imm>
+%<t>_off = OpBitwiseAnd %uint %<t>_offset %<align4>
+%<t>_d0 = OpLoad %uint %<d0>
+%<t>_d1 = OpLoad %uint %<d1>
+%<t>_bytes = OpLoad %uint %<d2>
+%<t>_hi = OpBitwiseAnd %uint %<t>_d1 %<mask16>
+%<t>_lo64 = OpUConvert %ulong %<t>_d0
+%<t>_hi64 = OpUConvert %ulong %<t>_hi
+%<t>_his = OpShiftLeftLogical %ulong %<t>_hi64 %<shift32>
+%<t>_b48 = OpBitwiseOr %ulong %<t>_his %<t>_lo64
+%<t>_bsh = OpShiftLeftLogical %ulong %<t>_b48 %<shift16>
+%<t>_base = OpShiftRightArithmetic %ulong %<t>_bsh %<shift16>
+)")
+	              .ReplaceStr("<t>", tag)
+	              .ReplaceStr("<imm>", imm)
+	              .ReplaceStr("<align4>", align4)
+	              .ReplaceStr("<mask16>", mask16)
+	              .ReplaceStr("<shift32>", shift32)
+	              .ReplaceStr("<shift16>", shift16)
+	              .ReplaceStr("<d0>", operand_variable_to_str(inst.src[0], 0).value)
+	              .ReplaceStr("<d1>", operand_variable_to_str(inst.src[0], 1).value)
+	              .ReplaceStr("<d2>", operand_variable_to_str(inst.src[0], 2).value);
+	if (!emit_address_words(spirv, inst, tag, "%" + tag + "_base", "%" + tag + "_off", "%" + tag + "_bytes", components,
+	                        SpirvType::Uint, &source))
+	{
+		return false;
+	}
+	*dst_source += source;
+	return true;
+}
+
 // Pixel, compute and geometry-pass programs read runtime V#s at guest device addresses.
 static bool ScalarBufferUsesGuestAddress(const Spirv* spirv, const ShaderInstruction& inst)
 {
@@ -3538,6 +3746,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDword_SdstSvSoffset)
 	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 1u, dst_source);
+	}
+	if (buffer_reads_by_address(spirv, inst, 0))
+	{
+		return EmitAddressScalarBufferLoad(spirv, inst, index, 1u, dst_source);
 	}
 	if (RecompileZeroSBufferLoad(inst, 1, bind_info, dst_source))
 	{
@@ -3599,6 +3811,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx2_Sdst2SvSoffset)
 	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 2u, dst_source);
+	}
+	if (buffer_reads_by_address(spirv, inst, 0))
+	{
+		return EmitAddressScalarBufferLoad(spirv, inst, index, 2u, dst_source);
 	}
 	if (RecompileZeroSBufferLoad(inst, 2, bind_info, dst_source))
 	{
@@ -3662,6 +3878,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
 	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 4u, dst_source);
+	}
+	if (buffer_reads_by_address(spirv, inst, 0))
+	{
+		return EmitAddressScalarBufferLoad(spirv, inst, index, 4u, dst_source);
 	}
 	if (RecompileZeroSBufferLoad(inst, 4, bind_info, dst_source))
 	{
@@ -3825,6 +4045,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 8u, dst_source);
 	}
+	if (buffer_reads_by_address(spirv, inst, 0))
+	{
+		return EmitAddressScalarBufferLoad(spirv, inst, index, 8u, dst_source);
+	}
 	if (RecompileZeroSBufferLoad(inst, 8, bind_info, dst_source))
 	{
 		return true;
@@ -3881,6 +4105,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
 	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 16u, dst_source);
+	}
+	if (buffer_reads_by_address(spirv, inst, 0))
+	{
+		return EmitAddressScalarBufferLoad(spirv, inst, index, 16u, dst_source);
 	}
 	if (RecompileZeroSBufferLoad(inst, 16, bind_info, dst_source))
 	{

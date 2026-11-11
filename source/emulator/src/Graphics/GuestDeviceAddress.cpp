@@ -1615,7 +1615,7 @@ static bool ResolvePublicationPiecesLocked(const Registry& registry, uint64_t va
 }
 
 bool GuestDeviceAddressResolveDrawInput(const GraphicContext* ctx, uint64_t vaddr, uint64_t size,
-                                        VkBuffer_T** buffer, uint64_t* offset)
+                                        VkBuffer_T** buffer, uint64_t* offset, uint64_t* device)
 {
 	EXIT_IF(ctx == nullptr || buffer == nullptr || offset == nullptr);
 	struct Run
@@ -1625,6 +1625,7 @@ bool GuestDeviceAddressResolveDrawInput(const GraphicContext* ctx, uint64_t vadd
 		uint64_t end           = 0;
 		VkBuffer buffer        = nullptr;
 		uint64_t buffer_offset = 0;
+		uint64_t device        = 0;
 	};
 	// A frame's draws read thousands of ranges out of a few dozen chunks: the chunk last
 	// resolved for each 64 KiB of guest memory answers without the registry lock.
@@ -1656,10 +1657,14 @@ bool GuestDeviceAddressResolveDrawInput(const GraphicContext* ctx, uint64_t vadd
 			return false;
 		}
 		run = {g_chunk_removals.load(std::memory_order_acquire), chunk->guest, chunk->guest + chunk->size,
-		       chunk->buffer, chunk->buffer_offset};
+		       chunk->buffer, chunk->buffer_offset, chunk->device};
 	}
 	*buffer = run.buffer;
 	*offset = run.buffer_offset + (vaddr - run.begin);
+	if (device != nullptr)
+	{
+		*device = run.device + (vaddr - run.begin);
+	}
 	return true;
 }
 
@@ -1777,6 +1782,7 @@ bool GuestDeviceAddressBindInPlace(GraphicContext* ctx, uint64_t vaddr, uint64_t
 	found->second.users++;
 	DropOverlaysOverlapping(&registry, vaddr, size);
 	out->buffer           = buffer;
+	out->usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT; // CreateAddressBuffer adds it
 	out->descriptor_range = size;
 	out->guest_in_place   = true;
 	out->guest_offset     = guest_offset;

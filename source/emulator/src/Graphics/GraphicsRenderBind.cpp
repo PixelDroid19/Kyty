@@ -3045,6 +3045,31 @@ static void ExitStorageBufferMaterializationFailure(uint64_t submit_id, uint64_t
 	     have_provenance && provenance.truncated ? 1 : 0, provenance_text_truncated ? 1 : 0, provenance_entries);
 }
 
+// The device address of [addr, addr + size) when a draw can read the guest
+// pages in place: inside one imported run, dword aligned, and no live object
+// over it holds a result the guest memory does not show yet.
+static bool StorageGuestPagesAddress(uint64_t addr, uint64_t size, uint64_t* device_address)
+{
+	VkBuffer pages  = nullptr;
+	uint64_t offset = 0;
+	return GuestDeviceAddressResolveDrawInput(g_render_ctx->GetGraphicCtx(), addr, size, &pages, &offset, device_address) &&
+	       (*device_address & 3u) == 0 && GpuMemoryRangeHoldsGuestBytes(addr, size);
+}
+
+// A V# row read by device address (ShaderStorageResources::by_address): words
+// 0-1 take the address, word 2 the bytes behind it; the stride and word 3 stay.
+// The shader sign-extends bit 47, so canonical high-half addresses fit too.
+static void WriteStorageAddressRow(uint64_t device_address, uint64_t backed_bytes, ShaderBufferResource* r)
+{
+	const uint64_t high = device_address >> 47u;
+	if ((high != 0u && high != 0x1ffffu) || (device_address & 3u) != 0)
+	{
+		EXIT("storage buffer device address 0x%016" PRIx64 " is not a dword-aligned canonical 48-bit address\n", device_address);
+	}
+	r->UpdateAddress48(device_address & ((1ull << 48u) - 1u));
+	r->fields[2] = static_cast<uint32_t>(std::min<uint64_t>(backed_bytes, UINT32_MAX));
+}
+
 static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkShaderStageFlags stage,
 	                              const ShaderBindResources& bind, VulkanBuffer** buffers, uint32_t** sgprs,
 	                              uint64_t shader_checksum)
@@ -3130,6 +3155,11 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 		trace.requested_size = declared_size;
 		trace.read_only = read_only;
 		VulkanBuffer* buf = nullptr;
+		const bool    by_address     = storage_buffers.by_address[i];
+		uint64_t      device_address = 0;
+		uint64_t      backed_bytes   = 0;
+		bool          reads_copy     = false;
+		uint64_t      copy_bytes     = 0;
 		if (raw_empty_oob || storage_buffers.unread_stream[i])
 		{
 			trace.path = raw_empty_oob ? "raw_empty_oob_carrier" : "unread_stream_carrier";
@@ -3197,7 +3227,11 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				trace.path = "copied_static_smem";
 				trace.transient_attempted = true;
 				trace.transient_bytes_arg = requested_size;
-				buf = buffer->UploadTransientBuffer(smem_span, requested_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+				buf = buffer->UploadTransientBuffer(smem_span, requested_size,
+				                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+				                                        (by_address ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u));
+				reads_copy  = true;
+				copy_bytes  = requested_size;
 				trace.transient_buffer = buf;
 			} else if (Kernel::Memory::KernelMappedRange guest_mapping {};
 			           materialized_size == 0 && !Kernel::Memory::KernelQueryMappedRange(addr, 1, &guest_mapping))
@@ -3251,6 +3285,12 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				     eud.eud_object_write_back ? 1 : 0, eud.eud_dependencies_complete ? 1 : 0,
 				     eud_near_readable ? 1 : 0, eud_near[0], eud_near[1], eud_near[2], eud_near[3], eud_near[4],
 				     eud_near[5], eud_near[6], eud_near[7]);
+			} else if (by_address && materialized_size == requested_size &&
+			           StorageGuestPagesAddress(addr, materialized_size, &device_address))
+			{
+				trace.path   = "device_address_in_place";
+				backed_bytes = materialized_size;
+				buf          = buffer->UploadTransientZeroCarrier(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 			} else
 			{
 				if (materialized_size != requested_size)
@@ -3260,11 +3300,14 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
 
 				trace.path = "persistent_range";
+				reads_copy = true;
+				copy_bytes = materialized_size;
 				StorageBufferGpuObject buf_info(stride, num_records, read_only);
 				trace.transient_attempted = true;
 				trace.transient_bytes_arg = materialized_size;
-				trace.transient_buffer = TryUploadTransientReadOnlyBuffer(buffer, addr, materialized_size, read_only,
-				                                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+				const VkBufferUsageFlags usage =
+				    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (by_address ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
+				trace.transient_buffer = TryUploadTransientReadOnlyBuffer(buffer, addr, materialized_size, read_only, usage);
 				buf = trace.transient_buffer;
 				if (buf == nullptr)
 				{
@@ -3287,9 +3330,25 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				                                       trace, buf);
 		}
 
+		if (by_address)
+		{
+			if (reads_copy)
+			{
+				// The copy or object the slot path would bind, read at its own address.
+				EXIT_IF((buf->usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) == 0u);
+				VkBufferDeviceAddressInfo info {};
+				info.sType     = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+				info.buffer    = buf->buffer;
+				device_address = vkGetBufferDeviceAddress(g_render_ctx->GetGraphicCtx()->device, &info) + buf->guest_offset;
+				backed_bytes   = std::min<uint64_t>(copy_bytes, buf->descriptor_range);
+				buf            = buffer->UploadTransientZeroCarrier(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+			}
+			WriteStorageAddressRow(device_address, backed_bytes, &r);
+		}
+
 		buffers[i] = buf;
 
-		if (storage_buffers.start_register[i] >= 0)
+		if (!by_address && storage_buffers.start_register[i] >= 0)
 		{
 			if (gen5)
 			{

@@ -230,6 +230,8 @@ public:
 	[[nodiscard]] String8 EmitMetadataStore(int row, int field, const String8& reg) const;
 	[[nodiscard]] String8 EmitThreadLimitLoad(uint32_t axis, const String8& id) const;
 	[[nodiscard]] bool    UsesGuestDeviceAddress() const;
+	// Guest device addressing or storage buffers read by device address.
+	[[nodiscard]] bool    UsesPhysicalStorageBuffer() const;
 	[[nodiscard]] String8 GuestDeviceAddressTypes(bool ulong_declared) const;
 	[[nodiscard]] String8 GuestDeviceAddressFunction() const;
 	[[nodiscard]] bool    EmitGuestLoad(const String8& lo, const String8& hi, int dwords, const String8& prefix, String8* output) const;

@@ -8,13 +8,12 @@
 
 namespace Kyty::Libs::Graphics {
 
-bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
-                                       int user_data_register_base)
+int ShaderStorageBufferBoundIndex(const ShaderBindResources& bind, const ShaderOperand& resource, int user_data_register_base)
 {
 	if (resource.type != ShaderOperandType::Sgpr || user_data_register_base < 0 ||
 	    resource.register_id < user_data_register_base)
 	{
-		return false;
+		return -1;
 	}
 	const int api_register = resource.register_id - user_data_register_base;
 	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
@@ -22,10 +21,16 @@ bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const S
 		const int start = bind.storage_buffers.start_register[i];
 		if (start >= 0 && start == api_register)
 		{
-			return true;
+			return i;
 		}
 	}
-	return false;
+	return -1;
+}
+
+bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
+                                       int user_data_register_base)
+{
+	return ShaderStorageBufferBoundIndex(bind, resource, user_data_register_base) >= 0;
 }
 
 bool ShaderBufferConsumerRedefinesDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst)
@@ -237,6 +242,7 @@ void ExcludeUnusedMetadataStorage(ShaderStorageResources* resources, ShaderDynam
 			resources->raw_vmem_oob_guarded[active_count]    = resources->raw_vmem_oob_guarded[source];
 			resources->raw_smem_use[active_count]             = resources->raw_smem_use[source];
 			resources->raw_tbuffer_use[active_count]          = resources->raw_tbuffer_use[source];
+			resources->dword_loads_only[active_count]         = resources->dword_loads_only[source];
 			resources->raw_smem_required_bytes[active_count]  = resources->raw_smem_required_bytes[source];
 			resources->raw_smem_dynamic_offset[active_count]  = resources->raw_smem_dynamic_offset[source];
 			resources->dynamic_sload[active_count]            = resources->dynamic_sload[source];

@@ -1787,6 +1787,8 @@ struct ShaderStorageUseEvidence
 	bool                raw_tbuffer_use         = false;
 	uint64_t            raw_smem_required_bytes = 0;
 	bool                raw_smem_dynamic_offset = false;
+	// Every instruction that consumes the V# is a raw BUFFER_LOAD_DWORD[x2..x4] or S_BUFFER_LOAD_DWORD[x2..x16].
+	bool dword_loads_only = false;
 };
 
 // Structural evidence for a compute kernel that writes one uniform four-word
@@ -1949,6 +1951,15 @@ struct ShaderStorageResources
 	// A vertex-stream SSBO that no instruction of the compiled program reads. The
 	// slot stays in the layout; its descriptor gets an empty carrier.
 	bool                       unread_stream[BUFFERS_MAX]           = {};
+	// Every consumer is a raw dword load (ShaderStorageUseEvidence::dword_loads_only).
+	bool dword_loads_only[BUFFERS_MAX] = {};
+	// Some consumer's V# register keeps word 0 but not words 1-2 on some path,
+	// so its row is not the one bound (ShaderCollectRedefinedBufferDescriptors).
+	bool row_redefined[BUFFERS_MAX] = {};
+	// Read through a device address the CPU writes into the V#'s metadata row
+	// (words 0-1) with the bytes it backs (word 2); the slot holds a carrier.
+	// Set by ShaderCalcBindingIndices (ShaderStorageBufferReadsByAddress).
+	bool by_address[BUFFERS_MAX] = {};
 	int                        slots[BUFFERS_MAX]                   = {0};
 	int                        start_register[BUFFERS_MAX]          = {0};
 	bool                       extended[BUFFERS_MAX]                = {};
@@ -2033,6 +2044,11 @@ struct ShaderBindResources;
 // indices at s8; negative stream sentinels never identify shader registers.
 [[nodiscard]] bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
                                                        int user_data_register_base = 0);
+// Index of the bound storage buffer whose user-data registers `resource` names, or -1.
+[[nodiscard]] int ShaderStorageBufferBoundIndex(const ShaderBindResources& bind, const ShaderOperand& resource,
+                                                int user_data_register_base = 0);
+// Whether the device can read storage buffers by address; set once at device creation.
+void               ShaderSetStorageAddressReads(bool supported);
 // A vector buffer V# that no discovered resource describes: neither a bound
 // storage buffer register still holding its user data nor the destination of a mapped descriptor S_LOAD
 // that reaches this consumer. It is built at run time (for example from
@@ -2235,6 +2251,11 @@ struct ShaderBindResources
 	// entries, 0} filled at bind time (see GuestDeviceAddress.h).
 	bool     device_address_used      = false;
 	uint32_t device_address_offset_dw = 0;
+	// Some storage buffer is read by address (storage_buffers.by_address).
+	bool storage_address_used = false;
+	// The scalar flow resolved, so redefined_descriptor_consumers and
+	// storage_buffers.row_redefined are complete.
+	bool descriptor_flow_proven = false;
 	// Per-dispatch global thread limits (USE_THREAD_DIMENSIONS), runtime data.
 	bool     thread_limits_used      = false;
 	uint32_t thread_limits_offset_dw = 0;
