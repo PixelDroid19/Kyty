@@ -602,8 +602,19 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       division by the page size was built and reverted: tracker time on both threads fell 0.26-0.66
       ms per frame against a 1 ms rule, in a run whose window was a lighter scene (2,832 draws per
       frame), so a small gain is not excluded. That run was also the first of the pushed
-      allocated-range change without the larger overlap table; it ended clean. Next: a cheap
-      rejection of untracked pages before the hashed probe, priced on the call count.
+      allocated-range change without the larger overlap table; it ended clean.
+    - Excluded, a region filter before the hashed probe (2026-11-11): one bit per 2 MiB of host
+      address space, set before a page key is published and never cleared, let a write whose
+      regions hold no tracked page return early. One run flipped it on and off each second (8 s of
+      world, 71.5 frames of 112 ms, 5,574 draws per frame, 36 submits per phase): 94.7 % of calls
+      were rejected, but the submitting thread's notification path fell only from 8.3 to 7.2 ns
+      per call, 0.7 ms per world frame (1.35 ms on the whole 20 s window, per call) against a
+      1.5 ms rule, so it was reverted. The check costs about a third of what it removes (the
+      skipped probes mostly hit the cache), and the rest, about 4.4 ms per frame, is the dispatch
+      chain from the C-string handler to the tracker, which a tracker-side filter cannot remove.
+      Hold plus gap per submit did not move within noise (111.6 against 109.9 ms).
+    - The gap levers (the drain, the notification path, other submitter CPU work) share one
+      21.8 ms budget per frame and substitute for the serial-submit lever rather than add to it.
   - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
     call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
     per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
