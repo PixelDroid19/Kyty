@@ -4,9 +4,9 @@ Guest memory copies and fills in the C-string handlers notify the dirty-page
 tracker before they write. The notifier copied its whole callback table
 under one process-wide mutex to call one pointer. In `PPSA17221 - Minecraft`
 while the player walks (one counted run) that was about 602,000
-notifications per frame on the submitting thread, 41 bytes each, and 182,000
-on the other guest threads; 99.4% of the page lookups behind them end at an
-empty slot.
+notifications per frame on the thread(s) the probe flagged, 41 bytes each,
+and 182,000 on the other guest threads; 99.4% of the page lookups behind
+them end at an empty slot.
 
 - **Fix.** The notifier pointer is published apart from the table when the
   callbacks are installed and read with acquire ordering; installation and
@@ -14,13 +14,20 @@ empty slot.
 - **Measured.** One sampled world run afterwards: the submitting thread's
   user time is 12.3 ms per frame against 16.7-18.6 ms in four runs before;
   host mutex calls plus the notifier are 4.9% of its samples against 25%.
-  No frame-rate claim (`docs/titles/sandbox.md`).
+  About 4 ms of the drop is attributed to the change (mutex 2.9 to 0.5 ms,
+  notifier 1.7 to 0.1 ms); the other 2 ms is not explained by it. No
+  frame-rate claim (`docs/titles/sandbox.md`).
 - **Verified.** The dirty-tracking unit suites, the callback contract test
   and the three repository gates pass. `PPSA34971 - Hollow Knight:
   Voidheart Edition` reaches its title menu and holds the 60 fps limit to
   75 s (its intro videos did not play in that run).
-- **Open.** The dirty-page part of each notification still costs about
-  4.7 ms per frame on that thread, nearly all for untracked pages.
+- **Open, under the bar.** The dirty-page part of each notification still
+  costs about 4.7 ms per frame on that thread (4.0% of a 118 ms frame),
+  nearly all for untracked pages. Candidate, not measured:
+  `GpuDirtyPageTracker.cpp:245` (`PageStart`) rounds by a runtime page size,
+  and `NotifyWrite` carries two divides per call. Direction: round with a
+  mask when the page size is a power of two, or reject an untracked
+  single-page write before the page-run setup.
 
 ## A write-back on a shared page reads as a guest change (2026-11-10, fixed)
 
