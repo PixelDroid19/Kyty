@@ -624,29 +624,33 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       Even a zero gap leaves a frame of about 86 ms or more against 16.7 ms, so they stay
       cross-title CPU leads, not a route to the frame-time goal.
     - Priced on paper for a lever of 30 ms or more of command processing (2026-11-11, no run;
-      shares from the full-stack check above, 74.7 ms per frame at 5,017 draws):
+      one basis: the full-stack check below, 74.7 ms per frame at 5,017 draws in 102 ms frames;
+      the 21.8 ms gap is from the drain-split run):
       - Repeat across frames: draw keys repeat in 94-99 % of draws within two frames (four
         titles, about 99 % in this world; `docs/bringup/cp-draw-plan.md`), but all descriptor
         words match in under 1 % of hits, buffer bases change in 44-92 % and buffer sizes in
         21-55 %, so a reused draw plan still captures bytes and binds objects. It could remove
-        the shader input information (7.4 ms, its recipe excluded at its field set), the pipeline
-        identities and lookup (4.6), descriptor sets with bindless indices (6.6) and part of the
-        register state: about 17-24 ms at most; read-only binds (16.1), vertex binding (8.9),
-        the alias write-back (2.7) and driver calls (8.3) stay.
+        the shader input information (7.4 ms, its recipe behind a recorded exclusion), the
+        pipeline identities and lookup (4.6), descriptor sets with bindless indices (6.6) and a
+        part of the register state that run did not split: about 18.6 ms plus that part, 11.2
+        outside the exclusion. Read-only binds (16.1), vertex binding (8.9), the alias
+        write-back (2.7) and driver calls (8.3) stay.
       - Independence: the title submits one command buffer per frame (1.01 submits per world
-        frame in the filter run), so there is nothing to decode side by side; splitting inside
-        it is the parallel-recording design (`docs/bringup/parallel-recording-design.md`):
-        16-32 ms, the upper end only if the shared caches and unattributed work leave the
-        processor thread, with the frame still at least stage A plus the gap, about 58 ms.
-      - Absent elsewhere (a lead only, from the other implementation's tree; it records no
-        draw counts for this title): it decodes on one thread, returns from a submit once the
-        batch is queued, copies vertex bytes per draw and uses per-draw descriptor sets, and
-        it has no write notifications on guest copies, no overlap admission and a sparse,
-        probabilistic texture check. Those missing steps are correctness guards here (about
-        13 ms of command processing plus the submitter's notifications), not removable work.
-      - Bound: no single class reaches 30 ms except parallel recording at its upper end, and
-        no combination brings the frame below about 58 ms (17 fps); 60 fps would need about
-        4.6 us of command processing per draw against about 15 us now.
+        frame in the filter run), so there is nothing to decode side by side. Splitting inside
+        it is the parallel-recording design (`docs/bringup/parallel-recording-design.md`); on
+        this basis it moves at most the pipeline lookup (1.6), the sets (6.6) and the driver
+        calls (8.3), about 16.5 ms, overlapping the repeat class on pipeline and sets.
+      - Absent elsewhere, unanswered: the other implementation's tree (a lead only) decodes on
+        one thread, returns from a submit once the batch is queued, copies vertex bytes per
+        draw, uses per-draw descriptor sets, and has no write notifications on guest copies, no
+        overlap admission and a sparse, probabilistic texture check. Whether those missing
+        steps explain its frame rate is open until its draws per frame in the measured scene
+        are known; its tree records none for this title so far.
+      - Bound: no single class reaches 30 ms. Outside recorded exclusions the union of the two
+        classes is about 19.5 ms plus the unsplit register-state part, leaving at least about
+        55 ms of command processing less that part, and a frame of about 77 ms less that part
+        with the gap kept (about 13 fps). 60 fps would need about 3.3 us of command processing per draw, with
+        the gap overlapped, against about 14.9 us now.
   - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
     call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
     per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
@@ -688,9 +692,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       above. Not priced as a change.
     - Nothing in B is buildable without a design. Outside the exclusions about 6.4 ms are left,
       plus parallel recording at most 14.5 ms that overlaps the set entry, of 82.5 ms of command
-      processing and a 107 ms frame. The earlier estimate: with A and the three per-draw items of
-      B about 44 ms of command processing is left, about 26-37 ms with parallel recording, and the
-      frame is that short only with the gap overlapped (27-38 fps). No combination reaches 16.7 ms.
+      processing and a 107 ms frame. The earlier estimate, which counts items behind recorded
+      exclusions: with A and the three per-draw items of B about 44 ms of command processing is left,
+      about 26-37 ms with parallel recording, and the frame is that short only with the gap overlapped
+      (27-38 fps). No combination reaches 16.7 ms.
     - Full-stack check on the pushed code (2026-11-11, 64 KB stacks, 1,444 of 1,459 samples reach
       the thread start, no lost samples; 98 world frames of 102 ms while profiling, 5,017 draws):
       74.7 ms of command-processor user CPU time per frame. The processor's own time counter reads
