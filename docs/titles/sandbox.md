@@ -355,28 +355,35 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 - **GPU estimate.** In the same run the render engine was busy 37% of 131 ms frames at 600-650 MHz,
   about 48 ms. If that time scaled with the clock it would be about 13 ms at 2,400 MHz; this is an
   estimate, not a measurement.
-- **Skipping whole draws (2026-11-11, offline reading of the measurements above, no run).** 30 fps
-  with the serial submit needs about 14 ms of command processing per frame at about 5,300 draws,
-  about 2.7 us per draw against about 17 us now, so a candidate has to remove at least half of a
-  draw's time at once. Grouped by what differs between a draw and its counterpart in the previous
-  frame (figures from several runs, an estimate):
-  - Same as the previous frame (the draw key, and the shader and stage registers with user data
-    masked): context-only state, about 1 us per draw and already served by cache lookups; pipeline
-    setup, part of the shared caches' 2.6 us; the shader input recipe's ceiling of 1.41 us, before
-    guards. At most about 4 us together.
-  - New every frame (user-data values and the ring slots they point to): command emission and
-    register state, about 4 us; read-only snapshot captures, 1.7 us (every capture is of a range the
-    previous frame did not probe); admission checks, about 1.3 us; the index-snapshot reuse path,
-    1.2 us; the vertex write-back check, 0.7 us; device-address preparation, 0.6 us; descriptor-set
-    finalization (98% of its misses differ only in a rotating storage object), resource binding and
-    the unattributed rest. About 13 us.
-  - The other implementation's in-world entry (above: 60 and 121 us per draw at p50 and p95, about
-    470 draws) adds no per-draw mechanism.
-  No group a previous-frame match could skip reaches about 9 us per draw, so no candidate qualifies
-  and none is built. Reopening needs a way to serve the per-frame data (ring slots, new snapshot
-  ranges) without per-draw work, not a previous-frame match.
+- **Skipping whole draws (2026-11-11, offline reading of the measurements above, no run).** In the
+  latest world run the frame was 111 ms at 5,342 draws: about 92 ms of command processing (about
+  17 us per draw) and the 19 ms gap. 30 fps with the serial submit needs about 14 ms of command
+  processing, so a candidate has to remove at least half of a draw's time at once. The counter
+  classes of "Parallel recording ceiling" below (4,945 draws), with the host waits taken at today's
+  2.1 ms, sum to about 92 ms and are used unscaled; figures from the other items are per draw or per
+  frame as measured, so the split is an estimate. Grouped by whether the work follows what repeats
+  from the previous frame (the draw key, the shader and stage registers with user data masked, the
+  index snapshot ranges) or what does not (the user-data values, which never matched one of the last
+  four inputs of the same program, and the ring slots they point to):
+  - Repeats, about 17 ms (3.1 us per draw): context-only state, 4-6 ms; the index-snapshot reuse
+    path, 4.2 ms (99.5% reused); the shader input recipe's ceiling, 1.41 us per draw (7.5 ms),
+    before guards.
+  - New every frame, about 11-14 ms: read-only snapshot captures, up to 8.5 ms (every capture is of
+    a range the previous frame did not probe); host waits, 2.1 ms; device-address preparation,
+    2.9 ms, if it follows the moving user-data addresses (not checked).
+  - Not classified, about 60 ms (11-12 us per draw): the rest of resource binding, the shared caches
+    (pipeline setup and descriptor-set finalization, 13 ms), command emission with the rest of the
+    register state, the vertex write-back check, dispatches and the 10 ms no counter attributes.
+  What is shown to repeat is about 3 us per draw, under the half-draw gate, so no candidate
+  qualifies and none is built. A bound does not settle it: skipping everything that repeats or is
+  not classified, at no cost, would leave 11-14 ms plus the 19 ms gap, 30-33 ms, at the 30 fps
+  line. Reopening needs the unclassified classes compared with their previous-frame counterparts.
+  The other implementation's in-world entry (above: 60 and 121 us per draw at p50 and p95, about
+  470 draws) adds no per-draw mechanism.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
-  now. None of the measured levers, alone or together, reaches that. In the profiled run (110 ms
+  then (2026-11-10; about 17 us at 5,342 draws on 2026-11-11, and the gap of about 19 ms between
+  batches alone is longer than a 60 fps frame, so 60 fps also needs the gap cut). None of the
+  measured levers, alone or together, reaches that. In the profiled run (110 ms
   frames) the command-processor thread was on a CPU about 73 ms of each frame. The fence waits are the
   only instrumented wait above 0.1 ms per frame (12-16 ms in six other runs before `d2ff690bc`, 2.09 ms
   in one run after `443032ed0`; in the clean control run
@@ -410,13 +417,13 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     processor still waited 18.9 ms of each frame for the next batch: 24-29 ms in three runs before
     the notifier fix, about 18-23 ms expected after it (time on the submitting thread lands in the
     gap about one for one), not near zero. The world drew normally and the run did not stop.
-    Excluded: more than one batch per frame (126 submits over 132 frames, all from one thread) and
-    a host flip wait taking the submit wait's place (0.07 ms per frame here and in the control run).
-    Not identified: what holds the guest. The probe counted no early returns, so either the early
-    return did not engage or the guest waits for an end-of-batch event of its own. Open: the next
-    world run adds an early-return count and a sync-wait snapshot. The batch tail (interrupt
-    queueing, flush and flip between the batch's last guest read and the signal) took 0.04 ms per
-    batch.
+    Excluded: more than one batch per frame (about one submit per frame, all from one thread).
+    Not identified: what holds the guest. The probe counted no early returns, so the early return
+    may not have engaged; if it did, the guest waits on something else, an end-of-batch event of its
+    own or a host-side flip or present wait on its thread (the flip-done counter, 0.07 ms per frame,
+    times the command processor's packet wait, not the guest's thread). Open, with no run of its
+    own: an early-return count and a sync-wait snapshot. The batch tail (interrupt queueing, flush
+    and flip between the batch's last guest read and the signal) took 0.04 ms per batch.
 - **Device-address residency (measured; populated-page query fixed in `67d6e9a95`).** Before the
   fix, in the world the residency timer read 8.1 and 9.1 ms per frame in two runs without temporary
   code, and 1.46 ms in the run with temporary counters, whose world is a lighter regime: the level of
