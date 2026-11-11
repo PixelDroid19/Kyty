@@ -518,17 +518,20 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     ledger, a driver division loop under buffer copies took 0-7.5 ms per frame depending on the
     run (`docs/bringup/cross-title.md`, buffer copies with awkward sizes). The guest-range checks
     of the read-only binds, about 7.4 ms in the full-stack run below, were priced after
-    (2026-11-11) and leave A ended:
-    - Overlap test, 5.7 ms: cache misses 2.9 (storage 1.5, vertex 0.8, index 0.5), cache hits 1.7,
-      and the writable-storage test 0.9, all of it under index binds. Index keys repeat every frame
-      and miss for 0.5 ms only, so slot collisions are not what misses; the misses are keys first
-      seen, which a larger cache or a verdict kept on the snapshot does not remove. On the reused
-      path the hits take 0.5 ms.
+    (2026-11-11) and are open:
+    - Overlap test, 5.7 ms: the miss walk 2.9 (storage 1.5, vertex 0.8, index 0.5), the cache
+      lookup every call pays 1.7 (a miss looks up twice, `GpuMemoryFind.cpp`, lines 299 and 381),
+      and the writable-storage test 0.9, all of it under index binds. Index binds are almost all
+      reused, so their misses are repeated keys, evicted by another key or cleared by an
+      invalidation; which of the two is not separated. On the reused path the lookup takes 0.5 ms.
     - Allocated-range check, 1.7 ms, of which its own cache's lookup and store are 1.4. That cache
       is invalidated only when a heap is added or removed, so a heap-generation stamp kept on a
       reused snapshot could stand in for it: 0.46 ms on that path, about 0.4 ms after the stamp
-      compare. Fresh captures have no snapshot to hold it. Which titles add heaps during play was
-      not looked at.
+      compare. Fresh captures have no snapshot to hold it. The cache has 4,096 slots against about
+      12,000 distinct read-only ranges per frame, so most lookups may miss: 1.4 ms of cache for a
+      search that shows as about 0.3 ms. Which titles add heaps during play was not looked at.
+    - Open: at most about 3.7 ms (the miss walk 2.9, the allocated-range store and search 0.8); a
+      count of misses by cause decides it.
   - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
     call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
     per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
