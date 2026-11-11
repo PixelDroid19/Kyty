@@ -173,6 +173,34 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     largest cut short of that, no polls with the recorded one-per-millisecond limit, which about
     halves the submissions, is about 4.6 ms, under the bar. The submission cost is the open item
     there.
+- **A free draw path does not reach 60 fps (2026-11-11, recorded runs plus two runs).** A graphics
+  submit returns after its batch is decoded (below), so the guest's time between submits and the
+  command processor's run of the batch are serial. In the walking window of 116 ms frames above,
+  command processing takes 90 ms, draws 85.6 ms of it. In three world runs with temporary counters
+  (130-139 ms frames, 5,016-5,158 draws per frame, one submit and one wait per frame) the
+  command-processor thread waited 24-29 ms of each frame for the next batch. The gap grows with the
+  draw load: 15.6 ms at 2,866 draws in the lighter run below, 26.4 ms at 5,000 here (5.4 and 5.3 us
+  per draw). With draw processing free the frame would stay at about 26 + 4.4 = 31 ms (about 32
+  fps). If the gap does not shrink, overlapping the two (the bound below) leaves it as the floor,
+  24-29 ms (35-42 fps). 60 fps at this load needs all three: command processing under about 17 ms,
+  the submit overlapped with it, and the gap under about 17 ms. In the lighter run below the
+  submitting thread was on a CPU 11.5 ms of a 15.6 ms gap.
+  - The submitting thread in the same three runs: 17.9-19.8 ms of each frame on a CPU (user
+    16.7-18.6 ms), 0.1-1.1 ms waiting to run. A fourth run sampled its user time for 10 s (75
+    frames of 134 ms, 4,000-5,900 draws per frame, 19.7 ms on a CPU per frame): game code 23% (4.2
+    ms), emulator code 52% (9.5 ms), host C library 24% (4.5 ms). The largest emulator item is the
+    host-write notification that the C-string handlers (and one memory-control handler) make for
+    guest writes: six symbols grouped by name, 36% (6.5 ms, 4.9% of the frame; the capture has no
+    call chains). The notifier copies its callback table under a global lock on every call, then
+    the dirty-page lookups run. Host mutex calls are 16% (2.9 ms); their callers were not sampled,
+    and on the other guest threads mutex samples outnumber notifier samples five to eight times.
+    That thread is off a CPU for 6-10 ms of the gap; what it waits on is not split.
+  - A run with every draw skipped from boot (`KYTY_AB_SKIP_ALL_DRAWS`, a diagnostic switch) stayed
+    at the 60 fps limit with 42-73 draw-processor calls and 22-35 dispatches per frame; world-level
+    counts were not seen. The cause is not established, and it is not a floor.
+  - The small cuts in this record together: polls 2.6 ms, half the early submissions 2.0 ms, set
+    creation 4.1 ms, the vertex walks 3.2 ms, index snapshots 4.2 ms and admission reuse 2.3 ms,
+    about 18 ms of a 120 ms frame, or about 10 fps.
 - **A lighter world frame is not a target (2026-11-11, offline reading, no run).** Another
   implementation's record of about 56 fps in a world was not measured at this load. Its own notes
   call that frame recognisable but not correct and no performance claim. A later entry there
