@@ -168,7 +168,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
-  - A write-back on a shared page reads as a guest change (2026-11-10, open)
+  - A write-back on a shared page reads as a guest change (2026-11-10, fixed)
   - Superseded overlay snapshots held the snapshot staging (2026-11-10, fixed)
   - Populated-page query walked the backing past its range (2026-11-10, fixed)
   - Which titles record geometry passes (2026-11-10)

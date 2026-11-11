@@ -92,7 +92,7 @@ which slow the CP):
   released is not established (`docs/titles/anime-fighter.md`).
 - Moving work to stage B cannot reduce stage A. Stage A shrinks only by doing less ordered work per
   draw: the 12-16 ms of waits (1.8-11.8 ms in four runs after `d2ff690bc`; in the one run tagged for it, three quarters were a
-  shared-page tracker false positive) and the memory-object creation in binding
+  shared-page tracker false positive, fixed in `443032ed0`; 2.09 ms in one run after it) and the memory-object creation in binding
   are the two largest parts,
   and the two measured attempts on them are excluded (`docs/titles/sandbox.md`: staging drain and
   retry; in-place vertex binds).

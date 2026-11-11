@@ -1,15 +1,25 @@
-## A write-back on a shared page reads as a guest change (2026-11-10, open)
+## A write-back on a shared page reads as a guest change (2026-11-10, fixed)
 
 Before a draw reads a storage result that has not reached guest memory, the
 command processor may serve it from the device only if the guest has not
 written the range since the device wrote it
 (`GpuMemory::StorageIsWholeGuestContent`). The dirty-page tracker answers per
-page, so when another object's write-back copy notifies a page that both
-ranges share, the range reads as changed and the draw waits on the host. In
+page, so when another object's write-back copy notified a page that both
+ranges share, the range read as changed and the draw waited on the host. In
 `PPSA17221 - Minecraft` one 30,720-byte range waited 4.36 ms per frame this
-way while a kept hash showed its bytes unchanged; a byte-compare probe cut
-fence waits from 5.80 to 2.21 ms per frame. Not fixed; evidence and the
-direction in `docs/titles/sandbox.md`.
+way while a kept hash showed its bytes unchanged. A notification also gives
+the page its write access back, so the tracker cannot be refined by byte
+extents; only the bytes can decide. The write-back re-baseline now keeps
+hashes of the range's partly covered first and last pages, and when the
+tracker reports a change, the range is taken as whole guest content if every
+fully covered page is clean and both slices still match under a stable read
+(`GpuMemory::ConfirmStorageEdgesUnchanged`). In one world run the check passed
+490 times in about 389 frames, deliberately corrupted pairs never passed (32
+waits), and fence waits read 2.09 ms per frame (5.80 in the run that tagged
+the cause); in `PPSA21567 - ASTRO BOT` it rarely ran, last error and
+allocations matched the control, and the intro cinematic showed no defect.
+Fixed in `443032ed0`; snapshot publication keeps the page-granular gate
+(open). Evidence in `docs/titles/sandbox.md`.
 
 ## Superseded overlay snapshots held the snapshot staging (2026-11-10, fixed)
 
