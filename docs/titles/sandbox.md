@@ -59,6 +59,15 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     whether a reuse signal can fire before the reading submission executes is not established.
   - Ceiling: about 1.25x alone. It also removes work done under the snapshot pool lock, which parallel
     recording needs.
+  - Vertex slice checked against a 10 ms per frame bar (2026-11-10, code reading plus the same census;
+    not built). Bind calls cost 14.2 ms per flip (2.85 us each); 2.5 ms of it is snapshot attempts that are
+    refused. Admitting those snapshots is no lever: the vertex ranges total about 297 MB per flip (8.9 GB in
+    30 flips) and a snapshot copies its range, while a vertex object re-copies only ranges its page
+    tracker reports changed. Binding the imported window in place still needs the query for pending device
+    results that `CopyPendingStorageIntoVertices` (`GraphicsRenderBind.cpp`) runs on every object bind, whose
+    cost was not separated, so the saving is at most about 11.7 ms and not shown to clear the bar. Two
+    correctness questions are open as well: a fetch past the stream's records reads neighbouring guest
+    bytes instead of the zero tail the object path writes, and the reuse signals named above.
 - **State setup split (temporary stage timers, one run, 1.4 million draws in the world, 4,945 draws
   per frame, 7.6 fps mean, 131 ms frames).** The timed span costs 5.2 us per draw (25.7 ms per frame) and no stage
   dominates. The standing counter reads 6.4 us per draw over the same run; the gap is not attributed.
