@@ -1,6 +1,6 @@
 # Parallel draw recording (design, 2026-11-10)
 
-Status: design, not built. The measured ceiling is below the build gate (see "Decision").
+Status: design, not built. The measured ceiling is at or below the build gate (see "Decision").
 
 ## Why
 
@@ -135,13 +135,16 @@ independent work about 16 and unattributed about 7.
   and returns, so the frame is at least the larger of copy plus gap and stage A. That reaches 2x
   (45 ms) only if the copy costs at most about 24 ms per frame on the submitting thread, or about
   8 ms if it runs on the CP thread. Measured (one world run with temporary stage timers and a
-  read-only census, 3,607 draws per frame): the lookups the copy has to repeat cost 17.0 ms per
-  frame (shader input information 7.5, index snapshot and vertex range 5.8, device-address
-  preparation 3.8) and the other read-only snapshots 8.9 ms; copying the 29-32 MB per frame that
-  the command processor uploads now takes at least 1.3 ms on this host (23 GB/s single-thread
-  memcpy). That is about 27 ms per frame, or about 24 ms if the instruments' share of that run's
-  command processing (80 against 68-72 ms) is taken out evenly, before vertex and texture bytes,
-  descriptor tables and nested command buffers. The case reaches 2x at best and is closed.
+  read-only census, 3,607 draws per frame; the census window held about 5,270 draws per frame, so
+  its costs are taken per draw): the lookups the copy has to repeat cost 17.0 ms per frame (shader
+  input information 7.5, index snapshot and vertex range 5.8, device-address preparation 3.8), the
+  other read-only snapshots 1.7 us per draw or 6.1 ms, and copying the 29-32 MB per frame that the
+  command processor uploads now takes at least 1.3 ms on this host (23 GB/s single-thread memcpy).
+  That is about 24 ms per frame, or about 21 ms if the instruments' share of that run's command
+  processing (80 against 68-72 ms) is taken out evenly. Not counted: vertex binds cost 3.65 us each
+  (about 13 ms per frame) and 94% of them copy guest bytes, but the copy share was not split out;
+  nor are texture bytes, descriptor tables and nested command buffers. Not built: the case sits at
+  the gate, open on the copy share of vertex binds and on what the submitting thread waits for.
 - The gap is mostly guest user time. In the run that counted submits per thread, the thread making
   them was on a CPU 14.3 ms per frame, 1.3 ms of it in the kernel, and off a CPU about 7 ms of the
   gap; a thread with the same profile (14.5 and 1.3 ms) ran on `443032ed0`. The CP thread spent
@@ -149,6 +152,7 @@ independent work about 16 and unattributed about 7.
   the submitting thread waits on during those 7 ms was not recorded: the temporary trace spent its
   line budget during loading.
 
-The four cases stay at or under the 2x gate; neither change is built. 60 fps (16.7 ms) needs about 5.4x on this
-frame: the gap alone exceeds it, so any such path needs the overlap, and the CP would have to
-process a draw in about 4.6 us. No measured lever or design here reaches that.
+Three cases stay under the 2x gate and the fourth sits at it; neither change is built. 60 fps
+(16.7 ms) needs about 5.4x on this frame: the gap alone exceeds it, so any such path needs the
+overlap, and the CP would have to process a draw in about 4.6 us. No measured lever or design here
+reaches that.
