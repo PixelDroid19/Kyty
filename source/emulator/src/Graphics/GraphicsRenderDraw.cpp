@@ -126,6 +126,9 @@ VertexRecordRequirement VertexRecordsOfIndexRange(uint32_t minimum, uint32_t max
 	return {.first = static_cast<uint32_t>(first), .records = static_cast<uint32_t>(last) + 1u};
 }
 
+// The longest index range one draw scans for its vertex range.
+constexpr uint64_t kMaxIndexScanBytes = 16u * 1024u * 1024u;
+
 VertexRecordRequirement ResolveIndexedVertexRecords(const void* index_addr, uint32_t index_count, VkIndexType index_type,
 	                                                  int32_t vertex_offset)
 {
@@ -140,15 +143,35 @@ VertexRecordRequirement ResolveIndexedVertexRecords(const void* index_addr, uint
 		return {.valid = false};
 	}
 	const uint64_t byte_count = static_cast<uint64_t>(index_count) * element_size;
-	constexpr uint64_t MaxIndexScanBytes = 16u * 1024u * 1024u;
 	const uint64_t address = reinterpret_cast<uint64_t>(index_addr);
-	if (byte_count > MaxIndexScanBytes || GpuMemoryGetAllocatedRangePrefix(address, byte_count) != byte_count)
+	if (byte_count > kMaxIndexScanBytes ||
+	    GpuMemoryGetAllocatedRangePrefix(address, byte_count) != byte_count)
 	{
 		return {};
 	}
 
 	const auto range = GraphicsRenderIndexValueRange(index_addr, index_count, element_size);
 	return VertexRecordsOfIndexRange(range.first, range.second, vertex_offset);
+}
+
+// Indexes whose guest memory holds their current bytes are read from its imported pages,
+// like the vertex streams. The range is one the draw can scan for its vertex range.
+bool ResolveGuestIndexPages(uint64_t index_addr, uint64_t index_size, VkIndexType index_type,
+                            VkBuffer* pages, VkDeviceSize* offset)
+{
+	const uint64_t element_size = index_type == VK_INDEX_TYPE_UINT16 ? 2u : 4u;
+	VkBuffer       found        = nullptr;
+	VkDeviceSize   found_offset = 0;
+	if (index_size == 0 || index_size > kMaxIndexScanBytes ||
+	    !GuestDeviceAddressResolveDrawInput(g_render_ctx->GetGraphicCtx(), index_addr, index_size, &found,
+	                                        &found_offset) ||
+	    found_offset % element_size != 0 || !GpuMemoryRangeHoldsGuestBytes(index_addr, index_size))
+	{
+		return false;
+	}
+	*pages  = found;
+	*offset = found_offset;
+	return true;
 }
 
 // The same range over an index snapshot the recording bound. Those are the
@@ -2050,26 +2073,41 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indexed vertex offset is outside int32 range; draw skipped\n");
 		return;
 	}
-	// Outside a geometry pass the vertex range comes from the index snapshot when
-	// there is one: only the snapshot holds the indexes the GPU reads. A snapshot
-	// excludes writable storage over the indexes, so the seed below leaves them alone.
-	const uint64_t          index_addr_u64  = reinterpret_cast<uint64_t>(index_addr);
-	VulkanBuffer*           index_snapshot  = nullptr;
-	uint64_t                index_upload_ns = 0;
+	// Outside a geometry pass the vertex range comes from the indexes the GPU reads: the
+	// guest's own pages when they hold the current bytes, else a snapshot. Both exclude
+	// writable storage over the indexes, so the seed below leaves them alone.
+	const uint64_t          index_addr_u64     = reinterpret_cast<uint64_t>(index_addr);
+	VkBuffer                guest_indices      = nullptr;
+	VkDeviceSize            guest_index_offset = 0;
+	VulkanBuffer*           index_snapshot     = nullptr;
+	uint64_t                index_upload_ns    = 0;
 	VertexRecordRequirement vertex_requirement {};
 	if (!geometry_pass)
 	{
 		const auto index_upload_start = DrawStageClock::now();
-		index_snapshot  = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		if (!ResolveGuestIndexPages(index_addr_u64, index_size, index_type, &guest_indices,
+		                            &guest_index_offset))
+		{
+			index_snapshot = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true,
+			                                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		}
 		index_upload_ns = DrawStageElapsedNs(index_upload_start);
 		// The base vertex of an indirect record is unknown here, so its window bounds no record.
+		if (guest_indices != nullptr && indirect == nullptr)
+		{
+			const uint32_t element_size = index_type == VK_INDEX_TYPE_UINT16 ? 2u : 4u;
+			const auto     range        = GraphicsRenderIndexValueRange(index_addr, index_count, element_size);
+			vertex_requirement          = VertexRecordsOfIndexRange(range.first, range.second, vertex_offset);
+		}
 		if (index_snapshot != nullptr && indirect == nullptr)
 		{
 			vertex_requirement = ResolveSnapshotIndexedVertexRecords(buffer, index_snapshot, index_addr_u64, index_count, index_type, vertex_offset);
 		}
 	}
 	const VertexStreamDrawRange draw_range {vertex_requirement.first, vertex_requirement.records, true, first_instance, instance_count};
-	const bool                  draw_range_known = indirect == nullptr && index_snapshot != nullptr && vertex_requirement.valid;
+	const bool                  indices_exact    = index_snapshot != nullptr || guest_indices != nullptr;
+	const bool                  draw_range_known = indirect == nullptr && indices_exact &&
+	                                               vertex_requirement.valid;
 	if (!PrepareVertexStreamsForRead(buffer, vs_input_info, draw_range_known ? &draw_range : nullptr, pending_submission) ||
 	    PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front->bind : vs_input_info.bind, &ps_input_info.bind,
 	                                     &device_address_table, pending_submission) != GuestDeviceAddressReadPreparation::Ready)
@@ -2129,7 +2167,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	if (geometry_pass)
 	{
 		vertex_requirement = ResolveLinearVertexRecords(0u, primitive_plan.draw_count);
-	} else if (index_snapshot == nullptr && indirect == nullptr)
+	} else if (!indices_exact && indirect == nullptr)
 	{
 		vertex_requirement = ResolveIndexedVertexRecords(index_addr, index_count, index_type, vertex_offset);
 	}
@@ -2171,7 +2209,8 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	if (pipeline->transport != nullptr)
 	{
 		FragmentTransportGeometry geometry {};
-		geometry.indices = geometry_pass
+		// The transport draw binds its indexes as a buffer object.
+		geometry.indices = geometry_pass || guest_indices != nullptr
 		                       ? TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
 		                       : index_snapshot;
 		geometry.indices_snapshotted = geometry.indices != nullptr;
@@ -2224,23 +2263,32 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 
 	SetDynamicParams(vk_buffer, pipeline);
 
-	// The vertex range was resolved from the guest indexes; only their snapshot is
-	// guaranteed to hold the same values when the GPU reads them. A geometry pass
-	// already consumed the indexes on the GPU; the pull stage draws without them.
+	// The vertex range was resolved from the guest indexes; only their snapshot or the
+	// guest pages that hold them have the same values when the GPU reads them. A geometry
+	// pass already consumed the indexes on the GPU; the pull stage draws without them.
 	bool indices_snapshotted = true;
 	if (!geometry_pass)
 	{
-		const auto    index_buffer_binding_start = DrawStageClock::now();
-		VulkanBuffer* indices                    = index_snapshot;
-		indices_snapshotted                      = indices != nullptr;
-		if (indices == nullptr)
+		const auto index_buffer_binding_start = DrawStageClock::now();
+		VkBuffer   bound                      = guest_indices;
+		indices_snapshotted                   = indices_exact;
+		if (bound == nullptr)
 		{
-			indices = static_cast<VulkanBuffer*>(
-			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
+			VulkanBuffer* indices = index_snapshot;
+			if (indices == nullptr)
+			{
+				indices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(
+				    submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size,
+				    IndexBufferGpuObject()));
+			}
+			if (indices == nullptr)
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n");
+			}
+			bound = indices->buffer;
 		}
-		if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
 
-		vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
+		vkCmdBindIndexBuffer(vk_buffer, bound, guest_index_offset, index_type);
 		DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start) + index_upload_ns);
 	}
 

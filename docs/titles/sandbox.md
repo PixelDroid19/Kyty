@@ -65,11 +65,10 @@ per-stream copy for vertex data; it does not change the frame time of this title
   counts also differ), same direct register values and table pointer 1.7 %, same table bytes 98.2 %; 25.3 bytes of
   guest tables per draw. Nearly every draw keeps its pipeline, target and textures and changes only its storage
   descriptors, register values and vertex and index ranges.
-- **What comes next.** (1) index buffers and constants the same way, with the in-place decision taken once where
-  the streams are prepared; (2) buffers out of the descriptor sets, since the set key has the range and not the
-  offset, which decides between the per-shader recipe of `docs/bringup/cp-draw-plan.md` and a path that records
-  only what changed since the previous draw; (3) the submit that returns before the host is done, last, with its
-  own review and the hazard probe repeated.
+- **What comes next.** (1) constants the same way; (2) buffers out of the descriptor sets, since the set key
+  has the range and not the offset, which decides between the per-shader recipe of
+  `docs/bringup/cp-draw-plan.md` and a path that records only what changed since the previous draw; (3) the
+  submit that returns before the host is done, last, with its own review and the hazard probe repeated.
 - **Prepare step (same day, built).** Per stream, the prepare step asked the memory manager whether writable
   storage overlaps the stream: two locks and a block search, 0.71 us per draw in the profile of the build
   above. Every object that search accepts is counted on its pages, so the search now returns at once for a
@@ -78,9 +77,32 @@ per-stream copy for vertex data; it does not change the frame time of this title
   page query 0.05, the address lookup 0.07, the vertex bind 0.36. The indexed-draw recording stays at 13.3 us
   per draw; its largest draw-input part is now the index copy path, 1.55 us per draw, and the copy pool under
   index and storage binds together takes 3.06 us per draw (compare 1.04, capture 0.64, slot lookup 0.34).
+- **Index buffers (same day, built).** An index range inside one imported run, aligned to its element size in
+  the import buffer, at most 16 MiB and on pages without a counted object is bound from the import buffer at the
+  guest offset; the draw's vertex range comes from one scan of the same guest memory. Imports carry the index
+  usage beside the vertex usage under the one per-device capability query. The transport draw and every refused
+  range keep the snapshot. The scan and the GPU's read are two reads of guest memory: the premise above (no bound
+  range changed before completion) covers them, and robust buffer access, which device selection requires,
+  bounds the fetch of a copied stream if an index did change.
+  - Pricing (temporary counter, world half of one run, 1,310,720 indexed draws): 3,535 index bytes per draw, all
+    16-bit, none indirect; 99.9 % eligible, 0.09 % on a counted page, none unresolved or misaligned.
+  - One profiled world run of the build (10 s, 130 frames, 4,069 draws per frame, 76.7 ms per frame): index side
+    0.43 us per draw (scan 0.37; the address lookup and the page query total 0.08 each with the streams) against
+    1.71 in the profile above (copy path 1.55, snapshot range 0.16), with no sample left in the index copy path.
+    The indexed-draw recording is 11.4 us per draw against 13.3. The two profiles are different views, so the
+    frame times are not compared: this is command-processor time, about 5 ms per frame at that draw count and
+    inside the spread between runs, not a frame-rate gain by itself.
+  - Verification: the world capture shows terrain, plants, HUD and text. `PPSA21402 - Balatro` with the
+    validation layer mapped in the process, 70 s, exit 0, no report. `PPSA09076 - DREDGE`, 100 s, exit 0,
+    2,757,586 of 2,768,896 indexed draws in place, town scene correct. `PPSA21402 - Balatro` on the AMD
+    integrated GPU, 70 s, exit 0, 425,983 of 425,984 in place, table and cards correct. The two counted runs
+    used the same code plus a temporary counter.
 - **Open.** A debug check that re-hashes in-place ranges at completion is not shipped. Ranges outside an
   imported run are not imported on demand. On the AMD driver the decision rests on the reported capability and
-  one title; no GPU time was compared there.
+  one title; no GPU time was compared there. Two consecutive runs of one build (2026-11-11) stayed on a menu
+  at 43 draws per frame with no world preload in the title's log, and the scripted route never entered the
+  world; the next six runs of the same binary showed the usual 51 draws per frame and entered. Cause not found,
+  and no capture of that screen exists; the run script now stops and captures when the world is not reached.
 
 ## Sandbox title: frame load and command-processor ceiling in the world (2026-11-10, measured)
 

@@ -16,6 +16,12 @@ replaces the count's answer with "none" for one in 16 refusals.
 | `PPSA09076 - DREDGE` | Intel A770, ANV | 97.8 % | 0.7 % | 1.5 % | 23,729, 0 missed | 167 of 167 |
 
 - Every refusal was writable storage in use on the stream's pages.
+- Index buffers are bound the same way (same day, temporary counter): 99.9 %
+  of the indexed draws of the `PPSA17221 - Minecraft` world were eligible,
+  2,757,586 of 2,768,896 were bound in place in `PPSA09076 - DREDGE`, and
+  425,983 of 425,984 in `PPSA21402 - Balatro` on the AMD integrated GPU. The
+  import capability asks for vertex and index usage together and passed on
+  both drivers.
 - Both `PPSA21402 - Balatro` runs held 60 fps for 90 s with exit 0 and show
   the same table, cards and text.
 - The premise that no bound range changes before its submission completes

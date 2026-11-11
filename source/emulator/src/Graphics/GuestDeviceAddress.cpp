@@ -598,10 +598,13 @@ struct PreparedHostImport
 			}
 		}
 
-		// Draws fetch vertex streams from the imported guest pages (GuestDeviceAddressResolveDrawInput).
-		const bool draw_input = ctx->guest_draw_input_import_supported;
-		buffer                = CreateAddressBuffer(ctx, size, handle_type,
-		                                            draw_input ? VK_BUFFER_USAGE_VERTEX_BUFFER_BIT : 0);
+		// Draws fetch vertex streams and indexes from the imported guest pages
+		// (GuestDeviceAddressResolveDrawInput).
+		const VkBufferUsageFlags draw_input =
+		    ctx->guest_draw_input_import_supported
+		        ? VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+		        : 0;
+		buffer = CreateAddressBuffer(ctx, size, handle_type, draw_input);
 		if (buffer == VK_NULL_HANDLE)
 		{
 			return false;
