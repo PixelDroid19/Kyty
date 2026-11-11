@@ -133,13 +133,22 @@ independent work about 16 and unattributed about 7.
   at least stage A plus the gap, about 58 ms: at most 1.56x.
 - Both, with the copy that record prescribes: the submit copies the memory the batch references
   and returns, so the frame is at least the larger of copy plus gap and stage A. That reaches 2x
-  (45 ms) if the copy costs at most about 24 ms per frame on the submitting thread, or about 8 ms
-  if it runs on the CP thread, and at most about 2.4x. Open: the copy cost is not measured.
+  (45 ms) only if the copy costs at most about 24 ms per frame on the submitting thread, or about
+  8 ms if it runs on the CP thread. Measured (one world run with temporary stage timers and a
+  read-only census, 3,607 draws per frame): the lookups the copy has to repeat cost 17.0 ms per
+  frame (shader input information 7.5, index snapshot and vertex range 5.8, device-address
+  preparation 3.8) and the other read-only snapshots 8.9 ms; copying the 29-32 MB per frame that
+  the command processor uploads now takes at least 1.3 ms on this host (23 GB/s single-thread
+  memcpy). That is about 27 ms per frame, or about 24 ms if the instruments' share of that run's
+  command processing (80 against 68-72 ms) is taken out evenly, before vertex and texture bytes,
+  descriptor tables and nested command buffers. The case reaches 2x at best and is closed.
 - The gap is mostly guest user time. In the run that counted submits per thread, the thread making
-  them was on a CPU 14.3 ms per frame, 1.3 ms of it in the kernel; a thread with the same profile
-  (14.5 and 1.3 ms) ran on `443032ed0`. The CP thread spent 3.9 ms per frame in the kernel there
-  (7.3 ms on the older build with temporary counters).
+  them was on a CPU 14.3 ms per frame, 1.3 ms of it in the kernel, and off a CPU about 7 ms of the
+  gap; a thread with the same profile (14.5 and 1.3 ms) ran on `443032ed0`. The CP thread spent
+  3.9 ms per frame in the kernel there (7.3 ms on the older build with temporary counters). What
+  the submitting thread waits on during those 7 ms was not recorded: the temporary trace spent its
+  line budget during loading.
 
-The first three stay under the 2x gate and the fourth is open on the copy cost; neither is built. 60 fps (16.7 ms) needs about 5.4x on this
+The four cases stay at or under the 2x gate; neither change is built. 60 fps (16.7 ms) needs about 5.4x on this
 frame: the gap alone exceeds it, so any such path needs the overlap, and the CP would have to
 process a draw in about 4.6 us. No measured lever or design here reaches that.
