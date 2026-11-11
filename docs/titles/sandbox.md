@@ -82,8 +82,9 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Target description and sample checks 0.28 us; everything else 0.3 us together.
 - **Per-draw cuts checked against a 4.5 ms per frame bar (2026-11-10, code reading plus the counters
   of two world runs; not built).** The bar is 5% of a 90 ms frame, about 1.25 us per draw at 3,600
-  draws. No cut is shown above it, and the two stages left uncounted were counted on 2026-11-11 (one
-  world run with a temporary tag, 56 frames of 5,077 draws while the player walks) and close too.
+  draws. No cut is shown above it. Two stages left uncounted were counted on 2026-11-11 (one world
+  run with a temporary tag, 56 frames of 5,077 draws while the player walks): the snapshot count
+  closes, the shader-input count does not yet.
   - Vertex binding: 2.2 us per draw (8.0 ms per frame) in a run with one temporary tag, 3.5 us in
     the run with stage timers and the read-only census. Per stream the object path takes the
     registry lock up to six times: the admission of a snapshot probe that is refused (94 of 158,141
@@ -100,11 +101,12 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     93% of scans and held at most 8 objects in 99.9%; `FindStorageContaining` took 1.11 ms per frame.
   - Shader input information: 2.1 us per draw with timers and no reuse path. The per-shader recipe is
     excluded (`docs/bringup/cp-draw-plan.md`, stage 2); reopening it needs a count of repeated input
-    structure in this title. Counted: over about 249,000 indexed draws no stage input repeated. The
-    exact input of each stage (program address, stage and shader registers, and every descriptor
-    word the parse reads through its reader, none in this scene) never matched the previous input or
-    one of the last four of the same program (28 vertex and 53 pixel programs). A memo on exact inputs
-    cannot hit here; which register words change per draw was not recorded.
+    structure in this title. Counted so far, exact inputs only: over about 249,000 indexed draws the
+    vertex stage's input (program address, stage and shader registers, and every descriptor word
+    the parse reads through its reader, none for that stage) never matched the previous input or one
+    of the last four of the same program (28 vertex programs). The pixel key included the vertex
+    key, so its result (53 programs, no repeat) follows from the vertex one. A memo on exact inputs
+    cannot hit; the structure count, without the user-data values, is still open.
   - Index snapshots: 1.17 us per probe in the census run, 99.5% reused, about 4.2 ms per frame (the
     binding counter reads 4.0 ms per frame in the run with one tag). A reuse takes the
     snapshot pool lock twice and the registry lock once and runs cached admission lookups. Snapshots
@@ -115,9 +117,11 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     7,619 captures per frame were of an address, size and read start that the previous frame did not
     probe, none seen with equal or other bytes, and 86% found no pool entry at that base. Reused
     probes were 94% seen in the previous frame with equal bytes, which checks the classifier. Reuse
-    across frames cannot remove these captures.
+    from the previous frame cannot remove these captures.
   - Admission checks over every probe: 6.1-6.9 ms per frame. At the average rate, reuses account for
     about 2.2-2.4 ms of it (an estimate).
+  - Dispatches: 2.5 ms per frame for 64-67 dispatches (about 38 us each) in two world runs, under the
+    bar; the 18.8 us per draw above divides all command processing, dispatches included, by draws.
 - **A lighter world frame is not a target (2026-11-11, offline reading, no run).** Another
   implementation's record of about 56 fps in a world was not measured at this load. Its own notes
   call that frame recognisable but not correct and no performance claim. A later entry there
