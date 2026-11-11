@@ -118,3 +118,20 @@ Not built. The ceiling (1.2-1.7x of CP time, about 9-11 fps in the measured scen
 2x build gate. Build only after the time outside CP processing (largely the serial submit, see
 above) is cut, and a change brings stage A low enough that stage A plus the remaining off-CP time fit in a 33 ms
 frame on the same route.
+
+Recomputed after `443032ed0` (one world run with a temporary tag, about 389 frames): 90 ms frames,
+68.8 ms of CP processing over 3,653 draws (18.8 us per draw), 2.1 ms of it host waits, and about
+21 ms outside CP processing. Scaling the non-wait classes of the table above by the same factor
+(an estimate; the classes were not timed again) gives stage A about 37 ms, shared caches about 10,
+independent work about 16 and unattributed about 7.
+
+- Parallel recording alone: CP time falls to 37-53 ms, the frame to 58-74 ms: 1.22-1.56x.
+- Submit overlap alone: the submit may return only after the memory the batch references is copied
+  ("A graphics submit returns after its batch is decoded"); without the split all CP processing
+  stays serial, so the frame stays at least 68.8 ms: at most 1.31x.
+- Both: the submitter returns once stage A has passed the batch's last guest read, so the frame is
+  at least stage A plus the gap, about 58 ms: at most 1.56x.
+
+All three stay under the 2x gate; neither is built. 60 fps (16.7 ms) needs about 5.4x on this
+frame: the gap alone exceeds it, so any such path needs the overlap, and the CP would have to
+process a draw in about 4.6 us. No measured lever or design here reaches that.
