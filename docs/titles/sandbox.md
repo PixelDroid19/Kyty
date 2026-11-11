@@ -35,6 +35,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 - **Measured ceilings (`perf` user-time profile of the command-processor thread, 10 s in the world):**
   - Work that depends only on context state, plus per-draw shader input re-analysis, is 14.3% of the
     thread (8.7% and 6.4%). A fast path for draws with unchanged state was therefore not built.
+    Input analysis follows user data, which changes on every draw, so state equality cannot skip it
+    (the per-shader recipe in `docs/bringup/cp-draw-plan.md` is excluded). The context-only part is
+    about 4-6 ms per frame in pieces of at most about 2% (pipeline lookup 2.2%, target materialization
+    2.0%, viewport and color description 0.8% each, framebuffer lookup 0.7%).
   - The read-only snapshot family (capture, compare, upload) is in about 17% of samples.
   - `GpuMemory` frames are in at least 30% of samples (call stacks are truncated). The per-stage bound
     on recording draws on several threads is in "Parallel recording ceiling" below.
@@ -137,7 +141,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     `GraphicsRing::Submit` waits on the decode completion, which `GraphicsRing::ThreadBatchRun`
     signals after the batch, its flush and its flip (`GraphicsRun.cpp:1949`). The only earlier
     release, while decode waits on a value no submitted GPU work writes, did not occur in that run (no
-    queued-producer waits). This is a recorded guest-visible contract (`docs/bringup/cross-title.md`,
+    suspended waits). This is a recorded guest-visible contract (`docs/bringup/cross-title.md`,
     "A graphics submit returns after its batch is decoded"), so the guest's work after a submit and
     the command processor's run of the batch are serial.
   - Bound: overlapping the two recovers at most this gap, about 1.24x (12 to 15 fps in that run). An
@@ -147,16 +151,25 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     batch reads, as the contract record says; its scope and cost are not measured. The work between
     the batch's last guest read and the signal (graphics interrupt queueing, flush, flip,
     `GraphicsRun.cpp:1930-1949`) also holds the submitter and is not measured.
-- **Residency sweeps (measured, same run).** In the world they cost 1.46 ms per frame. During loading,
-  for four seconds, the per-draw residency check ran up to 1,916 sweeps per second, each over one
-  unimported span, and imported no page in about 6,700 sweeps at up to 104 ms/s. Each sweep is one
-  `SEEK_DATA` query from the span start (`FindUnpopulatedSharedBackingSpans`,
-  `source/lib/Core/src/VirtualMemory.cpp`), 31-57 us there against about 3 us in quiet seconds, and is
-  triggered by a population change anywhere in the shared backing (it grew 20-25 MB/s while discards
-  rose 2,500-5,000 per second). In two runs without temporary code, command-processor system time
-  followed residency time (correlation 0.86 and 0.95; 0.75 in a run with read-only census code),
-  residency averaged 80-86 ms/s, and seconds above 300 ms/s held 6 of 9 frames over 250 ms. Narrowing the sweep needs per-range population information that the backing counter does not
-  give; not built.
+- **Device-address residency (measured).** In the world the residency timer reads 8.1 and 9.1 ms per
+  frame in two runs without temporary code, and 1.46 ms in the run with temporary counters, whose world
+  is a lighter regime: the level of live mappings whose direct memory was released moved 0.72 per
+  frame there against 3.89 in the other two. In all three, residency per sample follows the change of
+  that level (correlation 0.61-0.62, 2.0-2.5 ms per unit of it). Command-processor system time follows
+  residency time (correlation 0.86 and 0.95 in the two runs; 0.75 in a run with read-only census code),
+  and seconds above 300 ms/s held 6 of 9 frames over 250 ms in them. Table rebuilds are about 0.2 ms
+  per frame in all three.
+  - Light regime (the run with counters, 43 s of world): 322 populated spans imported at about 1.1 ms
+    each; spans of 16 pages cost 1.5-2.5 ms while the backing did not grow, so the cost is per call,
+    not per page. Which part of `ImportPhysicalSpan` costs it (physical resolve, the populated-page
+    query over the span, the run import) is not measured. The heavy regime has no split.
+  - Loading only, same run: for four seconds the check ran up to 1,916 sweeps per second, each over
+    one unimported span, and imported no page in about 6,700 sweeps at up to 104 ms/s. Each sweep is
+    one `SEEK_DATA` query from the span start (`FindUnpopulatedSharedBackingSpans`,
+    `source/lib/Core/src/VirtualMemory.cpp`), 31-57 us there against about 3 us in quiet seconds, and
+    is triggered by a population change anywhere in the shared backing (it grew 20-25 MB/s while
+    discards rose 2,500-5,000 per second).
+  - Not built: no change is proposed until the heavy regime is split.
 
 ## Sandbox title: letters missing from the death message (2026-11-10, open)
 
