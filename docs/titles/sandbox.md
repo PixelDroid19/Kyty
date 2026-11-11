@@ -70,11 +70,17 @@ per-stream copy for vertex data; it does not change the frame time of this title
   offset, which decides between the per-shader recipe of `docs/bringup/cp-draw-plan.md` and a path that records
   only what changed since the previous draw; (3) the submit that returns before the host is done, last, with its
   own review and the hazard probe repeated.
-- **Open.** A debug check that re-hashes in-place ranges at completion is not shipped. Per stream, the prepare
-  step still asks the memory manager whether writable storage overlaps (two locks and a collection, about
-  0.7 us per draw); the page count answers the same question and can return early. Ranges outside an imported
-  run are not imported on demand. On the AMD driver the decision rests on the reported capability and one title;
-  no GPU time was compared there.
+- **Prepare step (same day, built).** Per stream, the prepare step asked the memory manager whether writable
+  storage overlaps the stream: two locks and a block search, 0.71 us per draw in the profile of the build
+  above. Every object that search accepts is counted on its pages, so the search now returns at once for a
+  range without a counted page. One profiled world run of the new build (10 s, 133 frames, 3,128 draws per
+  frame, 75.0 ms per frame, a lighter view than the 5,200-draw one above): that step 0.08 us per draw, the
+  page query 0.05, the address lookup 0.07, the vertex bind 0.36. The indexed-draw recording stays at 13.3 us
+  per draw; its largest draw-input part is now the index copy path, 1.55 us per draw, and the copy pool under
+  index and storage binds together takes 3.06 us per draw (compare 1.04, capture 0.64, slot lookup 0.34).
+- **Open.** A debug check that re-hashes in-place ranges at completion is not shipped. Ranges outside an
+  imported run are not imported on demand. On the AMD driver the decision rests on the reported capability and
+  one title; no GPU time was compared there.
 
 ## Sandbox title: frame load and command-processor ceiling in the world (2026-11-10, measured)
 

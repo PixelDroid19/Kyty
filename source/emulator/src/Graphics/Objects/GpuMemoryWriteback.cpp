@@ -796,8 +796,10 @@ bool GpuMemory::PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueu
 std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorageIn(uint64_t vaddr, uint64_t size)
 {
 	std::vector<std::pair<int, int>> found;
-	// Every object this scan accepts is in m_writable_storage; most per-draw scans find it empty.
-	const int heap_id = m_writable_storage.empty() ? -1 : GetHeapId(vaddr, size);
+	// Every object this scan accepts is in m_writable_storage and counted on its pages
+	// (m_host_result_pages); most per-draw scans find neither.
+	const bool none   = m_writable_storage.empty() || !m_host_result_pages.Any(vaddr, size);
+	const int heap_id = none ? -1 : GetHeapId(vaddr, size);
 	if (heap_id < 0)
 	{
 		return found;
