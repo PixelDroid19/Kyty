@@ -1431,7 +1431,7 @@ TEST(CoreVirtualMemory, UnpopulatedSharedBackingSpansAreFoundInOneSweep)
 }
 
 // Page flags follow the backing's populated extents inside the queried
-// interval only, including an extent that starts before it or runs past it.
+// interval only, including an extent that starts before it, runs past it or both.
 TEST(CoreVirtualMemory, PopulatedSharedBackingPagesFollowBackingExtents)
 {
 #if !defined(__linux__)
@@ -1443,7 +1443,7 @@ TEST(CoreVirtualMemory, PopulatedSharedBackingPagesFollowBackingExtents)
 	ASSERT_NE(backing, nullptr);
 	const uint64_t view = MapSharedAligned(backing, 0, 0, size, Mode::ReadWrite, page);
 	ASSERT_NE(view, 0u);
-	for (const uint64_t index: {1u, 2u, 5u, 6u})
+	for (const uint64_t index: {1u, 2u, 5u, 6u, 7u})
 	{
 		reinterpret_cast<volatile uint8_t*>(view)[page * index] = 1;
 	}
@@ -1454,6 +1454,9 @@ TEST(CoreVirtualMemory, PopulatedSharedBackingPagesFollowBackingExtents)
 	std::array<uint8_t, 2> hole {};
 	ASSERT_TRUE(QueryPopulatedSharedBackingPages(backing, page * 3u, page * 2u, hole.data()));
 	EXPECT_EQ(hole, (std::array<uint8_t, 2> {0, 0}));
+	std::array<uint8_t, 1> inside {};
+	ASSERT_TRUE(QueryPopulatedSharedBackingPages(backing, page * 6u, page, inside.data()));
+	EXPECT_EQ(inside, (std::array<uint8_t, 1> {1}));
 	EXPECT_FALSE(QueryPopulatedSharedBackingPages(backing, page * 7u, page * 2u, populated.data()));
 	ASSERT_TRUE(Free(view));
 	DestroySharedBacking(backing);

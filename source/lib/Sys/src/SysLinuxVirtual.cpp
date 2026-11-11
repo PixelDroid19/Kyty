@@ -1107,13 +1107,13 @@ bool sys_virtual_query_shared_backing_data_pages(void* backing, uint64_t backing
 	{
 		return false;
 	}
-#if defined(__linux__) && defined(SEEK_DATA) && defined(SEEK_HOLE)
+#if defined(__linux__) && defined(SEEK_DATA)
 	if (shared->fd < 0)
 	{
 		return false;
 	}
-	// The memfd's extents skip a hole in one query, where a page-table or
-	// residency walk visits every page of it.
+	// SEEK_DATA answers a populated page at once and skips a hole in one query. SEEK_HOLE
+	// would walk every populated page up to the next hole, which can lie far past the range.
 	std::memset(populated, 0, static_cast<size_t>(size / page_size));
 	const int      saved_errno = errno;
 	const uint64_t end         = backing_offset + size;
@@ -1130,16 +1130,9 @@ bool sys_virtual_query_shared_backing_data_pages(void* backing, uint64_t backing
 		{
 			break;
 		}
-		const off_t hole = ::lseek(shared->fd, data, SEEK_HOLE);
-		if (hole <= data)
-		{
-			ok = false;
-			break;
-		}
-		const uint64_t first = static_cast<uint64_t>(data) / page_size * page_size;
-		const uint64_t last  = std::min(end, (static_cast<uint64_t>(hole) + page_size - 1u) / page_size * page_size);
-		std::memset(populated + (first - backing_offset) / page_size, 1, static_cast<size_t>((last - first) / page_size));
-		cursor = last;
+		const uint64_t page                            = static_cast<uint64_t>(data) / page_size * page_size;
+		populated[(page - backing_offset) / page_size] = 1;
+		cursor                                         = page + page_size;
 	}
 	errno = saved_errno;
 	return ok;
