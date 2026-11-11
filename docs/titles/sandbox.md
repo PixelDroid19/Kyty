@@ -110,6 +110,18 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     are new was not counted.
   - Admission checks over every probe: 6.1-6.9 ms per frame. At the average rate, reuses account for
     about 2.2-2.4 ms of it (an estimate).
+- **A lighter world frame is not a target (2026-11-11, offline reading, no run).** Another
+  implementation's record of about 56 fps in a world was not measured at this load. Its own notes
+  call that frame recognisable but not correct and no performance claim. A later entry there
+  describes incomplete distant terrain at about 14 fps, with about 470 draws and 23-29 dispatches
+  per frame at 60/121 us per draw (p50/p95). Here a world frame holds 3,600-4,500 draws (4,476
+  draws and 60.8 dispatches in one run), and the title's options file in that implementation's save
+  directory has the same graphics mode (2) and view distance (576) as ours. At 18.8 us per draw,
+  470 draws would cost about 9 ms of command processing. No guest-visible answer was found to
+  explain the gap: the title's executable imports neither the game-presets query nor the Neo-mode
+  query (its bundled modules were searched without a control), and the system-parameter answers
+  there are locale values with the same numbers. Excluded: taking that figure as a target at this
+  load; it carries no recording mechanism to reuse, and lowering the title's load is out of scope.
 - **Parallel recording ceiling (measured, not built).** The same run's counters, per frame of 105 ms
   of command processing, classed by whether the work depends on the order of draws:
   - Order-dependent, about 61 ms: the index snapshot, the vertex write-back check, device-address
