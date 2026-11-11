@@ -49,7 +49,9 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - Cost per frame: index snapshots 5.7 ms (99.5% reused), other snapshots 8.2 ms (21% reused),
     vertex binding about 12.6 ms (2.4 us per draw), together about 26 ms of the 104 ms the command
     processor runs per frame.
-  - 99.8% of vertex snapshots are refused. The bind then uses a host copy of the guest bytes (94%) or
+  - 99.8% of vertex snapshots are refused (this census; counted again on 2026-11-11 with later
+    fixes, 25% are accepted and every refusal is a writable storage buffer over the range: the
+    ledger below). The bind then uses a host copy of the guest bytes (94%) or
     a storage object already bound in place (6%); only 750 of 140,530 host-copy binds had device
     results not yet in guest memory.
   - 54% of index addresses are only 2-byte aligned, which a per-object in-place buffer cannot hold;
@@ -432,14 +434,32 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       (`docs/bringup/cross-title.md`, early submission);
     - context-only state for draws whose state did not change, 4-6 ms (profile share: pipeline,
       target and framebuffer lookups, viewport and color description; the target lookups counted
-      above sit inside it);
+      above sit inside it); priced by the calls that go (2026-11-11): 95.9% of draws bind the
+      pipeline their command buffer bound last (temporary counter, an upper bound: other graphics
+      bind sites are not seen), and the driver's pipeline bind leaves are about 1.2 ms, so skipping
+      the repeated bind is about 1.1 ms; the shader id copies of the pipeline lookup
+      (`PipelineCache::CreatePipeline`, `ShaderGetIdVS`/`PS`) allocate about 0.9-1.2 ms;
     - index snapshot reuse, up to 4.2 ms (two pool locks and one registry lock per reuse); dropped
       unbuilt: every mutex lock and unlock on the thread is about 2.7 ms per frame in the leaf
       profile, so three per reuse cannot remove half of it;
     - the descriptor-set create path, up to 4.1 ms (allocation through write; the writes stay);
+      the part a change removes is allocation, unindexing and list nodes, about 1.2-1.7 ms; the
+      lookups and hashes are paid by hits as well;
     - the vertex write-back walk and the bind's query, up to 3.2 ms (the in-use writable set was
       empty in 93% of scans); built, about 3.1 ms by the same timers (above);
-    - refused vertex snapshot attempts, up to 2.5 ms.
+    - refused vertex snapshot attempts, up to 2.5 ms; counted again 2026-11-11 (temporary
+      counters, 138 world frames): of 5,140 attempts per frame 1,288 are accepted and every one of
+      the 3,853 refusals is made at the overlap check, by a writable storage buffer over the
+      range, which the bind then reads through `GpuMemoryFindStorageContaining`. The admission
+      leaves cover all probes and vertex attempts are about a quarter of them: about 1-1.5 ms.
+    - range lookups of the GPU object index, a new entry (2026-11-11): about 25,900 per frame,
+      24% cache hits, 1.2 candidates per miss; every miss allocated and grew its candidate and
+      result arrays, every hit allocated an unused result. Built: allocator leaf time on the
+      command-processor thread 6.2-6.7 ms per frame in four runs, 4.5 ms after.
+
+    The run that measured the lookups (124 ms per frame, 5,237 draws) spent about 5 ms more than
+    the previous run in guest-data copies, hashing and object creation, which the change does not
+    touch; the driver division loop took no time in it.
 
     Together up to about 28 ms as first summed. Re-priced 2026-11-11: about 3.1 ms delivered, 0.9 ms
     measured and not kept, 8.8 ms out; the rest (context-only state, set creation, refused attempts,
