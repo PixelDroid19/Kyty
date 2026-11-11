@@ -402,16 +402,22 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     5 ms at the average cost per lookup; the vertex ones sit in vertex binding), finalization and
     command emission (per-draw cuts above), and the time outside the stage timers (the
     early-submission check above).
-  - Open, the one row of 5.5 ms or more without a measured exclusion: storage descriptors, 10.0 ms
-    (`PrepareStorageBuffers` into `TryUploadTransientReadOnlyBuffer`, `GraphicsRenderBind.cpp`),
-    which copy about 7,600-7,900 read-only ranges per frame that the previous frame did not probe.
-    Binding the imported window in place would drop the copies (these probes are 16-byte aligned,
-    the device offset limit is 4), but a read in place sees the bytes when the host GPU executes,
-    after the submit has returned, and a title is recorded rewriting memory its commands point to
-    as soon as the submit returns (`docs/bringup/cross-title.md`, "A graphics submit returns after
-    its batch is decoded"; that title rewrote descriptor tables, data buffers were not observed).
-    Whether this guest rewrites the captured ranges before the reading submission executes is the
-    question that blocks it; no code or run is planned before it is answered on paper.
+  - Closed as well, storage descriptors, 10.0 ms (`PrepareStorageBuffers` into
+    `TryUploadTransientReadOnlyBuffer`, `GraphicsRenderBind.cpp`). Binding the imported window in
+    place would drop the copies of about 7,600-7,900 read-only ranges per frame (the capture
+    uploads, 3.8 ms) and at most the validation of those roughly 9,600 probes (about 3.8 ms at the
+    average cost per probe), part of which an in-place bind still pays (the query for pending device
+    results). Finalization is not credited: sets still differ per offset without the parked
+    push-descriptor stage. At most about 7.6 ms, under the 10 ms per frame bar the in-place vertex
+    slice was held to; the in-place reads together stay at about 1.25x ("Read-only binds" above). A
+    read in place also sees the bytes when the host GPU executes, after the submit has returned, and
+    a title is recorded rewriting memory its commands point to as soon as the submit returns
+    (`docs/bringup/cross-title.md`, "A graphics submit returns after its batch is decoded";
+    descriptor tables, data buffers not observed).
+
+  This is the frontier for the command-processor run of this title as measured: no lever is open
+  and none is built, and no measured lever brings this scene to 30 fps. What holds the guest between
+  batches is not identified ("Command-processor idle between batches" below).
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
   then (2026-11-10; about 17 us at 5,342 draws on 2026-11-11, and the gap of about 19 ms between
   batches alone is longer than a 60 fps frame, so 60 fps also needs the gap cut). None of the
