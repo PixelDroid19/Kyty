@@ -264,6 +264,28 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       unclassified). With the path behind the draw entry at zero the full-load frame is about
       20 ms, so 60 fps at this load also needs about 3 ms off the submitting thread. The skip
       removed the GPU work too, so this is not an fps figure for a faster draw path.
+  - The path behind the draw entry priced by unit of work (2026-11-11, on paper from one
+    full-stack profile at 5,017 draws per frame; ceilings, about +-1 ms; no run). For each part the
+    question is how often its answer can change: per shader, per key per frame, per 2 MiB window per
+    index change, or per draw. The range queries under the draw entry are three: object overlap
+    (refused only by a buffer that is not all read-only, a surface not linked under the queried
+    view, or a truncated snapshot; read-only vertex objects pass), which a per-window count of the
+    refusing kinds could answer; allocated-range checks, already answered from the heap index except
+    the allocated-prefix lookup; and block finds inside the vertex rows. The shader input
+    information keeps its structure in every call once the user-data values are masked; the recipe
+    the exclusion above left undesigned (image bases and the two table addresses masked too) needs
+    guards on the image descriptor checks and on the attribute and buffer tables, whose bytes after
+    masking were never counted. Buckets, as ceilings: exact by construction about 5 ms (pipeline
+    ids, storage objects, textures) plus under 1 ms for the allocated-prefix lookup; exact once
+    counted, object overlap about 4 ms; behind a dirty-page fence whose no-write cost is unpriced,
+    in-place storage and index about 6 ms; with no guard evidence, in-place vertex about 9 ms; the
+    masked recipe about 5 ms. The countable rows reach about 29-30 ms before the fence, under the
+    30 ms build gate plus the noise; descriptor sets, targets and device-address preparation (up to
+    about 7 ms more) cannot be counted. Closed under the gate, not built.
+    - Found, not fixed: `GpuMemory::GetAllocatedRangePrefix` (`GpuMemory.cpp:249`) memoizes a
+      heap-index search through a range-query cache, and in the profile the cache's lookups and
+      stores outweigh the search, as on the validation path before it was answered from the heap
+      index. Direction: answer the prefix from the heap index under the same lock.
   - The small cuts in this record together: polls 2.6 ms, half the early submissions 2.0 ms, set
     creation 4.1 ms, the vertex walks 3.2 ms, index snapshots 4.2 ms and admission reuse 2.3 ms,
     about 18 ms of a 120 ms frame, or about 10 fps.
