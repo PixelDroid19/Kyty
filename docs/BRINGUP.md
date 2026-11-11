@@ -189,7 +189,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Reimplemented feature leads: landed, refused and excluded; GLOBAL load alignment and EXEC defects open (2026-10-29)
   - [Tessellation design](bringup/tessellation-design.md): hull/domain mapping to Vulkan, staged plan, PATCH draws refused first (2026-10-29, design)
   - [GPU-indexed descriptor tables](bringup/bindless-tables-design.md): table-selected T#/S# and ray-tracing dispatch needs (2026-10-29, design)
-  - [Parallel draw recording](bringup/parallel-recording-design.md): two-stage split, 22-26 draws per pass, ceiling 9-11 fps in the world scene, not built (2026-11-10, design)
+  - [Parallel draw recording](bringup/parallel-recording-design.md): two-stage split, 22-26 draws per pass, ceiling 9-11 fps in the world scene, not built (2026-11-10, design); submit overlap gives no run-ahead (2026-11-11)
   - [Temporal upscalers decision](bringup/temporal-upscalers-decision.md): no DLSS/XeSS now; temporal inputs first, FSR 2 before proprietary SDKs (2026-10-29, decided)
   - Guest `fprintf` read past its buffer and `strto*` dropped range errors (2026-10-30, fixed)
   - Intermittent boot crashes on a NULL guest pointer (2026-10-31, F.I.S.T. traced to a guest race 2026-11-02)
