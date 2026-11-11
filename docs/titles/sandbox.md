@@ -83,10 +83,11 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       today), and window buffers lose the cache skip fresh snapshots take, so their sets are
       indexed and trimmed. The creation side, 3.4 ms, is the bound only if every miss then hit;
       whether the guest ranges repeat across frames was not counted.
-    - Guard: none exists to reuse. An in-place object's device reads guest memory when it executes
-      (`StorageBuffer.cpp`, `MapBacking`), so a read-only bind would rest on the open reuse-signal
-      question above. In-place objects also skip the overlay check (`GpuMemoryWriteback.cpp`,
-      line 761), which a read-only bind would have to keep.
+    - Guard: none found in what was read (`StorageBuffer.cpp`, `MapBacking` and its update; the
+      in-place branches of `GpuMemoryWriteback.cpp`, lines 761 and 948). An in-place object's device
+      reads guest memory when it executes, so a read-only bind would rest on the open reuse-signal
+      question above. In-place objects also skip the overlay check (line 761), which a read-only
+      bind would have to keep.
   - Ceiling: about 1.25x alone. It also removes work done under the snapshot pool lock, which parallel
     recording needs.
   - Vertex slice checked against a 10 ms per frame bar (2026-11-10, code reading plus the same census;
@@ -469,8 +470,9 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       freed 2 KiB before. The allocator leaves went from 4.5 to 3.9 ms per frame at the same share
       of the thread's samples (4.7% and 4.6%) in a lighter scene: that saving is not separated
       from the scene, at most about 0.6 ms. On AMD (RADV, the host's integrated GPU, one run of
-      110 s, 2026-11-11) `PPSA21402 - Balatro` held gameplay at 60 fps with both changes, two
-      captures correct by inspection (not scored); this title was not run on AMD;
+      110 s, 2026-11-11) `PPSA21402 - Balatro` held gameplay at 60 fps with both changes present,
+      two captures correct by inspection (not scored); nothing counted whether the skip fired
+      there, and this title was not run on AMD;
     - index snapshot reuse, up to 4.2 ms (two pool locks and one registry lock per reuse); dropped
       unbuilt: every mutex lock and unlock on the thread is about 2.7 ms per frame in the leaf
       profile, so three per reuse cannot remove half of it;
@@ -560,12 +562,13 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       B about 44 ms of command processing is left, about 26-37 ms with parallel recording, and the
       frame is that short only with the gap overlapped (27-38 fps). No combination reaches 16.7 ms.
     - Full-stack check on the pushed code (2026-11-11, 64 KB stacks, 1,444 of 1,459 samples reach
-      the thread start; 103 world frames of 97 ms while profiling, 4,995 draws, 71.2 ms of
-      command-processor CPU time per frame against 80.1-82.5 ms in the earlier runs, not separated
-      by cause): inside draws 63.2 ms (56.4 was the lower bound). No entry above is higher by more
-      than 2 ms: read-only binds 15.4 (storage 7.8, index 5.0, vertex 2.6), vertex binding 8.4,
-      descriptor sets 6.3, alias write-back 2.5, shader input 7.1, pipeline
-      lookup without the identities 1.5 (building them, 2.8), driver calls 8.0 in all.
+      the thread start, no lost samples; 98 world frames of 102 ms while profiling, 5,017 draws):
+      74.7 ms of command-processor user CPU time per frame. The processor's own time counter reads
+      80.6 ms per frame there and 79.5 ms after, against 80.9 and 82.4 ms in two earlier clean runs,
+      so command processing did not fall. Inside draws 66.3 ms (56.4 was the lower bound). No entry
+      above is higher by more than 2 ms: read-only binds 16.1 (storage 8.2, index 5.2, vertex 2.7),
+      vertex binding 8.9, descriptor sets 6.6, alias write-back 2.7, shader input 7.4, pipeline
+      lookup without the identities 1.6 (building them, 3.0), driver calls 8.3 in all.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
   then (2026-11-10; about 17 us at 5,342 draws on 2026-11-11, and the gap of about 19 ms between
   batches alone is longer than a 60 fps frame, so 60 fps also needs the gap cut). None of the
