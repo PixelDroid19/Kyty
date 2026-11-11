@@ -355,31 +355,38 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 - **GPU estimate.** In the same run the render engine was busy 37% of 131 ms frames at 600-650 MHz,
   about 48 ms. If that time scaled with the clock it would be about 13 ms at 2,400 MHz; this is an
   estimate, not a measurement.
-- **Skipping whole draws (2026-11-11, offline reading of the measurements above, no run).** In the
-  latest world run the frame was 111 ms at 5,342 draws: about 92 ms of command processing (about
-  17 us per draw) and the 19 ms gap. 30 fps with the serial submit needs about 14 ms of command
-  processing, so a candidate has to remove at least half of a draw's time at once. The counter
-  classes of "Parallel recording ceiling" below (4,945 draws), with the host waits taken at today's
-  2.1 ms, sum to about 92 ms and are used unscaled; figures from the other items are per draw or per
-  frame as measured, so the split is an estimate. Grouped by whether the work follows what repeats
-  from the previous frame (the draw key, the shader and stage registers with user data masked, the
-  index snapshot ranges) or what does not (the user-data values, which never matched one of the last
-  four inputs of the same program, and the ring slots they point to):
-  - Repeats, about 17 ms (3.1 us per draw): context-only state, 4-6 ms; the index-snapshot reuse
-    path, 4.2 ms (99.5% reused); the shader input recipe's ceiling, 1.41 us per draw (7.5 ms),
-    before guards.
-  - New every frame, about 11-14 ms: read-only snapshot captures, up to 8.5 ms (every capture is of
-    a range the previous frame did not probe); host waits, 2.1 ms; device-address preparation,
-    2.9 ms, if it follows the moving user-data addresses (not checked).
-  - Not classified, about 60 ms (11-12 us per draw): the rest of resource binding, the shared caches
-    (pipeline setup and descriptor-set finalization, 13 ms), command emission with the rest of the
-    register state, the vertex write-back check, dispatches and the 10 ms no counter attributes.
-  What is shown to repeat is about 3 us per draw, under the half-draw gate, so no candidate
-  qualifies and none is built. A bound does not settle it: skipping everything that repeats or is
-  not classified, at no cost, would leave 11-14 ms plus the 19 ms gap, 30-33 ms, at the 30 fps
-  line. Reopening needs the unclassified classes compared with their previous-frame counterparts.
-  The other implementation's in-world entry (above: 60 and 121 us per draw at p50 and p95, about
-  470 draws) adds no per-draw mechanism.
+- **Skipping whole draws (2026-11-11, offline reading, no run).** Counters of one clean world run
+  after the notifier fix (138 walking frames, 5,059 draws, 111 ms frames): 91.7 ms of command
+  processing per frame (17.1 us per draw over 86.8 ms of draw processing) and the gap of about
+  19 ms. 30 fps needs about 14 ms of command processing with the serial submit, or about 33 ms if
+  the submit overlapped it, so a candidate has to remove at least half of the run (about 46 ms) at
+  once. Grouped by what each stage follows, against the draw's counterpart in the previous frame
+  (Experiment 0 in `docs/bringup/cp-draw-plan.md` counted this title: the draw key repeated against
+  one of the previous two frames, the user-data values never did); state-setup parts are the stage
+  timers above scaled to this run:
+  - Repeats, about 28 ms: index buffer binding 5.1 ms (99.5% of index snapshots reused), texture
+    descriptors 2.3 ms (image and sampler words change on 1-2% of key hits), pipeline setup
+    4.8 ms, target materialization 2.5 ms, and in state setup the shader input recipe's ceiling
+    (1.41 us per draw, 7.1 ms, before guards), the index snapshot and vertex range and the target
+    description (about 6.4 ms).
+  - Same layout, rotating storage object: descriptor-set finalization, 7.0 ms (98% of set misses
+    differ only in the storage object; a push-descriptor set would remove its bookkeeping and keep
+    the descriptor writes).
+  - New every frame, about 34 ms: vertex buffer binding 15.5 ms (buffer bases move on most key hits
+    and sizes on 55% of this title's; 79% of read-only probes are first captures of a range the
+    previous frame did not probe), storage descriptors 10.0 ms (ring slots), command emission
+    6.1 ms (recorded against those sets each frame) and the recipe's guard, about 2.2 ms.
+  - Not classified, about 23 ms: the rest of state setup (vertex write-back check, device-address
+    preparation and the untimed part, about 12 ms), draw time outside the stage timers (about
+    6 ms), dispatches 2.9 ms, and command processing outside draws and dispatches 2.0 ms (fence
+    waits 1.5 ms).
+
+  The rows that could follow a previous-frame match (repeats, finalization, not classified) are
+  about 58 ms, above half the run, so the gate is not settled on paper; the next step is a count of
+  the unclassified rows against their previous-frame counterparts. If all of them were skipped at
+  no cost, about 34 ms of command processing would remain: frames of about 53 ms with the serial
+  submit, at the 30 fps line with the submit overlapped. The other implementation's in-world entry
+  (above: 60 and 121 us per draw at p50 and p95, about 470 draws) adds no per-draw mechanism.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
   then (2026-11-10; about 17 us at 5,342 draws on 2026-11-11, and the gap of about 19 ms between
   batches alone is longer than a 60 fps frame, so 60 fps also needs the gap cut). None of the
