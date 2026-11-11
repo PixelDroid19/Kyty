@@ -1,3 +1,16 @@
+## A write-back on a shared page reads as a guest change (2026-11-10, open)
+
+Before a draw reads a storage result that has not reached guest memory, the
+command processor may serve it from the device only if the guest has not
+written the range since the device wrote it
+(`GpuMemory::StorageIsWholeGuestContent`). The dirty-page tracker answers per
+page, so when another object's write-back copy notifies a page that both
+ranges share, the range reads as changed and the draw waits on the host. In
+`PPSA17221 - Minecraft` one 30,720-byte range waited 4.36 ms per frame this
+way while a kept hash showed its bytes unchanged; a byte-compare probe cut
+fence waits from 5.80 to 2.21 ms per frame. Not fixed; evidence and the
+direction in `docs/titles/sandbox.md`.
+
 ## Superseded overlay snapshots held the snapshot staging (2026-11-10, fixed)
 
 An overlay that serves device-address readers also copies the result to a
@@ -11,7 +24,8 @@ the host. Submission completion (`GpuMemory::CompleteSubmission`) now frees
 superseded snapshots whose copy has finished; publication already skipped
 them, so guest memory receives the same bytes. In that title no staging
 allocation was refused in the world and fence waits read 11.8 against 13.0
-ms per frame in one pair of runs; in `PPSA21567 - ASTRO BOT` the take path
+ms per frame in one pair of runs (1.8, 11.8 and 5.8 ms in later runs on the
+fix, see the shared-page record above); in `PPSA21567 - ASTRO BOT` the take path
 still ran and 3,183 superseded snapshots were freed at completion, with the
 intro cinematic rendering as in the control. Fixed in `d2ff690bc`; evidence in
 `docs/titles/sandbox.md`.

@@ -91,7 +91,8 @@ which slow the CP):
   131 ms, so at most about 1.7x, still under the build gate; whether the guest starts earlier when
   released is not established (`docs/titles/anime-fighter.md`).
 - Moving work to stage B cannot reduce stage A. Stage A shrinks only by doing less ordered work per
-  draw: the 12-16 ms of waits (11.8 ms in one run after `d2ff690bc`) and the memory-object creation in binding
+  draw: the 12-16 ms of waits (1.8-11.8 ms in four runs after `d2ff690bc`; in the one run tagged for it, three quarters were a
+  shared-page tracker false positive) and the memory-object creation in binding
   are the two largest parts,
   and the two measured attempts on them are excluded (`docs/titles/sandbox.md`: staging drain and
   retry; in-place vertex binds).

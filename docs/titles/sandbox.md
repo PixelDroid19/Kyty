@@ -99,8 +99,9 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       64-byte aligned), and the overlay that would serve readers on this queue is refused at the
       16 MiB snapshot staging (two runs tagged it; in the one that told the cases apart, the staging
       was full).
-    - 15-92%: the CPU changed part of the range since the device wrote it. In the one run that
-      recorded sizes, every such range was smaller than a page.
+    - 15-92%: the dirty-page tracker reported a change in the range since the device wrote it
+      (`GpuMemory::StorageIsWholeGuestContent`, page-granular). The tagged ranges were 4-64 KiB and
+      not page-aligned. The guest did not change them: a write-back on a shared page did (below).
   - With four recording threads, command-processor time is bounded at 1.2x (only independent work in
     parallel) to 1.7x (caches, unattributed work and the double-count case in parallel too). Parallel
     recording was not built (design and bounds: `docs/bringup/parallel-recording-design.md`), and the in-place read-only binds above stay measured, not built.
@@ -137,7 +138,9 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       allocations was refused (500 of 500 in the world of the reference run).
     - Fence waits 11.8 against 13.0 ms per frame (13.6 against 18.3 waits), allocations 2.7 against
       2.2 MB per frame. One pair, no frame-rate claim. The expected share of about 7 ms was not
-      reached; the waits the fix leaves are not attributed.
+      reached. Three later world runs on the fix read 1.8, 11.8 and 5.8 ms per frame: the fix removes
+      the refusals, and the fence time it leaves varies between runs with the waits attributed in the
+      next item.
     - The release scan costs 0.04 us per completed submission (at most 32 pending snapshots).
     - `PPSA21567 - ASTRO BOT`, intro cinematic after a diagnostic tap, against a run of the
       `67d6e9a95` code with the same tap: the snapshot take ran (242,271 calls, 4,844 snapshots
@@ -145,6 +148,35 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       144 lines and no staging allocation was refused. The capture showed the same cinematic shot
       as the control, the last error was the one the control reports, and allocations in the
       cinematic read 0.00 against 0.01 MB per frame.
+- **The waits the staging fix leaves come from a page shared with another object's write-back
+  (measured; a byte compare probed, not built).** Two runs on `a099c9097`, same route and save, with
+  temporary tags at the wait site:
+  - In the first, 4.36 of the 5.80 ms per frame of fence waits were waits the tracker attributed to
+    a change in the range; time agreed with the draw-to-`WaitSubmission` backtraces (823 against
+    789 ms). All of them came from one 30,720-byte storage range at a non-page-aligned address with
+    three fully covered pages.
+  - A content hash kept at each re-baseline that leaves the stored hash at zero matched the guest
+    bytes in 150 of 150 tagged waits; one kept hash in sixteen was deliberately corrupted, and all
+    13 of those read different. The object's bytes had not changed.
+  - Only the partial last page had changed, and every mark on the object's pages since its baseline
+    came from a write-back copy: the write-back of another storage range, 1 KiB starting 80 bytes
+    after the object's end, notified its own bytes, and the tracker marks whole pages.
+  - A notification on an armed page also restores write access (`NotifyPageWriteEntered`,
+    `GpuDirtyPageTracker.cpp`), so a later guest write to that page leaves no mark until the next
+    re-arm. A tracker-side refinement such as byte extents of notifications therefore cannot be
+    sound; only comparing bytes can.
+  - Probe (temporary, behind an environment variable): when the tracker reported a change, re-arm the
+    range, compare the guest bytes with the kept hash and, on a stable match, take the range as whole
+    guest content and re-baseline its generation. In the world it applied in 339 of 341 frames, and
+    the corrupted hashes never passed (103 waited). Fence waits fell to 2.21 ms per frame, 0.69 ms of
+    them the corrupted controls. The capture showed the death screen at 125 s with the known glyph
+    defect, as on the clean binary. One pair in different scenes, no frame-rate claim.
+  - Snapshot publication (`GpuMemoryWriteback.cpp:466`) has the same page-granular gate; it runs only
+    from end-of-pipe write-backs, which this title does not raise.
+  - Direction: at each generation re-baseline keep a hash of the partial head and tail slices in a
+    field of its own (Update relies on a zero object hash to upload label holes); when the tracker
+    reports a change and every fully covered page is clean by page epoch, compare those slices under
+    `BeginRead`/`ReadObservationIsStable` and re-baseline on a match.
 - **GPU estimate.** In the same run the render engine was busy 37% of 131 ms frames at 600-650 MHz,
   about 48 ms. If that time scaled with the clock it would be about 13 ms at 2,400 MHz; this is an
   estimate, not a measurement.
