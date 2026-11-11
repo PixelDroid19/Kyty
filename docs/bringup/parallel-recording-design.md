@@ -131,7 +131,15 @@ independent work about 16 and unattributed about 7.
   stays serial, so the frame stays at least 68.8 ms: at most 1.31x.
 - Both: the submitter returns once stage A has passed the batch's last guest read, so the frame is
   at least stage A plus the gap, about 58 ms: at most 1.56x.
+- Both, with the copy that record prescribes: the submit copies the memory the batch references
+  and returns, so the frame is at least the larger of copy plus gap and stage A. That reaches 2x
+  (45 ms) if the copy costs at most about 24 ms per frame on the submitting thread, or about 8 ms
+  if it runs on the CP thread, and at most about 2.4x. Open: the copy cost is not measured.
+- The gap is mostly guest user time. In the run that counted submits per thread, the thread making
+  them was on a CPU 14.3 ms per frame, 1.3 ms of it in the kernel; a thread with the same profile
+  (14.5 and 1.3 ms) ran on `443032ed0`. The CP thread spent 3.9 ms per frame in the kernel there
+  (7.3 ms on the older build with temporary counters).
 
-All three stay under the 2x gate; neither is built. 60 fps (16.7 ms) needs about 5.4x on this
+The first three stay under the 2x gate and the fourth is open on the copy cost; neither is built. 60 fps (16.7 ms) needs about 5.4x on this
 frame: the gap alone exceeds it, so any such path needs the overlap, and the CP would have to
 process a draw in about 4.6 us. No measured lever or design here reaches that.
