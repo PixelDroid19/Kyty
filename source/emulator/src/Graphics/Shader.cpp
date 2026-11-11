@@ -5769,18 +5769,38 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 //	return ShaderUpdateBindInfo(code, &input_info->bind);
 //}
 
-// Collects one shader identity in a reserved local buffer; the identity vector
-// then takes every word in one copy instead of a copy-on-write check per word.
+// Collects one shader identity in a per-thread buffer whose capacity is kept, since
+// identities are built on every draw; the identity vector then takes every word in
+// one copy instead of a copy-on-write check per word.
 class ShaderIdWriter
 {
 public:
-	ShaderIdWriter() { m_words.reserve(512); }
+	ShaderIdWriter(): m_words(Words())
+	{
+		EXIT_IF(InUse());
+		InUse() = true;
+		m_words.clear();
+	}
+	~ShaderIdWriter() { InUse() = false; }
+
+	KYTY_CLASS_NO_COPY(ShaderIdWriter);
 
 	void Add(uint32_t word) { m_words.push_back(word); }
 	void Finish(ShaderId* id) const { id->ids.Add(m_words.data(), static_cast<uint32_t>(m_words.size())); }
 
 private:
-	std::vector<uint32_t> m_words;
+	static std::vector<uint32_t>& Words()
+	{
+		thread_local std::vector<uint32_t> words;
+		return words;
+	}
+	static bool& InUse()
+	{
+		thread_local bool in_use = false;
+		return in_use;
+	}
+
+	std::vector<uint32_t>& m_words;
 };
 
 static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bind)
