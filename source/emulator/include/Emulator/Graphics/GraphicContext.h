@@ -251,6 +251,21 @@ struct GraphicContext
 	VulkanSampleLocationCapabilities sample_location_capabilities;
 };
 
+// vkDeviceWaitIdle needs every queue externally synchronized, but submitters
+// only hold their own queue's mutex: wait for each queue under that mutex.
+inline void VulkanWaitQueuesIdle(GraphicContext* ctx)
+{
+	for (const auto& queue: ctx->queues)
+	{
+		if (queue.vk_queue == nullptr || queue.mutex == nullptr)
+		{
+			continue;
+		}
+		Core::LockGuard lock(*queue.mutex);
+		vkQueueWaitIdle(queue.vk_queue);
+	}
+}
+
 inline void VulkanApplyResourceSharing(const GraphicContext& ctx, VkSharingMode* mode, uint32_t* family_count, const uint32_t** families)
 {
 	if (ctx.resource_family_count < 2)

@@ -236,7 +236,7 @@ void DebugOverlayShutdown(GraphicContext* ctx)
 	}
 	EXIT_IF(ctx == nullptr || ctx->device == nullptr);
 
-	vkDeviceWaitIdle(ctx->device);
+	VulkanWaitQueuesIdle(ctx);
 	ImGui_ImplVulkan_Shutdown();
 	::Kyty::Emulator::Host::HostGuiShutdown();
 	ImGui::DestroyContext();
@@ -259,7 +259,7 @@ void DebugOverlayOnSwapchainRecreated(GraphicContext* ctx, VulkanSwapchain* swap
 		return;
 	}
 
-	vkDeviceWaitIdle(ctx->device);
+	VulkanWaitQueuesIdle(ctx);
 
 	if (swapchain->swapchain_format != g_swapchain_format)
 	{

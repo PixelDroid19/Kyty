@@ -2987,7 +2987,7 @@ static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uin
 
 	Core::LockGuard lock(g_window_ctx->mutex);
 
-	vkDeviceWaitIdle(ctx->device);
+	VulkanWaitQueuesIdle(ctx);
 
 	if (s->render_finished_semaphores != nullptr)
 	{
