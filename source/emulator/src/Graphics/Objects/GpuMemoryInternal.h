@@ -75,6 +75,18 @@ constexpr uint64_t ObjectsRelation(GpuMemoryObjectType b, OverlapType relation, 
 	       static_cast<uint64_t>(b) * static_cast<uint64_t>(OverlapType::Max) + static_cast<uint64_t>(relation);
 }
 
+// Hashes of a storage range's bytes on its partly covered first and last pages,
+// taken at a write-back re-baseline. They stand for the guest bytes there while
+// the object's generation and content sequence are the ones they were taken at.
+struct GpuMemoryStorageEdges
+{
+	uint64_t head_hash        = 0;
+	uint64_t tail_hash        = 0;
+	uint64_t generation       = 0;
+	uint64_t content_sequence = 0;
+	bool     valid            = false;
+};
+
 // Content hash / wall-clock helpers shared by Create, Update, WriteBack.
 uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_t size);
 uint64_t GpuMemoryGetCurrentTime();
@@ -360,6 +372,7 @@ private:
 		bool                         dirty_registered                   = false;
 		bool                         depth_meta_bound                   = false;
 		uint64_t                     dirty_generation[VADDR_BLOCKS_MAX] = {};
+		GpuMemoryStorageEdges        storage_edges;
 		// Tracker page generations at the last upload of a storage buffer; the
 		// next upload copies only the pages whose generation moved since.
 		std::vector<uint64_t>        page_generations;
@@ -486,7 +499,9 @@ private:
 	// `ranges` answers whether a block meets one of the queried guest ranges.
 	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const;
 	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorageIn(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool                             StorageContentTracked(int heap_id, const Object& object) const;
 	[[nodiscard]] bool StorageIsWholeGuestContent(int heap_id, const Object& object) const;
+	bool                                           ConfirmStorageEdgesUnchanged(int heap_id, int object_id);
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);
 	bool TransientReadOnlyOverlapsAllowedLocked(uint64_t vaddr, uint64_t size, const GpuMemoryRangeQueryKey& query,

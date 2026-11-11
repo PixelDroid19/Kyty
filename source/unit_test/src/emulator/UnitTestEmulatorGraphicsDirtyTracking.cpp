@@ -999,6 +999,29 @@ TEST(EmulatorGraphicsDirtyTracking, HostNotificationMarksEveryOverlappingPage)
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 
+// A write outside the range on a page it only partly covers changes the range's
+// page evidence but not its interior; a write on a page it wholly covers does.
+TEST(EmulatorGraphicsDirtyTracking, InteriorChangeSkipsPartlyCoveredPages)
+{
+	Mapping mapping(3u);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page    = GetPageSize();
+	const uint64_t      address = mapping.address + 16u;
+	const uint64_t      size    = 2u * page;
+	GpuDirtyPageTracker tracker;
+	ASSERT_TRUE(tracker.RegisterRange(address, size));
+	ASSERT_TRUE(tracker.PrepareForRead(address, size));
+	const uint64_t before = tracker.SnapshotGeneration(address, size);
+	EXPECT_FALSE(tracker.InteriorChangedSince(address, size, before));
+	(void)tracker.NotifyWrite(mapping.address, 1u);
+	EXPECT_TRUE(tracker.ChangedSince(address, size, before));
+	EXPECT_FALSE(tracker.InteriorChangedSince(address, size, before));
+	EXPECT_TRUE(tracker.InteriorChangedSince(address, size - 1u, before));
+	(void)tracker.NotifyWrite(mapping.address + page, 1u);
+	EXPECT_TRUE(tracker.InteriorChangedSince(address, size, before));
+	EXPECT_TRUE(tracker.UnregisterRange(address, size));
+}
+
 // Partial uploads copy only the pages whose generation moved: a write must
 // move exactly the pages it touched, a fault included, and nothing else.
 TEST(EmulatorGraphicsDirtyTracking, PageGenerationsMoveOnlyForWrittenPages)

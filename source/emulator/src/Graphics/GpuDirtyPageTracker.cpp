@@ -2023,6 +2023,39 @@ bool GpuDirtyPageTracker::ChangedSince(uintptr_t address, size_t size, uint64_t 
 	return result || !found;
 }
 
+bool GpuDirtyPageTracker::InteriorChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept
+{
+	if (!Enabled())
+	{
+		return true;
+	}
+	std::lock_guard<std::mutex> lock(*m_registration_mutex);
+	const uintptr_t             end   = RangeEnd(address, size);
+	const auto                  range = m_ranges.find({address, end});
+	if (end == 0 || range == m_ranges.end())
+	{
+		return true;
+	}
+	const uintptr_t first = PageStart(address) == address ? address : PageEnd(PageStart(address));
+	const uintptr_t stop  = PageStart(end);
+	if (first >= stop)
+	{
+		return false;
+	}
+	const uintptr_t last = stop - m_page_size;
+	if (HasHostWriteLocked(first, last))
+	{
+		return true;
+	}
+	const auto evidence = SegmentEvidence(first / m_page_size, last / m_page_size);
+	return !evidence.complete || evidence.fallback_epoch > range->second.registered_epoch || evidence.write_epoch > snapshot;
+}
+
+uint64_t GpuDirtyPageTracker::PageSize() const noexcept
+{
+	return m_page_size;
+}
+
 bool GpuDirtyPageTracker::ReadObservationIsStable(uintptr_t address, size_t size,
 	                                               const GpuDirtyReadObservation& observation) const noexcept
 {

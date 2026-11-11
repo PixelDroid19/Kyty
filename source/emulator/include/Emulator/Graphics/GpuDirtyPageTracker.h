@@ -146,6 +146,11 @@ public:
 
 	[[nodiscard]] uint64_t             SnapshotGeneration(uintptr_t address, size_t size) const noexcept;
 	[[nodiscard]] bool                 ChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept;
+	// Whether a page lying wholly inside the registered range changed since
+	// `snapshot`, on the evidence ChangedSince uses. Pages the range shares with
+	// other memory are not consulted; an unregistered range reports a change.
+	[[nodiscard]] bool                 InteriorChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept;
+	[[nodiscard]] uint64_t             PageSize() const noexcept;
 	[[nodiscard]] bool                 ReadObservationIsStable(uintptr_t address, size_t size,
 	                                                          const GpuDirtyReadObservation& observation) const noexcept;
 	[[nodiscard]] bool                 Enabled() const noexcept;

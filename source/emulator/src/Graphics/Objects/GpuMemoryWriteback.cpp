@@ -43,6 +43,26 @@
 
 namespace Kyty::Libs::Graphics {
 
+// Hashes the range's bytes on its partly covered first and last pages (a range
+// inside one page is all head). They count only if the range stayed unchanged
+// since `read` while they were read.
+static GpuMemoryStorageEdges TakeStorageEdges(GpuMemoryObjectType type, uint64_t vaddr, uint64_t size, const GpuDirtyReadObservation& read)
+{
+	const auto&           tracker    = GpuDirtyPageTracker::Instance();
+	const uint64_t        page       = tracker.PageSize();
+	const uint64_t        end        = vaddr + size;
+	const uint64_t        head_end   = std::min(end, vaddr - vaddr % page + page);
+	const uint64_t        head_size  = vaddr % page != 0 ? head_end - vaddr : 0;
+	const uint64_t        tail_start = std::max(vaddr, end - end % page);
+	const uint64_t        tail_size  = end % page != 0 && (head_size == 0 || tail_start >= head_end) ? end - tail_start : 0;
+	GpuMemoryStorageEdges edges;
+	edges.head_hash  = GpuMemoryCalcHash(type, reinterpret_cast<const uint8_t*>(vaddr), head_size);
+	edges.tail_hash  = GpuMemoryCalcHash(type, reinterpret_cast<const uint8_t*>(tail_start), tail_size);
+	edges.generation = read.generation;
+	edges.valid      = tracker.ReadObservationIsStable(vaddr, size, read);
+	return edges;
+}
+
 void GpuMemory::FrameDone(GraphicContext* ctx)
 {
 	EXIT_IF(ctx == nullptr);
@@ -277,7 +297,8 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	// as Update does after an unchanged compare; otherwise the next use hashes
 	// the whole range only to find it unchanged. Page generations stay stale so
 	// label-fence holes are still uploaded.
-	bool generation_baseline[VADDR_BLOCKS_MAX] = {};
+	bool                    generation_baseline[VADDR_BLOCKS_MAX] = {};
+	GpuDirtyReadObservation edge_read;
 	if (recompute_self && o.check_hash && o.dirty_registered)
 	{
 		for (int vi = 0; vi < block.vaddr_num; vi++)
@@ -287,6 +308,7 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 			{
 				o.dirty_generation[vi]  = read.generation;
 				generation_baseline[vi] = true;
+				edge_read               = vi == 0 ? read : edge_read;
 			}
 		}
 	}
@@ -300,6 +322,12 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	o.cpu_update_time               = GpuMemoryGetCurrentTime();
 	o.content_origin                = GpuMemoryContentOrigin::GpuWriteBack;
 	o.content_sequence              = content_sequence;
+	o.storage_edges                 = {};
+	if (generation_baseline[0] && o.object.type == GpuMemoryObjectType::StorageBuffer && block.vaddr_num == 1)
+	{
+		o.storage_edges                  = TakeStorageEdges(o.object.type, block.vaddr[0], block.size[0], edge_read);
+		o.storage_edges.content_sequence = content_sequence;
+	}
 	const auto history_kind = o.object.type == GpuMemoryObjectType::StorageBuffer
 	                              ? GpuWriteHistoryKind::StorageWriteBack
 	                              : (o.object.type == GpuMemoryObjectType::RenderTexture
@@ -477,6 +505,7 @@ void GpuMemory::PublishStorageSnapshotLocked(const GpuMemoryStorageSnapshot& sna
 			o.dirty_generation[0] = read.generation;
 		}
 		o.hash[0] = rebaselined ? 0 : GpuMemoryCalcHash(o.object.type, reinterpret_cast<const uint8_t*>(snapshot.vaddr), snapshot.size);
+		o.storage_edges = {};
 	}
 	GuestDeviceAddressOverlayWrittenBack(identity, snapshot.vaddr, snapshot.size, rebaselined, o.dirty_generation[0]);
 }
@@ -605,12 +634,11 @@ std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(GpuMemoryGues
 	return found;
 }
 
-// The whole object is the guest content of its range when every other object
-// sharing its bytes is one its write-back leaves alone, no label fence or depth
-// metadata lies in it (their write-backs keep byte-level exclusions and side
-// effects), and the guest has not written the range since the object was last
-// synchronized with it.
-bool GpuMemory::StorageIsWholeGuestContent(int heap_id, const Object& object) const
+// The tracker can tell whether the guest wrote an object's range when the object
+// is one block, hashed and registered in page-fault mode, every other object
+// sharing its bytes is one its write-back leaves alone, and no depth metadata
+// lies in it (its write-backs keep byte-level side effects).
+bool GpuMemory::StorageContentTracked(int heap_id, const Object& object) const
 {
 	const auto& info = object.info;
 	if (object.block.vaddr_num != 1 || info.depth_meta_bound || !info.check_hash || !info.dirty_registered)
@@ -625,11 +653,55 @@ bool GpuMemory::StorageIsWholeGuestContent(int heap_id, const Object& object) co
 			return false;
 		}
 	}
+	return GpuDirtyPageTracker::Instance().Mode(object.block.vaddr[0], object.block.size[0]) == GpuDirtyTrackingMode::PageFault;
+}
+
+// The whole object is the guest content of its range when the tracker covers it,
+// no label fence lies in it (its write-back keeps byte-level exclusions), and the
+// guest has not written the range since the object was last synchronized with it.
+bool GpuMemory::StorageIsWholeGuestContent(int heap_id, const Object& object) const
+{
+	const uint64_t vaddr = object.block.vaddr[0];
+	const uint64_t size  = object.block.size[0];
+	return StorageContentTracked(heap_id, object) &&
+	       !GpuDirtyPageTracker::Instance().ChangedSince(vaddr, size, object.info.dirty_generation[0]) && !LabelRangeHasFence(vaddr, size);
+}
+
+// The tracker marks whole pages, so another object's write to a page this range
+// only partly covers reads as a guest write here. When no page wholly inside the
+// range changed, the range's bytes on its first and last pages decide: equal to
+// those kept at the last write-back re-baseline, the guest has not changed the
+// range, and it is re-baselined as Update does after an unchanged compare.
+bool GpuMemory::ConfirmStorageEdgesUnchanged(int heap_id, int object_id)
+{
+	auto&       object = m_heaps[heap_id].objects[object_id];
+	auto&       info   = object.info;
+	const auto& edges  = info.storage_edges;
+	if (!edges.valid || edges.generation != info.dirty_generation[0] || edges.content_sequence != info.content_sequence ||
+	    !StorageContentTracked(heap_id, object))
+	{
+		return false;
+	}
 	const uint64_t vaddr   = object.block.vaddr[0];
 	const uint64_t size    = object.block.size[0];
-	const auto&    tracker = GpuDirtyPageTracker::Instance();
-	return tracker.Mode(vaddr, size) == GpuDirtyTrackingMode::PageFault &&
-	       !tracker.ChangedSince(vaddr, size, info.dirty_generation[0]) && !LabelRangeHasFence(vaddr, size);
+	auto&          tracker = GpuDirtyPageTracker::Instance();
+	if (LabelRangeHasFence(vaddr, size))
+	{
+		return false;
+	}
+	const auto read = tracker.BeginRead(vaddr, size);
+	if (!read.tracked || tracker.InteriorChangedSince(vaddr, size, info.dirty_generation[0]))
+	{
+		return false;
+	}
+	const auto current = TakeStorageEdges(info.object.type, vaddr, size, read);
+	if (!current.valid || current.head_hash != edges.head_hash || current.tail_hash != edges.tail_hash)
+	{
+		return false;
+	}
+	info.dirty_generation[0]      = read.generation;
+	info.storage_edges.generation = read.generation;
+	return true;
 }
 
 bool GpuMemory::PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
@@ -699,7 +771,8 @@ bool GpuMemory::PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueu
 		{
 			continue;
 		}
-		if (publishable == nullptr || (!in_place && (!consumer_ordered || !StorageIsWholeGuestContent(heap_id, object))))
+		if (publishable == nullptr || (!in_place && (!consumer_ordered || (!StorageIsWholeGuestContent(heap_id, object) &&
+		                                                                   !ConfirmStorageEdgesUnchanged(heap_id, object_id)))))
 		{
 			*dependency = unawaited.sequence != 0 ? unawaited : pending;
 			return true;
