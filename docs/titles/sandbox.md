@@ -127,6 +127,35 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   roughly 20-25 ms of a frame are in no instrumented wait; this mixes runs and is an estimate. No other
   thread was above 14%, but 13-14% is 15-19 ms of a frame, and whether that time overlaps the command
   processor was not measured.
+- **Command-processor idle between batches (measured; one run with temporary counters, 80.7 ms frames
+  at 2,866 draws per frame; clean runs are 98-110 ms).** Among the graphics submit functions the title
+  imports only the multi-DCB driver submit, and it submits one graphics batch per frame (12.6 per
+  second). The graphics command-processor thread waits about 15.6 ms of each frame for the next batch
+  (194 ms/s, mostly one wait of 8-20 ms per frame). One guest thread makes 565 of 566 submits and is on
+  a CPU 11.5 ms of each frame; the command-processor thread 53.5 ms.
+  - A graphics submit returns only after the command processor has run its whole batch:
+    `GraphicsRing::Submit` waits on the decode completion, which `GraphicsRing::ThreadBatchRun`
+    signals after the batch, its flush and its flip (`GraphicsRun.cpp`), except while decode waits on
+    a value no submitted GPU work writes. This is a recorded guest-visible contract
+    (`docs/bringup/cross-title.md`, "A graphics submit returns after its batch is decoded"), so the
+    guest's work after a submit and the command processor's run of the batch are serial. That the
+    submitting thread waits there, and not in a guest wait, fits its CPU time but was not mapped: the
+    thread snapshots carry no host thread id.
+  - Bound: overlapping the two recovers at most this gap, about 1.24x (12 to 15 fps in that run). It
+    needs a snapshot, taken before the submit returns, of the guest memory the batch reads, as the
+    contract record says; its scope and cost are not measured. The work between the batch's last guest
+    read and the signal (graphics interrupt queueing, flush, flip) also holds the submitter and is not
+    measured.
+- **Residency sweeps (measured, same run).** In the world they cost 1.46 ms per frame. During loading,
+  for four seconds, the per-draw residency check ran up to 1,916 sweeps per second, each over one
+  unimported span, and imported no page in about 6,700 sweeps at up to 104 ms/s. Each sweep is one
+  `SEEK_DATA` query from the span start (`FindUnpopulatedSharedBackingSpans`,
+  `source/lib/Core/src/VirtualMemory.cpp`), 31-57 us there against about 3 us in quiet seconds, and is
+  triggered by a population change anywhere in the shared backing (it grew 20-25 MB/s while discards
+  rose 2,500-5,000 per second). In three clean runs command-processor system time followed residency
+  time (correlation 0.75-0.95), and seconds above 300 ms/s held 6 of 9 frames over 250 ms in two of
+  them. Narrowing the sweep needs per-range population information that the backing counter does not
+  give; not built.
 
 ## Sandbox title: letters missing from the death message (2026-11-10, open)
 
@@ -152,6 +181,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   presents 4040-4059 were not dumped.
 - A second run from the same saved world, dumping every new small source from present 3950, did not
   reach the death screen (the player was alive at 160 s), so it gave no answer.
+- The pause menu, captured in a later run, renders all its text, but none of it contains K, Z, E or b,
+  so it does not test this defect.
 - Direction: when the death screen is reached again, dump the small sources without gaps and log
   every write to the atlas range, to tell whether the missing glyphs' sources are never produced,
   produced empty, or produced and not copied.

@@ -34,9 +34,10 @@ recording could be split across threads, what bounds the gain and what must hold
   buffers exist.
 - A command buffer slot holds up to 8 chunks and is submitted early when the GPU is idle, after a
   dispatch, or every 8 operations once 500 us have passed (`GraphicsRun.cpp:544-623`).
-- Measured in the world scene (agent performance samples of three earlier runs, samples with at
-  least 3 flips and 10,000 draws): 3,200-4,100 draws, 141-243 render-pass begins and 111-129
-  submissions per frame, so 15-22 draws per pass and 29-32 per submission on average.
+- Measured in the world scene (agent performance samples of two runs without temporary code,
+  samples with at least 3 flips and 10,000 draws): 3,170-3,480 draws, 133-141 render-pass begins and
+  95-111 submissions per frame, so 22-26 draws per pass and 29-37 per submission on average. The
+  command-processor counter reads 77-88 ms of 98-110 ms frames.
 - Per-submission bookkeeping at draw time: memory-object use, descriptor-set use
   (`RecordSetUse`), pipeline leases, snapshot leases, publication gate.
 
@@ -66,7 +67,8 @@ Two stages per draw, connected by a draw record.
 
 ## What bounds the gain
 
-Counter classes per frame of 105 ms of CP time (world scene, one run):
+Counter classes per frame of 105 ms of CP time (world scene, one run with temporary stage timers,
+which slow the CP):
 
 | Class | ms/frame | Stage |
 | --- | --- | --- |
@@ -78,20 +80,26 @@ Counter classes per frame of 105 ms of CP time (world scene, one run):
 - The sandbox record bounds CP time at 1.2x (only the independent work leaves the CP thread) to
   1.7x (caches and unattributed work leave too). The draw record adds a per-draw copy, and the
   shader input information that stage A keeps lowers the 1.2x end further; neither is measured.
-- The frame is 131 ms, so about 26 ms per frame lie outside CP processing and are not attributed.
-  At the bounds above the frame falls to about 88-113 ms: 9-11 fps.
+- In that run the frame is 131 ms, so about 26 ms per frame lie outside CP processing (21-22 ms in
+  the runs without timers). At the bounds above the frame falls to about 88-113 ms: 9-11 fps.
+- Most of that gap fits the submit contract: a graphics submit returns only after the CP has run its
+  whole batch (`docs/bringup/cross-title.md`, "A graphics submit returns after its batch is decoded"),
+  the title submits one batch per frame, and the CP then waits about 15.6 ms per frame for the next
+  one (`docs/titles/sandbox.md`, "Command-processor idle between batches"). With the split, the
+  submitter can return once stage A has passed the batch's last guest read, so stage B overlaps the
+  guest's next frame; this overlap is not in the bounds above.
 - Moving work to stage B cannot reduce stage A. Stage A shrinks only by doing less ordered work per
   draw: the 12-16 ms of waits and the memory-object creation in binding are the two largest parts,
   and the two measured attempts on them are excluded (`docs/titles/sandbox.md`: staging drain and
   retry; in-place vertex binds).
-- 30 fps is a 33 ms frame. With the 26 ms outside CP processing unchanged, stage A would have to
-  fit in about 7 ms per frame, about 2 us per draw. Stage A at 7 us per draw over 5,000 draws, with the
-  26 ms kept, gives about 16 fps.
+- 30 fps is a 33 ms frame. With 22-26 ms per frame outside CP processing unchanged, stage A would
+  have to fit in 7-11 ms per frame, 2-3 us per draw over 3,500 draws. Stage A at 7 us per draw over
+  3,500 draws, with the gap kept, gives about 20 fps.
 
 ## Risks
 
-- Short segments: passes hold 15-22 draws on average, so a secondary per segment is recorded about
-  140-240 times per frame. The per-call cost of `vkCmdExecuteCommands` and of a small secondary on
+- Short segments: passes hold 22-26 draws on average, so a secondary per segment is recorded about
+  130-140 times per frame. The per-call cost of `vkCmdExecuteCommands` and of a small secondary on
   each driver is unmeasured.
 - A secondary inherits no pipeline, descriptor, vertex-buffer or dynamic state, so each one
   re-emits all of it, and the state deduplication in `RecordState` restarts at every secondary.
@@ -103,6 +111,6 @@ Counter classes per frame of 105 ms of CP time (world scene, one run):
 ## Decision
 
 Not built. The ceiling (1.2-1.7x of CP time, about 9-11 fps in the measured scene) is below the
-2x build gate. Build only after the 26 ms per frame outside CP processing is attributed and cut,
-and a change brings stage A low enough that stage A plus the remaining off-CP time fit in a 33 ms
+2x build gate. Build only after the time outside CP processing (largely the serial submit, see
+above) is cut, and a change brings stage A low enough that stage A plus the remaining off-CP time fit in a 33 ms
 frame on the same route.
