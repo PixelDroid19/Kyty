@@ -2311,6 +2311,13 @@ TEST(EmulatorGraphicsState, GpuMemoryValidatesTheCompleteAllocatedGuestRangeRead
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(heap_base + heap_size - 4, 8), GpuMemoryRangeValidationStatus::Unallocated);
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(heap_base, 0), GpuMemoryRangeValidationStatus::InvalidArgument);
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(UINT64_MAX - 3, 8), GpuMemoryRangeValidationStatus::InvalidArgument);
+
+	// Two overlapping heaps: one heap must hold the whole range, not their union.
+	const uint64_t overlap_base = 0x0000005104000000ull;
+	GpuMemorySetAllocatedRange(overlap_base, 0x10000ull);
+	GpuMemorySetAllocatedRange(overlap_base + 0x8000ull, 0x18000ull);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(overlap_base + 0xc000ull, 0x8000ull), GpuMemoryRangeValidationStatus::Valid);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(overlap_base + 0x4000ull, 0x10000ull), GpuMemoryRangeValidationStatus::Unallocated);
 }
 
 namespace {

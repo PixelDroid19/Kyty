@@ -206,7 +206,6 @@ void GpuMemory::SetAllocatedRange(uint64_t vaddr, uint64_t size)
 
 	m_heaps.Add(h);
 	RebuildHeapIndex();
-	m_allocated_validation_cache.Invalidate();
 	m_allocated_prefix_cache.Invalidate();
 	m_overlap_snapshot_cache.Invalidate();
 }
@@ -231,37 +230,19 @@ GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRange(uint64_t vaddr,
 	}
 
 	Core::LockGuard lock(m_mutex);
-	const uint64_t query_size = size;
-	const auto     query      = GpuMemoryRangeQueryKey::Create(&vaddr, &query_size, 1, false);
-	return ValidateAllocatedRangeLocked(vaddr, size, query);
+	return ValidateAllocatedRangeLocked(vaddr, size);
 }
 
-GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
-	                                                                    const GpuMemoryRangeQueryKey& query)
+GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size) const
 {
-	GpuMemoryRangeValidationStatus cached {};
-	if (m_allocated_validation_cache.Lookup(query, &cached))
-	{
-		return cached;
-	}
-	// Any heap that covers vaddr may hold the whole range.
+	// Every heap open over vaddr starts at or before it, so the furthest end
+	// among them decides whether one heap holds the whole range.
 	const auto after = std::upper_bound(m_heap_index.begin(), m_heap_index.end(), vaddr,
 	                                    [](uint64_t value, const HeapSpan& span) { return value < span.begin; });
-	if (after != m_heap_index.begin() && vaddr < std::prev(after)->end)
+	if (after != m_heap_index.begin() && vaddr < std::prev(after)->end && size <= std::prev(after)->max_end - vaddr)
 	{
-		const auto& span = *std::prev(after);
-		for (uint32_t i = 0; i < span.open_count; i++)
-		{
-			const auto&    heap   = m_heaps[m_heap_index_open[span.open_first + i]];
-			const uint64_t offset = vaddr - heap.range.vaddr;
-			if (size <= heap.range.size - offset)
-			{
-				m_allocated_validation_cache.Store(query, GpuMemoryRangeValidationStatus::Valid);
-				return GpuMemoryRangeValidationStatus::Valid;
-			}
-		}
+		return GpuMemoryRangeValidationStatus::Valid;
 	}
-	m_allocated_validation_cache.Store(query, GpuMemoryRangeValidationStatus::Unallocated);
 	return GpuMemoryRangeValidationStatus::Unallocated;
 }
 
@@ -447,8 +428,13 @@ void GpuMemory::RebuildHeapIndex()
 			m_heap_index.back().end = edges[index].address;
 			continue;
 		}
+		uint64_t max_end = 0;
+		for (const int heap_id: open)
+		{
+			max_end = std::max(max_end, heaps[heap_id].range.vaddr + heaps[heap_id].range.size);
+		}
 		HeapSpan span {begin, edges[index].address, *open.begin(), static_cast<uint32_t>(m_heap_index_open.size()),
-		               static_cast<uint32_t>(open.size())};
+		               static_cast<uint32_t>(open.size()), max_end};
 		m_heap_index_open.insert(m_heap_index_open.end(), open.begin(), open.end());
 		m_heap_index.push_back(span);
 	}
@@ -557,7 +543,6 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuMemo
 				m_heaps.RemoveAt(index);
 				RebuildHeapIndex();
 				ForgetHeapStorageObjects(index);
-				m_allocated_validation_cache.Invalidate();
 				m_allocated_prefix_cache.Invalidate();
 				m_overlap_snapshot_cache.Invalidate();
 				break;

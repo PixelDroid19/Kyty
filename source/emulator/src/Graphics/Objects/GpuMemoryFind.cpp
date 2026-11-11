@@ -364,7 +364,7 @@ bool GpuMemory::CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemo
 
 	const auto      query = GpuMemoryRangeQueryKey::Create(&vaddr, &size, 1, false);
 	Core::LockGuard lock(m_mutex);
-	if (ValidateAllocatedRangeLocked(vaddr, size, query) != GpuMemoryRangeValidationStatus::Valid)
+	if (ValidateAllocatedRangeLocked(vaddr, size) != GpuMemoryRangeValidationStatus::Valid)
 	{
 		return false;
 	}
@@ -440,7 +440,7 @@ bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, voi
 	const auto      query = GpuMemoryRangeQueryKey::Create(&vaddr, &size, 1, false);
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
-	if (ValidateAllocatedRangeLocked(vaddr, size, query) != GpuMemoryRangeValidationStatus::Valid)
+	if (ValidateAllocatedRangeLocked(vaddr, size) != GpuMemoryRangeValidationStatus::Valid)
 	{
 		finish_validation();
 		return false;
@@ -501,7 +501,7 @@ bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, con
 	const auto      query = GpuMemoryRangeQueryKey::Create(&vaddr, &size, 1, false);
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
-	if (ValidateAllocatedRangeLocked(vaddr, size, query) != GpuMemoryRangeValidationStatus::Valid)
+	if (ValidateAllocatedRangeLocked(vaddr, size) != GpuMemoryRangeValidationStatus::Valid)
 	{
 		finish_validation();
 		return false;

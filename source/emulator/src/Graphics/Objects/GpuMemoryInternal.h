@@ -428,7 +428,6 @@ private:
 	};
 
 	using MaterializationCache = GpuMemoryMaterializationCache<Materialization, 2048>;
-	using AllocatedValidationCache = GpuMemoryRangeQueryCache<GpuMemoryRangeValidationStatus, 4096>;
 	using AllocatedPrefixCache     = GpuMemoryRangeQueryCache<uint64_t, 4096>;
 	using OverlapSnapshotCache     = GpuMemoryRangeQueryCache<GpuMemoryOverlapSnapshot, 16384>;
 
@@ -508,8 +507,7 @@ private:
 	[[nodiscard]] bool                             StorageContentTracked(int heap_id, const Object& object) const;
 	[[nodiscard]] bool StorageIsWholeGuestContent(int heap_id, const Object& object) const;
 	bool                                           ConfirmStorageEdgesUnchanged(int heap_id, int object_id);
-	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
-	                                                            const GpuMemoryRangeQueryKey& query);
+	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size) const;
 	bool TransientReadOnlyOverlapsAllowedLocked(uint64_t vaddr, uint64_t size, const GpuMemoryRangeQueryKey& query,
 	                                            GpuMemorySnapshotAdmission admission);
 	// Whether a writable storage buffer whose GPU writes are not yet published covers part of the range.
@@ -554,7 +552,8 @@ private:
 	Vector<Heap> m_heaps;
 	// [begin, end) address spans, sorted and disjoint, each naming the lowest heap
 	// index that covers it: GetHeapId's first-match answer by binary search.
-	// Every covering heap, ascending, is m_heap_index_open[open_first, +open_count).
+	// Every covering heap, ascending, is m_heap_index_open[open_first, +open_count);
+	// max_end is the furthest end among them.
 	struct HeapSpan
 	{
 		uint64_t begin      = 0;
@@ -562,6 +561,7 @@ private:
 		int      heap_id    = -1;
 		uint32_t open_first = 0;
 		uint32_t open_count = 0;
+		uint64_t max_end    = 0;
 	};
 	std::vector<HeapSpan> m_heap_index;
 	std::vector<int>      m_heap_index_open;
@@ -614,7 +614,6 @@ private:
 	uint32_t m_retirement_object_cursor          = 0;
 
 	MaterializationCache m_materialization_cache;
-	AllocatedValidationCache m_allocated_validation_cache;
 	AllocatedPrefixCache     m_allocated_prefix_cache;
 	OverlapSnapshotCache     m_overlap_snapshot_cache;
 	// FindBlocks' candidate ids; reused under m_mutex so a lookup does not allocate them.
