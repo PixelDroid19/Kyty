@@ -355,6 +355,26 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 - **GPU estimate.** In the same run the render engine was busy 37% of 131 ms frames at 600-650 MHz,
   about 48 ms. If that time scaled with the clock it would be about 13 ms at 2,400 MHz; this is an
   estimate, not a measurement.
+- **Skipping whole draws (2026-11-11, offline reading of the measurements above, no run).** 30 fps
+  with the serial submit needs about 14 ms of command processing per frame at about 5,300 draws,
+  about 2.7 us per draw against about 17 us now, so a candidate has to remove at least half of a
+  draw's time at once. Grouped by what differs between a draw and its counterpart in the previous
+  frame (figures from several runs, an estimate):
+  - Same as the previous frame (the draw key, and the shader and stage registers with user data
+    masked): context-only state, about 1 us per draw and already served by cache lookups; pipeline
+    setup, part of the shared caches' 2.6 us; the shader input recipe's ceiling of 1.41 us, before
+    guards. At most about 4 us together.
+  - New every frame (user-data values and the ring slots they point to): command emission and
+    register state, about 4 us; read-only snapshot captures, 1.7 us (every capture is of a range the
+    previous frame did not probe); admission checks, about 1.3 us; the index-snapshot reuse path,
+    1.2 us; the vertex write-back check, 0.7 us; device-address preparation, 0.6 us; descriptor-set
+    finalization (98% of its misses differ only in a rotating storage object), resource binding and
+    the unattributed rest. About 13 us.
+  - The other implementation's in-world entry (above: 60 and 121 us per draw at p50 and p95, about
+    470 draws) adds no per-draw mechanism.
+  No group a previous-frame match could skip reaches about 9 us per draw, so no candidate qualifies
+  and none is built. Reopening needs a way to serve the per-frame data (ring slots, new snapshot
+  ranges) without per-draw work, not a previous-frame match.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
   now. None of the measured levers, alone or together, reaches that. In the profiled run (110 ms
   frames) the command-processor thread was on a CPU about 73 ms of each frame. The fence waits are the
