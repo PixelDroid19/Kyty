@@ -518,42 +518,83 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     ledger, a driver division loop under buffer copies took 0-7.5 ms per frame depending on the
     run (`docs/bringup/cross-title.md`, buffer copies with awkward sizes). The guest-range checks
     of the read-only binds, about 7.4 ms in the full-stack run below, were priced after
-    (2026-11-11) and are open:
+    (2026-11-11); the allocated-range check was then fixed and the rest is open:
     - Overlap test, 5.7 ms: the miss walk 2.9 (storage 1.5, vertex 0.8, index 0.5), the cache
       lookup every call pays 1.7 (a miss looks up twice, `GpuMemoryFind.cpp`, lines 299 and 381),
       and the writable-storage test 0.9, all of it under index binds. Index binds are almost all
       reused, so their misses are repeated keys, evicted by another key or cleared by an
       invalidation; which of the two is not separated. On the reused path the lookup takes 0.5 ms.
-    - Allocated-range check, 1.7 ms, of which its own cache's lookup and store are 1.4. That cache
-      is invalidated only when a heap is added or removed, so a heap-generation stamp kept on a
-      reused snapshot could stand in for it: 0.46 ms on that path, about 0.4 ms after the stamp
-      compare. Fresh captures have no snapshot to hold it. The cache has 4,096 slots against about
-      12,000 distinct read-only ranges per frame, so most lookups may miss: 1.4 ms of cache for a
-      search that shows as about 0.3 ms. Which titles add heaps during play was not looked at.
-    - Counted (2026-11-11, one 165 s run with temporary counters; 191 world frames of 115 ms,
-      5,187 draws per frame; lookups matched the bind probes and index lookups the draws). Per
-      frame, overlap test outside index binds: 17,028 lookups, of which 7,099 hit, 164 found an
+    - Allocated-range check, 1.7 ms, of which its own cache's lookup and store were 1.4: the cache
+      had 4,096 slots against about 12,000 distinct read-only ranges per frame, so most lookups
+      missed, around a search of about 0.3 ms. Fixed: each span of the heap index keeps the
+      furthest end among the heaps open over it, so the check is one binary search and one compare
+      (`GpuMemory.cpp`, `ValidateAllocatedRangeLocked`), and the cache is gone (0.4 MB of
+      `GpuMemory`). A unit test covers two overlapping heaps. In the verification run below the
+      check took 0.05 ms per frame (one sample); that binary also carried the temporary counters
+      and the larger overlap table, and that run is the change's only title evidence.
+    - Counted (2026-11-11, one run of about 150 s with temporary counters; 191 world frames of
+      115 ms, 5,187 draws per frame; lookups matched the bind probes and index lookups the draws).
+      Per frame, overlap test outside index binds: 17,028 lookups, of which 7,099 hit, 164 found an
       empty slot, 3,462 a slot left by a whole invalidation and 6,303 another key; under index
       binds 5,209 (3,321, 60, 613, 1,214); allocated-range check 23,061 (8,077, 0, 1,616,
       13,368). Range invalidations cleared 78 live overlap entries per frame. Whole invalidations
-      come only from adding or removing a heap and ran 0.83 times per frame. The count tests the
-      generation before the key, so a slot left by a whole invalidation may also hold another key:
-      among the other lookups 47 % did (26 % under index binds, 62 % in the allocated-range check).
+      come only from adding or removing a heap and ran 0.83 times per frame; the two later runs
+      with heap counters saw only heap adds (0.97 and 0.80 per frame) and no removal. The count
+      tests the generation before the key, so a slot left by a whole invalidation may also hold
+      another key: among the other lookups 47 % did (26 % under index binds, 62 % in the
+      allocated-range check).
     - Priced at about 0.25 us per overlap miss and 0.05 us per allocated-range miss, from the
       full-stack run, which had the same bind probes per frame (20,407 against 20,487). Another
       key costs about 2.3 ms in the overlap test, counting its share of the invalidated slots;
-      invalidating only the heap's range instead of the whole caches would save about 0.6 ms. The
-      allocated-range cache costs its lookup and store, 1.4 ms, around a search of about 0.3 ms
-      (about six samples). These prices overlap and do not add.
+      invalidating only the heap's range instead of the whole caches would save about 0.6 ms.
+      These prices overlap and do not add. The 2.3 ms is not a lever as it stands: four times the
+      slots did not shorten the miss walk (below). The slot is the key's mixed 64-bit hash masked
+      by the capacity (`GpuMemoryRangeQueryCache.h`), so it spreads with the table; the likelier
+      reading is that most of those misses are keys not yet stored in the frame, which miss at any
+      size. Misses were not counted in the verification run, so that stays unconfirmed.
+    - A larger overlap table was tried and reverted: 65,536 slots (table 8.0 to 32.0 MB, about
+      24 MB more resident), kept only if the miss walk plus the lookup fell by 1 ms. In the
+      verification run they rose from 4.61 to 5.02 ms per frame (5,271 draws against 5,183), and
+      the span index's store and unlink from 2.56 to 3.41 ms.
     - Heap-range invalidation is a lead, not built: it is under 1 ms, and a stale entry would reach
       every title. The argument for it: a heap is added empty and removed after its objects are
       freed, overlap results depend on objects only, and allocation validity changes only for
       queries that overlap the heap. Lines 312-340 of `QueryOverlapsLocked`
       (`GpuMemoryFind.cpp`) were not read.
-    - The heap events themselves: in the full-stack run no sample of any thread (3,001 samples)
-      fell in adding or removing a heap, the heap index rebuild or the queue drain, so their CPU
-      time is under about 0.15 ms per frame. Time spent waiting in a drain is not seen by those
-      samples, and which of the two sites the events come from was not separated.
+    - Verification run (2026-11-11, one run ended 40 s after the world loaded; both changes and
+      temporary heap and drain counters; 168 world frames of 103.7 ms, 5,271 draws per frame;
+      command-processor CPU 75.1 ms per frame against 74.7 in the full-stack run; one sample is
+      0.054 ms per frame). The read-only capture fell from 15.0 to 13.4 ms and the read-only upload
+      from 16.1 to 14.1 ms, about the allocated-range gain within about 0.9 ms of noise.
+    - The heap events themselves: in the full-stack run no sample of any thread fell in adding or
+      removing a heap, the heap index rebuild or the queue drain, so their user time is under
+      about 0.15 ms per frame (3,001 user-CPU samples, symbolized by address against a rebuilt
+      binary whose layout was checked on 1,268 addresses of the processor thread). Kernel time and
+      waits are not seen by samples, so the verification run counted the drains.
+    - Drains, open (verification run, world window of 17 s, 164 frames): 4.46 per frame, all from
+      releasing direct memory (`GraphicsInvalidateGpuMappingRanges`); none came from removing a
+      heap, and none was seen for a cover heap or a video buffer (those counters never fired). A
+      drain waits for the submission admission gate, then for the GPU to go idle: 6.9 ms of drain
+      per frame, the gate held 7.1 ms. Of 732 invalidations, 619 found no GPU object, device-address
+      window or video buffer, 48 a GPU object and 113 a device-address window. A Gen5 submit
+      returns only after its batch is decoded and holds the gate meanwhile, about 82 ms per frame,
+      so a release waits for the decode in flight; the releasing threads waited about 75 ms per
+      frame in total, in parallel behind the decode, which is not a frame cost by itself.
+    - Drain bound on the frame: the frame is the submitter's cycle, about 82 ms inside the submit
+      and a 21.8 ms gap. The submitting thread made 94 of about 97 submits and ran 1.31 drains per
+      frame, waiting 1.9 ms for the gate before them; its user CPU was 12.9 ms per frame, of which
+      the release path was 0.5 ms. That leaves 7.0 ms of the gap for its drains, kernel time and
+      any other wait, so the drains cost the frame between about 2 and 9 ms (1.31 drains at the
+      mean 1.54 ms give about 2 ms more than the wait). Admitted submits waited 0.005 ms per frame
+      at the gate, which is why the first reading, gate waits of submits only, missed it.
+    - Load-time lead: in the first 92 s the drains held the gate 22-64 % of each 15 s window and
+      10,899 of 12,630 invalidations (86 %) found nothing (2,415 of 2,417 between 16 and 31 s).
+    - Write notifications on guest memory copies, a lead found in the same run: on the submitting
+      thread 76 of 238 samples, about 4.1 ms per frame inside the gap, are the dirty-page tracker
+      called from the guest `memcpy` (`LibCString.cpp`, `GpuDirtyPageTracker::NotifyWrite`); the
+      processor thread spends about 1.8 ms per frame there. Of the 76, 22 fall in `PageStart`, a
+      division by the page size, and 16 in the hashed page probe. Calls per frame were not
+      counted.
   - Needing a design, or changing when guest bytes are read (B), re-priced 2026-11-11 on one
     call-graph run (61 world frames of 107 ms, 5,081 draws, 82.5 ms of command-processor CPU time
     per frame, 921 samples, so about 1 ms of noise at 10 ms; whole-function shares). Its 16 KB
