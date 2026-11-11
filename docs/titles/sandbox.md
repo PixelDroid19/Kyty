@@ -6,6 +6,76 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Sandbox title: vertex streams fetched from the imported guest pages (2026-11-11, built, frame time unchanged)
+
+First slice of the rework of how draws reach guest memory (stages in "What comes next" below). It removes the
+per-stream copy for vertex data; it does not change the frame time of this title by itself.
+
+- **Change.** A vertex stream whose guest range lies inside one imported run of direct memory, and over which no
+  live GPU object may hold a result the guest bytes do not show, is bound from the import buffer at the guest
+  offset. No copy, snapshot lookup or compare runs for it. Every other stream keeps the copy path: a stream that
+  fetches past its records (the copy provides the zero tail), a range outside one imported run, and a range that
+  shares a page with such an object.
+  - Guard: a per-page count of the live objects that may hold a host result. Surfaces always count; storage,
+    vertex and index buffers count only while writable and in use, because their write-back copies the result
+    to guest memory before the use clears, under the same lock. The count changes only where an object's state
+    changes (creation, free, heap removal and the one function every `in_use` / `read_only` change calls).
+  - Lookup: the chunk last resolved for each 64 KiB of guest memory answers without the registry lock, and
+    holds while no chunk has left the registry. No buffer is created per range and nothing is imported on demand.
+  - Device gate: the import buffers get the vertex usage only when every import handle type the device uses
+    reports itself importable with that usage; otherwise nothing is bound in place.
+- **Premise, measured first (hazard probe, temporary).** A probe hashed the guest bytes of every vertex, index
+  and storage range a draw bound, and hashed them again when the draw's submission completed. No range changed:
+  `PPSA17221 - Minecraft` 166,425 ranges checked, `PPSA21402 - Balatro` 462,256, `PPSA09076 - DREDGE` 1,879,841.
+  A hand-made write between the two hashes was reported every time (41 of 41, 113 of 113, 459 of 459). This was
+  measured with the serial submit, where the guest thread waits for the submission; a submit that returns early
+  must repeat the probe before it relies on the result.
+- **Guard checked against the slow walk (temporary census, always-on run).** For one in 16 streams bound in
+  place the page count was compared, under one lock, with a walk of every object overlapping the stream's pages:
+  180,311 checked in the world run, none where the walk found an object the count lacked. For one in 16 refusals
+  the count's answer was replaced by "none" and the walk had to find the object: 16,344 of 16,344.
+- **Engagement (same census).** World run, 5,261 draws per flip: 98.8 % of streams bound in place, 1.2 % refused
+  by the page count (all of them writable storage in use), 427 streams with a tail fetch, none unresolved. The
+  chunk lookup took the registry lock for 36,219 of 857,046 streams. Other titles and the second GPU are in
+  `docs/bringup/cross-title.md` ("Vertex streams from guest pages: engagement by title and GPU").
+- **Measurement (Intel A770, Mesa 26.2.6, strict, 60 fps limit, world route from one save copy, one always-on and
+  one always-off run of the same binary).** Time the submitting thread holds a submission, matched by vertex
+  binds per submission in 1 s buckets: 5,200-5,600 binds 79.98 ms on (n=16) against 82.71 off (n=8); 5,600-6,200
+  82.99 (n=20) against 87.42 (n=15). That is 3-4 ms of command-processor time from one pair of runs with an
+  unpinned GPU clock (median 850 against 750 MHz, render busy 40-43 % in both). World frame median 102.3 ms on,
+  102.7 ms off; a third always-on run gave 94.8 ms (p10 87.1, p90 103.1), so the spread between runs (about 8 ms)
+  is larger than the gain. This is not an fps gain.
+- **Images.** The always-on and the always-off capture each show a correct night world with intact terrain,
+  HUD and text. They are different views (the route ends wherever the night's mobs leave the player), so the
+  material scores are not comparable and neither passes the gate on a dark scene (70 and 77 quantized colors).
+  One always-on run ended on the death screen with the letters missing that the record below lists as open;
+  that defect predates this change.
+- **Build without the census.** One world run: exit 0, world from 103 s, frame median 102.8 ms (p10 93.8,
+  p90 125.5) at 5,256 draws per flip; the capture shows the forest with intact terrain, HUD and text. That run
+  predates two later edits, line wraps and the write-back fix's `in_use` condition, neither on the bind path.
+  The final build passed 351 tests of the graphics-state and memory-manager suites and the three repository
+  gates.
+- **Vulkan validity.** Every chunk the lookup can return gets its buffer from the one import site that adds the
+  vertex usage. One 63 s run of `PPSA21402 - Balatro` on the final build with the validation layer loaded
+  (errors stop the run) ended with exit 0 and no report; the census run of that title bound 67 % of its
+  streams in place.
+- **Draw-to-draw repetition (temporary census, last 40 s of the world run, 2,254,171 indexed draws, each compared
+  with the previous indexed draw on its thread).** Same pipeline 97.7 %, same framebuffer 98.7 %, same textures
+  and samplers 91.7 %, same storage descriptors 0.0 % (2.1 % when the base address is ignored: sizes and record
+  counts also differ), same direct register values and table pointer 1.7 %, same table bytes 98.2 %; 25.3 bytes of
+  guest tables per draw. Nearly every draw keeps its pipeline, target and textures and changes only its storage
+  descriptors, register values and vertex and index ranges.
+- **What comes next.** (1) index buffers and constants the same way, with the in-place decision taken once where
+  the streams are prepared; (2) buffers out of the descriptor sets, since the set key has the range and not the
+  offset, which decides between the per-shader recipe of `docs/bringup/cp-draw-plan.md` and a path that records
+  only what changed since the previous draw; (3) the submit that returns before the host is done, last, with its
+  own review and the hazard probe repeated.
+- **Open.** A debug check that re-hashes in-place ranges at completion is not shipped. Per stream, the prepare
+  step still asks the memory manager whether writable storage overlaps (two locks and a collection, about
+  0.7 us per draw); the page count answers the same question and can return early. Ranges outside an imported
+  run are not imported on demand. On the AMD driver the decision rests on the reported capability and one title;
+  no GPU time was compared there.
+
 ## Sandbox title: frame load and command-processor ceiling in the world (2026-11-10, measured)
 
 - **Observation (Intel A770, Mesa 26.2.6, strict, 60 fps present limit, world route, build of
@@ -331,7 +401,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       write-back on a shared page had marked it (below, fixed in `443032ed0`).
   - With four recording threads, command-processor time is bounded at 1.2x (only independent work in
     parallel) to 1.7x (caches, unattributed work and the double-count case in parallel too). Parallel
-    recording was not built (design and bounds: `docs/bringup/parallel-recording-design.md`), and the in-place read-only binds above stay measured, not built.
+    recording was not built (design and bounds: `docs/bringup/parallel-recording-design.md`), and of the in-place read-only binds above only vertex streams were built (2026-11-11, first record of this file); storage and index binds stay measured, not built.
 - **Snapshot staging was released only at end-of-pipe write-backs (superseded snapshots fixed in
   `d2ff690bc`; one change excluded).** Before the fix, overlay snapshots freed their staging only in `GpuMemory::PublishStorageSnapshotsLocked`
   (`Objects/GpuMemoryWriteback.cpp:420`). It is reached only from `WriteBackCompletedSubmission`,

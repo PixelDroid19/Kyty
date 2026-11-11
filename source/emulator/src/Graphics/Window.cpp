@@ -3405,6 +3405,25 @@ static void VulkanCreate(WindowContext* ctx)
 			ctx->graphic_ctx.guest_dma_buf_import_supported =
 			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
 			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0;
+			const auto imports_as_vertex_buffer = [ctx](VkExternalMemoryHandleTypeFlagBits handle_type)
+			{
+				VkPhysicalDeviceExternalBufferInfo info {};
+				info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO;
+				info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+				             VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+				info.handleType = handle_type;
+				VkExternalBufferProperties properties {};
+				properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES;
+				vkGetPhysicalDeviceExternalBufferProperties(ctx->graphic_ctx.physical_device, &info, &properties);
+				const auto features = properties.externalMemoryProperties.externalMemoryFeatures;
+				return (features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
+				       (features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0;
+			};
+			ctx->graphic_ctx.guest_draw_input_import_supported =
+			    (!ctx->graphic_ctx.guest_host_pointer_import_supported ||
+			     imports_as_vertex_buffer(VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)) &&
+			    (!ctx->graphic_ctx.guest_dma_buf_import_supported ||
+			     imports_as_vertex_buffer(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT));
 			// Flexible memory is snapshotted either way; direct memory needs one of the imports.
 			ctx->graphic_ctx.guest_device_address_supported =
 			    ctx->graphic_ctx.guest_host_pointer_import_supported || ctx->graphic_ctx.guest_dma_buf_import_supported;

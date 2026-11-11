@@ -19,6 +19,7 @@
 // linked depth parent through the ordinary parent walk.
 
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/GpuMemoryHostResultPages.h"
 
 #include "Kyty/Core/Database.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -48,6 +49,7 @@ namespace Kyty::Libs::Graphics {
 
 // Changes when a device-address read may have new storage work; see StorageScanMemo.
 extern std::atomic<uint64_t> g_storage_scan_generation;
+
 
 struct StorageTextureRawRenderSource;
 
@@ -312,6 +314,7 @@ public:
 	void                    LinkDepthMetaStorage(uint64_t depth_vaddr, uint64_t depth_size, uint64_t htile_addr, uint64_t htile_size);
 	bool                    DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
 	bool                    CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission);
+	[[nodiscard]] bool      RangeHoldsGuestBytes(uint64_t vaddr, uint64_t size);
 	bool                    CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns,
 	                                                      uint64_t* copy_ns, GpuMemorySnapshotAdmission admission);
 	bool                    CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot, bool* matches,
@@ -446,6 +449,7 @@ private:
 		Vector<OverlappedBlock> others;
 		GpuMemoryScenario       scenario     = GpuMemoryScenario::Common;
 		bool                    free         = true;
+		bool                    host_result_counted = false; // its pages are in m_host_result_pages
 		int                     next_free_id = -1;
 	};
 
@@ -491,6 +495,8 @@ private:
 	               int* id);
 	Block CreateBlock(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, int heap_id, int obj_id);
 	void  DeleteBlock(Block* b, int heap_id, int obj_id);
+	// Keeps m_host_result_pages equal to the live objects that may hold a host result.
+	void  SetHostResultPagesCounted(Object* object, bool counted);
 	void  Link(int heap_id, int id1, int id2, OverlapType rel, GpuMemoryScenario scenario);
 	[[nodiscard]] uint64_t NextContentSequence();
 	[[nodiscard]] DebugStatsGpuMemoryLinkedTopology ClassifyLinkedStorageTopology(
@@ -617,6 +623,7 @@ private:
 	MaterializationCache m_materialization_cache;
 	AllocatedPrefixCache     m_allocated_prefix_cache;
 	OverlapSnapshotCache     m_overlap_snapshot_cache;
+	GpuMemoryHostResultPages m_host_result_pages;
 	// FindBlocks' candidate ids; reused under m_mutex so a lookup does not allocate them.
 	Vector<int> m_find_blocks_candidates;
 

@@ -1,3 +1,38 @@
+## Vertex streams from guest pages: engagement by title and GPU (2026-11-11, built)
+
+A vertex stream inside one imported run of direct memory, with no live GPU
+object on its pages that may hold an unpublished result, is bound from the
+import buffer (design and world measurement: `docs/titles/sandbox.md`,
+first record). Counts below come from a temporary census in always-on runs,
+strict, 60 fps limit; "cross-check" compares the page count with a walk of
+the overlapping objects for one in 16 streams bound in place, and "forced"
+replaces the count's answer with "none" for one in 16 refusals.
+
+| Title | GPU | Bound in place | Refused by the page count | Tail fetch | Cross-check | Forced |
+| --- | --- | --- | --- | --- | --- | --- |
+| `PPSA17221 - Minecraft` (world) | Intel A770, ANV | 98.8 % | 1.2 % | 427 streams | 180,311, 0 missed | 16,344 of 16,344 |
+| `PPSA21402 - Balatro` | Intel A770, ANV | 67.2 % | 32.8 % | 0 | 36,240, 0 missed | 17,697 of 17,697 |
+| `PPSA21402 - Balatro` | AMD integrated, RADV | 67.3 % | 32.7 % | 0 | 37,126, 0 missed | 18,062 of 18,062 |
+| `PPSA09076 - DREDGE` | Intel A770, ANV | 97.8 % | 0.7 % | 1.5 % | 23,729, 0 missed | 167 of 167 |
+
+- Every refusal was writable storage in use on the stream's pages.
+- Both `PPSA21402 - Balatro` runs held 60 fps for 90 s with exit 0 and show
+  the same table, cards and text.
+- The premise that no bound range changes before its submission completes
+  was measured under the serial submit only (`docs/titles/sandbox.md`).
+- Not measured: GPU time on the AMD driver, and any title that rewrites a
+  bound vertex range before its draw executes (none is known).
+
+## Replacing a registered range leaves its chunks' buffers alive (2026-11-11, open, found by reading)
+
+`GuestDeviceAddressRegisterRange` (`GuestDeviceAddress.cpp:1452`), when
+called for a base address that is already registered, removes the old
+range's chunks from the table and overwrites the range without destroying
+their import buffers and memory, unlike the release and invalidation paths
+(`DestroyChunk`). No run showed a failure from it; it would leak the
+imports of a re-registered range. Direction: release the replaced range's
+chunks through the quiesced invalidation before overwriting it.
+
 ## Buffer copies with awkward sizes cost host time in the Intel driver, intermittently (2026-11-11, open)
 
 Mesa 26.2.6 (Intel, Xe) records `vkCmdCopyBuffer` through the same surface

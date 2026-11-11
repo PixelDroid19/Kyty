@@ -355,6 +355,17 @@ bool GpuMemory::QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size,
 	return true;
 }
 
+bool GpuMemory::RangeHoldsGuestBytes(uint64_t vaddr, uint64_t size)
+{
+	if (size == 0 || vaddr > UINT64_MAX - (size - 1u))
+	{
+		return false;
+	}
+	Core::LockGuard lock(m_mutex);
+	return ValidateAllocatedRangeLocked(vaddr, size) == GpuMemoryRangeValidationStatus::Valid &&
+	       !m_host_result_pages.Any(vaddr, size);
+}
+
 bool GpuMemory::CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission)
 {
 	if (!GpuMemoryCanUseTransientReadOnlyBuffer(true, size, true, true) || vaddr > UINT64_MAX - (size - 1u))
@@ -745,6 +756,25 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 		heap.objects_map2->Insert(vaddr[vi], size[vi], obj_id);
 	}
 	return nb;
+}
+
+void GpuMemory::SetHostResultPagesCounted(Object* object, bool counted)
+{
+	if (object->host_result_counted == counted)
+	{
+		return;
+	}
+	object->host_result_counted = counted;
+	for (int vi = 0; vi < object->block.vaddr_num; vi++)
+	{
+		if (counted)
+		{
+			m_host_result_pages.Add(object->block.vaddr[vi], object->block.size[vi]);
+		} else
+		{
+			m_host_result_pages.Remove(object->block.vaddr[vi], object->block.size[vi]);
+		}
+	}
 }
 
 void GpuMemory::DeleteBlock(Block* b, int heap_id, int obj_id)

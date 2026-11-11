@@ -127,6 +127,9 @@ struct Overlay
 
 std::atomic<uint64_t> g_flipped_frames {0};
 
+// Counts chunks leaving the registry; a resolved draw input holds while it is unchanged.
+std::atomic<uint64_t> g_chunk_removals {0};
+
 // Snapshots publish within the frame; guest memory may still lag across the one flip after.
 bool OverlayHeldTooLong(const Overlay& overlay)
 {
@@ -276,6 +279,7 @@ void RemoveTableEntry(Registry* registry, const Chunk& chunk)
 	const auto at = EntryAtOrAfter(registry, chunk.guest);
 	EXIT_IF(at == registry->entries.end() || at->guest != chunk.guest);
 	registry->entries.erase(at);
+	g_chunk_removals.fetch_add(1, std::memory_order_release);
 }
 
 void DestroyChunk(VkDevice device, Registry* registry, const Chunk& chunk)
@@ -594,7 +598,10 @@ struct PreparedHostImport
 			}
 		}
 
-		buffer = CreateAddressBuffer(ctx, size, handle_type);
+		// Draws fetch vertex streams from the imported guest pages (GuestDeviceAddressResolveDrawInput).
+		const bool draw_input = ctx->guest_draw_input_import_supported;
+		buffer                = CreateAddressBuffer(ctx, size, handle_type,
+		                                            draw_input ? VK_BUFFER_USAGE_VERTEX_BUFFER_BIT : 0);
 		if (buffer == VK_NULL_HANDLE)
 		{
 			return false;
@@ -1601,6 +1608,55 @@ static bool ResolvePublicationPiecesLocked(const Registry& registry, uint64_t va
 		pieces->push_back({found->buffer, cursor - vaddr, found->buffer_offset + (cursor - found->guest), piece_end - cursor});
 		cursor = piece_end;
 	}
+	return true;
+}
+
+bool GuestDeviceAddressResolveDrawInput(const GraphicContext* ctx, uint64_t vaddr, uint64_t size,
+                                        VkBuffer_T** buffer, uint64_t* offset)
+{
+	EXIT_IF(ctx == nullptr || buffer == nullptr || offset == nullptr);
+	struct Run
+	{
+		uint64_t removals      = UINT64_MAX;
+		uint64_t begin         = 0;
+		uint64_t end           = 0;
+		VkBuffer buffer        = nullptr;
+		uint64_t buffer_offset = 0;
+	};
+	// A frame's draws read thousands of ranges out of a few dozen chunks: the chunk last
+	// resolved for each 64 KiB of guest memory answers without the registry lock.
+	constexpr uint64_t                         kRunBytes = 64u * 1024u;
+	constexpr uint64_t                         kRuns     = 4096u;
+	thread_local std::array<Run, kRuns>* const runs      = new std::array<Run, kRuns>;
+	if (size == 0 || vaddr > UINT64_MAX - size || !ctx->guest_device_address_supported ||
+	    !ctx->guest_draw_input_import_supported)
+	{
+		return false;
+	}
+	auto& run = (*runs)[vaddr / kRunBytes % kRuns];
+	if (run.removals != g_chunk_removals.load(std::memory_order_acquire) || vaddr < run.begin ||
+	    vaddr + size > run.end)
+	{
+		auto&                       registry = GetRegistry();
+		std::lock_guard<std::mutex> lock(registry.mutex);
+		const auto                  range = registry.ranges.upper_bound(vaddr);
+		if (range == registry.ranges.begin())
+		{
+			return false;
+		}
+		const auto& chunks   = std::prev(range)->second.chunks;
+		const auto  in_chunk = [vaddr, size](const Chunk& chunk)
+		{ return chunk.physical && chunk.guest <= vaddr && vaddr + size - chunk.guest <= chunk.size; };
+		const auto chunk = std::find_if(chunks.begin(), chunks.end(), in_chunk);
+		if (chunk == chunks.end())
+		{
+			return false;
+		}
+		run = {g_chunk_removals.load(std::memory_order_acquire), chunk->guest, chunk->guest + chunk->size,
+		       chunk->buffer, chunk->buffer_offset};
+	}
+	*buffer = run.buffer;
+	*offset = run.buffer_offset + (vaddr - run.begin);
 	return true;
 }
 

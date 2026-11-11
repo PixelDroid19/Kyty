@@ -2680,6 +2680,18 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 	{
 		const auto& buffer_info = input.buffers[i];
 		const auto [address, size, read_begin, tail_fetched] = ResolveVertexStreamRead(input, i, range);
+		// Guest memory that holds the stream's current bytes is fetched from its imported
+		// pages. A fetch past the records reads zero, which only a copy provides.
+		VkBuffer     guest_pages  = nullptr;
+		VkDeviceSize guest_offset = 0;
+		auto*        ctx          = g_render_ctx->GetGraphicCtx();
+		if (!tail_fetched && read_begin < size &&
+		    GuestDeviceAddressResolveDrawInput(ctx, address, size, &guest_pages, &guest_offset) &&
+		    GpuMemoryRangeHoldsGuestBytes(address + read_begin, size - read_begin))
+		{
+			vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &guest_pages, &guest_offset);
+			continue;
+		}
 
 		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin,
 		                                                  tail_fetched);

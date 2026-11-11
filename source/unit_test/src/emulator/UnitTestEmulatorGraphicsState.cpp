@@ -20,6 +20,7 @@
 #include "Emulator/Graphics/NativeCapture.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/GpuMemoryHostResultPages.h"
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
 #include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
@@ -3441,6 +3442,52 @@ TEST(EmulatorGraphicsState, TiledSampleDetileUsesTheGuestFormatElementWidth)
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(1u, 9u), 1u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(22u, 9u), 4u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(1u, 27u), 0u);
+}
+
+TEST(EmulatorGraphicsState, HostResultPagesCountObjectsHoldingUnpublishedResults)
+{
+	// A buffer holds a result the guest lacks only while it is writable and in use.
+	EXPECT_FALSE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::StorageBuffer, true, true));
+	EXPECT_FALSE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::VertexBuffer, true, true));
+	EXPECT_FALSE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::IndexBuffer, true, true));
+	EXPECT_FALSE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::StorageBuffer, false, false));
+	EXPECT_TRUE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::StorageBuffer, false, true));
+	EXPECT_TRUE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::VertexBuffer, false, true));
+	// A surface is counted whatever its state.
+	EXPECT_TRUE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::RenderTexture, true, false));
+	EXPECT_TRUE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::Texture, true, false));
+	EXPECT_TRUE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::Label, false, false));
+
+	constexpr uint64_t       kPage = 0x1000;
+	constexpr uint64_t       kBase = 0x200000000ull;
+	GpuMemoryHostResultPages pages;
+	EXPECT_FALSE(pages.Any(kBase, 64 * kPage));
+
+	// One byte at the end of a page and the first byte of the next count both pages.
+	pages.Add(kBase + 3 * kPage - 1, 2);
+	EXPECT_FALSE(pages.Any(kBase, 2 * kPage));
+	EXPECT_TRUE(pages.Any(kBase, 2 * kPage + 1));
+	EXPECT_TRUE(pages.Any(kBase + 3 * kPage + 0xfff, 1));
+	EXPECT_FALSE(pages.Any(kBase + 4 * kPage, 60 * kPage));
+	EXPECT_FALSE(pages.Any(kBase + 3 * kPage, 0));
+
+	// Two objects on one page: the page stays counted until both are gone.
+	pages.Add(kBase + 2 * kPage, kPage);
+	pages.Remove(kBase + 3 * kPage - 1, 2);
+	EXPECT_TRUE(pages.Any(kBase + 2 * kPage + 8, 8));
+	EXPECT_FALSE(pages.Any(kBase + 3 * kPage, kPage));
+	pages.Remove(kBase + 2 * kPage, kPage);
+	EXPECT_FALSE(pages.Any(kBase, 64 * kPage));
+
+	// A range spanning several 2 MiB blocks is found from a query inside any of them.
+	pages.Add(kBase + 510 * kPage, 1030 * kPage);
+	EXPECT_FALSE(pages.Any(kBase, 510 * kPage));
+	EXPECT_TRUE(pages.Any(kBase + 1024 * kPage, 1));
+	EXPECT_TRUE(pages.Any(kBase + 1539 * kPage, kPage));
+	EXPECT_FALSE(pages.Any(kBase + 1540 * kPage, 4096 * kPage));
+	EXPECT_TRUE(pages.Any(kBase, 4096 * kPage));
+	pages.Remove(kBase + 510 * kPage, 1030 * kPage);
+	EXPECT_FALSE(pages.Any(kBase, 4096 * kPage));
 }
 
 TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)

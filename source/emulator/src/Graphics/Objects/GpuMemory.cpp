@@ -357,7 +357,11 @@ void GpuMemoryInvalidateStorageScans()
 void GpuMemory::SyncWriteBackIndexes(int heap_id, int object_id)
 {
 	const std::pair<int, int> key {heap_id, object_id};
-	const auto&               object = m_heaps[heap_id].objects[object_id];
+	auto&                     object = m_heaps[heap_id].objects[object_id];
+	const auto&               info   = object.info;
+	const bool                result = GpuMemoryObjectMayHoldHostResult(info.object.type, info.read_only,
+	                                                                    info.in_use);
+	SetHostResultPagesCounted(&object, !object.free && result);
 	const bool                pending =
 	    !object.free && object.info.in_use && !object.info.read_only && object.info.write_back_func != nullptr;
 	if (pending)
@@ -536,6 +540,10 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuMemo
 				if (!a.objects_map1->IsEmpty()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !a.objects_map1->IsEmpty() condition ignored (continuing)\n"); }
 				if (!a.objects_map2->IsEmpty()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !a.objects_map2->IsEmpty() condition ignored (continuing)\n"); }
 
+				for (auto& object: a.objects)
+				{
+					SetHostResultPagesCounted(&object, false);
+				}
 				delete a.objects_map1;
 				delete a.objects_map2;
 				delete a.overlap_cache;
@@ -693,6 +701,7 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 	h.free             = true;
 	h.next_free_id     = heap.first_free_id;
 	heap.first_free_id = object_id;
+	SetHostResultPagesCounted(&h, false);
 	DeleteBlock(&h.block, heap_id, object_id);
 
 	return ret;
@@ -751,6 +760,11 @@ uint64_t GpuMemoryGetMappedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
 		covered += prefix;
 	}
 	return covered;
+}
+
+bool GpuMemoryRangeHoldsGuestBytes(uint64_t vaddr, uint64_t size)
+{
+	return g_gpu_memory != nullptr && g_gpu_memory->RangeHoldsGuestBytes(vaddr, size);
 }
 
 bool GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission)

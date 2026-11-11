@@ -8,6 +8,7 @@
 #include <functional>
 #include <vector>
 
+struct VkBuffer_T;
 struct VkCommandBuffer_T;
 
 #ifdef KYTY_EMU_ENABLED
@@ -123,6 +124,14 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 // device-address readers through GuestDeviceAddressPendingWriteBack; these need
 // the processor write-back before the reader is recorded.
 [[nodiscard]] bool GuestDeviceAddressPendingWriteBackOutsideStorage();
+
+// The imported buffer over the guest pages of [vaddr, vaddr + size) and the range's
+// offset in it, so a draw fetches the guest's bytes without a copy. False: the range
+// is not inside one imported run of direct memory. The buffer lives until its range
+// is released or invalidated, which runs with submissions quiesced.
+[[nodiscard]] bool GuestDeviceAddressResolveDrawInput(const GraphicContext* ctx, uint64_t vaddr,
+                                                      uint64_t size, VkBuffer_T** buffer,
+                                                      uint64_t* offset);
 
 // Creates `out` directly over the guest pages of [vaddr, vaddr + size), so device
 // writes reach guest memory without a copy and CPU stores reach the device. False:

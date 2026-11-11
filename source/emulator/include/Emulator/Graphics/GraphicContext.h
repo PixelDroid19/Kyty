@@ -240,6 +240,9 @@ struct GraphicContext
 	bool guest_host_pointer_import_supported = false;
 	// Device-addressable buffers can import dma-buf descriptors.
 	bool guest_dma_buf_import_supported = false;
+	// Every import type the device uses also imports as a vertex buffer, so a
+	// draw can fetch its streams from the imported guest pages.
+	bool guest_draw_input_import_supported = false;
 	ShaderComputeWaveVulkanState compute_wave_vulkan_state {};
 
 	// VK_EXT_sample_locations is optional at device discovery time. A draw that

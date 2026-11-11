@@ -1570,6 +1570,9 @@ enum class GpuMemorySnapshotAdmission: uint8_t
 // Validates a bounded allocated range and classifies its cached GPU overlaps.
 // Capture/compare additionally require dirty-page tracking and reject a read
 // if a CPU/HLE writer changes the range during that transaction.
+// Whether guest memory holds the current bytes of an allocated range: no live
+// object over any of its pages may hold a GPU result the guest does not show.
+[[nodiscard]] bool      GpuMemoryRangeHoldsGuestBytes(uint64_t vaddr, uint64_t size);
 bool                    GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size,
                                                             GpuMemorySnapshotAdmission admission = GpuMemorySnapshotAdmission::ReadOnlyOverlaps);
 bool                    GpuMemoryCaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst,
