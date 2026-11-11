@@ -557,6 +557,13 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
       processing and a 107 ms frame. The earlier estimate: with A and the three per-draw items of
       B about 44 ms of command processing is left, about 26-37 ms with parallel recording, and the
       frame is that short only with the gap overlapped (27-38 fps). No combination reaches 16.7 ms.
+    - Full-stack check on the pushed code (2026-11-11, 64 KB stacks, 1,444 of 1,459 samples reach
+      the thread start; 103 world frames of 97 ms while profiling, 4,995 draws, 71.2 ms of
+      command-processor CPU time per frame against 80.1-82.5 ms in the earlier runs, not separated
+      by cause): inside draws 63.2 ms (56.4 was the lower bound). No entry above is higher by more
+      than 2 ms: read-only binds 15.4 (storage 7.8, index 5.0, vertex 2.6), vertex binding 8.4,
+      descriptor sets 6.3, alias write-back 2.5, shader input 7.1, pipeline
+      lookup without the identities 1.5 (building them, 2.8), driver calls 8.0 in all.
 - **Open.** 60 fps at this load needs about 3.3 us of command processing per draw against about 21 us
   then (2026-11-10; about 17 us at 5,342 draws on 2026-11-11, and the gap of about 19 ms between
   batches alone is longer than a 60 fps frame, so 60 fps also needs the gap cut). None of the
