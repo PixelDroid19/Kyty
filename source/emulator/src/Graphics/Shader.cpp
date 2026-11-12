@@ -1345,6 +1345,9 @@ struct ShaderVertexProgram
 	bool                   front_has_getpc              = false;
 	bool                   front_has_global_memory_load = false;
 	std::bitset<108>       front_sbuffer_base_sgprs;
+	// Indices of the front_code instructions the per-draw binding checks inspect.
+	std::vector<uint32_t>  front_buffer_loads;
+	std::vector<uint32_t>  front_pointer_scalar_loads;
 	// Vertex-stream access scan of `code` for the last fetch-register pair it was asked for.
 	mutable std::mutex                                          stream_access_mutex;
 	mutable std::shared_ptr<const ShaderVertexStreamAccessScan> stream_access;
@@ -1375,6 +1378,9 @@ static ShaderVertexProgramCache* g_vs_isa_cache = nullptr;
 static std::mutex                g_vs_isa_cache_mutex;
 static uint64_t                  g_vs_isa_cache_bytes = 0;
 static uint64_t                  g_vs_program_generation = 1;
+// Advances with every retirement of vertex programs, under the exclusive lifetime
+// lock, so a lookup remembered under the shared lock holds while it is unchanged.
+static uint64_t g_vs_lookup_generation = 1;
 
 static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program);
 
@@ -1387,6 +1393,7 @@ static bool ShaderRangesOverlap(uint64_t a, uint64_t a_size, uint64_t b, uint64_
 // offset results that read guest code in [addr, addr + size).
 static void ShaderInvalidateVertexProgramRangeLocked(uint64_t addr, uint64_t size)
 {
+	++g_vs_lookup_generation;
 	std::scoped_lock cache_lock(g_vs_isa_cache_mutex, g_vertex_offset_sgpr_mutex);
 	if (g_vs_isa_cache != nullptr)
 	{
@@ -1419,6 +1426,7 @@ static void ShaderInvalidateVertexProgramsLocked()
 {
 	EXIT_IF(g_vs_program_generation == UINT64_MAX);
 	++g_vs_program_generation;
+	++g_vs_lookup_generation;
 	std::scoped_lock cache_lock(g_vs_isa_cache_mutex, g_vertex_offset_sgpr_mutex);
 	if (g_vs_isa_cache != nullptr) { g_vs_isa_cache->clear(); }
 	g_vs_isa_cache_bytes = 0;
@@ -2043,6 +2051,8 @@ static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program)
 		         static_cast<uint64_t>(code->GetDebugPrintfs().Capacity()) * sizeof(ShaderDebugPrintf);
 	}
 	bytes += static_cast<uint64_t>(program.gs_user_data_loads.capacity()) * sizeof(ShaderGsUserDataDescriptorLoad);
+	bytes += static_cast<uint64_t>(program.front_buffer_loads.capacity() + program.front_pointer_scalar_loads.capacity()) *
+	         sizeof(uint32_t);
 	if (program.front_scalar_flow != nullptr)
 	{
 		const auto& flow = *program.front_scalar_flow;
@@ -2088,6 +2098,19 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 	program->front_has_getpc              = program->front_code.HasAnyOf({ShaderInstructionType::SGetpcB64});
 	program->front_has_global_memory_load = ShaderHasGlobalMemoryLoad(program->front_code);
 	program->front_sbuffer_base_sgprs     = ShaderScalarBufferBaseSgprs(program->front_code);
+	for (uint32_t index = 0; index < program->front_code.GetInstructions().Size(); ++index)
+	{
+		const auto& inst = program->front_code.GetInstructions().At(index);
+		if (ShaderInstructionIsBufferLoad(inst.type))
+		{
+			program->front_buffer_loads.push_back(index);
+		}
+		if (ShaderInstructionIsScalarMemoryLoad(inst.type) && inst.src_num >= 1 &&
+		    (inst.src[0].type == ShaderOperandType::Sgpr || inst.src[0].type == ShaderOperandType::VccLo))
+		{
+			program->front_pointer_scalar_loads.push_back(index);
+		}
+	}
 	program->code = program->front_code;
 	std::vector<uint32_t> back_words;
 	if (ShaderHasTerminalSetpc(program->front_code))
@@ -2131,6 +2154,43 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 	}
 	g_vs_isa_cache->emplace(key, program);
 	g_vs_isa_cache_bytes += cache_cost;
+	return program;
+}
+
+// Caller holds the shared lifetime lock. A draw stream binds a few programs over
+// and over; remembering each thread's recent ones skips three locked map lookups.
+static std::shared_ptr<const ShaderVertexProgram> LookupVertexProgramLocked(const HW::VertexShaderInfo& regs, bool gs_front,
+                                                                           ShaderMappedData* data)
+{
+	struct Recent
+	{
+		uint64_t                                 generation = 0;
+		uint64_t                                 shader_addr = 0;
+		uint64_t                                 bound_back_addr = 0;
+		uint64_t                                 checksum = 0;
+		bool                                     gs_front = false;
+		ShaderMappedData                         data;
+		std::weak_ptr<const ShaderVertexProgram> program;
+	};
+	// Weak: an evicted program, up to megabytes of IR, is not kept alive here.
+	static thread_local std::array<Recent, 16> recent;
+	const uint64_t shader_addr = gs_front ? regs.es_regs.data_addr : regs.vs_regs.data_addr;
+	auto&          slot        = recent[((shader_addr >> 8u) ^ (shader_addr >> 12u)) % recent.size()];
+	if (slot.generation == g_vs_lookup_generation && slot.shader_addr == shader_addr && slot.bound_back_addr == regs.gs_back_addr &&
+	    slot.checksum == regs.gs_regs.chksum && slot.gs_front == gs_front)
+	{
+		if (auto program = slot.program.lock(); program != nullptr)
+		{
+			*data = slot.data;
+			return program;
+		}
+	}
+	if (!ShaderGetMappedData(shader_addr, data) || data->code_size_bytes == 0u)
+	{
+		EXIT("Gen5 vertex shader has no bounded mapped code range: address=0x%016" PRIx64 "\n", shader_addr);
+	}
+	auto program = GetCachedVertexProgramLocked(regs, *data, gs_front);
+	slot         = {g_vs_lookup_generation, shader_addr, regs.gs_back_addr, regs.gs_regs.chksum, gs_front, *data, program};
 	return program;
 }
 
@@ -4101,20 +4161,28 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 // A scalar load whose base is a pointer the program computed (VCC or an SGPR
 // outside the user-data window) has no binding-time mapping: it reads guest
 // memory at run time.
-static bool ShaderHasComputedPointerScalarLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_base,
-                                               int user_data_count)
+static bool ShaderIsComputedPointerScalarLoad(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_base,
+                                              int user_data_count)
 {
-	const auto& instructions = code.GetInstructions();
-	return std::any_of(instructions.begin(), instructions.end(),
-	                   [&](const ShaderInstruction& inst)
-	                   {
-		                   const bool computed_base =
-		                       inst.src_num >= 1 && (inst.src[0].type == ShaderOperandType::VccLo ||
-		                                             (inst.src[0].type == ShaderOperandType::Sgpr &&
-		                                              (inst.src[0].register_id < user_data_base ||
-		                                               inst.src[0].register_id + 1 >= user_data_base + user_data_count)));
-		                   return computed_base && ShaderScalarLoadNeedsGuestAddress(inst, bind);
-	                   });
+	const bool computed_base = inst.src_num >= 1 && (inst.src[0].type == ShaderOperandType::VccLo ||
+	                                                 (inst.src[0].type == ShaderOperandType::Sgpr &&
+	                                                  (inst.src[0].register_id < user_data_base ||
+	                                                   inst.src[0].register_id + 1 >= user_data_base + user_data_count)));
+	return computed_base && ShaderScalarLoadNeedsGuestAddress(inst, bind);
+}
+
+// A vector buffer load through a runtime descriptor or a computed-pointer scalar
+// load in front_code; only the instructions either can match are visited.
+static bool VertexFrontReadsGuestMemory(const ShaderVertexProgram& program, const ShaderBindResources& bind, int user_data_base,
+                                        int user_data_count)
+{
+	const auto& instructions = program.front_code.GetInstructions();
+	return std::any_of(program.front_buffer_loads.begin(), program.front_buffer_loads.end(),
+	                   [&](uint32_t index)
+	                   { return ShaderVectorBufferUsesRuntimeDescriptor(bind, instructions.At(index), user_data_base); }) ||
+	       std::any_of(program.front_pointer_scalar_loads.begin(), program.front_pointer_scalar_loads.end(),
+	                   [&](uint32_t index)
+	                   { return ShaderIsComputedPointerScalarLoad(instructions.At(index), bind, user_data_base, user_data_count); });
 }
 
 void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
@@ -4175,11 +4243,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		// This is not a snapshot of arbitrary writes to the pointed-to resources.
 		// Nested code/debug helpers must use their Locked forms under this lease.
 		shader_lifetime_lock.lock();
-		if (!ShaderGetMappedData(shader_addr, &data) || data.code_size_bytes == 0u)
-		{
-			EXIT("Gen5 vertex shader has no bounded mapped code range: address=0x%016" PRIx64 "\n", shader_addr);
-		}
-		info->program = GetCachedVertexProgramLocked(*regs, data, gs_instead_of_vs);
+		info->program = LookupVertexProgramLocked(*regs, gs_instead_of_vs, &data);
 	}
 
 	if (ps5)
@@ -4231,8 +4295,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			info->bind.program_base_used   = info->program->front_has_getpc;
 			info->bind.program_base        = info->bind.program_base_used ? shader_addr : 0u;
 			info->bind.device_address_used =
-			    info->program->front_has_global_memory_load || ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) ||
-			    ShaderHasComputedPointerScalarLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase, static_cast<int>(user_sgpr_num));
+			    info->program->front_has_global_memory_load ||
+			    VertexFrontReadsGuestMemory(*info->program, info->bind, kGen5GsFrontUserDataBase, static_cast<int>(user_sgpr_num));
 		}
 	} else
 	{
