@@ -61,9 +61,21 @@ descriptor set every draw.
   - `PPSA21402 - Balatro` with the validation layer loaded: exit 0. On the AMD integrated GPU (RADV): exit 0.
   - `kyty_agent playable-regression` exits 3 as before this branch.
   - 2,648 unit tests and the four repository gates pass.
-- **Open.** The every-path check was added after the matrix and ran in one world run only. The front proof
-  runs on every draw; its verdict could be kept on the program. The remaining per-draw cost is spread over
-  shader input parsing, pipeline lookup and command emission; the early-returning submit is still last.
+- **Every-path check, verified.** `EmulatorShaderGetpc.SlotOnlyConsumerNeedsTheRegisterReloadedOnEveryPath`
+  builds two fronts by hand: a straight-line reload makes the consumer slot-only, a reload on one branch refuses
+  the buffer. A world run with a DIAG probe that re-read every in-place storage range at submit found 0 of
+  253,197 checked reads changed between bind and submit (62 of 62 hand-built changes reported), so reading the
+  guest pages in place is sound under the current serial submit. An early-returning submit needs this check again.
+- **Open.** The front proof runs on every draw; its verdict could be kept on the program, keyed only on code
+  facts. The remaining per-draw cost is spread over shader input parsing, pipeline lookup and command emission;
+  the early-returning submit is still last.
+- **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
+  bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
+  unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
+  path then hands `WriteStorageAddressRow` (`GraphicsRenderBind.cpp:3062`) the copy's address plus the guest
+  offset, which stops the emulator when the offset keeps those bits. Direction: align the base down before both
+  paths, as the shader already masks the offset (`EmitAddressScalarBufferLoad`, `ShaderSpirvBuffer.cpp:3645`).
+  The ISA also leaves the destination of out-of-range scalar-load dwords unwritten, where both paths return zero.
 
 ## Sandbox title: storage buffers read by device address (2026-11-11, built, command-processor time only)
 
