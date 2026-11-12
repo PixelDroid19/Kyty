@@ -172,6 +172,19 @@ descriptor set every draw.
   -0.02 to -0.16), about 4.5-6.5 % of the draw. `PPSA21567 - Astro Bot` on the same route: same image and the same
   pre-existing storage-frontier error, 78.9 against 77.9 us per draw over the whole run (one run each). Unit tests
   (2,649) and the three repository gates pass.
+- **Excluded (2026-11-12): three per-draw leads after the vector fix.** Profile of the command-processor thread in the
+  world (about 12.5 fps, 4.8k draws per frame, 1,272 samples over 10 s):
+  - The index min/max scan (3.1 % of the thread, about 0.28 us per draw) is already vectorized with SSE2; the cost
+    is reading the indices.
+  - Resetting the vertex input's binding resources in `ShaderGetInputInfoVS` is part of its contract (a caller
+    reuses one input across calls); with empty vectors free it only zeroes 7.3 KB.
+  - Copying pending storage results into a vertex object (`CopyPendingStorageIntoVertices`): about 1.6k calls per
+    second, always one result covering the whole fetch window. The branch costs 10-13 us per call (copy and barriers
+    about 3 us, the vertex object 8-10 us), about 1.3 ms per frame; 21-32 % of the copies repeat within one
+    submission. Binding the result directly needs it to start at or before the stream base, which nothing
+    guarantees. Gain under 2 % of the thread.
+  The remaining inclusive buckets (descriptor binding 15.6 %, pipeline lookup 10 %, vertex input 9.6 %, memory
+  objects 9.5 %) each split into children under 5 %; no single cut there reaches 0.5 us per draw.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
