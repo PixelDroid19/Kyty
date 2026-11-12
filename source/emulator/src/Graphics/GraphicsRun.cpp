@@ -2634,8 +2634,6 @@ bool CommandProcessor::DrawIndexIndirectOnDevice(uint64_t args_address)
 	return recorded;
 }
 
-// A direct draw after a device-side DRAW_INDEX_INDIRECT draws as many instances as that record
-// latched; the host reads the latch once the recording that holds the record completes.
 PreparedDrawInputs* CommandProcessor::TakePreparedDrawInputs()
 {
 	if (m_draw_front == nullptr)
@@ -2663,6 +2661,8 @@ PreparedDrawInputs* CommandProcessor::TakePreparedDrawInputs()
 	return nullptr;
 }
 
+// A direct draw after a device-side DRAW_INDEX_INDIRECT draws as many instances as that record
+// latched; the host reads the latch once the recording that holds the record completes.
 void CommandProcessor::ResolveNumInstancesLatch()
 {
 	SubmissionId latch;
