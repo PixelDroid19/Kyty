@@ -3,18 +3,21 @@
 An indexed draw whose indexes are read from the guest's own pages scans them for their smallest and largest
 value, to bind only the vertex records it fetches (`GraphicsRenderIndexValueRange`). The base x86-64 target has
 no unsigned 16- and 32-bit vector min/max, so the compiler emulates them with several instructions per vector.
-The same loop is now also compiled for AVX2 and chosen once at startup when the host has it (x86-64 with GCC or
+The same loop is now also compiled for AVX2 and chosen on first use when the host has it (x86-64 with GCC or
 Clang; other builds keep the base loop). The result is the same.
 
 - `PPSA21567 - Astro Bot`, walking dunes (captures at 108, 125 and 145 s), profile from 110 to 130 s: the scan
-  was 21.8 % of the command-processor thread in self time, all of it from that indexed-draw path. Base and AVX2
-  alternating every 1,024 calls in the same run, about 147k calls each: 12.9 and 14.3 GB/s (16- and 32-bit
-  indexes) against 35.5 and 58.9 GB/s, 12.7 against 3.2 us per call. Same-run 4 s windows in the walking dunes
-  (one run, 15 windows each): median 19.82 against 19.78 fps, mean 19.45 against 18.67; the GPU was busy 95-96 %
-  in both, and the freed processor time went to fence and `WAIT_REG_MEM` waits (+1.9 and +3.0 ms per frame).
-  No frame-rate change is claimed there. In the dunes intro (another run): median 17.8 against 16.8 fps.
-- `PPSA17221 - Minecraft`, world: 0.31 against 0.15 us per call over about 1.7M calls per arm (about 3.5 KB of
-  indexes per draw).
+  held 469 of the 2,151 samples in the packet loop of the command-processor thread (self time), all from that
+  indexed-draw path; the thread was on the CPU about 59 % of the window. Base and AVX2 alternating every 1,024
+  calls in the same run, about 147k calls each: 12.9 and 14.3 GB/s (16- and 32-bit indexes) against 35.5 and
+  58.9 GB/s, 12.7 against 3.2 us per call. Same-run 4 s windows in the walking dunes (one run, 15 one-second
+  samples from 5-6 windows per arm): the draw state-setup row, which holds the scan, fell from 22.8 to 13.9 us
+  per draw and from 13.3 to 8.2 ms per frame. Frame rate: median 19.82 against 19.78 fps, mean 19.45 against
+  18.67; the GPU was busy 95-96 % in both, and the freed processor time went to fence and `WAIT_REG_MEM` waits
+  (+1.9 and +3.0 ms per frame). No frame-rate change is claimed there: the dunes need GPU work. In the dunes
+  intro (another run): median 17.8 against 16.8 fps.
+- `PPSA17221 - Minecraft`, world (alive, 5.2-5.7k draws per frame, about 20 fps): 0.31 against 0.15 us per call
+  over about 1.7M calls per arm (about 3.5 KB of indexes per draw), about 0.85 ms per frame.
 - A temporary counter saw 98 % (Astro) and 83 % (Minecraft) of the scanned bytes repeat the same address, count
   and width within the last 8,192 scans. A memo of the range would need the guest's writes to those pages
   tracked, which this path does not do today; not built.
