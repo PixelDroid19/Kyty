@@ -54,8 +54,24 @@ The submit contract is unchanged: a submit still returns once its batch is decod
   about 232 draws per frame dominated by first-use shader compiles. Clean build: same pre-existing
   `gfx_storage_frontier` error, intro cinematic correct, exit 0; no comparable baseline run, so no frame-time
   claim.
-- **Open.** The command processor restarts the replay about every 4.5-15 draws, because the next packet the
-  replay does not admit (events, nested buffers, waits) comes that soon; admitting more packets is the next lever.
+- **Measured, look-ahead switched in alternating 4 s windows of one run (temporary switch, removed; same host).**
+  World plus 5-40 s, about 5,385 draws per frame in both arms: off 79.7 ms per frame (12.5 fps, 10.88 us per
+  draw), on 62.4 ms (16.0 fps, 8.16 us per draw). Per-draw rows with it on: state 2.03 us (off 3.89), resource
+  binding 1.98, command emission 1.17, pipeline 1.00; the look-ahead moves only the state row.
+- **Robot platformer gameplay (`PPSA21567 - Astro Bot`), same switch.** The dunes route from the "Continue:
+  worldmap" save reached walking in the dunes in 1 of 3 runs (the others stopped in the intro cinematic or the
+  crash cinematic). Walking, 102-140 s, about 610-620 draws per frame: off 67.3 ms per frame (14.9 fps, 111.9
+  us per draw), on 59.5 ms (16.8 fps, 103.5 us per draw); per-second medians 15.7 against 17.0 fps, about 10
+  samples per arm, one run. Intro cinematic of another run, about 275 draws per frame: off 46.4 ms (21.5 fps),
+  on 32.0 ms (31.3 fps).
+- **Excluded: admitting more packets to the replay (2026-11-12, temporary census).** 86.5 % of the world's indexed
+  draws (824,317 of 952,951) already take prepared inputs; the replay restarts at 56,000 packets per run. In
+  the world 80 % of those are `EVENT_WRITE`, then `DISPATCH_DIRECT` (11 %) and the `DRAW_INDEX_AUTO` and
+  `RELEASE_MEM` NOPs. Stepping over an `EVENT_WRITE` without an address (it only records a barrier) moved every
+  such restart to the `WRITE_DATA` that follows it: take rate 86.5 % again, 62.3 against 62.4 ms per frame.
+  Admitting a guest-memory write needs the guest ranges each analysis read, to reject only the records it
+  overlaps. With every remaining miss at the measured saving, the whole allowlist is worth at most about 2 ms
+  per frame here and about 1 ms in the robot platformer's dunes (82 % taken), so it is not built.
   Not checked: `playable-regression`, scored captures, other titles (the ones that depend on label
   write-backs test the epoch most), the second GPU.
 
