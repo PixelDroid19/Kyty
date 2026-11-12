@@ -1,3 +1,30 @@
+## Per-draw input infos no longer zeroed through a default std::optional (2026-11-12, built)
+
+GCC 16 (libstdc++ 16, -O3) zeroes the whole storage of a default-constructed `std::optional<T>` local. The
+analysed vertex and pixel input infos and the geometry front of an indexed draw were such locals, so every draw
+zeroed about 29 KB, also the 86 % of draws that take prepared inputs and never touch them. They now live in a
+`std::unique_ptr` built only when the draw needs them (the analysed infos are value-initialized, as before).
+
+- `PPSA17221 - Minecraft`, world (5.2-5.7k draws per frame): old and new cost alternating every 1,024 draws in
+  the same run (the old arm re-created two of the three zeroed locals, 18.3 of 28.8 KB), about 2.1M draws per
+  arm: 5.43 against 5.24 us per draw (5.54 against 5.38 over the last third). Scaled to the full 28.8 KB, about
+  0.25-0.29 us per draw, 1.2-1.4 ms per frame. The heap allocation on draws without prepared inputs is not
+  priced separately. No frame-rate claim.
+- `PPSA21567 - Astro Bot`, walking dunes, same image at 108/125/145 s and the same pre-existing
+  `gfx_storage_frontier` event: 20.8 fps median, 40.7 us per draw (earlier runs 18.8-19.8 fps, 45.8-46.4 us).
+  A first run on a loaded host gave 16.8 fps and 71 us per draw and is not evidence.
+
+Excluded while looking for per-draw processor time in the same scene (no code kept):
+
+- **Shader ids computed ahead of the command processor.** The pixel and vertex ids read fields written on the
+  command-processor thread after the prepared inputs are taken (dual-source blend, resolution cohort and
+  host-to-guest scale, device-address binding, clip probe), so they cannot be built ahead.
+- **A memo of `GpuMemoryResetHash` on a global write epoch.** About 2.5 hashes reset per draw, 198 ns each
+  (about 2.5 ms per frame); 94-99 % repeat a recent key, but only about 0.2 % find the global epoch unchanged.
+  A memo would have to be range-aware.
+- **Lock contention in `GpuMemoryResetHash`.** A temporary `try_lock` saw no failure over the run, and each lock
+  costs about 10-15 ns; a lock against `try_lock` microbenchmark showed no difference.
+
 ## Index min/max scan with AVX2 (2026-11-12, built)
 
 An indexed draw whose indexes are read from the guest's own pages scans them for their smallest and largest
