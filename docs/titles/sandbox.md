@@ -102,8 +102,13 @@ descriptor set every draw.
   almost all of them land on single pages the tracker does not hold (0.16% found, temporary counters). On
   `0be0c39a2` the tracker held 150 of the 347 samples of the submitting thread (43%). A 16 KiB bit map with one
   bit per 64-page block, set before a page identity is published and never cleared, now answers an untracked
-  page without probing the 2M-slot page table: 103-108 of 316-337 samples (31-34%) in three runs, about 1 ms a
-  frame. The rest is the per-call path itself; a finer 1 MiB per-page map measured the same.
+  page without probing the 2M-slot page table: 108 of 316 samples (34%). Two finer 1 MiB per-page maps, hashed
+  and direct, measured 103 of 331 and 107 of 337, so the lookup is no longer what costs. A shift and mask in
+  place of the page divisions removed `PageStart` from the profile, but the total stayed at 104 of 357 (29%):
+  about 50 ns per notification moves between the frames of the call path. The change is about 2 ms/s of CPU on
+  the submitting thread (one baseline run, sampling noise about 16 samples); frame rate did not move measurably
+  (14.2 against 14.3 fps at the stop point). Not checked: how full the map gets over a long session, since its
+  bits are never cleared while this title maps and releases direct memory every frame.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy

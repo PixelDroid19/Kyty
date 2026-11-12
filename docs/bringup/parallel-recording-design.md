@@ -188,3 +188,11 @@ Three cases stay under the 2x gate and the fourth sits at it; neither change is 
 (16.7 ms) needs about 5.4x on this frame: the gap alone exceeds it, so any such path needs the
 overlap, and the CP would have to process a draw in about 4.6 us. No measured lever or design here
 reaches that.
+
+Re-priced 2026-11-12 on the sandbox world (`PPSA17221 - Minecraft`), after the per-draw cuts
+`0be0c39a2` and `7b2b35fd4`: 11.36 us per draw, 2,805 draws a frame, 31.9 ms of command-processor
+time in a 44.8 ms frame. A draw plan is worth about 1.5 us per draw (pixel inputs already use a
+cached analysis; vertex inputs are mostly the descriptor gather). Submit still returns only after
+the batch is decoded, because the title rewrites its descriptor tables after submit, so the
+command processor cannot run behind the guest. Under that contract the plan plus a two-stage
+command processor reach about 27-31 fps at this load. The gates above stay closed.
