@@ -247,7 +247,9 @@ descriptor set every draw.
 - **Excluded (2026-11-12): three per-draw leads after the vector fix.** Profile of the command-processor thread in the
   world (about 12.5 fps, 4.8k draws per frame, 1,272 samples over 10 s):
   - The index min/max scan (3.1 % of the thread, about 0.28 us per draw) is already vectorized with SSE2; the cost
-    is reading the indices.
+    is reading the indices. Corrected 2026-11-12: the base x86-64 target has no unsigned 16- and 32-bit vector
+    min/max, so the scan was bound by its emulation, not by reading; it now runs with AVX2 where the host has it
+    (`docs/bringup/cross-title.md`, "Index min/max scan with AVX2").
   - Resetting the vertex input's binding resources in `ShaderGetInputInfoVS` is part of its contract (a caller
     reuses one input across calls); with empty vectors free it only zeroes 7.3 KB.
   - Copying pending storage results into a vertex object (`CopyPendingStorageIntoVertices`): about 1.6k calls per

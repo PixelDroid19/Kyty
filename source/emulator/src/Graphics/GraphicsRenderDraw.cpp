@@ -101,7 +101,7 @@ VertexRecordRequirement ResolveLinearVertexRecords(int32_t first_vertex, uint32_
 
 // Smallest and largest index value; one loop per index width so it vectorizes.
 template <typename Index>
-static std::pair<uint32_t, uint32_t> IndexValueRange(const uint8_t* bytes, uint32_t index_count)
+[[gnu::always_inline]] static inline std::pair<uint32_t, uint32_t> IndexValueRange(const uint8_t* bytes, uint32_t index_count)
 {
 	Index minimum = std::numeric_limits<Index>::max();
 	Index maximum = 0;
@@ -114,6 +114,16 @@ static std::pair<uint32_t, uint32_t> IndexValueRange(const uint8_t* bytes, uint3
 	}
 	return {minimum, maximum};
 }
+
+#if defined(__x86_64__) && defined(__GNUC__)
+// The base x86-64 target has no unsigned 16- and 32-bit vector min/max, so the scan above runs several
+// times slower than with AVX2, where the same loop needs one instruction for each.
+template <typename Index>
+[[gnu::target("avx2")]] static std::pair<uint32_t, uint32_t> IndexValueRangeAvx2(const uint8_t* bytes, uint32_t index_count)
+{
+	return IndexValueRange<Index>(bytes, index_count);
+}
+#endif
 
 // Records [first, records) that indexes in [minimum, maximum] fetch after `vertex_offset`.
 VertexRecordRequirement VertexRecordsOfIndexRange(uint32_t minimum, uint32_t maximum, int32_t vertex_offset)
@@ -460,6 +470,13 @@ std::pair<uint32_t, uint32_t> GraphicsRenderIndexValueRange(const void* indexes,
 {
 	EXIT_IF(indexes == nullptr || (element_size != 2u && element_size != 4u));
 	const auto* bytes = static_cast<const uint8_t*>(indexes);
+#if defined(__x86_64__) && defined(__GNUC__)
+	static const bool avx2 = __builtin_cpu_supports("avx2");
+	if (avx2)
+	{
+		return element_size == 2u ? IndexValueRangeAvx2<uint16_t>(bytes, count) : IndexValueRangeAvx2<uint32_t>(bytes, count);
+	}
+#endif
 	return element_size == 2u ? IndexValueRange<uint16_t>(bytes, count) : IndexValueRange<uint32_t>(bytes, count);
 }
 

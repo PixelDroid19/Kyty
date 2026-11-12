@@ -40,6 +40,7 @@ UT_LINK(EmulatorFragmentMaskFlow);
 UT_LINK(EmulatorVertexExecFlow);
 UT_LINK(EmulatorFragmentTransport);
 UT_LINK(EmulatorComputeColorFill);
+UT_LINK(EmulatorIndexValueRange);
 UT_LINK(EmulatorSyncOnAddressLibrary);
 UT_LINK(EmulatorImeDialog);
 UT_LINK(EmulatorPrimitiveState);
