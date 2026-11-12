@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: BVH kernel register pressure is added by the driver back end (2026-11-12, open)
   - Robot platformer: banded frame in the intro cinematic (2026-11-10, open)
   - Robot platformer: the guest does not pace the still dune view (2026-11-10)
   - Robot platformer: the still dune view waited on a full submission ring (2026-11-10, fixed)

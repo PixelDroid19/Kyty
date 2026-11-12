@@ -6,6 +6,44 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: BVH kernel register pressure is added by the driver back end (2026-11-12, open)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, translator 215, offline.
+The question: the 2026-11-10 record below closes the BVH traversal kernel
+`0x3666fa39` on "the guest program's live ranges at 128 registers". Does the
+guest program itself need more than 128 live values?
+
+- **Module.** The stored compute recipe of the dunes route whose descriptor
+  layout matches `0x3666fa39` (10+10 2D, 5+5 2D-array, 1+1 3D textures, 7
+  samplers, 2 storage images, workgroup 256) compiles at SIMD8 to 41,398
+  instructions, 1352 sends, 145 loops, spills:fills 622:2426 and 358 maximum
+  live registers (`VK_KHR_pipeline_executable_properties`, shader cache
+  disabled). That is heavier than the translator 210 baseline below (37,309,
+  1219, 137, 556:2138, 354); the cause was not traced.
+- **Guest liveness.** A backward CFG liveness pass over the guest listing
+  (3,066 instructions, 80 labels; `exec` and `scc` left out, every write
+  counted as a full definition, so a lower bound) peaks at 53 scalar and 69
+  vector registers, 122 in all; the mean is 19 scalar and 48 vector. The
+  program declares 72 VGPRs.
+- **Pressure in the final NIR** (the driver's last IR before its back end,
+  `INTEL_DEBUG=cs`): exact CFG liveness peaks at 126 32-bit words (49 uniform,
+  77 divergent); first-to-last-reference intervals, ignoring holes, peak at
+  108. The 358 live registers therefore appear in the back end's lowering,
+  not in the module's live ranges or control-flow layout. Which back-end
+  step adds them was not established; no translation rule tried so far
+  reaches it.
+- **Cross-lane operations.** The guest uses only `v_readlane` (44),
+  `v_writelane` (36), `v_readfirstlane` (9) and `s_ff1` on 64-bit masks (30):
+  no DPP, `v_permlane16`, `v_permlanex16`, `ds_swizzle` or `ds_bpermute`. The
+  ISA confines those to 16-lane rows or 32-lane halves, so that confinement
+  cannot keep any of this kernel's exchanges inside a part.
+- **Excluded: one guest wave64 as one 32-lane host subgroup with two guest
+  lanes per invocation.** It removes the exchange between parts, but on 128
+  registers per thread a SIMD32 value takes 4 registers, and the kernel keeps
+  about 69 vector values live per lane, twice per invocation. The records
+  below measured the nearer variants: 16-lane parts compiled to 1574:9325, and
+  32-lane parts gave wrong output at 101 ms per call.
+
 ## Robot platformer: banded frame in the intro cinematic (2026-11-10, open)
 
 - Observed (Intel Arc A770, ANV Mesa 26.2.6, strict, `6dab9a32e` plus the uncommitted
