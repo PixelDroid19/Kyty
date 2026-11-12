@@ -5,13 +5,17 @@ Every draw discards, for each of its color and depth targets, the pending comput
 it has seen every pending fill; what it discards is unchanged. Measured against the full scan in the same run
 (arms alternating every 16,384 draws), emission row, new minus old:
 
-- `PPSA21567 - Astro Bot`, walking dunes (captures at 108, 125 and 145 s): -0.29 us per draw mean, -0.11
-  median, 10 of 13 windows lower (213k draws per arm). A second run that ended in the cinematic: -0.33 mean,
-  -0.20 median. A temporary counter saw about 3.7 discards per indexed draw, with the table empty in 63 % of
-  them. At about 615 draws per frame that is about 0.15 ms per frame.
+- `PPSA21567 - Astro Bot`, walking dunes (captures at 108, 125 and 145 s): median -0.11 us per draw (mean
+  -0.29, pulled by a few windows that swing about 1 us on their own), 10 of 13 windows lower, 213k draws per
+  arm. A second run that did not reach the walking dunes (one black capture, not examined): median -0.20, mean
+  -0.33. Over both runs 38 of 54 windows are lower. A temporary counter saw roughly 3.7 scans per indexed draw
+  (counters read at different moments), with the table empty in 62 % of them. At about 615 draws per frame that
+  is roughly 0.07 to 0.18 ms per frame.
 - `PPSA17221 - Minecraft`, world: -0.03 to -0.06 us per draw, within noise (131k to 590k draws per arm).
 
-The total per-draw time moves by several us between windows in both titles, so no frame-rate change is claimed.
+The gain sits at the 0.1 us threshold this work uses; the change is kept because it does less work for the
+same result. The total per-draw time moves by several us between windows in both titles, so no frame-rate
+change is claimed. The committed build was not run on a title; the measured arm ran the same scan.
 Not run: other titles, `playable-regression`, the second GPU.
 
 ## Indexed-draw shader inputs prepared ahead of the command processor (2026-11-12, built)
