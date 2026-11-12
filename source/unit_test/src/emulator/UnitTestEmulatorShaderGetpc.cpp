@@ -548,6 +548,70 @@ TEST(EmulatorShaderGetpc, RedefinedBoundDescriptorReadsRuntimeDescriptor)
 	EXPECT_TRUE(ShaderVectorBufferUsesRuntimeDescriptor(bind, instructions.At(3)));
 }
 
+// A stage without runtime V# lowering (the vertex front) keeps a reloaded
+// consumer on the slot path. That is sound only when every path reloads the
+// register; a path that keeps the bound row refuses the buffer instead.
+static ShaderBindResources SlotOnlyBind(bool reload_on_one_branch)
+{
+	const ShaderOperand descriptor {.type = ShaderOperandType::Sgpr, .register_id = 12, .size = 4};
+	ShaderInstruction   scalar_load {};
+	scalar_load.type    = ShaderInstructionType::SBufferLoadDword;
+	scalar_load.dst     = {.type = ShaderOperandType::Sgpr, .register_id = 20, .size = 1};
+	scalar_load.src_num = 2;
+	scalar_load.src[0]  = descriptor;
+	scalar_load.src[1]  = {.type = ShaderOperandType::LiteralConstant, .size = 1};
+	ShaderInstruction branch {};
+	branch.type               = ShaderInstructionType::SCbranchScc0;
+	branch.format             = ShaderInstructionFormat::Label;
+	branch.src[0].type        = ShaderOperandType::LiteralConstant;
+	branch.src[0].constant.i  = 4; // skips the reload
+	branch.src_num            = 1;
+	ShaderInstruction reload {};
+	reload.type = ShaderInstructionType::SGetpcB64;
+	reload.dst  = {.type = ShaderOperandType::Sgpr, .register_id = 12, .size = 2};
+	ShaderInstruction vector_load {};
+	vector_load.type    = ShaderInstructionType::BufferLoadDword;
+	vector_load.dst     = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	vector_load.src_num = 3;
+	vector_load.src[0]  = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	vector_load.src[1]  = descriptor;
+	ShaderInstruction end {};
+	end.type = ShaderInstructionType::SEndpgm;
+
+	ShaderCode code;
+	for (auto inst: reload_on_one_branch ? std::vector {scalar_load, branch, reload, vector_load, end}
+	                                     : std::vector {scalar_load, reload, vector_load, end})
+	{
+		inst.pc = code.GetInstructions().Size() * 4u;
+		code.GetInstructions().Add(inst);
+	}
+	if (reload_on_one_branch)
+	{
+		code.GetLabels().Add(ShaderLabel(12u, 4u));
+		code.GetIndirectLabels().Add(ShaderLabel(8u, 4u));
+	}
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num       = 1;
+	bind.storage_buffers.start_register[0] = 12;
+	ShaderCodeResourceMemo memo;
+	ShaderCollectRedefinedBufferDescriptors(code, &bind, 0, *ShaderScalarFlowOf(code), &memo, false);
+	EXPECT_TRUE(bind.descriptor_flow_proven);
+	EXPECT_EQ(bind.redefined_descriptor_consumers.Size(), 0u);
+	return bind;
+}
+
+TEST(EmulatorShaderGetpc, SlotOnlyConsumerNeedsTheRegisterReloadedOnEveryPath)
+{
+	const auto straight = SlotOnlyBind(false);
+	ASSERT_EQ(straight.slot_only_consumers.Size(), 1u);
+	EXPECT_EQ(straight.slot_only_consumers.At(0), 8u);
+	EXPECT_FALSE(straight.storage_buffers.row_redefined[0]);
+
+	const auto branched = SlotOnlyBind(true);
+	EXPECT_EQ(branched.slot_only_consumers.Size(), 0u);
+	EXPECT_TRUE(branched.storage_buffers.row_redefined[0]);
+}
+
 static String8 VertexScalarProbeSource(bool enabled, uint32_t loads)
 {
 	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
