@@ -91,9 +91,19 @@ descriptor set every draw.
   lookup 0.20), materialization 0.48, unattributed about 1.2. 2,805 draws a frame make 31.9 ms of the 44.8 ms
   frame. `0be0c39a2` keeps each thread's recent vertex programs (0 disagreements in 28,672 sampled comparisons
   with the full lookup) and visits only the load instructions in the per-draw guest-memory checks: setup fell
-  from 4.25 to 3.95 us, about 0.8 ms a frame. Without overlap, 60 fps needs about 1.3 us per draw; with the
-  command processor overlapped with the guest, about 5.9 us here and 3.0 us at 5,458 draws. A plan that skips
-  input parsing, ids and the pipeline lookup removes at most about 3.5 us, so overlap is needed as well.
+  from 4.25 to 3.95 us, about 0.8 ms a frame. Without overlap, 60 fps needs about 1.3 us per draw. Overlap is
+  bounded by the submit contract: submit returns only after the batch is decoded, because the title rewrites
+  its descriptor tables after submit, so the decode cannot run behind the guest. Priced against that contract,
+  a draw plan (worth about 1.5 us: pixel inputs already use a cached analysis and vertex inputs are mostly the
+  descriptor gather) and a two-stage command processor together reach about 27-31 fps at this load, not 60.
+  (Corrects the 2026-11-12 estimate of "overlap plus 5.9 us per draw".)
+- **Write notification cost on the submitting thread (2026-11-12, world, perf at 199 Hz).** Guest
+  `memcpy`/`memset`/`memmove` notify the dirty-page tracker of every write, about a million times a second, and
+  almost all of them land on single pages the tracker does not hold (0.16% found, temporary counters). On
+  `0be0c39a2` the tracker held 150 of the 347 samples of the submitting thread (43%). A 16 KiB bit map with one
+  bit per 64-page block, set before a page identity is published and never cleared, now answers an untracked
+  page without probing the 2M-slot page table: 103-108 of 316-337 samples (31-34%) in three runs, about 1 ms a
+  frame. The rest is the per-call path itself; a finer 1 MiB per-page map measured the same.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
