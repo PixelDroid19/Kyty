@@ -1,3 +1,30 @@
+## Shader ids of prepared draws built on the draw front (2026-11-12, built)
+
+The vertex and pixel shader ids serialize every field of the input infos and were built on the command
+processor for every draw, about 7.6 % of its thread in the `PPSA17221 - Minecraft` world profile. The draw
+front, which already prepares the input infos of indexed draws ahead and runs about four draws for each one
+the processor records, now also builds both ids. The processor moves them into the pipeline lookup.
+
+After it takes prepared inputs the processor still sets two pixel fields the pixel id reads: the host-to-guest
+scale (resolution cohorts) and the dual-source blend flag. The front keeps their prepared values, and the
+processor reuses the ids only while both are unchanged; otherwise it builds them as before. Probe and tap
+fields are the only other fields it sets, and a draw takes no prepared inputs while a probe selector is set.
+A geometry pass also takes none. The id layout is unchanged, so module caches stay valid.
+
+- Correctness check (temporary diagnostic, not committed): every draw that reused prepared ids also rebuilt
+  both ids on the processor and compared them. A forged id with one extra word was reported as different.
+  `PPSA17221 - Minecraft` world: 950,000 draws, 0 differences. `PPSA21567 - Astro Bot`, intro to dunes:
+  650,000 draws, 0 differences. No draw in either run fell back because of the two pixel fields.
+- `PPSA17221 - Minecraft` world, old and new alternating in 4 s windows of one run (13 new and 15 old 1 s
+  samples at 5.2-5.7k draws per frame; the scene left that range after 50 s): command processor 34.1 against
+  35.4 ms per frame, 5.88 against 6.11 us per draw, median frame time 48.0 against 49.0 ms, mean 20.63 against
+  19.66 fps.
+- `PPSA21567 - Astro Bot`, same alternation from 100 s (the run stayed in the intro cinematic): command
+  processor 244 against 246 us per draw and every timed draw stage equal, pipeline setup 2.08 against
+  2.07 us. About 370 draws per frame, so the ids cost little there. No frame-rate claim.
+- Not run: `kyty_agent playable-regression`, titles with resolution scaling (the fallback path did not engage
+  live), a second GPU.
+
 ## Per-draw input infos no longer zeroed through a default std::optional (2026-11-12, built)
 
 GCC 16 (libstdc++ 16, -O3) zeroes the whole storage of a default-constructed `std::optional<T>` local. The
