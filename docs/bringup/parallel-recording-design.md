@@ -114,6 +114,10 @@ which slow the CP):
 
 ## Decision
 
+Amended 2026-11-12: the maintainer withdrew the 2x build gate, and this split is workstream C of
+`performance-architecture-plan.md`, built after the release path and the submit overlap. The text
+below is the decision as first recorded.
+
 Not built. The ceiling (1.2-1.7x of CP time, about 9-11 fps in the measured scene) is below the
 2x build gate. Build only after the time outside CP processing (largely the serial submit, see
 above) is cut, and a change brings stage A low enough that stage A plus the remaining off-CP time fit in a 33 ms
