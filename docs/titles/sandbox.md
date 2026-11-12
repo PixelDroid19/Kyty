@@ -133,6 +133,10 @@ descriptor set every draw.
   draw, not the 0.7 of the first pair. `PPSA21567 - Astro Bot` unchanged at 74 us per draw over the same route.
   Building both shader ids in place in `PipelineCache::CreatePipeline` instead of copying them saves two
   allocations per draw: pipeline setup 1.085 -> 1.037 us, within that noise.
+- **Excluded (2026-11-12): sharing repeated shader-id words.** A per-thread table of recent identities let a draw
+  reuse the stored words of an identity seen before (no allocation) and compare equal identities by pointer.
+  Two world runs read pipeline setup 1.08 and 1.08 us against 1.04, whole draw 9.20 and 9.15 us against 9.07 and
+  9.50: allocating the id words is not what the pipeline setup row pays for. Reverted.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
