@@ -212,3 +212,9 @@ the hand-off (a multi-KB input record per draw): about 6.7 ms of a 44.8 ms frame
 Dispatches, guest-memory waits and writes, end-of-pipe writes, barriers and flips would drain it.
 Reaching 5-6 us needs binding and the ordered part of state setup rebuilt as functions of a
 versioned snapshot, or recorded on workers as above; neither is designed.
+
+Built 2026-11-12, first stage (`docs/titles/sandbox.md`, "Shader inputs of indexed draws prepared ahead of
+the command processor"): a second thread replays register packets on a shadow command processor and
+prepares the shader input information of direct indexed draws, the per-draw class priced at 7.5 ms per
+frame above. Measured in the world with the paired in-run A/B: 10.54 -> 8.31 us per draw. The submit
+contract is unchanged; the replay restarts every 4.5-15 draws, at the next packet it does not admit.

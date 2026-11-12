@@ -201,6 +201,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - [Tessellation design](bringup/tessellation-design.md): hull/domain mapping to Vulkan, staged plan, PATCH draws refused first (2026-10-29, design)
   - [GPU-indexed descriptor tables](bringup/bindless-tables-design.md): table-selected T#/S# and ray-tracing dispatch needs (2026-10-29, design)
   - [Parallel draw recording](bringup/parallel-recording-design.md): two-stage split, 22-26 draws per pass, ceiling 9-11 fps in the world scene, not built (2026-11-10, design); one batch of submit overlap did not shrink the gap, cause open (2026-11-11)
+    - First stage built: indexed-draw shader inputs prepared ahead, 10.54 -> 8.31 us per draw (2026-11-12)
   - [Binding over a versioned snapshot](bringup/binding-snapshot-design.md): epochs, by-address storage, texture heap priced on paper at 3.0-5.2 us/draw saved, leaving 6.5-8.5 us; 3 us needs recording off the command-processor thread (2026-11-12, design)
   - [Temporal upscalers decision](bringup/temporal-upscalers-decision.md): no DLSS/XeSS now; temporal inputs first, FSR 2 before proprietary SDKs (2026-10-29, decided)
   - Guest `fprintf` read past its buffer and `strto*` dropped range errors (2026-10-30, fixed)

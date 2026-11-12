@@ -6,6 +6,59 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Sandbox title: shader inputs of indexed draws prepared ahead of the command processor (2026-11-12, built)
+
+First stage of the split of command processing over two threads (`docs/bringup/parallel-recording-design.md`).
+The submit contract is unchanged: a submit still returns once its batch is decoded.
+
+- **Change.** A second thread replays, on a shadow command processor, the packets that follow the command
+  processor's position, and analyses the vertex and pixel shader inputs of each direct indexed draw it meets.
+  The command processor takes the prepared inputs at the draw instead of analysing them inline.
+  - The replay admits only packets that change nothing but the registers and index state of their processor
+    (`SET_*_REG`, index base/size/type, instance count, register-table and marker NOPs) and direct indexed
+    draws. It stops at the first other packet; the command processor stops it before running that packet and
+    at the end of every run, and restarts it from the next indexed draw with a copy of its own registers.
+  - Why the registers are not compared at the take: the shadow starts from the command processor's registers
+    and runs the same handlers over the same packets, and a draw changes no register. A byte digest of the
+    register state never matched: the register structures contain padding.
+  - Guest memory read ahead: a record is taken only if no emulator write of guest memory was announced since its
+    analysis began. The epoch advances on label write-backs, on the end-of-pipe GDS copy and when a wait for
+    published GPU results ends. Guest calls that write memory (HLE `memcpy`/`memset`) do not advance it: the
+    submitting thread waits for the batch to be decoded, and a write from another guest thread meanwhile races
+    the inline analysis equally. An epoch that counted every
+    notified write advanced 223-341 million times per run and no record was ever taken; this one advanced 17,000
+    times in the world run.
+  - The draws the gate refuses keep the inline analysis: geometry passes, indirect draws, draws without a depth
+    target, depth/stencil copies and the color modes that take the special paths.
+  - A ring of 64 records. When it is full the replay parks outside the packet handler (the handler may still read
+    its packet) and resumes when half the ring is free.
+- **Checked (temporary cross-check, removed).** Every taken record was compared field by field with an inline
+  analysis of the same draw, with 4 differences planted by hand in each run to show the comparison reports one.
+  - Earlier build of the change (the replay waited for a free record inside the draw handler): `PPSA17221 -
+    Minecraft` 285,408 records including the world, `PPSA21567 - Astro Bot` 100,753, no difference apart from
+    the planted ones.
+  - Committed code with the ring cut to 4 records, so the replay parks on a full ring: 243,265 records, 111,420
+    parks, only the 4 planted differences, exit 0. Menu and loading only; the run, slowed by the comparison,
+    had not reached the world after 200 s.
+- **Measured (Intel A770, Mesa 26.2.6, strict, 60 fps limit, world route from one save copy; a VM and a browser
+  were running on the host).** Paired in-run A/B (arms alternate every 16k draws, world window): command
+  processing per draw 10.54 -> 8.31 us (-2.22 us), of which draw state 4.12 -> 2.09 us. 814,000 takes, 61,000
+  restarts. Separate runs on the instrumented build, frames of about 5,400 draws: off 88 ms per frame (11.3 fps,
+  12.8 us per draw), on about 69 ms (about 14.5 fps). The clean build ran the route with exit 0; its world
+  window is not used for frame time.
+- **Unexplained.** Both runs with the look-ahead on ended on the death screen at night, while the run with it
+  off, from the same save copy, stayed alive. Not investigated; a faster simulation at a higher frame rate is a
+  guess, not a measurement. The letters missing from that screen predate the change ("Letters missing from the
+  death message" below).
+- **Robot platformer (`PPSA21567 - Astro Bot`), intro route.** Paired A/B 69.0 -> 55.6 us per draw in a window of
+  about 232 draws per frame dominated by first-use shader compiles. Clean build: same pre-existing
+  `gfx_storage_frontier` error, intro cinematic correct, exit 0; no comparable baseline run, so no frame-time
+  claim.
+- **Open.** The command processor restarts the replay about every 4.5-15 draws, because the next packet the
+  replay does not admit (events, nested buffers, waits) comes that soon; admitting more packets is the next lever.
+  Not checked: `playable-regression`, scored captures, other titles (the ones that depend on label
+  write-backs test the epoch most), the second GPU.
+
 ## Sandbox title: boot pauses with no GPU work before the main menu (2026-11-11, open, intermittent)
 
 - **Observation.** On one binary (the device-address storage reads and the queue wait fix, built 2026-11-11), four

@@ -1,3 +1,10 @@
+## Indexed-draw shader inputs prepared ahead of the command processor (2026-11-12, built)
+
+A second thread prepares the shader inputs of direct indexed draws ahead of the command processor in every
+title. Records, cross-checks and measurements: `docs/titles/sandbox.md`, "Shader inputs of indexed draws prepared
+ahead of the command processor". Checked on `PPSA17221 - Minecraft` and `PPSA21567 - Astro Bot` only; titles
+that depend on label write-backs, `playable-regression` and the second GPU were not run.
+
 ## Device wait-idle races a queue submit under the validation layer (2026-11-11, fixed)
 
 One 63 s run of `PPSA21402 - Balatro` with the validation layer loaded stopped with exit 65 on a threading
