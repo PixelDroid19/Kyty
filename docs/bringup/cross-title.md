@@ -67,8 +67,10 @@ submit after it. A hand-made change was reported in every window.
   modelled). `PPSA17221 - Minecraft`, world: 20.3 batches a second, decode 70 % of the span and the
   guest's gap 29 %, estimated x1.43. `PPSA21567 - ASTRO BOT`, dunes: 97 batches a second (about five
   a frame), decode 92 % of the span including its waits on the GPU, guest gap median 0.04 ms, at
-  most x1.08. Estimates, not measured frame rates
-  (`docs/bringup/performance-architecture-plan.md`, section 6).
+  most x1.08. With each release drain on the submitting thread waiting for the batch in flight (a
+  third run: 979 drains in 671 of 827 gaps, starting at a median 0.82 of the gap), the sandbox
+  title keeps x1.29 of its x1.42, so the plan builds one batch ahead before the release path.
+  Estimates, not measured frame rates (`docs/bringup/performance-architecture-plan.md`, section 6).
 
 ## Performance plan, stage 0: release census and draw-front coverage (2026-11-12, measured)
 

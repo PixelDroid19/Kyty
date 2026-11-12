@@ -1,6 +1,6 @@
 # Performance architecture plan (2026-11-12)
 
-Status: plan, stage 0, B0.2 and a one-batch-ahead estimate measured (section 6), next A2 and A3. Maintainer decision of 2026-11-12:
+Status: plan, stage 0, B0.2 and a one-batch-ahead estimate measured (section 6), next B1. Maintainer decision of 2026-11-12:
 build the changes below, and the 2x build gate of `parallel-recording-design.md` is withdrawn.
 Every gain in this document is an estimate until its stage is measured. Each stage names its
 measurement and its correctness gate.
@@ -53,7 +53,7 @@ only where Kyty's own traces agree.
 
 ## 3. Workstreams
 
-### A. Memory release without a full drain (first)
+### A. Memory release without a full drain (after B1 to B3)
 
 - **Problem.** `release_direct_memory` (`Memory.cpp`) reaches `GraphicsInvalidateGpuMappingRanges`,
   which runs under `Gpu::RunQuiesced`; `Gpu::WaitLocked` drains every ring and the host GPU. The
@@ -70,8 +70,9 @@ only where Kyty's own traces agree.
   once and keeps the views that map it; the backing goes only when no view maps it. Without the
   drain a late write can land in a range the guest has allocated again. No test over memory objects
   and device-address ranges can therefore show that a release is safe without the drain.
-- **Why first.** Without it the sandbox title cannot show any overlap, and with it the
-  one-batch-ahead experiment (B0) measures the real ceiling before the capture is built.
+- **Order.** Planned first; amended 2026-11-12 (section 6, timeline): with one batch in flight the
+  drains start late in the guest's gap and leave an estimated x1.29 of the x1.42, so B1 to B3 go
+  first and A3 follows, measured against a submit that returns early.
 - **A1, measure.** Per release, one run per title: size, whether a memory object, a device-address
   entry or an import window overlaps the range, whether the command processor is inside a host read
   of the range, and whether the next mapping reuses the addresses before the queued batches end.
@@ -105,7 +106,7 @@ only where Kyty's own traces agree.
      nothing about a released submitter. Measured 2026-11-12 over program intervals of the serial
      submit (section 6, B0.2): one batch ahead no descriptor table or shader code changed in the
      three titles; vertex and index copies did; the sandbox title's tables change two batches ahead.
-  3. One batch ahead after workstream A: the frame time, and whether the guest starts its next
+  3. One batch ahead: the frame time, and whether the guest starts its next
      frame earlier. This is not established for any title; the fighting title waited on an event
      flag instead (`docs/titles/anime-fighter.md`). The serial submit's timeline (section 6)
      estimates x1.43 for the sandbox title and at most x1.08 for the robot platformer.
@@ -192,7 +193,7 @@ only where Kyty's own traces agree.
 ## 4. Order
 
 1. Stage 0: A1, B0.1, E2 and F0, four short runs.
-2. A2 and A3, then B0.2 and B0.3, then B1 to B3, then C, then D.
+2. B0.2 and the one-batch-ahead timeline (done), then B1 to B3, then A2 and A3, then C, then D.
 3. E1 and F1 are small and independent; they go in between.
 
 ## 5. Verification of every stage
@@ -351,7 +352,7 @@ intervals, sooner.
 - **Consequence for B1.** One batch ahead, the capture is the analysis that finds the batch's
   vertex and index copies (the draw front's replay to the batch end, about 14 ms per frame in the
   sandbox title by the replay time above) and those copies. The release drain still waits for the
-  in-flight decode, about 1.5 times a frame in the sandbox title, so A comes first.
+  in-flight decode, about 1.5 times a frame in the sandbox title, priced by the timeline below.
 
 ### Per-batch timeline of the serial submit and a one-batch-ahead estimate
 
@@ -382,10 +383,20 @@ of the decode time; it ignores the release drain, which also waits for the in-fl
   the title is GPU-bound (89 % in the stage 0 run), so its frame needs less GPU and
   command-processor time (workstreams C and D, and F), not an earlier return. The decode time
   includes the decode thread's waits on the GPU, so x1.08 is an upper bound.
-- **Consequence.** The decision rule set before the runs was a gain of at least x1.2 in the
-  sandbox title for one batch ahead to be built first in workstream B; it passes, as an estimate.
-  It is not a measured frame rate: the release drain waits for the in-flight decode about 1.5
-  times a frame in that title, so A3 comes before B1.
+- **Release drains with one batch in flight** (one more sandbox run, the same stamps plus each
+  quiesce's entry and exit with its thread). The submit came from one thread (828 of 829 submits).
+  In 40 s, 979 quiesces ran on that thread, in 671 of 827 guest gaps, 0.22 ms median each; none ran
+  inside a submit. They start late in the gap, at a median 0.82 of its length. Replayed with each
+  such drain waiting for the batch in flight, one batch ahead gives x1.29 instead of x1.42 in the
+  same run. Another 115 quiesces ran on other threads (0.16 ms median, 10 ms mean); they hold
+  submissions back only while they run and are not modelled. A hand-made drain at the start of every
+  gap gives x1.00 and one at its end x1.41, so the replay engages.
+- **Consequence.** The decision rule set before the runs was a gain of at least x1.2 in the sandbox
+  title for one batch ahead to be built first; it passes with the drains blocking (x1.29), so B1 to
+  B3 come before A3. It is an estimate, not a frame rate: it assumes the guest does not wait in its
+  gap on work of the batch in flight, as the fighting title waited on an event flag. With B1 in
+  place, A3's open items (a queued batch reading a released range, address reuse before the queued
+  batches end) become measurable.
 
 ### E2, reported output size (excluded for the robot platformer)
 
