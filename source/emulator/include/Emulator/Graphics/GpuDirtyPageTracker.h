@@ -97,6 +97,12 @@ class GpuDirtyPageTracker
 {
 public:
 	static GpuDirtyPageTracker& Instance() noexcept;
+
+	// Advances when the emulator announces a write of guest memory that no guest call asked for, and
+	// when a wait for work that may publish one returns. A reader of guest bytes that sees it
+	// unchanged before and after met no such event in between.
+	[[nodiscard]] static uint64_t HostWriteEpoch() noexcept { return s_host_write_epoch.load(std::memory_order_acquire); }
+	static void                   NoteHostWrite() noexcept { s_host_write_epoch.fetch_add(1, std::memory_order_acq_rel); }
 	explicit GpuDirtyPageTracker(bool enabled = true);
 	GpuDirtyPageTracker(const GpuDirtyPageProtectionOps& protection_ops, bool enabled = true);
 	~GpuDirtyPageTracker();
@@ -164,6 +170,7 @@ public:
 	[[nodiscard]] bool PageGenerations(uintptr_t address, size_t size, uint64_t* generations, size_t count) const noexcept;
 
 private:
+	static inline std::atomic<uint64_t> s_host_write_epoch {0};
 	friend struct GpuDirtyPageTrackerTestAccess;
 
 	struct PageEntry;

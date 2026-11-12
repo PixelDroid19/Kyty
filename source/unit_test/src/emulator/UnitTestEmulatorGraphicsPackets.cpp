@@ -34,6 +34,7 @@
 #include "../../../emulator/src/Graphics/ShaderSpirvInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvScJoin.h"
 #include "../../../emulator/src/Graphics/ShaderStorageAnalysis.h"
+#include "../../../emulator/src/Graphics/GraphicsRunDrawFront.h"
 #include "../../../emulator/src/Graphics/GraphicsRunInternal.h"
 #include "../../../emulator/src/Graphics/GraphicsRunWaitPolicy.h"
 
@@ -12046,6 +12047,32 @@ TEST(EmulatorGraphicsPackets, WritesAgcMultiDrawPackets)
 	EXPECT_EQ(instanced[14], 0xc6000000u);
 
 	EXPECT_EQ(Gen5::GraphicsDcbDrawIndirectMulti(nullptr, 0u, 0u, 0u, 0u, 0u, 0u), nullptr);
+}
+
+// The replay ahead of a processor runs only the packets this classification admits, so a packet with
+// any effect beyond its processor's registers must classify as Other.
+TEST(EmulatorGraphicsPackets, DrawFrontAdmitsOnlyRegisterAndIndexedDrawPackets)
+{
+	auto classify = [](std::vector<uint32_t> packet)
+	{ return DrawFrontClassifyPacket(packet.data(), static_cast<uint32_t>(packet.size())); };
+
+	EXPECT_EQ(classify({0x80000000u}), DrawFrontPacket::Padding);
+	EXPECT_EQ(classify({0u, 0u}), DrawFrontPacket::Padding);
+
+	EXPECT_EQ(classify({KYTY_PM4(3, Pm4::IT_SET_CONTEXT_REG, 0u), 0x10u, 1u}), DrawFrontPacket::Registers);
+	EXPECT_EQ(classify({KYTY_PM4(3, Pm4::IT_SET_SH_REG, 0u) | 1u, 0x20cu, 1u}), DrawFrontPacket::Registers);
+	EXPECT_EQ(classify({KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0x6875000du}), DrawFrontPacket::Registers);
+	EXPECT_EQ(classify({KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0x12345678u}), DrawFrontPacket::Registers);
+
+	EXPECT_EQ(classify({KYTY_PM4(6, Pm4::IT_DRAW_INDEX_2, 0u), 3u, 0u, 0u, 3u, 0u}), DrawFrontPacket::IndexedDraw);
+	EXPECT_EQ(classify({KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u), 3u, 0u, 3u, 0u}), DrawFrontPacket::IndexedDraw);
+	EXPECT_EQ(classify({KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX), 3u, 0u, 0u, 0u, 0u, 0u}), DrawFrontPacket::IndexedDraw);
+
+	// A flip marker, an event, an indirect buffer and a packet longer than its run are not register state.
+	EXPECT_EQ(classify({KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0x68750777u}), DrawFrontPacket::Other);
+	EXPECT_EQ(classify({KYTY_PM4(3, Pm4::IT_EVENT_WRITE, 0u), 0u, 0u}), DrawFrontPacket::Other);
+	EXPECT_EQ(classify({KYTY_PM4(4, Pm4::IT_INDIRECT_BUFFER, 0u), 0u, 0u, 0u}), DrawFrontPacket::Other);
+	EXPECT_EQ(classify({KYTY_PM4(4, Pm4::IT_SET_CONTEXT_REG, 0u), 0x10u, 1u}), DrawFrontPacket::Other);
 }
 
 UT_END();

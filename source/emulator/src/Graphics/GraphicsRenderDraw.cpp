@@ -40,6 +40,7 @@
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -1793,10 +1794,17 @@ static VulkanBuffer* RecordGeometryIndirectPass(uint64_t submit_id, CommandBuffe
                                                 const GuestDeviceAddressTable* device_address_table, ShaderVertexInputInfo* pull,
                                                 const SubmissionId* mutation_conflict);
 
+// A default-initialized input info: emplacing the info itself would zero all of it first.
+struct AnalysedVertexInput
+{
+	ShaderVertexInputInfo info;
+	AnalysedVertexInput() {} // NOLINT(modernize-use-equals-default)
+};
+
 static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                               uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                               uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
-                              SubmissionId* pending_submission, IndexedIndirectSource* indirect)
+                              SubmissionId* pending_submission, IndexedIndirectSource* indirect, PreparedDrawInputs* prepared)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -2011,8 +2019,18 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	}
 	VulkanSampleLocationState sample_locations {};
 	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info), &sample_locations);
-	ShaderVertexInputInfo vs_input_info;
-	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info, &ctx->GetShaderStagesRaw());
+	// A geometry pass derives its inputs and a probe selects the draw by its guest count, so neither
+	// takes inputs prepared ahead.
+	if (geometry_pass || indirect != nullptr || DrawProbeSelectorSet())
+	{
+		prepared = nullptr;
+	}
+	std::optional<AnalysedVertexInput> analysed_vs;
+	ShaderVertexInputInfo&             vs_input_info = prepared != nullptr ? prepared->vs : analysed_vs.emplace().info;
+	if (prepared == nullptr)
+	{
+		ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info, &ctx->GetShaderStagesRaw());
+	}
 	MaybeReportNativeWaveInput(*ctx, *ucfg, *sh_ctx, vs_input_info,
 	                          {index_count, true, index_type_and_size, first_instance, instance_count,
 	                           reinterpret_cast<uint64_t>(index_addr), vertex_offset_add, draw_modifier});
@@ -2053,8 +2071,13 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	}
 	MaybeDumpPrimitiveDrawPlan("indexed", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true, primitive_plan);
 
-	ShaderPixelInputInfo ps_input_info {};
-	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info, !ps_required);
+	std::optional<ShaderPixelInputInfo> analysed_ps;
+	ShaderPixelInputInfo&               ps_input_info = prepared != nullptr ? prepared->ps : analysed_ps.emplace();
+	if (prepared == nullptr)
+	{
+		ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info,
+		                     !ps_required);
+	}
 	if (indirect == nullptr && DrawProbeSelectorSet())
 	{
 		ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count);
@@ -2467,10 +2490,10 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                              uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
-                             SubmissionId* pending_submission)
+                             SubmissionId* pending_submission, PreparedDrawInputs* prepared)
 {
 	RecordIndexedDraw(submit_id, buffer, ctx, ucfg, sh_ctx, index_type_and_size, index_count, index_addr, draw_modifier, type,
-	                  instance_count, vertex_offset_add, first_instance, pending_submission, nullptr);
+	                  instance_count, vertex_offset_add, first_instance, pending_submission, nullptr, prepared);
 }
 
 bool GraphicsRenderDrawIndexIndirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
@@ -2480,8 +2503,61 @@ bool GraphicsRenderDrawIndexIndirect(uint64_t submit_id, CommandBuffer* buffer, 
 	IndexedIndirectSource indirect {.args_address = args_address, .latch_queue = latch_queue, .previous_instances = previous_instances};
 	// Instance count zero binds every declared record of per-instance streams.
 	RecordIndexedDraw(submit_id, buffer, ctx, ucfg, sh_ctx, index_type_and_size, index_window, index_base, 0, 1, 0, 0, 0,
-	                  pending_submission, &indirect);
+	                  pending_submission, &indirect, nullptr);
 	return indirect.recorded;
+}
+
+// Whether RecordIndexedDraw reaches its shader input analysis outside a geometry pass for these
+// registers. It rejects every draw the recording leaves before that analysis, so inputs are never
+// prepared for a draw whose shaders the recording does not analyse. A draw without a depth target is
+// rejected because its no-output exit depends on the host color targets.
+static bool IndexedDrawInputsPreparable(const HW::Context& ctx, const HW::UserConfig& ucfg, HW::Shader* sh_ctx, uint32_t index_count,
+                                        uint32_t instance_count)
+{
+	if (index_count == 0)
+	{
+		return false;
+	}
+	GeometryDrawPlan geometry_plan;
+	if (ResolveGeometryDraw(ctx, ucfg, *sh_ctx, index_count, instance_count, &geometry_plan))
+	{
+		return false;
+	}
+	if (!DrawHasValidVertexShader(*sh_ctx) || ShouldSkipUnsupportedGeShader(ctx, ucfg, *sh_ctx))
+	{
+		return false;
+	}
+	// Color decompression (6), fast-clear elimination (2) and resolve (3) replace the draw.
+	const auto color_mode = static_cast<uint32_t>(ctx.GetColorControl().mode);
+	if (color_mode == 6u || color_mode == 2u || color_mode == 3u || ctx.GetRenderControl().depth_copy ||
+	    ctx.GetRenderControl().stencil_copy || shader_disable_reason(sh_ctx) != nullptr)
+	{
+		return false;
+	}
+	RenderDepthInfo depth_info;
+	DescribeRenderDepthInfo(ctx, &depth_info);
+	return depth_info.format != VK_FORMAT_UNDEFINED;
+}
+
+bool GraphicsRenderPrepareIndexedDrawInputs(const HW::Context& ctx, const HW::UserConfig& ucfg, HW::Shader* sh_ctx,
+                                            uint32_t index_count, uint32_t instance_count, PreparedDrawInputs* inputs)
+{
+	EXIT_IF(sh_ctx == nullptr || inputs == nullptr);
+	if (!IndexedDrawInputsPreparable(ctx, ucfg, sh_ctx, index_count, instance_count))
+	{
+		return false;
+	}
+	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx.GetShaderRegisters(), &inputs->vs, &ctx.GetShaderStagesRaw());
+	PrimitiveDrawPlan primitive_plan {};
+	if (!inputs->vs.input_resources_valid ||
+	    !GraphicsResolvePrimitiveDrawPlan(ucfg.GetPrimType(), index_count, inputs->vs.buffers_num, true, &primitive_plan))
+	{
+		return false;
+	}
+	const bool ps_required =
+	    State::PixelShaderStageRequired(ctx.GetRenderTargetMask(), ctx.GetShaderRegisters(), ctx.GetAlphaToMaskEnable());
+	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx.GetShaderRegisters(), &inputs->vs, ctx.GetRenderTargetMask(), &inputs->ps, !ps_required);
+	return true;
 }
 
 static bool GraphicsRenderDepthStencilCopyClearSource(uint64_t submit_id, CommandBuffer* buffer, RenderDepthInfo* source,

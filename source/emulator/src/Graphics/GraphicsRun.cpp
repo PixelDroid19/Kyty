@@ -12,6 +12,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GpuSubmissionPublicationGate.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/GuestDeviceAddress.h"
@@ -46,6 +47,7 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+#include "GraphicsRunDrawFront.h"
 #include "GraphicsRunInternal.h"
 
 namespace Kyty::Libs::Graphics {
@@ -721,6 +723,8 @@ void CommandProcessor::WaitUntilPublishedUnlessReentrant(SubmissionId submission
 	require_publication_success(m_publication_gate.WaitUntilPublished(submission), "WaitUntilPublished", m_queue, submission);
 	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - started).count();
 	TraceWait("publication_end", m_queue, 0, 0, 0, 0, submission.sequence, static_cast<uint64_t>(elapsed));
+	// Guest bytes read before this wait returned may precede what the submission published.
+	GpuDirtyPageTracker::NoteHostWrite();
 }
 
 void CommandProcessor::WaitSubmission(SubmissionId submission)
@@ -2241,6 +2245,13 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 
 		if (dw > num_dw) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw > num_dw condition ignored (continuing)\n"); }
 
+		m_packet = cmd;
+		// The replay reads packets, registers and guest memory only between packets that change nothing else.
+		if (m_draw_front != nullptr && m_draw_front->Live() && DrawFrontClassifyPacket(cmd, dw) == DrawFrontPacket::Other)
+		{
+			m_draw_front->Stop();
+		}
+
 		auto cmd_id = *cmd++;
 		dw -= 1;
 
@@ -2401,6 +2412,10 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 		dw -= s;
 	}
 
+	if (m_draw_front != nullptr)
+	{
+		m_draw_front->Stop();
+	}
 	m_active_run_begin = previous_run_begin;
 	m_active_run_end   = previous_run_end;
 }
@@ -2495,9 +2510,15 @@ static void RetryGuestDeviceAddressDraw(CommandProcessor* cp, const Callback& ca
 
 void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type)
 {
+	if (m_draw_front_shadow)
+	{
+		m_draw_front->Prepare(m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
+		return;
+	}
 	SubmitRecordedDispatchesBeforeDraw();
 	ResolveNumInstancesLatch();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
+	PreparedDrawInputs*         prepared = TakePreparedDrawInputs();
 	uint64_t submit_id = 0;
 	uint32_t index_type_and_size = 0;
 	uint32_t instance_count = 1;
@@ -2525,17 +2546,25 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 	{
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		// A retry records against registers a wait may have changed, so it analyses them again.
 		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
-		                        index_addr, draw_modifier, type, instance_count, 0, 0, pending);
+		                        index_addr, draw_modifier, type, instance_count, 0, 0, pending, std::exchange(prepared, nullptr));
 	});
+	m_draw_front->Release();
 	SubmitRecordedWorkIfGpuIdle();
 }
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags)
 {
+	if (m_draw_front_shadow)
+	{
+		m_draw_front->Prepare(m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
+		return;
+	}
 	SubmitRecordedDispatchesBeforeDraw();
 	ResolveNumInstancesLatch();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
+	PreparedDrawInputs*         prepared = TakePreparedDrawInputs();
 	uint64_t submit_id = 0;
 	uint32_t index_type_and_size = 0;
 	uint32_t instance_count = 1;
@@ -2565,8 +2594,9 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
-		                        index_addr, flags, 1, instance_count, 0, 0, pending);
+		                        index_addr, flags, 1, instance_count, 0, 0, pending, std::exchange(prepared, nullptr));
 	});
+	m_draw_front->Release();
 	SubmitRecordedWorkIfGpuIdle();
 }
 
@@ -2606,6 +2636,33 @@ bool CommandProcessor::DrawIndexIndirectOnDevice(uint64_t args_address)
 
 // A direct draw after a device-side DRAW_INDEX_INDIRECT draws as many instances as that record
 // latched; the host reads the latch once the recording that holds the record completes.
+PreparedDrawInputs* CommandProcessor::TakePreparedDrawInputs()
+{
+	if (m_draw_front == nullptr)
+	{
+		auto* shadow                = new CommandProcessor(m_submission_coordinator, m_queue);
+		m_draw_front                = new DrawFront(shadow);
+		shadow->m_draw_front        = m_draw_front;
+		shadow->m_draw_front_shadow = true;
+	}
+	if (m_draw_front->Live())
+	{
+		return m_draw_front->Take(m_packet, m_num_instances);
+	}
+	// The replay is idle. It continues from this draw with the registers this processor holds.
+	auto* shadow                  = m_draw_front->Shadow();
+	shadow->m_ctx                 = m_ctx;
+	shadow->m_ucfg                = m_ucfg;
+	shadow->m_sh_ctx              = m_sh_ctx;
+	shadow->m_user_data_marker    = m_user_data_marker;
+	shadow->m_index_type_and_size = m_index_type_and_size;
+	shadow->m_index_buffer_size   = m_index_buffer_size;
+	shadow->m_index_base_addr     = m_index_base_addr;
+	shadow->m_num_instances       = m_num_instances;
+	m_draw_front->Start(m_packet, m_active_run_end);
+	return nullptr;
+}
+
 void CommandProcessor::ResolveNumInstancesLatch()
 {
 	SubmissionId latch;

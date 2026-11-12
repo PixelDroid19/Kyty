@@ -2727,6 +2727,12 @@ struct ShaderPixelInputInfo
 		return (system_input_enable & system_input_address & (1u << 13u)) != 0;
 	}
 };
+// The shader input information of one indexed draw, prepared ahead of its recording.
+struct PreparedDrawInputs
+{
+	ShaderVertexInputInfo vs;
+	ShaderPixelInputInfo  ps {};
+};
 
 [[nodiscard]] ShaderFragmentTapConfig ShaderResolveFragmentTapConfig(uint64_t code_id, bool indexed, uint32_t guest_count);
 

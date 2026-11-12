@@ -107,6 +107,7 @@ inline void trace_aa_register_write(const char* path, const char* name, uint32_t
 }
 
 class Gpu;
+class DrawFront;
 
 extern Gpu* g_gpu;
 
@@ -261,7 +262,7 @@ public:
 
 	CommandProcessor(GpuSubmissionCoordinator* submission_coordinator, int queue)
 	    : m_submission_slots(submission_coordinator, GpuQueueId(static_cast<uint32_t>(queue))),
-	      m_publication_gate(GpuQueueId(static_cast<uint32_t>(queue))), m_queue(queue)
+	      m_publication_gate(GpuQueueId(static_cast<uint32_t>(queue))), m_queue(queue), m_submission_coordinator(submission_coordinator)
 	{
 		EXIT_IF(submission_coordinator == nullptr);
 		EXIT_IF(queue < 0 || queue >= GraphicContext::QUEUES_NUM);
@@ -423,6 +424,8 @@ private:
 	void DispatchIndirectAtAddress(uint64_t address, uint32_t mode);
 	bool                 DrawIndexIndirectOnDevice(uint64_t args_address);
 	void                 ResolveNumInstancesLatch();
+	// The inputs prepared ahead for the indexed draw this processor is at, or null.
+	PreparedDrawInputs*  TakePreparedDrawInputs();
 	static constexpr int VK_BUFFERS_NUM = static_cast<int>(CommandProcessorSubmissionSlots::SlotCount);
 	void                 CompleteSubmittedThroughLocked(SubmissionId target, SubmissionId* latest_completed);
 	void                 TryCompleteSubmittedLocked(SubmissionId* latest_completed);
@@ -499,6 +502,12 @@ private:
 	uint32_t m_last_pm4_dw                 = 0;
 	const uint32_t* m_active_run_begin     = nullptr;
 	const uint32_t* m_active_run_end       = nullptr;
+	// The header of the packet this processor is at.
+	const uint32_t* m_packet               = nullptr;
+	// Prepares the inputs of the indexed draws that follow; its shadow processor only replays registers.
+	DrawFront*                      m_draw_front        = nullptr;
+	bool                            m_draw_front_shadow = false;
+	GpuSubmissionCoordinator* const m_submission_coordinator;
 	bool            m_suspend_run_requested = false;
 	bool            m_suspended_run_valid   = false;
 	SuspendedRun    m_suspended_run;

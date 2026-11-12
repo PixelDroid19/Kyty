@@ -886,10 +886,18 @@ private:
 void GraphicsRenderInit();
 void GraphicsRenderCreateContext();
 
+// The vertex and pixel shader input information of one indexed draw, prepared ahead of its recording
+// from registers equal to the draw's. The recording takes ownership of the contents.
+struct PreparedDrawInputs;
+// Fills `inputs` and returns true when the recording of an indexed draw with these registers reaches
+// its shader input analysis outside a geometry pass. Reads the registers and guest memory only.
+[[nodiscard]] bool GraphicsRenderPrepareIndexedDrawInputs(const HW::Context& ctx, const HW::UserConfig& ucfg, HW::Shader* sh_ctx,
+                                                          uint32_t index_count, uint32_t instance_count, PreparedDrawInputs* inputs);
+// `prepared` is null or holds inputs prepared from registers equal to this draw's.
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                              uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
-                             SubmissionId* pending_submission);
+                             SubmissionId* pending_submission, PreparedDrawInputs* prepared = nullptr);
 // A DRAW_INDEX_INDIRECT whose record at `args_address` the device reads in queue order, from the storage
 // buffer an earlier command of this queue writes. The host knows only the `index_window` indexes from
 // `index_base`. False when the draw needs the record on the host instead; nothing was recorded then.

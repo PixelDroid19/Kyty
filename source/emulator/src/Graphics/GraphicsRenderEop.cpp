@@ -122,8 +122,10 @@ static bool GdsPublishLabelCallback(SubmissionId /*submission*/, const uint64_t*
 		// write access in one transaction with map, unmap and protection changes.
 		auto&          tracker = GpuDirtyPageTracker::Instance();
 		const uint64_t token   = tracker.BeginHostWrite(address, record->bytes);
+		GpuDirtyPageTracker::NoteHostWrite();
 		written                = Core::VirtualMemory::CopyToGuestIfMappingMatches(record->destination, record->mapped, record->bytes);
 		tracker.EndHostWrite(token);
+		GpuDirtyPageTracker::NoteHostWrite();
 	}
 	if (!written)
 	{
