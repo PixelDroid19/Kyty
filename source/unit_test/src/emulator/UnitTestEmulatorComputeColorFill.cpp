@@ -494,6 +494,22 @@ TEST(EmulatorComputeColorFill, PendingFillsAreBoundedAndOverlappingWritesRevokeT
 	EXPECT_FALSE(events.Consume(FillIdentity(newest), Submission(8, 1000), &event));
 }
 
+TEST(EmulatorComputeColorFill, OverlappingWritesRevokeFillsPublishedAfterAConsumedOne)
+{
+	ComputeColorFillEvents events;
+	const std::array<uint32_t, 4> words {0u, 0u, 0u, 0u};
+	for (uint32_t i = 0; i < 3u; ++i)
+	{
+		ASSERT_TRUE(events.Publish(FillIdentity(0x100000u + i * 0x1000u), Submission(8, 1 + i), words));
+	}
+	ComputeColorFillEvent event {};
+	ASSERT_TRUE(events.Consume(FillIdentity(0x100000u), Submission(8, 1000), &event));
+	events.DiscardOverlaps(0x102800u, 4u);
+	EXPECT_FALSE(events.Consume(FillIdentity(0x102000u), Submission(8, 1000), &event));
+	EXPECT_TRUE(events.Consume(FillIdentity(0x101000u), Submission(8, 1000), &event));
+	EXPECT_TRUE(events.Empty());
+}
+
 TEST(EmulatorComputeColorFill, UniformFillTexelsDecodeOnlyWhenTheQuadRepeatsOneTexel)
 {
 	VkClearColorValue clear {};

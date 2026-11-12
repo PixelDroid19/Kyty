@@ -174,6 +174,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Pending compute-fill scan stops once every pending fill was seen (2026-11-12, built)
   - Device wait-idle races a queue submit under the validation layer (2026-11-11, fixed)
   - Vertex streams from guest pages: engagement by title and GPU (2026-11-11, built)
   - Replacing a registered range leaves its chunks' buffers alive (2026-11-11, open, found by reading)

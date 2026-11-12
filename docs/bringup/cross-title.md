@@ -1,3 +1,19 @@
+## Pending compute-fill scan stops once every pending fill was seen (2026-11-12, built)
+
+Every draw discards, for each of its color and depth targets, the pending compute color fills it overlaps
+(`ComputeColorFillEvents::DiscardOverlaps`), and the scan visited all 64 slots of the table. It now stops once
+it has seen every pending fill; what it discards is unchanged. Measured against the full scan in the same run
+(arms alternating every 16,384 draws), emission row, new minus old:
+
+- `PPSA21567 - Astro Bot`, walking dunes (captures at 108, 125 and 145 s): -0.29 us per draw mean, -0.11
+  median, 10 of 13 windows lower (213k draws per arm). A second run that ended in the cinematic: -0.33 mean,
+  -0.20 median. A temporary counter saw about 3.7 discards per indexed draw, with the table empty in 63 % of
+  them. At about 615 draws per frame that is about 0.15 ms per frame.
+- `PPSA17221 - Minecraft`, world: -0.03 to -0.06 us per draw, within noise (131k to 590k draws per arm).
+
+The total per-draw time moves by several us between windows in both titles, so no frame-rate change is claimed.
+Not run: other titles, `playable-regression`, the second GPU.
+
 ## Indexed-draw shader inputs prepared ahead of the command processor (2026-11-12, built)
 
 A second thread prepares the shader inputs of direct indexed draws ahead of the command processor in every
