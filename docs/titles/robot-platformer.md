@@ -11,6 +11,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, branch `perf/guest-memory-binding` at `0fe51e855`,
 strict run, `KYTY_PRESENT_FPS_LIMIT=60`, `RenderResolutionMode = Fixed`, `RenderResolutionScope =
 RenderTargets`, 960x540, the user playing with a real pad (no input route), per-second agent samples.
+The binary also held a temporary binding diagnostic, compiled in and switched off.
 
 - **Frame rate.** It never reached 60 fps. Menus and the first scene: 30.5 fps, GPU busy 79 %, command
   processor 34.5 ms/f, of which 13.8 ms were waits. Gameplay at 370-630 draws per frame: 19.6-20.7 fps, GPU

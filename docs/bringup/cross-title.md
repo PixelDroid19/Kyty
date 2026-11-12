@@ -1,3 +1,30 @@
+## Draw plan, binding layer: reuse per shader pair when every descriptor word repeats (2026-11-12, measured, not a lever)
+
+Question: can a draw reuse the bound descriptor set and push constants of the previous draw with the same
+stage and shader when its storage, texture and sampler descriptor words are identical? A temporary diagnostic
+(not committed) compared the words of every graphics bind with the previous bind of the same (stage, shader),
+timed the storage, texture, sampler and finalize stages, and compared the bound set and push constants. A
+repeat counts as safe when it also falls in the same submission with no host write to guest memory between.
+Rule fixed before the runs: build a guarded reuse only if safe repeats hold at least 3 ms per frame in the
+sandbox world or 3 us per draw in the robot platformer, with the compare under half of it and the outcome
+equal in at least 99 % of them.
+
+| | `PPSA17221 - Minecraft`, world | `PPSA21567 - ASTRO BOT`, dunes |
+| --- | --- | --- |
+| Draws per frame, binds per draw | 5,040, 1.69 | 490-650, 1.5 |
+| Binding stages | 6.2 ms per frame | 7.9-9.9 ms per frame, 13.7-20.2 us per draw |
+| Every word repeats | 10.6 % | 15.5-16.5 % |
+| Repeats except storage bases | 39.5 % | 54-56 %, holding 5.4-7.0 us per draw |
+| Safe repeats, time they hold | 10.5 %, 0.67 ms per frame | 13-14 %, 0.8-1.3 us per draw |
+| Outcome equal on safe repeats | 98.4 % | 30-39 % |
+| Compare as written (unoptimized) | 0.65 ms per frame | 0.5-0.6 us per draw |
+
+The rule fails in both titles: safe repeats are few and are the cheap binds. In the robot platformer the
+outcome differs on most safe repeats, so the words alone are not a valid key there; what else changes was not
+traced. The test is all-or-nothing per shader pair. It does not price a persistent slot per texture
+descriptor, which is what the robot platformer's binding cost (8-10 ms per frame at about 600 draws) would
+need; that is workstream D of `performance-architecture-plan.md`. One run per title.
+
 ## Draw plan, render-target layer: repeat rate and ceiling (2026-11-12, measured, not built)
 
 Question: can a draw plan skip the render-target work of a draw whose targets repeat the previous draw's? A
