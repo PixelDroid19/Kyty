@@ -6,7 +6,7 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
-## Sandbox title: boot pauses with no GPU work before the main menu (2026-11-12, open, intermittent)
+## Sandbox title: boot pauses with no GPU work before the main menu (2026-11-11, open, intermittent)
 
 - **Observation.** On one binary (the device-address storage reads and the queue wait fix, built 2026-11-11), four
   consecutive strict boots stopped presenting after about 17-32 s and stayed on the loading screen with the GPU idle
@@ -21,7 +21,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 - **Direction.** One paused boot with condition-wait tracking on and the stall supervisor
   (`docs/devtools/runtime-stall-snapshot.md`), compared with a boot that did not pause.
 
-## Sandbox title: vertex-front buffers read by device address (2026-11-12, built, command-processor time only)
+## Sandbox title: vertex-front buffers read by device address (2026-11-11, built, command-processor time only)
 
 Follow-up to the record below ("What is still copied"). The fused vertex front parses its resources without the
 program code, so its read-only metadata V# had no load evidence, was copied for every draw and got a new
@@ -35,28 +35,35 @@ descriptor set every draw.
   stages apply. A program with a continuation keeps every buffer on the descriptor path. A buffer that fails the
   proof keeps its parsed evidence.
 - **Register reuse.** The four hottest world fronts read the metadata V# at s[8:11] with two scalar loads at
-  entry, then load another V# from the vertex table into s[8:11] for a typed fetch. The translator fills that row
-  with a descriptor-slot index, so that fetch must stay on the slot path. Consumers whose register no longer holds
-  the bound V# are recorded per program as slot-only: the by-address read skips them and the list is part of
-  the shader id. The front does not record them as runtime-descriptor consumers, because the vertex stage has no
-  guest-address lowering for scalar loads. Translator version 215.
-- **Result (world run, temporary counters active, standing on the death screen at 2,846 draws per frame against
-  5,452 in the earlier profile, so per-draw figures only).** Vertex sets found in 99.97 % of lookups. Descriptor
-  binding 1.73 us per draw against 3.44, storage preparation 0.29 against 1.33, the per-draw copy 0.02 against
-  0.76, indexed-draw recording 9.16 against 10.07. No frame-rate gain is claimed from this run.
+  entry, then load another V# from the vertex table into s[8:11] for a typed fetch, whose lowering this change
+  leaves as it was (slot path). Consumers whose register no longer holds the bound V# are recorded per program as
+  slot-only: the by-address read skips them and the list is part of the shader id. The front does not record them
+  as runtime-descriptor consumers, because the vertex stage has no guest-address lowering for scalar loads. A
+  slot-only consumer must never receive the bound row, which may hold a device address, so its register must have
+  one write that reaches it on every path; when only some paths redefine it (a join clears the held-value bit
+  too), its buffer keeps the descriptor path. Translator version 215.
+- **Result.** With temporary counters on the set lookup, vertex sets were found in 99.97 % of lookups. One clean
+  profiled world run (10 s, 1,299 command-processor samples, mostly on the death screen at 2,882 draws per frame
+  against 5,452 in the earlier profile, so per-draw figures only): descriptor binding 1.70 us per draw against
+  3.44, the per-draw copy 0.05 against 0.76, indexed-draw recording 8.68 against 10.07. The front proof itself
+  (the redefinition scan) costs 0.19 us per draw. No frame-rate gain is claimed from this run.
 - **Verification.** Strict 125 s runs on the generic first-gameplay route, Intel A770 (ANV), a new private
   shader cache, 60 fps limit, binary built from 4ef52548c plus this change:
   - Exit 0, same results as the matrix for the record below: `PPSA28311 - Absolum`, `PPSA09076 - DREDGE`,
     `PPSA09809 - OCTOPATH TRAVELER II`, `PPSA21402 - Balatro`, `PPSA21567 - Astro Bot` (space intro capture
     correct), `PPSA34971 - Hollow Knight: Voidheart Edition` and `PPSA17221 - Minecraft` (menu panorama
     correct). The `gfx_storage_frontier` events of OCTOPATH TRAVELER II and Hollow Knight have identical fields;
-    Astro Bot's first event is a different vertex-front metadata buffer of the same unknown-access class.
+    Astro Bot's last event names another vertex-front metadata buffer (binding 2, user SGPR 16) of the same
+    unknown-access class, which stays on the descriptor path.
+  - The path is live: 736 of the 1,135 SPIR-V modules the matrix built on the A770 and 12 of 17 on RADV carry the
+    by-address base, against 457 of 1,521 and 6 of 17 before this change.
   - The mechanical-fist platformer stops at the same cold-cache stall as before this branch.
   - `PPSA21402 - Balatro` with the validation layer loaded: exit 0. On the AMD integrated GPU (RADV): exit 0.
   - `kyty_agent playable-regression` exits 3 as before this branch.
   - 2,648 unit tests and the four repository gates pass.
-- **Open.** The remaining per-draw cost is spread over shader input parsing, pipeline lookup and command
-  emission; the early-returning submit is still last.
+- **Open.** The every-path check was added after the matrix and ran in one world run only. The front proof
+  runs on every draw; its verdict could be kept on the program. The remaining per-draw cost is spread over
+  shader input parsing, pipeline lookup and command emission; the early-returning submit is still last.
 
 ## Sandbox title: storage buffers read by device address (2026-11-11, built, command-processor time only)
 
