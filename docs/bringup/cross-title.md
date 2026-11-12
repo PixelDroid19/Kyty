@@ -1,4 +1,4 @@
-## Draw plan, render-target layer: repeat rate and ceiling (2026-11-12, excluded)
+## Draw plan, render-target layer: repeat rate and ceiling (2026-11-12, measured, not built)
 
 Question: can a draw plan skip the render-target work of a draw whose targets repeat the previous draw's? A
 temporary diagnostic (not committed) timed, per non-indirect indexed draw outside a geometry pass, the target
@@ -14,11 +14,12 @@ equal the previous draw's.
 The ceiling before any guard is about 0.71 us x 5.4k = 3.8 ms per frame in the sandbox world and about
 0.6 ms per frame in the GPU-bound robot platformer (370 draws per frame). A sound guard must still re-check the
 target registers and the validity of the materialized objects, whose writes the global epoch cannot bound
-(see the `GpuMemoryResetHash` memo exclusion below). Below the stage rule (at least 1 us per repeated draw),
-so this layer is not built. The pipeline layer is now about 0.5 us per draw after the ids moved to the draw
-front; the binding layer (about 2 us per draw) needs per-draw descriptor data and persistent descriptor slots,
-since in three of four titles only 0.4-0.9 % of repeated draw keys had identical descriptors (26 % in the
-fourth; `cp-draw-plan.md`, 2026-10-27).
+(see the `GpuMemoryResetHash` memo exclusion below); its cost was not measured. Not built for now: the
+sandbox world stays under the stage rule (at least 1 us per repeated draw), and the robot platformer passes it
+but is GPU-bound at 370 draws per frame. Reopen it for a command-processor-bound title with the robot
+platformer's target cost, or once a guard is measured. The binding layer is the next one to measure: its
+repeat rate under the by-address rows of 2026-11-11, which made buffer bases per-draw data, is unknown (the
+2026-10-27 figures in `cp-draw-plan.md` predate them).
 
 ## Shader ids of prepared draws built on the draw front (2026-11-12, built)
 
