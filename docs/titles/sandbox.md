@@ -81,7 +81,19 @@ descriptor set every draw.
   ids repeat in 99.92 %. The misses show the key lacks descriptor shape (ids) and fixed-function state
   (pipeline), so a plan that skips input parsing and the id and pipeline lookups needs guards on both.
   Input information and pipeline setup are about 2.7 us of the 11 us per draw; resource binding, 3.1 us,
-  is the next block.
+  is the next block. All 488 id misses were counted before the world loaded; in the world the ids repeated
+  on every keyed hit.
+- **Per-draw price (2026-11-12, world, `b5f22b2a2` and `0be0c39a2`, emulator stage counters over 72,933
+  draws plus temporary timers on 1 draw in 16).** 11.36 us per draw: state setup 3.79 (vertex input 1.12,
+  pixel input 0.80, guest-address read preparation 0.72, before the vertex input 0.55, index range and
+  stream preparation 0.46), resource binding 3.16 (vertex buffers 1.04, descriptor finalize 0.54, textures
+  0.50, storage 0.47, index buffer 0.23), command emission 1.39, pipeline setup 1.34 (shader ids 0.53, pipeline
+  lookup 0.20), materialization 0.48, unattributed about 1.2. 2,805 draws a frame make 31.9 ms of the 44.8 ms
+  frame. `0be0c39a2` keeps each thread's recent vertex programs (0 disagreements in 28,672 sampled comparisons
+  with the full lookup) and visits only the load instructions in the per-draw guest-memory checks: setup fell
+  from 4.25 to 3.95 us, about 0.8 ms a frame. Without overlap, 60 fps needs about 1.3 us per draw; with the
+  command processor overlapped with the guest, about 5.9 us here and 3.0 us at 5,458 draws. A plan that skips
+  input parsing, ids and the pipeline lookup removes at most about 3.5 us, so overlap is needed as well.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
