@@ -6,6 +6,21 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Sandbox title: boot pauses with no GPU work before the main menu (2026-11-12, open, intermittent)
+
+- **Observation.** On one binary (the device-address storage reads and the queue wait fix, built 2026-11-11), four
+  consecutive strict boots stopped presenting after about 17-32 s and stayed on the loading screen with the GPU idle
+  for 30 to more than 95 s; the next four boots reached the main menu at about 20 s with no pause. During one pause
+  the runtime status was `stalled` (present 287, 33 s since the last present), every guest thread but two sat in
+  a condition, event-queue, semaphore or sleep wait, and the host CPU was nearly idle. No TCP connection was open
+  (socket list at 10-40 s).
+- **Not excluded.** The queue wait change of the same day, the storage reads by device address, and a guest wait
+  on a host network call: `sync-waits` tracking was disabled in that run, so its empty list is not evidence.
+- **Consequence.** A route with fixed press times misses the menu after a pause. Runs now enter the world by
+  presses that check each screen.
+- **Direction.** One paused boot with condition-wait tracking on and the stall supervisor
+  (`docs/devtools/runtime-stall-snapshot.md`), compared with a boot that did not pause.
+
 ## Sandbox title: storage buffers read by device address (2026-11-11, built, command-processor time only)
 
 Second slice of the rework ("What comes next" in the record below). A read-only storage buffer whose every
