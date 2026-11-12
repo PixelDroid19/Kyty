@@ -133,10 +133,10 @@ descriptor set every draw.
   draw, not the 0.7 of the first pair. `PPSA21567 - Astro Bot` unchanged at 74 us per draw over the same route.
   Building both shader ids in place in `PipelineCache::CreatePipeline` instead of copying them saves two
   allocations per draw: pipeline setup 1.085 -> 1.037 us, within that noise.
-- **Excluded (2026-11-12): sharing repeated shader-id words.** A per-thread table of recent identities let a draw
+- **Not resolved (2026-11-12): sharing repeated shader-id words.** A per-thread table of recent identities let a draw
   reuse the stored words of an identity seen before (no allocation) and compare equal identities by pointer.
   Two world runs read pipeline setup 1.08 and 1.08 us against 1.04, whole draw 9.20 and 9.15 us against 9.07 and
-  9.50. Only this memo is excluded: its hit rate was not measured (direct-mapped, 256 slots) and each id still
+  9.50. Not an exclusion: its hit rate was not measured (direct-mapped, 256 slots) and each id still
   allocated its empty array header before taking the shared words. Reverted.
 - **Excluded (2026-11-12): an exact-value memo of the pixel-stage resource parse.** The parse
   (`ShaderParseUsage2` from `ShaderGetInputInfoPS`) is about 5 % of the command-processor thread, about 0.45 us per
@@ -144,11 +144,12 @@ descriptor set every draw.
   37 % of the last ~390,000 calls (33.5 % cumulative, pre-world calls included), almost all on back-to-back draws
   of the same program: a memo keyed on exact values would save at most about 0.17 us per draw. This does not
   exclude reusing the layout (shape) of the parse while refilling values.
-- **Excluded (2026-11-12): sharing the image copy-read memo's result.** `ShaderCodeResourceMemo::ImageCopyReads`
+- **Not resolved (2026-11-12): sharing the image copy-read memo's result.** `ShaderCodeResourceMemo::ImageCopyReads`
   is about 1.4 % of the command-processor thread (building its layout key and the map lookup, then copying the
   result). Reserving the key and returning a shared result left state setup at 3.59 and 3.70 us per draw in two
-  world runs, against 3.49-3.63 in the four runs before: no gain within the noise. Reverted. Cuts of this size
-  (about 0.1 us per draw) cannot be told apart from run-to-run noise with two runs per arm.
+  world runs, against 3.49-3.63 in the four runs before, but rows it does not touch moved as much (binding 1.94 ->
+  2.18, emission 1.17 -> 1.24): host noise, not a verdict. Reverted. Cuts of this size (about 0.1 us per draw) need
+  both arms inside one run.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
