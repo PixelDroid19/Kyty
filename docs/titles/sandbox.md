@@ -119,6 +119,10 @@ descriptor set every draw.
   `DestroyRetiredTables` (`GuestDeviceAddress.cpp:1546`), which frees retired Vulkan tables with no reader
   check, on every release, both relying on the host GPU being idle. The drain matters only for an early
   submit return, where it puts the batch back on the guest (see the holder record above).
+- **Vertex-buffer binding repeat, excluded (2026-11-12, world, temporary counters in `BindVertexBuffers`).** Of
+  the last 1,000,000 vertex streams bound, 97 % were fetched from imported guest pages; only 1.8 % had the same
+  address, size and read start as the same slot of the previous draw (0.9 % in the object path), because each
+  draw reads a different window of its pool. A bind cache keyed on the previous draw cannot remove the 1.04 us.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
