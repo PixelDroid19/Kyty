@@ -78,6 +78,7 @@ static bool buffer_reads_by_address(const Spirv* spirv, const ShaderInstruction&
 	const auto* vertex = spirv->GetVsInputInfo();
 	// A consumer whose register no longer holds the bound V# reads its own V#.
 	if (bind == nullptr || !bind->storage_address_used || ShaderBufferConsumerRedefinesDescriptor(*bind, inst) ||
+	    std::find(bind->slot_only_consumers.begin(), bind->slot_only_consumers.end(), inst.pc) != bind->slot_only_consumers.end() ||
 	    ShaderIsDynamicVectorStorageConsumer(*bind, inst) || ShaderIsDynamicScalarStorageConsumer(*bind, inst))
 	{
 		return false;

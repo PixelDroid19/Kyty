@@ -2280,6 +2280,10 @@ struct ShaderBindResources
 	// longer holds its user-data value there (redefined, for example from
 	// s_getpc): they read through the runtime V#, never the descriptor slot.
 	Vector<uint32_t> redefined_descriptor_consumers;
+	// The same consumers in a stage with no runtime V# lowering (the vertex
+	// front): they keep the slot path, so their buffer may still be read by
+	// address everywhere else.
+	Vector<uint32_t> slot_only_consumers;
 	Vector<ShaderCopiedImageDescriptor> copied_image_descriptors;
 	Vector<ShaderConstantSampler>       constant_samplers;
 };

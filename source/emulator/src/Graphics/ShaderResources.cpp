@@ -2967,7 +2967,8 @@ static bool ShaderBufferRegisterNamesBinding(const ShaderBindResources& bind, co
 }
 
 void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
-                                             const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo)
+                                             const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo,
+                                             bool record_consumers)
 {
 	EXIT_IF(bind == nullptr);
 	const auto& holding      = scalar_flow.holding_entry_value;
@@ -3004,7 +3005,7 @@ void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindR
 		}
 		if (!holding[index].test(static_cast<size_t>(base)))
 		{
-			bind->redefined_descriptor_consumers.Add(inst.pc);
+			(record_consumers ? bind->redefined_descriptor_consumers : bind->slot_only_consumers).Add(inst.pc);
 			continue;
 		}
 		// A read by address also takes words 1 (high address) and 2 (size) from the row.

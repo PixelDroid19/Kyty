@@ -2665,6 +2665,54 @@ bool ShaderStorageBufferReadsByAddress(const ShaderStorageResources& storage, in
 
 } // namespace
 
+// The vertex front gets no general ISA analysis, so a read-only V# there is
+// proven readable by address from the front code alone. A program with a
+// continuation keeps every buffer in its slot, a consumer whose V# register the
+// front redefines keeps the slot path, and a buffer that fails the proof keeps
+// its evidence.
+static void ShaderProveFrontStorageReads(const ShaderVertexProgram& program, ShaderBindResources* bind, int user_data_register_base)
+{
+	if (!g_storage_address_reads.load(std::memory_order_relaxed) || program.back_bytes != 0u || program.front_scalar_flow == nullptr ||
+	    bind->storage_buffers.buffers_num == 0)
+	{
+		return;
+	}
+	ShaderCollectRedefinedBufferDescriptors(program.front_code, bind, user_data_register_base, *program.front_scalar_flow,
+	                                        &program.front_resource_memo, false);
+	if (!bind->descriptor_flow_proven)
+	{
+		return;
+	}
+	auto& storage = bind->storage_buffers;
+	for (int i = 0; i < storage.buffers_num; i++)
+	{
+		if (storage.start_register[i] < 0 || storage.extended[i] || storage.dynamic_sload[i] ||
+		    ShaderStorageResourceHasDynamicSLoad(*bind, i))
+		{
+			continue;
+		}
+		const auto use = AnalyzeShaderStorageUse(program.front_code, storage.start_register[i] + user_data_register_base,
+		                                         &program.front_resource_memo);
+		if (use.access != ShaderStorageAccess::Raw || !use.dword_loads_only)
+		{
+			continue;
+		}
+		const auto saved = std::make_tuple(storage.accesses[i], storage.exact_matches[i], storage.dword_loads_only[i],
+		                                   storage.decoded_unknown[i], storage.indirect_descriptor_use[i], storage.raw_tbuffer_use[i]);
+		storage.accesses[i]                = use.access;
+		storage.exact_matches[i]           = true;
+		storage.dword_loads_only[i]        = true;
+		storage.decoded_unknown[i]         = use.decoded_unknown;
+		storage.indirect_descriptor_use[i] = use.indirect_descriptor_use;
+		storage.raw_tbuffer_use[i]         = use.raw_tbuffer_use;
+		if (!ShaderStorageBufferReadsByAddress(storage, i))
+		{
+			std::tie(storage.accesses[i], storage.exact_matches[i], storage.dword_loads_only[i], storage.decoded_unknown[i],
+			         storage.indirect_descriptor_use[i], storage.raw_tbuffer_use[i]) = saved;
+		}
+	}
+}
+
 void ShaderSetStorageAddressReads(bool supported)
 {
 	g_storage_address_reads.store(supported, std::memory_order_relaxed);
@@ -4166,6 +4214,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		// are resolved separately from the rebased metadata sharp table.
 		ShaderParseUsage2(usage_user, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr, kGen5GsFrontUserDataBase,
 		                  true, vs_isa, nullptr, info->program->front_scalar_flow.get(), nullptr, &info->program->front_resource_memo);
+		ShaderProveFrontStorageReads(*info->program, &info->bind, kGen5GsFrontUserDataBase);
 		ShaderBindGsUserDataDescriptors(info->program->code, info->program->gs_user_data_loads, regs->gs_user_data_addr, user_sgpr,
 		                                &info->bind, &usage, &info->program->resource_memo);
 		if (vs_isa != nullptr)
@@ -5925,6 +5974,11 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 
 	ids->Add(bind.redefined_descriptor_consumers.Size());
 	for (const auto pc: bind.redefined_descriptor_consumers)
+	{
+		ids->Add(pc);
+	}
+	ids->Add(bind.slot_only_consumers.Size());
+	for (const auto pc: bind.slot_only_consumers)
 	{
 		ids->Add(pc);
 	}

@@ -277,9 +277,11 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
                                          int user_data_register_base, const ShaderScalarFlow& scalar_flow,
                                          const ShaderCodeResourceMemo* memo);
 // Records the buffer instructions whose bound V# register was redefined on
-// every path before them (bind->redefined_descriptor_consumers).
+// every path before them (bind->redefined_descriptor_consumers, or without
+// record_consumers bind->slot_only_consumers).
 void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
-                                             const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo = nullptr);
+                                             const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo = nullptr,
+                                             bool record_consumers = true);
 void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                              int user_sgpr_num, int user_data_register_base, const ShaderScalarFlow& scalar_flow,
                                              const ShaderCodeResourceMemo* memo);
