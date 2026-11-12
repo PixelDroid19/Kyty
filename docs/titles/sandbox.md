@@ -74,6 +74,12 @@ The submit contract is unchanged: a submit still returns once its batch is decod
   per frame here and about 1 ms in the robot platformer's dunes (82 % taken), so it is not built.
   Not checked: `playable-regression`, scored captures, other titles (the ones that depend on label
   write-backs test the epoch most), the second GPU.
+- **Excluded (2026-11-12): stopping the per-draw scan of pending compute fills early.** Every draw discards
+  the pending compute color fills that overlap each of its targets, and the scan visits all 64 slots of a
+  table that is usually empty. A profile of the processor thread put `InvalidateMemoryObject` at 5.2 % of the
+  draw recording. A scan that stops once it has seen every pending event measured, against the full scan in
+  the same run (arms alternating every 16,384 draws, 131k to 590k draws per arm), -0.03 to -0.06 us per draw
+  in the emission row and noise (+0.29 to -0.05 us) in the total: under the 0.1 us that would justify it.
 
 ## Sandbox title: boot pauses with no GPU work before the main menu (2026-11-11, open, intermittent)
 
