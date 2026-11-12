@@ -25,6 +25,44 @@ traced. The test is all-or-nothing per shader pair. It does not price a persiste
 descriptor, which is what the robot platformer's binding cost (8-10 ms per frame at about 600 draws) would
 need; that is workstream D of `performance-architecture-plan.md`. One run per title.
 
+## End-of-pipe clock marks of one submission share one value (2026-11-12, defect, open)
+
+`GraphicsRenderWriteAtEndOfPipeClockCounter` records a label whose callback writes the clock when the
+label fires, which is when the host submission that holds it completes (`GraphicsRenderEop.cpp:272-296`).
+Every clock mark of one host submission therefore gets nearly the same value, whatever work lies between
+the marks. Observed in `PPSA21567 - ASTRO BOT` with a temporary diagnostic (not committed): about 8,700
+clock values a second, about 440 a frame, written in pairs 0x20 bytes apart; the two values of a pair
+differ by about 0.02 ms, so a guest that subtracts them reads close to zero GPU time for the work between
+them.
+
+- **Effect, one run, not established.** With every mark written at least 0.1 ms after the previous one
+  (a diagnostic, not a model of the GPU) the title drew 6 draws at 2432x1368 against 2,117 without the
+  spacing and nothing below 1920x1080. That run reached gameplay later than the other, so the frame-rate
+  effect of correct marks is open (`docs/titles/robot-platformer.md`).
+- **Not fixed.** Suggested direction: a host timestamp query at each end-of-pipe clock position, converted
+  to the guest's clock when the submission completes; `GraphicsRenderCommandBuffer.cpp:2831-2844` already
+  writes host timestamps for another purpose. Open questions before building: the query pool size for 440
+  marks a frame and the cost of a timestamp between passes on tile-less desktop GPUs.
+
+## Performance plan, stage 0: release census and draw-front coverage (2026-11-12, measured)
+
+Measurements that the performance architecture plan asked for before any build
+(`performance-architecture-plan.md`, section 6, holds the tables). Intel Arc A770, serial submit, a
+temporary diagnostic (not committed).
+
+- **Memory release.** `PPSA17221 - Minecraft`, world, two runs: 40-53 quiesce transactions a second for
+  98-188 released ranges; 1.4-2.6 % of the ranges overlap a memory object and 4.6-7.8 % a device-address
+  range; the action takes 0.06-0.08 ms and the drain before it 0.35-0.42 ms on average, 16-21 ms at worst.
+  91 % of the released addresses had been released among the previous 256. The count excludes the
+  `ObjectsOnly` sweep that the command processor runs once per batch, which is not a guest release.
+  `PPSA21567 - ASTRO BOT` released nothing in its window.
+- **Draw-front coverage.** In batches of at least 64 draws the last item without prepared inputs sits at
+  0.998 of the batch's time in the sandbox title (always a draw the front had not reached yet) and at 0.988
+  in the robot platformer (an auto draw or a dispatch, which the front never prepares). The draw front as
+  it stands cannot stand for the guest reads of a batch.
+- **Still open.** Whether a queued batch reads a released range and whether a mapping reuses released
+  addresses before the queued batches end; both need a submit that returns early.
+
 ## Draw plan, render-target layer: repeat rate and ceiling (2026-11-12, measured, not built)
 
 Question: can a draw plan skip the render-target work of a draw whose targets repeat the previous draw's? A

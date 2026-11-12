@@ -1,8 +1,9 @@
 # Performance architecture plan (2026-11-12)
 
-Status: plan, stage 0 in progress. Maintainer decision of 2026-11-12: build the changes below, and
-the 2x build gate of `parallel-recording-design.md` is withdrawn. Every gain in this document is an
-estimate until its stage is measured. Each stage names its measurement and its correctness gate.
+Status: plan, stage 0 measured (section 6), next A2 and A3. Maintainer decision of 2026-11-12:
+build the changes below, and the 2x build gate of `parallel-recording-design.md` is withdrawn.
+Every gain in this document is an estimate until its stage is measured. Each stage names its
+measurement and its correctness gate.
 
 Scope: (A) memory release without a full drain, (B) a submit that returns once its batch's guest
 reads are done, (C) staged command processing, (D) the per-draw binding floor, (E) internal
@@ -96,7 +97,10 @@ only where Kyty's own traces agree.
      flag instead (`docs/titles/anime-fighter.md`).
 - **B1, capture.** The draw front becomes the batch's capture: register state and descriptor words
   gathered before the submit returns, plus a copy, in a bounded arena owned by the batch, of each
-  class B0 finds rewritten. A batch over the bound stays serial.
+  class B0 finds rewritten. A batch over the bound stays serial. Stage 0 (section 6) amends this:
+  the capture has to cover auto draws and dispatches as well as indexed draws and has to reach the
+  end of the batch before the submit returns, because in both titles the last item the draw front
+  does not prepare sits in the last hundredths of the batch.
 - **B2, return rule.** Each batch keeps a mark of the last guest read still pending. A read that
   depends on an earlier command of the same batch (the host-write-epoch rule) stays with the
   command processor at its position, and the submit waits until the mark passes it.
@@ -135,7 +139,8 @@ only where Kyty's own traces agree.
   of stopping the run.
 - **E2, one run.** Whether the title's own grid follows the output size the guest is told
   (`ScreenWidth`, `ScreenHeight`). If it does, the output size becomes an option separate from the
-  window size.
+  window size. Result (section 6): it does not in the robot platformer, so that option is not
+  built.
 - **E3, scaled texel access.** Lower integer texel access (fetch, image load and store, fragment
   coordinate, size queries) with the scale, so storage and fetch paths stay scaled.
 - **Limit.** A compute program's grid is fixed by the guest. Emulator-side scaling cannot shrink
@@ -146,15 +151,26 @@ only where Kyty's own traces agree.
 
 - **Detection.** Programs that contain `ImageBvhIntersectRay` (opcode 0xE6). Opcode 0xE7 is not
   decoded, and a BVH walked with plain loads cannot be detected.
-- **Evidence.** A forced miss at every node saved about 1 ms of 24 in the robot platformer, so a
-  mode that reports misses does not deliver. Not running the program is what removes the cost.
-- **F0, one run.** Skip the programs that contain the instruction; take a capture and the frame
-  rate.
+- **Evidence.** A forced miss at every node saved about 1 ms of 24 in the robot platformer: the
+  traversal is a small part of that program, the rest is shading that runs either way.
+- **F0, one run, done: skipping is rejected.** Not running the programs that contain the
+  instruction raised the dunes from 20.0 to 26.0 fps and left the image wrong (section 6): the
+  programs' outputs stay unwritten and the passes that read them show dark terrain and translucent
+  models. Which output each later pass reads was not traced. A skip is therefore not an option
+  Kyty offers.
 - **F1, option.** `RayTracing = Guest` (default) or `Off`, in the configuration, the launcher and
-  an environment variable. `Off` is not a strict mode and makes no compatibility claim, like a game
-  patch. The content of a skipped program's outputs is defined by F0's capture.
-- **Expectation.** The robot platformer's command processing without waits was 28-36 ms a frame in
-  the user run, so about 30 fps even with the GPU freed.
+  an environment variable. `Off` makes every intersection report a miss: the programs still run
+  and write every output, so the image keeps its lighting and loses what the rays add (traced
+  shadows and reflections). `Off` is not a strict mode and makes no compatibility claim, like a
+  game patch. Expected saving in the robot platformer: about 1 ms of 24 per call of the heavy
+  program, by the record above; it is built for the titles where traversal is the cost.
+- **Expectation, amended.** With the GPU cost of those programs gone entirely (the rejected skip)
+  the dunes ran at 26.0 fps with 36.1 ms of command processing a frame. No GPU-side lever alone
+  passes about 26-28 fps in that scene; the rest is command processing (workstreams B to D). The
+  title's own renderer selection (a game patch, `docs/game-patches.md`) is the other way to drop
+  the ray-traced passes. It measured 20.6-20.9 fps against 18.5 in the hub and its image was not
+  verified (`docs/titles/robot-platformer.md`, "Game patch trial and geometry cost", 2026-11-01).
+  It is the guest's configuration, not an emulator option.
 
 ## 4. Order
 
@@ -167,3 +183,117 @@ only where Kyty's own traces agree.
 The unit suites and the three CTest gates, `kyty_agent playable-regression`, a strict run of
 `PPSA17221 - Minecraft` and of `PPSA21567 - ASTRO BOT` with scored captures, `PPSA21402 - Balatro`
 for workstream B, and the AMD integrated GPU as a second driver.
+
+## 6. Stage 0 results (2026-11-12)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, `bbc559839` plus a temporary diagnostic (not
+committed) that prints five counter lines every 4 s, serial submit, strict runs, 60 fps present
+limit. Windows: `PPSA17221 - Minecraft` world, 40 s; `PPSA21567 - ASTRO BOT` dunes route, 105-148 s
+(36 s of counters).
+Frame rates are comparable only inside this section.
+
+### A1, release census (partial: serial submit only)
+
+`PPSA17221 - Minecraft`, two runs. The per-batch sweep in `ObjectsOnly` mode is not a guest release
+and is left out.
+
+| | Run 1 | Run 2 |
+| --- | --- | --- |
+| Quiesce transactions per second | 40.5 | 52.6 |
+| Ranges released by `release_direct_memory` per second | 98.3, 8.7 MiB | 188.2, 14.6 MiB |
+| Ranges that overlap a memory object | 114 of 4,333 (2.6 %) | 103 of 7,529 (1.4 %) |
+| Ranges that overlap a device-address range | 337 (7.8 %), one chunk each | 343 (4.6 %), one chunk each |
+| Drain per transaction, mean and maximum | 0.42 ms, 15.9 ms | 0.35 ms, 20.8 ms |
+| Drain per second of run | 17.2 ms | 18.5 ms |
+| Action per transaction; write-back step | 0.08 ms; about 1 ms per second | 0.06 ms; about 1 ms per second |
+
+- Run 2 sizes: 7,219 ranges up to 64 KiB, 297 up to 1 MiB, 13 up to 16 MiB. 6,860 of 7,529 (91 %)
+  released an address that was among the 256 addresses released before it. No release in unmap
+  mode.
+- `PPSA21567 - ASTRO BOT`, dunes: no guest release in the window.
+- **Reading.** About nine released ranges in ten overlap nothing the emulator holds, and the action
+  itself is short; the drain is the cost, and its 16-21 ms maximum is a frame hitch even with the
+  serial submit.
+- **Not measured.** Import windows; whether a queued batch reads a released range; whether the next
+  mapping reuses the addresses before the queued batches end. The last two need a submit that
+  returns early. The 91 % address reuse says the "wait as today" case of A3 may be the common one,
+  so A3 carries no gain claim until that is measured.
+
+### B0.1, last item without prepared inputs
+
+Batches of at least 64 draws. Position is the fraction of the batch's time at which the item was
+processed.
+
+| | `PPSA17221 - Minecraft`, world | `PPSA21567 - ASTRO BOT`, dunes |
+| --- | --- | --- |
+| Batches per second, time each | 32, 22.4 ms | 70 (160 with the small ones, over several rings), 11.2 ms |
+| Indexed draws with prepared inputs, per batch | 2,522 | 50.2 (all batches) |
+| Indexed draws without, per batch | 291 (10.4 %) | 9.1 (15.3 %) |
+| Auto draws, dispatches per batch | 18.9, 47.1 | 13.1, 11.6 |
+| Position of the last item without prepared inputs | 0.998, in the last tenth in 1,280 of 1,280 batches (1,367 of 1,367 in run 1) | 0.988, in the last tenth in 2,528 of 2,532 |
+| Kind of that last item | draw front behind the command processor, 1,280 of 1,280 | auto draw 2,165, dispatch 367 of 2,532 |
+
+Reasons a draw or dispatch had no prepared inputs, per second, with the mean position of the last
+one of its kind in a batch:
+
+| Reason | Minecraft | Position | ASTRO BOT | Position |
+| --- | --- | --- | --- | --- |
+| Draw front restarted | 1,170 | 0.872 | 285 | 0.693 |
+| Record not prepared yet | 422 | 0.076 | 0 | |
+| Stale by a host write to guest memory | 2,160 | 0.145 | 948 | 0.874 |
+| Draw front behind the command processor | 5,567 | 0.998 | 221 | 0.918 |
+| Auto draw (never prepared) | 605 | 0.845 | 2,102 | 0.980 |
+| Dispatch (never prepared) | 1,507 | 0.865 | 1,865 | 0.912 |
+
+- **Reading.** The draw front as it stands is not the capture: it does not reach the end of any
+  batch ahead of the command processor in the sandbox title, and it never prepares the auto draws
+  and dispatches that end the robot platformer's batches. Reads that depend on a host write end
+  early in the sandbox title's batches and late in the robot platformer's.
+- **Not measured.** The draw front's own time per batch, which is the time a submit would still
+  hold the guest once the front is the capture.
+
+### E2, reported output size (excluded for the robot platformer)
+
+Census of the first colour target's extent per indexed draw, `PPSA21567 - ASTRO BOT`, dunes route.
+The diagnostic printed the screen size it read, so the variable engaged.
+
+| Reported output size | 1920x1080 | 2432x1368 | 3840x2160 | 960x540 | Frame rate | GPU busy |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1280x720 | 451,615 | 2,117 | 7,179 | 73,443 | 19.5 fps | 92 % |
+| 960x540 | 466,605 | 3,340 | 7,566 | 75,545 | 20.4 fps | 95 % |
+
+The title's targets do not follow the reported size, and its display buffer is 3840x2160 in both
+runs. `PPSA17221 - Minecraft` also draws mainly at 1920x1080 with 1280x720 reported. The robot
+platformer starts at 2432x1368 and steps to 1920x1080 by itself (2,117 draws at the larger size
+with 1280x720 reported; 3328x1872 appeared only with 960x540 reported, 6 draws).
+
+### F0, programs with intersection instructions not run (rejected)
+
+`PPSA21567 - ASTRO BOT`, dunes route, one pair of runs.
+
+| | Guest | Programs skipped |
+| --- | --- | --- |
+| Frame rate | 20.0 fps | 26.0 fps |
+| Command processing per frame | 54.1 ms | 36.1 ms |
+| Of which fence waits, register waits | 15.6 ms, 11.6 ms | 1.2 ms, 1.3 ms |
+| GPU busy | 94 % | 82 % |
+
+18,024 dispatches were skipped. The image is wrong: dark terrain, a translucent player model and
+washed-out objects, in the scored capture pair and under user play (26-30 fps reported by the
+window). The cause is recorded as not traced: the skipped programs' outputs stay unwritten, and
+which later pass reads which output was not followed.
+
+### Guest GPU clock marks
+
+The robot platformer writes about 8,700 end-of-pipe clock values a second, about 440 a frame, in
+pairs 0x20 bytes apart. Kyty samples the clock when the label callback runs at the completion of
+the host submission (`GraphicsRenderEop.cpp:284-296`), so every mark of one submission gets nearly
+the same value and the two values of a pair differ by about 0.02 ms. Recorded as an open defect in
+`cross-title.md` with a suggested direction (a host timestamp per end-of-pipe position).
+
+One run with every mark written at least 0.1 ms after the previous one: 6 draws at 2432x1368
+against 2,117 in the run without the spacing, and no main target below 1920x1080 in 143 s. That
+run is not comparable beyond its first frames: its captures at 108, 125 and 145 s show the intro
+cinematic where the other run is in gameplay, and it measured 17.4 fps with 369 draws a frame
+against 19.5 and 592. Open: whether the title's dynamic resolution follows the marks, whether
+1920x1080 is its lowest step, and whether correct marks change the frame rate.

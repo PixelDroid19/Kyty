@@ -6,6 +6,60 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: not running the programs that contain intersection instructions (2026-11-12, rejected)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, `bbc559839` plus a temporary diagnostic (not committed) that returned
+from a compute dispatch without running it when its program contains `ImageBvhIntersectRay`. Dunes route,
+105-148 s, one pair of runs, 60 fps present limit.
+
+| | Guest | Programs not run |
+| --- | --- | --- |
+| Frame rate | 20.0 fps | 26.0 fps |
+| Command processing per frame | 54.1 ms | 36.1 ms |
+| Of which fence waits, register waits | 15.6 ms, 11.6 ms | 1.2 ms, 1.3 ms |
+| GPU busy | 94 % | 82 % |
+
+- **Rejected on the image.** 18,024 dispatches were not run. The scored capture pair and a user-played
+  session (26-30 fps on the window) show dark terrain, a translucent player model and washed-out objects.
+  The outputs of the skipped programs stay unwritten; which later pass reads which output was not traced.
+- **What it bounds.** With that GPU cost gone entirely the scene runs at 26 fps with 36 ms of command
+  processing a frame, so no GPU-side change alone passes about 26-28 fps here.
+- **What stays possible.** Every intersection reporting a miss keeps all outputs written; the record of
+  2026-11-09 below ("paired kernel measurement") priced it at about 1 ms of 24 per call of the heavy
+  program, because the traversal is a small part of it. The title's own renderer selection through a game
+  patch is the other route and is the guest's configuration; its image was not verified ("Game patch
+  trial and geometry cost", 2026-11-01, below).
+
+## Robot platformer: the reported output size does not move the title's render targets (2026-11-12, excluded)
+
+Question of the performance plan (E2): does the title size its targets from the output size the guest is
+told? Census of the first colour target's extent per indexed draw over the dunes route, with a temporary
+diagnostic (not committed) that also printed the screen size it read.
+
+| Reported output size | 1920x1080 | 2432x1368 | 3840x2160 | 960x540 | Frame rate | GPU busy |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1280x720 | 451,615 | 2,117 | 7,179 | 73,443 | 19.5 fps | 92 % |
+| 960x540 | 466,605 | 3,340 | 7,566 | 75,545 | 20.4 fps | 95 % |
+
+The display buffer is 3840x2160 in both runs. The title does not follow the reported size, so an
+output-size option separate from the window size is not built for it.
+
+## Robot platformer: GPU clock marks and the title's dynamic resolution (2026-11-12, open, frame-rate effect not established)
+
+The title starts with main targets of 2432x1368 and steps to 1920x1080 by itself (2,117 draws at the larger
+size over the dunes route). Its end-of-pipe clock marks all carry nearly the same value inside one host
+submission (`cross-title.md`, open defect). One run with a temporary diagnostic (not committed) that wrote
+every mark at least 0.1 ms after the previous one drew 6 draws at 2432x1368 and no main target below
+1920x1080 in 143 s.
+
+- **Not comparable past the first frames.** Its captures at 108, 125 and 145 s show a black frame and the
+  intro cinematic where the run without the spacing is in gameplay; it measured 17.4 fps, 369 draws a
+  frame and 31 ms a frame in each of fence and register waits, against 19.5 fps, 592 draws, 12 and 8 ms.
+  Whether the spacing delayed the route or the host did was not separated.
+- **Open.** Whether the dynamic resolution follows the marks (one contrast, one run), whether 1920x1080 is
+  its lowest step, and whether correct marks change the frame rate. Next step: the same pair with the
+  scene checked by capture before any figure is compared.
+
 ## Robot platformer: render-target scaling to 960x540 under user play, and a depth-array exit (2026-11-12, open)
 
 Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, branch `perf/guest-memory-binding` at `0fe51e855`,

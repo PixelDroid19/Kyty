@@ -6,6 +6,19 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Sandbox title: release census and draw-front coverage under the serial submit (2026-11-12, measured)
+
+Stage 0 of `docs/bringup/performance-architecture-plan.md` (section 6 holds the tables). World scene,
+Intel Arc A770, two runs with a temporary diagnostic (not committed).
+
+- **Release.** 98-188 ranges a second reach `release_direct_memory`, in 40-53 quiesce transactions; 7,219
+  of 7,529 are at most 64 KiB; 1.4-2.6 % overlap a memory object and 4.6-7.8 % a device-address range. The
+  drain before the action averages 0.35-0.42 ms (17-19 ms per second of run) and reaches 16-21 ms.
+- **Draw front.** Per batch of 22.4 ms: 2,522 indexed draws take prepared inputs and 291 do not (10.4 %),
+  plus 18.9 auto draws and 47.1 dispatches. The front falls behind the command processor 5,567 times a
+  second and restarts 1,170 times a second; the last draw of every batch is one it had not reached.
+- **Also seen.** The title draws mainly at 1920x1080 with an output size of 1280x720 reported.
+
 ## Sandbox title: shader inputs of indexed draws prepared ahead of the command processor (2026-11-12, built)
 
 First stage of the split of command processing over two threads (`docs/bringup/parallel-recording-design.md`).
