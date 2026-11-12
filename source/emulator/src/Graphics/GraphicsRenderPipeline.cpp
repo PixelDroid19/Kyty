@@ -59,6 +59,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 #include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -1682,7 +1683,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
                                               RenderDepthInfo* depth,
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
                                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
-                                              const VulkanSampleLocationState& sample_locations)
+                                              const VulkanSampleLocationState& sample_locations, ShaderId* prepared_vs_id,
+                                              ShaderId* prepared_ps_id)
 {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
 
@@ -1721,11 +1723,12 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	EXIT_IF(gctx == nullptr);
 
-	// Built in place: every draw makes both ids, and a copy would allocate them again.
+	// Built in place: every draw makes both ids, and a copy would allocate them again. Ids prepared
+	// with the inputs move in.
 	Pipeline p {};
-	p.render_pass    = framebuffer->compatibility;
-	p.ps_shader_id   = ShaderGetIdPS(&ps_regs, ps_input_info);
-	p.vs_shader_id   = ShaderGetIdVS(&vs_regs, vs_input_info);
+	p.render_pass  = framebuffer->compatibility;
+	p.ps_shader_id = prepared_ps_id != nullptr ? std::move(*prepared_ps_id) : ShaderGetIdPS(&ps_regs, ps_input_info);
+	p.vs_shader_id = prepared_vs_id != nullptr ? std::move(*prepared_vs_id) : ShaderGetIdVS(&vs_regs, vs_input_info);
 	const ShaderId& vs_id = p.vs_shader_id;
 	const ShaderId& ps_id = p.ps_shader_id;
 	PipelineStaticParameters  lookup_static {};

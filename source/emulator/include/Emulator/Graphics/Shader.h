@@ -2732,6 +2732,12 @@ struct PreparedDrawInputs
 {
 	ShaderVertexInputInfo vs;
 	ShaderPixelInputInfo  ps {};
+	// The shader ids of `vs` and `ps` as prepared. The recording sets the two pixel fields copied
+	// below after it takes the inputs, so it reuses the ids only while both keep these values.
+	ShaderId               vs_id;
+	ShaderId               ps_id;
+	RenderHostToGuestScale ids_host_to_guest_scale;
+	bool                   ids_dual_source_blend = false;
 };
 
 [[nodiscard]] ShaderFragmentTapConfig ShaderResolveFragmentTapConfig(uint64_t code_id, bool indexed, uint32_t guest_count);

@@ -290,7 +290,8 @@ public:
 	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
 	                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
 	                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
-	                               const VulkanSampleLocationState& sample_locations);
+	                               const VulkanSampleLocationState& sample_locations, ShaderId* prepared_vs_id = nullptr,
+	                               ShaderId* prepared_ps_id = nullptr);
 	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, const ShaderComputeInputInfo* input_info,
 	                               const HW::ComputeShaderInfo* cs_regs,
 	                               const HW::ShaderRegisters* sh_regs);
