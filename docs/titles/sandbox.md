@@ -185,6 +185,10 @@ descriptor set every draw.
     guarantees. Gain under 2 % of the thread.
   The remaining inclusive buckets (descriptor binding 15.6 %, pipeline lookup 10 %, vertex input 9.6 %, memory
   objects 9.5 %) each split into children under 5 %; no single cut there reaches 0.5 us per draw.
+  Guest-address read preparation (4.4 %, about 0.4 us per draw) is mostly the per-draw overlay validation
+  (`GuestDeviceAddressValidateOverlays`, one locked `ChangedSince` per overlay, about 1.2 % or 0.1 us). An epoch
+  skip there would have to cover every input of `ChangedSince` (write and fallback epochs, range registration, host
+  writes, block arming); a missed bump reads stale guest bytes. Not built at that price.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
