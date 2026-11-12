@@ -144,6 +144,11 @@ descriptor set every draw.
   37 % of the last ~390,000 calls (33.5 % cumulative, pre-world calls included), almost all on back-to-back draws
   of the same program: a memo keyed on exact values would save at most about 0.17 us per draw. This does not
   exclude reusing the layout (shape) of the parse while refilling values.
+- **Excluded (2026-11-12): sharing the image copy-read memo's result.** `ShaderCodeResourceMemo::ImageCopyReads`
+  is about 1.4 % of the command-processor thread (building its layout key and the map lookup, then copying the
+  result). Reserving the key and returning a shared result left state setup at 3.59 and 3.70 us per draw in two
+  world runs, against 3.49-3.63 in the four runs before: no gain within the noise. Reverted. Cuts of this size
+  (about 0.1 us per draw) cannot be told apart from run-to-run noise with two runs per arm.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
