@@ -386,6 +386,7 @@ void GpuMemory::SyncWriteBackIndexes(int heap_id, int object_id)
 // heap index open over it, so overlapping heaps resolve as a linear scan would.
 void GpuMemory::RebuildHeapIndex()
 {
+	m_guest_bytes_generation.fetch_add(1, std::memory_order_acq_rel);
 	struct Edge
 	{
 		uint64_t address = 0;
@@ -442,6 +443,7 @@ void GpuMemory::RebuildHeapIndex()
 		m_heap_index_open.insert(m_heap_index_open.end(), open.begin(), open.end());
 		m_heap_index.push_back(span);
 	}
+	m_guest_bytes_generation.fetch_add(1, std::memory_order_release);
 }
 
 // Every heap that intersects any of the ranges, ascending: the heaps a

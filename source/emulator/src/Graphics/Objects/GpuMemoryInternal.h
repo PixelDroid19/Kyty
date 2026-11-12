@@ -612,6 +612,15 @@ private:
 	// Advances whenever an object block enters or leaves a heap. Lookup results
 	// over the object graph stay valid while it is unchanged.
 	std::atomic<uint64_t> m_object_graph_generation {1};
+	// Odd while the heap index or the host-result pages change, even otherwise:
+	// RangeHoldsGuestBytes answers from a per-thread window while it is unchanged.
+	// Each instance starts apart so a window never outlives the memory it proved.
+	static uint64_t       FirstGuestBytesGeneration()
+	{
+		static std::atomic<uint64_t> next {0};
+		return next.fetch_add(uint64_t {1} << 40u, std::memory_order_relaxed);
+	}
+	std::atomic<uint64_t> m_guest_bytes_generation {FirstGuestBytesGeneration()};
 
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;

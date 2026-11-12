@@ -361,9 +361,47 @@ bool GpuMemory::RangeHoldsGuestBytes(uint64_t vaddr, uint64_t size)
 	{
 		return false;
 	}
+	// Draws check thousands of ranges a frame inside a few allocations. A window
+	// proven allocated and free of host results stays proven until the
+	// generation moves; a range answered from it orders before that change.
+	struct Window
+	{
+		const GpuMemory* owner      = nullptr;
+		uint64_t         generation = UINT64_MAX;
+		uint64_t         begin      = 0;
+		uint64_t         end        = 0;
+	};
+	constexpr uint64_t                            kWindowBytes = 1024u * 1024u;
+	constexpr uint64_t                            kWindows     = 256u;
+	thread_local std::array<Window, kWindows>* const windows   = new std::array<Window, kWindows>;
+	auto&          window     = (*windows)[(vaddr / kWindowBytes) % kWindows];
+	const uint64_t generation = m_guest_bytes_generation.load(std::memory_order_acquire);
+	if (window.owner == this && window.generation == generation && vaddr >= window.begin && vaddr < window.end &&
+	    size <= window.end - vaddr)
+	{
+		return true;
+	}
 	Core::LockGuard lock(m_mutex);
-	return ValidateAllocatedRangeLocked(vaddr, size) == GpuMemoryRangeValidationStatus::Valid &&
-	       !m_host_result_pages.Any(vaddr, size);
+	if (ValidateAllocatedRangeLocked(vaddr, size) != GpuMemoryRangeValidationStatus::Valid || m_host_result_pages.Any(vaddr, size))
+	{
+		return false;
+	}
+	const uint64_t stable = m_guest_bytes_generation.load(std::memory_order_relaxed);
+	const auto     after  = std::upper_bound(m_heap_index.begin(), m_heap_index.end(), vaddr,
+	                                         [](uint64_t value, const HeapSpan& span) { return value < span.begin; });
+	if ((stable & 1u) != 0u || after == m_heap_index.begin())
+	{
+		return true;
+	}
+	const auto&    span  = *std::prev(after);
+	const uint64_t align = vaddr - vaddr % kWindowBytes;
+	const uint64_t begin = std::max(span.begin, align);
+	const uint64_t end   = std::min(span.end, align > UINT64_MAX - kWindowBytes ? UINT64_MAX : align + kWindowBytes);
+	if (begin < end && !m_host_result_pages.Any(begin, end - begin))
+	{
+		window = {this, stable, begin, end};
+	}
+	return true;
 }
 
 bool GpuMemory::CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission)
@@ -765,6 +803,7 @@ void GpuMemory::SetHostResultPagesCounted(Object* object, bool counted)
 		return;
 	}
 	object->host_result_counted = counted;
+	m_guest_bytes_generation.fetch_add(1, std::memory_order_acq_rel);
 	for (int vi = 0; vi < object->block.vaddr_num; vi++)
 	{
 		if (counted)
@@ -775,6 +814,7 @@ void GpuMemory::SetHostResultPagesCounted(Object* object, bool counted)
 			m_host_result_pages.Remove(object->block.vaddr[vi], object->block.size[vi]);
 		}
 	}
+	m_guest_bytes_generation.fetch_add(1, std::memory_order_release);
 }
 
 void GpuMemory::DeleteBlock(Block* b, int heap_id, int obj_id)
