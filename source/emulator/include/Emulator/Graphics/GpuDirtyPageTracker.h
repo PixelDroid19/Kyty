@@ -239,8 +239,15 @@ private:
 	// fixed table once, including sparse spans over unmapped guest memory.
 	static constexpr size_t kDirectWritePages  = 64u;
 	static constexpr size_t kDirectWriteBlocks = 2048u;
+	// One bit per block of pages, set before a page identity is published and
+	// never cleared. Guest copies notify about a million mostly untracked pages
+	// a second; a clear bit in this L1-sized map answers them without probing
+	// the page table.
+	static constexpr unsigned kIdentityFilterLog2 = 17u;
+	static constexpr size_t   kIdentityFilterBits = size_t {1} << kIdentityFilterLog2;
 
 	[[nodiscard]] uintptr_t         PageStart(uintptr_t address) const noexcept;
+	[[nodiscard]] size_t            IdentityFilterBit(uintptr_t page) const noexcept;
 	[[nodiscard]] uintptr_t         PageEnd(uintptr_t page) const noexcept;
 	[[nodiscard]] uintptr_t         RangeEnd(uintptr_t address, size_t size) const noexcept;
 	[[nodiscard]] PageEntry*        FindPage(uintptr_t page) noexcept;
@@ -320,6 +327,7 @@ private:
 	uint64_t                      m_page_size = 0;
 	std::unique_ptr<PageEntry[]>  m_pages;
 	std::unique_ptr<BlockEntry[]> m_blocks;
+	std::unique_ptr<std::atomic<uint64_t>[]> m_identity_filter;
 	std::map<RangeKey, RangeRecord> m_ranges;
 	// Rearm scratch: each block's change count read before its pages are
 	// visited, kUnprovenBlock once one of them was not found armed.

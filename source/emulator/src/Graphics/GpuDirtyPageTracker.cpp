@@ -113,7 +113,9 @@ GpuDirtyPageTracker::GpuDirtyPageTracker(bool enabled)
 
 GpuDirtyPageTracker::GpuDirtyPageTracker(const GpuDirtyPageProtectionOps& protection_ops, bool enabled)
     : m_page_size(Core::VirtualMemory::GetPageSize()), m_pages(enabled ? new PageEntry[kPageTableSize] : nullptr),
-      m_blocks(enabled ? new BlockEntry[kBlockTableSize] : nullptr), m_registration_mutex(enabled ? new std::mutex : nullptr),
+      m_blocks(enabled ? new BlockEntry[kBlockTableSize] : nullptr),
+      m_identity_filter(enabled ? new std::atomic<uint64_t>[kIdentityFilterBits / 64u]() : nullptr),
+      m_registration_mutex(enabled ? new std::mutex : nullptr),
       m_epoch(enabled ? new std::atomic<uint64_t>(0) : nullptr), m_protection_ops(protection_ops),
       m_authority {this, &AuthorityBeginChange, &AuthorityDecide, &AuthorityEndChange},
       m_enabled(enabled && protection_ops.remove_write_and_capture != nullptr && protection_ops.remove_write != nullptr &&
@@ -287,9 +289,21 @@ const GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindPage(uintptr_t pa
 	return const_cast<GpuDirtyPageTracker*>(this)->FindPage(page);
 }
 
+size_t GpuDirtyPageTracker::IdentityFilterBit(uintptr_t page) const noexcept
+{
+	return static_cast<size_t>((page / (m_page_size * kBlockPages)) & (kIdentityFilterBits - 1u));
+}
+
 GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindWritePage(uintptr_t page) noexcept
 {
 	if (page == 0 || m_pages == nullptr)
+	{
+		return nullptr;
+	}
+	// The bit is set before the key is published, so a clear bit means the probe
+	// below could not find the page either.
+	const size_t filter_bit = IdentityFilterBit(page);
+	if ((m_identity_filter[filter_bit / 64u].load(std::memory_order_acquire) & (uint64_t {1} << (filter_bit % 64u))) == 0u)
 	{
 		return nullptr;
 	}
@@ -395,6 +409,8 @@ GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t 
 		entry->original_token.store(0, std::memory_order_relaxed);
 		entry->original_mode_valid.store(0, std::memory_order_relaxed);
 		m_blocks[block].page_mask.fetch_or(uint64_t {1} << ((page / m_page_size) % kBlockPages), std::memory_order_relaxed);
+		const size_t filter_bit = IdentityFilterBit(page);
+		m_identity_filter[filter_bit / 64u].fetch_or(uint64_t {1} << (filter_bit % 64u), std::memory_order_release);
 		entry->key.store(page, std::memory_order_release);
 		++m_page_identity_count;
 		ReleaseIdentityWriter();
