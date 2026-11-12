@@ -195,4 +195,5 @@ time in a 44.8 ms frame. A draw plan is worth about 1.5 us per draw (pixel input
 cached analysis; vertex inputs are mostly the descriptor gather). Submit still returns only after
 the batch is decoded, because the title rewrites its descriptor tables after submit, so the
 command processor cannot run behind the guest. Under that contract the plan plus a two-stage
-command processor reach about 27-31 fps at this load. The gates above stay closed.
+command processor reach about 31-36 fps at this load (the frame becomes the command processor's
+31.9 ms, or about 28 ms with the plan). The gates above stay closed.

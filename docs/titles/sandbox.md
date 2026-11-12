@@ -95,7 +95,8 @@ descriptor set every draw.
   bounded by the submit contract: submit returns only after the batch is decoded, because the title rewrites
   its descriptor tables after submit, so the decode cannot run behind the guest. Priced against that contract,
   a draw plan (worth about 1.5 us: pixel inputs already use a cached analysis and vertex inputs are mostly the
-  descriptor gather) and a two-stage command processor together reach about 27-31 fps at this load, not 60.
+  descriptor gather) and a two-stage command processor together reach about 31-36 fps at this load, not 60:
+  with full overlap the frame is the command processor's 31.9 ms, 28 ms with the plan.
   (Corrects the 2026-11-12 estimate of "overlap plus 5.9 us per draw".)
 - **Write notification cost on the submitting thread (2026-11-12, world, perf at 199 Hz).** Guest
   `memcpy`/`memset`/`memmove` notify the dirty-page tracker of every write, about a million times a second, and
@@ -109,6 +110,15 @@ descriptor set every draw.
   the submitting thread (one baseline run, sampling noise about 16 samples); frame rate did not move measurably
   (14.2 against 14.3 fps at the stop point). Not checked: how full the map gets over a long session, since its
   bits are never cleared while this title maps and releases direct memory every frame.
+- **Host-GPU wait inside the release drain, excluded as a frame lever (2026-11-12, world, temporary timers in
+  `Gpu::WaitLocked`, serial submit).** In 18 s of world the drains ran 33 times a second: 25.7 ms/s waiting
+  for the rings to finish decoding and 6.6 ms/s in `CommandProcessor::SubmitAndWait` for the host GPU, under
+  0.5 ms a frame. (Before the world: 164 drains a second, 231 and 31 ms/s.) Skipping the host wait for
+  releases that overlap nothing is therefore not worth its risk; it would also not be sound as the code
+  stands: `GpuMemory::Free` runs the global `WriteBackAllCompleted` and the device-address release runs
+  `DestroyRetiredTables` (`GuestDeviceAddress.cpp:1546`), which frees retired Vulkan tables with no reader
+  check, on every release, both relying on the host GPU being idle. The drain matters only for an early
+  submit return, where it puts the batch back on the guest (see the holder record above).
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
