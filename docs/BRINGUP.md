@@ -175,6 +175,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Draw plan, render-target layer: repeat rate and ceiling (2026-11-12, excluded)
   - Shader ids of prepared draws built on the draw front (2026-11-12, built)
   - Per-draw input infos no longer zeroed through a default std::optional (2026-11-12, built)
   - Index min/max scan with AVX2 (2026-11-12, built)
