@@ -1718,15 +1718,16 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	}
 
 	ShaderRequireVertexProgram(&vs_regs, vs_input_info);
-	auto vs_id = ShaderGetIdVS(&vs_regs, vs_input_info);
-	auto ps_id = ShaderGetIdPS(&ps_regs, ps_input_info);
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	EXIT_IF(gctx == nullptr);
 
+	// Built in place: every draw makes both ids, and a copy would allocate them again.
 	Pipeline p {};
 	p.render_pass    = framebuffer->compatibility;
-	p.ps_shader_id   = ps_id;
-	p.vs_shader_id   = vs_id;
+	p.ps_shader_id   = ShaderGetIdPS(&ps_regs, ps_input_info);
+	p.vs_shader_id   = ShaderGetIdVS(&vs_regs, vs_input_info);
+	const ShaderId& vs_id = p.vs_shader_id;
+	const ShaderId& ps_id = p.ps_shader_id;
 	PipelineStaticParameters  lookup_static {};
 	PipelineDynamicParameters lookup_dynamic {};
 	p.static_params  = &lookup_static;
