@@ -138,6 +138,12 @@ descriptor set every draw.
   Two world runs read pipeline setup 1.08 and 1.08 us against 1.04, whole draw 9.20 and 9.15 us against 9.07 and
   9.50. Only this memo is excluded: its hit rate was not measured (direct-mapped, 256 slots) and each id still
   allocated its empty array header before taking the shared words. Reverted.
+- **Excluded (2026-11-12): reusing the pixel-stage resource parse on repeated user data.** The parse
+  (`ShaderParseUsage2` from `ShaderGetInputInfoPS`) is about 5 % of the command-processor thread, about 0.45 us per
+  draw. A temporary counter over 1.4 million world draws (59 pixel programs, none with extended user data) found
+  the user SGPRs equal to that program's previous call in 37 % of calls, almost all on back-to-back draws of the
+  same program: a memo of the parse would save at most about 0.17 us per draw, before checking the guest tables it
+  reads.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
