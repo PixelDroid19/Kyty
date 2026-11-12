@@ -63,17 +63,23 @@ descriptor set every draw.
   - 2,648 unit tests and the four repository gates pass.
 - **Every-path check, verified.** `EmulatorShaderGetpc.SlotOnlyConsumerNeedsTheRegisterReloadedOnEveryPath`
   builds two fronts by hand: a straight-line reload makes the consumer slot-only, a reload on one branch refuses
-  the buffer. A world run with a DIAG probe that re-read every in-place storage range at submit found 0 of
-  253,197 checked reads changed between bind and submit (62 of 62 hand-built changes reported), so reading the
-  guest pages in place is sound under the current serial submit. An early-returning submit needs this check again.
+  the buffer. A world run with a temporary probe hashed a sample of the guest ranges draws read at bind
+  (253,199 sampled, 253,197 checked) and again when the consuming submission completed, before its labels were
+  published: 0 changed, and 62 of 62 hand-built changes were reported. Reading the guest pages in place is sound
+  under the current submit; an early-returning submit lets the guest run sooner and needs this check again.
+- **Frame split (same 10 s world window, 214 frames, 45.7 ms each).** The command processor runs 33.0 ms per
+  frame, waits 1.15 ms on fences and under 0.1 ms on acquire, present and flips; the other ~11.5 ms it idles
+  until the guest submits again (two runs per frame). The render engine was 59 % busy at 800-1,250 MHz of a
+  2,400 MHz maximum, so the GPU is not the limit. The next step is overlap: a submit that returns to the guest
+  before the command processor finishes, which at best brings the frame to the 33 ms of command-processor work.
 - **Open.** The front proof runs on every draw; its verdict could be kept on the program, keyed only on code
-  facts. The remaining per-draw cost is spread over shader input parsing, pipeline lookup and command emission;
-  the early-returning submit is still last.
+  facts. After overlap, the per-draw cost (shader input parsing, pipeline lookup, command emission) is the limit.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
   path then hands `WriteStorageAddressRow` (`GraphicsRenderBind.cpp:3062`) the copy's address plus the guest
-  offset, which stops the emulator when the offset keeps those bits. Direction: align the base down before both
+  offset. An in-place object keeps the low bits in that offset, which stops the emulator; a snapshot copy may
+  instead start at the unaligned guest byte, which reads bytes shifted from the ISA's. Direction: align the base down before both
   paths, as the shader already masks the offset (`EmitAddressScalarBufferLoad`, `ShaderSpirvBuffer.cpp:3645`).
   The ISA also leaves the destination of out-of-range scalar-load dwords unwritten, where both paths return zero.
 
