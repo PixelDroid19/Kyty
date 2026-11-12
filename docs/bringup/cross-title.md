@@ -15,7 +15,9 @@ zeroed about 29 KB, also the 86 % of draws that take prepared inputs and never t
   5.2-5.7k draws per frame, 14 new and 16 old. Command processor 36.1 against 37.9 ms per frame, 6.17 against
   6.52 us per draw, median frame time 49.5 against 51.5 ms, mean 19.57 against 19.09 fps (+2.5 %); the median
   of the 1 s rates moves only from 19.75 to 19.79, since each sample counts whole flips. A first run reached
-  only 16 s of world before the player died (5 and 6 samples) and is not counted.
+  only 16 s of world before the player died (5 and 6 samples) and is not counted. A repeat run (same route,
+  21 new and 22 old samples) gave 34.4 against 36.8 ms per frame, 5.95 against 6.34 us per draw, median frame
+  time 48.0 against 50.0 ms and mean 20.73 against 19.49 fps (+6.4 %).
 - `PPSA21567 - Astro Bot`, walking dunes, same image at 108/125/145 s and the same pre-existing
   `gfx_storage_frontier` event: 20.8 fps median, 40.7 us per draw (earlier runs 18.8-19.8 fps, 45.8-46.4 us).
   A first run on a loaded host gave 16.8 fps and 71 us per draw and is not evidence.
