@@ -1065,10 +1065,21 @@ per-stream copy for vertex data; it does not change the frame time of this title
     74.6 ms frames, the same command processing plus guest time as before. The thread is not spinning:
     no thread but the command processor ran more than 14.4 ms of CPU per frame (57.5 ms for the command
     processor), and `threads` shows no guest wait object in 240 of 262 polls, as it also does while the
-    thread is blocked in the submit's decode wait. It is held inside the emulator by something that ends
-    with the batch; what it is was not identified. Excluded for this title: an early return alone does
-    not shorten the frame. The two runs reached scenes of different load, but command processing per
-    draw is the same, 11.1 and 11.2 us.
+    thread is blocked in the submit's decode wait. The two runs reached scenes of different load, but
+    command processing per draw is the same, 11.1 and 11.2 us.
+  - What holds it (2026-11-11, same early return plus a temporary timer per guest thread and call site
+    on the interruptible host waits). The submitting thread spent 691 ms of each second in one wait:
+    the guest releases direct memory every frame, and `release_direct_memory` (`Memory.cpp:2978`) calls
+    `GraphicsInvalidateGpuMappingRanges` (`Graphics.cpp:130-153`), which runs the invalidation under
+    `GraphicsRunWithQuiescedSubmissions` (`GraphicsRun.cpp:3613`), whose `Gpu::WaitLocked` waits in
+    `GraphicsRing::WaitForIdle` (`GraphicsRun.cpp:1630`) until the command processor has run every
+    queued batch. `sceGnmSubmitDone` is not called by this title (a timer on `GraphicsRing::Done` never
+    fired). With the serial submit the ring is already idle there, so the wait costs nothing; with an
+    early return it puts the whole batch back on the guest. The quiesce protects the emulator's own GPU
+    objects and device-address registry, which the command processor uses while it runs, not a guest
+    contract. An early return gains this title up to its ~11 ms of guest time per frame only if the
+    invalidation runs in submission order on the command processor instead of draining it, and the
+    descriptor-table contract above is met.
 - **Device-address residency (measured; populated-page query fixed in `67d6e9a95`).** Before the
   fix, in the world the residency timer read 8.1 and 9.1 ms per frame in two runs without temporary
   code, and 1.46 ms in the run with temporary counters, whose world is a lighter regime: the level of
