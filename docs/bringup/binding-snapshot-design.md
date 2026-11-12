@@ -185,3 +185,6 @@ parallel-recording-design) on top of these stages.
 - Update-after-bind and descriptor-buffer behavior on Windows Intel and current RADV/NVIDIA builds (limits, device-lost risk).
 - Whether the "~1.2 unattributed" is the sum of per-call profiler overhead (possible: counters wrap calls).
 - GPU-side cost of any bindless/address indirection (not CPU-priced here).
+
+Stage 1 result (2026-11-12): the guest-bytes generation is built; the sandbox world measured 9.80 -> 9.07 us
+per draw in one run against one baseline in the same scene (`docs/titles/sandbox.md`).
