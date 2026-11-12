@@ -136,7 +136,8 @@ descriptor set every draw.
 - **Excluded (2026-11-12): sharing repeated shader-id words.** A per-thread table of recent identities let a draw
   reuse the stored words of an identity seen before (no allocation) and compare equal identities by pointer.
   Two world runs read pipeline setup 1.08 and 1.08 us against 1.04, whole draw 9.20 and 9.15 us against 9.07 and
-  9.50: allocating the id words is not what the pipeline setup row pays for. Reverted.
+  9.50. Only this memo is excluded: its hit rate was not measured (direct-mapped, 256 slots) and each id still
+  allocated its empty array header before taking the shared words. Reverted.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
