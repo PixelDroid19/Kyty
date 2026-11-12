@@ -60,6 +60,12 @@ temporary diagnostic (not committed).
   0.998 of the batch's time in the sandbox title (always a draw the front had not reached yet) and at 0.988
   in the robot platformer (an auto draw or a dispatch, which the front never prepares). The draw front as
   it stands cannot stand for the guest reads of a batch.
+- **Drain split and replay time** (one more run each). The sandbox title's drain is mostly ring waits
+  (0.96 ms per frame) and only 0.20 ms per frame of the command processors' `SubmitAndWait`, so the
+  release work (A) removes at most about 1.2 ms per frame under the serial submit. The draw front's replay
+  costs 2.88 us per prepared record in the sandbox title (14.3 ms per frame against 35.3 ms of command
+  processor) and 20.2 us in the robot platformer (9.6 ms per frame, GPU 89 % busy). An early-returning
+  submit is estimated at about 28 fps in the sandbox title, bounded by the command processor; not measured.
 - **Still open.** Whether a queued batch reads a released range and whether a mapping reuses released
   addresses before the queued batches end; both need a submit that returns early.
 

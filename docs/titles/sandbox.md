@@ -18,6 +18,10 @@ Intel Arc A770, two runs with a temporary diagnostic (not committed).
   plus 18.9 auto draws and 47.1 dispatches. The front falls behind the command processor 5,567 times a
   second and restarts 1,170 times a second; the last draw of every batch is one it had not reached.
 - **Also seen.** The title draws mainly at 1920x1080 with an output size of 1280x720 reported.
+- **Drain split and replay time (third run).** 29.3 drains a second: ring waits 0.96 ms per frame,
+  the command processors' `SubmitAndWait` 0.20 ms per frame, the longest ring wait 29.9 ms. The draw
+  front's replay takes 2.88 us per prepared record, 14.3 ms per frame against 35.3 ms of command
+  processor, at 20.2 fps.
 
 ## Sandbox title: shader inputs of indexed draws prepared ahead of the command processor (2026-11-12, built)
 
@@ -1271,7 +1275,9 @@ per-stream copy for vertex data; it does not change the frame time of this title
     fired). With the serial submit the ring is already idle there, so the wait costs nothing; with an
     early return it puts the whole batch back on the guest. The quiesce protects the emulator's own GPU
     objects and device-address registry, which the command processor uses while it runs, not a guest
-    contract. An early return gains this title up to its ~11 ms of guest time per frame only if the
+    contract. (Corrected 2026-11-12: it also keeps label stores and end-of-pipe callback writes that
+    complete after the release out of a physical range the guest may already have allocated again;
+    `docs/bringup/performance-architecture-plan.md`, section A.) An early return gains this title up to its ~11 ms of guest time per frame only if the
     invalidation runs in submission order on the command processor instead of draining it, and the
     descriptor-table contract above is met.
 - **Device-address residency (measured; populated-page query fixed in `67d6e9a95`).** Before the

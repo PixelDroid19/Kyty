@@ -1,6 +1,6 @@
 # Performance architecture plan (2026-11-12)
 
-Status: plan, stage 0 measured (section 6), next A2 and A3. Maintainer decision of 2026-11-12:
+Status: plan, stage 0 measured (section 6), next B0.2, then A2 and A3. Maintainer decision of 2026-11-12:
 build the changes below, and the 2x build gate of `parallel-recording-design.md` is withdrawn.
 Every gain in this document is an estimate until its stage is measured. Each stage names its
 measurement and its correctness gate.
@@ -60,8 +60,16 @@ only where Kyty's own traces agree.
   same quiesce serves unmap, fixed-map replacement and protection changes. The world scene of
   `PPSA17221 - Minecraft` drains 33 times a second. With the serial submit the rings are already
   idle there (under 0.5 ms a frame); with a submit that returns early the guest thread spent 691 ms
-  of each second in this wait (`docs/titles/sandbox.md`). The quiesce protects the emulator's own
-  objects, not a guest contract.
+  of each second in this wait (`docs/titles/sandbox.md`).
+- **What the drain also protects (read 2026-11-12).** Host writes that land when a submission
+  completes: label stores (`Label.cpp:481-491`) and end-of-pipe callbacks (for example the clock
+  value at `GraphicsRenderEop.cpp:290`) write through guest pointers checked when they were
+  recorded. A physical release keeps the heap, so the allocated-range check before a label store
+  still passes, and the label fence registry lists label stores only, not callback writes. On Gen5
+  `PhysicalMemory::Release` (`Memory.cpp:1154-1273`) takes the range out of the allocated set at
+  once and keeps the views that map it; the backing goes only when no view maps it. Without the
+  drain a late write can land in a range the guest has allocated again. No test over memory objects
+  and device-address ranges can therefore show that a release is safe without the drain.
 - **Why first.** Without it the sandbox title cannot show any overlap, and with it the
   one-batch-ahead experiment (B0) measures the real ceiling before the capture is built.
 - **A1, measure.** Per release, one run per title: size, whether a memory object, a device-address
@@ -69,12 +77,15 @@ only where Kyty's own traces agree.
   of the range, and whether the next mapping reuses the addresses before the queued batches end.
 - **A2, the two global steps.** `GpuMemory::Free` runs `WriteBackAllCompleted` and the
   device-address release runs `DestroyRetiredTables`; both assume an idle host GPU. Each retired
-  item gets the submission that last used it and is freed when that submission completes.
+  item gets the submission that last used it and is freed when that submission completes; the
+  device-address registry already retires tables by reader (`GuestDeviceAddress.cpp:2229-2238`).
+  These steps alone do not let the drain go: the late host writes above need A3's range lifetime.
 - **A3, ordered invalidation.** The release posts the range into the ring in submission order and
   the command processor applies it between batches. The guest thread waits only while the command
   processor is inside a host access of that range, or when a new mapping would reuse addresses that
-  queued batches still hold; then it waits for the ring as today. The host pages stay mapped until
-  the ring has passed the invalidation.
+  queued batches still hold; then it waits for the ring as today. The host pages stay mapped, and
+  the physical range is not handed out again, until the submissions outstanding at the release
+  are complete.
 - **Gate.** The strict regression set; a unit test for a release between two queued batches; a
   hand-made access after release that the check must report.
 
@@ -211,9 +222,10 @@ and is left out.
   released an address that was among the 256 addresses released before it. No release in unmap
   mode.
 - `PPSA21567 - ASTRO BOT`, dunes: no guest release in the window.
-- **Reading.** About nine released ranges in ten overlap nothing the emulator holds, and the action
-  itself is short; the drain is the cost, and its 16-21 ms maximum is a frame hitch even with the
-  serial submit.
+- **Reading.** About nine released ranges in ten overlap no memory object and no device-address
+  range, and the action itself is short; the drain is the cost, and its 16-21 ms maximum is a frame
+  hitch even with the serial submit. Overlapping nothing does not make a release safe without the
+  drain (section A, late host writes).
 - **Not measured.** Import windows; whether a queued batch reads a released range; whether the next
   mapping reuses the addresses before the queued batches end. The last two need a submit that
   returns early. The 91 % address reuse says the "wait as today" case of A3 may be the common one,
@@ -250,7 +262,37 @@ one of its kind in a batch:
   and dispatches that end the robot platformer's batches. Reads that depend on a host write end
   early in the sandbox title's batches and late in the robot platformer's.
 - **Not measured.** The draw front's own time per batch, which is the time a submit would still
-  hold the guest once the front is the capture.
+  hold the guest once the front is the capture. The replay time per prepared record stands in for it
+  in the next subsection.
+
+### Drain split and draw-front replay time
+
+One run per title on `a6c3df9f1` with a second temporary diagnostic (not committed): the drain timed
+in two parts, the ring waits and the command processors' `SubmitAndWait`, and the draw front's
+`Replay` timed against the records it prepared. `Replay` holds no wait; the front parks outside it.
+
+| | `PPSA17221 - Minecraft`, world, 40 s | `PPSA21567 - ASTRO BOT`, dunes, 44 s |
+| --- | --- | --- |
+| Frame rate; draws and dispatches per frame | 20.2; 5,054 draws | 18.3; 593 draws, 84 dispatches |
+| Command processor per frame; GPU busy | 35.3 ms; 65 % | 56.0 ms (all pipes); 89 % |
+| Quiesce drains per second | 29.3 | 0 |
+| Ring waits per second; per frame | 19.4 ms; 0.96 ms | |
+| `SubmitAndWait` per second; per frame | 4.0 ms; 0.20 ms | |
+| Ring waits over 1 ms per second; longest ring wait; longest `SubmitAndWait` | 2.7; 29.9 ms; 2.4 ms | |
+| Replay per second; records prepared per second | 288 ms; 100,276 | 176 ms; 8,730 |
+| Replay per prepared record; per frame | 2.88 us; 14.3 ms | 20.2 us; 9.6 ms |
+
+- **Reading, release.** Most of the drain waits for other rings to finish a batch in flight; the
+  command processors' own wait is 0.2 ms per frame. Under the serial submit, A removes at most about
+  1.2 ms per frame and the drain's 30 ms worst case. A is a prerequisite of B, not a frame-rate
+  lever on its own.
+- **Reading, submit.** If a capture costs what the replay costs per record, a submit that returns
+  after the capture holds the sandbox title's guest about 14 ms per frame instead of the command
+  processor's 35 ms. The frame then follows the command processor, about 28 fps. That is an
+  estimate: the capture's own cost and the copies of B0.2 are not in it. The robot platformer is
+  bounded by the GPU at 89 % busy; B carries no frame-rate estimate there.
+- **Consequence.** B alone does not reach 30 fps in the sandbox title; the command processor's time
+  per frame has to fall as well (C and D).
 
 ### E2, reported output size (excluded for the robot platformer)
 
