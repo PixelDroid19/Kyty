@@ -9,7 +9,13 @@ zeroed about 29 KB, also the 86 % of draws that take prepared inputs and never t
   the same run (the old arm re-created two of the three zeroed locals, 18.3 of 28.8 KB), about 2.1M draws per
   arm: 5.43 against 5.24 us per draw (5.54 against 5.38 over the last third). Scaled to the full 28.8 KB, about
   0.25-0.29 us per draw, 1.2-1.4 ms per frame. The heap allocation on draws without prepared inputs is not
-  priced separately. No frame-rate claim.
+  priced separately.
+- Frame rate, together with the AVX2 index scan below, `PPSA17221 - Minecraft` world: both old paths
+  (scalar scan and the three zeroed locals) restored in alternating 4 s windows of one run, 1 s samples at
+  5.2-5.7k draws per frame, 14 new and 16 old. Command processor 36.1 against 37.9 ms per frame, 6.17 against
+  6.52 us per draw, median frame time 49.5 against 51.5 ms, mean 19.57 against 19.09 fps (+2.5 %); the median
+  of the 1 s rates moves only from 19.75 to 19.79, since each sample counts whole flips. A first run reached
+  only 16 s of world before the player died (5 and 6 samples) and is not counted.
 - `PPSA21567 - Astro Bot`, walking dunes, same image at 108/125/145 s and the same pre-existing
   `gfx_storage_frontier` event: 20.8 fps median, 40.7 us per draw (earlier runs 18.8-19.8 fps, 45.8-46.4 us).
   A first run on a loaded host gave 16.8 fps and 71 us per draw and is not evidence.
