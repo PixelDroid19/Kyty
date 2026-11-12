@@ -197,3 +197,18 @@ the batch is decoded, because the title rewrites its descriptor tables after sub
 command processor cannot run behind the guest. Under that contract the plan plus a two-stage
 command processor reach about 31-36 fps at this load (the frame becomes the command processor's
 31.9 ms, or about 28 ms with the plan). The gates above stay closed.
+
+Front/back pipeline inside one submit, priced from source on 2026-11-12 (stage counters above, not
+built). A front thread would take only what needs registers and guest memory: vertex input 1.12,
+pixel input 0.80 and shader ids 0.53 us, about 2.5 us per draw. Everything else stays on the
+thread that owns the command buffer, because it feeds the next draw: guest-address read
+preparation mutates the device-address registry and can retry the draw, index preparation reuses
+the previous draw's transient snapshot, materialization creates or finds host images, the pipeline
+key needs the framebuffer's compatibility, which needs the materialized targets and the live image
+layouts that the previous `BeginRenderPass` changed, binding creates memory objects and descriptor
+sets, and emission resets the hashes of drawn targets that the next draw's materialization reads.
+The back stage stays at about 8.8 us, so the batch goes from 11.36 to about 9 us per draw before
+the hand-off (a multi-KB input record per draw): about 6.7 ms of a 44.8 ms frame at 2,805 draws.
+Dispatches, guest-memory waits and writes, end-of-pipe writes, barriers and flips would drain it.
+Reaching 5-6 us needs binding and the ordered part of state setup rebuilt as functions of a
+versioned snapshot, or recorded on workers as above; neither is designed.
