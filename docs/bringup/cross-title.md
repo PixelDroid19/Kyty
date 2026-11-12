@@ -14,16 +14,21 @@ A geometry pass also takes none. The id layout is unchanged, so module caches st
 - Correctness check (temporary diagnostic, not committed): every draw that reused prepared ids also rebuilt
   both ids on the processor and compared them. A forged id with one extra word was reported as different.
   `PPSA17221 - Minecraft` world: 950,000 draws, 0 differences. `PPSA21567 - Astro Bot`, intro to dunes:
-  650,000 draws, 0 differences. No draw in either run fell back because of the two pixel fields.
-- `PPSA17221 - Minecraft` world, old and new alternating in 4 s windows of one run (13 new and 15 old 1 s
-  samples at 5.2-5.7k draws per frame; the scene left that range after 50 s): command processor 34.1 against
-  35.4 ms per frame, 5.88 against 6.11 us per draw, median frame time 48.0 against 49.0 ms, mean 20.63 against
-  19.66 fps.
-- `PPSA21567 - Astro Bot`, same alternation from 100 s (the run stayed in the intro cinematic): command
-  processor 244 against 246 us per draw and every timed draw stage equal, pipeline setup 2.08 against
-  2.07 us. About 370 draws per frame, so the ids cost little there. No frame-rate claim.
-- Not run: `kyty_agent playable-regression`, titles with resolution scaling (the fallback path did not engage
-  live), a second GPU.
+  650,000 draws, 0 differences, and 700,000 with 0 differences at a fixed 960x540 render-target resolution
+  (scaling applied, 1/4). No draw in the three runs fell back because of the two pixel fields, so the fallback
+  has not run live.
+- `PPSA17221 - Minecraft` world, previous code and new code alternating in 4 s windows of one run (the old arm
+  builds no ids on the front and rebuilds both on the processor; 20 new and 22 old 1 s samples at 5.2-5.7k
+  draws per frame): command processor 36.3 against 38.2 ms per frame, 6.22 against 6.46 us per draw, median
+  frame time 51.0 against 52.5 ms, mean 19.83 against 19.18 fps (+3.4 %). Prepared inputs were taken by
+  91.1 % and 91.9 % of draws, so the slower front costs no take rate. A first run whose old arm still built the
+  ids on the front gave 34.1 against 35.4 ms per frame.
+- `PPSA21567 - Astro Bot`, the first alternation from 100 s (the run stayed in the intro cinematic, whose image
+  looked correct but was not compared with a matched scene): command processor 244 against 246 us per draw and
+  every timed draw stage equal, pipeline setup 2.08 against 2.07 us. About 370 draws per frame, so the ids
+  cost little there. No frame-rate claim.
+- Not run: `kyty_agent playable-regression`, a title whose pixel programs read a scaled fragment position, a
+  second GPU.
 
 ## Per-draw input infos no longer zeroed through a default std::optional (2026-11-12, built)
 
@@ -53,7 +58,10 @@ Excluded while looking for per-draw processor time in the same scene (no code ke
 
 - **Shader ids computed ahead of the command processor.** The pixel and vertex ids read fields written on the
   command-processor thread after the prepared inputs are taken (dual-source blend, resolution cohort and
-  host-to-guest scale, device-address binding, clip probe), so they cannot be built ahead.
+  host-to-guest scale, device-address binding, clip probe), so they cannot be built ahead. Superseded the same
+  day by the record above: the processor sets only the host-to-guest scale and the dual-source flag of those,
+  both guarded; the device-address fields are set by the input analysis itself, and probes never take prepared
+  inputs.
 - **A memo of `GpuMemoryResetHash` on a global write epoch.** About 2.5 hashes reset per draw, 198 ns each
   (about 2.5 ms per frame); 94-99 % repeat a recent key, but only about 0.2 % find the global epoch unchanged.
   A memo would have to be range-aware.
