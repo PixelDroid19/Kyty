@@ -49,6 +49,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <set>
 #include <utility>
@@ -1811,13 +1812,6 @@ static VulkanBuffer* RecordGeometryIndirectPass(uint64_t submit_id, CommandBuffe
                                                 const GuestDeviceAddressTable* device_address_table, ShaderVertexInputInfo* pull,
                                                 const SubmissionId* mutation_conflict);
 
-// A default-initialized input info: emplacing the info itself would zero all of it first.
-struct AnalysedVertexInput
-{
-	ShaderVertexInputInfo info;
-	AnalysedVertexInput() {} // NOLINT(modernize-use-equals-default)
-};
-
 static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                               uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                               uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
@@ -2042,8 +2036,14 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	{
 		prepared = nullptr;
 	}
-	std::optional<AnalysedVertexInput> analysed_vs;
-	ShaderVertexInputInfo&             vs_input_info = prepared != nullptr ? prepared->vs : analysed_vs.emplace().info;
+	// The inputs analysed here live on the heap: GCC zeroes the whole storage of a default std::optional,
+	// several kilobytes on every draw, even when the draw takes prepared inputs.
+	std::unique_ptr<ShaderVertexInputInfo> analysed_vs;
+	if (prepared == nullptr)
+	{
+		analysed_vs = std::make_unique<ShaderVertexInputInfo>();
+	}
+	ShaderVertexInputInfo& vs_input_info = prepared != nullptr ? prepared->vs : *analysed_vs;
 	if (prepared == nullptr)
 	{
 		ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info, &ctx->GetShaderStagesRaw());
@@ -2062,11 +2062,12 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 		return;
 	}
 	// A geometry pass runs the guest program; the host vertex stage draws its output.
-	// Built only for a geometry pass: an input info zeroes several kilobytes and allocates.
-	std::optional<ShaderVertexInputInfo> geometry_front;
+	// Built only for a geometry pass, on the heap: an input info zeroes several kilobytes and allocates, and
+	// GCC zeroes the whole storage of a default std::optional.
+	std::unique_ptr<ShaderVertexInputInfo> geometry_front;
 	if (geometry_pass)
 	{
-		geometry_front = MakeGeometryFrontInput(vs_input_info);
+		geometry_front = std::make_unique<ShaderVertexInputInfo>(MakeGeometryFrontInput(vs_input_info));
 		vs_input_info  = MakeGeometryPullInput(vs_input_info, geometry_plan);
 	}
 
@@ -2088,8 +2089,12 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	}
 	MaybeDumpPrimitiveDrawPlan("indexed", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true, primitive_plan);
 
-	std::optional<ShaderPixelInputInfo> analysed_ps;
-	ShaderPixelInputInfo&               ps_input_info = prepared != nullptr ? prepared->ps : analysed_ps.emplace();
+	std::unique_ptr<ShaderPixelInputInfo> analysed_ps;
+	if (prepared == nullptr)
+	{
+		analysed_ps = std::make_unique<ShaderPixelInputInfo>();
+	}
+	ShaderPixelInputInfo& ps_input_info = prepared != nullptr ? prepared->ps : *analysed_ps;
 	if (prepared == nullptr)
 	{
 		ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info,
@@ -3559,11 +3564,12 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		return;
 	}
 	// A geometry pass runs the guest program; the host vertex stage draws its output.
-	// Built only for a geometry pass: an input info zeroes several kilobytes and allocates.
-	std::optional<ShaderVertexInputInfo> geometry_front;
+	// Built only for a geometry pass, on the heap: an input info zeroes several kilobytes and allocates, and
+	// GCC zeroes the whole storage of a default std::optional.
+	std::unique_ptr<ShaderVertexInputInfo> geometry_front;
 	if (geometry_pass)
 	{
-		geometry_front = MakeGeometryFrontInput(vs_input_info);
+		geometry_front = std::make_unique<ShaderVertexInputInfo>(MakeGeometryFrontInput(vs_input_info));
 		vs_input_info  = MakeGeometryPullInput(vs_input_info, geometry_plan);
 	}
 
