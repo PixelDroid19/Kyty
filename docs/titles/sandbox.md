@@ -150,6 +150,19 @@ descriptor set every draw.
   world runs, against 3.49-3.63 in the four runs before, but rows it does not touch moved as much (binding 1.94 ->
   2.18, emission 1.17 -> 1.24): host noise, not a verdict. Reverted. Cuts of this size (about 0.1 us per draw) need
   both arms inside one run.
+- **Paired measurement (2026-11-12, temporary switch, not committed).** A switch that alternates the two arms every
+  16,384 draws inside one run and sums the stage counters per arm puts both arms in the same scene and host load.
+  Checked with a 100 ns spin in one arm's state setup: that row read +0.10 and +0.20 us in two runs while untouched
+  rows stayed within about 0.05-0.08 us, against about 0.4 us between separate runs. Sharing the image copy-read
+  result measured -0.04 us in state setup under it, with an untouched row moving the same amount: under 0.1 us, not
+  adopted.
+- **Closed (2026-11-12): reusing layout-only shader-input work per program.** Of the per-draw walks after the
+  resource parse, only the vertex front storage proof (about 2 % of the command-processor thread), the redefined
+  buffer descriptor walk of the pixel stage (about 0.9 %), the vertex front guest-memory test and the unused-storage
+  compaction depend on the code and the binding layout alone. The texture and sampler shape steps, copied image
+  descriptors, constant samplers, zero-image resources, assembled and nested copied buffers and the GS user-data
+  binding read descriptor words, user SGPR values or guest tables. A layout-keyed memo of the first group is worth
+  about 0.3 us per draw, under the 0.5 us this line needed; not built.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
