@@ -2597,6 +2597,31 @@ static uint32_t ShaderUniqueReachingSgprWrite(const ShaderCode& code, const Shad
 	return UINT32_MAX;
 }
 
+bool ShaderCodeResourceMemo::SgprWrittenOnEveryPath(const ShaderCode& code, uint32_t index, int reg) const
+{
+	std::shared_ptr<const ShaderControlFlowGraph> cfg;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		const auto                  found = m_written_on_every_path.find({index, reg});
+		if (found != m_written_on_every_path.end())
+		{
+			return found->second;
+		}
+		cfg = m_cfg;
+	}
+	if (cfg == nullptr)
+	{
+		cfg = std::make_shared<const ShaderControlFlowGraph>(ShaderBuildControlFlowGraph(code));
+	}
+	const bool                  written = ShaderUniqueReachingSgprWrite(code, *cfg, index, reg) != UINT32_MAX;
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (m_cfg == nullptr)
+	{
+		m_cfg = cfg;
+	}
+	return m_written_on_every_path.emplace(std::make_pair(index, reg), written).first->second;
+}
+
 // Follows each V# dword of a buffer consumer back, through the only write
 // reaching it on every path, across scalar moves to the load that writes it.
 // The dwords must be four consecutive dwords of one table read through one
@@ -3003,9 +3028,26 @@ void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindR
 		{
 			continue;
 		}
+		if (!holding[index].test(static_cast<size_t>(base)) && record_consumers)
+		{
+			bind->redefined_descriptor_consumers.Add(inst.pc);
+			continue;
+		}
 		if (!holding[index].test(static_cast<size_t>(base)))
 		{
-			(record_consumers ? bind->redefined_descriptor_consumers : bind->slot_only_consumers).Add(inst.pc);
+			// A slot-only consumer must never see the bound row, which may hold a
+			// device address: a path that keeps it refuses the buffer instead.
+			const bool written = memo != nullptr
+			                         ? memo->SgprWrittenOnEveryPath(code, index, base)
+			                         : ShaderUniqueReachingSgprWrite(code, ShaderBuildControlFlowGraph(code), index, base) != UINT32_MAX;
+			const int  bound   = ShaderStorageBufferBoundIndex(*bind, scalar ? inst.src[0] : *vector, user_data_register_base);
+			if (written)
+			{
+				bind->slot_only_consumers.Add(inst.pc);
+			} else if (bound >= 0)
+			{
+				bind->storage_buffers.row_redefined[bound] = true;
+			}
 			continue;
 		}
 		// A read by address also takes words 1 (high address) and 2 (size) from the row.

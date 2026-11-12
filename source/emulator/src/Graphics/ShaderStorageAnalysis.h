@@ -210,6 +210,8 @@ public:
 	// Descriptor blocks of the pointer-table load at index; empty when a part
 	// of it has no consumer it alone defines.
 	[[nodiscard]] const std::vector<ShaderDescriptorBlock>& TableLoadBlocks(const ShaderCode& code, uint32_t index) const;
+	// One write of the SGPR reaches the instruction at index on every path.
+	[[nodiscard]] bool SgprWrittenOnEveryPath(const ShaderCode& code, uint32_t index, int reg) const;
 	[[nodiscard]] ShaderDynamicSLoadSpan DynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping) const;
 	// Copy-flow reads for the binding layout of `bind` (ShaderImageCopyLayout).
 	[[nodiscard]] std::vector<ShaderImageCopyRead> ImageCopyReads(const ShaderCode& code, const ShaderBindResources& bind,
@@ -233,6 +235,7 @@ private:
 	mutable bool                                                    m_constant_sampler_reads_ready = false;
 	mutable std::shared_ptr<const ShaderControlFlowGraph>           m_cfg;
 	mutable std::map<uint32_t, std::vector<ShaderDescriptorBlock>>  m_table_load_blocks;
+	mutable std::map<std::pair<uint32_t, int>, bool>                m_written_on_every_path;
 	// Keyed by load PC, last consumer PC, destination register and dword count.
 	mutable std::map<std::tuple<uint32_t, uint32_t, int, int>, ShaderDynamicSLoadSpan> m_dynamic_sload_spans;
 	mutable std::map<std::vector<int32_t>, std::vector<ShaderImageCopyRead>>           m_image_copy_reads;
