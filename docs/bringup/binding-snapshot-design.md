@@ -187,4 +187,5 @@ parallel-recording-design) on top of these stages.
 - GPU-side cost of any bindless/address indirection (not CPU-priced here).
 
 Stage 1 result (2026-11-12): the guest-bytes generation is built; the sandbox world measured 9.80 -> 9.07 us
-per draw in one run against one baseline in the same scene (`docs/titles/sandbox.md`).
+per draw in a first run and 9.50 in a second; the rows it touches show about 0.1-0.2 us per draw
+(`docs/titles/sandbox.md`). Run-to-run noise of the whole draw is about 0.4 us.

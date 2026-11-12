@@ -123,13 +123,16 @@ descriptor set every draw.
   the last 1,000,000 vertex streams bound, 97 % were fetched from imported guest pages; only 1.8 % had the same
   address, size and read start as the same slot of the previous draw (0.9 % in the object path), because each
   draw reads a different window of its pool. A bind cache keyed on the previous draw cannot remove the 1.04 us.
-- **Guest-bytes validity by generation (2026-11-12, world, emulator stage counters world+10..20 s, one run each,
-  same heavy scene, 12-14 fps).** `GpuMemory::RangeHoldsGuestBytes` took the memory mutex, searched the heap
-  index and scanned the host-result pages for every vertex stream, index buffer and storage row. A generation
-  that is odd while the heap index or the host-result pages change now lets each thread answer from a 1 MiB
-  window it proved earlier. Per draw: processor 9.80 -> 9.07 us, state setup 3.63 -> 3.39, vertex buffers
-  0.33 -> 0.26, index buffer 0.09 -> 0.06, storage 0.42 -> 0.32 (about 4.7 ms a frame at the scene's ~6,400
-  draws). `PPSA21567 - Astro Bot` unchanged at 74 us per draw over the same route.
+- **Guest-bytes validity by generation (2026-11-12, world, emulator stage counters world+10..20 s, same heavy
+  scene, 12-15 fps).** `GpuMemory::RangeHoldsGuestBytes` took the memory mutex, searched the heap index and
+  scanned the host-result pages for every vertex stream, index buffer and storage row. A generation that is odd
+  while the heap index or the host-result pages change now lets each thread answer from a 1 MiB window it proved
+  earlier. Rows that call it, baseline against two runs with it: index buffer 0.088 -> 0.056 and 0.055 us,
+  storage 0.42 -> 0.32 and 0.36, vertex buffers 0.33 -> 0.26 and 0.33. The whole draw read 9.80 -> 9.07 and 9.50
+  us: rows this change does not touch moved by up to 0.25 us between runs, so the gain is about 0.1-0.2 us per
+  draw, not the 0.7 of the first pair. `PPSA21567 - Astro Bot` unchanged at 74 us per draw over the same route.
+  Building both shader ids in place in `PipelineCache::CreatePipeline` instead of copying them saves two
+  allocations per draw: pipeline setup 1.085 -> 1.037 us, within that noise.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
