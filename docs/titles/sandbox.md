@@ -1054,11 +1054,13 @@ per-stream copy for vertex data; it does not change the frame time of this title
     before its own batch was done (counter 4,080-4,200, rising by one per submit), so the earlier probe
     had not engaged. The previous batch was always done by the next submit (wait 0.0-1.2 ms), yet the
     thread took 70-78 ms between submits against 61.1 ms of command processing at 5,458 draws per frame:
-    74.6 ms frames, the same command processing plus guest time as before. In 262 polls of `threads`
-    that thread was outside any guest wait object in 240, so it runs while it waits, consistent with
-    polling memory the batch's end writes. Excluded for this title: overlap with the guest, through an
-    early return or a submit snapshot, cannot shorten its frame. The two runs reached scenes of
-    different load, but command processing per draw is the same, 11.1 and 11.2 us.
+    74.6 ms frames, the same command processing plus guest time as before. The thread is not spinning:
+    no thread but the command processor ran more than 14.4 ms of CPU per frame (57.5 ms for the command
+    processor), and `threads` shows no guest wait object in 240 of 262 polls, as it also does while the
+    thread is blocked in the submit's decode wait. It is held inside the emulator by something that ends
+    with the batch; what it is was not identified. Excluded for this title: an early return alone does
+    not shorten the frame. The two runs reached scenes of different load, but command processing per
+    draw is the same, 11.1 and 11.2 us.
 - **Device-address residency (measured; populated-page query fixed in `67d6e9a95`).** Before the
   fix, in the world the residency timer read 8.1 and 9.1 ms per frame in two runs without temporary
   code, and 1.46 ms in the run with temporary counters, whose world is a lighter regime: the level of
