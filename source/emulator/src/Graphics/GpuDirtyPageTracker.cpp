@@ -121,6 +121,11 @@ GpuDirtyPageTracker::GpuDirtyPageTracker(const GpuDirtyPageProtectionOps& protec
       m_enabled(enabled && protection_ops.remove_write_and_capture != nullptr && protection_ops.remove_write != nullptr &&
                 protection_ops.restore != nullptr && protection_ops.restore_signal_safe != nullptr)
 {
+	if ((m_page_size & (m_page_size - 1u)) != 0u)
+	{
+		EXIT("dirty-page tracker needs a power-of-two host page size\n");
+	}
+	m_page_shift = m_page_size == 0 ? 0u : static_cast<unsigned>(__builtin_ctzll(m_page_size));
 }
 
 GpuDirtyPageTracker::~GpuDirtyPageTracker()
@@ -244,7 +249,7 @@ void GpuDirtyPageTracker::LowerFence() noexcept
 
 uintptr_t GpuDirtyPageTracker::PageStart(uintptr_t address) const noexcept
 {
-	return m_page_size == 0 ? 0 : address - address % m_page_size;
+	return address & ~(m_page_size - 1u);
 }
 
 uintptr_t GpuDirtyPageTracker::PageEnd(uintptr_t page) const noexcept
@@ -291,7 +296,7 @@ const GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindPage(uintptr_t pa
 
 size_t GpuDirtyPageTracker::IdentityFilterBit(uintptr_t page) const noexcept
 {
-	return static_cast<size_t>((page / (m_page_size * kBlockPages)) & (kIdentityFilterBits - 1u));
+	return static_cast<size_t>(((page >> m_page_shift) / kBlockPages) & (kIdentityFilterBits - 1u));
 }
 
 GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindWritePage(uintptr_t page) noexcept
@@ -643,7 +648,7 @@ void GpuDirtyPageTracker::VisitOverlappingRangesLocked(uintptr_t begin, uintptr_
 template <typename Visitor>
 void GpuDirtyPageTracker::VisitWritePages(uintptr_t first, uintptr_t last, const Visitor& visitor) noexcept
 {
-	if ((last - first) / m_page_size < kDirectWritePages)
+	if (((last - first) >> m_page_shift) < kDirectWritePages)
 	{
 		for (uintptr_t page = first;; page += m_page_size)
 		{

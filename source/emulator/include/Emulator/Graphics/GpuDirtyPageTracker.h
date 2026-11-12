@@ -325,6 +325,9 @@ private:
 	uint64_t m_next_host_write = 1;
 
 	uint64_t                      m_page_size = 0;
+	// Guest copies reach the page arithmetic about a million times a second; a
+	// shift and a mask replace the divisions there.
+	unsigned                      m_page_shift = 0;
 	std::unique_ptr<PageEntry[]>  m_pages;
 	std::unique_ptr<BlockEntry[]> m_blocks;
 	std::unique_ptr<std::atomic<uint64_t>[]> m_identity_filter;
