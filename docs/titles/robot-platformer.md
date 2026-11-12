@@ -6,6 +6,25 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: render-target scaling to 960x540 under user play, and a depth-array exit (2026-11-12, open)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, branch `perf/guest-memory-binding` at `0fe51e855`,
+strict run, `KYTY_PRESENT_FPS_LIMIT=60`, `RenderResolutionMode = Fixed`, `RenderResolutionScope =
+RenderTargets`, 960x540, the user playing with a real pad (no input route), per-second agent samples.
+
+- **Frame rate.** It never reached 60 fps. Menus and the first scene: 30.5 fps, GPU busy 79 %, command
+  processor 34.5 ms/f, of which 13.8 ms were waits. Gameplay at 370-630 draws per frame: 19.6-20.7 fps, GPU
+  busy 83-90 %, command processor 51 ms/f, of which 15-23 ms were waits. Short peaks of 58-60 fps appeared
+  only in scenes with about 170-260 draws.
+- **Why the scaling does not help.** This scope scales only render targets of the display extent; the main
+  passes and the BVH kernel's guest grid keep their size (see the 640x360 test below). The internal-resolution
+  lever is the game patch that lowers the guest grid, and it measured 16.6-18.1 fps in the dunes, not 60.
+- **Defect, not fixed.** After 223 s the run exited at `GraphicsRenderAttachments.cpp:824`: "depth array layer
+  4 ... lies partly outside depth images" (block 0x529e30000 of the layer at 0x529c30000). No depth image
+  covers that 64 KiB block. It is not known whether native resolution reaches the same state, since the route
+  was the user's and was not recorded. Suggested direction: record a pad route to that scene, repeat at native
+  resolution, and log the depth images near that address when the layer is assembled.
+
 ## Robot platformer: BVH kernel register pressure, guest against host (2026-11-12, open)
 
 Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, translator 215, offline.
