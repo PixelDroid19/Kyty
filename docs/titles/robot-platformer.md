@@ -5915,6 +5915,8 @@ native program spills?
   first dispatch of five dune programs: `0x874bd13f`, `0xe1b1315d`, `0x2bcba9a2`, `0xfd1ee59c`, `0xbf8ee9fc`.
   Ten other wave32 programs ran correctly in 8-lane parts before that. The admission checks accept wave32 only in
   16-lane parts, so the product never takes this layout.
+- **Re-read 2026-11-12, parked.** Nothing on HEAD changes the record: `0x874bd13f` still runs native at width 32
+  because a wave32 program splits only above 64 VGPRs. No new rule was built or measured.
 
 ## Depth targets no longer wait for deferred storage aliases (2026-11-07)
 
