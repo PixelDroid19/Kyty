@@ -1,6 +1,6 @@
 # Performance architecture plan (2026-11-12)
 
-Status: plan, stage 0 measured (section 6), next B0.2, then A2 and A3. Maintainer decision of 2026-11-12:
+Status: plan, stage 0 and B0.2 measured (section 6), next A2 and A3. Maintainer decision of 2026-11-12:
 build the changes below, and the 2x build gate of `parallel-recording-design.md` is withdrawn.
 Every gain in this document is an estimate until its stage is measured. Each stage names its
 measurement and its correctness gate.
@@ -102,7 +102,9 @@ only where Kyty's own traces agree.
      bytes at use, per class (register tables, descriptor tables, index, vertex, storage, texture,
      shader code), on `PPSA21402 - Balatro`, `PPSA17221 - Minecraft` and `PPSA21567 - ASTRO BOT`.
      The 2026-11-11 result that no data range changed was measured with the serial submit and says
-     nothing about a released submitter.
+     nothing about a released submitter. Measured 2026-11-12 over program intervals of the serial
+     submit (section 6, B0.2): one batch ahead no descriptor table or shader code changed in the
+     three titles; vertex and index copies did; the sandbox title's tables change two batches ahead.
   3. One batch ahead after workstream A: the frame time, and whether the guest starts its next
      frame earlier. This is not established for any title; the fighting title waited on an event
      flag instead (`docs/titles/anime-fighter.md`).
@@ -111,7 +113,9 @@ only where Kyty's own traces agree.
   class B0 finds rewritten. A batch over the bound stays serial. Stage 0 (section 6) amends this:
   the capture has to cover auto draws and dispatches as well as indexed draws and has to reach the
   end of the batch before the submit returns, because in both titles the last item the draw front
-  does not prepare sits in the last hundredths of the batch.
+  does not prepare sits in the last hundredths of the batch. B0.2 amends it again: one batch
+  ahead, the copies the capture must take are the vertex and index copies; a depth beyond one adds
+  the descriptor tables.
 - **B2, return rule.** Each batch keeps a mark of the last guest read still pending. A read that
   depends on an earlier command of the same batch (the host-write-epoch rule) stays with the
   command processor at its position, and the submit waits until the mark passes it.
@@ -119,7 +123,8 @@ only where Kyty's own traces agree.
   stream order after the work they certify, and the order across the graphics and compute rings
   kept. Each path is listed and checked before B2 is enabled.
 - **Estimate.** Sandbox world: the frame becomes the larger of guest time plus capture and command
-  processing, about 28-36 fps from 20.
+  processing, about 28-36 fps from 20. Section 6 narrows it to about 28 fps, bounded by the command
+  processor, with the capture costed at the draw front's replay time.
 
 ### C. Staged command processing
 
@@ -282,8 +287,11 @@ in two parts, the ring waits and the command processors' `SubmitAndWait`, and th
 | Replay per second; records prepared per second | 288 ms; 100,276 | 176 ms; 8,730 |
 | Replay per prepared record; per frame | 2.88 us; 14.3 ms | 20.2 us; 9.6 ms |
 
-- **Reading, release.** Most of the drain waits for other rings to finish a batch in flight; the
-  command processors' own wait is 0.2 ms per frame. Under the serial submit, A removes at most about
+- **Reading, release.** Most of the drain is ring waits. A ring stays busy after its decode signal
+  for the rest of the batch (the wait for the submission, the publication), so a guest that releases
+  memory right after its own submit returns can wait on its own ring; which ring the time belongs to
+  was not identified. The command processors' `SubmitAndWait` is 0.2 ms per frame. Under the serial
+  submit, A removes at most about
   1.2 ms per frame and the drain's 30 ms worst case. A is a prerequisite of B, not a frame-rate
   lever on its own.
 - **Reading, submit.** If a capture costs what the replay costs per record, a submit that returns
@@ -293,6 +301,54 @@ in two parts, the ring waits and the command processors' `SubmitAndWait`, and th
   bounded by the GPU at 89 % busy; B carries no frame-rate estimate there.
 - **Consequence.** B alone does not reach 30 fps in the sandbox title; the command processor's time
   per frame has to fall as well (C and D).
+
+### B0.2, guest bytes a batch read and what the guest rewrites after the submit
+
+Serial submit, `0ce88de2b` plus a temporary diagnostic (not committed). Every guest read the
+command processor and the draw front make while decoding a batch whose submit waits for its
+decode is recorded with its bytes' hash: nested command words, indirect register tables outside
+the submit snapshot, descriptor tables (the usage parse's tables, vertex attribute tables and
+vertex-buffer descriptors), shader code, scalar-memory spans, and the index, vertex and storage
+copies. Each entry is rehashed through the same checked guest copy at three points: when the next
+submit on the ring enters (one batch ahead), when that submit returns, and when the submit after
+it enters (two batches ahead). A hand-made entry that the diagnostic changes before each check was
+reported changed in every window. Textures and indirect arguments are not covered (the GPU reads
+the arguments at execution); the submit already copies the top-level indirect register tables. The
+windows are program intervals of the serial submit: a guest released earlier runs the same
+intervals, sooner.
+
+| | `PPSA21402 - Balatro`, boot | `PPSA17221 - Minecraft`, world (2 runs) | `PPSA21567 - ASTRO BOT`, dunes |
+| --- | --- | --- | --- |
+| Windows; mean length one batch ahead; two ahead | 5,771; 1.3 ms; 18.0 ms | 5,172 and 4,741; 16.1-16.8 ms; 44.9-47.3 ms | 18,055; 0.94 ms; 8.7 ms |
+| Descriptor entries checked; changed one batch ahead | 1.77 M; 0 | 31.3 M and 28.5 M; 0 | 1.57 M; 0 |
+| Descriptor entries changed by the next submit's return | 0 | 0 (second run) | 0 |
+| Descriptor entries changed two batches ahead | 0 | 24.7 M (79 %) and 20.6 M (72 %) | 0 |
+| Shader code: entries, changed; nested command words and their register tables | 23, 0; none read | 180-203, 0; none read | 619, 0; none read |
+| Vertex copies: entries; changed one batch ahead | 162 k; 8 (16 two ahead), 128 bytes each | 253 k and 225 k; 5,702 and 5,578 (about 0.9 MiB) | 1,451; 0 |
+| Index copies: entries; changed one batch ahead | 1; 0 | 1,765 and 854; 14 and 5 | 2,339; 0 |
+| Storage copies: changed one batch ahead; by the return | none read | 50 and 8; 5,204 (19.4 GiB, second run) | 1,170 (1.3 GiB, 32-byte and 2 MiB ranges); 1,168 |
+| Entries recorded on the draw-front thread | 0 | 30.0 M and 27.4 M | 1.0 M |
+
+- **Reading, one batch ahead.** In the three titles no descriptor table, shader code or nested
+  command word that a batch read had changed when the next submit entered or returned. The
+  sandbox title rewrites 72-79 % of its descriptor entries before the submit after that: its
+  tables are reused two submits later. A submit that returns before
+  decode and waits for the previous batch's decode (one batch ahead) therefore needs no copy of
+  these classes in these runs. That is a lower bound: equal bytes at two instants do not prove
+  that nothing was written in between, and other scenes may reuse sooner.
+- **Reading, copies.** Vertex and index copies change one batch ahead (the sandbox title about
+  5,600 vertex and 5-14 index entries per run, the card title 8 vertex entries). The writer, guest
+  or GPU, was not identified, so B1 takes those copies before the submit returns. Storage changes
+  include the GPU's own writes (most land while the next submit waits, with the submitter
+  blocked) and are not attributed.
+- **Reading, run-ahead.** Two batches ahead the sandbox title's tables are already rewritten, so
+  any depth beyond one needs a descriptor capture. The card title's failure of 2026-10-23 (an
+  unbounded early return) does not reproduce within two batches here: no descriptor it read had
+  changed two batches ahead. What it read then remains unexplained by this measurement.
+- **Consequence for B1.** One batch ahead, the capture is the analysis that finds the batch's
+  vertex and index copies (the draw front's replay to the batch end, about 14 ms per frame in the
+  sandbox title by the replay time above) and those copies. The release drain still waits for the
+  in-flight decode, about 1.5 times a frame in the sandbox title, so A comes first.
 
 ### E2, reported output size (excluded for the robot platformer)
 

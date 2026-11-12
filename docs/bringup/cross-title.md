@@ -44,6 +44,25 @@ them.
   writes host timestamps for another purpose. Open questions before building: the query pool size for 440
   marks a frame and the cost of a timestamp between passes on tile-less desktop GPUs.
 
+## Guest rewrites of what a batch read, one and two submits later (2026-11-12, measured)
+
+Stage B0.2 of `performance-architecture-plan.md` (section 6 holds the table). Serial submit, Intel Arc
+A770, a temporary diagnostic (not committed) that hashed every guest range the command processor and the
+draw front read for a batch and rehashed it at the next submit's entry and return and at the entry of the
+submit after it. A hand-made change was reported in every window.
+
+- **Descriptor tables and shader code.** None changed by the next submit's return: `PPSA17221 - Minecraft`
+  about 30 M entries over two runs, `PPSA21567 - ASTRO BOT` 1.57 M, `PPSA21402 - Balatro` 1.77 M. The
+  sandbox title rewrites 72-79 % of them before the submit after that.
+- **Copies.** Vertex and index copies change before the next submit (the sandbox title about 5,600 vertex
+  and 5-14 index entries per run, the card title 8 vertex entries). Storage changes include GPU writes and
+  are not attributed.
+- **Consequence.** A submit that returns before decode and holds one batch in flight has to capture the
+  vertex and index copies; descriptor tables need a capture only beyond one batch. Lower bound: equal
+  bytes at two instants do not prove that nothing was written between them.
+- **Card title, 2026-10-23.** Its boot failure under an unbounded early return is not explained by reuse
+  within two submits: none of the descriptors it read had changed two submits later.
+
 ## Performance plan, stage 0: release census and draw-front coverage (2026-11-12, measured)
 
 Measurements that the performance architecture plan asked for before any build
@@ -61,9 +80,10 @@ temporary diagnostic (not committed).
   in the robot platformer (an auto draw or a dispatch, which the front never prepares). The draw front as
   it stands cannot stand for the guest reads of a batch.
 - **Drain split and replay time** (one more run each). The sandbox title's drain is mostly ring waits
-  (0.96 ms per frame) and only 0.20 ms per frame of the command processors' `SubmitAndWait`, so the
-  release work (A) removes at most about 1.2 ms per frame under the serial submit. The draw front's replay
-  costs 2.88 us per prepared record in the sandbox title (14.3 ms per frame against 35.3 ms of command
+  (0.96 ms per frame, including the tail of a batch after its decode signal; ring not identified) and
+  only 0.20 ms per frame of the command processors' `SubmitAndWait`, so the release work (A) removes at
+  most about 1.2 ms per frame under the serial submit. The draw front's replay costs 2.88 us per prepared
+  record in the sandbox title (14.3 ms per frame against 35.3 ms of command
   processor) and 20.2 us in the robot platformer (9.6 ms per frame, GPU 89 % busy). An early-returning
   submit is estimated at about 28 fps in the sandbox title, bounded by the command processor; not measured.
 - **Still open.** Whether a queued batch reads a released range and whether a mapping reuses released
@@ -2158,6 +2178,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   completed: about 166,000 checked, and a write made by hand was detected
   every time (`docs/titles/sandbox.md`, "Read-only binds"). One title; the
   descriptor-table reuse above still stands.
+- **Later submits (2026-11-12, three titles).** Within one following submit no
+  descriptor table had changed; the sandbox title rewrites them two submits
+  later, and vertex and index copies change within one ("Guest rewrites of
+  what a batch read, one and two submits later").
 
 ## Compute ring runs copied in bytes across the ring end (2026-10-23)
 
