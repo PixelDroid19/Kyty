@@ -17,7 +17,8 @@ target registers and the validity of the materialized objects, whose writes the 
 (see the `GpuMemoryResetHash` memo exclusion below). Below the stage rule (at least 1 us per repeated draw),
 so this layer is not built. The pipeline layer is now about 0.5 us per draw after the ids moved to the draw
 front; the binding layer (about 2 us per draw) needs per-draw descriptor data and persistent descriptor slots,
-since only 0.4-0.9 % of repeated draw keys had identical descriptors (draw-repeat experiment, 2026-10-27).
+since in three of four titles only 0.4-0.9 % of repeated draw keys had identical descriptors (26 % in the
+fourth; `cp-draw-plan.md`, 2026-10-27).
 
 ## Shader ids of prepared draws built on the draw front (2026-11-12, built)
 
