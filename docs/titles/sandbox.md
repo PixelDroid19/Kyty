@@ -163,6 +163,15 @@ descriptor set every draw.
   descriptors, constant samplers, zero-image resources, assembled and nested copied buffers and the GS user-data
   binding read descriptor words, user SGPR values or guest tables. A layout-keyed memo of the first group is worth
   about 0.3 us per draw, under the 0.5 us this line needed; not built.
+- **Fixed (2026-11-12, `cbe2dd12f`): empty vectors no longer allocate.** The core `Vector` allocated an empty array on
+  every default construction. The shader input information (10.5 KB vertex, 7.7 KB pixel), the binding resources
+  (7.3 KB) and the shader ids hold several of them each, so every draw allocated and released a few dozen empty
+  arrays: about 6 % of the command-processor thread (allocator under `~ShaderBindResources`, `CreatePipeline`,
+  `RecordIndexedDraw` and `ShaderGetInputInfoVS`). A vector now gets storage on its first write. Paired in-run
+  measurement over two world runs: 0.42 and 0.61-0.72 us less per draw (state setup -0.19 to -0.26, the other rows
+  -0.02 to -0.16), about 4.5-6.5 % of the draw. `PPSA21567 - Astro Bot` on the same route: same image and the same
+  pre-existing storage-frontier error, 78.9 against 77.9 us per draw over the whole run (one run each). Unit tests
+  (2,649) and the three repository gates pass.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
