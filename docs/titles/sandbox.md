@@ -74,6 +74,14 @@ descriptor set every draw.
   "Rechecked with the early return engaged" below): the limit is command-processor time per draw, about 11 us.
 - **Open.** The front proof runs on every draw; its verdict could be kept on the program, keyed only on code
   facts. The per-draw cost (shader input parsing, pipeline lookup, command emission) is the limit.
+- **Draw-plan repeat rate (2026-11-11, one world run, `5f15a2b16` plus a temporary counter at the indexed
+  draw's pipeline lookup, 1.8 million draws).** Only 169 distinct keys (vertex and pixel program address and
+  checksum, render-pass compatibility, topology). A key seen before gave the same vertex and pixel shader ids
+  as its last draw in 99.97 % of hits and the same pipeline in 99.83 %. Keyed on the program pair alone the
+  ids repeat in 99.92 %. The misses show the key lacks descriptor shape (ids) and fixed-function state
+  (pipeline), so a plan that skips input parsing and the id and pipeline lookups needs guards on both.
+  Input information and pipeline setup are about 2.7 us of the 11 us per draw; resource binding, 3.1 us,
+  is the next block.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
