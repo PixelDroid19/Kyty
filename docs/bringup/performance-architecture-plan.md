@@ -1,6 +1,6 @@
 # Performance architecture plan (2026-11-12)
 
-Status: plan, stage 0 and B0.2 measured (section 6), next A2 and A3. Maintainer decision of 2026-11-12:
+Status: plan, stage 0, B0.2 and a one-batch-ahead estimate measured (section 6), next A2 and A3. Maintainer decision of 2026-11-12:
 build the changes below, and the 2x build gate of `parallel-recording-design.md` is withdrawn.
 Every gain in this document is an estimate until its stage is measured. Each stage names its
 measurement and its correctness gate.
@@ -107,7 +107,8 @@ only where Kyty's own traces agree.
      three titles; vertex and index copies did; the sandbox title's tables change two batches ahead.
   3. One batch ahead after workstream A: the frame time, and whether the guest starts its next
      frame earlier. This is not established for any title; the fighting title waited on an event
-     flag instead (`docs/titles/anime-fighter.md`).
+     flag instead (`docs/titles/anime-fighter.md`). The serial submit's timeline (section 6)
+     estimates x1.43 for the sandbox title and at most x1.08 for the robot platformer.
 - **B1, capture.** The draw front becomes the batch's capture: register state and descriptor words
   gathered before the submit returns, plus a copy, in a bounded arena owned by the batch, of each
   class B0 finds rewritten. A batch over the bound stays serial. Stage 0 (section 6) amends this:
@@ -123,8 +124,8 @@ only where Kyty's own traces agree.
   stream order after the work they certify, and the order across the graphics and compute rings
   kept. Each path is listed and checked before B2 is enabled.
 - **Estimate.** Sandbox world: the frame becomes the larger of guest time plus capture and command
-  processing, about 28-36 fps from 20. Section 6 narrows it to about 28 fps, bounded by the command
-  processor, with the capture costed at the draw front's replay time.
+  processing, about 28-36 fps from 20. Section 6 narrows it to at most about 28 fps, bounded by the
+  command processor, with the capture costed at the draw front's replay time.
 
 ### C. Staged command processing
 
@@ -296,7 +297,7 @@ in two parts, the ring waits and the command processors' `SubmitAndWait`, and th
   lever on its own.
 - **Reading, submit.** If a capture costs what the replay costs per record, a submit that returns
   after the capture holds the sandbox title's guest about 14 ms per frame instead of the command
-  processor's 35 ms. The frame then follows the command processor, about 28 fps. That is an
+  processor's 35 ms. The frame then follows the command processor, at most about 28 fps. That is an
   estimate: the capture's own cost and the copies of B0.2 are not in it. The robot platformer is
   bounded by the GPU at 89 % busy; B carries no frame-rate estimate there.
 - **Consequence.** B alone does not reach 30 fps in the sandbox title; the command processor's time
@@ -304,16 +305,18 @@ in two parts, the ring waits and the command processors' `SubmitAndWait`, and th
 
 ### B0.2, guest bytes a batch read and what the guest rewrites after the submit
 
-Serial submit, `0ce88de2b` plus a temporary diagnostic (not committed). Every guest read the
-command processor and the draw front make while decoding a batch whose submit waits for its
-decode is recorded with its bytes' hash: nested command words, indirect register tables outside
+Serial submit, `0ce88de2b` plus a temporary diagnostic (not committed). The guest reads that the
+command processor and the draw front make at these sites, while decoding a batch whose submit
+waits for its decode, are recorded with their bytes' hash: nested command words, indirect register tables outside
 the submit snapshot, descriptor tables (the usage parse's tables, vertex attribute tables and
 vertex-buffer descriptors), shader code, scalar-memory spans, and the index, vertex and storage
 copies. Each entry is rehashed through the same checked guest copy at three points: when the next
 submit on the ring enters (one batch ahead), when that submit returns, and when the submit after
 it enters (two batches ahead). A hand-made entry that the diagnostic changes before each check was
 reported changed in every window. Textures and indirect arguments are not covered (the GPU reads
-the arguments at execution); the submit already copies the top-level indirect register tables. The
+the arguments at execution); the submit already copies the top-level indirect register tables, and
+texture, sampler and buffer descriptors held in user registers come with the command words it
+copies. The other direct guest reads on the draw path are trace-only or shader-code reads. The
 windows are program intervals of the serial submit: a guest released earlier runs the same
 intervals, sooner.
 
@@ -349,6 +352,40 @@ intervals, sooner.
   vertex and index copies (the draw front's replay to the batch end, about 14 ms per frame in the
   sandbox title by the replay time above) and those copies. The release drain still waits for the
   in-flight decode, about 1.5 times a frame in the sandbox title, so A comes first.
+
+### Per-batch timeline of the serial submit and a one-batch-ahead estimate
+
+Serial submit, `b05446080` plus a temporary diagnostic (not committed) that stamps, per graphics
+ring, the submit's entry, the decode thread's dequeue, its decode signal, the submit's return and
+the decode thread's next dequeue. Only submits that wait for their decode are stamped. The
+estimate replays the measured decode times and guest gaps (submit return to the next entry) with
+a submitter that returns once the previous batch is decoded, the capture costed at zero and at 0.4
+of the decode time; it ignores the release drain, which also waits for the in-flight decode.
+
+| | `PPSA17221 - Minecraft`, world (40 s) | `PPSA21567 - ASTRO BOT`, dunes (40 s) |
+| --- | --- | --- |
+| Batches per second | 20.3 | 97.1 |
+| Decode: mean, median; share of the span | 34.4 ms, 33.6 ms; 70.0 % | 9.5 ms, 8.0 ms; 92.1 % |
+| Guest gap: mean, median; share of the span | 14.4 ms, 13.5 ms; 29.3 % | 0.56 ms, 0.04 ms; 5.4 % |
+| Entry to dequeue; signal to return; signal to next dequeue (medians) | 0.26 ms; 0.07 ms; 0.10 ms | 0.09 ms; 0.04 ms; 0.05 ms |
+| One batch ahead, capture 0 and 0.4 of decode | x1.43 and x1.43 | x1.08 and x1.08 |
+
+- **Reading.** In the sandbox title, under the serial submit, a batch's decode is 70 % of the
+  span and the guest's own work between submits the other 29 %. The decode
+  thread takes the next batch about 0.1 ms after its signal, so no tail of work after the signal
+  holds the ring. With one batch in flight the frame becomes the decode time, about x1.43 (about
+  20 to at most 28-29 batches per second). The estimate holds for a capture up to 0.4 of the decode
+  because the decode, not the submitter, sets the pace. A first run (shorter window) gave x1.42.
+- **Reading, robot platformer.** The guest submits about five batches per frame (about 19 frames per
+  second by the captures' frame counters) and re-enters the submit almost at once (median gap 0.04
+  ms): the decode thread is busy 92 % of the span. One batch ahead gains at most x1.08 there, and
+  the title is GPU-bound (89 % in the stage 0 run), so its frame needs less GPU and
+  command-processor time (workstreams C and D, and F), not an earlier return. The decode time
+  includes the decode thread's waits on the GPU, so x1.08 is an upper bound.
+- **Consequence.** The decision rule set before the runs was a gain of at least x1.2 in the
+  sandbox title for one batch ahead to be built first in workstream B; it passes, as an estimate.
+  It is not a measured frame rate: the release drain waits for the in-flight decode about 1.5
+  times a frame in that title, so A3 comes before B1.
 
 ### E2, reported output size (excluded for the robot platformer)
 

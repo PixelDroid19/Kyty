@@ -44,7 +44,7 @@ them.
   writes host timestamps for another purpose. Open questions before building: the query pool size for 440
   marks a frame and the cost of a timestamp between passes on tile-less desktop GPUs.
 
-## Guest rewrites of what a batch read, one and two submits later (2026-11-12, measured)
+## Guest rewrites of what a batch read, one and two submits later, and the one-batch-ahead estimate (2026-11-12, measured)
 
 Stage B0.2 of `performance-architecture-plan.md` (section 6 holds the table). Serial submit, Intel Arc
 A770, a temporary diagnostic (not committed) that hashed every guest range the command processor and the
@@ -62,6 +62,13 @@ submit after it. A hand-made change was reported in every window.
   bytes at two instants do not prove that nothing was written between them.
 - **Card title, 2026-10-23.** Its boot failure under an unbounded early return is not explained by reuse
   within two submits: none of the descriptors it read had changed two submits later.
+- **What one batch ahead would gain** (one more run each, per-batch timeline of the serial submit,
+  replayed with a submitter that returns once the previous batch is decoded; release drains not
+  modelled). `PPSA17221 - Minecraft`, world: 20.3 batches a second, decode 70 % of the span and the
+  guest's gap 29 %, estimated x1.43. `PPSA21567 - ASTRO BOT`, dunes: 97 batches a second (about five
+  a frame), decode 92 % of the span including its waits on the GPU, guest gap median 0.04 ms, at
+  most x1.08. Estimates, not measured frame rates
+  (`docs/bringup/performance-architecture-plan.md`, section 6).
 
 ## Performance plan, stage 0: release census and draw-front coverage (2026-11-12, measured)
 
@@ -85,7 +92,7 @@ temporary diagnostic (not committed).
   most about 1.2 ms per frame under the serial submit. The draw front's replay costs 2.88 us per prepared
   record in the sandbox title (14.3 ms per frame against 35.3 ms of command
   processor) and 20.2 us in the robot platformer (9.6 ms per frame, GPU 89 % busy). An early-returning
-  submit is estimated at about 28 fps in the sandbox title, bounded by the command processor; not measured.
+  submit is estimated at most about 28 fps in the sandbox title, bounded by the command processor; not measured.
 - **Still open.** Whether a queued batch reads a released range and whether a mapping reuses released
   addresses before the queued batches end; both need a submit that returns early.
 
