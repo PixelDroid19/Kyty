@@ -70,10 +70,10 @@ descriptor set every draw.
 - **Frame split (same 10 s world window, 214 frames, 45.7 ms each).** The command processor runs 33.0 ms per
   frame, waits 1.15 ms on fences and under 0.1 ms on acquire, present and flips; the other ~11.5 ms it idles
   until the guest submits again (two runs per frame). The render engine was 59 % busy at 800-1,250 MHz of a
-  2,400 MHz maximum, so the GPU is not the limit. The next step is overlap: a submit that returns to the guest
-  before the command processor finishes, which at best brings the frame to the 33 ms of command-processor work.
+  2,400 MHz maximum, so the GPU is not the limit. Overlap with the guest gains nothing in this title (see
+  "Rechecked with the early return engaged" below): the limit is command-processor time per draw, about 11 us.
 - **Open.** The front proof runs on every draw; its verdict could be kept on the program, keyed only on code
-  facts. After overlap, the per-draw cost (shader input parsing, pipeline lookup, command emission) is the limit.
+  facts. The per-draw cost (shader input parsing, pipeline lookup, command emission) is the limit.
 - **Open, checked against the RDNA2 ISA (no title trace yet, behaviour unchanged).** The ISA ignores the two low
   bits of V#.base and of the final address for scalar loads and for untyped dword buffer loads. Kyty refuses an
   unaligned base for the in-place path (`StorageGuestPagesAddress`, `GraphicsRenderBind.cpp:3051`) and the copy
@@ -1046,6 +1046,19 @@ per-stream copy for vertex data; it does not change the frame time of this title
     times the command processor's packet wait, not the guest's thread). Open, with no run of its
     own: an early-return count and a sync-wait snapshot. The batch tail (interrupt queueing, flush
     and flip between the batch's last guest read and the signal) took 0.04 ms per batch.
+  - Rechecked with the early return engaged (2026-11-11, `c8f187722` plus temporary code, private
+    shader caches, the saved world entered from the menu, 10 s from 8 s after the world loads). Without
+    the change the submitting guest thread waits 29-32 ms in each submit for its batch and runs 10-12 ms
+    until the next one, one submit per frame: 44.7 ms frames, 32.5 ms of command processing at 2,935
+    draws per frame. With each submit waiting on the previous batch instead, every submit returned
+    before its own batch was done (counter 4,080-4,200, rising by one per submit), so the earlier probe
+    had not engaged. The previous batch was always done by the next submit (wait 0.0-1.2 ms), yet the
+    thread took 70-78 ms between submits against 61.1 ms of command processing at 5,458 draws per frame:
+    74.6 ms frames, the same command processing plus guest time as before. In 262 polls of `threads`
+    that thread was outside any guest wait object in 240, so it runs while it waits, consistent with
+    polling memory the batch's end writes. Excluded for this title: overlap with the guest, through an
+    early return or a submit snapshot, cannot shorten its frame. The two runs reached scenes of
+    different load, but command processing per draw is the same, 11.1 and 11.2 us.
 - **Device-address residency (measured; populated-page query fixed in `67d6e9a95`).** Before the
   fix, in the world the residency timer read 8.1 and 9.1 ms per frame in two runs without temporary
   code, and 1.46 ms in the run with temporary counters, whose world is a lighter regime: the level of

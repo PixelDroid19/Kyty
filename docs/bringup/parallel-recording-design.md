@@ -155,8 +155,9 @@ independent work about 16 and unattributed about 7.
 
 Submit overlap measured (2026-11-11, `docs/titles/sandbox.md`, "Measured, one batch ahead does not
 shrink the gap"): with the guest allowed one batch ahead, the CP still waited 18.9 ms of each frame
-for the next batch. What holds the guest is not identified (the probe counted no early returns), so
-the overlap rows above are unproven for this title, not excluded.
+for the next batch. That probe had not engaged. With the early return engaged (same record, "Rechecked
+with the early return engaged"), the guest still took command processing plus its own ~11 ms between
+submits, running outside any guest wait object: the overlap rows above are excluded for this title.
 
 Rechecked against an exclusive per-draw profile (2026-11-11, one full-stack profile, 5,017 draws per
 frame, 74.7 ms of CP processing, every draw-path sample in one row; `docs/titles/sandbox.md`, "The
