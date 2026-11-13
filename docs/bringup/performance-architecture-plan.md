@@ -612,3 +612,12 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   on the same build (one run each). 11,857 releases skipped the drain and 554 drained (7.5 s of
   ring idle, maximum 126 ms). The gain needs an A3 that does not wait for the queued batches and
   is safe by construction; the probe's predicate is not that.
+- **Release to reuse.** Serial submit, `PPSA17221 - Minecraft` (a lighter scene than the rows above,
+  3,009 draws per frame): of 44,594 direct-memory allocations that overlapped a range released
+  before, 13,751 came under 1 ms after the release, 10,916 under 5 ms, 8,563 under 20 ms, 4,445
+  under 50 ms and 6,919 later. Deferring the release while the allocator may hand the same physical
+  range back would move the wait to the allocation in most cases. Kyty's allocator chooses the
+  physical address, so a deferred design keeps released ranges out of the free pool until the
+  batches queued before the release retire, and allocates elsewhere meanwhile; the reserve that
+  needs is the released bytes of about one queue depth (8.7-14.6 MiB per second released, A1).
+  Not built; how the guest's search windows constrain the allocator was not checked.
