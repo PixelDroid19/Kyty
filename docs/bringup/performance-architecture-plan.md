@@ -199,6 +199,15 @@ only where Kyty's own traces agree.
   stage 2 move the replay to a worker, where its gain is bounded by the driver share (12-14 %
   of the thread) minus the encode cost. Even at the bound, Minecraft goes from about 26 to about
   29 fps: this does not reach 30 alone.
+- **C stage 1 sync points measured (2026-11-13, temporary counters, Minecraft world).** Per
+  in-pass draw the command buffer was asked for its handle 2.71 times through `RecordState`
+  (the draw's own binds, which the list would take), 0.114 times through
+  `RecordOutsideRenderPass` (barriers, copies, clears) and 0.033 times for a new render pass.
+  With only the draw tail encoded, a recording worker must drain at every outside-pass access,
+  about every 9 draws (about 55 us of thread time). A cross-thread handoff of 1-5 us there
+  costs 2-9 % of the thread, most of the 12-14 % the worker could take. Stage 2 is worth
+  building only when the outside-pass commands (about 40 `RecordOutsideRenderPass` callers)
+  are encoded too, so the worker drains only at submit.
 
 ### E. Internal resolution as a functional option
 
