@@ -759,6 +759,10 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   The post-alignment profile still showed 6.5 %, so the timer was repeated with `lfence`
   around each TSC read: about 60 ticks (16 ns) for the pair after subtracting an empty
   measurement, 13 million calls. The result holds.
+- The 14 % of samples without a symbol on the same thread are all in the Vulkan driver
+  (`libvulkan_intel.so`), which matches the driver share already used to bound
+  workstream C. The rest of the thread's cost is spread over many sites, none above
+  about 7 % once measured.
 - Excluded: remembering the index min/max range of a draw (the scan is about 7 % of the
   thread, about 0.45 µs per draw). A temporary memo keyed by address and count, validated
   by the dirty-page tracker generation, measured:
