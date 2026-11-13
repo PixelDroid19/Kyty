@@ -659,9 +659,28 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   are accepted on fence waits per frame and draw-processor time, not on fps alone.
 - **Excluded: per-slot latches.** A profile seemed to put latch waits on the CP path; a counter
   showed 0 latch waits in Minecraft gameplay (the inlined stack was misattributed). No gain.
-- **Excluded: storage edges on guest uploads.** After B1+A3 the CP waits on its own queue about
-  4 times per frame, almost all on one 48-byte storage buffer whose pending write-back
-  (`PendingStorageWriteBack`) needs edge hashes that were only taken at write-back. Taking them
-  on upload removed the stale-edge case, but rehashing on clean uses showed the guest rewrites
-  those bytes between uses, so the wait is required. Rehashing on every use also cost time
-  (21.8 fps, p95 92 ms). The wait stays.
+- **Storage edges on guest uploads (fixed, 8cd64a97b).** After B1+A3 the CP waited on its own
+  queue about 4 times per frame, almost all on one 48-byte storage buffer whose pending
+  write-back (`PendingStorageWriteBack`) needs edge hashes that were only taken at write-back.
+  An earlier note here said the guest rewrites those bytes; that was wrong. A split counter
+  showed the bytes equal on every clean use (2,048 of 2,048, none different). The edges went
+  missing because uploads never took them, and the generation check kept failing because the
+  guest keeps writing other bytes on the same page. Edges are now taken on upload and on
+  creation. When no page lies wholly inside the range, the hashes cover every byte and decide
+  without the generation. Larger ranges keep the generation check, because an alias
+  re-baseline (`GpuMemoryWriteback.cpp`, the alias loop after a parent write-back) advances the
+  generation over interior bytes the edges do not cover.
+  - `PPSA17221 - Minecraft`, same route and scene (5,457 draws per frame): fence waits 6.1 to
+    1.9 ms per frame, 26.0 fps. The CP time hardly moved: runs that kept the waits had CP
+    37.8-38.0 ms against 37.4. Where the removed wait time went is open; it is not yet known
+    whether `fence_wait_ns` lies inside the CP run timer.
+  - `PPSA21567 - ASTRO BOT` dunes: 19.93 fps, fence 7.5 ms per frame, CP 41.2 ms, the same as
+    before. `playable-regression` on `PPSA06084 - Superliminal`: 12 of 15 gates pass; the 3
+    failures were already failing before.
+  - Open defect, not caused by this change: on the 3-4 MB storage buffers, the edge bytes
+    changed on clean uses 37 times in one run while the dirty tracker reported the range
+    unchanged (`GpuMemoryCreate.cpp`, the `!need_update` path in `GpuMemory::Update`). Either
+    device writes reach guest memory without a tracker write, or the tracker misses guest
+    writes. Suggested direction: log the writer of those pages.
+  - Open defect, also seen on `da7ea4d80`: Minecraft's death screen drops letters from its
+    text ("yty was slain y S ider").
