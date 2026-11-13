@@ -761,8 +761,7 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   measurement, 13 million calls. The result holds.
 - The 14 % of samples without a symbol on the same thread are all in the Vulkan driver
   (`libvulkan_intel.so`), which matches the driver share already used to bound
-  workstream C. The rest of the thread's cost is spread over many sites, none above
-  about 7 % once measured.
+  workstream C.
 - Priced, not built: stage 2 of the binding snapshot design (skip the guest-address read
   preparation when nothing changed). Its own counters on the same Minecraft window give
   207 ns per draw for the whole preparation, 154 ns of it the refresh check of tracked
@@ -774,8 +773,23 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   - 99.9 % of draws repeat a key with the same range on both titles;
   - the tracker confirms the pages unchanged for 64-66 % of Minecraft draws and 0 % of
     ASTRO BOT dunes draws;
-  - lookup plus `ChangedSince` costs about 1,440 TSC ticks (about 380 ns), close to the
-    scan it would replace;
+  - lookup plus `ChangedSince` measured about 1,440 TSC ticks (about 380 ns), but that
+    includes the probe's own hash map, so the check cost is not established;
   - no range differed where the tracker reported clean pages (a forced stale entry was
     counted, so the counter worked).
-  The check costs about as much as the scan, so the memo gains nothing and is not built.
+  Not built: with 0 % valid on ASTRO BOT and 65 % on Minecraft its ceiling is about 4.5 %
+  of the Minecraft thread, and it would add trust in the tracker where the scan reads live
+  bytes.
+
+### Early submit interval 0.5 -> 1.5 ms (2026-11-13)
+
+- `SubmitRecordedWorkIfGpuIdle` took 6.8 % of the Minecraft command-processor thread: with
+  a 0.5 ms floor between early submits it submitted about 76 times per frame.
+- Change: the floor is 1.5 ms (`GraphicsRun.cpp`).
+- Minecraft world+2..22 s, µs per draw (median): 6.56 before; 6.24 and 5.93 after (two
+  runs); fps 25.2 before, 25.0 and 26.4 after at the same draws per frame.
+- PPSA21567 - ASTRO BOT, GPU-bound, same route: 19.2 fps before, 19.5 after (about 590
+  draws per frame in both).
+- Unit tests 2,661 pass, CTest gates pass, `playable-regression` on PPSA06084 -
+  Superliminal 12/15 with the same three failures. Not re-checked: the CPU-paced titles
+  the 0.5 ms floor was verified on (the GPU can now wait up to 1.5 ms for a batch).

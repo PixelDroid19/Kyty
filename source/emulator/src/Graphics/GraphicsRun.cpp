@@ -645,7 +645,7 @@ void CommandProcessor::SubmitRecordedWorkIfGpuIdle()
 	// the interval below are extended; that bounds the cost to a few percent
 	// of the CP thread while the GPU waits at most that long.
 	constexpr uint32_t operations_per_submission = 8;
-	constexpr auto     min_submission_interval   = std::chrono::microseconds(500);
+	constexpr auto     min_submission_interval   = std::chrono::microseconds(1500);
 	if (m_queue != GraphicContext::QUEUE_GFX)
 	{
 		return;
