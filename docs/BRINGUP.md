@@ -215,7 +215,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Reimplemented feature leads: landed, refused and excluded; GLOBAL load alignment and EXEC defects open (2026-10-29)
   - [Tessellation design](bringup/tessellation-design.md): hull/domain mapping to Vulkan, staged plan, PATCH draws refused first (2026-10-29, design)
   - [GPU-indexed descriptor tables](bringup/bindless-tables-design.md): table-selected T#/S# and ray-tracing dispatch needs (2026-10-29, design)
-  - [Performance architecture plan](bringup/performance-architecture-plan.md): release without a full drain, submit overlap, staged recording, binding floor, internal resolution and a ray-tracing option; stage 0 measured, skip of ray-traced programs rejected, one batch in flight and release without a drain on hold (2026-11-12, plan)
+  - [Performance architecture plan](bringup/performance-architecture-plan.md): release without a full drain, submit overlap, staged recording, binding floor, internal resolution and a ray-tracing option; stage 0 measured, skip of ray-traced programs rejected, one batch in flight with an own-producer rule passes three boots, release without a drain in design (2026-11-12, plan)
   - [Parallel draw recording](bringup/parallel-recording-design.md): two-stage split, 22-26 draws per pass, ceiling 9-11 fps in the world scene, not built (2026-11-10, design); one batch of submit overlap did not shrink the gap, cause open (2026-11-11)
     - First stage built: indexed-draw shader inputs prepared ahead, 10.54 -> 8.31 us per draw (2026-11-12)
     - Admitting more packets to the replay excluded: 86.5 % of draws already taken, at most ~2 ms per frame (2026-11-12)

@@ -6,7 +6,7 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
-## Robot platformer: one batch in flight stops the boot (2026-11-12, probe, on hold)
+## Robot platformer: one batch in flight stops the boot (2026-11-12, probe, own-producer rule passes)
 
 - **Observed.** A temporary change made a graphics submit wait for the previous batch's decode
   instead of its own. The title stopped at frame 1 with no present, with or without the release-drain
@@ -19,6 +19,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   found no producer and 91.8 % had it in the command processor's current host submission (inferred
   to be the same batch, not shown). The mechanism is inferred from the record;
   thread states were not taken.
+- **Own-producer rule.** Returning early only the batches whose every memory wait is written by an
+  earlier packet of the same batch: 16,153 batches early, 4,038 serial, and every host-produced
+  release falls in a serial batch. The title boots and plays the dunes route; 17.98 fps at 105-145 s
+  against 19.44 serial (no gain, as estimated).
 - **Record.** `docs/bringup/performance-architecture-plan.md`, section 6.
 
 ## Robot platformer: not running the programs that contain intersection instructions (2026-11-12, rejected)

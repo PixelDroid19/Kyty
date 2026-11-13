@@ -79,9 +79,12 @@ submit after it. A hand-made change was reported in every window.
   of the 2026-10-26 stop: a batch suspended on a CPU-written label must not return its own
   submitter. No graphics batch in either title has its waits already satisfied at submit entry,
   but every wait of the sandbox title and 91.8 % of the robot platformer's are written by an earlier
-  packet of the same submission; a rule built on that is not built or measured. One batch in flight
-  (B1) and the release without a drain (A3) are on hold; the sandbox title's decode cost (C, D) is
-  next
+  packet of the same submission. A temporary rule that returns early only the batches whose every
+  memory wait is written by an earlier packet of the same batch passed three boots: the robot
+  platformer (80 % of batches early, every host-produced release kept serial), `PPSA21402 - Balatro`
+  (every batch early) and the sandbox title (every batch early, about x1.20 with the drain skip).
+  Before building it: the writer of the vertex and index bytes that change one batch ahead, and the
+  in-flight batch's overlap with the releases the drain skip lets through
   (`docs/bringup/performance-architecture-plan.md`, section 6).
 
 ## Performance plan, stage 0: release census and draw-front coverage (2026-11-12, measured)

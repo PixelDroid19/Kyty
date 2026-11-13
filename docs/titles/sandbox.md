@@ -30,7 +30,10 @@ Intel Arc A770, two runs with a temporary diagnostic (not committed).
   not attributed.
 - **One batch in flight with the release drain skipped (probe, temporary).** About x1.21 at the same
   scene (24.5-26.5 against 20.3-21.2 fps). The combination stops `PPSA21567 - ASTRO BOT` at boot, so
-  it is on hold (`docs/bringup/performance-architecture-plan.md`, section 6).
+  it was put on hold. With the early return limited to batches whose memory waits are all written
+  by an earlier packet of the same batch (every batch of this title qualifies), the robot platformer
+  boots, and this title again runs 23.0-25.5 fps against 20.0-21.2 serial for a minute in the world.
+  The drain skip is still unsafe (`docs/bringup/performance-architecture-plan.md`, section 6).
 - **Death screen lacks letters (open, defect at `6baccd17e`).** With no input the player is killed
   about 20-25 s after the world loads (night, zombie). The death message and the respawn button miss
   letters: "Kyty was slain by Zombie" shows as "yty was slain  y  om ie" and "RESPAWN" as "R SPAWN".

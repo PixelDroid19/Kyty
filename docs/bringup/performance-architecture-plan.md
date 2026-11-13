@@ -1,6 +1,6 @@
 # Performance architecture plan (2026-11-12)
 
-Status: plan, stage 0, B0.2 and the one-batch-ahead probes measured (section 6); B1 and A3 on hold, next C and D. Maintainer decision of 2026-11-12:
+Status: plan, stage 0, B0.2 and the one-batch-ahead probes measured (section 6); an own-producer rule for B1 passed three boot gates, next the read-set writer and the in-flight overlap of A3. Maintainer decision of 2026-11-12:
 build the changes below, and the 2x build gate of `parallel-recording-design.md` is withdrawn.
 Every gain in this document is an estimate until its stage is measured. Each stage names its
 measurement and its correctness gate.
@@ -53,7 +53,7 @@ only where Kyty's own traces agree.
 
 ## 3. Workstreams
 
-### A. Memory release without a full drain (on hold, section 6)
+### A. Memory release without a full drain (in design, section 6)
 
 - **Problem.** `release_direct_memory` (`Memory.cpp`) reaches `GraphicsInvalidateGpuMappingRanges`,
   which runs under `Gpu::RunQuiesced`; `Gpu::WaitLocked` drains every ring and the host GPU. The
@@ -91,7 +91,7 @@ only where Kyty's own traces agree.
 - **Gate.** The strict regression set; a unit test for a release between two queued batches; a
   hand-made access after release that the check must report.
 
-### B. A submit returns when its batch's guest reads are done (on hold, section 6)
+### B. A submit returns when its batch's guest reads are done (in design, section 6)
 
 - **Contract kept.** The guest gets control back only after every read its batch makes of memory
   the guest may rewrite. Today that is the end of decode. The change moves those reads earlier. The
@@ -196,7 +196,9 @@ only where Kyty's own traces agree.
 ## 4. Order
 
 1. Stage 0: A1, B0.1, E2 and F0, four short runs.
-2. B0.2, the one-batch-ahead timeline and probes (done); B1 and A3 are on hold (section 6). Next C, then D.
+2. B0.2, the one-batch-ahead timeline and probes (done); the own-producer rule (section 6). Next the
+   writer of the copies that change one batch ahead and the in-flight overlap of A3, then B1 and A3
+   together, then the fence wait, then C, then D.
 3. E1 and F1 are small and independent; they go in between.
 
 ## 5. Verification of every stage
@@ -474,7 +476,8 @@ Temporary changes on `6baccd17e`, not committed, one run each:
   that stops the robot platformer.
 - **Consequence.** B1 (return before decode) and A3 (release without a drain) are on hold. The only
   measured gain needs both, the probe of the release is unsafe, and the combination stops the robot
-  platformer at boot. The own-submission rule above is the open way back for B1. The 8.8 ms of fence
+  platformer at boot. The own-submission rule above is the open way back for B1 (taken in the next
+  subsection). The 8.8 ms of fence
   waits a frame appear only with one batch in flight (0.4 ms with the serial return), so they are
   not a lead for the serial submit. Next are C and D, the sandbox title's decode cost. The robot
   platformer is GPU-bound (89-91 % busy) and B gives it at most x1.08; its frame-rate levers are E1
@@ -483,6 +486,55 @@ Temporary changes on `6baccd17e`, not committed, one run each:
   serial return and the drain skip, and also in the census run, whose submit and release behaviour
   is unchanged (it only reads the command words and the awaited values). The defect exists at
   `6baccd17e` without either probe (`docs/titles/sandbox.md`).
+
+### Own-producer rule for the early return
+
+Temporary changes on `b0003cd26`, not committed, one run per title and configuration:
+
+- **Scan at submit.** A batch is eligible when it has no nested command buffer and every top-level
+  memory wait's address is written by an earlier packet of the same batch. The packets that count
+  are `WRITE_DATA` (both forms), `RELEASE_MEM` (both forms, when their data selector writes),
+  end-of-pipe and end-of-shader event writes, the custom DMA packet, `DUMP_CONST_RAM` and the two
+  label-writing markers. A 64-bit wait with address 0 takes the destination of the release packet
+  just before it, as the command processor does. `DMA_DATA` is left out (its destination selector
+  was not checked). Hand-built packets were classified correctly in every run: a wait after its
+  release, a wait alone, and an address-0 wait after a release.
+- **Census at decode** (serial semantics). Per batch, whether any wait was classed other than
+  current-producer by the command processor, and whether the decode was released for a host-produced
+  value.
+- **Early return.** An eligible batch's submit waits for the previous batch's decode; any other
+  batch keeps the serial return.
+
+| Title, configuration | Result |
+| --- | --- |
+| Robot platformer, census | 15,642 eligible batches, none with a wait already satisfied, from a queued submission, mismatched or without a producer, and none released. All 3,352 releases and 3,386 waits without a producer are in the 3,910 ineligible batches. |
+| Sandbox, census | All 5,264 batches eligible, all 337,595 waits with an earlier producer in the batch, no release. |
+| Robot platformer, early return | 16,153 batches early, 4,038 serial. Boots and plays the dunes route; the three captures render the scene. 105-145 s: 17.98 fps at 605 draws a frame, against 19.44 at 579 in the serial run (route variation; no gain, as estimated). |
+| `PPSA21402 - Balatro`, boot, early return | All 5,765 batches early. 60 fps; at 100 s the same game state as the serial boot. |
+| Sandbox, early return with the drain skip | All 5,289 batches early; drains 10,698 skipped, 591 run. Over a full minute in the world (5,374-5,460 draws a frame): 23.0-25.5 fps, mostly 25.0, against 20.0-21.2 serial, about x1.20. Command-processor time 38-42 ms a frame, fence waits 5.9-9.0 ms, GPU busy 65-68 %. The last capture is clean. |
+
+- **Reading.** The rule separates the batches that wait on work outside themselves from those that
+  produce their own labels, in all three titles: the batches whose decode is released for a
+  host-produced value are all kept serial, the robot platformer boots, and the card title boots with
+  every batch early (its 2026-10-23 failure under an unbounded early return does not reproduce at
+  depth one). The sandbox title's gain is the earlier probe's again, and it exists only with the drain
+  skip, which is unsafe.
+- **Before B1 is built.** In the sandbox title, B0.2 found about 5,600 vertex and 5-14 index
+  entries per run that change one batch ahead, writer unknown; with the early return, decode reads
+  them while the guest runs. One clean frame does not cover that. The writer decides the design: a
+  host write needs no capture, a guest write must be copied before the return, at a cost to price.
+  The real rule must use the command processor's own decision that a packet stores a value that
+  satisfies the wait (reference and mask), not a parallel scan of addresses. An eligible batch that
+  reaches a host-produced release must fail explicitly. The rule earns a unit test.
+- **Before A3 is built.** Under the serial submit, every batch from the releasing thread is decoded
+  before the release. With one batch in flight, its reads and label writes are not registered yet,
+  so the drain skip's overlap test cannot see them, and both sandbox runs with the drain skip ran
+  exactly that. The next run
+  checks the in-flight batch's waits, releases and guest reads against the skipped ranges.
+- **Claims.** Neither change alone gives the sandbox title a frame (the in-flight probe and the drain-skip run
+  above), so the first code
+  commit claims no frame rate. With both, the 6-9 ms of fence waits a frame are about the distance
+  to 30 fps and come before C and D.
 
 ### E2, reported output size (excluded for the robot platformer)
 
