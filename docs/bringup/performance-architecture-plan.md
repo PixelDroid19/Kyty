@@ -648,5 +648,9 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   and 19.94 before (542-558 draws per frame). No change, as expected for a GPU-bound scene.
 - **Open.** No end-to-end test of retirement in `PhysicalMemory`; only the retiring list is
   unit tested. A clean range's retirement can wait on a batch suspended on a guest store, now
-  in the allocating thread instead of the releasing one. Not yet run: `playable-regression`,
-  Balatro and the other titles.
+  in the allocating thread instead of the releasing one. Titles beyond Minecraft, Astro and
+  Balatro are not yet run.
+- **Balatro and the playable gate.** `PPSA21402 - Balatro` boot 40-100 s: 59.93 fps, 155 draws
+  per frame, same as before. `playable-regression` on `PPSA06084 - Superliminal`: 10 of 15 gates
+  pass, the same 5 fail as before the change (no baseline, no checkpoint, action response, input
+  tap and delivery).
