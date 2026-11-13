@@ -144,9 +144,18 @@ only where Kyty's own traces agree.
   CP 6.85 us per draw, draw processor 6.43. State setup 1.57 and command emission 1.01 (the
   independent class, 2.58); pipeline setup 0.67 and descriptor finalize 0.45 (shared caches,
   1.12); resource binding outside the descriptor stages, materialization and vertex and index
-  binds about 2.2 (ordered); about 0.55 unattributed. Moving only the independent class gives
-  about 6.85 / 4.3 = 1.6x of CP time, before the cost of secondaries and re-emitted state. The
-  part of state setup that prepares shader inputs stays ordered and is still not split out.
+  binds about 2.2 (ordered); about 0.55 unattributed.
+- **Correction: state setup is mostly ordered.** The state-setup window
+  (`GraphicsRenderDraw.cpp`, `RecordIndexedDraw` up to the materialization timer) holds colour
+  decompress, fast-clear elimination and resolve (which record outside the pass and can replace
+  the draw), transient read-only uploads, vertex stream and device-address preparation (which can
+  return a pending submission and make the draw retry), shader-input analysis and resolution
+  cohorts. All of it reads live guest registers and memory in guest order. The truly independent
+  part is the Vulkan recording: command emission (1.01 us per draw) and the pipeline, dynamic
+  state, vertex, index and descriptor binds. In a profile of the same scene (1,682 CP samples),
+  12.5 % of the CP samples are inside the Vulkan driver. The realistic bound of workstream C is
+  therefore about 1.15-1.3x of CP time, not 1.6x, and the simplest form is one recording worker
+  that replays an ordered command list into the primary, not secondaries per segment.
 - **Secondary cost (2026-11-13, standalone microbenchmark, not Kyty code).** 140 secondaries per
   primary, each begun with dynamic-rendering inheritance, re-emitting viewport, scissor, stencil
   reference, depth bias and blend constants, best of 50: Intel Arc A770 (ANV) 0.80 us to record
