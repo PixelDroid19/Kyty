@@ -803,10 +803,13 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
 ### Early submit interval 0.5 -> 1.5 ms (2026-11-13)
 
 - `SubmitRecordedWorkIfGpuIdle` took 6.8 % of the Minecraft command-processor thread: with
-  a 0.5 ms floor between early submits it submitted about 76 times per frame.
+  a 0.5 ms floor between early submits it flushed 59 command buffers per frame (agent
+  counter, world+2..22 s).
 - Change: the floor is 1.5 ms (`GraphicsRun.cpp`).
 - Minecraft world+2..22 s, µs per draw (median): 6.56 before; 6.24 and 5.93 after (two
   runs); fps 25.2 before, 25.0 and 26.4 after at the same draws per frame.
+- Flushes per frame 59 -> 27 in both runs; command-processor time per draw 6.93 -> 6.65 and
+  6.40 us.
 - PPSA21567 - ASTRO BOT, GPU-bound, same route: 19.2 fps before, 19.5 after (about 590
   draws per frame in both).
 - Unit tests 2,661 pass, CTest gates pass, `playable-regression` on PPSA06084 -
