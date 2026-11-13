@@ -751,10 +751,19 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
     same 5,425 draws per frame; the fps spread of this route is wider than that gap).
 - PPSA21567 - ASTRO BOT dunes render correctly with the change. That run reached the
   cinematic, so its fps is not comparable.
-- Unit tests 2,661 pass; the CTest gates pass.
+- Unit tests 2,661 pass; the CTest gates pass. `playable-regression` on PPSA06084 - Superliminal: 12/15, the same three failures as before (visual_compare, scene_checkpoint, action_response).
 - The two `ResetHash` locks showed about 5.7 % in the same profile. A temporary TSC timer
   around both acquisitions measured about 20 ns for the pair (75 ticks at 3.79 GHz, 0.6 %
   above 1,000 ticks, 16 million calls), so the share is sampling skid and the recorded lock
   exclusion stands.
-- Still open: the index min/max scan (about 7 %). Measure how often an index range could
-  be reused because its pages did not change, on Minecraft and ASTRO BOT, before building.
+- Excluded: remembering the index min/max range of a draw (the scan is about 7 % of the
+  thread, about 0.45 µs per draw). A temporary memo keyed by address and count, validated
+  by the dirty-page tracker generation, measured:
+  - 99.9 % of draws repeat a key with the same range on both titles;
+  - the tracker confirms the pages unchanged for 64-66 % of Minecraft draws and 0 % of
+    ASTRO BOT dunes draws;
+  - lookup plus `ChangedSince` costs about 1,440 TSC ticks (about 380 ns), close to the
+    scan it would replace;
+  - no range differed where the tracker reported clean pages (a forced stale entry was
+    counted, so the counter worked).
+  The check costs about as much as the scan, so the memo gains nothing and is not built.
