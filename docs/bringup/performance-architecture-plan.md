@@ -756,6 +756,9 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   around both acquisitions measured about 20 ns for the pair (75 ticks at 3.79 GHz, 0.6 %
   above 1,000 ticks, 16 million calls), so the share is sampling skid and the recorded lock
   exclusion stands.
+  The post-alignment profile still showed 6.5 %, so the timer was repeated with `lfence`
+  around each TSC read: about 60 ticks (16 ns) for the pair after subtracting an empty
+  measurement, 13 million calls. The result holds.
 - Excluded: remembering the index min/max range of a draw (the scan is about 7 % of the
   thread, about 0.45 µs per draw). A temporary memo keyed by address and count, validated
   by the dirty-page tracker generation, measured:
