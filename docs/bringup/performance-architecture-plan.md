@@ -581,3 +581,29 @@ run is not comparable beyond its first frames: its captures at 108, 125 and 145 
 cinematic where the other run is in gameplay, and it measured 17.4 fps with 369 draws a frame
 against 19.5 and 592. Open: whether the title's dynamic resolution follows the marks, whether
 1920x1080 is its lowest step, and whether correct marks change the frame rate.
+
+### B1 and A3 probes (2026-11-13)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, `7a7f9e6c8` plus temporary diagnostics (not
+committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world window 100-140 s,
+`PPSA21402 - Balatro` boot.
+
+- **In-flight hazards of a skipped drain, Minecraft.** With the early return and the A3 ceiling
+  probe (a release that overlaps no memory object, device-address range, label fence or display
+  buffer skips the drain), 25,809 releases skipped the drain. Of 56.3 M reads and waits checked
+  inside batches entered before a skip, 28.8 M had a skip in flight, and none touched a skipped
+  range; 721,936 publication stores (64- and 32-bit labels, end-of-pipe clock, GDS publication)
+  found none in the last 500 ms of skips. A live injection (every 256th skip, its range offered
+  to the next check on the real path) was detected 52 of 64 times. Not hooked: the label
+  `store_bytes` branch, the write-backs before label publication and the label callbacks; the
+  store window has no injection. Balatro had no release that the probe skips, and the dunes route
+  of `PPSA21567 - ASTRO BOT` has none, so the result is Minecraft only.
+- **Where the drain goes.** Splitting the quiesce into ring idle (the command processors finish
+  their queued batches) and device waits: serial submit 17.2 s of ring idle against 1.8 s of
+  device waits over 11,206 quiesces (maximum 25 ms); with the early return 64.1 s against 1.8 s
+  over 10,673 (maximum 317 ms). Skipping only the device wait saves little; an A3 with a gain must
+  not wait for the queued batches, which is the variant whose read hazards are only measured.
+- **The early return alone.** 21.41 fps against 20.53 serial (5,438 and 5,439 draws per frame,
+  one run each, inside noise); frame time median 44.0 against 48.1 ms, 95th percentile 67.8
+  against 53.1 ms. The early return moves the wait into each release, which now waits for the
+  whole queue. B1 is not an improvement without an A3 that skips the queued batches.
