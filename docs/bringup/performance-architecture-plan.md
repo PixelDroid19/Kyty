@@ -752,7 +752,9 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
 - PPSA21567 - ASTRO BOT dunes render correctly with the change. That run reached the
   cinematic, so its fps is not comparable.
 - Unit tests 2,661 pass; the CTest gates pass.
-- Still open on the same profile: the two `ResetHash` locks (about 5.7 %) and the index
-  min/max scan (about 7 %). Both need a measurement before any change: ns per lock
-  acquisition, and how often an index range could be reused because its pages did not
-  change.
+- The two `ResetHash` locks showed about 5.7 % in the same profile. A temporary TSC timer
+  around both acquisitions measured about 20 ns for the pair (75 ticks at 3.79 GHz, 0.6 %
+  above 1,000 ticks, 16 million calls), so the share is sampling skid and the recorded lock
+  exclusion stands.
+- Still open: the index min/max scan (about 7 %). Measure how often an index range could
+  be reused because its pages did not change, on Minecraft and ASTRO BOT, before building.
