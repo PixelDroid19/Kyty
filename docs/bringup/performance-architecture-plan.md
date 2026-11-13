@@ -734,3 +734,25 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
     writes. Suggested direction: log the writer of those pages.
   - Open defect, also seen on `da7ea4d80`: Minecraft's death screen drops letters from its
     text ("yty was slain y S ider").
+
+### Statistics counters on their own cache lines (2026-11-13)
+
+- A 599 Hz profile of the command-processor thread in PPSA17221 - Minecraft (world, 5,450
+  draws per frame) put about 9 % of its samples in the always-on statistics: clock reads,
+  `RecordTimed` and the `UpdateMax` load, which in this profile follows the counter
+  `fetch_add`s. The counters were packed next to each other, and the command processor,
+  render and completion threads write them, so their cache lines moved between cores on
+  every update.
+- Change: every global counter and each `TimedMetric` in `DebugStats.cpp` is aligned to
+  64 bytes. The reported values do not change.
+- Measured on world+2..22 s, draw processor µs per draw (median / p25):
+  - with perf: 7.09 / 6.98 before, 6.82 / 6.59 after;
+  - without perf: 7.05 / 6.78 before, 6.56 / 6.42 after (fps 21.5 against 25.2 at the
+    same 5,425 draws per frame; the fps spread of this route is wider than that gap).
+- PPSA21567 - ASTRO BOT dunes render correctly with the change. That run reached the
+  cinematic, so its fps is not comparable.
+- Unit tests 2,661 pass; the CTest gates pass.
+- Still open on the same profile: the two `ResetHash` locks (about 5.7 %) and the index
+  min/max scan (about 7 %). Both need a measurement before any change: ns per lock
+  acquisition, and how often an index range could be reused because its pages did not
+  change.
