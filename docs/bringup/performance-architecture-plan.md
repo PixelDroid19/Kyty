@@ -190,6 +190,16 @@ only where Kyty's own traces agree.
   repeat rate and cost of resolving one texture descriptor, in the robot platformer, whose texture
   stage costs 8.9 us per draw.
 
+- **C stage 1, defined 2026-11-13 (not built).** About 220 `vkCmd*` call sites in 22 files
+  record into the command buffer. Stage 1 encodes only the indexed draw's in-pass tail
+  (pipeline, descriptor-set, push-constant, vertex and index binds, dynamic state, the draw)
+  into a per-buffer list. The list is replayed on the same thread before any other direct
+  `vkCmd*` on that buffer and before submit, so the recorded order is unchanged. Gate: the
+  encode-plus-replay cost per draw on the Minecraft world stays below 0.2 us. Only then does
+  stage 2 move the replay to a worker, where its gain is bounded by the driver share (12-14 %
+  of the thread) minus the encode cost. Even at the bound, Minecraft goes from about 26 to about
+  29 fps: this does not reach 30 alone.
+
 ### E. Internal resolution as a functional option
 
 - **State.** `RenderResolutionScope = RenderTargets` scales only targets of the display extent and
