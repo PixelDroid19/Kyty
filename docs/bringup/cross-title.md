@@ -77,9 +77,11 @@ submit after it. A hand-made change was reported in every window.
   nothing (temporary, unsafe against late host writes), the sandbox title gained about x1.21 at the
   same scene, but the robot platformer then stops at boot (frame 1, no present), with the signature
   of the 2026-10-26 stop: a batch suspended on a CPU-written label must not return its own
-  submitter. Every graphics batch in both titles has a memory wait unsatisfied at submit entry, so
-  no submit-time rule of that kind lets a batch return early. One batch in flight (B1) and the
-  release without a drain (A3) are on hold; the decode cost (C, D) is next
+  submitter. No graphics batch in either title has its waits already satisfied at submit entry,
+  but every wait of the sandbox title and 91.8 % of the robot platformer's are written by an earlier
+  packet of the same submission; a rule built on that is not built or measured. One batch in flight
+  (B1) and the release without a drain (A3) are on hold; the sandbox title's decode cost (C, D) is
+  next
   (`docs/bringup/performance-architecture-plan.md`, section 6).
 
 ## Performance plan, stage 0: release census and draw-front coverage (2026-11-12, measured)

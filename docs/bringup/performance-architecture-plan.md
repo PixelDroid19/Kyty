@@ -444,9 +444,9 @@ Temporary changes on `6baccd17e`, not committed, one run each:
 | Robot platformer, one batch in flight only | Same stop. |
 | Robot platformer, wait rule, version that also released the suspended batch's own submitter | Same stop. |
 | Robot platformer, wait rule | Boots and plays: 3,599 presents at 145 s, 18,014 batches dequeued and signalled. No batch returned early. |
-| Sandbox, wait rule with the drain skip | No batch returned early (5,741 serial). Drains: 12,434 skipped, 827 run. In the 10 s before the player died: 17.8-20.2 fps at 5,290-5,450 draws a frame, against 20.6-21.0 serial. |
-| Robot platformer, census | 18,512 batches, each with at least one wait unsatisfied at entry (about 20 32-bit and 5 64-bit memory waits per batch). 3,083 (17 %) were released for a host-produced value. |
-| Sandbox, census | 5,659 batches, each with an unsatisfied wait at entry (about 64 32-bit memory waits per batch). None was released for a host-produced value. |
+| Sandbox, wait rule with the drain skip | No batch returned early (5,741 serial). Drains: 12,434 skipped, 827 run. In three 5-second slices from 5 to 20 s after the world loaded, before the player died: 17.8-20.2 fps at 5,290-5,450 draws a frame, against 20.6-21.0 serial. |
+| Robot platformer, census | 18,512 batches, each with at least one wait unsatisfied at entry or outside mapped memory (the two are not separated; about 20 32-bit and 5 64-bit memory waits per batch). 3,083 (17 %) were released for a host-produced value. The command processor's wait counters in the same run: 148,478 waits at decode, 91.8 % written by an earlier packet of the same submission, 5.8 % already satisfied, 0.8 % by a queued submission, 1.6 % suspended with no producer. |
+| Sandbox, census | 5,659 batches, each with a wait unsatisfied at entry or outside mapped memory (about 64 32-bit memory waits per batch). None was released for a host-produced value. The command processor's wait counters: 323,443 waits at decode, all written by an earlier packet of the same submission. |
 
 - **Reading, robot platformer.** The stop has the signature of the one recorded on 2026-10-26
   (`docs/titles/robot-platformer.md`, "A suspended submitter must not pass the command
@@ -456,21 +456,28 @@ Temporary changes on `6baccd17e`, not committed, one run each:
   batch serial, releasing the suspended batch's own submitter stops the title, and keeping it boots
   the title. The mechanism is inferred from the record: thread states and suspended waits were not
   taken in these runs.
-- **Reading, census.** In neither title does any batch have its waits already satisfied at submit,
-  so no rule of that kind lets a batch return early. The sandbox title's waits all resolve without a
-  host-produced value (labels written by the GPU); in the robot platformer, 17 % of batches wait for
-  one. Only one kind of submit-time rule is left: predicting each wait's GPU producer, a release in a
-  batch already queued or in flight. It is neither built nor measured. Hardware returns from a
-  submit at once, so which ordering in Kyty makes the early return unsafe is still unidentified.
-- **Reading, drain skip alone.** With the serial return, the drain skip gave no gain in the 10 s
-  before the player died. That is one run, and the player was being hit. x1.21 came only from the
-  combination that stops the robot platformer.
+- **Reading, census.** In neither title are a batch's waits already satisfied at submit, so a
+  rule of that kind lets no batch return early. The census lumps two other cases in with
+  "unsatisfied": waits outside mapped memory, and waits whose value an earlier packet of the same
+  batch writes, which are unsatisfied at entry by construction. The command processor's counters
+  show the second case dominates. Every wait of the sandbox title and 91.8 % of the robot
+  platformer's are written by their own submission, and only the robot platformer has waits with no
+  producer (1.6 %). A submit-time rule that a batch's waits are all written by its own earlier
+  packets would therefore let every sandbox batch return early and keep serial the robot
+  platformer's batches that wait on other work. That rule is neither built nor measured. Hardware
+  returns from a submit at once, so which ordering in Kyty makes the early return unsafe is still
+  unidentified.
+- **Reading, drain skip alone.** With the serial return the drains cost 0.9 ms of each guest gap
+  (serial timeline above), so skipping them alone cannot move the frame much. The one run agrees: no
+  gain in three 5-second slices while the player was being hit. x1.21 came only from the combination
+  that stops the robot platformer.
 - **Consequence.** B1 (return before decode) and A3 (release without a drain) are on hold. The only
-  measured gain needs both, that combination breaks a recorded contract of the robot platformer, and
-  no submit-time rule found here separates the batches that may return early. The 8.8 ms of fence
-  waits a frame appear only with one batch in flight, so they are not a lead for the serial submit.
-  Next are C and D, the decode cost, which both titles need: the robot platformer is decode- and
-  GPU-bound, and B gives it at most x1.08.
+  measured gain needs both, the probe of the release is unsafe, and the combination stops the robot
+  platformer at boot. The own-submission rule above is the open way back for B1. The 8.8 ms of fence
+  waits a frame appear only with one batch in flight (0.4 ms with the serial return), so they are
+  not a lead for the serial submit. Next are C and D, the sandbox title's decode cost. The robot
+  platformer is GPU-bound (89-91 % busy) and B gives it at most x1.08; its frame-rate levers are E1
+  and F1, and C's rule for it is command-processor time per frame.
 - **Missing letters.** The sandbox title's death screen lacked letters again in the run with the
   serial return and the drain skip, so the defect is not tied to one batch in flight. No run without
   a temporary change has reached that screen. A3 cannot ship until a clean build has been checked
