@@ -628,3 +628,25 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   21.41 (100-140 s), both 25.63 and 24.55. Each half alone is inside noise; together they gain
   20-25 %. The early return lets the command processor run ahead, and without a skipped drain
   every release waits for that lead. B1 and A3 ship together or not at all.
+
+### B1 and A3 shipped (2026-11-13)
+
+- **What changed.** A graphics submit whose batch has no indirect buffer and whose every memory
+  wait is produced earlier in the same batch returns once the previous batch has decoded (depth
+  1); any other batch, and any header the scanner cannot size, stays serial. An early-returned
+  batch that suspends on a host-produced wait exits with the wait address. A direct-memory
+  release whose range holds no GPU object, device-address range, label fence or display buffer
+  no longer drains the GPU: it takes a ticket of the work each ring has queued, and the range
+  stays out of the allocator, with its backing kept, until that work has finished on the
+  device. At retirement the range is checked again and fully invalidated if a later batch
+  created anything over it. Other releases drain as before.
+- **Minecraft.** `PPSA17221 - Minecraft`, scripted world entry, same scene as the probes
+  (5,413-5,421 draws per frame): 23.81 and 24.40 fps in 100-120 s and 120-140 s, against 20.58
+  and 20.49 serial and 25.63 and 24.55 for the unsafe probe; frame time median 48.1 -> 40.5-42.1
+  ms. One run per arm; the serial figure is from the probe build with probes off.
+- **Astro gameplay.** `PPSA21567 - ASTRO BOT` dunes, 90-147 s: 20.07 and 19.96 fps against 20.19
+  and 19.94 before (542-558 draws per frame). No change, as expected for a GPU-bound scene.
+- **Open.** No end-to-end test of retirement in `PhysicalMemory`; only the retiring list is
+  unit tested. A clean range's retirement can wait on a batch suspended on a guest store, now
+  in the allocating thread instead of the releasing one. Not yet run: `playable-regression`,
+  Balatro and the other titles.

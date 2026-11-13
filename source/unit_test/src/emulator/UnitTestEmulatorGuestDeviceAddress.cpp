@@ -689,7 +689,9 @@ int StartGpuMappingRuntime(LifecycleBridge* bridge, GuestLoad* load)
 	}
 	Kyty::Emulator::GpuMemoryFault::GetPort().NotifyFaultHandlerInstalled();
 	const Kernel::Memory::GpuMappingLifecycleCallbacks callbacks {bridge, LifecycleBridge::Register, LifecycleBridge::Invalidate,
-	                                                             LifecycleBridge::Release, LifecycleBridge::Protect};
+	                                                             LifecycleBridge::Release, LifecycleBridge::Protect,
+	                                                             +[](void* c, const Kernel::Memory::KernelGpuMappingRange* r, size_t n, uint64_t* t) { *t = 0; return LifecycleBridge::Invalidate(c, r, n); },
+	                                                             +[](void*, uint64_t) { return true; }, +[](void*, uint64_t) {}};
 	return Kernel::Memory::GetGpuMappingLifecyclePort().Install(callbacks) ? 0 : 3;
 }
 

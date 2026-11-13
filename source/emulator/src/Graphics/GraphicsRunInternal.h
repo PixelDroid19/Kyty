@@ -16,13 +16,16 @@
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Kernel/Pthread.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -284,6 +287,8 @@ public:
 	[[nodiscard]] bool OldestSubmittedTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value);
 	void               SubmitAndWait();
 	void               WaitSubmission(SubmissionId submission);
+	// Non-blocking: true once the submission completed (or was retired from the slots).
+	[[nodiscard]] bool IsSubmissionComplete(SubmissionId submission);
 	// Submits the submission if it is still being recorded and returns the timeline value its
 	// completion signals; false once it completed.
 	[[nodiscard]] bool SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value);
@@ -556,6 +561,47 @@ private:
 	bool           m_started       = false;
 };
 
+// The submission each finished batch ended with. A release ticket retires once the batches it covers finished and
+// their submissions completed on the device, the state Gpu::WaitLocked guarantees.
+class BatchEndLog
+{
+public:
+	void Note(uint64_t count, SubmissionId submission)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_ends.push_back({count, submission});
+		if (m_ends.size() > kCapacity)
+		{
+			m_ends.pop_front();
+		}
+	}
+
+	// Submission of the batch that finished at `count`. An aged-out count answers with the oldest kept one,
+	// which is later and therefore only delays retirement; a count past the newest answers with the newest.
+	[[nodiscard]] bool Find(uint64_t count, SubmissionId* submission) const
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_ends.empty())
+		{
+			return false;
+		}
+		const auto it = std::find_if(m_ends.begin(), m_ends.end(), [count](const End& end) { return end.count >= count; });
+		*submission   = (it != m_ends.end() ? *it : m_ends.back()).submission;
+		return true;
+	}
+
+private:
+	struct End
+	{
+		uint64_t     count;
+		SubmissionId submission;
+	};
+	static constexpr size_t kCapacity = 256;
+
+	mutable std::mutex m_mutex;
+	std::deque<End>    m_ends;
+};
+
 class GraphicsRing
 {
 public:
@@ -569,6 +615,13 @@ public:
 	void Done();
 	void WaitForIdle();
 	bool IsIdle();
+
+	// Monotonic counters for release tickets: a ticket holds EnqueuedBatches() and is retired once
+	// FinishedBatches() reaches it. Finished means the batch ran to its end, the point WaitForIdle waits for.
+	[[nodiscard]] uint64_t EnqueuedBatches() const { return m_enqueued_batches.load(); }
+	// Retired: the first `count` batches ran to their end and their submissions completed on the device.
+	[[nodiscard]] bool     IsRetired(uint64_t count) const;
+	void                   WaitRetired(uint64_t count);
 
 	void SetCp(CommandProcessor* cp)
 	{
@@ -633,6 +686,11 @@ private:
 		bool                           with_api_flip = false;
 		GraphicsSubmissionCompletion completion   = GraphicsSubmissionCompletion::None;
 		std::shared_ptr<DecodeCompletion> decode_completion;
+		// Signalled when this batch's decode ends or is suspended; the next submitter that returns early waits on it.
+		std::shared_ptr<DecodeCompletion> follow_completion;
+		// Its submitter already returned (or may return) before this batch decodes: its memory waits must all be
+		// produced inside it, so it can never need the guest to release its decode.
+		bool                              returns_before_decode = false;
 	};
 
 	static void ThreadBatchRun(void* data);
@@ -644,10 +702,16 @@ private:
 	Core::Mutex          m_mutex;
 	// Set while decode waits on a value no submitted GPU work produces.
 	bool                 m_decode_released = false;
+	// Follow completion of the latest submitted batch.
+	std::shared_ptr<CmdBatch::DecodeCompletion> m_previous_follow_completion;
 	// Only the ring thread touches it: a deferred completion it still pumps while idle.
 	bool                 m_async_completion_pending = false;
 	Core::CondVar        m_cond_var;
 	Core::CondVar        m_idle_cond_var;
+	Core::CondVar        m_finished_cond_var;
+	std::atomic_uint64_t m_enqueued_batches {0};
+	std::atomic_uint64_t m_finished_batches {0};
+	BatchEndLog          m_batch_ends;
 	SubmissionTimelineWaiter m_timeline_waiter {&m_mutex, &m_cond_var};
 	Core::List<CmdBatch> m_cmd_batches;
 	bool                 m_done = true;
@@ -669,6 +733,11 @@ public:
 	void Done();
 	void WaitForIdle();
 	bool IsIdle();
+
+	// Same ticket counters as GraphicsRing; a doorbell is the unit, and the run that consumes it finishes it.
+	[[nodiscard]] uint64_t EnqueuedBatches() const { return m_enqueued_doorbells.load(); }
+	[[nodiscard]] bool     IsRetired(uint64_t count) const;
+	void                   WaitRetired(uint64_t count);
 
 	void SetCp(CommandProcessor* cp)
 	{
@@ -694,6 +763,10 @@ private:
 	Core::Mutex   m_mutex;
 	Core::CondVar m_cond_var;
 	Core::CondVar m_idle_cond_var;
+	Core::CondVar m_finished_cond_var;
+	std::atomic_uint64_t m_enqueued_doorbells {0};
+	std::atomic_uint64_t m_finished_doorbells {0};
+	BatchEndLog          m_batch_ends;
 	SubmissionTimelineWaiter m_timeline_waiter {&m_mutex, &m_cond_var};
 	bool          m_done = true;
 	bool          m_idle = true;
@@ -738,6 +811,11 @@ public:
 	void     WaitSubmission(SubmissionId submission);
 	bool     SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value);
 	bool     RunQuiesced(GraphicsRunQuiescedAction action, void* data);
+	// A ticket stands for the work every ring had in flight when it was taken (0 when none). It never
+	// quiesces: later submissions are not part of it, so guest memory it protects must not be reachable by them.
+	uint64_t TakeReleaseTicket();
+	bool     IsReleaseTicketRetired(uint64_t ticket);
+	void     WaitReleaseTicket(uint64_t ticket);
 	int      GetFrameNum();
 	bool     AreSubmitsAllowed();
 
@@ -760,6 +838,21 @@ private:
 	GraphicsRing*              m_agc_async_ring[GraphicsAgcAsyncQueueSlots::Capacity] = {};
 
 	std::atomic_int m_done_num = 0;
+
+	struct ReleaseTicket
+	{
+		uint64_t                                         id = 0;
+		std::vector<std::pair<GraphicsRing*, uint64_t>> graphics;
+		std::vector<std::pair<ComputeRing*, uint64_t>>  compute;
+	};
+	[[nodiscard]] static bool IsReleaseTicketFinished(const ReleaseTicket& ticket);
+	// Retirement is monotonic in id, so only the front can be the next to retire.
+	void PruneRetiredTicketsLocked();
+
+	std::mutex               m_ticket_mutex;
+	std::deque<ReleaseTicket> m_release_tickets;
+	uint64_t                 m_last_ticket_id    = 0;
+	uint64_t                 m_retired_ticket_id = 0;
 };
 
 } // namespace Kyty::Libs::Graphics

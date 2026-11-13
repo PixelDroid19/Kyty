@@ -111,6 +111,9 @@ void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vad
 // every table still retained in the retirement list.
 void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 
+// True when a registered range overlaps [vaddr, vaddr + size).
+bool GuestDeviceAddressOverlapsRegisteredRange(uint64_t vaddr, uint64_t size);
+
 // Writes back GPU results held in Kyty storage-buffer objects over every
 // registered range, so a shader dereferencing guest pointers reads the
 // current guest memory. Call before recording such a dispatch on `consumer`.

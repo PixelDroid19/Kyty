@@ -533,6 +533,7 @@ public:
 	void             QueueGpuFlip(int handle);
 	bool             RunBufferUnmapTransaction(const VideoOutBufferRange* ranges, size_t range_count, VideoOutQuiescedAction action,
 	                                           void* data);
+	bool             BuffersOverlap(uint64_t vaddr, uint64_t size);
 
 	void Init(uint32_t width, uint32_t height);
 
@@ -2633,6 +2634,27 @@ void VideoOutWaitFlipDone(int handle, int index)
 	if (index < 0 || index > 15) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index < 0 || index > 15 condition ignored (continuing)\n"); }
 
 	g_video_out_context->GetFlipQueue().Wait(ctx, index);
+}
+
+bool VideoOutContext::BuffersOverlap(uint64_t vaddr, uint64_t size)
+{
+	Core::LockGuard lock(m_mutex);
+	for (const auto& ctx: m_video_out_ctx)
+	{
+		for (const auto& buffer: ctx.buffers)
+		{
+			if (buffer.buffer != nullptr && VideoOutRangesOverlap(vaddr, size, reinterpret_cast<uint64_t>(buffer.buffer), buffer.buffer_size))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool VideoOutBuffersOverlap(uint64_t vaddr, uint64_t size)
+{
+	return g_video_out_context == nullptr || g_video_out_context->BuffersOverlap(vaddr, size);
 }
 
 bool VideoOutRunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action, void* data)

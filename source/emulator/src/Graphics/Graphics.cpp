@@ -153,6 +153,65 @@ bool GraphicsInvalidateGpuMappingRanges(void* context, const Kernel::Memory::Ker
 	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingInvalidation, &transaction);
 }
 
+// A released range nothing in the GPU's tables refers to needs no quiescence: work already queued can still read
+// the old bytes, which stay valid until the ticket retires, and nothing queued later may name released memory.
+bool GraphicsGpuMappingRangesAreClean(const Kernel::Memory::KernelGpuMappingRange* ranges, size_t range_count)
+{
+	for (size_t i = 0; i < range_count; ++i)
+	{
+		GpuMemoryOverlapSnapshot snapshot {};
+		const uint64_t           vaddr = ranges[i].vaddr;
+		const uint64_t           size  = ranges[i].size;
+		if (!GpuMemoryQueryOverlaps(&vaddr, &size, 1, &snapshot) || snapshot.total_count != 0 || LabelRangeHasFence(vaddr, size) ||
+		    GuestDeviceAddressOverlapsRegisteredRange(vaddr, size) || VideoOut::VideoOutBuffersOverlap(vaddr, size))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool GraphicsInvalidateGpuMappingRangesDeferred(void* context, const Kernel::Memory::KernelGpuMappingRange* ranges, size_t range_count,
+                                                uint64_t* retire_ticket)
+{
+	EXIT_IF(retire_ticket == nullptr);
+	*retire_ticket = 0;
+	if (ranges == nullptr || range_count == 0)
+	{
+		return false;
+	}
+	for (size_t i = 0; i < range_count; ++i)
+	{
+		if (ranges[i].vaddr == 0 || ranges[i].size == 0 || ranges[i].vaddr > std::numeric_limits<uint64_t>::max() - ranges[i].size)
+		{
+			return false;
+		}
+	}
+	if (!GraphicsGpuMappingRangesAreClean(ranges, range_count))
+	{
+		return GraphicsInvalidateGpuMappingRanges(context, ranges, range_count);
+	}
+	for (size_t i = 0; i < range_count; ++i)
+	{
+		LabelReleaseMappedRange(ranges[i].vaddr, ranges[i].size);
+		GuestTextureLayoutInvalidateRange(ranges[i].vaddr, ranges[i].size);
+	}
+	*retire_ticket = GraphicsRunTakeReleaseTicket();
+	return true;
+}
+
+bool GraphicsIsGpuReleaseTicketRetired(void* context, uint64_t ticket)
+{
+	(void)context;
+	return GraphicsRunIsReleaseTicketRetired(ticket);
+}
+
+void GraphicsWaitGpuReleaseTicket(void* context, uint64_t ticket)
+{
+	(void)context;
+	GraphicsRunWaitReleaseTicket(ticket);
+}
+
 bool GraphicsReleaseGpuMappingRange(void* context, uint64_t vaddr, uint64_t size,
 	                                Kernel::Memory::KernelGpuMappingCompletion completion, void* completion_data)
 {
@@ -258,6 +317,9 @@ void GraphicsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 	    GraphicsInvalidateGpuMappingRanges,
 	    GraphicsReleaseGpuMappingRange,
 	    GraphicsProtectGpuMappingRange,
+	    GraphicsInvalidateGpuMappingRangesDeferred,
+	    GraphicsIsGpuReleaseTicketRetired,
+	    GraphicsWaitGpuReleaseTicket,
 	};
 	EXIT_IF(!Kernel::Memory::GetGpuMappingLifecyclePort().Install(gpu_mapping_lifecycle_callbacks));
 	const Kyty::Emulator::GuestMemory::Callbacks guest_memory_callbacks {GraphicsQueryMappedRange, GraphicsQueryProtection};

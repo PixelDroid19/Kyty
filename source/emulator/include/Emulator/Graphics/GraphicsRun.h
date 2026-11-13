@@ -193,6 +193,10 @@ void     GraphicsRunDingDong(uint32_t ring_id, uint32_t offset_dw);
 int      GraphicsRunGetFrameNum();
 bool     GraphicsRunAreSubmitsAllowed();
 bool     GraphicsRunWithQuiescedSubmissions(GraphicsRunQuiescedAction action, void* data);
+// Release tickets stand for the batches in flight when taken, without quiescing. 0 is a ticket with nothing in flight.
+uint64_t GraphicsRunTakeReleaseTicket();
+bool     GraphicsRunIsReleaseTicketRetired(uint64_t ticket);
+void     GraphicsRunWaitReleaseTicket(uint64_t ticket);
 
 void GraphicsRunCommandProcessorFlush(CommandProcessor* cp);
 void GraphicsRunCommandProcessorWait(CommandProcessor* cp);

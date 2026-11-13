@@ -1488,6 +1488,74 @@ TEST(EmulatorGraphicsPackets, EvaluatesWaitDeadlinesWithoutClockUnderflow)
 	EXPECT_TRUE(SuspendedWaitDiagnosticDeadlineReached(UINT64_MAX, 1u, UINT64_MAX - 1u));
 }
 
+TEST(EmulatorGraphicsPackets, BatchWaitProducedByEarlierWriteIsSelfContained)
+{
+	// IT_WRITE_DATA of one dword to 0x20000, then R_WAIT_MEM_32 on the same dword.
+	const uint32_t words[] = {0xC0033700u, 0u, 0x20000u, 0u, 1u, 0xC0051028u, 0x20000u, 0u, 0xffffffffu, 1u, 3u, 10u};
+	const auto     scan    = ScanBatchMemoryWaits(words, 12u);
+	EXPECT_EQ(scan.waits, 1u);
+	EXPECT_EQ(scan.own, 1u);
+	EXPECT_TRUE(BatchProducesItsOwnWaits(scan, ScanBatchMemoryWaits(nullptr, 0u)));
+}
+
+TEST(EmulatorGraphicsPackets, BatchWaitProducedByEarlierReleaseIsSelfContained)
+{
+	// IT_RELEASE_MEM storing a 32-bit value to 0x30000, then IT_WAIT_REG_MEM on it.
+	const uint32_t words[] = {0xC0054902u, 0u, 1u << 29u, 0x30000u, 0u, 1u, 0u, 0xC0053C00u, 0u, 0x30000u, 0u, 1u, 0xffffffffu, 10u};
+	const auto     scan    = ScanBatchMemoryWaits(words, 14u);
+	EXPECT_EQ(scan.waits, 1u);
+	EXPECT_EQ(scan.own, 1u);
+	EXPECT_TRUE(BatchProducesItsOwnWaits(scan, scan));
+}
+
+TEST(EmulatorGraphicsPackets, BatchWaitWithoutEarlierProducerStaysSerial)
+{
+	const uint32_t no_producer[] = {0xC0051028u, 0x20000u, 0u, 0xffffffffu, 1u, 3u, 10u};
+	EXPECT_FALSE(BatchProducesItsOwnWaits(ScanBatchMemoryWaits(no_producer, 7u), ScanBatchMemoryWaits(nullptr, 0u)));
+
+	// The producer comes after the wait, so it cannot have satisfied it.
+	const uint32_t late_producer[] = {0xC0051028u, 0x20000u, 0u, 0xffffffffu, 1u, 3u, 10u, 0xC0033700u, 0u, 0x20000u, 0u, 1u};
+	EXPECT_FALSE(BatchProducesItsOwnWaits(ScanBatchMemoryWaits(late_producer, 12u), ScanBatchMemoryWaits(nullptr, 0u)));
+
+	// A write to a different address does not produce the awaited one.
+	const uint32_t other_address[] = {0xC0033700u, 0u, 0x40000u, 0u, 1u, 0xC0051028u, 0x20000u, 0u, 0xffffffffu, 1u, 3u, 10u};
+	EXPECT_FALSE(BatchProducesItsOwnWaits(ScanBatchMemoryWaits(other_address, 12u), ScanBatchMemoryWaits(nullptr, 0u)));
+}
+
+TEST(EmulatorGraphicsPackets, BatchWithIndirectBufferStaysSerial)
+{
+	const uint32_t words[] = {0xC0033F00u, 0x1000u, 0u, 0x10u, 0u};
+	const auto     scan    = ScanBatchMemoryWaits(words, 5u);
+	EXPECT_EQ(scan.nested, 1u);
+	EXPECT_EQ(scan.waits, 0u);
+	EXPECT_FALSE(BatchProducesItsOwnWaits(scan, ScanBatchMemoryWaits(nullptr, 0u)));
+}
+
+TEST(EmulatorGraphicsPackets, BatchWaitWithNullAddressUsesPrecedingReleaseDestination)
+{
+	const uint32_t release_then_wait[] = {0xC0051060u, 0u, 2u << 16u, 0x20000u, 0u, 1u, 0u, 0xC0071058u, 0u, 0u, 0xffffffffu, 0xffffffffu, 1u, 0u, 3u, 10u};
+	const auto     own                 = ScanBatchMemoryWaits(release_then_wait, 16u);
+	EXPECT_EQ(own.waits, 1u);
+	EXPECT_EQ(own.own, 1u);
+
+	// Without the release in front, the null address names no producer.
+	const auto alone = ScanBatchMemoryWaits(release_then_wait + 7, 9u);
+	EXPECT_EQ(alone.waits, 1u);
+	EXPECT_EQ(alone.own, 0u);
+}
+
+TEST(EmulatorGraphicsPackets, BatchWithAnUnsizableHeaderStaysSerial)
+{
+	// An impossible COUNT is a 2-dword unit to the decoder; the scan keeps walking after it, but the batch fails closed
+	// even though the wait after it has an earlier producer.
+	const uint32_t words[] = {0xC3FF0000u, 0u, 0xC0033700u, 0u, 0x20000u, 0u, 1u, 0xC0051028u, 0x20000u, 0u, 0xffffffffu, 1u, 3u, 10u};
+	const auto     scan    = ScanBatchMemoryWaits(words, 14u);
+	EXPECT_EQ(scan.unparsed, 1u);
+	EXPECT_EQ(scan.waits, 1u);
+	EXPECT_EQ(scan.own, 1u);
+	EXPECT_FALSE(BatchProducesItsOwnWaits(scan, ScanBatchMemoryWaits(nullptr, 0u)));
+}
+
 TEST(EmulatorGraphicsPackets, RejectsByteMisalignedRawStorage)
 {
 	ShaderBufferResource resource {};

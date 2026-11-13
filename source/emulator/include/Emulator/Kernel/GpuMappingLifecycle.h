@@ -40,6 +40,15 @@ struct KernelGpuMappingRange
 };
 // Must invalidate the complete batch or return false without changing any range.
 using KernelGpuMappingInvalidateRanges = bool (*)(void* context, const KernelGpuMappingRange* ranges, size_t range_count);
+// Like KernelGpuMappingInvalidateRanges, but the adapter may return before the GPU stops using the ranges. It then
+// stores a nonzero ticket in `retire_ticket`: the old backing must stay untouched until the ticket retires. A zero
+// ticket means the GPU no longer uses the ranges.
+using KernelGpuMappingInvalidateRangesDeferred = bool (*)(void* context, const KernelGpuMappingRange* ranges, size_t range_count,
+                                                          uint64_t* retire_ticket);
+// Non-blocking: true once the GPU work that was in flight when the ticket was issued has finished.
+using KernelGpuMappingTicketRetired = bool (*)(void* context, uint64_t ticket);
+// Blocks until the ticket retires, bounded only by the GPU's own progress.
+using KernelGpuMappingWaitTicket = void (*)(void* context, uint64_t ticket);
 using KernelGpuMappingReleaseRange    = bool (*)(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion,
                                                  void* completion_data);
 // Runs `completion` (Kernel's protection change) with GPU submissions
@@ -55,6 +64,10 @@ struct GpuMappingLifecycleCallbacks
 	KernelGpuMappingInvalidateRanges invalidate_ranges = nullptr;
 	KernelGpuMappingReleaseRange    release_range    = nullptr;
 	KernelGpuMappingProtectRange    protect_range    = nullptr;
+	// Required: a release may return a ticket the adapter alone can retire.
+	KernelGpuMappingInvalidateRangesDeferred invalidate_ranges_deferred = nullptr;
+	KernelGpuMappingTicketRetired            ticket_retired             = nullptr;
+	KernelGpuMappingWaitTicket               wait_ticket                = nullptr;
 };
 
 // A complete callback bundle is installed once and remains process-lifetime.
@@ -73,6 +86,10 @@ public:
 	[[nodiscard]] bool RegisterRange(uint64_t vaddr, uint64_t size, KernelGpuMappingBacking backing);
 	[[nodiscard]] bool InvalidateRanges(const KernelGpuMappingRange* ranges, size_t range_count);
 	[[nodiscard]] bool InvalidateRange(uint64_t vaddr, uint64_t size);
+	// On success `*retire_ticket` is zero when the ranges are already free of GPU use.
+	[[nodiscard]] bool InvalidateRangesDeferred(const KernelGpuMappingRange* ranges, size_t range_count, uint64_t* retire_ticket);
+	[[nodiscard]] bool IsTicketRetired(uint64_t ticket);
+	void               WaitTicket(uint64_t ticket);
 	[[nodiscard]] bool ReleaseRange(uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion, void* completion_data);
 	[[nodiscard]] bool ProtectRange(uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion, void* completion_data);
 

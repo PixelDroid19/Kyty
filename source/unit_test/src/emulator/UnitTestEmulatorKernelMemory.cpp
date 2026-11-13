@@ -4,6 +4,7 @@
 #include "Emulator/Kernel/GpuMappingLifecycle.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/RetiringRanges.h"
 #include "Emulator/Kernel/SyncOnAddress.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -243,6 +244,13 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortForwardsReleaseCompletionInAda
 	callbacks.register_range   = GpuMappingLifecycleTestState::RegisterRange;
 	callbacks.invalidate_ranges = GpuMappingLifecycleTestState::InvalidateRanges;
 	callbacks.release_range    = GpuMappingLifecycleTestState::ReleaseRange;
+	callbacks.invalidate_ranges_deferred = [](void* c, const KernelGpuMappingRange* r, size_t n, uint64_t* t)
+	{
+		*t = 0;
+		return GpuMappingLifecycleTestState::InvalidateRanges(c, r, n);
+	};
+	callbacks.ticket_retired = [](void*, uint64_t) { return true; };
+	callbacks.wait_ticket    = [](void*, uint64_t) {};
 	EXPECT_FALSE(lifecycle.Install(callbacks));
 	EXPECT_FALSE(lifecycle.ProtectRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, nullptr));
 	callbacks.protect_range = GpuMappingLifecycleTestState::ProtectRange;
@@ -299,6 +307,13 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortAllowsAdapterReentrancy)
 	callbacks.invalidate_ranges = GpuMappingLifecycleTestState::InvalidateRanges;
 	callbacks.release_range    = GpuMappingLifecycleTestState::ReentrantReleaseRange;
 	callbacks.protect_range    = GpuMappingLifecycleTestState::ProtectRange;
+	callbacks.invalidate_ranges_deferred = [](void* c, const KernelGpuMappingRange* r, size_t n, uint64_t* t)
+	{
+		*t = 0;
+		return GpuMappingLifecycleTestState::InvalidateRanges(c, r, n);
+	};
+	callbacks.ticket_retired = [](void*, uint64_t) { return true; };
+	callbacks.wait_ticket    = [](void*, uint64_t) {};
 	ASSERT_TRUE(lifecycle.Install(callbacks));
 
 	ASSERT_TRUE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, &state));
@@ -371,7 +386,9 @@ int RunProtectUnmapRace()
 {
 	static ProtectUnmapRace            race;
 	const GpuMappingLifecycleCallbacks callbacks {&race, ProtectUnmapRace::RegisterRange, ProtectUnmapRace::InvalidateRanges,
-	                                              ProtectUnmapRace::ReleaseRange, ProtectUnmapRace::ProtectRange};
+	                                              ProtectUnmapRace::ReleaseRange, ProtectUnmapRace::ProtectRange,
+	                                              +[](void* c, const KernelGpuMappingRange* r, size_t n, uint64_t* t) { *t = 0; return ProtectUnmapRace::InvalidateRanges(c, r, n); },
+	                                              +[](void*, uint64_t) { return true; }, +[](void*, uint64_t) {}};
 	if (!GetGpuMappingLifecyclePort().Install(callbacks))
 	{
 		return 2;
@@ -524,7 +541,9 @@ int RunProtectOwnerReuseRace(bool replacement_gpu_owner)
 	race.replacement_gpu_owner = replacement_gpu_owner;
 
 	const GpuMappingLifecycleCallbacks callbacks {&race, ProtectOwnerReuseRace::RegisterRange, ProtectOwnerReuseRace::InvalidateRanges,
-	                                              ProtectOwnerReuseRace::ReleaseRange, ProtectOwnerReuseRace::ProtectRange};
+	                                              ProtectOwnerReuseRace::ReleaseRange, ProtectOwnerReuseRace::ProtectRange,
+	                                              +[](void* c, const KernelGpuMappingRange* r, size_t n, uint64_t* t) { *t = 0; return ProtectOwnerReuseRace::InvalidateRanges(c, r, n); },
+	                                              +[](void*, uint64_t) { return true; }, +[](void*, uint64_t) {}};
 	if (!GetGpuMappingLifecyclePort().Install(callbacks))
 	{
 		return 2;
@@ -2065,6 +2084,63 @@ TEST(EmulatorKernelMemory, QueryMappedRangeAcceptsContainedSmemSpanAndRejectsDec
 	EXPECT_FALSE(KernelQueryMappedRange(base + kSpanOffset, kDeclaredVsharp, &declared));
 
 	EXPECT_EQ(KernelMunmap(base, kMappingSize), OK);
+}
+
+// A range released under a ticket stays out of the allocator until the GPU work in flight at release time
+// finishes, and only then does its backing drop.
+TEST(EmulatorKernelMemory, RetiringRangesBlockReuseUntilTheirTicketRetires)
+{
+	RetiringRanges retiring;
+	retiring.Add({0x20000, 0x10000, 2, true});
+	retiring.Add({0x00000, 0x10000, 1, false});
+
+	uint64_t end = 0;
+	EXPECT_TRUE(retiring.FindOverlap(0x08000, 0x1000, &end));
+	EXPECT_EQ(end, 0x10000u);
+	EXPECT_TRUE(retiring.FindOverlap(0x1f000, 0x2000, &end));
+	EXPECT_EQ(end, 0x30000u);
+	EXPECT_FALSE(retiring.FindOverlap(0x10000, 0x10000, &end));
+
+	// Nothing has retired: no entry is handed back.
+	EXPECT_TRUE(retiring.Collect([](uint64_t) { return false; }).empty());
+	EXPECT_EQ(retiring.Size(), 2u);
+
+	// A retired entry keeps its range occupied until it is removed, so it can be checked first.
+	const auto retired = retiring.Collect([](uint64_t ticket) { return ticket <= 1; });
+	ASSERT_EQ(retired.size(), 1u);
+	EXPECT_EQ(retired[0].start, 0u);
+	EXPECT_FALSE(retired[0].discard_backing);
+	EXPECT_TRUE(retiring.FindOverlap(0x08000, 0x1000, &end));
+	retiring.Remove(retired[0].start);
+	EXPECT_FALSE(retiring.FindOverlap(0x08000, 0x1000, &end));
+	EXPECT_TRUE(retiring.FindOverlap(0x20000, 0x1000, &end));
+}
+
+TEST(EmulatorKernelMemory, RetiringRangesWaitOnlyForTicketsInsideTheSearchWindow)
+{
+	RetiringRanges retiring;
+	retiring.Add({0x10000, 0x10000, 5, true});
+	retiring.Add({0x40000, 0x10000, 3, true});
+
+	uint64_t ticket = 0;
+	EXPECT_TRUE(retiring.OldestTicketIn(0, 0x30000, &ticket));
+	EXPECT_EQ(ticket, 5u);
+	EXPECT_TRUE(retiring.OldestTicketIn(0, UINT64_MAX, &ticket));
+	EXPECT_EQ(ticket, 3u);
+	EXPECT_FALSE(retiring.OldestTicketIn(0x20000, 0x40000, &ticket));
+}
+
+TEST(EmulatorKernelMemory, RetiringRangesReportWhenTheyAreFull)
+{
+	RetiringRanges retiring;
+	for (uint64_t i = 0; i < RetiringRanges::kCapacity; ++i)
+	{
+		EXPECT_FALSE(retiring.IsFull());
+		retiring.Add({i * 0x10000, 0x10000, i + 1, false});
+	}
+	EXPECT_TRUE(retiring.IsFull());
+	retiring.Remove(0);
+	EXPECT_FALSE(retiring.IsFull());
 }
 
 UT_END();

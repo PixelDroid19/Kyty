@@ -11,6 +11,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/GuestCodeRanges.h"
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/RetiringRanges.h"
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/Log.h"
 
@@ -262,7 +263,10 @@ public:
 	static constexpr uint64_t BackingSize() { return static_cast<uint64_t>(16) * 1024 * 1024 * 1024; }
 
 	bool     Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out, int memory_type);
-	bool     Release(uint64_t start, size_t len);
+	// A nonzero retire_ticket keeps the range out of the allocator, and its backing intact, until the GPU
+	// work that was in flight at release time has finished.
+	// `gpu_ranges` are the guest views whose GPU state the release dropped, checked again at retirement.
+	bool     Release(uint64_t start, size_t len, uint64_t retire_ticket = 0, const std::vector<KernelGpuMappingRange>& gpu_ranges = {});
 	PhysicalReleaseClaimStatus ClaimDirectRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings);
 	void     AbortDirectRelease(uint64_t start, size_t len);
 	struct MappedView
@@ -333,6 +337,12 @@ private:
 	// false when the interval is invalid or overlaps a pinned window.
 	[[nodiscard]] bool PinWindowUnlocked(uint64_t phys_addr, uint64_t size);
 	void               UnpinWindowUnlocked(uint64_t phys_addr, uint64_t size);
+	// Hands retired ranges back to the allocator once no GPU state names them. Tickets up to `waited_ticket` are
+	// known retired. Takes no memory lock for the caller: the GPU checks run outside it.
+	void RetireReadyRanges(uint64_t waited_ticket = 0);
+	[[nodiscard]] bool ReleaseUnlocked(uint64_t start, size_t len, uint64_t retire_ticket, const std::vector<KernelGpuMappingRange>& gpu_ranges);
+	// First aligned free span in the window, skipping retiring ranges.
+	[[nodiscard]] bool FindFreeSpanUnlocked(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* out) const;
 	// Drops the bytes of backing [start, start + len): pinned windows are
 	// zeroed in place, the rest is punched out of the backing.
 	[[nodiscard]] bool DiscardBackingUnlocked(uint64_t start, uint64_t len);
@@ -372,6 +382,9 @@ private:
 		uint64_t size;
 	};
 	std::vector<PendingDirectRelease>  m_pending_direct_releases;
+	RetiringRanges                     m_retiring;
+	// One retirer at a time, so a range is checked and returned once; held across the GPU checks, never with m_mutex.
+	std::mutex                         m_retire_mutex;
 	Core::Mutex                        m_mutex;
 	VirtualMemory::SharedBacking*      m_backing = nullptr;
 	// Disjoint backing intervals that device imports hold pinned, by offset.
@@ -1023,6 +1036,116 @@ KernelMemorySnapshot KernelGetMemorySnapshot()
 	return snapshot;
 }
 
+bool PhysicalMemory::FindFreeSpanUnlocked(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* out) const
+{
+	uint64_t candidate = 0;
+	if (!get_aligned_pos(search_start, alignment, &candidate))
+	{
+		return false;
+	}
+
+	for (;;)
+	{
+		// Walk the sorted allocations and choose the first aligned free span inside
+		// the caller's search window. Released ranges must become reusable; otherwise
+		// a long-running guest exhausts the physical pool despite having large holes.
+		for (const auto& block: m_allocated)
+		{
+			if (block.size > std::numeric_limits<uint64_t>::max() - block.start_addr)
+			{
+				return false;
+			}
+
+			const uint64_t block_end = block.start_addr + block.size;
+			if (block_end <= candidate)
+			{
+				continue;
+			}
+			if (block.start_addr >= search_end)
+			{
+				break;
+			}
+			if (candidate < block.start_addr && len <= block.start_addr - candidate)
+			{
+				break;
+			}
+
+			candidate = std::max(candidate, block_end);
+			if (!get_aligned_pos(candidate, alignment, &candidate) || candidate > search_end - len)
+			{
+				return false;
+			}
+		}
+
+		if (candidate > search_end - len)
+		{
+			return false;
+		}
+		// The GPU may still read a retiring range, so it is occupied like an allocation.
+		uint64_t retiring_end = 0;
+		if (!m_retiring.FindOverlap(candidate, len, &retiring_end))
+		{
+			*out = candidate;
+			return true;
+		}
+		if (!get_aligned_pos(retiring_end, alignment, &candidate) || candidate > search_end - len)
+		{
+			return false;
+		}
+	}
+}
+
+void PhysicalMemory::RetireReadyRanges(uint64_t waited_ticket)
+{
+	std::lock_guard<std::mutex> retirer(m_retire_mutex);
+	auto&                       port = GetGpuMappingLifecyclePort();
+
+	std::vector<uint64_t> tickets;
+	{
+		Core::LockGuard lock(m_mutex);
+		tickets = m_retiring.Tickets();
+	}
+	// The port reaches ring and processor locks, so it is asked without the memory lock.
+	std::vector<uint64_t> retired_tickets;
+	for (const uint64_t ticket: tickets)
+	{
+		if (ticket <= waited_ticket || port.IsTicketRetired(ticket))
+		{
+			retired_tickets.push_back(ticket);
+		}
+	}
+	if (retired_tickets.empty())
+	{
+		return;
+	}
+	std::vector<RetiringRanges::Entry> ready;
+	{
+		Core::LockGuard lock(m_mutex);
+		ready = m_retiring.Collect([&](uint64_t ticket) { return std::find(retired_tickets.begin(), retired_tickets.end(), ticket) != retired_tickets.end(); });
+	}
+	for (const auto& entry: ready)
+	{
+		// A batch that was in flight at release may have decoded after the clean check and created GPU state over the
+		// range. The adapter checks again and quiesces when it did.
+		uint64_t ignored = 0;
+		if (!entry.gpu_ranges.empty() &&
+		    !port.InvalidateRangesDeferred(entry.gpu_ranges.data(), entry.gpu_ranges.size(), &ignored))
+		{
+			EXIT("Retiring a released physical range failed to invalidate its GPU views: phys=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
+			     entry.start, entry.size);
+		}
+	}
+	Core::LockGuard lock(m_mutex);
+	for (const auto& entry: ready)
+	{
+		m_retiring.Remove(entry.start);
+		if (entry.discard_backing)
+		{
+			(void)DiscardBackingUnlocked(entry.start, entry.size);
+		}
+	}
+}
+
 bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out,
                            int memory_type)
 {
@@ -1031,75 +1154,54 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 		return false;
 	}
 
-	Core::LockGuard lock(m_mutex);
-
-	search_end = std::min(search_end, Size());
-	if (search_start >= search_end || len > search_end - search_start)
+	uint64_t waited_ticket = 0;
+	for (;;)
 	{
-		return false;
-	}
-
-	uint64_t candidate = 0;
-	if (!get_aligned_pos(search_start, alignment, &candidate))
-	{
-		return false;
-	}
-
-	// Walk the sorted allocations and choose the first aligned free span inside
-	// the caller's search window. Released ranges must become reusable; otherwise
-	// a long-running guest exhausts the physical pool despite having large holes.
-	for (const auto& block: m_allocated)
-	{
-		if (block.size > std::numeric_limits<uint64_t>::max() - block.start_addr)
+		RetireReadyRanges(waited_ticket);
+		uint64_t ticket = 0;
 		{
-			return false;
-		}
+			Core::LockGuard lock(m_mutex);
 
-		const uint64_t block_end = block.start_addr + block.size;
-		if (block_end <= candidate)
-		{
-			continue;
-		}
-		if (block.start_addr >= search_end)
-		{
-			break;
-		}
-		if (candidate < block.start_addr && len <= block.start_addr - candidate)
-		{
-			break;
-		}
+			const uint64_t window_end = std::min(search_end, Size());
+			if (search_start >= window_end || len > window_end - search_start)
+			{
+				return false;
+			}
 
-		candidate = std::max(candidate, block_end);
-		if (!get_aligned_pos(candidate, alignment, &candidate) || candidate > search_end - len)
-		{
-			return false;
+			uint64_t candidate = 0;
+			if (FindFreeSpanUnlocked(search_start, window_end, len, alignment, &candidate))
+			{
+				// A physical range can be released while virtual aliases still reference the
+				// shared backing. Reusing that range starts a new allocation lifetime, which
+				// must not expose bytes retained by the previous owner. Discard before
+				// publishing the allocation; all aliases then observe the same fresh pages.
+				if (!DiscardBackingUnlocked(candidate, len))
+				{
+					return false;
+				}
+
+				AllocatedBlock block {};
+				block.size        = len;
+				block.start_addr  = candidate;
+				block.memory_type = memory_type;
+
+				const auto insert_pos = std::lower_bound(m_allocated.begin(), m_allocated.end(), block.start_addr,
+				                                         [](const AllocatedBlock& existing, uint64_t start) { return existing.start_addr < start; });
+				m_allocated.InsertAt(static_cast<uint32_t>(insert_pos - m_allocated.begin()), block);
+
+				*phys_addr_out = candidate;
+				return true;
+			}
+			// No fit: only a retiring range inside the window can still make one.
+			if (!m_retiring.OldestTicketIn(search_start, window_end, &ticket))
+			{
+				return false;
+			}
 		}
+		// The GPU may be waiting on a thread that needs the lock, so it is awaited outside it.
+		GetGpuMappingLifecyclePort().WaitTicket(ticket);
+		waited_ticket = ticket;
 	}
-
-	if (candidate > search_end - len)
-	{
-		return false;
-	}
-	// A physical range can be released while virtual aliases still reference the
-	// shared backing. Reusing that range starts a new allocation lifetime, which
-	// must not expose bytes retained by the previous owner. Discard before
-	// publishing the allocation; all aliases then observe the same fresh pages.
-	if (!DiscardBackingUnlocked(candidate, len))
-	{
-		return false;
-	}
-
-	AllocatedBlock block {};
-	block.size        = len;
-	block.start_addr  = candidate;
-	block.memory_type = memory_type;
-
-	const auto insert_pos = std::lower_bound(m_allocated.begin(), m_allocated.end(), block.start_addr,
-	                                         [](const AllocatedBlock& existing, uint64_t start) { return existing.start_addr < start; });
-	m_allocated.InsertAt(static_cast<uint32_t>(insert_pos - m_allocated.begin()), block);
-
-	*phys_addr_out = candidate;
-	return true;
 }
 
 bool PhysicalMemory::IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len, int* memory_type) const
@@ -1151,14 +1253,38 @@ bool PhysicalMemory::IsDirectReleasePendingUnlocked(uint64_t start, uint64_t siz
 	                   { return start < pending.start + pending.size && pending.start < end; });
 }
 
-bool PhysicalMemory::Release(uint64_t start, size_t len)
+bool PhysicalMemory::Release(uint64_t start, size_t len, uint64_t retire_ticket, const std::vector<KernelGpuMappingRange>& gpu_ranges)
 {
 	if (len == 0 || start > std::numeric_limits<uint64_t>::max() - len)
 	{
 		return false;
 	}
 
-	Core::LockGuard lock(m_mutex);
+	uint64_t waited_ticket = 0;
+	for (;;)
+	{
+		if (retire_ticket != 0)
+		{
+			RetireReadyRanges(waited_ticket);
+		}
+		uint64_t oldest = 0;
+		{
+			Core::LockGuard lock(m_mutex);
+			// The retiring list is hard-bounded: the check and the insertion share one lock hold.
+			if (retire_ticket == 0 || !m_retiring.IsFull())
+			{
+				return ReleaseUnlocked(start, len, retire_ticket, gpu_ranges);
+			}
+			(void)m_retiring.OldestTicketIn(0, UINT64_MAX, &oldest);
+		}
+		// The GPU may be waiting on a thread that needs the lock, so it is awaited outside it.
+		GetGpuMappingLifecyclePort().WaitTicket(oldest);
+		waited_ticket = oldest;
+	}
+}
+
+bool PhysicalMemory::ReleaseUnlocked(uint64_t start, size_t len, uint64_t retire_ticket, const std::vector<KernelGpuMappingRange>& gpu_ranges)
+{
 	if (!IsAllocatedRangeCoveredUnlocked(start, len))
 	{
 		return false;
@@ -1262,7 +1388,10 @@ bool PhysicalMemory::Release(uint64_t start, size_t len)
 
 	const bool still_mapped = std::any_of(m_mapped.begin(), m_mapped.end(), [start, end](const MappedBlock& mapped)
 	                                      { return mapped.phys_addr < end && mapped.phys_addr + mapped.map_size > start; });
-	if (!still_mapped)
+	if (retire_ticket != 0)
+	{
+		m_retiring.Add({start, len, retire_ticket, !still_mapped, gpu_ranges});
+	} else if (!still_mapped)
 	{
 		(void)DiscardBackingUnlocked(start, len);
 	}
@@ -2986,6 +3115,8 @@ static int release_direct_memory(int64_t start, size_t len)
 	std::unique_lock<std::recursive_mutex> lifecycle_lock(g_gpu_mapping_lifecycle_mutex);
 
 	Vector<PhysicalMemory::MappedBlock> mappings;
+	uint64_t                            retire_ticket = 0;
+	std::vector<KernelGpuMappingRange>  retire_ranges;
 	const bool next_gen = Config::IsNextGen();
 	switch (g_physical_memory->ClaimDirectRelease(static_cast<uint64_t>(start), len, &mappings))
 	{
@@ -3041,14 +3172,15 @@ static int release_direct_memory(int64_t start, size_t len)
 			}
 		}
 		if (!invalidation_ranges.IsEmpty() &&
-		    !GetGpuMappingLifecyclePort().InvalidateRanges(invalidation_ranges.GetData(), invalidation_ranges.Size()))
+		    !GetGpuMappingLifecyclePort().InvalidateRangesDeferred(invalidation_ranges.GetData(), invalidation_ranges.Size(), &retire_ticket))
 		{
 			g_physical_memory->AbortDirectRelease(static_cast<uint64_t>(start), len);
 			return KERNEL_ERROR_EBUSY;
 		}
+		retire_ranges.assign(invalidation_ranges.GetData(), invalidation_ranges.GetData() + invalidation_ranges.Size());
 	}
 
-	bool result = g_physical_memory->Release(static_cast<uint64_t>(start), len);
+	bool result = g_physical_memory->Release(static_cast<uint64_t>(start), len, retire_ticket, retire_ranges);
 
 	if (!result)
 	{

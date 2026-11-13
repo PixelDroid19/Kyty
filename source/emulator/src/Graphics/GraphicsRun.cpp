@@ -345,6 +345,97 @@ void Gpu::WaitLocked()
 	}
 }
 
+uint64_t Gpu::TakeReleaseTicket()
+{
+	ReleaseTicket ticket;
+	const auto    note_graphics = [&](GraphicsRing* ring)
+	{
+		const uint64_t enqueued = ring->EnqueuedBatches();
+		if (!ring->IsRetired(enqueued))
+		{
+			ticket.graphics.emplace_back(ring, enqueued);
+		}
+	};
+	note_graphics(m_gfx_ring);
+	for (auto* ring: m_agc_async_ring)
+	{
+		if (ring != nullptr)
+		{
+			note_graphics(ring);
+		}
+	}
+	for (auto* ring: m_compute_ring)
+	{
+		if (ring == nullptr)
+		{
+			continue;
+		}
+		const uint64_t enqueued = ring->EnqueuedBatches();
+		if (!ring->IsRetired(enqueued))
+		{
+			ticket.compute.emplace_back(ring, enqueued);
+		}
+	}
+	if (ticket.graphics.empty() && ticket.compute.empty())
+	{
+		return 0;
+	}
+
+	std::lock_guard<std::mutex> lock(m_ticket_mutex);
+	PruneRetiredTicketsLocked();
+	ticket.id = ++m_last_ticket_id;
+	m_release_tickets.push_back(std::move(ticket));
+	return m_last_ticket_id;
+}
+
+bool Gpu::IsReleaseTicketFinished(const ReleaseTicket& ticket)
+{
+	return std::all_of(ticket.graphics.begin(), ticket.graphics.end(),
+	                   [](const auto& entry) { return entry.first->IsRetired(entry.second); }) &&
+	       std::all_of(ticket.compute.begin(), ticket.compute.end(),
+	                   [](const auto& entry) { return entry.first->IsRetired(entry.second); });
+}
+
+void Gpu::PruneRetiredTicketsLocked()
+{
+	while (!m_release_tickets.empty() && IsReleaseTicketFinished(m_release_tickets.front()))
+	{
+		m_retired_ticket_id = m_release_tickets.front().id;
+		m_release_tickets.pop_front();
+	}
+}
+
+bool Gpu::IsReleaseTicketRetired(uint64_t ticket)
+{
+	std::lock_guard<std::mutex> lock(m_ticket_mutex);
+	PruneRetiredTicketsLocked();
+	return ticket <= m_retired_ticket_id;
+}
+
+void Gpu::WaitReleaseTicket(uint64_t ticket)
+{
+	// Rings are never destroyed, so the entry can be waited on without holding the ticket mutex.
+	ReleaseTicket pending;
+	{
+		std::lock_guard<std::mutex> lock(m_ticket_mutex);
+		const auto                  it = std::find_if(m_release_tickets.begin(), m_release_tickets.end(),
+		                                              [ticket](const ReleaseTicket& entry) { return entry.id == ticket; });
+		if (it == m_release_tickets.end())
+		{
+			return;
+		}
+		pending = *it;
+	}
+	for (const auto& [ring, count]: pending.graphics)
+	{
+		ring->WaitRetired(count);
+	}
+	for (const auto& [ring, count]: pending.compute)
+	{
+		ring->WaitRetired(count);
+	}
+}
+
 bool Gpu::SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value)
 {
 	CommandProcessor* owner = nullptr;
@@ -766,6 +857,21 @@ void CommandProcessor::WaitSubmission(SubmissionId submission)
 	PublishCompletedSubmissions();
 	WaitUntilPublishedUnlessReentrant(submission);
 	(void)GuestDeviceAddressAcknowledgeReader(submission);
+}
+
+bool CommandProcessor::IsSubmissionComplete(SubmissionId submission)
+{
+	EXIT_IF(!OwnsSubmissionQueue(submission));
+	Core::LockGuard lock(m_mutex);
+
+	uint32_t slot = 0;
+	if (m_submission_slots.FindSlot(submission, &slot) != GpuSubmissionResult::Success)
+	{
+		return true;
+	}
+	GpuSubmissionState state = GpuSubmissionState::Completed;
+	require_submission_success(m_submission_slots.GetState(submission, &state), "GetState", m_queue, slot);
+	return state == GpuSubmissionState::Completed;
 }
 
 bool CommandProcessor::SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value)
@@ -1461,6 +1567,8 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 	const auto decode_completion = completion == GraphicsSubmissionCompletion::QueuedGraphicsInterrupt
 	                                   ? std::make_shared<CmdBatch::DecodeCompletion>()
 	                                   : nullptr;
+	std::shared_ptr<CmdBatch::DecodeCompletion> previous_follow_completion;
+	bool                                        returns_before_own_decode = false;
 	{
 		Core::LockGuard lock(m_mutex);
 
@@ -1494,18 +1602,44 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 		{
 			decode_completion->Signal();
 		}
+		if (decode_completion != nullptr)
+		{
+			buf.follow_completion = std::make_shared<CmdBatch::DecodeCompletion>();
+			if (m_decode_released)
+			{
+				buf.follow_completion->Signal();
+			}
+			previous_follow_completion   = m_decode_released ? nullptr : m_previous_follow_completion;
+			m_previous_follow_completion = buf.follow_completion;
+			// Only a batch whose memory waits are all produced inside itself can leave its decode running: any
+			// other wait may depend on a CPU store the guest makes after this call returns.
+			returns_before_own_decode = BatchProducesItsOwnWaits(ScanBatchMemoryWaits(buf.draw_buffer.data, buf.draw_buffer.num_dw),
+			                                                     ScanBatchMemoryWaits(buf.const_buffer.data, buf.const_buffer.num_dw));
+			buf.returns_before_decode = returns_before_own_decode;
+		}
 
 		m_cmd_batches.Add(buf);
+		m_enqueued_batches++;
 		// A drain must see queued work before the worker wakes to dequeue it.
 		m_idle = false;
 
 		m_cond_var.Signal();
 	}
 
-	if (decode_completion != nullptr)
+	if (decode_completion == nullptr)
 	{
-		decode_completion->Wait();
+		return;
 	}
+	// Depth 1: the submitter proceeds once the previous batch has decoded, so one batch stays in flight.
+	if (returns_before_own_decode)
+	{
+		if (previous_follow_completion != nullptr)
+		{
+			previous_follow_completion->Wait();
+		}
+		return;
+	}
+	decode_completion->Wait();
 }
 
 // The command processor reads through the GPU's contiguous virtual space, so the range may cross from one
@@ -1640,6 +1774,31 @@ void GraphicsRing::WaitForIdle()
 	}
 }
 
+bool GraphicsRing::IsRetired(uint64_t count) const
+{
+	SubmissionId submission;
+	return m_finished_batches.load() >= count && (!m_batch_ends.Find(count, &submission) || !m_cp->OwnsSubmissionQueue(submission) ||
+	                                              m_cp->IsSubmissionComplete(submission));
+}
+
+// Waits like WaitForIdle does for the same batches: interruptible at safe points, and for as long as a batch
+// suspended on a guest store keeps running. Nothing here releases such a batch early.
+void GraphicsRing::WaitRetired(uint64_t count)
+{
+	{
+		Core::LockGuard lock(m_mutex);
+		while (m_finished_batches.load() < count)
+		{
+			Kernel::PthreadInterruptibleWait(&m_finished_cond_var, &m_mutex);
+		}
+	}
+	SubmissionId submission;
+	if (m_batch_ends.Find(count, &submission) && m_cp->OwnsSubmissionQueue(submission))
+	{
+		m_cp->WaitSubmission(submission);
+	}
+}
+
 bool GraphicsRing::IsIdle()
 {
 	Core::LockGuard lock(m_mutex);
@@ -1764,6 +1923,11 @@ void GraphicsRing::SetDecodeReleased(const CmdBatch* current, bool released)
 	{
 		return;
 	}
+	// The suspended batch's follower is released too, or the next early-returning submitter would wait on it.
+	if (current->follow_completion != nullptr)
+	{
+		current->follow_completion->Signal();
+	}
 	// The suspended batch keeps waiting: its completion interrupt follows the
 	// packets after the wait, so the CP can only consume them once the value
 	// lands. Its submitter must not observe completion first, or the title can
@@ -1775,6 +1939,7 @@ void GraphicsRing::SetDecodeReleased(const CmdBatch* current, bool released)
 		const auto& queued = m_cmd_batches.At(index);
 		if (queued.decode_completion != nullptr)
 		{
+			queued.follow_completion->Signal();
 			queued.decode_completion->Signal();
 		}
 	}
@@ -1846,6 +2011,7 @@ void GraphicsRing::ThreadBatchRun(void* data)
 	for (;;)
 	{
 		CmdBatch buf = ring->GetCmdBatch();
+		SubmissionId batch_submission;
 
 		const ::Kyty::Emulator::Ports::ScopedProgress progress(::Kyty::Emulator::Ports::ProgressLane::GraphicsCommands);
 		cp->RunLock();
@@ -1920,6 +2086,13 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				const bool host_producer = !SuspendedRunsHaveGpuProducer(cp, constant_wait, draw_wait);
 				if (host_producer)
 				{
+					const auto* wait = constant_wait != nullptr ? constant_wait : draw_wait;
+					if (buf.returns_before_decode)
+					{
+						EXIT("Batch that returned before its decode suspended on a wait no submitted work produces: address=0x%016" PRIx64
+						     " size=%" PRIu32 "\n",
+						     reinterpret_cast<uint64_t>(wait->address), static_cast<uint32_t>(wait->size));
+					}
 					ring->SetDecodeReleased(&buf, true);
 				}
 				WaitForSuspendedRuns(cp, constant_wait, draw_wait);
@@ -1945,12 +2118,14 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				cp->Flip();
 				flip_submission = cp->BufferFlush();
 			}
+			batch_submission = flip_submission;
 			// A consolidated wait's label is published with the submission, like
 			// any other completion payload of this batch.
 			const bool consolidated_wait = cp->TakeConsolidatedPlainWait();
 			if (buf.decode_completion != nullptr)
 			{
 				buf.decode_completion->Signal();
+				buf.follow_completion->Signal();
 			}
 			if (!consolidated_wait && !GraphicsBatchCanDeferSubmissionCompletion(cp->CompletionCallbackSources()) &&
 			    GraphicsBatchNeedsSubmissionCompletion(cp->CompletionCallbackIssued()))
@@ -1963,6 +2138,13 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			ring->m_async_completion_pending = true;
 		}
 		cp->RunUnlock();
+
+		{
+			Core::LockGuard lock(ring->m_mutex);
+			ring->m_batch_ends.Note(ring->m_finished_batches.load() + 1u, batch_submission);
+			ring->m_finished_batches++;
+			ring->m_finished_cond_var.SignalAll();
+		}
 	}
 }
 
@@ -2012,12 +2194,16 @@ void ComputeRing::ThreadRun(void* data)
 				continue;
 			}
 			ring->m_idle = true;
+			// An idle ring has consumed every doorbell, or dropped them because it was deactivated.
+			ring->m_finished_doorbells.store(ring->m_enqueued_doorbells.load());
+			ring->m_finished_cond_var.SignalAll();
 			ring->m_idle_cond_var.Signal();
 			ring->m_cond_var.Wait(&ring->m_mutex);
 		}
 
 		ring->m_idle = false;
 
+		const uint64_t consumed_doorbells = ring->m_enqueued_doorbells.load();
 		auto  pos       = *ring->m_read_ptr_addr;
 		auto  num_dw    = ring->m_run_offset_dw;
 		auto  next_pos  = pos + num_dw;
@@ -2037,6 +2223,7 @@ void ComputeRing::ThreadRun(void* data)
 		}
 
 		ring->m_mutex.Unlock();
+		SubmissionId run_submission;
 
 		const ::Kyty::Emulator::Ports::ScopedProgress progress(::Kyty::Emulator::Ports::ProgressLane::ComputeCommands);
 		cp->RunLock();
@@ -2067,15 +2254,18 @@ void ComputeRing::ThreadRun(void* data)
 				run_source_data = nullptr;
 			}
 
-			cp->BufferFlush();
+			run_submission = cp->BufferFlush();
 		}
 		cp->RunUnlock();
 
+		ring->m_batch_ends.Note(consumed_doorbells, run_submission);
 		ring->m_mutex.Lock();
 
 		ring->m_completion_pending = true;
 		ring->m_run_offset_dw -= num_dw;
 		*ring->m_read_ptr_addr = next_pos % ring_size;
+		ring->m_finished_doorbells.store(consumed_doorbells);
+		ring->m_finished_cond_var.SignalAll();
 	}
 }
 
@@ -2128,6 +2318,7 @@ void ComputeRing::DingDong(uint32_t offset_dw)
 	uint32_t advance = (offset_dw + (offset_dw < m_last_dingdong_offset_dw ? m_ring_size_dw : 0)) - m_last_dingdong_offset_dw;
 
 	m_run_offset_dw += advance;
+	m_enqueued_doorbells++;
 
 	m_last_dingdong_offset_dw = offset_dw;
 
@@ -2145,6 +2336,29 @@ void ComputeRing::Done()
 		}
 	}
 	m_done = true;
+}
+
+bool ComputeRing::IsRetired(uint64_t count) const
+{
+	SubmissionId submission;
+	return m_finished_doorbells.load() >= count && (!m_batch_ends.Find(count, &submission) || !m_cp->OwnsSubmissionQueue(submission) ||
+	                                                m_cp->IsSubmissionComplete(submission));
+}
+
+void ComputeRing::WaitRetired(uint64_t count)
+{
+	{
+		Core::LockGuard lock(m_mutex);
+		while (m_finished_doorbells.load() < count)
+		{
+			Kernel::PthreadInterruptibleWait(&m_finished_cond_var, &m_mutex);
+		}
+	}
+	SubmissionId submission;
+	if (m_batch_ends.Find(count, &submission) && m_cp->OwnsSubmissionQueue(submission))
+	{
+		m_cp->WaitSubmission(submission);
+	}
 }
 
 void ComputeRing::WaitForIdle()
@@ -3665,6 +3879,27 @@ bool GraphicsRunAreSubmitsAllowed()
 	EXIT_IF(g_gpu == nullptr);
 
 	return g_gpu->AreSubmitsAllowed();
+}
+
+uint64_t GraphicsRunTakeReleaseTicket()
+{
+	EXIT_IF(g_gpu == nullptr);
+
+	return g_gpu->TakeReleaseTicket();
+}
+
+bool GraphicsRunIsReleaseTicketRetired(uint64_t ticket)
+{
+	EXIT_IF(g_gpu == nullptr);
+
+	return g_gpu->IsReleaseTicketRetired(ticket);
+}
+
+void GraphicsRunWaitReleaseTicket(uint64_t ticket)
+{
+	EXIT_IF(g_gpu == nullptr);
+
+	g_gpu->WaitReleaseTicket(ticket);
 }
 
 bool GraphicsRunWithQuiescedSubmissions(GraphicsRunQuiescedAction action, void* data)
