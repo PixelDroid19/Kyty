@@ -607,3 +607,8 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   one run each, inside noise); frame time median 44.0 against 48.1 ms, 95th percentile 67.8
   against 53.1 ms. The early return moves the wait into each release, which now waits for the
   whole queue. B1 is not an improvement without an A3 that skips the queued batches.
+- **Ceiling of the early return with the A3 probe** (unsafe, measurement only): 25.08 fps, frame
+  time median 38.8 ms and 95th percentile 45.9 ms, 5,431 draws per frame, against 20.53 fps serial
+  on the same build (one run each). 11,857 releases skipped the drain and 554 drained (7.5 s of
+  ring idle, maximum 126 ms). The gain needs an A3 that does not wait for the queued batches and
+  is safe by construction; the probe's predicate is not that.
