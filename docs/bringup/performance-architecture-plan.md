@@ -672,8 +672,9 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   generation over interior bytes the edges do not cover.
   - `PPSA17221 - Minecraft`, same route and scene (5,457 draws per frame): fence waits 6.1 to
     1.9 ms per frame, 26.0 fps. The CP time hardly moved: runs that kept the waits had CP
-    37.8-38.0 ms against 37.4. Where the removed wait time went is open; it is not yet known
-    whether `fence_wait_ns` lies inside the CP run timer.
+    37.8-38.0 ms against 37.4. `fence_wait_ns` is not CP time: it is recorded by every thread
+    that waits on a command buffer fence (`GraphicsRenderCommandBuffer.cpp`, the fence wait in
+    the command buffer), so most of the removed waits were off the CP thread.
   - `PPSA21567 - ASTRO BOT` dunes: 19.93 fps, fence 7.5 ms per frame, CP 41.2 ms, the same as
     before. `playable-regression` on `PPSA06084 - Superliminal`: 12 of 15 gates pass; the 3
     failures were already failing before.
