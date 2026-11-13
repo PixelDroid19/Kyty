@@ -69,8 +69,12 @@ submit after it. A hand-made change was reported in every window.
   a frame), decode 92 % of the span including its waits on the GPU, guest gap median 0.04 ms, at
   most x1.08. With each release drain on the submitting thread waiting for the batch in flight (a
   third run: 979 drains in 671 of 827 gaps, starting at a median 0.82 of the gap), the sandbox
-  title keeps x1.29 of its x1.42, so the plan builds one batch ahead before the release path.
-  Estimates, not measured frame rates (`docs/bringup/performance-architecture-plan.md`, section 6).
+  title was estimated to keep x1.29 of its x1.42. A probe that made the submit wait for the previous
+  batch's decode (temporary, not committed) disproved that: at the same scene the frame rate did not
+  move (19-23 against 18-22 fps), because the release drains on the submitting thread then waited for
+  the batch in flight and its host GPU tail, 22.4 ms of each guest gap against 0.9 ms, while the
+  decode grew from 33-34 to 37-42 ms. The release path (workstream A) goes first again; that it is
+  enough is not shown (`docs/bringup/performance-architecture-plan.md`, section 6).
 
 ## Performance plan, stage 0: release census and draw-front coverage (2026-11-12, measured)
 

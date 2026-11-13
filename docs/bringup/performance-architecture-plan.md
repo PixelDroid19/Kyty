@@ -1,6 +1,6 @@
 # Performance architecture plan (2026-11-12)
 
-Status: plan, stage 0, B0.2 and a one-batch-ahead estimate measured (section 6), next B1. Maintainer decision of 2026-11-12:
+Status: plan, stage 0, B0.2 and a one-batch-ahead probe measured (section 6), next A2 and A3. Maintainer decision of 2026-11-12:
 build the changes below, and the 2x build gate of `parallel-recording-design.md` is withdrawn.
 Every gain in this document is an estimate until its stage is measured. Each stage names its
 measurement and its correctness gate.
@@ -53,7 +53,7 @@ only where Kyty's own traces agree.
 
 ## 3. Workstreams
 
-### A. Memory release without a full drain (after B1 to B3)
+### A. Memory release without a full drain (first)
 
 - **Problem.** `release_direct_memory` (`Memory.cpp`) reaches `GraphicsInvalidateGpuMappingRanges`,
   which runs under `Gpu::RunQuiesced`; `Gpu::WaitLocked` drains every ring and the host GPU. The
@@ -70,9 +70,10 @@ only where Kyty's own traces agree.
   once and keeps the views that map it; the backing goes only when no view maps it. Without the
   drain a late write can land in a range the guest has allocated again. No test over memory objects
   and device-address ranges can therefore show that a release is safe without the drain.
-- **Order.** Planned first; amended 2026-11-12 (section 6, timeline): with one batch in flight the
-  drains start late in the guest's gap and leave an estimated x1.29 of the x1.42, so B1 to B3 go
-  first and A3 follows, measured against a submit that returns early.
+- **Order.** First. A timeline estimate briefly put B1 ahead; a probe with one batch in flight
+  (section 6) disproved it: the release drains on the submitting thread took 22 ms of each guest gap
+  and the frame rate did not move. A3 is necessary for any gain from B; that it is sufficient is not
+  shown.
 - **A1, measure.** Per release, one run per title: size, whether a memory object, a device-address
   entry or an import window overlaps the range, whether the command processor is inside a host read
   of the range, and whether the next mapping reuses the addresses before the queued batches end.
@@ -109,7 +110,8 @@ only where Kyty's own traces agree.
   3. One batch ahead: the frame time, and whether the guest starts its next
      frame earlier. This is not established for any title; the fighting title waited on an event
      flag instead (`docs/titles/anime-fighter.md`). The serial submit's timeline (section 6)
-     estimates x1.43 for the sandbox title and at most x1.08 for the robot platformer.
+     estimated x1.43 for the sandbox title and at most x1.08 for the robot platformer; a probe
+     with one batch in flight measured no gain in the sandbox title, held by the release drains.
 - **B1, capture.** The draw front becomes the batch's capture: register state and descriptor words
   gathered before the submit returns, plus a copy, in a bounded arena owned by the batch, of each
   class B0 finds rewritten. A batch over the bound stays serial. Stage 0 (section 6) amends this:
@@ -126,7 +128,8 @@ only where Kyty's own traces agree.
   kept. Each path is listed and checked before B2 is enabled.
 - **Estimate.** Sandbox world: the frame becomes the larger of guest time plus capture and command
   processing, about 28-36 fps from 20. Section 6 narrows it to at most about 28 fps, bounded by the
-  command processor, with the capture costed at the draw front's replay time.
+  command processor, with the capture costed at up to 0.4 of the decode time (the draw front's
+  replay time does not cover the vertex and index analysis; section 6).
 
 ### C. Staged command processing
 
@@ -193,7 +196,7 @@ only where Kyty's own traces agree.
 ## 4. Order
 
 1. Stage 0: A1, B0.1, E2 and F0, four short runs.
-2. B0.2 and the one-batch-ahead timeline (done), then B1 to B3, then A2 and A3, then C, then D.
+2. B0.2, the one-batch-ahead timeline and probe (done), then A2 and A3, then B1 to B3, then C, then D.
 3. E1 and F1 are small and independent; they go in between.
 
 ## 5. Verification of every stage
@@ -350,8 +353,10 @@ intervals, sooner.
   unbounded early return) does not reproduce within two batches here: no descriptor it read had
   changed two batches ahead. What it read then remains unexplained by this measurement.
 - **Consequence for B1.** One batch ahead, the capture is the analysis that finds the batch's
-  vertex and index copies (the draw front's replay to the batch end, about 14 ms per frame in the
-  sandbox title by the replay time above) and those copies. The release drain still waits for the
+  vertex and index copies and those copies. The draw front does not do that analysis: it computes
+  the shader input layout and the shader ids (`GraphicsRenderPrepareIndexedDrawInputs`), reading
+  descriptor and attribute tables, while the index scan and the vertex and index copies run on the
+  command processor. Its replay time above is not the capture's cost. The release drain still waits for the
   in-flight decode, about 1.5 times a frame in the sandbox title, priced by the timeline below.
 
 ### Per-batch timeline of the serial submit and a one-batch-ahead estimate
@@ -387,16 +392,31 @@ of the decode time; it ignores the release drain, which also waits for the in-fl
   quiesce's entry and exit with its thread). The submit came from one thread (828 of 829 submits).
   In 40 s, 979 quiesces ran on that thread, in 671 of 827 guest gaps, 0.22 ms median each; none ran
   inside a submit. They start late in the gap, at a median 0.82 of its length. Replayed with each
-  such drain waiting for the batch in flight, one batch ahead gives x1.29 instead of x1.42 in the
-  same run. Another 115 quiesces ran on other threads (0.16 ms median, 10 ms mean); they hold
+  such drain waiting for the batch in flight, one batch ahead gave an estimated x1.29 instead of
+  x1.42 in the same run; the probe below disproved that estimate. Another 115 quiesces ran on other threads (0.16 ms median, 10 ms mean); they hold
   submissions back only while they run and are not modelled. A hand-made drain at the start of every
   gap gives x1.00 and one at its end x1.41, so the replay engages.
-- **Consequence.** The decision rule set before the runs was a gain of at least x1.2 in the sandbox
-  title for one batch ahead to be built first; it passes with the drains blocking (x1.29), so B1 to
-  B3 come before A3. It is an estimate, not a frame rate: it assumes the guest does not wait in its
-  gap on work of the batch in flight, as the fighting title waited on an event flag. With B1 in
-  place, A3's open items (a queued batch reading a released range, address reuse before the queued
-  batches end) become measurable.
+- **Probe, one batch in flight** (one more sandbox run; a temporary change, not committed, made a
+  graphics submit wait for the previous batch's decode instead of its own, with the same stamps).
+  The player was killed about 9 s after the world loaded (no input route, night) and the death
+  screen draws half as much, so only the 8 s before it compare with the serial runs at the same
+  scene (5,200-5,800 draws a frame): 19-23 fps against 18-22, no gain. Over those 8 s against the
+  serial run: decode 37-42 ms against 33-34 ms (command-processor time 38.4 against 33.6 ms a frame,
+  fence waits 1.5 against 0.3 ms); guest gap 47.2 ms against 14.9 ms; submit 0-4 ms against 34 ms.
+  Quiesces on the submitting thread: 390 against 210, 9.5 ms mean against 0.7 ms, 22.4 ms of each
+  gap against 0.9 ms. The long ones end a median 4.3 ms after the in-flight batch's decode signal:
+  they wait for that decode and its tail on the host GPU. Per gap (medians), 11.8 ms of guest work
+  come before the first drain, about 30 ms of drains follow, then 2.2 ms; the guest's own work
+  outside the drains stays about the same (15.3 against about 14 ms). Why the quiesce count doubled
+  was not found.
+- **Consequence.** The x1.29 estimate is disproved: it ended each drain at the decode's end and kept
+  the serial decode and gap lengths. One batch in flight alone gains nothing in this title, and the
+  release path (A3) is necessary before B can gain; that A3 is sufficient is not shown. With no
+  drain waiting, the frame would still follow the decode, now 37-42 ms, about 24-27 fps at most, so
+  reaching 30 in this title also needs a cheaper decode (C, D). A3 goes first again.
+- **Open, unattributed.** On the death screen of the probe run the text lacks letters (the killer's
+  name and the respawn button). No serial run reached that screen, so whether one batch in flight
+  caused it is not known; it is the first sign that the reads one batch ahead puts at risk are real.
 
 ### E2, reported output size (excluded for the robot platformer)
 

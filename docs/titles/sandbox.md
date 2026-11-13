@@ -22,6 +22,12 @@ Intel Arc A770, two runs with a temporary diagnostic (not committed).
   the command processors' `SubmitAndWait` 0.20 ms per frame, the longest ring wait 29.9 ms. The draw
   front's replay takes 2.88 us per prepared record, 14.3 ms per frame against 35.3 ms of command
   processor, at 20.2 fps.
+- **One batch in flight (probe, temporary, not committed).** The submit waited for the previous
+  batch's decode instead of its own. In the 8 s at the same scene the frame rate stayed at 19-23 fps:
+  the release drains on the submitting thread waited for the batch in flight, 22.4 ms of each guest
+  gap. The player was then killed (no input, night). **Open:** on that death screen the text lacks
+  letters (the killer's name, the respawn button); no serial run reached that screen, so the cause is
+  not attributed.
 
 ## Sandbox title: shader inputs of indexed draws prepared ahead of the command processor (2026-11-12, built)
 
