@@ -1,6 +1,6 @@
 # Performance architecture plan (2026-11-12)
 
-Status: plan, stage 0, B0.2 and a one-batch-ahead probe measured (section 6), next A2 and A3. Maintainer decision of 2026-11-12:
+Status: plan, stage 0, B0.2 and the one-batch-ahead probes measured (section 6); B1 and A3 on hold, next C and D. Maintainer decision of 2026-11-12:
 build the changes below, and the 2x build gate of `parallel-recording-design.md` is withdrawn.
 Every gain in this document is an estimate until its stage is measured. Each stage names its
 measurement and its correctness gate.
@@ -53,7 +53,7 @@ only where Kyty's own traces agree.
 
 ## 3. Workstreams
 
-### A. Memory release without a full drain (first)
+### A. Memory release without a full drain (on hold, section 6)
 
 - **Problem.** `release_direct_memory` (`Memory.cpp`) reaches `GraphicsInvalidateGpuMappingRanges`,
   which runs under `Gpu::RunQuiesced`; `Gpu::WaitLocked` drains every ring and the host GPU. The
@@ -91,7 +91,7 @@ only where Kyty's own traces agree.
 - **Gate.** The strict regression set; a unit test for a release between two queued batches; a
   hand-made access after release that the check must report.
 
-### B. A submit returns when its batch's guest reads are done
+### B. A submit returns when its batch's guest reads are done (on hold, section 6)
 
 - **Contract kept.** The guest gets control back only after every read its batch makes of memory
   the guest may rewrite. Today that is the end of decode. The change moves those reads earlier. The
@@ -196,7 +196,7 @@ only where Kyty's own traces agree.
 ## 4. Order
 
 1. Stage 0: A1, B0.1, E2 and F0, four short runs.
-2. B0.2, the one-batch-ahead timeline and probe (done), then A2 and A3, then B1 to B3, then C, then D.
+2. B0.2, the one-batch-ahead timeline and probes (done); B1 and A3 are on hold (section 6). Next C, then D.
 3. E1 and F1 are small and independent; they go in between.
 
 ## 5. Verification of every stage
@@ -413,10 +413,68 @@ of the decode time; it ignores the release drain, which also waits for the in-fl
   the serial decode and gap lengths. One batch in flight alone gains nothing in this title, and the
   release path (A3) is necessary before B can gain; that A3 is sufficient is not shown. With no
   drain waiting, the frame would still follow the decode, now 37-42 ms, about 24-27 fps at most, so
-  reaching 30 in this title also needs a cheaper decode (C, D). A3 goes first again.
+  reaching 30 in this title also needs a cheaper decode (C, D). A3 went first again; the next
+  subsection puts A3 and B1 on hold.
 - **Open, unattributed.** On the death screen of the probe run the text lacks letters (the killer's
   name and the respawn button). No serial run reached that screen, so whether one batch in flight
-  caused it is not known; it is the first sign that the reads one batch ahead puts at risk are real.
+  caused it is not known. The next subsection shows it with the serial return as well.
+
+### Release drain skip, one batch in flight on the robot platformer, and a wait census
+
+Temporary changes on `6baccd17e`, not committed, one run each:
+
+- **Drain skip (A3 probe).** A release whose range overlaps no tracked GPU memory, fence label,
+  guest device-address table or VideoOut buffer skips the drain and runs only the label release and
+  the texture-layout invalidation. It is unsafe against late host writes (label stores and
+  end-of-pipe callbacks write through guest pointers when their submission is published), so it is
+  a measurement only.
+- **Wait rule.** A batch whose top-level command words hold a memory wait (`WAIT_REG_MEM` or the
+  32- and 64-bit memory-wait packets) or a nested command buffer keeps the serial return; any other
+  batch's submit waits for the previous batch's decode.
+- **Census, serial semantics.** For each graphics batch at submit entry: its top-level waits, and
+  whether each is already satisfied by the command processor's own compare. Later in the run:
+  whether its decode was released because no submitted GPU work writes the awaited value. In every
+  run, four hand-built packets (one wait satisfied, one unsatisfied, one with address 0, one with no
+  wait) were classified correctly.
+
+| Title, configuration | Result |
+| --- | --- |
+| Sandbox, one batch in flight with the drain skip | 9,552 of 10,095 releases skipped. At the same scene (5,380-5,455 draws a frame), 24.5-26.5 fps against 20.3-21.2 in the serial run, about x1.21. Command-processor time 38.7 ms a frame, fence waits 8.8 against 0.3 ms, GPU busy 76 %. Drains remain in 57 of 1,000 gaps, median 39.5 ms. |
+| Robot platformer, one batch in flight with the drain skip | Stops at boot: frame 1, no present. On the graphics ring, 5 batches are dequeued and 4 signalled. |
+| Robot platformer, one batch in flight only | Same stop. |
+| Robot platformer, wait rule, version that also released the suspended batch's own submitter | Same stop. |
+| Robot platformer, wait rule | Boots and plays: 3,599 presents at 145 s, 18,014 batches dequeued and signalled. No batch returned early. |
+| Sandbox, wait rule with the drain skip | No batch returned early (5,741 serial). Drains: 12,434 skipped, 827 run. In the 10 s before the player died: 17.8-20.2 fps at 5,290-5,450 draws a frame, against 20.6-21.0 serial. |
+| Robot platformer, census | 18,512 batches, each with at least one wait unsatisfied at entry (about 20 32-bit and 5 64-bit memory waits per batch). 3,083 (17 %) were released for a host-produced value. |
+| Sandbox, census | 5,659 batches, each with an unsatisfied wait at entry (about 64 32-bit memory waits per batch). None was released for a host-produced value. |
+
+- **Reading, robot platformer.** The stop has the signature of the one recorded on 2026-10-26
+  (`docs/titles/robot-platformer.md`, "A suspended submitter must not pass the command
+  processor"). There, a batch suspended on a CPU-written label must not return its own submitter
+  before decode passes the wait. One batch in flight returns that submitter before the decode even
+  reaches the wait. The two wait-rule runs are an A/B of that contract at this revision: with every
+  batch serial, releasing the suspended batch's own submitter stops the title, and keeping it boots
+  the title. The mechanism is inferred from the record: thread states and suspended waits were not
+  taken in these runs.
+- **Reading, census.** In neither title does any batch have its waits already satisfied at submit,
+  so no rule of that kind lets a batch return early. The sandbox title's waits all resolve without a
+  host-produced value (labels written by the GPU); in the robot platformer, 17 % of batches wait for
+  one. Only one kind of submit-time rule is left: predicting each wait's GPU producer, a release in a
+  batch already queued or in flight. It is neither built nor measured. Hardware returns from a
+  submit at once, so which ordering in Kyty makes the early return unsafe is still unidentified.
+- **Reading, drain skip alone.** With the serial return, the drain skip gave no gain in the 10 s
+  before the player died. That is one run, and the player was being hit. x1.21 came only from the
+  combination that stops the robot platformer.
+- **Consequence.** B1 (return before decode) and A3 (release without a drain) are on hold. The only
+  measured gain needs both, that combination breaks a recorded contract of the robot platformer, and
+  no submit-time rule found here separates the batches that may return early. The 8.8 ms of fence
+  waits a frame appear only with one batch in flight, so they are not a lead for the serial submit.
+  Next are C and D, the decode cost, which both titles need: the robot platformer is decode- and
+  GPU-bound, and B gives it at most x1.08.
+- **Missing letters.** The sandbox title's death screen lacked letters again in the run with the
+  serial return and the drain skip, so the defect is not tied to one batch in flight. No run without
+  a temporary change has reached that screen. A3 cannot ship until a clean build has been checked
+  there.
 
 ### E2, reported output size (excluded for the robot platformer)
 

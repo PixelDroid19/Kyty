@@ -6,6 +6,19 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: one batch in flight stops the boot (2026-11-12, probe, on hold)
+
+- **Observed.** A temporary change made a graphics submit wait for the previous batch's decode
+  instead of its own. The title stopped at frame 1 with no present, with or without the release-drain
+  skip. On the graphics ring, 5 batches were dequeued and 4 signalled.
+- **Contract.** It is the signature of the 2026-10-26 stop ("A suspended submitter must not pass
+  the command processor", below). Keeping serial every batch with a top-level memory wait boots the
+  title, but also releasing the suspended batch's own submitter at the host-producer release stops it
+  again. All 18,512 batches of a dunes run have a wait unsatisfied at submit entry, and 17 % are
+  released for a host-produced value, so no batch could return early. The mechanism is inferred from
+  the record; thread states were not taken.
+- **Record.** `docs/bringup/performance-architecture-plan.md`, section 6.
+
 ## Robot platformer: not running the programs that contain intersection instructions (2026-11-12, rejected)
 
 Intel Arc A770, Mesa 26.2.6 on Xe, `bbc559839` plus a temporary diagnostic (not committed) that returned

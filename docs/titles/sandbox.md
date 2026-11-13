@@ -28,6 +28,12 @@ Intel Arc A770, two runs with a temporary diagnostic (not committed).
   gap. The player was then killed (no input, night). **Open:** on that death screen the text lacks
   letters (the killer's name, the respawn button); no serial run reached that screen, so the cause is
   not attributed.
+- **One batch in flight with the release drain skipped (probe, temporary).** About x1.21 at the same
+  scene (24.5-26.5 against 20.3-21.2 fps). The combination stops `PPSA21567 - ASTRO BOT` at boot, so
+  it is on hold. In a later run with the serial return and the drain skip, the death screen lacked
+  the same letters, so the defect is not tied to one batch in flight. It is still unattributed, and no
+  run without a temporary change has reached that screen
+  (`docs/bringup/performance-architecture-plan.md`, section 6).
 
 ## Sandbox title: shader inputs of indexed draws prepared ahead of the command processor (2026-11-12, built)
 

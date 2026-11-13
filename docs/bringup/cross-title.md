@@ -73,8 +73,14 @@ submit after it. A hand-made change was reported in every window.
   batch's decode (temporary, not committed) disproved that: at the same scene the frame rate did not
   move (19-23 against 18-22 fps), because the release drains on the submitting thread then waited for
   the batch in flight and its host GPU tail, 22.4 ms of each guest gap against 0.9 ms, while the
-  decode grew from 33-34 to 37-42 ms. The release path (workstream A) goes first again; that it is
-  enough is not shown (`docs/bringup/performance-architecture-plan.md`, section 6).
+  decode grew from 33-34 to 37-42 ms. With the release drain also skipped for ranges that touch
+  nothing (temporary, unsafe against late host writes), the sandbox title gained about x1.21 at the
+  same scene, but the robot platformer then stops at boot (frame 1, no present), with the signature
+  of the 2026-10-26 stop: a batch suspended on a CPU-written label must not return its own
+  submitter. Every graphics batch in both titles has a memory wait unsatisfied at submit entry, so
+  no submit-time rule of that kind lets a batch return early. One batch in flight (B1) and the
+  release without a drain (A3) are on hold; the decode cost (C, D) is next
+  (`docs/bringup/performance-architecture-plan.md`, section 6).
 
 ## Performance plan, stage 0: release census and draw-front coverage (2026-11-12, measured)
 
