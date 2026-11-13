@@ -162,6 +162,19 @@ only where Kyty's own traces agree.
   and 0.27 us to execute each, so about 0.04 ms per frame stays on the ordering thread; RADV
   (Raphael iGPU) 0.11 and 0.02 us. Not measured: pipeline, descriptor-set and vertex-buffer
   rebinding per secondary, and the GPU cost of the split.
+- **Excluded: skipping repeated descriptor-set binds (2026-11-13).** 12 % of CP samples are in the
+  Vulkan driver, 7.1 % of them under the single `vkCmdDrawIndexed` in `RecordIndexedDraw`, where
+  ANV emits the state made dirty since the last draw. 92 % of graphics descriptor-set binds repeat
+  the set, layout and slot of the previous bind on the same command buffer; push constants keep
+  the layout in 95 % of draws but change bytes in 91 %. Skipping the repeated set binds (a
+  per-recording memory beside the pipeline one, cleared by every other graphics bind) left the
+  driver share at 12.1 % and the draw call at 6.0 % (1,634 samples, within sampling noise), and
+  per-draw time stayed inside the run spread (6.10-7.13 against 6.49-6.87 us). The draw-time cost
+  is not driven by the set binds. Built, measured and reverted.
+- **Run spread on this route.** The idle world route ends in a random death (night mobs), which
+  changes the scene from 5,400 to 2,700-4,200 draws per frame; whole-window fps is only
+  comparable between runs that stayed in the same scene, and the first 2-22 s after world entry
+  are the most stable window.
 - **Yardstick.** Per-second draw-processor time per draw (median of 30 one-second samples) moves
   about 3 % between two runs of the same code, against 16 % for whole-window CP time; levers in
   this workstream are judged on it.
