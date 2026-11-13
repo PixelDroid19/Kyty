@@ -139,6 +139,17 @@ only where Kyty's own traces agree.
   are measured again at today's 6.3 us before the build. With B in place command processing is the
   frame, so the factor reaches the frame rate.
 - Unmeasured: the cost of a secondary per segment of 22-26 draws and of the state each one re-emits.
+- **Classes again at today's cost (2026-11-13, 8cd64a97b).** `PPSA17221 - Minecraft` world,
+  world+10 to +40 s, 5,457 draws per frame, from the agent's stage counters (no temporary code):
+  CP 6.85 us per draw, draw processor 6.43. State setup 1.57 and command emission 1.01 (the
+  independent class, 2.58); pipeline setup 0.67 and descriptor finalize 0.45 (shared caches,
+  1.12); resource binding outside the descriptor stages, materialization and vertex and index
+  binds about 2.2 (ordered); about 0.55 unattributed. Moving only the independent class gives
+  about 6.85 / 4.3 = 1.6x of CP time, before the cost of secondaries and re-emitted state. The
+  part of state setup that prepares shader inputs stays ordered and is still not split out.
+- **Yardstick.** Per-second draw-processor time per draw (median of 30 one-second samples) moves
+  about 3 % between two runs of the same code, against 16 % for whole-window CP time; levers in
+  this workstream are judged on it.
 
 ### D. Per-draw binding floor
 
