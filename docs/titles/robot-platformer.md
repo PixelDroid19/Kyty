@@ -22,9 +22,11 @@ fix, strict runs, `KYTY_PRESENT_FPS_LIMIT=60`, native resolution, the user playi
   the range and the classification.
 - **First attempt rejected.** Classifying the whole layer returned unsupported, because the depth image that
   holds the first half overlaps it; that build exited at 270 s on the same layer (e77).
-- **Verified.** The user's run past the dunes exit held 321 s with no exit (e78); `kyty_unit_test` 2652
-  passed; the three CTest gates passed. Not verified: a recorded route to that scene, captures of the
-  layer's consumer, and other titles (no other title is known to reach this path).
+- **Checked.** A user-played run on the fixed build held 321 s with no exit (e78), where the previous build
+  exited at 270 s (e77); `kyty_unit_test` 2652 passed; the three CTest gates passed. Not confirmed: that the
+  mixed-layer branch ran in e78 (no counter was compiled in, and an earlier 893 s run also had no exit),
+  the image of the layer's consumer, a recorded route to that scene, and other titles. The mixed layer
+  re-uploads 4 MiB of guest bytes on every use; that cost was not measured.
 
 ## Robot platformer: Arc compute engine not usable for the compute queues (2026-11-13, excluded)
 
@@ -35,9 +37,11 @@ Same host and build with temporary counters (removed), dune route 105-145 s.
   (126), so every queue runs on the render engine: rcs 93-94 %, ccs 0 %.
 - Counted depth copies: D16 copies were recorded only on the graphics queue (7,966-8,794 per run), none on
   Kyty compute queues 0-7. The compute queues recorded 4,212-4,276 D32 copies per run, all from the texel-bit
-  reinterpretation copy (image to buffer to image, depth aspect on one side), which the specification
-  forbids on a queue without graphics unless the format declares the bit. No depth-to-depth image copy ran
-  on them.
+  reinterpretation copy (`vkCmdCopyImageToBuffer` then `vkCmdCopyBufferToImage` through a scratch
+  buffer); the source-side and destination-side counters were equal, so whether one or both sides were
+  depth is not settled. Either way a buffer copy with a depth aspect needs the format's copy-on-compute
+  bit on a queue without graphics. Of the image-to-image sites only the depth array layer copy was
+  counted (none on the compute queues).
 - Skipping only the D16 check (e75) left the gate closed on D32: 19.63 fps, rcs 93 %, ccs 0 %, against
   20.04 fps on the base (e71).
 - The BVH kernel `0x3666fa39` is recorded on the graphics queue (Kyty queue 8) and would stay on the render
