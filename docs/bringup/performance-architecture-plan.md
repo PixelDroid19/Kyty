@@ -225,6 +225,15 @@ only where Kyty's own traces agree.
   shadows and reflections). `Off` is not a strict mode and makes no compatibility claim, like a
   game patch. Expected saving in the robot platformer: about 1 ms of 24 per call of the heavy
   program, by the record above; it is built for the titles where traversal is the cost.
+- **F1 built and measured, excluded (2026-11-13).** `RayTracing = Off` (configuration,
+  `KYTY_RAY_TRACING`) translated the intersection so that no node is in bounds, the same answer
+  as an out-of-range node (four invalid children for a box, a miss for a triangle), with its own
+  translation-cache bit. `PPSA21567 - ASTRO BOT`, dunes route, third run with warm caches: 17.3
+  fps against 19.9 on the same build with `Guest`, and the dunes dark and hazy with neither the
+  robot nor the blocks drawn. The title's ray queries feed more than traced shadows: a miss
+  removes geometry and light from later passes, as the rejected skip did. The first two runs
+  after switching recompiled every program (the key bit applies to all of them) and fell behind
+  the timed route. Reverted; Kyty does not offer the option.
 - **Expectation, amended.** With the GPU cost of those programs gone entirely (the rejected skip)
   the dunes ran at 26.0 fps with 36.1 ms of command processing a frame. No GPU-side lever alone
   passes about 26-28 fps in that scene; the rest is command processing (workstreams B to D). The
