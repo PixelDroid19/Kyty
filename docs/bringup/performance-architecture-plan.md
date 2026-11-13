@@ -620,4 +620,6 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   physical address, so a deferred design keeps released ranges out of the free pool until the
   batches queued before the release retire, and allocates elsewhere meanwhile; the reserve that
   needs is the released bytes of about one queue depth (8.7-14.6 MiB per second released, A1).
-  Not built; how the guest's search windows constrain the allocator was not checked.
+  Not built. In a second run all 54,212 allocations came from `KernelAllocateMainDirectMemory`, which
+  takes no search window, and none from the windowed call, so this title leaves the address free.
+  Other titles were not checked.
