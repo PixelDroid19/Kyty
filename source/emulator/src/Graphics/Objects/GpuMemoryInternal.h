@@ -29,6 +29,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Graphics/GpuDeferredDeletionQueue.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GpuMemoryMaterializationCache.h"
 #include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -78,8 +79,10 @@ constexpr uint64_t ObjectsRelation(GpuMemoryObjectType b, OverlapType relation, 
 }
 
 // Hashes of a storage range's bytes on its partly covered first and last pages,
-// taken at a write-back re-baseline. They stand for the guest bytes there while
-// the object's generation and content sequence are the ones they were taken at.
+// taken when the object last matched guest memory (a write-back re-baseline, a guest
+// upload or creation from guest bytes). They stand for the guest bytes there while the
+// object's content sequence is the one they were taken at and, unless they cover the
+// whole range, its generation too.
 struct GpuMemoryStorageEdges
 {
 	uint64_t head_hash        = 0;
@@ -88,6 +91,11 @@ struct GpuMemoryStorageEdges
 	uint64_t content_sequence = 0;
 	bool     valid            = false;
 };
+
+// Takes the edges of [vaddr, vaddr + size) as guest memory holds them now; valid only if
+// the range stayed unchanged since `read` began.
+GpuMemoryStorageEdges GpuMemoryTakeStorageEdges(GpuMemoryObjectType type, uint64_t vaddr, uint64_t size,
+                                                const GpuDirtyReadObservation& read);
 
 // Content hash / wall-clock helpers shared by Create, Update, WriteBack.
 uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_t size);

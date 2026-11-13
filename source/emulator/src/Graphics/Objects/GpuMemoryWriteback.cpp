@@ -30,8 +30,6 @@
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
-#include <cstdio>
-#include <cstdlib>
 #include <iterator>
 #include <utility>
 #include <vector>
@@ -41,12 +39,14 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+#include <cstdio>
+#include <cstdlib>
 namespace Kyty::Libs::Graphics {
 
 // Hashes the range's bytes on its partly covered first and last pages (a range
 // inside one page is all head). They count only if the range stayed unchanged
 // since `read` while they were read.
-static GpuMemoryStorageEdges TakeStorageEdges(GpuMemoryObjectType type, uint64_t vaddr, uint64_t size, const GpuDirtyReadObservation& read)
+GpuMemoryStorageEdges GpuMemoryTakeStorageEdges(GpuMemoryObjectType type, uint64_t vaddr, uint64_t size, const GpuDirtyReadObservation& read)
 {
 	const auto&           tracker    = GpuDirtyPageTracker::Instance();
 	const uint64_t        page       = tracker.PageSize();
@@ -325,7 +325,7 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	o.storage_edges                 = {};
 	if (generation_baseline[0] && o.object.type == GpuMemoryObjectType::StorageBuffer && block.vaddr_num == 1)
 	{
-		o.storage_edges                  = TakeStorageEdges(o.object.type, block.vaddr[0], block.size[0], edge_read);
+		o.storage_edges                  = GpuMemoryTakeStorageEdges(o.object.type, block.vaddr[0], block.size[0], edge_read);
 		o.storage_edges.content_sequence = content_sequence;
 	}
 	const auto history_kind = o.object.type == GpuMemoryObjectType::StorageBuffer
@@ -670,21 +670,25 @@ bool GpuMemory::StorageIsWholeGuestContent(int heap_id, const Object& object) co
 // The tracker marks whole pages, so another object's write to a page this range
 // only partly covers reads as a guest write here. When no page wholly inside the
 // range changed, the range's bytes on its first and last pages decide: equal to
-// those kept at the last write-back re-baseline, the guest has not changed the
+// those kept when the object last matched guest memory, the guest has not changed the
 // range, and it is re-baselined as Update does after an unchanged compare.
 bool GpuMemory::ConfirmStorageEdgesUnchanged(int heap_id, int object_id)
 {
 	auto&       object = m_heaps[heap_id].objects[object_id];
 	auto&       info   = object.info;
 	const auto& edges  = info.storage_edges;
-	if (!edges.valid || edges.generation != info.dirty_generation[0] || edges.content_sequence != info.content_sequence ||
-	    !StorageContentTracked(heap_id, object))
-	{
-		return false;
-	}
 	const uint64_t vaddr   = object.block.vaddr[0];
 	const uint64_t size    = object.block.size[0];
 	auto&          tracker = GpuDirtyPageTracker::Instance();
+	// With no page wholly inside the range the edge hashes cover every byte, so they decide
+	// alone; otherwise the interior is only known unchanged since the generation they were taken at.
+	const uint64_t page            = tracker.PageSize();
+	const bool     edges_cover_all = vaddr + (page - vaddr % page) % page + page > vaddr + size;
+	if (!edges.valid || edges.content_sequence != info.content_sequence ||
+	    (!edges_cover_all && edges.generation != info.dirty_generation[0]) || !StorageContentTracked(heap_id, object))
+	{
+		return false;
+	}
 	if (LabelRangeHasFence(vaddr, size))
 	{
 		return false;
@@ -694,7 +698,7 @@ bool GpuMemory::ConfirmStorageEdgesUnchanged(int heap_id, int object_id)
 	{
 		return false;
 	}
-	const auto current = TakeStorageEdges(info.object.type, vaddr, size, read);
+	const auto current = GpuMemoryTakeStorageEdges(info.object.type, vaddr, size, read);
 	if (!current.valid || current.head_hash != edges.head_hash || current.tail_hash != edges.tail_hash)
 	{
 		return false;

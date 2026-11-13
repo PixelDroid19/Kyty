@@ -591,6 +591,15 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 				}
 			}
 		}
+		updated.storage_edges = {};
+		// The object now holds the guest bytes it was read from, so a later result may be published over
+		// them while the guest leaves them unchanged.
+		if (updated.dirty_registered && updated.object.type == GpuMemoryObjectType::StorageBuffer && h.block.vaddr_num == 1 &&
+		    dirty_read[0].tracked)
+		{
+			updated.storage_edges = GpuMemoryTakeStorageEdges(updated.object.type, h.block.vaddr[0], h.block.size[0], dirty_read[0]);
+			updated.storage_edges.content_sequence = updated.content_sequence;
+		}
 	}
 }
 
@@ -3278,6 +3287,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			for (int vi = 0; vi < created.block.vaddr_num; vi++)
 			{
 				created.info.dirty_generation[vi] = create_dirty_read[vi].generation;
+			}
+			if (created.info.object.type == GpuMemoryObjectType::StorageBuffer && created.block.vaddr_num == 1 &&
+			    created.info.content_origin == GpuMemoryContentOrigin::CpuUpload)
+			{
+				created.info.storage_edges = GpuMemoryTakeStorageEdges(created.info.object.type, created.block.vaddr[0], created.block.size[0],
+				                                                       create_dirty_read[0]);
+				created.info.storage_edges.content_sequence = created.info.content_sequence;
 			}
 		}
 		const auto dirty_publish_ns =
