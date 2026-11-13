@@ -623,3 +623,8 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   Not built. In a second run all 54,212 allocations came from `KernelAllocateMainDirectMemory`, which
   takes no search window, and none from the windowed call, so this title leaves the address free.
   Other titles were not checked.
+- **Each half alone.** Same build and scene (5,420-5,457 draws per frame), fps in 100-120 s and
+  120-140 s: serial 20.58 and 20.49, drain-skip probe alone 21.16 and 21.23, early return alone
+  21.41 (100-140 s), both 25.63 and 24.55. Each half alone is inside noise; together they gain
+  20-25 %. The early return lets the command processor run ahead, and without a skipped drain
+  every release waits for that lead. B1 and A3 ship together or not at all.
