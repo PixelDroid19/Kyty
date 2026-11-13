@@ -153,8 +153,9 @@ only where Kyty's own traces agree.
   cohorts. All of it reads live guest registers and memory in guest order. The truly independent
   part is the Vulkan recording: command emission (1.01 us per draw) and the pipeline, dynamic
   state, vertex, index and descriptor binds. In a profile of the same scene (1,682 CP samples),
-  12.5 % of the CP samples are inside the Vulkan driver. The realistic bound of workstream C is
-  therefore about 1.15-1.3x of CP time, not 1.6x, and the simplest form is one recording worker
+  12.5 % of the CP samples are inside the Vulkan driver. The measured bound of workstream C is
+  therefore about 1.14x of CP time before the cost of encoding the command list, not 1.6x
+  (emission also holds ordered work such as target invalidation), and the simplest form is one recording worker
   that replays an ordered command list into the primary, not secondaries per segment.
 - **Secondary cost (2026-11-13, standalone microbenchmark, not Kyty code).** 140 secondaries per
   primary, each begun with dynamic-rendering inheritance, re-emitting viewport, scissor, stencil
