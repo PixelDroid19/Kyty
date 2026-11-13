@@ -793,3 +793,12 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
 - Unit tests 2,661 pass, CTest gates pass, `playable-regression` on PPSA06084 -
   Superliminal 12/15 with the same three failures. Not re-checked: the CPU-paced titles
   the 0.5 ms floor was verified on (the GPU can now wait up to 1.5 ms for a batch).
+
+### E1 repeat on the dunes route (2026-11-13)
+
+- PPSA21567 - ASTRO BOT, dunes route, `RenderResolutionScope = RenderTargets` at 960x540:
+  the agent reports `scaling_applied` at scale 1/4 and the run did not exit; 19.1 fps at
+  577 draws per frame, against 19.2-19.5 fps native on the same route. Scaling the targets
+  does not move this scene's frame rate.
+- The `GraphicsRenderAttachments.cpp` depth-layer exit seen in the user run of 2026-11-12
+  was not reproduced here, so the demotion is not built yet: it needs that scene's route.
