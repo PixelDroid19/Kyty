@@ -654,3 +654,14 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   per frame, same as before. `playable-regression` on `PPSA06084 - Superliminal`: 10 of 15 gates
   pass, the same 5 fail as before the change (no baseline, no checkpoint, action response, input
   tap and delivery).
+- **Run-to-run spread (Minecraft).** Three later gameplay runs of the shipped code, same route
+  and draw count: 23.8, 26.1 and 23.1 fps. A single pair is within that spread, so later levers
+  are accepted on fence waits per frame and draw-processor time, not on fps alone.
+- **Excluded: per-slot latches.** A profile seemed to put latch waits on the CP path; a counter
+  showed 0 latch waits in Minecraft gameplay (the inlined stack was misattributed). No gain.
+- **Excluded: storage edges on guest uploads.** After B1+A3 the CP waits on its own queue about
+  4 times per frame, almost all on one 48-byte storage buffer whose pending write-back
+  (`PendingStorageWriteBack`) needs edge hashes that were only taken at write-back. Taking them
+  on upload removed the stale-edge case, but rehashing on clean uses showed the guest rewrites
+  those bytes between uses, so the wait is required. Rehashing on every use also cost time
+  (21.8 fps, p95 92 ms). The wait stays.
