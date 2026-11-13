@@ -14,9 +14,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 - **Contract.** It is the signature of the 2026-10-26 stop ("A suspended submitter must not pass
   the command processor", below). Keeping serial every batch with a top-level memory wait boots the
   title, but also releasing the suspended batch's own submitter at the host-producer release stops it
-  again. In a dunes run, 17 % of 18,512 batches were released for a host-produced value (1.6 % of
-  148,478 waits found no producer), so those batches cannot return early; 91.8 % of the waits are
-  written by an earlier packet of the same submission. The mechanism is inferred from the record;
+  again. Over a whole boot-to-dunes run, 17 % of 18,512 batches were released for a host-produced
+  value, so those batches cannot return early. In the dunes window (90-145 s), 1.6 % of 148,478 waits
+  found no producer and 91.8 % had it in the command processor's current host submission (inferred
+  to be the same batch, not shown). The mechanism is inferred from the record;
   thread states were not taken.
 - **Record.** `docs/bringup/performance-architecture-plan.md`, section 6.
 

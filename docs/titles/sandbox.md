@@ -30,10 +30,15 @@ Intel Arc A770, two runs with a temporary diagnostic (not committed).
   not attributed.
 - **One batch in flight with the release drain skipped (probe, temporary).** About x1.21 at the same
   scene (24.5-26.5 against 20.3-21.2 fps). The combination stops `PPSA21567 - ASTRO BOT` at boot, so
-  it is on hold. In a later run with the serial return and the drain skip, the death screen lacked
-  the same letters, so the defect is not tied to one batch in flight. It is still unattributed, and no
-  run without a temporary change has reached that screen
-  (`docs/bringup/performance-architecture-plan.md`, section 6).
+  it is on hold (`docs/bringup/performance-architecture-plan.md`, section 6).
+- **Death screen lacks letters (open, defect at `6baccd17e`).** With no input the player is killed
+  about 20-25 s after the world loads (night, zombie). The death message and the respawn button miss
+  letters: "Kyty was slain by Zombie" shows as "yty was slain  y  om ie" and "RESPAWN" as "R SPAWN".
+  It is seen in three runs: one batch in flight, the serial return with the release-drain skip, and a
+  run whose submit and release behaviour is unchanged (a read-only census of the command words). The
+  cause is not localized. Suggested direction: compare the font texture's guest bytes with the host
+  image once the death screen appears, to tell a texture update that does not reach the host from
+  glyphs the title never wrote.
 
 ## Sandbox title: shader inputs of indexed draws prepared ahead of the command processor (2026-11-12, built)
 
