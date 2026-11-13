@@ -743,11 +743,13 @@ static void UploadGuestDepthLayer(CommandBuffer* buffer, VkCommandBuffer vk_buff
 }
 
 // The copies that rebuild a depth layer from the depth images whose planes hold its bytes, and a digest of what
-// those images held when planned.
+// those images held when planned. `guest_blocks` is set when some blocks lie in no image's plane: those hold
+// what guest memory holds.
 struct DepthLayerBlockCopies
 {
 	std::vector<std::pair<DepthStencilVulkanImage*, std::vector<VkImageCopy>>> sources;
-	uint64_t                                                                   digest = 0;
+	uint64_t                                                                   digest       = 0;
+	std::vector<std::pair<uint64_t, uint64_t>>                                 guest_blocks; // merged [addr, end) ranges
 };
 
 static uint64_t MixDepthLayerDigest(uint64_t digest, uint64_t value)
@@ -761,7 +763,7 @@ static uint64_t MixDepthLayerDigest(uint64_t digest, uint64_t value)
 // Plans depth layer `layer` (at addr, size bytes, pitch in elements) of a 64 KiB tiled view as the memory the
 // guest reads there: each 64 KiB block of the layer is a block of one image's depth plane, the bytes that image's
 // slice wrote, so the layer's samples are that block's samples translated by the XOR of the two slice patterns.
-// Exits when a block the view reads lies in no image's plane.
+// A block the view reads that lies in no image's plane is left to the guest bytes (`guest_blocks`).
 // Plans the copies only when the layer's sources changed since `stamp`; otherwise returns the digest alone.
 static DepthLayerBlockCopies PlanDepthLayerFromImages(const DepthStencilVulkanImage* array, uint32_t layer, uint64_t addr, uint64_t size,
                                                       uint32_t pitch, uint32_t bytes, const Vector<DepthStencilVulkanImage*>& images,
@@ -821,8 +823,14 @@ static DepthLayerBlockCopies PlanDepthLayerFromImages(const DepthStencilVulkanIm
 		}
 		if (source == nullptr)
 		{
-			EXIT("depth array layer %u at 0x%012" PRIx64 " lies partly outside depth images: block=0x%012" PRIx64 "\n", layer, addr,
-			     block_addr);
+			if (!plan.guest_blocks.empty() && plan.guest_blocks.back().second == block_addr)
+			{
+				plan.guest_blocks.back().second += k_block_bytes;
+			} else
+			{
+				plan.guest_blocks.emplace_back(block_addr, block_addr + k_block_bytes);
+			}
+			continue;
 		}
 		const auto source_extent = source->GetGuestExtent();
 		if (source->format != array->format || source->samples != VK_SAMPLE_COUNT_1_BIT || source->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
@@ -958,6 +966,29 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 					continue;
 				}
 				record();
+				if (!plan.guest_blocks.empty())
+				{
+					// The blocks outside every image hold guest memory, so only they must be guest-owned: upload the layer's
+					// guest bytes, then copy the images' blocks over them. The digest does not cover guest bytes, so the
+					// layer is rebuilt on each use.
+					for (const auto& [begin, end]: plan.guest_blocks)
+					{
+						const auto source = GuestDepthLayerSource(begin, end - begin);
+						if (source != GpuMemoryDepthD16Source::Guest)
+						{
+							EXIT("depth array layer %u at 0x%012" PRIx64 " lies partly outside depth images and blocks 0x%012" PRIx64
+							     "-0x%012" PRIx64 " have no guest bytes: source=%u\n",
+							     layer, slice_addr, begin, end, static_cast<uint32_t>(source));
+						}
+					}
+					UploadGuestDepthLayer(buffer, vk_buffer, slice_array, layer, slice_addr, slice_size, fmt, pitch);
+					VkMemoryBarrier barrier {};
+					barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+					barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+					barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+					vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+					                     nullptr);
+				}
 				for (const auto& [source, regions]: plan.sources)
 				{
 					if (!regions.empty())
@@ -965,7 +996,7 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 						copy_from(source, regions.data(), static_cast<uint32_t>(regions.size()));
 					}
 				}
-				state.stamp = plan.digest;
+				state.stamp = plan.guest_blocks.empty() ? plan.digest : 0u;
 				continue;
 			}
 			const auto source = plain_guest_depth ? GuestDepthLayerSource(slice_addr, slice_size) : GpuMemoryDepthD16Source::Unsupported;

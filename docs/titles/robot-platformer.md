@@ -6,6 +6,45 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: a depth array layer partly outside its depth image (2026-11-13, fixed)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, branch `perf/guest-memory-binding` at `05f53da47` plus the
+fix, strict runs, `KYTY_PRESENT_FPS_LIMIT=60`, native resolution, the user playing with a real pad.
+
+- **Cause.** Leaving the dunes, a 64 KiB tiled depth view reads layer 4 (D32, 1024x1024, 4 MiB at
+  0x529c30000). One depth image (1536x1536, plane 0x529530000-0x529e30000) holds the layer's first 2 MiB;
+  the rest lies in no image's plane. The layer planner exited on the first such block (the record of
+  2026-11-12 below).
+- **Fix.** The planner keeps the blocks outside every image as merged address ranges. When a layer has such
+  ranges, each range must classify as guest-owned (the same classification the plain guest layer uses); the
+  layer's guest bytes are uploaded, then the images' blocks are copied over them. The layer is rebuilt on
+  each use, since its digest does not cover guest bytes. A range that is not guest-owned still exits, naming
+  the range and the classification.
+- **First attempt rejected.** Classifying the whole layer returned unsupported, because the depth image that
+  holds the first half overlaps it; that build exited at 270 s on the same layer (e77).
+- **Verified.** The user's run past the dunes exit held 321 s with no exit (e78); `kyty_unit_test` 2652
+  passed; the three CTest gates passed. Not verified: a recorded route to that scene, captures of the
+  layer's consumer, and other titles (no other title is known to reach this path).
+
+## Robot platformer: Arc compute engine not usable for the compute queues (2026-11-13, excluded)
+
+Same host and build with temporary counters (removed), dune route 105-145 s.
+
+- On this host the compute-only family is selected only when every renderable depth format declares
+  `DEPTH_COPY_ON_COMPUTE_QUEUE` (`VK_KHR_maintenance10`). ANV declares it for neither D16 (124) nor D32
+  (126), so every queue runs on the render engine: rcs 93-94 %, ccs 0 %.
+- Counted depth copies: D16 copies were recorded only on the graphics queue (7,966-8,794 per run), none on
+  Kyty compute queues 0-7. The compute queues recorded 4,212-4,276 D32 copies per run, all from the texel-bit
+  reinterpretation copy (image to buffer to image, depth aspect on one side), which the specification
+  forbids on a queue without graphics unless the format declares the bit. No depth-to-depth image copy ran
+  on them.
+- Skipping only the D16 check (e75) left the gate closed on D32: 19.63 fps, rcs 93 %, ccs 0 %, against
+  20.04 fps on the base (e71).
+- The BVH kernel `0x3666fa39` is recorded on the graphics queue (Kyty queue 8) and would stay on the render
+  engine in any case; the compute queues held about 6 ms of the frame in the record of 2026-10-30 (gw137,
+  older build, not re-measured). Using the compute engine would need those copies moved to the graphics
+  queue with cross-queue synchronization, for at most about 2-3 fps.
+
 ## Robot platformer: one batch in flight stops the boot (2026-11-12, probe, own-producer rule passes)
 
 - **Observed.** A temporary change made a graphics submit wait for the previous batch's decode
@@ -79,7 +118,7 @@ every mark at least 0.1 ms after the previous one drew 6 draws at 2432x1368 and 
   its lowest step, and whether correct marks change the frame rate. Next step: the same pair with the
   scene checked by capture before any figure is compared.
 
-## Robot platformer: render-target scaling to 960x540 under user play, and a depth-array exit (2026-11-12, open)
+## Robot platformer: render-target scaling to 960x540 under user play, and a depth-array exit (2026-11-12, exit fixed 2026-11-13)
 
 Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, branch `perf/guest-memory-binding` at `0fe51e855`,
 strict run, `KYTY_PRESENT_FPS_LIMIT=60`, `RenderResolutionMode = Fixed`, `RenderResolutionScope =
