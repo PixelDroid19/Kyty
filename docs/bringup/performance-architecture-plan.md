@@ -147,6 +147,12 @@ only where Kyty's own traces agree.
   binds about 2.2 (ordered); about 0.55 unattributed. Moving only the independent class gives
   about 6.85 / 4.3 = 1.6x of CP time, before the cost of secondaries and re-emitted state. The
   part of state setup that prepares shader inputs stays ordered and is still not split out.
+- **Secondary cost (2026-11-13, standalone microbenchmark, not Kyty code).** 140 secondaries per
+  primary, each begun with dynamic-rendering inheritance, re-emitting viewport, scissor, stencil
+  reference, depth bias and blend constants, best of 50: Intel Arc A770 (ANV) 0.80 us to record
+  and 0.27 us to execute each, so about 0.04 ms per frame stays on the ordering thread; RADV
+  (Raphael iGPU) 0.11 and 0.02 us. Not measured: pipeline, descriptor-set and vertex-buffer
+  rebinding per secondary, and the GPU cost of the split.
 - **Yardstick.** Per-second draw-processor time per draw (median of 30 one-second samples) moves
   about 3 % between two runs of the same code, against 16 % for whole-window CP time; levers in
   this workstream are judged on it.
