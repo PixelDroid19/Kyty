@@ -763,6 +763,11 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   (`libvulkan_intel.so`), which matches the driver share already used to bound
   workstream C. The rest of the thread's cost is spread over many sites, none above
   about 7 % once measured.
+- Priced, not built: stage 2 of the binding snapshot design (skip the guest-address read
+  preparation when nothing changed). Its own counters on the same Minecraft window give
+  207 ns per draw for the whole preparation, 154 ns of it the refresh check of tracked
+  chunks and 31 ns the residency scan: about 3 % of the 6.5 µs per draw, below the
+  0.4-0.8 µs the design estimated.
 - Excluded: remembering the index min/max range of a draw (the scan is about 7 % of the
   thread, about 0.45 µs per draw). A temporary memo keyed by address and count, validated
   by the dirty-page tracker generation, measured:
