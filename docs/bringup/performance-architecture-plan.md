@@ -824,3 +824,29 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   does not move this scene's frame rate.
 - The `GraphicsRenderAttachments.cpp` depth-layer exit seen in the user run of 2026-11-12
   was not reproduced here, so the demotion is not built yet: it needs that scene's route.
+
+### Repeated render targets: guard eligibility (2026-11-13, measured, not built)
+
+- The render-target layer record of 2026-11-12 (`cross-title.md`) found 98.5 % of Minecraft
+  draws repeating the previous framebuffer and depth image, at 0.71 us per repeat. It stopped
+  at an unmeasured guard.
+- A static audit of the chain (description, resolution cohorts, materialization,
+  `CreateFramebuffer`) gives a guard built from state that already exists: the same described
+  colour and depth info, the same `submit_id` (`GpuMemory::Update` only runs for a newer
+  submission), an unchanged `GpuMemoryObjectGraphGeneration` (bumped by every object create and
+  delete), empty compute-fill and colour-meta clear queues, no pending depth-meta clear, image
+  layouts equal to the previous draw's, and target scaling off (no generation covers the
+  resolution state). Per-draw work kept on a skip: the `content_stamp` bump, the pixel
+  program's host-to-guest scale, dual-source blend and depth-stencil access.
+- Temporary counters, per indexed draw, same framebuffer and depth image + same graph
+  generation + same submission:
+
+  | Title, scene | Draws | Same targets | Graph unchanged | Same submission | All three |
+  | --- | --- | --- | --- | --- | --- |
+  | `PPSA17221 - Minecraft`, world | 6.5 million | 97.2 % | 100.0 % | 99.9 % | 97.2 % |
+  | `PPSA21567 - ASTRO BOT`, dunes | 0.5 million | 93.6 % | 100.0 % | 98.1 % | 93.2 % |
+
+- Ceiling: about 0.6 us per draw after the guard on Minecraft (about 9 % of the thread); the
+  GPU-bound ASTRO BOT gains nothing in frame rate. Not yet checked: the share left after the
+  clear-queue, depth-meta and layout terms, and whether the dropped `write_time` updates of
+  the cached-reuse path are read between two repeated draws.
