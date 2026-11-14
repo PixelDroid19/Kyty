@@ -992,3 +992,18 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   ASTRO BOT dunes 101 -> 24 ns, fps unchanged at about 20 (GPU-bound). Unit tests 2,662
   pass, the CTest gates pass, `playable-regression` on PPSA06084 - Superliminal 12/15 (the
   same three pre-existing failures).
+- **Excluded: dropping the draw-front input reset (PPSA17221 - Minecraft world, 2026-11-14).**
+  The draw front supplies 91.6 % of the world's draws; temporary counters in `DrawFront::Take`
+  put the misses at 80 % "front behind", 20 % stale host-write epoch and almost no skipped
+  draws. The front thread spends about a fifth of its samples constructing a fresh
+  `PreparedDrawInputs` (18,368 bytes) per record. A read of the builders shows the reset is
+  load-bearing: `resources_num` is only appended to, `input_resources_valid` and the pixel
+  `stage_enabled` are only ever cleared, the fetch flags, registers and vertex-offset fields are
+  set on some paths only, the pixel `bind` and custom interpolation are accumulated without a
+  reset, and the recording edits the prepared record in place (scale, dual-source blend,
+  fragment tap, probes). A targeted reset could spare at most the vertex `bind` (which
+  `ShaderGetInputInfoVS` reassigns) and the counted vertex arrays, about 10 KB, against an
+  unverified tail (`storage_slot` readers, in-place `bind` edits) and a CP gain bounded by the
+  4.4 % of draws that miss because the front is behind. Not built.
+  With a51a6bc97 the world's heavy scene measured 33.5 ms of command processing per frame
+  against 33.3 ms for 30 fps (fence waits 1.5 ms per frame).
