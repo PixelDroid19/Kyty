@@ -316,8 +316,8 @@ only where Kyty's own traces agree.
     writes for all later reads in submission order. Writes stamped before the recording
     began were recorded in earlier submissions. No synchronization-validation run was made.
     Cross-queue ordering is the same as for the copy it replaces.
-- **Excluded: C stages 1 and 2, the draw tail replayed on a worker (2026-11-14, built, measured
-  and reverted).**
+- **C stages 1 and 2, the draw tail replayed on a worker (2026-11-14, built and measured; under
+  evaluation, not in the tree).**
   - What was built:
     - Stage 1 encoded the indexed draw's tail into a per-buffer list: pipeline, index,
       vertex and descriptor-set binds, push constants, dynamic state, the depth-kill
@@ -333,13 +333,16 @@ only where Kyty's own traces agree.
     - Replay took about 600 ns per flush, about 300 bytes each.
   - Stage 2 hand-off: with a 200 us poll window, under 65,536 of 10.1 M hand-offs found work
     still pending at the next drain.
-  - Stage 2 results, Minecraft world, world+2..22 s, same binary, worker against a
-    no-worker control (two runs each):
-    - Draw processor 5.78 and 5.50 against 5.85 and 6.18 us per draw, about -0.37 us.
-    - Frame time did not follow. A line through the controls (8.3 ms + 5.0 us per draw)
-      predicts both worker runs within 0-0.5 ms (29.5 against 29.6 ms; 34.7 against
-      35.2 ms), which is under 1 fps.
-    - What holds the frame once draw processing shrinks was not identified in these runs.
+  - Stage 2 results, Minecraft world, world+2..40 s, only the seconds at 5,000-5,800 draws
+    per frame (the route changes scene between runs, so whole-window figures do not compare):
+    - Worker, two runs (12 and 36 s in the band): 28.4 and 30.0 fps; command-processor time
+      6.13 and 5.91 us per draw.
+    - No-worker control on the same binary, two runs (38 and 9 s): 27.3 and 26.9 fps; 6.46
+      and 6.48 us per draw. Stage 1 and the build before it (38 and 16 s): 26.7 and 27.2 fps;
+      6.60 and 6.45 us per draw.
+    - About +2.6 fps and -0.5 us per draw in this scene, from two worker runs: the effect is
+      not yet established. A first reading of whole-window figures, which mixed scenes,
+      wrongly concluded that frame time did not change.
   - Other titles:
     - PPSA21402 - Balatro: stage 1 and an eager-replay control show the same gameplay
       screen.
@@ -351,7 +354,9 @@ only where Kyty's own traces agree.
     - Skipping the drain on purpose produced `UNASSIGNED-Threading-MultipleThreads-Write`
       and an abort, so the check was live.
     - The command pool is per queue, shared by every slot and segment chunk.
-  - Retry this only once frame time is shown to follow draw-processor time.
+  - Not yet checked with the worker: PPSA21402 - Balatro, PPSA21567 - ASTRO BOT (GPU-bound,
+    where the polling thread must cost nothing), a worker-mode capture, and thread safety
+    outside the Minecraft world.
     The patch is kept in the run evidence, outside the repository.
 
 ### E. Internal resolution as a functional option
