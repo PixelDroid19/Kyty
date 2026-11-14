@@ -107,6 +107,21 @@ so where the robot stands depends on how long the loads took).
   driver's heuristic, with no general translation that reproduces it. Hand-edited offline variants did
   not match the live translator output (plain 40,923 against 34,087 instructions live), so offline
   figures in this record that came from hand edits are not comparable with live ones.
+  The loop-depth split came from a parser that resolved 36 to 66 of the driver's 137 loops, and the
+  doubled variant's statistics came from the dumped single-wrapper binary with its return operand
+  switched to the second call, not from a separate live dump.
+- **Walking-dunes GPU time is command work, not submit gaps or guest flush barriers (2026-11-14, t216,
+  probe builds).** Per-command-buffer GPU stamps (start of pipe at begin, end of pipe at end): about 600
+  buffers a second, their union covers 94-96 % of wall time, the gaps between buffers 4-5 %; the render
+  engine is 86-91 % busy, so the GPU is not waiting for the command processor in this view. Draw and
+  dispatch stamps in the same view account for about 39 of 47 busy ms a frame (BVH kernel 16 ms, other
+  compute 8, 1920x1080 draws 11.8, shadow pass 2.4); the rest was not attributed further, and per-draw
+  stamps add their own drains. A Vulkan call counter showed about 937 pipeline barriers a frame, 615
+  with all-commands stages, about 320 of them from guest cache-flush packets (`ACQUIRE_MEM` /
+  `RELEASE_MEM` mapped to one full memory barrier). Skipping that barrier in alternate 5 s blocks of one
+  run (a pricing probe, not a valid translation) moved GPU time from 51.3 to 50.8 ms a frame and fps
+  from 17.3 to 17.7: guest flush barriers cost about 0.5 ms a frame here and are not the lever. A Mesa
+  per-event timing run (`INTEL_MEASURE`) crashed inside the driver and gave no data.
 - **Excluded: remembering each invocation's last address-table entry (2026-11-14).** A translator
   variant tried the entry of the invocation's previous guest-address translation before the directory
   and the binary search (entries are disjoint, so a containing entry is the search's answer). Unit tests
