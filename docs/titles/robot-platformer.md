@@ -126,9 +126,11 @@ so where the robot stands depends on how long the loads took).
   barriers, which bracket buffer fills, copies and guest-address publishes, drain around the transfers
   they bracket; stamp pairs around the transfers themselves (same scene, a separate run) gave fills
   0.34-0.37 ms a frame (64 calls), buffer copies 0.11-0.12 ms (21) and render-pass begins with their
-  load and clear 0.06 ms (52): together about 0.5 ms, not the lever either. On this scene the frame is
-  the guest's draws and dispatches executed serially on the render engine; the title issues its
-  compute in the graphics stream, so the compute engine stays idle by the guest's own ordering. A Mesa
+  load and clear 0.06 ms (52): together about 0.5 ms, not the lever either. About 6 ms of busy time a
+  frame stays unattributed (18 image clears, image copies and blits were not stamped). The BVH kernel
+  arrives on the guest graphics ring (Kyty queue 8); the guest compute queues also run on the render
+  engine on this host because the compute-only family gate stays closed (Arc compute engine record
+  below), so all of it executes on one engine. A Mesa
   per-event timing run (`INTEL_MEASURE`) crashed inside the driver and gave no data.
 - **Excluded: remembering each invocation's last address-table entry (2026-11-14).** A translator
   variant tried the entry of the invocation's previous guest-address translation before the directory
