@@ -857,3 +857,10 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   between a whole-chain skip and a narrower memo of the object lookup inside
   `GpuMemoryCreateObject` (same side effects, lookup skipped), measure how the about 220 ns
   of one cached hit split between lookup and side effects.
+- Measured with `lfence`-bracketed TSC reads, 19.5 million cached hits on the Minecraft world
+  (each segment includes about 25 ticks of timer cost, 3.79 GHz): locks and statistics start
+  144 ticks, the setup before the key 197, key, lookup and checks 271, side effects and
+  statistics completion 165. No segment dominates, so a lookup memo would save about 70 ns
+  per create (about 0.16 us per draw). The whole-chain skip, which keeps only the side
+  effects of the two creates (with their locks, about 0.2 us per draw), stays the larger
+  lever at about 0.5 us per draw.
