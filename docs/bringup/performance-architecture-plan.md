@@ -357,11 +357,13 @@ only where Kyty's own traces agree.
     - The fragment-transport and guest depth-stencil copy paths were not reached by any of
       the three titles.
   - Thread safety: validation limited to thread safety reported nothing on the Minecraft
-    world and on Balatro with the worker. Skipping the drain on purpose produced
+    world, on Balatro and on the ASTRO BOT dunes with the worker. Skipping the drain on purpose produced
     `UNASSIGNED-Threading-MultipleThreads-Write` and an abort, so the check was live.
   - Unit tests 2,662 pass, CTest gates 4/4.
+  - `kyty_agent playable-regression` on PPSA06084 - Superliminal: 12 of 15 gates pass (10 on
+    2026-10-31, when input delivery and the input sequence failed); the three that fail need
+    a baseline or an external scene checkpoint.
   - Cost: the polling thread uses one host core while frames record.
-    The patch is kept in the run evidence, outside the repository.
 
 ### E. Internal resolution as a functional option
 

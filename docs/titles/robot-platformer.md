@@ -6,6 +6,13 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: draw tail recorded on a replay thread (2026-11-14, measured)
+
+`docs/bringup/performance-architecture-plan.md`, entry "Built: C stages 1 and 2". Intel Arc A770, strict
+run, 60 fps present limit, dunes gameplay: 20.3 fps against 19.1 fps with the draw tail recorded inline
+(one run each; the scene is GPU-bound, so this is not a speed claim). The Vulkan validation layer with
+only its thread-safety checks is clean.
+
 ## Robot platformer: a depth array layer partly outside its depth image (2026-11-13, fixed)
 
 Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, branch `perf/guest-memory-binding` at `05f53da47` plus the

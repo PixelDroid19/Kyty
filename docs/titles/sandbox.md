@@ -6,6 +6,20 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Sandbox title: draw tail recorded on a replay thread (2026-11-14, measured)
+
+`docs/bringup/performance-architecture-plan.md`, entry "Built: C stages 1 and 2". Intel Arc A770, strict
+runs, 60 fps present limit, world route. Only seconds at 5,000-5,800 draws per frame between 2 and 40 s
+after world entry are compared, at least 10 s per run, because the scene differs from run to run.
+
+- **Result.** Three runs a side on one binary: 27.3, 26.6 and 27.8 fps without the thread (pooled
+  27.2), 28.4, 30.0 and 29.5 fps with it (pooled 29.6); command processing 6.32-6.50 us per draw
+  without and 5.91-6.13 with. The ranges
+  do not overlap.
+- **Checked.** The Vulkan validation layer with only its thread-safety checks is clean; a temporary
+  switch that skips the drain makes it report concurrent writes, so the check is live.
+- **Open.** The missing death-screen glyphs are the known glyph defect, present before this change.
+
 ## Sandbox title: release census and draw-front coverage under the serial submit (2026-11-12, measured)
 
 Stage 0 of `docs/bringup/performance-architecture-plan.md` (section 6 holds the tables). World scene,
