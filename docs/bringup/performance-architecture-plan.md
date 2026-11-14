@@ -240,6 +240,16 @@ only where Kyty's own traces agree.
   remove under a tenth of the index and vertex binds. Fewer binds needs the index and
   vertex pools to hand out offsets in a few long-lived buffers, an architecture change in
   the pools whose driver saving is unmeasured.
+- **Most render-pass breaks come from vertex seeding (same counter with caller addresses,
+  Minecraft world).** In 20 s: 175 k `BeginRenderPass` from `CommandBuffer::BeginRenderPass`,
+  closed by `CloseRenderPass` (175 k), and 134 k barrier, copy and barrier groups from
+  `CopyPendingStorageIntoVertices` (`BindVertexBuffers`). That is about 5 % of draws, roughly
+  380 pass re-opens per frame, and about 0.26 us per draw of driver time for copy, pass and
+  barriers. Only 15 % of those copies repeat a source, destination and region already
+  copied in the same command buffer, so dropping repeats is not the lever. Lifting the
+  per-draw outside-pass access needs these storage-to-vertex seeds issued before the pass
+  (at publication, or batched at pass start). Workstream C stage 1 was rejected only for
+  this access rate. Not built.
 
 ### E. Internal resolution as a functional option
 
