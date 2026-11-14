@@ -363,10 +363,12 @@ display-resolution cohorts 1.8 %, framebuffer lookup and render-pass begin 2.4 %
 deliberately unsafe switch reused the previous indexed draw's materialized colour and depth
 information, and skipped the end-of-draw target invalidation, when the described targets were
 byte-equal to the previous draw's in the same command buffer and submission. In alternate 4 s blocks
-of the sandbox world it engaged on about 80 % of draws (materialization 0.486 -> 0.098 µs/draw,
+of the sandbox world it engaged (the share of draws is inferred from stage time, about 80 %, not counted; materialization 0.486 -> 0.098 µs/draw,
 emission 0.368 -> 0.157 µs/draw) and cut command-processor time by 0.53 µs/draw (standard error
 0.14, 14 pairs) and frame time by 0.70 µs/draw (standard error 0.31); 34.6 -> 37.4 fps in a scene of
-about 4,500 draws per frame. It is not shipped: skipping the per-draw `ResetHash` leaves the target's
+about 4,500 draws per frame. That run drew about 4,500 draws per frame in both blocks against 5,400
+in the two runs before it on the same route and world time, unexplained, so its frame rates are not
+comparable to the ~31 fps baseline; only the paired differences are. It is not shipped. Not checked yet: skipping the per-draw `ResetHash` leaves the target's
 GPU update time at the first draw of the run, which is wrong when another object over the same
 memory was used in between, and the reused information holds image pointers that a freed or
 replaced object would leave dangling. A shippable version must keep the update time current and
