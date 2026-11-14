@@ -354,17 +354,21 @@ only where Kyty's own traces agree.
       run each, GPU-bound); the dunes render correctly.
     - PPSA21402 - Balatro reaches gameplay with the worker; stage 1 and an eager-replay
       control show the same screen.
-    - The fragment-transport and guest depth-stencil copy paths were not reached by any of
-      the three titles. An ASTRO BOT run on the pause-menu route (200 s) with
-      `KYTY_TRANSPORT_DUMP` set wrote no transport program, so it did not reach them either.
-    - That run's thread-safety layer reported one `UNASSIGNED-Threading-Info` "Couldn't find
-      VkEvent" on reset, set and destroy of one handle. `LabelManager::Destroy`
-      (`Label.cpp`) destroys a label's event outside the manager's lock while another
-      thread may create one; the likely cause (not traced) is the driver reusing the address, so the layer's bookkeeping
-      loses the new event. Vulkan allows that overlap, so it would not be an application error.
+    - The dunes, Minecraft and Balatro runs did not reach the fragment-transport or the guest
+      depth-stencil copy paths. On the ASTRO BOT pause-menu route (300 s), a temporary one-shot
+      report at each entry showed fragment transport recorded and the depth-stencil copy not
+      reached; that copy's explicit flush rests on a code read only.
+    - On that route, thread safety plus unique handles and object lifetime reported no
+      threading error. Thread safety alone (unique handles off) had reported "Couldn't find
+      VkEvent" on one label event (messages capped at five); with handles wrapped it is gone
+      and object lifetime names no dead event, which fits a reused driver address in the
+      layer's bookkeeping. Object lifetime instead found transport shade pipelines whose empty
+      set layout was destroyed right after pipeline creation, invalid without
+      `maintenance4`; fixed by sharing the device-lifetime empty layout, after which the
+      same run reports nothing and its captures score as before.
   - Thread safety: validation limited to thread safety reported nothing on the Minecraft
-    world, on Balatro and on the ASTRO BOT dunes with the worker. Skipping the drain on purpose produced
-    `UNASSIGNED-Threading-MultipleThreads-Write` and an abort, so the check was live.
+    world, on Balatro and on the ASTRO BOT dunes with the worker. Skipping the drain on purpose
+    produced `UNASSIGNED-Threading-MultipleThreads-Write` and an abort, so the check was live.
   - Unit tests 2,662 pass, CTest gates 4/4.
   - `kyty_agent playable-regression` on PPSA06084 - Superliminal: 12 of 15 gates pass (10 on
     2026-10-31, when input delivery and the input sequence failed); the three that fail need

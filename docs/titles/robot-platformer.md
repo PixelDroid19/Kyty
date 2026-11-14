@@ -6,6 +6,21 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: transport shade layout destroyed while in use (2026-11-14, fixed)
+
+Intel Arc A770, Mesa ANV, strict run, 60 fps present limit, pause-menu route, 300 s, with the Vulkan
+validation layer's thread-safety, unique-handle and object-lifetime checks.
+
+- **Cause.** `FragmentTransportCreateShadePipeline` built the shade pipeline layout from an empty
+  descriptor set layout and destroyed that layout right after pipeline creation. Without
+  `maintenance4` the set layouts of a pipeline layout must stay alive while it is used, so every
+  bind of such a pipeline was invalid (`VUID-vkCmdBindPipeline-pipeline-parameter`).
+- **Fix.** The shade pipelines use the device-lifetime empty layout that the graphics pipelines
+  already share.
+- **Verified.** The same route reports nothing under those checks; a temporary entry report
+  confirmed fragment transport was recorded in both runs, and the three captures have the same
+  health metrics as before the fix.
+
 ## Robot platformer: draw tail recorded on a replay thread (2026-11-14, measured)
 
 `docs/bringup/performance-architecture-plan.md`, entry "Built: C stages 1 and 2". Intel Arc A770, strict
