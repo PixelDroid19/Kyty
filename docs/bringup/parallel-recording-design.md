@@ -354,3 +354,20 @@ did engage: the command-processor run counter read zero in the off blocks. Frame
 not move: off minus on +0.10 µs/draw, standard error 0.30, 14 pairs; 30.3 fps off against 30.8 on.
 Gating the statistics behind a diagnostics request is therefore not a frame-rate lever on this
 host, and the agent's performance counters stay always on.
+
+### Priced, not built: reusing the previous draw's materialized targets (2026-11-14)
+
+Per-draw render-target work is about 19 % of the command-processor samples in the sandbox profile:
+materialization 7.4 %, `InvalidateMemoryObject` with `ResetHash` 4.3 %, target description 3.5 %,
+display-resolution cohorts 1.8 %, framebuffer lookup and render-pass begin 2.4 %. A temporary,
+deliberately unsafe switch reused the previous indexed draw's materialized colour and depth
+information, and skipped the end-of-draw target invalidation, when the described targets were
+byte-equal to the previous draw's in the same command buffer and submission. In alternate 4 s blocks
+of the sandbox world it engaged on about 80 % of draws (materialization 0.486 -> 0.098 µs/draw,
+emission 0.368 -> 0.157 µs/draw) and cut command-processor time by 0.53 µs/draw (standard error
+0.14, 14 pairs) and frame time by 0.70 µs/draw (standard error 0.31); 34.6 -> 37.4 fps in a scene of
+about 4,500 draws per frame. It is not shipped: skipping the per-draw `ResetHash` leaves the target's
+GPU update time at the first draw of the run, which is wrong when another object over the same
+memory was used in between, and the reused information holds image pointers that a freed or
+replaced object would leave dangling. A shippable version must keep the update time current and
+must be invalidated by any change to the memory-object graph.
