@@ -863,4 +863,21 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   statistics completion 165. No segment dominates, so a lookup memo would save about 70 ns
   per create (about 0.16 us per draw). The whole-chain skip, which keeps only the side
   effects of the two creates (with their locks, about 0.2 us per draw), stays the larger
-  lever at about 0.5 us per draw.
+  lever at about 0.3 to 0.35 us per draw once the guard and the kept side effects are paid.
+- **Excluded: whole-chain render-target skip (shadow run, 2026-11-13).** A temporary shadow
+  check evaluated the guard (same described colour and depth info, same submit and buffer
+  submission, same object graph generation, unchanged fill and metadata-clear queues, same
+  `PA_CL_VS_OUT_CNTL`) before the chain, ran the chain as today and compared. Astro's fill
+  and metadata-clear queues are never empty, so the guard uses a queue mutation count rather
+  than emptiness (92 % eligible on Astro dunes, 97 % on the Minecraft world). The forced
+  mismatch fired on both titles. Two results falsify the guard as an exactness proof:
+  - 7,858 eligible Minecraft draws (0.11 %) took the `FastReuse` path, counted at the create
+    site. That path calls `Update` because the object's submit id or check hash moved, so a
+    skip would drop a content update. The graph generation does not see it.
+  - The framebuffer object changed twice with identical attachments (cache replacement), so
+    a memoized framebuffer can be stale.
+  Closing both needs the per-target cached check (about 271 ticks per create) and a
+  framebuffer-cache term. Measured window 2,267 ticks (0.60 us) minus the guard (133 ticks),
+  the per-target check and the kept side effects (2.28 x about 436 ticks) leaves about
+  0.3 us per draw: at the build threshold with no margin, and the depth meta-clear consume
+  never fired in either run, so no HTILE-clear title was covered. Not built.
