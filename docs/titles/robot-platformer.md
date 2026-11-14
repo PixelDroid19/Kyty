@@ -6,6 +6,28 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: a guest 960x540 render resolution re-measured on the dunes (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV, Ryzen 5 7600, `6a6a5818a`, 60 fps present limit, dunes route from the
+world-map slot, 1 s agent samples over 155-215 s. The patched run applies one game patch: a mod
+that fixes the guest's render resolution at 960x540 (13 writes to the 01.018.000 executable). A
+run with a game patch is not a strict run and supports no compatibility claim.
+
+| Run | Mean fps | Steady fps | GPU busy (rcs) | Draws per frame |
+| --- | --- | --- | --- | --- |
+| No patch | 18.9 | 20-21 | 91 % | 525 |
+| 960x540 patch | 31.9 | 37-41 after 166 s; 14-16 before | 78 % | 469 |
+
+- **Scenes differ.** The input route is timed, and the faster run walks the dunes and the cliff
+  path. The unpatched run stands next to a rock in the dunes during the window. Both include one
+  load pause (0-2 fps). The captures at 160, 185 and 210 s show correct dunes, the robot and the
+  cliffs in both runs; no scored compare was made.
+- **Against the 2026-11-02 figure.** The same lever measured 16.6-18.1 fps then. The
+  command-processor work cut since then lets the smaller GPU frame show: the GPU is no longer busy
+  all the time (78 % against 91 %).
+- **Not done.** The same scene was not reached in both runs, the patch was not run twice, and the
+  first 10 s of the patched window (14-16 fps) were not traced to a scene.
+
 ## Robot platformer: transport shade layout destroyed while in use (2026-11-14, fixed)
 
 Intel Arc A770, Mesa ANV, strict run, 60 fps present limit, pause-menu route, 300 s, with the Vulkan
@@ -605,7 +627,7 @@ site.
   no wave64 lowering design is written. The one lever of that size is
   internal resolution: at a 960x540 game patch the BVH kernel took 6.45
   instead of 22.64 ms ("Internal resolution is the lever", measured then at
-  16.6-18.1 fps against 12-13; not re-measured since). The GPU sum there was
+  16.6-18.1 fps against 12-13; 37-41 fps on 2026-11-14, record at the top). The GPU sum there was
   still 36.0 ms per frame, so lower resolution gains fps but does not reach
   60 either.
 - **Decision: no command-processor change for the dunes.**
