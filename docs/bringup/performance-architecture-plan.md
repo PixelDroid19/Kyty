@@ -1185,6 +1185,15 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   would still check shader identity and keep the lease, so it would remove about 0.2-0.25 us per
   draw, inside the 0.22 us per-draw run spread. Not built; the census compared only the returned
   pointer, and `IT_CLEAR_STATE`, `IT_ONE_REG_WRITE` and direct context writes were not counted.
+- **Profile after the replay thread (PPSA17221 - Minecraft world, 2026-11-14).** A 10 s user-mode
+  profile of the world with the draw tail on its replay thread: the Vulkan driver holds 3.2 % of the
+  command-processor thread (12.5 % before), libc about 15 % (mutexes 6.4 %, memset 2 %), and no symbol
+  more than 3.7 %. `BindDescriptors` encloses about 26 % of the thread: `PrepareTextures` 7 %,
+  `PrepareStorageBuffers` 6.4 % and `DescriptorCache::GetDescriptor` 6.4 %, of which the set hash is
+  about 2 % (about 0.12 us per draw). A previous-set shortcut would save only the hash and the map
+  lookup, and would have to prove that the previous set was neither trimmed nor recycled as an
+  uncached set; not built. The replay thread itself takes about as many samples as the command
+  processor, mostly reading the clock while it polls.
 - **Measured: profile-guided build on 2b27ac3c4 (2026-11-14).** `KYTY_PGO=GENERATE` in a separate
   build directory, trained by one PPSA17221 - Minecraft world run and one PPSA21567 - ASTRO BOT
   dunes run, then `KYTY_PGO=USE` (a cache change needs `cmake -S source -B <dir>`; without
