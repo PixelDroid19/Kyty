@@ -1005,7 +1005,11 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   refresh, 159,000 queries for about 546,000 preparations, fps unchanged at about 18
   (GPU-bound). The Minecraft run after the change (122 queries in 2.88 million
   preparations) had no partial range, so the Minecraft effect is not demonstrated yet; it
-  needs a same-build run in the partial state.
+  needs a same-build run in the partial state. Across 16 Minecraft world runs only draw
+  state setup splits by the state (10.4-11.2 ms per frame with a partial range, 7.0-8.5
+  without), and it encloses the preparation, so the partial state's extra cost is the query
+  itself; resource creation, uploads, hashing, index binding and fence waits vary with the
+  scene and between runs, not with the state.
   Shadow check (temporary, removed): on every reused ASTRO BOT preparation the population
   was queried anyway, and when it had moved the unimported spans of the partial ranges were
   asked for populated pages. Of about 700,000 reused preparations, 115-135 saw the
