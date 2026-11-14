@@ -280,3 +280,14 @@ primary. Single thread, 190 timed frames, two repeats each agree within 1 %.
   per-segment secondaries, is the shape this design should take on ANV.
 - The same 135 render passes grouped into 8 primaries submitted in order: GPU 1.31 ms per frame
   against 1.12 for one primary on ANV (+0.19 ms), recording 16.3-16.8 us per segment against 14.7.
+
+### Consequence for the build order (2026-11-14)
+
+The Vulkan calls already run on the replay thread, so the class-B work left on the command-processor
+thread is Kyty's own: pipeline setup (0.68 us per draw) and descriptor finalization (0.44) feed the
+encoded list, and encoding is 0.39. The replay thread spends most of its time polling. Moving the
+first two onto it would need no extra command buffers, so neither per-buffer cost above applies; the
+blockers are the results the command processor reads back on the same draw (for example the
+pipeline's `writes_guest_memory`, which ends the geometry segment in `GraphicsRenderDraw.cpp`).
+Which results are read back was not listed. Multiple recording threads with grouped primaries are
+needed only if one replay thread cannot keep up.
