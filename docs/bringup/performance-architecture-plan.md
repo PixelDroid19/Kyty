@@ -360,8 +360,8 @@ only where Kyty's own traces agree.
     - That run's thread-safety layer reported one `UNASSIGNED-Threading-Info` "Couldn't find
       VkEvent" on reset, set and destroy of one handle. `LabelManager::Destroy`
       (`Label.cpp`) destroys a label's event outside the manager's lock while another
-      thread may create one, and the driver reused the address; the layer's own bookkeeping
-      then loses the new event. Vulkan allows this, so it is not an application error.
+      thread may create one; the likely cause (not traced) is the driver reusing the address, so the layer's bookkeeping
+      loses the new event. Vulkan allows that overlap, so it would not be an application error.
   - Thread safety: validation limited to thread safety reported nothing on the Minecraft
     world, on Balatro and on the ASTRO BOT dunes with the worker. Skipping the drain on purpose produced
     `UNASSIGNED-Threading-MultipleThreads-Write` and an abort, so the check was live.
