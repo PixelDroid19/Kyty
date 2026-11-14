@@ -976,3 +976,19 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   `PreparedDrawInputs` is 18,368 bytes (vertex inputs 10,544, pixel inputs 7,752) and
   `ShaderBindResources` 7,264. Not zeroing them would need every reader proven to read only
   the counted entries; about 0.2 us per draw on the command processor at most.
+- **Built: skip the tracked-chunk refresh while nothing changed (2026-11-14).** The dirty-page
+  tracker keeps an evidence version that advances after every change to the state
+  `ChangedSince` reads (range registration, page and block entries, write and fallback epochs,
+  host writes), and the guest-address registry counts chunk additions and removals. A refresh
+  walk that refreshed no chunk is recorded with both values; the next preparation skips the
+  walk while both hold. A temporary shadow check that walked anyway on every skip found no
+  chunk changed in 8.9 million skipped preparations on PPSA17221 - Minecraft and 970,000 on
+  PPSA21567 - ASTRO BOT; the epoch was unchanged between preparations 99.1 % and 98.6 % of the
+  time. A unit test drives each change class and requires the version to move.
+  Measured (whole-run refresh counter, ns per preparation): Minecraft 206 -> 90 on the same
+  world scene (draw processor 5.97 -> 5.76 us per draw, 27.9 -> 28.8 fps at 5,420-5,434 draws
+  per frame, one run per arm); a second run reached a lighter scene (4,168 draws per frame)
+  where the walk ran more often (251 ns), so the gain depends on how quiet the tracker is.
+  ASTRO BOT dunes 101 -> 24 ns, fps unchanged at about 20 (GPU-bound). Unit tests 2,662
+  pass, the CTest gates pass, `playable-regression` on PPSA06084 - Superliminal 12/15 (the
+  same three pre-existing failures).
