@@ -1007,3 +1007,15 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   4.4 % of draws that miss because the front is behind. Not built.
   With a51a6bc97 the world's heavy scene measured 33.5 ms of command processing per frame
   against 33.3 ms for 30 fps (fence waits 1.5 ms per frame).
+- **Measured: profile-guided build on 2b27ac3c4 (2026-11-14).** `KYTY_PGO=GENERATE` in a separate
+  build directory, trained by one PPSA17221 - Minecraft world run and one PPSA21567 - ASTRO BOT
+  dunes run, then `KYTY_PGO=USE` (a cache change needs `cmake -S source -B <dir>`; without
+  `-S` the reconfigure kept GENERATE and the instrumented binary measured 17.8 us per draw).
+  Minecraft world, world+2..22 s:
+  - heavy scene, 5,457 draws per frame: 30.8 fps, 5.42 us per draw, command processing
+    31.45 ms per frame (without PGO on the same revision family: 28.8 fps, 5.76 us,
+    33.47 ms at 5,434 draws per frame);
+  - lighter scene, 4,195 draws per frame: 35.6 fps, 5.64 us per draw.
+  ASTRO BOT dunes: 19.3 / 20.6 fps in the 100-120 / 120-150 s windows, unchanged (GPU-bound).
+  One run per arm and scene. The profile is tied to the revision and to the training titles,
+  so release builds would need a training step; not adopted here.
