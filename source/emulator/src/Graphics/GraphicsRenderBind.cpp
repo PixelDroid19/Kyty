@@ -106,8 +106,8 @@ struct DrawMaterialTraceSession
 	const DrawMaterialTraceContext* draw = nullptr;
 	bool                            trace_rt_lifetime = false;
 	uint32_t                        ordinal = 0;
-	uint32_t                        textures_num = 0;
-	DrawMaterialTraceTexture        textures[TEXTURES_MAX] {};
+	// Filled only while a trace is engaged: every descriptor bind builds a session.
+	std::vector<DrawMaterialTraceTexture> textures;
 };
 
 static bool RenderTargetLifetimeTraceRequested()
@@ -261,11 +261,11 @@ static void RecordDrawMaterialTraceTexture(DrawMaterialTraceSession* session, in
 	{
 		return;
 	}
-	if (session->draw == nullptr || session->textures_num >= DrawMaterialTraceSession::TEXTURES_MAX)
+	if (session->draw == nullptr || session->textures.size() >= DrawMaterialTraceSession::TEXTURES_MAX)
 	{
 		return;
 	}
-	auto& record            = session->textures[session->textures_num++];
+	auto& record            = session->textures.emplace_back();
 	record.descriptor_index = descriptor_index;
 	record.slot             = descriptor.slot;
 	record.start_register   = descriptor.start_register;
@@ -1783,7 +1783,7 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 	    depth != nullptr && depth->stencil_test_enable ? 1u : 0u, draw.blend_enable, draw.blend_src, draw.blend_op, draw.blend_dst,
 	    draw.blend_bypass, draw.color_mask, draw.color_on_depth_fail, draw.color_off_depth_pass, draw.cull_front, draw.cull_back,
 	    draw.face, draw.vp_x, draw.vp_y, draw.vp_width, draw.vp_height, draw.vp_zmin, draw.vp_zmax, draw.dx_clip,
-	    scissor.left, scissor.top, scissor.right, scissor.bottom, session.textures_num);
+	    scissor.left, scissor.top, scissor.right, scissor.bottom, static_cast<uint32_t>(session.textures.size()));
 	const auto* host = g_render_ctx != nullptr ? g_render_ctx->GetGraphicCtx() : nullptr;
 	std::fprintf(out,
 	             "KYTY_TRACE_PS_WAVE ordinal=%u ps_in_control=0x%08x guest_wave32=%u required_subgroup=%u"
@@ -2057,7 +2057,7 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 			}
 		}
 	}
-	for (uint32_t i = 0; i < session.textures_num; ++i)
+	for (uint32_t i = 0; i < session.textures.size(); ++i)
 	{
 		const auto& texture = session.textures[i];
 		const auto* image   = texture.image;
@@ -5392,7 +5392,9 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		VulkanImage*  textures2d_storage[DescriptorCache::TEXTURES_STORAGE_MAX] = {};
 		int           textures2d_storage_view[DescriptorCache::TEXTURES_STORAGE_MAX];
 		uint64_t      samplers[DescriptorCache::SAMPLERS_MAX];
-		uint32_t      sgprs[DescriptorCache::METADATA_DWORDS_MAX] = {};
+		// Only the first push_constant_size bytes are written and read; zero just those.
+		uint32_t      sgprs[DescriptorCache::METADATA_DWORDS_MAX];
+		std::memset(sgprs, 0, bind.push_constant_size);
 
 		uint32_t* sgprs_ptr = sgprs;
 

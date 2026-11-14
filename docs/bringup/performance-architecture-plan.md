@@ -253,6 +253,23 @@ only where Kyty's own traces agree.
   a draw expressible as one `vertexOffset`, which guest strides and offsets do not give in
   general. Kyty's own vertex-binding term (about 0.5 us per draw) is therefore mostly Kyty
   work, not driver bind cost.
+- **Built: less per-draw zeroing in descriptor binds (2026-11-14).** A preloaded `memset`
+  counter (1 in 32 calls, split by thread, Minecraft world) found the command-processor
+  thread zeroing about 30 KB per draw in about 28 calls (3 % of its samples in a flat
+  profile); the input-preparation thread zeroes its own `PreparedDrawInputs` separately.
+  `BindDescriptors` accounted for 54 % of the processor thread's bytes: a 2.3 KB
+  material-trace session built on every bind, also when no trace is engaged, and the 2.7 KB
+  push-constant block, zeroed whole although only `push_constant_size` bytes are written
+  and read. The session now keeps its texture records in a vector filled only while a
+  trace is engaged, and only the used push-constant bytes are zeroed. The texture and image
+  arrays stay zeroed: alias validation reads them up to their maximum.
+  - Same counter after the change: processor-thread bytes per `memset` 1,061 -> 734
+    (-31 %), the same call count.
+  - Without the counter, one run per arm, world+2..22 s: draw processor 6.13 -> 6.01 us per
+    draw, inside the 3 % run spread, so the gain is not established. PPSA21402 - Balatro
+    reaches gameplay at 59.9 fps. Unit tests 2,662 pass, CTest gates 4/4.
+  - Still zeroed per draw: `RenderColorInfo` (1.2 KB) four times in the colour
+    description, and `PreparedDrawInputs` (about 21 KB) on the preparation thread.
 - **Most render-pass breaks come from vertex seeding (same counter with caller addresses,
   Minecraft world).** In 20 s: 175 k `BeginRenderPass` from `CommandBuffer::BeginRenderPass`,
   closed by `CloseRenderPass` (175 k), and 134 k barrier, copy and barrier groups from
