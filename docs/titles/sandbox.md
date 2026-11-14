@@ -33,8 +33,9 @@ clock): the indexed draw encloses 88 % of the command-processor thread; `BindDes
 `GpuMemory::CreateObject` 11 %, `PrepareGuestDeviceAddressForRead` 8.5 %, `PipelineCache::CreatePipeline`
 8 %, depth and colour materialization 4.3 % and 3.2 %, vertex streams 4.2 %. No function's own time
 passes 3.2 % of the thread: mutex lock and unlock 5.3 % together, the index range scan 3.2 %, draw
-encoding 3.2 %, memset 2.7 %, `GpuMemory::GetHeapId` 2.4 %, statistics clock reads 2.3 %, the
-descriptor hash 2.3 %. A 30 % cut of command-processor time therefore needs a structural change
+encoding 3.2 %, memset 2.7 %, `GpuMemory::GetHeapId` 2.4 %, statistics clock reads 2.3 % (switching
+the statistics off did not change frame time, see the parallel-recording design), the descriptor
+hash 2.3 %. A 30 % cut of command-processor time therefore needs a structural change
 (`docs/bringup/parallel-recording-design.md`), not a hot spot.
 
 ### Is the world rate a stable 30? (2026-11-14, measured)
