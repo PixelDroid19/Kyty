@@ -316,6 +316,43 @@ only where Kyty's own traces agree.
     writes for all later reads in submission order. Writes stamped before the recording
     began were recorded in earlier submissions. No synchronization-validation run was made.
     Cross-queue ordering is the same as for the copy it replaces.
+- **Excluded: C stages 1 and 2, the draw tail replayed on a worker (2026-11-14, built, measured
+  and reverted).**
+  - What was built:
+    - Stage 1 encoded the indexed draw's tail into a per-buffer list: pipeline, index,
+      vertex and descriptor-set binds, push constants, dynamic state, the depth-kill
+      timestamp and `vkCmdDrawIndexed`.
+    - Every handle accessor, pass begin and close, chunk switch and `End` replayed the list
+      first, so the recorded order did not change.
+    - Stage 2 gave each command pool one replay thread. A render-pass continuation (98.5 %
+      of `BeginRenderPass` calls on the Minecraft world: 149 k against 2.3 k real begins
+      per second) handed the list over without waiting. Every other accessor, and every
+      reset or free of a pool buffer, drained the thread first.
+  - Stage 1 cost, on the Minecraft world:
+    - 5.97 us per draw against 6.01 before, inside the run spread.
+    - Replay took about 600 ns per flush, about 300 bytes each.
+  - Stage 2 hand-off: with a 200 us poll window, under 65,536 of 10.1 M hand-offs found work
+    still pending at the next drain.
+  - Stage 2 results, Minecraft world, world+2..22 s, same binary, worker against a
+    no-worker control (two runs each):
+    - Draw processor 5.78 and 5.50 against 5.85 and 6.18 us per draw, about -0.37 us.
+    - Frame time did not follow. A line through the controls (8.3 ms + 5.0 us per draw)
+      predicts both worker runs within 0-0.5 ms (29.5 against 29.6 ms; 34.7 against
+      35.2 ms), which is under 1 fps.
+    - What holds the frame once draw processing shrinks was not identified in these runs.
+  - Other titles:
+    - PPSA21402 - Balatro: stage 1 and an eager-replay control show the same gameplay
+      screen.
+    - PPSA21567 - ASTRO BOT: stage 1 renders the dunes correctly.
+    - The fragment-transport and guest depth-stencil copy paths, which needed explicit
+      drains, were not reached by any of the three titles.
+  - Thread safety: a validation run limited to thread safety reported nothing on the
+    Minecraft world with the worker.
+    - Skipping the drain on purpose produced `UNASSIGNED-Threading-MultipleThreads-Write`
+      and an abort, so the check was live.
+    - The command pool is per queue, shared by every slot and segment chunk.
+  - Retry this only once frame time is shown to follow draw-processor time.
+    The patch is kept in the run evidence, outside the repository.
 
 ### E. Internal resolution as a functional option
 
