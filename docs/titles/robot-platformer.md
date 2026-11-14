@@ -67,6 +67,19 @@ so where the robot stands depends on how long the loads took).
   283-287; the 41 recipes shared with the t215 census are unchanged. One run on the dunes route
   (capture checked, close-up dune scene) measured 17.7-18.1 fps against 16.4-16.9 fps the run before
   without the change: within run-to-run noise, so no frame-rate gain is claimed.
+- **Split-wave rendezvous cost priced: small (2026-11-14, t216).** A temporary translator probe added two
+  sequence-only rendezvous rounds (no value slot written, parity kept) to every exchange of the two BVH
+  kernels only, compiled outside the translation cache so every other program kept its t216 SPIR-V; a
+  stderr line confirmed both kernels took it. GPU timestamps around each dispatch, on the walking-dunes
+  view of the dunes route (capture checked, about 8,000 thread groups a call, the second BVH kernel
+  absent in both runs): 1.913-1.919 us per group and 15.4 ms per call without the probe, 2.092-2.095 us
+  and 16.7 ms with it. Two extra rounds per exchange cost 1.3 ms, so the rendezvous the kernel already
+  pays is about 0.65 ms of its 15.4 ms (about 4 %): removing the exchanges' synchronisation cannot bring
+  the 30 fps target; the kernel's time is its own work and spills. The data the exchanges move is not
+  priced. Earlier probe runs that doubled the exchanges of every split-wave program from boot left the
+  route (ship cinematic, world map, the title's command-buffer assert), so the probe was narrowed. The
+  walking view differs from the close-up scene of the earlier per-group figures (2.5 us), so the two are
+  not compared.
 - **Excluded: remembering each invocation's last address-table entry (2026-11-14).** A translator
   variant tried the entry of the invocation's previous guest-address translation before the directory
   and the binary search (entries are disjoint, so a containing entry is the search's answer). Unit tests
