@@ -232,14 +232,26 @@ only where Kyty's own traces agree.
   constants are bound per draw. Dynamic state set to the value already held is filtered by
   the common runtime, so a repeat-value filter in Kyty would not help. The lever left inside
   the driver is binding fewer objects per draw. Index and vertex streams in one buffer, with
-  draw offsets, would avoid the per-draw binds. It is not priced.
+  draw offsets, would avoid the per-draw binds; priced below as too small.
 - **Per-draw binds are mostly new buffers (same counter, third run, 2.28 M draws).** Index
   binds: 65 % a different `VkBuffer`, 27 % the same buffer at a new offset, 8 % identical.
   Vertex binds: 70 % different buffers, 28 % same buffers at new offsets, 2 % identical.
   Descriptor sets: 22 % repeat the previous bind. A repeat-bind filter would therefore
   remove under a tenth of the index and vertex binds. Fewer binds needs the index and
   vertex pools to hand out offsets in a few long-lived buffers, an architecture change in
-  the pools whose driver saving is unmeasured.
+  the pools. Priced below: not a lever.
+- **Excluded: pooling index and vertex buffers (standalone Vulkan benchmark, A770, ANV,
+  2026-11-14).** 5,400 indexed draws per command buffer, each with two dynamic-state
+  sets and a 64-byte push constant, best CPU recording time of 40 runs, two runs. A
+  distinct index and vertex buffer per draw (each in its own allocation) costs 0.135-0.139
+  us per draw; one buffer rebound at a new offset per draw costs 0.133-0.137 us, the same;
+  binding once and moving `firstIndex`/`vertexOffset` costs 0.087-0.089 us. Pools that hand
+  out offsets in long-lived buffers therefore save nothing while the bind is still issued.
+  Only removing the bind saves about 0.05 us per draw, about 0.25 ms per frame at Minecraft's
+  5,000 draws, against the 3 ms the 30 fps target needs. It also needs every vertex stream of
+  a draw expressible as one `vertexOffset`, which guest strides and offsets do not give in
+  general. Kyty's own vertex-binding term (about 0.5 us per draw) is therefore mostly Kyty
+  work, not driver bind cost.
 - **Most render-pass breaks come from vertex seeding (same counter with caller addresses,
   Minecraft world).** In 20 s: 175 k `BeginRenderPass` from `CommandBuffer::BeginRenderPass`,
   closed by `CloseRenderPass` (175 k), and 134 k barrier, copy and barrier groups from
