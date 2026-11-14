@@ -289,5 +289,22 @@ encoded list, and encoding is 0.39. The replay thread spends most of its time po
 first two onto it would need no extra command buffers, so neither per-buffer cost above applies; the
 blockers are the results the command processor reads back on the same draw (for example the
 pipeline's `writes_guest_memory`, which ends the geometry segment in `GraphicsRenderDraw.cpp`).
-Which results are read back was not listed. Multiple recording threads with grouped primaries are
-needed only if one replay thread cannot keep up.
+Multiple recording threads with grouped primaries are needed only if one replay thread cannot keep
+up.
+
+Results the command processor reads back on the same draw (indexed path, `GraphicsRenderDraw.cpp`):
+
+- From the pipeline: `writes_guest_memory` (ends the geometry segment), `transport` (early return
+  or the fragment-transport draw, which binds inline), the static and dynamic parameters that
+  `SetDynamicParams` encodes, and `pipeline_layout` for the descriptor binds and push constants.
+  The key is built from the context registers at call time, so a deferred lookup needs a copy of
+  every input it reads (see the pipeline memo record in `performance-architecture-plan.md`); the
+  lease is attached to the recording command buffer under the cache mutex.
+- From descriptor finalization: the set handle goes only into the encoded bind, but the same step
+  records storage-image barriers and layout changes on the command buffer and reads GPU-memory
+  state in command-processor order (`GraphicsRenderBind.cpp`, `GraphicsRenderDescriptor.cpp`).
+
+So neither stage moves as is: the pipeline lookup needs its inputs snapshotted and its read-back
+fields resolved earlier (they follow the shader pair and the registers, not the Vulkan object), and
+descriptor finalization keeps ordered side effects. At most about 0.68 us per draw of pipeline
+setup is movable without splitting the descriptor step, about 11 % of the command-processor time.
