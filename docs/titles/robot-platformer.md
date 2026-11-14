@@ -44,9 +44,15 @@ so where the robot stands depends on how long the loads took).
   `0xbf8ee9fc` dispatched 13,072 groups per call (152x86, the 2432x1368 grid), while the indexed
   draws render at 1920x1080. Whether the guest picks that grid from its dynamic resolution, and so from the
   end-of-pipe clock marks (`cross-title.md`, open defect), is not traced.
-- **Defect, not reproduced.** An earlier run of the same probes engaged from boot (intro crowd scene,
-  not the dunes) exited with status 139 at 185 s with no log line and no core dump. It has not
-  recurred; it is recorded against the probe build only.
+- **Defect, open.** Status 139 has ended two diagnostic runs, both in scenes off the dunes route:
+  the probes engaged from boot (intro crowd scene, 185 s, no log line, no core dump), and a run
+  that also doubled the BVH kernel's cross-part exchanges (ship cinematic). The second left a crash
+  context: a guest-thread execute fault at address 0. Both builds carried temporary probes; no run
+  of a clean build has shown it. Direction: rerun the cinematic on a clean build and, if it
+  recurs, trace the caller of the null call from the crash context's stack.
+- **Excluded as a measurement: doubled exchanges off-route.** The run with doubled exchanges
+  slowed boot so much that the timed route ended in the ship cinematic; its per-group figures
+  come from another scene and price nothing.
 
 ## Robot platformer: a guest 960x540 render resolution re-measured on the dunes (2026-11-14, measured)
 
