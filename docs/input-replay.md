@@ -38,7 +38,9 @@ between the recorded and the replayed run shift the guest state the inputs
 meet; record with the shader caches the replay will use.
 
 The route is applied after the host/controller state and is OR-ed with the
-diagnostic agent overlay. It reports a connected pad while active, so titles
+diagnostic agent overlay. Route buttons are OR-ed with held ones; on a stick
+axis the route holds, a live stick or key moved off rest wins, so the user can
+still steer during a replay. It reports a connected pad while active, so titles
 that gate their startup screens on controller presence follow the same path as
 an attached device. It does not alter graphics, timing, or game memory.
 
