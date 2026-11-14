@@ -845,8 +845,10 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
 - PPSA21567 - ASTRO BOT, GPU-bound, same route: 19.2 fps before, 19.5 after (about 590
   draws per frame in both).
 - Unit tests 2,661 pass, CTest gates pass, `playable-regression` on PPSA06084 -
-  Superliminal 12/15 with the same three failures. Not re-checked: the CPU-paced titles
-  the 0.5 ms floor was verified on (the GPU can now wait up to 1.5 ms for a batch).
+  Superliminal 12/15 with the same three failures.
+- PPSA21402 - Balatro boot route, 70-105 s: 59.99 fps with the 1.5 ms floor and 60.00 fps
+  without it, median frame 16.6 ms and p95 16.8 ms in both. Other CPU-paced titles are not
+  re-checked.
 
 ### E1 repeat on the dunes route (2026-11-13)
 
