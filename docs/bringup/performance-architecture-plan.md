@@ -848,5 +848,12 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
 
 - Ceiling: about 0.6 us per draw after the guard on Minecraft (about 9 % of the thread); the
   GPU-bound ASTRO BOT gains nothing in frame rate. Not yet checked: the share left after the
-  clear-queue, depth-meta and layout terms, and whether the dropped `write_time` updates of
-  the cached-reuse path are read between two repeated draws.
+  clear-queue, depth-meta and layout terms.
+- `write_time` is read: the write-back and creation paths order a target against its aliases
+  by comparing it with their `device_write_time` (`GpuMemoryWriteback.cpp:361`, `:1152`,
+  `GpuMemoryCreate.cpp:1024`, `:1043`). A skip must keep the per-draw side effects of the
+  cached-reuse hit (`write_time`, use counters, `RecordUse`, `SyncWriteBackIndexes`), which
+  takes part of the 509 ns per draw that the 2.28 attachment creates cost. Before choosing
+  between a whole-chain skip and a narrower memo of the object lookup inside
+  `GpuMemoryCreateObject` (same side effects, lookup skipped), measure how the about 220 ns
+  of one cached hit split between lookup and side effects.
