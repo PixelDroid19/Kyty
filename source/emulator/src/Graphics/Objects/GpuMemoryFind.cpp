@@ -593,7 +593,8 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 		m_materialization_cache.InvalidateRange(vaddr[vi], size[vi], writer);
 	}
 
-	int heap_id = GetHeapId(vaddr[0], size[0]);
+	const ResetHashFind* found   = FindResetHashTarget(vaddr, size, vaddr_num, type);
+	int                  heap_id = found != nullptr ? found->heap_id : GetHeapId(vaddr[0], size[0]);
 
 	if (heap_id < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: heap_id < 0 condition ignored (continuing)\n"); }
 
@@ -601,9 +602,13 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 
 	uint64_t new_hash = 0;
 
-	int fast_id = -1;
-	if (FindFast(heap_id, vaddr, size, vaddr_num, type, false, &fast_id))
+	int fast_id = found != nullptr ? found->object_id : -1;
+	if (found != nullptr || FindFast(heap_id, vaddr, size, vaddr_num, type, false, &fast_id))
 	{
+		if (found == nullptr)
+		{
+			RememberResetHashTarget(vaddr, size, vaddr_num, type, heap_id, fast_id);
+		}
 		auto& h = heap.objects[fast_id];
 		EXIT_IF(h.free);
 		auto& o = h.info;
@@ -705,6 +710,42 @@ bool GpuMemory::FindFast(int heap_id, const uint64_t* vaddr, const uint64_t* siz
 
 	return false;
 }
+
+// A remembered find stays the FindFast answer while no block entered or left a heap
+// and the heap index is unchanged.
+const GpuMemory::ResetHashFind* GpuMemory::FindResetHashTarget(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
+                                                               GpuMemoryObjectType type) const
+{
+	const uint64_t graph_generation = m_object_graph_generation.load(std::memory_order_acquire);
+	const uint64_t heap_generation  = m_guest_bytes_generation.load(std::memory_order_acquire);
+	for (const auto& find: m_reset_hash_finds)
+	{
+		if (find.vaddr_num != vaddr_num || find.type != type || find.graph_generation != graph_generation ||
+		    find.heap_generation != heap_generation || !std::equal(vaddr, vaddr + vaddr_num, find.vaddr) ||
+		    !std::equal(size, size + vaddr_num, find.size))
+		{
+			continue;
+		}
+		return &find;
+	}
+	return nullptr;
+}
+
+void GpuMemory::RememberResetHashTarget(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, int heap_id,
+                                        int object_id)
+{
+	auto& find             = m_reset_hash_finds[m_reset_hash_find_next];
+	m_reset_hash_find_next = (m_reset_hash_find_next + 1u) % RESET_HASH_FINDS;
+	std::copy(vaddr, vaddr + vaddr_num, find.vaddr);
+	std::copy(size, size + vaddr_num, find.size);
+	find.vaddr_num        = vaddr_num;
+	find.type             = type;
+	find.heap_id          = heap_id;
+	find.object_id        = object_id;
+	find.graph_generation = m_object_graph_generation.load(std::memory_order_acquire);
+	find.heap_generation  = m_guest_bytes_generation.load(std::memory_order_acquire);
+}
+
 Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
                                                          bool only_first)
 {

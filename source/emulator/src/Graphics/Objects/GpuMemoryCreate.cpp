@@ -1325,7 +1325,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				o.in_use     = true;
 				o.check_hash = info.check_hash;
 				RecordUse(&o, buffer);
-				SyncWriteBackIndexes(heap_id, cached.object_id);
+				// The indexes follow free, in_use, read_only and the callbacks; a hit keeps all but read_only.
+				// Storage objects record a scan change on every writable use, so they always sync.
+				if (o.read_only != previous_read_only || o.object.type == GpuMemoryObjectType::StorageBuffer)
+				{
+					SyncWriteBackIndexes(heap_id, cached.object_id);
+				}
 				finish_classification();
 				create_stats.Complete(DebugStatsGpuMemoryCreateOutcome::CachedReuse);
 				return o.object.obj;

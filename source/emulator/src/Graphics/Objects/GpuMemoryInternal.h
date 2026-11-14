@@ -617,6 +617,27 @@ private:
 	[[nodiscard]] bool            DeferredAliasUseConflicts(int heap_id, const Vector<OverlappedBlock>& links, GpuMemoryObjectType type,
 	                                                        const uint64_t* params);
 
+	// The last few targets ResetHash found by exact range: a draw invalidates the same
+	// colour and depth objects again and again while the object graph is unchanged.
+	struct ResetHashFind
+	{
+		uint64_t            vaddr[VADDR_BLOCKS_MAX] {};
+		uint64_t            size[VADDR_BLOCKS_MAX] {};
+		int                 vaddr_num        = 0;
+		GpuMemoryObjectType type             = GpuMemoryObjectType::Invalid;
+		int                 heap_id          = -1;
+		int                 object_id        = -1;
+		uint64_t            graph_generation = 0;
+		uint64_t            heap_generation  = 0;
+	};
+	static constexpr size_t                     RESET_HASH_FINDS = 4;
+	std::array<ResetHashFind, RESET_HASH_FINDS> m_reset_hash_finds {};
+	size_t                                      m_reset_hash_find_next = 0;
+	[[nodiscard]] const ResetHashFind*          FindResetHashTarget(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
+	                                                                GpuMemoryObjectType type) const;
+	void RememberResetHashTarget(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, int heap_id,
+	                             int object_id);
+
 	// Advances whenever an object block enters or leaves a heap. Lookup results
 	// over the object graph stay valid while it is unchanged.
 	std::atomic<uint64_t> m_object_graph_generation {1};
