@@ -421,3 +421,16 @@ reached differs is not checked.
 `kyty_agent playable-regression` on `PPSA06084 - Superliminal` at `04bafcefa` (60 fps limit): every
 gate passes except the three that have no reviewed input here (visual baseline, scene checkpoint,
 action response); exit status 3, baseline missing.
+
+### Built: repeated memory-object hits answered without hashing the key (2026-11-14)
+
+`GpuMemory::CreateObject` keeps its last eight cached hits with the object graph generation, the
+heap index generation and a new count of entries the materialization cache dropped or replaced.
+While none moved, a repeated key takes the remembered answer instead of hashing the key, finding its
+heap and probing the cache; every hit check (object live, same logical generation, submit, use and
+callbacks) still runs. A shadow check that repeated the heap search and the cache lookup on every
+remembered hit, with one forced mismatch each run reported, found no other mismatch: sandbox world
+13.8 million hits (82 % of calls), robot-platformer dunes 6.0 million, deck-builder boot 0.9 million.
+Paired 4 s blocks in the sandbox world (first 6 s left out, 13 pairs): materialization -0.094
+µs/draw (standard error 0.003); total command-processor time +0.01 (standard error 0.10, below the
+totals' detection limit of about 0.2). Gates 4/4, `kyty_unit_test` 2,662 passed, 11 skipped.
