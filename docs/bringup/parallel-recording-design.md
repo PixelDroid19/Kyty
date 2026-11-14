@@ -268,5 +268,15 @@ primary. Single thread, 190 timed frames, two repeats each agree within 1 %.
 - `PPSA17221 - Minecraft` world on the A770 keeps the GPU 70 % busy at 31 fps (about 22.6 ms per
   frame, same run as above). With 3.7 ms more, the GPU frame is about 26 ms, past the 25 ms of 40
   fps, so per-segment secondaries cannot reach 40 fps in that scene on this GPU; about 38 is the
-  bound. Fewer, longer secondaries (several segments each) or recording in parallel into primaries
-  submitted in order would avoid the per-secondary GPU cost; neither is measured.
+  bound.
+- Mode R records each segment into its own primary command buffer and submits all 135 in order in
+  one `vkQueueSubmit`: on ANV 18.4 us per segment to record and 3.49 ms of GPU per frame (+2.4 ms,
+  about 18 us per command buffer); on RADV 14.3 us and 2.24 ms. Per-command-buffer GPU cost is
+  therefore not specific to secondaries on ANV.
+- The same draws in 8 command buffers per frame (8 render passes of 675 draws, as a stand-in for
+  contiguous runs of segments per worker) cost 0.13 ms more GPU per frame than one primary on ANV.
+  Recording contiguous runs of segments, one primary per worker run, submitted in order, keeps the
+  per-buffer cost near 0.1 ms per frame; per-segment secondaries do not. That grouping, not
+  per-segment secondaries, is the shape this design should take on ANV. The grouped case changed the
+  render-pass count as well, so it bounds the per-buffer cost only; it was not measured with 135
+  passes in 8 buffers.
