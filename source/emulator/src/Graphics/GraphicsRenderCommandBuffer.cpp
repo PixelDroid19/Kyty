@@ -42,6 +42,7 @@
 #include <cinttypes>
 #include <cstring>
 #include <cstdio>
+#include <immintrin.h>
 #include <cstdlib>
 #include <map>
 #include <string>
@@ -4185,7 +4186,7 @@ void DeferredReplayWorker::Run()
 		const auto poll_start = std::chrono::steady_clock::now();
 		while (!m_has_pending.load(std::memory_order_acquire) && std::chrono::steady_clock::now() - poll_start < kPollWindow)
 		{
-			__builtin_ia32_pause();
+			_mm_pause();
 		}
 		VkCommandBuffer target = VK_NULL_HANDLE;
 		{
