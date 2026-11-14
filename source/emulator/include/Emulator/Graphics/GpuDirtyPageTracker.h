@@ -152,6 +152,10 @@ public:
 
 	[[nodiscard]] uint64_t             SnapshotGeneration(uintptr_t address, size_t size) const noexcept;
 	[[nodiscard]] bool                 ChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept;
+	// Advances after every change to the state ChangedSince reads (ranges, page
+	// and block entries, their write and fallback epochs, host writes). While it
+	// holds, ChangedSince returns what it returned for the same arguments.
+	[[nodiscard]] uint64_t EvidenceVersion() const noexcept { return m_evidence_version.load(std::memory_order_acquire); }
 	// Whether a page lying wholly inside the registered range changed since
 	// `snapshot`, on the evidence ChangedSince uses. Pages the range shares with
 	// other memory are not consulted; an unregistered range reports a change.
@@ -348,6 +352,16 @@ private:
 	uintptr_t                     m_max_range_bytes    = 0;
 	mutable std::mutex*           m_registration_mutex = nullptr;
 	std::atomic<uint64_t>*        m_epoch              = nullptr;
+	std::atomic<uint64_t>         m_evidence_version {0};
+	// Advances m_evidence_version when the change it guards has been made.
+	struct EvidenceChange
+	{
+		explicit EvidenceChange(GpuDirtyPageTracker* tracker): tracker(tracker) {}
+		~EvidenceChange() { tracker->m_evidence_version.fetch_add(1, std::memory_order_release); }
+		EvidenceChange(const EvidenceChange&)            = delete;
+		EvidenceChange& operator=(const EvidenceChange&) = delete;
+		GpuDirtyPageTracker* tracker;
+	};
 	GpuDirtyPageProtectionOps     m_protection_ops {};
 	// Guest protection authority. Restorers announce themselves in m_restorers
 	// and back off while m_authority_fences is nonzero; a VM change or a slot

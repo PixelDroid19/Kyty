@@ -166,6 +166,12 @@ struct Registry
 	// Physical-backing population at the last complete scan of physical ranges.
 	Core::VirtualMemory::SharedBackingPopulation scanned_population;
 	bool                                         population_scanned = false;
+	// Advances on every chunk added or removed. A refresh that found no chunk
+	// changed stays valid while this and the tracker's evidence version hold.
+	uint64_t chunk_version          = 0;
+	uint64_t clean_chunk_version    = 0;
+	uint64_t clean_evidence_version = 0;
+	bool     refresh_clean          = false;
 	Table                     table;
 	std::vector<Table>        retired;
 	std::array<Reader, GraphicContext::QUEUES_NUM> readers {}; // Latest registered reader for each queue.
@@ -269,6 +275,7 @@ std::vector<TableEntry>::iterator EntryAtOrAfter(Registry* registry, uint64_t gu
 // Chunks cover disjoint guest bytes, so the guest base identifies an entry.
 void AddTableEntry(Registry* registry, const Chunk& chunk)
 {
+	registry->chunk_version++;
 	const auto at = EntryAtOrAfter(registry, chunk.guest);
 	EXIT_IF(at != registry->entries.end() && at->guest == chunk.guest);
 	registry->entries.insert(at, TableEntry {chunk.guest, chunk.size, chunk.device, chunk.span});
@@ -276,6 +283,7 @@ void AddTableEntry(Registry* registry, const Chunk& chunk)
 
 void RemoveTableEntry(Registry* registry, const Chunk& chunk)
 {
+	registry->chunk_version++;
 	const auto at = EntryAtOrAfter(registry, chunk.guest);
 	EXIT_IF(at == registry->entries.end() || at->guest != chunk.guest);
 	registry->entries.erase(at);
@@ -2206,7 +2214,15 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 	// Refresh snapshots the CPU wrote since they were taken; the imported
 	// host memory is coherent, so the device sees the refresh directly.
 	const DebugStatsScopedTimer refresh_timer(DebugStatsRecordGuestAddressRefresh);
-	for (const uint64_t base: registry->tracked)
+	// Read the versions before the walk: a change made during it advances them past
+	// what is recorded, so the next preparation walks again.
+	const uint64_t evidence_version = GpuDirtyPageTracker::Instance().EvidenceVersion();
+	const bool     walk             = !registry->refresh_clean || registry->clean_evidence_version != evidence_version ||
+	                    registry->clean_chunk_version != registry->chunk_version;
+	registry->refresh_clean = false;
+	bool refreshed          = false;
+	static const std::set<uint64_t> no_ranges;
+	for (const uint64_t base: walk ? registry->tracked : no_ranges)
 	{
 		for (auto& chunk: registry->ranges.at(base).chunks)
 		{
@@ -2214,6 +2230,7 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 			{
 				continue;
 			}
+			refreshed = true;
 			// A write fault can dirty this snapshot after the whole-registry preflight
 			// above. Check again at the refresh point before replacing bytes that an
 			// in-flight GPU reader may still observe.
@@ -2228,6 +2245,9 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 			}
 		}
 	}
+	registry->refresh_clean          = !refreshed;
+	registry->clean_evidence_version = evidence_version;
+	registry->clean_chunk_version    = registry->chunk_version;
 	if (registry->dirty)
 	{
 		const SubmissionId active_reader       = FirstActiveReader(*registry);

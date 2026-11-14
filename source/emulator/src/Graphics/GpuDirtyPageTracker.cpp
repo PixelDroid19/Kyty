@@ -367,6 +367,7 @@ uint64_t GpuDirtyPageTracker::BlockWritePageMask(uintptr_t page) noexcept
 
 void GpuDirtyPageTracker::ReactivateRetiredPage(PageEntry* entry) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (entry->refs.load(std::memory_order_acquire) != 0u ||
 	    entry->protection_state.load(std::memory_order_acquire) != static_cast<uint32_t>(GpuDirtyProtectionState::Retired))
 	{
@@ -392,6 +393,7 @@ void GpuDirtyPageTracker::ReactivateRetiredPage(PageEntry* entry) noexcept
 
 GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t page) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	const size_t start = GpuDirtyPageTableIndex(page, kPageTableSize - 1u);
 	PageEntry*   first_tombstone = nullptr;
 	auto         initialize      = [this, page](PageEntry* entry) noexcept -> PageEntry*
@@ -450,6 +452,7 @@ GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t 
 // Later fault lookups skip the tombstone and will resolve any reused key anew.
 void GpuDirtyPageTracker::ReleasePageSlot(PageEntry* entry) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	AcquireIdentityWriter();
 	RaiseFence();
 	const uintptr_t page  = entry->key.load(std::memory_order_relaxed);
@@ -515,6 +518,7 @@ const GpuDirtyPageTracker::BlockEntry* GpuDirtyPageTracker::FindBlock(uintptr_t 
 
 uint32_t GpuDirtyPageTracker::FindOrCreateBlock(uintptr_t page) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	const uintptr_t key             = BlockKey(page);
 	const size_t    start           = GpuDirtyPageTableIndex(key << 12u, kBlockTableSize - 1u);
 	size_t          first_tombstone = kBlockTableSize;
@@ -809,6 +813,7 @@ bool GpuDirtyPageTracker::AdmitPages(uintptr_t first, uintptr_t last) noexcept
 
 bool GpuDirtyPageTracker::RegisterRange(uintptr_t address, size_t size) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (!m_enabled || m_page_size == 0 || address == 0 || size == 0)
 	{
 		return false;
@@ -882,6 +887,7 @@ bool GpuDirtyPageTracker::RegisterRange(uintptr_t address, size_t size) noexcept
 
 bool GpuDirtyPageTracker::UnregisterRange(uintptr_t address, size_t size) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (!m_enabled || m_registration_mutex == nullptr)
 	{
 		return false;
@@ -978,6 +984,7 @@ void GpuDirtyPageTracker::MarkFallback(uintptr_t page, uintptr_t end) noexcept
 // the evidence later; none is visited here.
 void GpuDirtyPageTracker::MarkPageFallback(PageEntry* page) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (page == nullptr)
 	{
 		return;
@@ -993,6 +1000,7 @@ void GpuDirtyPageTracker::MarkPageFallback(PageEntry* page) noexcept
 
 void GpuDirtyPageTracker::MarkPageWrite(PageEntry* page) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (page == nullptr)
 	{
 		return;
@@ -1936,6 +1944,7 @@ void GpuDirtyPageTracker::PrepareHostWriteLocked(uintptr_t address, size_t size)
 
 uint64_t GpuDirtyPageTracker::BeginHostWrite(uintptr_t address, size_t size) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (!Enabled() || address == 0 || RangeEnd(address, size) == 0)
 	{
 		return 0;
@@ -1966,6 +1975,7 @@ uint64_t GpuDirtyPageTracker::BeginHostWrite(uintptr_t address, size_t size) noe
 
 void GpuDirtyPageTracker::EndHostWrite(uint64_t token) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (token == 0) { return; }
 	EXIT_IF(!Enabled());
 	std::lock_guard<std::mutex> lock(*m_registration_mutex);

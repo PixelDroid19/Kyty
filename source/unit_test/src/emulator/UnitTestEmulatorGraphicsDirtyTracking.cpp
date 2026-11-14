@@ -534,6 +534,43 @@ TEST(EmulatorGraphicsDirtyTracking, FaultAndRearmAdvanceGeneration)
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 
+// Callers reuse a clean ChangedSince answer while the evidence version holds, so
+// every change that can turn that answer must advance it.
+TEST(EmulatorGraphicsDirtyTracking, EvidenceVersionAdvancesOnEveryChangeChangedSinceReads)
+{
+	Mapping mapping;
+	ASSERT_NE(mapping.address, 0u);
+	GpuDirtyPageTracker tracker;
+	uint64_t version = tracker.EvidenceVersion();
+	const auto advanced = [&]
+	{
+		const uint64_t now  = tracker.EvidenceVersion();
+		const bool     moved = now != version;
+		version              = now;
+		return moved;
+	};
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	EXPECT_TRUE(advanced());
+	ASSERT_TRUE(tracker.PrepareForRead(mapping.address, mapping.size));
+	const uint64_t snapshot = tracker.SnapshotGeneration(mapping.address, mapping.size);
+	(void)advanced();
+	EXPECT_FALSE(tracker.ChangedSince(mapping.address, mapping.size, snapshot));
+	EXPECT_FALSE(advanced());
+	ASSERT_TRUE(tracker.HandleWriteFault(mapping.address));
+	*reinterpret_cast<uint8_t*>(mapping.address) = 0x5a;
+	EXPECT_TRUE(advanced());
+	EXPECT_TRUE(tracker.ChangedSince(mapping.address, mapping.size, snapshot));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	(void)advanced();
+	const uint64_t token = tracker.BeginHostWrite(mapping.address, 1u);
+	ASSERT_NE(token, 0u);
+	EXPECT_TRUE(advanced());
+	tracker.EndHostWrite(token);
+	EXPECT_TRUE(advanced());
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+	EXPECT_TRUE(advanced());
+}
+
 // A rearm that finds the whole range armed lets later rearms skip the page walk,
 // until a write to any of its pages makes that page writable again.
 TEST(EmulatorGraphicsDirtyTracking, ProvenArmedRangeIsProtectedAgainAfterAWrite)
