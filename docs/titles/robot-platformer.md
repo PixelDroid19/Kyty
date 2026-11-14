@@ -12,7 +12,9 @@ Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from t
 Baseline: `23c501b05` without diagnostics, 1 s agent samples over 150-210 s. Bill: the same commit plus
 two temporary diagnostics (not committed) that bracket every guest dispatch and every indexed or
 pull draw with bottom-of-pipe timestamps, engaged only from 150 s so the route keeps its timing;
-5 s dumps. Captures at 160, 185 and 210 s show the robot in the dunes in both runs.
+5 s dumps. The bill run's captures at 160, 185 and 210 s show the robot walking in the dunes; the
+baseline's show it standing still against a rock in the dunes (the timed input route ends at 140.5 s,
+so where the robot stands depends on how long the loads took).
 
 - **Baseline.** 18.8 fps in the steady windows, the render engine 89-91 % busy (about 48 ms of GPU
   per frame), 530 draws per frame. The command processor spends about 27 ms per frame outside
@@ -38,9 +40,9 @@ pull draw with bottom-of-pipe timestamps, engaged only from 150 s so the route k
   view: 7,700 groups and 19.6 ms on entry, 1,100-2,700 groups and 2-6 ms on the walk. No program
   takes more than about 6 ms per frame on the walk; 30 fps needs about 17 ms off a 48 ms frame,
   so no single program is that lever.
-- **The composite runs on the larger grid.** `0xbf8ee9fc` dispatched 13,072 groups (152x86, the
-  2432x1368 grid) in 12 of 14 dumps and 8,160 (1920x1080) in 2, while the indexed draws render
-  at 1920x1080. Whether the guest picks that grid from its dynamic resolution, and so from the
+- **The composite runs on the larger grid.** In every dump of the bill run where it appears (9),
+  `0xbf8ee9fc` dispatched 13,072 groups per call (152x86, the 2432x1368 grid), while the indexed
+  draws render at 1920x1080. Whether the guest picks that grid from its dynamic resolution, and so from the
   end-of-pipe clock marks (`cross-title.md`, open defect), is not traced.
 - **Defect, not reproduced.** An earlier run of the same probes engaged from boot (intro crowd scene,
   not the dunes) exited with status 139 at 185 s with no log line and no core dump. It has not
