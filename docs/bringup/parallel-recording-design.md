@@ -373,3 +373,22 @@ GPU update time at the first draw of the run, which is wrong when another object
 memory was used in between, and the reused information holds image pointers that a freed or
 replaced object would leave dangling. A shippable version must keep the update time current and
 must be invalidated by any change to the memory-object graph.
+
+What a repeat materialization of the same targets still does, read from the code (2026-11-14):
+
+- the memory-object hit bumps `use_num`, `use_last_frame` and, for a written target, `write_uses` and
+  `write_time`; `RecordUse` itself is idempotent per submission (one entry per queue, highest
+  sequence);
+- each materialization assigns the image a new `content_stamp`;
+- depth links its meta storage and checks the committed extent (which records a use when the render
+  scope is on);
+- depth meta clears, compute colour fills, DCC and CMASK clears are consumed on materialization:
+  a clear registered between two draws must still be applied by the second;
+- the end-of-draw `ResetHash` gives the target a new `gpu_update_time` and `device_write_time`;
+  at least twelve readers order write-back, alias selection and parent choice by these fields.
+
+The object graph generation is bumped by every block creation and deletion, so it detects a
+replaced target, but not a pending clear or a time-field reader. A safe reuse therefore keeps every
+item above and saves only the lookups (materialization key and hash, cache lookups, `GetHeapId`,
+`FindFast`, the extra lock round trips and statistics traces): an estimated half of the measured
+0.53 µs/draw, not measured.
