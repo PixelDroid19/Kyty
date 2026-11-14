@@ -10,6 +10,7 @@
 #include "Kyty/Core/Timer.h"
 #include "Kyty/Core/Vector.h"
 #include "Kyty/Core/VirtualMemory.h"
+#include "Kyty/Sys/SysTimer.h"
 
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Audio.h"
@@ -2861,6 +2862,39 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	return swapchain;
 }
 
+// The calibrated-timestamp extension whose host domain is the one the host performance counter reads, or null.
+static const char* VulkanClockMarkExtension(VkInstance instance, VkPhysicalDevice physical_device,
+                                            const Vector<VkExtensionProperties>& available, VkTimeDomainKHR* host_domain)
+{
+	*host_domain = Kyty::sys_performance_counter_clock() == Kyty::SysPerformanceClock::Monotonic
+	                   ? VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR
+	                   : VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
+	const auto has = [&available](const char* name)
+	{ return available.Contains(name, [](const VkExtensionProperties& e, const char* n) { return strcmp(e.extensionName, n) == 0; }); };
+	const bool  khr       = has(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+	const char* extension = khr ? VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME
+	                            : (has(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) ? VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME : nullptr);
+	if (extension == nullptr)
+	{
+		return nullptr;
+	}
+	const auto get_domains = reinterpret_cast<PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR>(vkGetInstanceProcAddr(
+	    instance, khr ? "vkGetPhysicalDeviceCalibrateableTimeDomainsKHR" : "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT"));
+	uint32_t count = 0;
+	if (get_domains == nullptr || get_domains(physical_device, &count, nullptr) != VK_SUCCESS)
+	{
+		return nullptr;
+	}
+	std::vector<VkTimeDomainKHR> domains(count);
+	if (get_domains(physical_device, &count, domains.data()) != VK_SUCCESS)
+	{
+		return nullptr;
+	}
+	const bool device_domain = std::find(domains.begin(), domains.end(), VK_TIME_DOMAIN_DEVICE_KHR) != domains.end();
+	const bool host          = std::find(domains.begin(), domains.end(), *host_domain) != domains.end();
+	return device_domain && host ? extension : nullptr;
+}
+
 static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 {
 	EXIT_IF(ctx == nullptr);
@@ -2876,6 +2910,12 @@ static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 		ctx->queues[id].index  = info.index;
 		EXIT_IF(ctx->queues[id].vk_queue != nullptr);
 		vkGetDeviceQueue(ctx->device, ctx->queues[id].family, ctx->queues[id].index, &ctx->queues[id].vk_queue);
+		uint32_t family_count = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(ctx->physical_device, &family_count, nullptr);
+		std::vector<VkQueueFamilyProperties> families(family_count);
+		vkGetPhysicalDeviceQueueFamilyProperties(ctx->physical_device, &family_count, families.data());
+		EXIT_IF(info.family >= family_count);
+		ctx->queues[id].timestamp_valid_bits = families[info.family].timestampValidBits;
 		if (ctx->queues[id].vk_queue == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ctx->queues[id].vk_queue == nullptr condition ignored (continuing)\n"); }
 	};
 
@@ -3180,6 +3220,7 @@ static void VulkanCreate(WindowContext* ctx)
 	}
 
 	if (queues.compute.At(0).family != queues.graphics.At(0).family) { device_extensions.Add(VK_KHR_MAINTENANCE_10_EXTENSION_NAME); }
+	const char* clock_mark_extension = nullptr;
 
 	// Detect VK_EXT_color_write_enable support; drop it from the enabled extension
 	// list when absent (MoltenVK) so device creation still succeeds.
@@ -3295,6 +3336,12 @@ static void VulkanCreate(WindowContext* ctx)
 			device_extensions.Add(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
 		}
 		KYTY_LOG_INFO("Device fault reports %s\n", ctx->graphic_ctx.device_fault_supported ? "enabled" : "unavailable");
+		clock_mark_extension = VulkanClockMarkExtension(ctx->graphic_ctx.instance, ctx->graphic_ctx.physical_device,
+		                                                dev_exts, &ctx->graphic_ctx.host_time_domain);
+		if (clock_mark_extension != nullptr)
+		{
+			device_extensions.Add(clock_mark_extension);
+		}
 
 		ctx->graphic_ctx.color_write_enable_supported =
 		    has_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME) && color_write_enable.colorWriteEnable == VK_TRUE;
@@ -3550,6 +3597,14 @@ static void VulkanCreate(WindowContext* ctx)
 	ctx->graphic_ctx.shader_maximal_reconvergence_enabled    = ctx->graphic_ctx.shader_maximal_reconvergence_supported;
 
 	VulkanCreateQueues(&ctx->graphic_ctx, queues);
+	if (clock_mark_extension != nullptr)
+	{
+		const bool khr = strcmp(clock_mark_extension, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) == 0;
+		ctx->graphic_ctx.get_calibrated_timestamps = reinterpret_cast<PFN_vkGetCalibratedTimestampsKHR>(
+		    vkGetDeviceProcAddr(ctx->graphic_ctx.device, khr ? "vkGetCalibratedTimestampsKHR" : "vkGetCalibratedTimestampsEXT"));
+		ctx->graphic_ctx.timestamp_period_ns = device_properties.limits.timestampPeriod;
+	}
+	KYTY_LOG_INFO("End-of-pipe clock marks use %s\n", ctx->graphic_ctx.get_calibrated_timestamps != nullptr ? "device timestamps" : "completion time");
 
 	ctx->swapchain = VulkanCreateSwapchain(&ctx->graphic_ctx, 2);
 	DebugOverlayInit(ctx->host_window, &ctx->graphic_ctx, ctx->swapchain);

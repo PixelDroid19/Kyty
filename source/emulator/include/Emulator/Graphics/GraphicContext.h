@@ -136,6 +136,8 @@ struct VulkanQueueInfo
 	uint32_t     family   = static_cast<uint32_t>(-1);
 	uint32_t     index    = static_cast<uint32_t>(-1);
 	VkQueue      vk_queue = nullptr;
+	// Meaningful bits of the family's timestamps; zero when the family cannot write them.
+	uint32_t timestamp_valid_bits = 0;
 	// Signaled by every command-processor submission with a value that rises in
 	// submission order (guarded by mutex), so rings wait for completion.
 	VkSemaphore timeline       = nullptr;
@@ -224,6 +226,11 @@ struct GraphicContext
 	// Intel parts lose the device (engine reset, fixed-function units busy, shader units idle) in depth passes that
 	// mix consecutive pixel-killing draws with depth writes, unless a pipelined timestamp separates those draws.
 	bool separate_depth_kill_draws = false;
+	// VK_KHR/EXT_calibrated_timestamps in the host performance counter's domain: end-of-pipe clock marks then carry
+	// the device time of their position in the stream. Null when the device cannot relate the two clocks.
+	PFN_vkGetCalibratedTimestampsKHR get_calibrated_timestamps = nullptr;
+	VkTimeDomainKHR                  host_time_domain          = VK_TIME_DOMAIN_DEVICE_KHR;
+	float                            timestamp_period_ns       = 0.0f;
 
 	// Vulkan subgroup limits used to validate shaders that require an exact guest
 	// wave width. A zero maximum means the physical-device query was unavailable.

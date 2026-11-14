@@ -37,7 +37,7 @@ traced. The test is all-or-nothing per shader pair. It does not price a persiste
 descriptor, which is what the robot platformer's binding cost (8-10 ms per frame at about 600 draws) would
 need; that is workstream D of `performance-architecture-plan.md`. One run per title.
 
-## End-of-pipe clock marks of one submission share one value (2026-11-12, defect, open)
+## End-of-pipe clock marks of one submission share one value (2026-11-12, defect, fixed 2026-11-14)
 
 `GraphicsRenderWriteAtEndOfPipeClockCounter` records a label whose callback writes the clock when the
 label fires, which is when the host submission that holds it completes (`GraphicsRenderEop.cpp:272-296`).
@@ -51,10 +51,20 @@ them.
   (a diagnostic, not a model of the GPU) the title drew 6 draws at 2432x1368 against 2,117 without the
   spacing and nothing below 1920x1080. That run reached gameplay later than the other, so the frame-rate
   effect of correct marks is open (`docs/titles/robot-platformer.md`).
-- **Not fixed.** Suggested direction: a host timestamp query at each end-of-pipe clock position, converted
-  to the guest's clock when the submission completes; `GraphicsRenderCommandBuffer.cpp:2831-2844` already
-  writes host timestamps for another purpose. Open questions before building: the query pool size for 440
-  marks a frame and the cost of a timestamp between passes on tile-less desktop GPUs.
+- **Fixed (2026-11-14).** Each clock mark now records a bottom-of-pipe device timestamp at its place in
+  the stream, in order with deferred draws; when its label fires the timestamp is read and converted to the
+  guest counter through a calibrated device/host clock pair (`VK_KHR_calibrated_timestamps`, or the EXT
+  name, in the domain the host performance counter reads), retaken at most every 100 ms. Timestamps wrap
+  at the queue family's valid bits, so the distance to the calibration is sign-extended from them; a mark
+  never lies after the moment it is published. Devices without the extension or the host domain, and
+  queues without timestamps, keep the completion time.
+- **Verified, one run, Intel Arc A770, dunes route.** The device path engaged (logged at device creation);
+  a temporary diagnostic (not committed) printed marks of one submission about 3.3 us apart in device
+  time, published 18-54 ms after they were written, where before they shared one value. The close-up dune
+  scene (capture checked) ran at 16.4-16.9 fps against 15.0-15.6 fps for the same scene in an earlier
+  stamped run, so the 440 timestamps a frame show no cost; the frame-rate comparison is not clean.
+- **No frame-rate lever in the dunes.** The title's main targets stay at 1920x1080 there with over-budget
+  marks too (`docs/titles/robot-platformer.md`); its dynamic resolution has no level below that.
 
 ## Guest rewrites of what a batch read, one and two submits later, and the one-batch-ahead estimate (2026-11-12, measured)
 

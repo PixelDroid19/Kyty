@@ -794,6 +794,14 @@ public:
 	// Called before each graphics draw is recorded. Where the device needs it, a bottom-of-pipe timestamp
 	// separates a draw whose pixel shader kills pixels while depth writes are on from the draw before and after it.
 	void SeparateDepthKillDraw(bool kills_with_depth_write);
+	struct TimestampQuery
+	{
+		VkQueryPool pool  = VK_NULL_HANDLE;
+		uint32_t    query = 0;
+	};
+	// Records a bottom-of-pipe timestamp at this point of the stream; it is readable once the submission completed
+	// and until the recording begins again.
+	TimestampQuery WriteTimestamp();
 	[[nodiscard]] bool AwaitsSubmissionOnDevice(SubmissionId submission) const;
 	[[nodiscard]] const std::vector<SubmissionId>& DeviceAwaitedSubmissions() const { return m_device_awaited; }
 
@@ -854,9 +862,9 @@ private:
 	TransientSnapshotLeases*   m_snapshot_leases           = nullptr;
 	std::vector<VulkanBuffer*> m_recording_uploads;
 	VkDescriptorPool           m_transport_descriptor_pool = VK_NULL_HANDLE;
-	// Timestamp queries written by SeparateDepthKillDraw; reset from the host when the recording begins.
-	std::vector<VkQueryPool> m_draw_separation_pools;
-	uint32_t                 m_draw_separations          = 0;
+	// Timestamp queries written by WriteTimestamp; reset from the host when the recording begins.
+	std::vector<VkQueryPool> m_timestamp_pools;
+	uint32_t                 m_timestamps                = 0;
 	bool                     m_previous_draw_kills_depth = false;
 
 	mutable std::mutex           m_pipeline_lease_mutex;

@@ -1,5 +1,6 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GdsRange.h"
+#include "Emulator/Graphics/GpuClockMark.h"
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 #include "Emulator/Graphics/GraphicsRender.h"
@@ -9,6 +10,7 @@
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Threads.h"
+#include "Kyty/Core/Timer.h"
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -24,6 +26,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cinttypes>
+#include <mutex>
 #include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -256,9 +259,8 @@ void GraphicsRenderWriteAtEndOfPipe64(uint64_t /*submit_id*/, CommandBuffer* buf
 
 // Gen5 titles convert GPU clock intervals at a fixed 100 MHz, the RDNA2 reference clock; Gen4 titles read
 // the rate from GetGpuCoreClockFrequency, which reports the host counter's own rate.
-static uint64_t EndOfPipeClockCounter()
+static uint64_t EndOfPipeClockCounter(uint64_t counter)
 {
-	const uint64_t counter = Kernel::TimePort::GetCounter();
 	if (!Config::IsNextGen())
 	{
 		return counter;
@@ -267,6 +269,56 @@ static uint64_t EndOfPipeClockCounter()
 	const uint64_t     frequency       = Kernel::TimePort::GetFrequency();
 	EXIT_IF(frequency == 0);
 	return counter / frequency * kGen5GpuClockHz + counter % frequency * kGen5GpuClockHz / frequency;
+}
+
+// A device timestamp paired with the guest's counter, retaken at most every 100 ms so clock drift stays far below a
+// frame. The guest counter is the host performance counter less the timer's start, so the pair is shifted by that.
+static GpuClockCalibration CurrentClockCalibration(const GraphicContext& gctx)
+{
+	static std::mutex          mutex;
+	static GpuClockCalibration calibration;
+	static uint64_t            taken_at = 0;
+
+	std::lock_guard<std::mutex> lock(mutex);
+	const uint64_t              now = Kernel::TimePort::GetCounter();
+	if (taken_at != 0 && now - taken_at < Kernel::TimePort::GetFrequency() / 10)
+	{
+		return calibration;
+	}
+	VkCalibratedTimestampInfoKHR domains[2] {};
+	domains[0].sType      = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
+	domains[0].timeDomain = VK_TIME_DOMAIN_DEVICE_KHR;
+	domains[1].sType      = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
+	domains[1].timeDomain = gctx.host_time_domain;
+	uint64_t   timestamps[2] = {};
+	uint64_t   deviation     = 0;
+	const auto result        = gctx.get_calibrated_timestamps(gctx.device, 2, domains, timestamps, &deviation);
+	if (result != VK_SUCCESS)
+	{
+		EXIT("vkGetCalibratedTimestamps failed: result=%d\n", static_cast<int>(result));
+	}
+	const uint64_t counter = Kernel::TimePort::GetCounter();
+	const uint64_t host    = Core::Timer::QueryPerformanceCounter();
+	calibration            = {timestamps[0], counter - (host - timestamps[1])};
+	taken_at               = counter;
+	return calibration;
+}
+
+// Guest counter value at the end-of-pipe timestamp `query` of `pool`, written by a completed submission on a queue
+// whose timestamps keep `valid_bits` bits.
+static uint64_t ClockMarkCounter(VkQueryPool pool, uint32_t query, uint32_t valid_bits)
+{
+	const auto& gctx   = *g_render_ctx->GetGraphicCtx();
+	uint64_t    ticks  = 0;
+	const auto  result = vkGetQueryPoolResults(gctx.device, pool, query, 1, sizeof(ticks), &ticks, sizeof(ticks), VK_QUERY_RESULT_64_BIT);
+	if (result != VK_SUCCESS)
+	{
+		EXIT("end-of-pipe clock mark is not readable after its submission completed: result=%d\n", static_cast<int>(result));
+	}
+	const uint64_t counter = GpuClockMarkHostCounter(CurrentClockCalibration(gctx), ticks, valid_bits, gctx.timestamp_period_ns,
+	                                                 Kernel::TimePort::GetFrequency());
+	// The two clocks are read a few microseconds apart; a mark never lies after the moment it is published.
+	return std::min(counter, Kernel::TimePort::GetCounter());
 }
 
 void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr)
@@ -279,17 +331,33 @@ void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandB
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	uint64_t args[LABEL_ARGS_MAX] = {reinterpret_cast<uint64_t>(dst_gpu_addr), 0, 0, 0};
+	const auto&    gctx       = *g_render_ctx->GetGraphicCtx();
+	const uint32_t valid_bits = gctx.queues[buffer->GetQueueIndex()].timestamp_valid_bits;
+	// Without calibrated timestamps the mark carries the time its submission was seen complete.
+	if (gctx.get_calibrated_timestamps == nullptr || valid_bits == 0)
+	{
+		uint64_t args[LABEL_ARGS_MAX] = {reinterpret_cast<uint64_t>(dst_gpu_addr)};
+		RecordTransientLabel64(
+		    buffer, dst_gpu_addr, 0,
+		    [](SubmissionId /*submission*/, const uint64_t* args)
+		    {
+			    *reinterpret_cast<uint64_t*>(args[0]) = EndOfPipeClockCounter(Kernel::TimePort::GetCounter());
+			    return false;
+		    },
+		    nullptr, args);
+		return;
+	}
 
+	const auto mark                  = buffer->WriteTimestamp();
+	uint64_t   args[LABEL_ARGS_MAX] = {reinterpret_cast<uint64_t>(dst_gpu_addr), reinterpret_cast<uint64_t>(mark.pool), mark.query,
+	                                   valid_bits};
 	RecordTransientLabel64(
 	    buffer, dst_gpu_addr, 0,
 	    [](SubmissionId /*submission*/, const uint64_t* args)
 	    {
-		    auto* dst_gpu_addr = reinterpret_cast<uint64_t*>(args[0]);
-		    EXIT_IF(dst_gpu_addr == nullptr);
-		    *dst_gpu_addr = EndOfPipeClockCounter();
-		    KYTY_LOG_DEBUG(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- Clock: 0x%016" PRIx64 "\n" FG_DEFAULT,
-		           reinterpret_cast<uint64_t>(dst_gpu_addr), *dst_gpu_addr);
+		    const uint64_t counter =
+		        ClockMarkCounter(reinterpret_cast<VkQueryPool>(args[1]), static_cast<uint32_t>(args[2]), static_cast<uint32_t>(args[3]));
+		    *reinterpret_cast<uint64_t*>(args[0]) = EndOfPipeClockCounter(counter);
 		    return false;
 	    },
 	    nullptr, args);

@@ -139,6 +139,18 @@ inline void sys_query_performance_frequency(uint64_t* freq)
 	*freq = 1000000000LL;
 }
 
+// The host clock sys_query_performance_counter reads, so other clocks (GPU timestamps) can be related to it.
+enum class SysPerformanceClock
+{
+	Monotonic,
+	QueryPerformanceCounter,
+};
+
+inline SysPerformanceClock sys_performance_counter_clock()
+{
+	return SysPerformanceClock::Monotonic;
+}
+
 inline void sys_query_performance_counter(uint64_t* counter)
 {
 	struct timespec now

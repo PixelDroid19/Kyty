@@ -180,7 +180,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
-  - End-of-pipe clock marks of one submission share one value (2026-11-12, defect, open)
+  - End-of-pipe clock marks of one submission share one value (2026-11-12, defect, fixed 2026-11-14)
   - Guest rewrites of what a batch read, one and two submits later, and the one-batch-ahead estimate (2026-11-12, measured)
   - Performance plan, stage 0: release census and draw-front coverage (2026-11-12, measured)
   - Draw plan, binding layer: reuse per shader pair when every descriptor word repeats (2026-11-12, measured, not a lever)

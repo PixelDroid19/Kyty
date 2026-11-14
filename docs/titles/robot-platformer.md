@@ -233,6 +233,8 @@ every mark at least 0.1 ms after the previous one drew 6 draws at 2432x1368 and 
   106,479 without the spacing, the same handful at 2432x1368, nothing new below 1080p, and 15.8 against
   15.2 fps. The title's resolution does not drop in the dunes when the marks report over-budget frames,
   so correct marks are a correctness fix there, not a frame-rate lever.
+- **Marks fixed (2026-11-14).** Device timestamps now back every mark (`cross-title.md`); one run in the
+  close-up dune scene measured 16.4-16.9 fps with main targets unchanged.
 
 ## Robot platformer: render-target scaling to 960x540 under user play, and a depth-array exit (2026-11-12, exit fixed 2026-11-13)
 
