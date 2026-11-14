@@ -6,6 +6,14 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Sandbox title: world frame rate at `6a6a5818a` (2026-11-14, measured)
+
+`PPSA17221 - Minecraft`, Intel Arc A770, Ryzen 5 7600, 60 fps present limit, saved world, one run,
+1 s agent samples. Menus hold 60 fps. In the world, from 86 s to the end of the run, at 5,300-5,600
+draws per frame: 28-33 fps, mean about 31, with single seconds at 24-28. At about 6.2 us of
+command-processor time per draw, 5,400 draws take about 33 ms, so the frame is the command
+processor's. 40 fps in this scene needs about 4.6 us per draw.
+
 ## Sandbox title: draw tail recorded on a replay thread (2026-11-14, measured)
 
 `docs/bringup/performance-architecture-plan.md`, entry "Built: C stages 1 and 2". Intel Arc A770, strict
