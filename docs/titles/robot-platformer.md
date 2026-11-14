@@ -44,6 +44,14 @@ so where the robot stands depends on how long the loads took).
   `0xbf8ee9fc` dispatched 13,072 groups per call (152x86, the 2432x1368 grid), while the indexed
   draws render at 1920x1080. Whether the guest picks that grid from its dynamic resolution, and so from the
   end-of-pipe clock marks (`cross-title.md`, open defect), is not traced.
+- **Close-up scene, every draw path stamped (second run, same route).** With the non-indexed draw path
+  bracketed too, the stamps cover 366-384 of 381 draws per frame. That run's captures show the robot close
+  up in the dunes, at 15.2 fps. Per frame: compute 43-46 ms, draws 11.4-12.0 ms (non-indexed ones 2.1-2.4
+  ms). `0x3666fa39` and `0x874bd13f` each dispatched 8,160 groups per call, one call per frame, at 2.5 and
+  1.7 us per group: about 20 and 14 ms. 8,160 is the 120x68 grid, which with one 64-lane wave per group
+  matches a 960x540 image in 8x8 tiles, so the BVH kernel's group count reads as the number of half-
+  resolution tiles the guest traces, all of them when the robot fills the view. Both programs spill on
+  this host (records of 2026-11-06 and 2026-11-12 below); no translator change was tried in this run.
 - **Defect, open.** Status 139 has ended two diagnostic runs, both in scenes off the dunes route:
   the probes engaged from boot (intro crowd scene, 185 s, no log line, no core dump), and a run
   that also doubled the BVH kernel's cross-part exchanges (ship cinematic). The second left a crash
