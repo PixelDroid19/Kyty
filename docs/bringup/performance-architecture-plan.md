@@ -963,3 +963,16 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   every full barrier reached different scenes and showed no per-draw gain (27.8 ms per 224
   draws against 25.6 ms per 204, 48.2 ms per 503 against 43.3 ms per 356). A narrower
   ACQUIRE_MEM mapping would need evidence of which consumers the guest orders; not pursued.
+- **Priced, not built: per-draw preparation leftovers (PPSA17221 - Minecraft world,
+  2026-11-14).** A 10 s profile of HEAD showed `__fstat64` at about 3 % of the command
+  processor thread, under the physical-population query of the guest-address preparation.
+  A temporary TSC timer around the query measured about 14 ns per preparation: the query
+  runs only while a physical range is partly imported (127,000 of 15 million preparations,
+  1,122 population changes), so the profile share is sampling skid. The preparation itself
+  measured about 380 ns per draw without the profiler (residency 39, refresh 214), so the
+  refresh check of tracked chunks stays its largest part (stage 2 above).
+  The same profile puts `memset` at about 3 % of the command processor thread and about a
+  fifth of the draw-front thread. The zeroed objects are per-draw value types:
+  `PreparedDrawInputs` is 18,368 bytes (vertex inputs 10,544, pixel inputs 7,752) and
+  `ShaderBindResources` 7,264. Not zeroing them would need every reader proven to read only
+  the counted entries; about 0.2 us per draw on the command processor at most.
