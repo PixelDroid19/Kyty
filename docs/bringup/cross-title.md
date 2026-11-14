@@ -62,7 +62,7 @@ them.
   a temporary diagnostic (not committed) printed marks of one submission about 3.3 us apart in device
   time, published 18-54 ms after they were written, where before they shared one value. The close-up dune
   scene (capture checked) ran at 16.4-16.9 fps against 15.0-15.6 fps for the same scene in an earlier
-  stamped run, so the 440 timestamps a frame show no cost; the frame-rate comparison is not clean.
+  run that carried timing stamps; the cost of 440 timestamps a frame has no clean control yet.
 - **No frame-rate lever in the dunes.** The title's main targets stay at 1920x1080 there with over-budget
   marks too (`docs/titles/robot-platformer.md`); its dynamic resolution has no level below that.
 

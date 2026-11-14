@@ -71,8 +71,9 @@ so where the robot stands depends on how long the loads took).
   variant tried the entry of the invocation's previous guest-address translation before the directory
   and the binary search (entries are disjoint, so a containing entry is the search's answer). Unit tests
   with real device loads passed; one run on the dunes route (capture checked, close-up dune scene)
-  measured 17.6-18.4 fps against 17.7-18.1 fps without it. The dependent reads of the address search are
-  not what bounds the title's compute time; the variant was not kept.
+  measured 17.6-18.4 fps against 17.7-18.1 fps without it. The memo's hit rate and the kernels' time per
+  group were not measured, so this shows no frame-rate change, not that the address search costs
+  nothing; the variant was not kept.
 - **Status 139 off the route is the title's own command-buffer assert (2026-11-14).** It ended two
   diagnostic runs and one run of a build without probes (ship cinematic, then `hub_crashsite_tutorial`
   loading). The crash context's "execute fault at address 0" is how the host reports the guest's
