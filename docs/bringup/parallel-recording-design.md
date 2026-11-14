@@ -418,3 +418,6 @@ pair cut command emission by 0.102 µs/draw (standard error 0.006) and materiali
 below the detection limit of the totals (about 0.35 µs/draw); the stage counters resolve it. The
 draws per frame differed between these runs (3,800-5,400) on the same route; whether the scene
 reached differs is not checked.
+`kyty_agent playable-regression` on `PPSA06084 - Superliminal` at `04bafcefa` (60 fps limit): every
+gate passes except the three that have no reviewed input here (visual baseline, scene checkpoint,
+action response); exit status 3, baseline missing.
