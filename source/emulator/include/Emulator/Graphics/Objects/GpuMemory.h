@@ -1459,7 +1459,11 @@ struct GpuMemoryStorageSeedSource
 	uint64_t            offset = 0;
 	uint64_t            vaddr  = 0;
 	uint64_t            size   = 0;
+	// Logical time of the result's last device write (see GpuMemoryGetCurrentTime).
+	uint64_t device_write_time = 0;
 };
+// Advances and returns the logical clock that stamps device writes.
+uint64_t GpuMemoryGetCurrentTime();
 // The results the guest bytes of [vaddr, vaddr + size) do not hold yet, oldest device
 // write first, for `reader` to copy over an object seeded from those bytes. `reader`
 // becomes a use of each, so its write-back and release follow the copy.

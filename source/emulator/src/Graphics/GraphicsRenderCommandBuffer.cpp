@@ -2465,7 +2465,9 @@ void CommandBuffer::Begin()
 	m_device_wait_semaphores.clear();
 	m_device_wait_values.clear();
 	// A barrier at the start of a recording still orders it after earlier submissions.
-	m_latest_full_barrier = false;
+	m_latest_full_barrier   = false;
+	m_full_barrier_recorded = false;
+	m_recording_begin_time  = GpuMemoryGetCurrentTime();
 	// Chunks of an executed recording that was not reset are reset again when they begin.
 	m_chunks.clear();
 	m_geometry_segment = {};
@@ -3710,7 +3712,22 @@ void CommandBuffer::FullMemoryBarrier()
 	mem_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
 	vkCmdPipelineBarrier(RecordOutsideRenderPass(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1,
 	                     &mem_barrier, 0, nullptr, 0, nullptr);
-	m_latest_full_barrier = true;
+	m_latest_full_barrier   = true;
+	m_full_barrier_recorded = true;
+}
+
+bool CommandBuffer::OrderEarlierDeviceWrite(uint64_t device_write_time, VkCommandBuffer target)
+{
+	EXIT_IF(IsInvalid());
+	if (target != m_main || device_write_time >= m_recording_begin_time)
+	{
+		return false;
+	}
+	if (!m_full_barrier_recorded)
+	{
+		FullMemoryBarrier();
+	}
+	return target == m_main;
 }
 
 

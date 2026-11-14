@@ -249,7 +249,29 @@ only where Kyty's own traces agree.
   copied in the same command buffer, so dropping repeats is not the lever. Lifting the
   per-draw outside-pass access needs these storage-to-vertex seeds issued before the pass
   (at publication, or batched at pass start). Workstream C stage 1 was rejected only for
-  this access rate. Not built.
+  this access rate.
+- **Built: in-place fetch of seeded storage (2026-11-13).** When exactly one storage result
+  covers every byte the draw reads (no fetch past the stream), the draw fetches that result
+  in place instead of copying it into the vertex object. The result's write must be stamped
+  before the recording began. The recording then holds one full memory barrier
+  (`CommandBuffer::OrderEarlierDeviceWrite` records it at most once per recording), so the
+  pass breaks once per recording instead of once per seeded draw. Anything else keeps the
+  copy. Of 900 k seeded copies on the Minecraft world all had one covering source; 67 % had
+  no full barrier yet in their recording, and 1.4 % fetched past the stream.
+  - Minecraft world, external counter: copies from this caller 0.082 -> 0 per draw, pass
+    begins 0.092 -> 0.014, barriers 0.31 -> 0.073, `vkCmdDrawIndexed` 491 -> 410 ns, driver
+    time 1,058 -> 771 ns per draw.
+  - Minecraft world without the counter, one run per arm, world+2..22 s: draw processor
+    6.57 -> 6.35 us per draw, 137 k -> 148 k draws/s, 24.3 -> 25.4 fps (fps within noise).
+    The world capture shows terrain, trees, mobs and HUD intact.
+  - PPSA21567 - ASTRO BOT dunes: this caller never fires (its copies come from GDS and
+    guest-address overlays), so the change is not on its path. PPSA21402 - Balatro 59.89 fps.
+    `playable-regression` on PPSA06084 - Superliminal 12/15, same three failures. Unit tests
+    2,661 pass, CTest gates 4/4.
+  - Synchronization rests on a code read. `FullMemoryBarrier` orders all earlier memory
+    writes for all later reads in submission order. Writes stamped before the recording
+    began were recorded in earlier submissions. No synchronization-validation run was made.
+    Cross-queue ordering is the same as for the copy it replaces.
 
 ### E. Internal resolution as a functional option
 

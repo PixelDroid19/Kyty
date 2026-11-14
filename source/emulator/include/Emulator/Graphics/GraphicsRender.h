@@ -679,6 +679,10 @@ public:
 	// stages and memory accesses. Guest cache flushes often come several in a row;
 	// when the latest command already is such a barrier, another orders nothing more.
 	void FullMemoryBarrier();
+	// Makes a device write stamped at `device_write_time` visible to the commands recorded next into
+	// `target`, recording at most one full memory barrier per recording. False when the write may
+	// belong to this recording or `target` is not its current main buffer.
+	[[nodiscard]] bool OrderEarlierDeviceWrite(uint64_t device_write_time, VkCommandBuffer target);
 	void WaitForFence();
 	void WaitForFenceWithoutLabelCallbacks();
 	void WaitForFenceAndReset();
@@ -850,6 +854,10 @@ private:
 	std::optional<OpenRenderPass> m_open_render_pass;
 	// The latest command recorded is a full memory barrier. Every recording handle clears it.
 	mutable bool m_latest_full_barrier = false;
+	// Writes stamped before the recording began were recorded in earlier submissions; once a full
+	// memory barrier is recorded, every later command of the recording sees them.
+	uint64_t m_recording_begin_time  = 0;
+	bool     m_full_barrier_recorded = false;
 	// The graphics pipeline BindDrawPipeline bound last, and the command buffer it went to.
 	VkCommandBuffer m_draw_pipeline_buffer = VK_NULL_HANDLE;
 	VkPipeline      m_draw_pipeline        = VK_NULL_HANDLE;

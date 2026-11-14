@@ -2582,15 +2582,33 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 // The vertex object at object_addr was seeded from guest bytes; storage results of this
 // queue the guest does not hold yet are copied over the bytes the draw reads, [vaddr,
 // vaddr + size). A shared vertex pool can hold hundreds of them; other draws copy their own.
-static void CopyPendingStorageIntoVertices(CommandBuffer* buffer, VulkanBuffer* vertices, uint64_t object_addr, uint64_t vaddr, uint64_t size)
+// Returns the storage result to fetch instead, when one result holds every byte the draw reads from
+// `fetch_base` on and its write is already ordered before this point of the recording; the draw then
+// reads it in place without leaving the render pass.
+static const GpuMemoryStorageSeedSource* CopyPendingStorageIntoVertices(CommandBuffer* buffer, VkCommandBuffer vk_buffer,
+                                                                       VulkanBuffer* vertices, uint64_t object_addr,
+                                                                       uint64_t fetch_base, uint64_t vaddr, uint64_t size,
+                                                                       std::vector<GpuMemoryStorageSeedSource>* sources_out)
 {
 	SubmissionId reader;
 	EXIT_IF(!buffer->GetSubmissionId(&reader));
-	std::vector<GpuMemoryStorageSeedSource> sources;
+	auto& sources = *sources_out;
+	sources.clear();
 	GpuMemoryCollectStorageForGuestSeed(vaddr, size, reader, &sources);
 	if (sources.empty())
 	{
-		return;
+		return nullptr;
+	}
+	if (sources.size() == 1)
+	{
+		const auto&    source     = sources[0];
+		const uint64_t block_base = source.vaddr - source.offset;
+		if (source.vaddr == vaddr && source.size == size && fetch_base >= block_base &&
+		    (source.buffer->usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) != 0u &&
+		    buffer->OrderEarlierDeviceWrite(source.device_write_time, vk_buffer))
+		{
+			return &source;
+		}
 	}
 
 	auto*           cmd = buffer->RecordOutsideRenderPass();
@@ -2616,6 +2634,7 @@ static void CopyPendingStorageIntoVertices(CommandBuffer* buffer, VulkanBuffer* 
 		vkCmdCopyBuffer(cmd, source.buffer->buffer, vertices->buffer, 1, &region);
 	}
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+	return nullptr;
 }
 
 static VkBuffer ZeroVertexBuffer(GraphicContext* ctx)
@@ -2676,6 +2695,7 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
 
 	const VertexStreamDrawRange range {first_record, required_records, records_exact, first_instance, instance_count};
+	std::vector<GpuMemoryStorageSeedSource> seed_sources;
 	for (int i = 0; i < input.buffers_num; i++)
 	{
 		const auto& buffer_info = input.buffers[i];
@@ -2737,7 +2757,16 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 				const uint64_t copy_size = tail_fetched ? stream_size : size - read_begin;
 				if (copy_size != 0u)
 				{
-					CopyPendingStorageIntoVertices(buffer, vertices, object_addr, copy_addr, copy_size);
+					// A fetch past the stream reads zero only from the seeded copy.
+					const auto* in_place = CopyPendingStorageIntoVertices(buffer, tail_fetched ? VK_NULL_HANDLE : vk_buffer, vertices,
+					                                                      object_addr, address, copy_addr, copy_size, &seed_sources);
+					if (in_place != nullptr)
+					{
+						const uint64_t block_base = in_place->vaddr - in_place->offset;
+						VkDeviceSize   in_place_offset = in_place->buffer->guest_offset + (address - block_base);
+						vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &in_place->buffer->buffer, &in_place_offset);
+						continue;
+					}
 				}
 			}
 		}

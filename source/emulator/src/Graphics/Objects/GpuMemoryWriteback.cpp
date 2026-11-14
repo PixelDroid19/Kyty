@@ -878,7 +878,8 @@ void GpuMemory::CollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, Submis
 		const uint64_t begin = std::max(vaddr, object.block.vaddr[0]);
 		const uint64_t end   = std::min(vaddr + size, object.block.vaddr[0] + object.block.size[0]);
 		RecordUse(&object.info, reader);
-		sources->push_back({static_cast<const VulkanBuffer*>(object.info.object.obj), begin - object.block.vaddr[0], begin, end - begin});
+		sources->push_back({static_cast<const VulkanBuffer*>(object.info.object.obj), begin - object.block.vaddr[0], begin, end - begin,
+		                    object.info.device_write_time});
 	}
 }
 
