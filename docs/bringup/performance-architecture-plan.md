@@ -1194,6 +1194,14 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   lookup, and would have to prove that the previous set was neither trimmed nor recycled as an
   uncached set; not built. The replay thread itself takes about as many samples as the command
   processor, mostly reading the clock while it polls.
+- **Not shown: sparser clock reads in the replay thread's poll (PPSA17221 - Minecraft world,
+  2026-11-14).** A temporary switch alternated, in 4 s wall-clock blocks, a clock read per pause
+  (shipped) and one per 64 pauses; one-second samples that crossed a block edge were dropped, so both
+  arms see the same stretch of the route. Two runs: 29.52 against 30.79 fps and 32.32 against 33.10
+  fps (command processing 5.82/5.80 and 6.23/6.06 us per draw). Paired by adjacent blocks the
+  difference is +0.38 fps with a standard error of 0.71 (28 pairs), so no effect is shown. The
+  method resolves about 1.4 fps with two runs; a lever of about 0.2 us per draw (about 1 fps at this
+  load) would need about four runs of pairs.
 - **Measured: profile-guided build on 2b27ac3c4 (2026-11-14).** `KYTY_PGO=GENERATE` in a separate
   build directory, trained by one PPSA17221 - Minecraft world run and one PPSA21567 - ASTRO BOT
   dunes run, then `KYTY_PGO=USE` (a cache change needs `cmake -S source -B <dir>`; without
