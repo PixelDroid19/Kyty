@@ -208,6 +208,17 @@ only where Kyty's own traces agree.
   costs 2-9 % of the thread, most of the 12-14 % the worker could take. Stage 2 is worth
   building only when the outside-pass commands (about 40 `RecordOutsideRenderPass` callers)
   are encoded too, so the worker drains only at submit.
+- **C encode priced (2026-11-13, external call counter, Minecraft world, 20 s, 2.48 M draws).**
+  A preloaded counter around every exported `vkCmd*` entry point, split by thread, found
+  12.6 commands per draw on the command-processor thread and 0.98 us per draw inside the
+  driver, about 0.8 us after the counter's own fenced timing (about 13 ns per call). Commands
+  per draw: `vkCmdDrawIndexed`, `vkCmdBindIndexBuffer`, `vkCmdBindVertexBuffers`,
+  `vkCmdSetLineWidth`, `vkCmdSetDepthBias` 1.0 each, descriptor-set binds and push
+  constants 1.69 each, barriers 0.22, timestamps 0.19. `vkCmdDrawIndexed` alone takes
+  0.47 us per draw: the driver emits pending state at the draw. Encoding 12.6 small records
+  per draw should cost about 0.1 us, so the full workstream C can move at most about 0.7 us
+  per draw off the thread. That is short of the 0.93 us per draw that 30 fps on the
+  Minecraft world needs at about 5,450 draws per frame.
 
 ### E. Internal resolution as a functional option
 
