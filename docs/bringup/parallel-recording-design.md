@@ -392,3 +392,16 @@ replaced target, but not a pending clear or a time-field reader. A safe reuse th
 item above and saves only the lookups (materialization key and hash, cache lookups, `GetHeapId`,
 `FindFast`, the extra lock round trips and statistics traces): an estimated half of the measured
 0.53 µs/draw, not measured.
+
+### Excluded: remembering the targets `ResetHash` finds (2026-11-14)
+
+`ResetHash` runs at the end of every draw for each colour and depth target and spends most of its
+time finding the same object again (`FindFast` 1.8 %, `GetHeapId` 0.9 % of the command-processor
+samples). Four remembered exact-range finds, valid while the object graph generation and the heap
+index generation are unchanged, answered 98.5 % of the calls in the sandbox world, and a shadow
+check that also ran the full find on every hit counted no mismatch in 16.5 million hits (its one
+deliberately forced mismatch was reported). In alternate 4 s blocks it did not move
+command-processor time (+0.02 µs/draw, standard error 0.19, 14 pairs) or frame time (+0.05,
+standard error 0.37), so it is not shipped. That run and the target-reuse run drew about 4,700 and
+4,500 draws per frame against 5,400 in the two runs before them on the same route; the scene
+reached differs between runs.
