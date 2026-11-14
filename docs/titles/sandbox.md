@@ -37,6 +37,17 @@ encoding 3.2 %, memset 2.7 %, `GpuMemory::GetHeapId` 2.4 %, statistics clock rea
 descriptor hash 2.3 %. A 30 % cut of command-processor time therefore needs a structural change
 (`docs/bringup/parallel-recording-design.md`), not a hot spot.
 
+### Is the world rate a stable 30? (2026-11-14, measured)
+
+No. Over the first 56 s in the world, one-second windows of the baseline run read 31.7 fps median,
+27.7 at the 5th percentile and 23.7 at the minimum; the repeat run reads 32.7, 21.8 and 20.8, with
+its lowest windows in the first 4 s after the world appears. The slow windows hold frames of 55-70 ms
+and a longer command-processor run (43 ms longest against 32 ms in the median window), with more
+draws per frame (5,400-5,600). No pipeline compile, shader translation or one-off stall stands out
+in them; the largest single item is an index-buffer upload of up to 3.4 ms. The dips are the same
+command-processor-bound cost on heavier frames, so the per-draw cost is still the lever for a stable
+30 as well as for 40.
+
 ## Sandbox title: draw tail recorded on a replay thread (2026-11-14, measured)
 
 `docs/bringup/performance-architecture-plan.md`, entry "Built: C stages 1 and 2". Intel Arc A770, strict
