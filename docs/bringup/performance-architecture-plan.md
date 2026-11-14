@@ -233,6 +233,13 @@ only where Kyty's own traces agree.
   the common runtime, so a repeat-value filter in Kyty would not help. The lever left inside
   the driver is binding fewer objects per draw. Index and vertex streams in one buffer, with
   draw offsets, would avoid the per-draw binds. It is not priced.
+- **Per-draw binds are mostly new buffers (same counter, third run, 2.28 M draws).** Index
+  binds: 65 % a different `VkBuffer`, 27 % the same buffer at a new offset, 8 % identical.
+  Vertex binds: 70 % different buffers, 28 % same buffers at new offsets, 2 % identical.
+  Descriptor sets: 22 % repeat the previous bind. A repeat-bind filter would therefore
+  remove under a tenth of the index and vertex binds. Fewer binds needs the index and
+  vertex pools to hand out offsets in a few long-lived buffers, an architecture change in
+  the pools whose driver saving is unmeasured.
 
 ### E. Internal resolution as a functional option
 
