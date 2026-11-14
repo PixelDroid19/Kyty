@@ -25,8 +25,10 @@ run with a game patch is not a strict run and supports no compatibility claim.
 - **Against the 2026-11-02 figure.** The same lever measured 16.6-18.1 fps then. The
   command-processor work cut since then lets the smaller GPU frame show: the GPU is no longer busy
   all the time (78 % against 91 %).
-- **Not done.** The same scene was not reached in both runs, the patch was not run twice, and the
-  first 10 s of the patched window (14-16 fps) were not traced to a scene.
+- **Repeated.** A second patched run held 37-39 fps from 170 s to the end of the window, after the
+  same slow start (13-20 fps), without a load pause.
+- **Not done.** The same scene was not reached in both runs, and the slow start of the patched
+  window was not traced to a scene.
 
 ## Robot platformer: transport shade layout destroyed while in use (2026-11-14, fixed)
 
