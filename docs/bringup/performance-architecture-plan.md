@@ -245,10 +245,11 @@ only where Kyty's own traces agree.
   sets and a 64-byte push constant, best CPU recording time of 40 runs, two runs. A
   distinct index and vertex buffer per draw (each in its own allocation) costs 0.135-0.139
   us per draw; one buffer rebound at a new offset per draw costs 0.133-0.137 us, the same;
-  binding once and moving `firstIndex`/`vertexOffset` costs 0.087-0.089 us. Pools that hand
-  out offsets in long-lived buffers therefore save nothing while the bind is still issued.
-  Only removing the bind saves about 0.05 us per draw, about 0.25 ms per frame at Minecraft's
-  5,000 draws, against the 3 ms the 30 fps target needs. It also needs every vertex stream of
+  binding once and moving `firstIndex`/`vertexOffset` costs 0.087-0.089 us. With three and
+  six vertex streams per draw the three arms cost 0.148 / 0.147 / 0.087 and 0.175 / 0.173 /
+  0.091 us. Pools that hand out offsets in long-lived buffers therefore save nothing while
+  the bind is still issued. Only removing the bind saves 0.05-0.08 us per draw, 0.25-0.4 ms
+  per frame at Minecraft's 5,000 draws, against the 3 ms the 30 fps target needs. It also needs every vertex stream of
   a draw expressible as one `vertexOffset`, which guest strides and offsets do not give in
   general. Kyty's own vertex-binding term (about 0.5 us per draw) is therefore mostly Kyty
   work, not driver bind cost.
