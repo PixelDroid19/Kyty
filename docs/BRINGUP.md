@@ -129,7 +129,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Sandbox title: storage buffers read by device address (2026-11-11, built, command-processor time only)
   - Sandbox title: vertex streams fetched from the imported guest pages (2026-11-11, built, frame time unchanged)
   - Sandbox title: frame load and command-processor ceiling in the world (2026-11-10, measured)
-  - Sandbox title: letters missing from the death message (2026-11-10, open, cause localized 2026-11-14)
+  - Sandbox title: letters missing from the death message (2026-11-10, fixed 2026-11-14)
   - Sandbox title: snapshot comparisons in the world (2026-10-24, improved)
   - Sandbox title: GPU hang on the first world frame (2026-10-23, fixed)
   - Sandbox title: shadow cascades bound as slice ranges (2026-10-23, fixed)

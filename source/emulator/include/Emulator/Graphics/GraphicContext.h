@@ -495,6 +495,18 @@ struct StorageTextureVulkanImage: public VulkanImage
 {
 	StorageTextureVulkanImage(): VulkanImage(VulkanImageType::StorageTexture) {}
 	uint64_t guest_vaddr = 0;
+	// A single-level 2D Standard64KB image seeded from guest memory keeps the detiled guest bytes of its last seed or
+	// merge (rows of guest_seed_pitch texels), the range it registered with the dirty-page tracker and the generation
+	// of that read. Storage images are not written back, so a later CPU write reaches the image only by merging the
+	// texels it changed (StorageTextureMergeCpuWrites).
+	std::vector<uint8_t> guest_seed;
+	uint64_t             guest_seed_addr       = 0;
+	uint64_t             guest_seed_size       = 0;
+	uint64_t             guest_seed_generation = 0;
+	uint32_t             guest_seed_width      = 0;
+	uint32_t             guest_seed_height     = 0;
+	uint32_t             guest_seed_pitch      = 0;
+	uint32_t             guest_seed_bpe        = 0;
 	// Normalized identity mapping of every storage view of this image.
 	VkComponentMapping storage_components = {};
 };

@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Shader.h"
@@ -270,6 +271,32 @@ ImageModuleFixture MakeSampledShapesImageModule(uint32_t shapes, ShaderInstructi
 }
 
 } // namespace
+
+TEST(EmulatorGraphicsResources, StorageTextureChangedTexelRunsSplitRowsAndIgnorePitchPadding)
+{
+	// 4x2 texels of 2 bytes in rows of 5 texels: the fifth texel of each row is padding.
+	uint8_t before[2 * 5 * 2] = {};
+	uint8_t after[2 * 5 * 2]  = {};
+	after[(0 * 5 + 1) * 2]     = 7; // (1,0)
+	after[(0 * 5 + 2) * 2 + 1] = 7; // (2,0), second byte only
+	after[(1 * 5 + 0) * 2 + 1] = 9; // (0,1)
+	after[(1 * 5 + 3) * 2]     = 9; // (3,1)
+	after[(1 * 5 + 4) * 2]     = 1; // padding
+
+	const auto runs = StorageTextureChangedTexelRuns(before, after, 4, 2, 5, 2);
+
+	ASSERT_EQ(runs.Size(), 3u);
+	EXPECT_EQ(runs[0].x, 1u);
+	EXPECT_EQ(runs[0].y, 0u);
+	EXPECT_EQ(runs[0].length, 2u);
+	EXPECT_EQ(runs[1].x, 0u);
+	EXPECT_EQ(runs[1].y, 1u);
+	EXPECT_EQ(runs[1].length, 1u);
+	EXPECT_EQ(runs[2].x, 3u);
+	EXPECT_EQ(runs[2].y, 1u);
+	EXPECT_EQ(runs[2].length, 1u);
+	EXPECT_TRUE(StorageTextureChangedTexelRuns(before, before, 4, 2, 5, 2).IsEmpty());
+}
 
 TEST(EmulatorGraphicsResources, FindObjectsWithoutRegisteredHeapReturnsEmpty)
 {

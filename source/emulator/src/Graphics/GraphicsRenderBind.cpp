@@ -4335,6 +4335,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 							alias_index = static_cast<size_t>(filtered[alias_index]);
 						}
 						tex = stex.At(static_cast<int>(alias_index));
+						StorageTextureMergeCpuWrites(buffer, stex.At(static_cast<int>(alias_index)));
 					}
 					// Guest memory is untyped: an image a dispatch wrote as R8_UINT
 					// holds the bytes a later R8_UNORM sample of the same range reads.
@@ -4353,6 +4354,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 							storage_texture    = true;
 							reinterpret_format = sample_format;
 							materialize        = "st-reinterpret";
+							StorageTextureMergeCpuWrites(buffer, candidate);
 							break;
 						}
 					}

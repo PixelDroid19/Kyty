@@ -7,6 +7,7 @@
 #include "Emulator/Graphics/Gen5TextureArrayLayout.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
@@ -21,6 +22,8 @@
 // IWYU pragma: no_forward_declare VkImageView_T
 
 #include <algorithm>
+#include <cstring>
+#include <numeric>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -118,6 +121,57 @@ static uint32_t NormalizeStorageTextureSwizzle(uint64_t format, uint32_t swizzle
 	return swizzle;
 }
 
+// Detiles the guest bytes a seed is about to upload and keeps them on the image, with the dirty-page generation of
+// the read, so StorageTextureMergeCpuWrites can tell the texels a later CPU write changes. The read comes first:
+// a CPU write racing the seed is copied again by the next merge, which is harmless.
+static void KeepGuestSeed(StorageTextureVulkanImage* image, uint64_t vaddr, uint64_t size, uint32_t fmt, uint32_t width, uint32_t height,
+                          uint32_t pitch_elems)
+{
+	const uint32_t bpe          = ShaderGen5TextureBytesPerElement(fmt);
+	const uint64_t linear_bytes = static_cast<uint64_t>(pitch_elems) * height * bpe;
+	image->guest_seed.clear();
+	if (bpe == 0u || linear_bytes == 0u || linear_bytes > size || width > pitch_elems)
+	{
+		return;
+	}
+	auto& tracker = GpuDirtyPageTracker::Instance();
+	if (image->guest_seed_size == 0u && tracker.RegisterRange(vaddr, size))
+	{
+		image->guest_seed_addr = vaddr;
+		image->guest_seed_size = size;
+	}
+	if (image->guest_seed_addr != vaddr || image->guest_seed_size != size)
+	{
+		return;
+	}
+	const auto observation = tracker.BeginRead(vaddr, size);
+	if (!observation.tracked)
+	{
+		return;
+	}
+	std::vector<uint8_t> seed(static_cast<size_t>(linear_bytes));
+	TileDetileRequest    detile {};
+	detile.dst               = seed.data();
+	detile.src               = reinterpret_cast<const void*>(vaddr);
+	detile.width             = width;
+	detile.height            = height;
+	detile.pitch_elems       = pitch_elems;
+	detile.dst_pitch_elems   = pitch_elems;
+	detile.bytes_per_element = bpe;
+	detile.layout            = TileDetileLayout::Standard64KB;
+	detile.src_bytes         = size;
+	if (!TileDetile(detile))
+	{
+		return;
+	}
+	image->guest_seed.swap(seed);
+	image->guest_seed_generation = observation.generation;
+	image->guest_seed_width      = width;
+	image->guest_seed_height     = height;
+	image->guest_seed_pitch      = pitch_elems;
+	image->guest_seed_bpe        = bpe;
+}
+
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("StorageTextureObject::update_func");
@@ -153,6 +207,13 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	if (skip_seed)
 	{
 		return;
+	}
+	// Only a single-level, single-layer sample layout keeps its seed for CPU-write merges; render-target layouts,
+	// multi-layer arrays and mip chains keep the device-owned contract.
+	if (tile == 9u && levels == 1u && !mip_backing && depth == 1u && base_array == 0u && (resource_type == 9u || arrayed_2d))
+	{
+		KeepGuestSeed(vk_obj, *vaddr, *size, static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+		              static_cast<uint32_t>(pitch != 0u ? pitch : width));
 	}
 
 	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_GENERAL;
@@ -464,6 +525,119 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	}
 }
 
+Vector<StorageTextureTexelRun> StorageTextureChangedTexelRuns(const uint8_t* before, const uint8_t* after, uint32_t width, uint32_t height,
+                                                              uint32_t pitch_elems, uint32_t bytes_per_element)
+{
+	EXIT_IF(before == nullptr || after == nullptr || width > pitch_elems || bytes_per_element == 0u);
+	Vector<StorageTextureTexelRun> runs;
+	const auto texel_changed = [&](uint32_t x, uint32_t y)
+	{
+		const size_t offset = (static_cast<size_t>(y) * pitch_elems + x) * bytes_per_element;
+		return std::memcmp(before + offset, after + offset, bytes_per_element) != 0;
+	};
+	for (uint32_t y = 0; y < height; y++)
+	{
+		uint32_t x = 0;
+		while (x < width)
+		{
+			if (!texel_changed(x, y))
+			{
+				x++;
+				continue;
+			}
+			const uint32_t start = x;
+			while (x < width && texel_changed(x, y))
+			{
+				x++;
+			}
+			runs.Add(StorageTextureTexelRun {start, y, x - start});
+		}
+	}
+	return runs;
+}
+
+void StorageTextureMergeCpuWrites(CommandBuffer* buffer, StorageTextureVulkanImage* image)
+{
+	EXIT_IF(buffer == nullptr || image == nullptr);
+	if (image->guest_seed.empty())
+	{
+		return;
+	}
+	auto&          tracker = GpuDirtyPageTracker::Instance();
+	const uint64_t addr    = image->guest_seed_addr;
+	const uint64_t size    = image->guest_seed_size;
+	if (!tracker.ChangedSince(addr, size, image->guest_seed_generation))
+	{
+		return;
+	}
+	KYTY_PROFILER_BLOCK("StorageTextureMergeCpuWrites");
+	const auto           observation = tracker.BeginRead(addr, size);
+	std::vector<uint8_t> current(image->guest_seed.size());
+	TileDetileRequest    detile {};
+	detile.dst               = current.data();
+	detile.src               = reinterpret_cast<const void*>(addr);
+	detile.width             = image->guest_seed_width;
+	detile.height            = image->guest_seed_height;
+	detile.pitch_elems       = image->guest_seed_pitch;
+	detile.dst_pitch_elems   = image->guest_seed_pitch;
+	detile.bytes_per_element = image->guest_seed_bpe;
+	detile.layout            = TileDetileLayout::Standard64KB;
+	detile.src_bytes         = size;
+	EXIT_IF(!TileDetile(detile));
+	const auto runs = StorageTextureChangedTexelRuns(image->guest_seed.data(), current.data(), image->guest_seed_width,
+	                                                 image->guest_seed_height, image->guest_seed_pitch, image->guest_seed_bpe);
+	const uint32_t bpe = image->guest_seed_bpe;
+	// Copy offsets into the staging buffer stay multiples of 4 bytes and of the texel size.
+	const uint64_t                 align = std::lcm<uint64_t>(4u, bpe);
+	std::vector<uint8_t>           staging;
+	std::vector<VkBufferImageCopy> copies;
+	for (const auto& run: runs)
+	{
+		const uint64_t offset = (staging.size() + align - 1u) / align * align;
+		const size_t   src    = (static_cast<size_t>(run.y) * image->guest_seed_pitch + run.x) * bpe;
+		staging.resize(static_cast<size_t>(offset));
+		staging.insert(staging.end(), current.begin() + static_cast<std::ptrdiff_t>(src),
+		               current.begin() + static_cast<std::ptrdiff_t>(src + static_cast<size_t>(run.length) * bpe));
+		VkBufferImageCopy copy {};
+		copy.bufferOffset     = offset;
+		copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+		copy.imageOffset      = {static_cast<int32_t>(run.x), static_cast<int32_t>(run.y), 0};
+		copy.imageExtent      = {run.length, 1u, 1u};
+		copies.push_back(copy);
+	}
+	image->guest_seed.swap(current);
+	image->guest_seed_generation = observation.tracked ? observation.generation : 0u;
+	if (copies.empty() || image->layout == VK_IMAGE_LAYOUT_UNDEFINED)
+	{
+		return;
+	}
+	auto*      upload    = buffer->UploadRecordingBuffer(staging.data(), staging.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+	auto       vk_buffer = buffer->RecordOutsideRenderPass();
+	const auto layout    = image->layout;
+	const auto barrier   = [&](VkImageLayout from, VkImageLayout to, VkAccessFlags src_access, VkAccessFlags dst_access,
+                             VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage)
+	{
+		VkImageMemoryBarrier b {};
+		b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		b.srcAccessMask       = src_access;
+		b.dstAccessMask       = dst_access;
+		b.oldLayout           = from;
+		b.newLayout           = to;
+		b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		b.image               = image->image;
+		b.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+		vkCmdPipelineBarrier(vk_buffer, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
+	};
+	constexpr VkAccessFlags shader_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	barrier(layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, shader_access | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+	vkCmdCopyBufferToImage(vk_buffer, upload->buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(copies.size()),
+	                       copies.data());
+	barrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layout, VK_ACCESS_TRANSFER_WRITE_BIT, shader_access, VK_PIPELINE_STAGE_TRANSFER_BIT,
+	        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+}
+
 static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
                          VulkanMemory* mem)
 {
@@ -765,6 +939,11 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 	EXIT_IF(ctx == nullptr);
 
 	DeleteDescriptor(vk_obj);
+
+	if (vk_obj->guest_seed_size != 0u)
+	{
+		(void)GpuDirtyPageTracker::Instance().UnregisterRange(vk_obj->guest_seed_addr, vk_obj->guest_seed_size);
+	}
 
 	for (auto view: vk_obj->image_view)
 	{

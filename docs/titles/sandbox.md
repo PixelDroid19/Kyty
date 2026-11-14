@@ -91,8 +91,8 @@ Intel Arc A770, two runs with a temporary diagnostic (not committed).
   by an earlier packet of the same batch (every batch of this title qualifies), the robot platformer
   boots, and this title again runs 23.0-25.5 fps against 20.0-21.2 serial for a minute in the world.
   The drain skip is still unsafe (`docs/bringup/performance-architecture-plan.md`, section 6).
-- **Death screen lacks letters (open, cause localized 2026-11-14: CPU glyph writes after the atlas's
-  storage image exists never reach it; see the record below).** With no input the player is killed
+- **Death screen lacks letters (fixed 2026-11-14: CPU glyph writes after the atlas's storage image
+  exists now reach it; see the record below).** With no input the player is killed
   about 20-25 s after the world loads (night, zombie). The death message and the respawn button miss
   letters: "Kyty was slain by Zombie" shows as "yty was slain  y  om ie" and "RESPAWN" as "R SPAWN".
   It is seen in three runs: one batch in flight, the serial return with the release-drain skip, and a
@@ -1397,7 +1397,7 @@ per-stream copy for vertex data; it does not change the frame time of this title
     missed the title screen on both binaries, and a diagnostic agent tap took both to the intro
     cinematic; residency was 0.19 against 0.17 ms per frame.
 
-## Sandbox title: letters missing from the death message (2026-11-10, open, cause localized 2026-11-14)
+## Sandbox title: letters missing from the death message (2026-11-10, fixed 2026-11-14)
 
 - Observed (Intel, strict, the world route of the frame-load record, world saved at night): at 130 s
   the player has been killed and the death screen shows "yty was slain  y  om ie" for "Kyty was slain by
@@ -1449,12 +1449,31 @@ per-stream copy for vertex data; it does not change the frame time of this title
     refresh is not a fix.
   - Not yet attributed: Z, missing in the first two runs ("Zombie"). It was not in the guest atlas
     of the runs that dumped it, because a different enemy killed the player there.
-- Direction: either write storage images back to guest memory, so that guest memory holds both
-  writers and a dirty upload is safe, or merge CPU-changed bytes into the live storage image
-  against a snapshot of the guest bytes taken at the last sync. Either change touches the rule
-  that keeps a texture linked under a live storage or render image from re-detiling guest memory
-  (that rule prevents banding), so it must be re-run on PPSA21567 - ASTRO BOT and another title
-  with storage-linked textures, not only here.
+- Fix (2026-11-14): a storage image seeded from guest memory with a single-level, single-layer
+  Standard64KB layout (tile mode 9) keeps the detiled guest bytes of its seed and the dirty-page
+  generation of that read. When a bind selects the live storage image, a change reported by the
+  dirty-page tracker is merged texel by texel. The guest bytes are detiled again, compared with the
+  kept copy, and only the runs of changed texels are copied into the image, inside the command
+  buffer before the draw or dispatch. Texels the device wrote and the CPU did not keep the device's
+  contents. Writing storage images back to guest memory was not chosen, because it needs a read-back
+  and re-tile for every storage write.
+- Verified (Intel, strict, same world route): the merge engaged in three runs (one or two CPU changes
+  of the atlas each). The run that reached the death screen shows "YOU DIED!" and "Kyty was slain by
+  Zombie" whole, Z included.
+- Other checks:
+  - The PPSA21567 - ASTRO BOT dunes route renders normally, at 21.4 fps at 150 s against 18.2 for
+    the earlier clean run (noise).
+  - `kyty_agent playable-regression` passes 12 of 15 gates, the same as before the change (no
+    baseline for the visual and checkpoint gates; the action gate as before).
+  - The four CTest gates pass, and `kyty_unit_test` runs 2677 tests: 2666 pass, 11 are skipped.
+    `EmulatorGraphicsState.StorageTextureArrayDescriptorsAreViewsOfTheLiveArray` fails when run on
+    its own; the change does not touch the code it tests.
+- Limits:
+  - Storage images with render-target tiling, multiple layers or mip levels keep the device-owned
+    contract; a CPU write after their creation still does not reach them.
+  - A CPU write that stores, into a texel the device changed, the same value the guest bytes held at
+    the last sync is not detected.
+  - PPSA21402 - Balatro was not re-run.
 
 ## Sandbox title: snapshot comparisons in the world (2026-10-24, improved)
 
