@@ -285,6 +285,9 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t guest_address_residency_calls = 0;
 	uint64_t guest_address_residency_ns = 0;
 	uint64_t guest_address_residency_max_ns = 0;
+	uint64_t guest_address_population_calls = 0;
+	uint64_t guest_address_population_ns = 0;
+	uint64_t guest_address_population_max_ns = 0;
 	uint64_t guest_address_refresh_calls = 0;
 	uint64_t guest_address_refresh_ns = 0;
 	uint64_t guest_address_refresh_max_ns = 0;
@@ -488,6 +491,7 @@ void DebugStatsRecordDispatchProcessor(uint64_t elapsed_ns);
 void DebugStatsRecordDispatchWriteBack(uint64_t elapsed_ns);
 void DebugStatsRecordGuestAddressPrepare(uint64_t elapsed_ns);
 void DebugStatsRecordGuestAddressResidency(uint64_t elapsed_ns);
+void DebugStatsRecordGuestAddressPopulation(uint64_t elapsed_ns);
 void DebugStatsRecordGuestAddressRefresh(uint64_t elapsed_ns);
 void DebugStatsRecordDrawRenderLockWait(uint64_t elapsed_ns);
 void DebugStatsRecordDrawStateSetup(uint64_t elapsed_ns);

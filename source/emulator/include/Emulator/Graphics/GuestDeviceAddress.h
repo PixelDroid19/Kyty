@@ -102,6 +102,14 @@ enum class GuestDeviceAddressPrepareResult: uint8_t
 // preparation. Untouched pages read as zero, like the table's null target.
 void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physical_backing);
 
+// Marks a point after which guest memory may hold pages the GPU must see: a
+// command-processor run begins or ends, or a packet other than a register write
+// or an indexed draw completed, or the emulator wrote guest memory back. The
+// physical population is queried again only after such a point or an announced
+// host write (GpuDirtyPageTracker::HostWriteEpoch), so a page first touched by
+// the guest is imported by the first preparation after the guest orders it.
+void GuestDeviceAddressNoteOrderingPoint() noexcept;
+
 // Must run with GPU submissions quiesced: drops the imports overlapping the
 // range (its protection or contents may have changed); they are imported
 // again on the next use. The range stays registered.

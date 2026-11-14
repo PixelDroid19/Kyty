@@ -968,9 +968,45 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   processor thread, under the physical-population query of the guest-address preparation.
   A temporary TSC timer around the query measured about 14 ns per preparation: the query
   runs only while a physical range is partly imported (127,000 of 15 million preparations,
-  1,122 population changes), so the profile share is sampling skid. The preparation itself
-  measured about 380 ns per draw without the profiler (residency 39, refresh 214), so the
-  refresh check of tracked chunks stays its largest part (stage 2 above).
+  1,122 population changes). The preparation itself measured about 380 ns per draw without
+  the profiler (residency 39, refresh 214), so the refresh check of tracked chunks stays its
+  largest part (stage 2 above). Corrected below: the 14 ns held only for that run, where no
+  range stayed partly imported; in other runs of the same route the query costs about
+  0.46 us per preparation ("Physical-population query on every preparation").
+- **Built: physical-population query reused between ordering points (2026-11-14).** While any physical
+  range stays partly imported, `PrepareLocked` (`GuestDeviceAddress.cpp`) asks the backing
+  for its population (one `fstat` of the memfd) on every preparation. Preparation time
+  outside residency and refresh is bimodal on the same binary and route: about 22 ns per
+  preparation with no partial range, 485-492 ns with one (PPSA17221 - Minecraft world
+  window, 12 runs: 8 at 21-63 ns, 4 at 485-490). PPSA21567 - ASTRO BOT dunes measured
+  587-598 ns in all three runs. At about 5,400 draws per frame that is about 2.5 ms of
+  command processing per frame in Minecraft's slow runs, about half of the spread between
+  a fast and a slow run (5.42 against 6.24 us per draw). Temporary counters (removed) found
+  the ranges stable: in Minecraft two ranges (2,160 pages with 1,760 imported; 16,384 pages
+  with 400 imported) stayed partial for the whole run while the population changed in only
+  12,000 of 7.5 million preparations; ASTRO BOT kept six ranges partial with 848,896 pages
+  (3.3 GiB) never imported. Importing the untouched remainder is therefore not bounded (the
+  earlier exclusion of populating all GPU-visible memory grew memory by 3.6 GiB). Why some
+  Minecraft runs have no partial range is not explained.
+  Change: the preparation reuses the last population while no ordering point and no
+  announced host write (`HostWriteEpoch`) happened since it. An ordering point is noted when
+  a command-processor run begins or ends, after every packet other than a register write or
+  an indexed draw completes (the draw front's own class, so waits, DMA and unknown packets
+  end the stretch; noted after the packet so a wait's producer wrote first), and after every
+  object write-back. A page the guest first touches is therefore imported at the first
+  preparation after the guest orders that write for the GPU, not at the next draw of the
+  same stretch; `PhysicalImportCoversResidentBlock` now notes the point a submission gives.
+  Pricing counters (removed): 98.3-99.1 % of Minecraft world preparations and 83 % of
+  ASTRO BOT dunes preparations fell in such a stretch. A new `guest_address_population`
+  stat times each query. Measured: ASTRO BOT dunes 100-150 s, 593 -> 46 ns per preparation
+  outside residency and refresh, 159,000 queries for about 546,000 preparations, fps
+  unchanged (18.3 / 17.9, GPU-bound). Minecraft world+2..22 s: 122 queries in 2.88 million
+  preparations, guest-address preparation 3.50 -> 0.83 ms per frame and command processing
+  36.3 -> 35.2 ms per frame against the slow pre-change run (26.3 -> 26.9 fps, one run per
+  arm, partial state of the new run not recorded); the rest of the spread lies elsewhere
+  (draw state setup and resource binding). Unit tests 2,662 pass, CTest gates pass,
+  `playable-regression` on PPSA06084 - Superliminal 12/15 (the same three pre-existing
+  failures).
   The same profile puts `memset` at about 3 % of the command processor thread and about a
   fifth of the draw-front thread. The zeroed objects are per-draw value types:
   `PreparedDrawInputs` is 18,368 bytes (vertex inputs 10,544, pixel inputs 7,752) and

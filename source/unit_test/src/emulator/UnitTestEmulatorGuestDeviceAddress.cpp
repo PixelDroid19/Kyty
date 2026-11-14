@@ -1487,7 +1487,8 @@ int PhysicalReleaseRetiresDeviceAddressRangeProbe()
 
 // Physical pages written one at a time are imported as their whole 64 MiB chunk:
 // two separate writes give one entry, repeated preparation imports nothing new
-// and leaves the untouched block unpopulated, and a write there adds its block.
+// and leaves the untouched block unpopulated, and a write there adds its block at
+// the first preparation after an ordering point (a submission, in a title).
 int PhysicalImportCoversResidentBlockProbe()
 {
 	static LifecycleBridge bridge;
@@ -1527,6 +1528,7 @@ int PhysicalImportCoversResidentBlockProbe()
 		if (status == 0 && second_block_resident() != 0) { status = 44; }
 	}
 	WriteMarker(guest + kBlockBytes + kGuestPageBytes, kMarkerC);
+	GuestDeviceAddressNoteOrderingPoint();
 	if (status == 0 && (!GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries) || entries != 2)) { status = 45; }
 	if (status == 0) { status = load.Expect("second block", table, entries, guest + kBlockBytes + kGuestPageBytes, kMarkerC); }
 

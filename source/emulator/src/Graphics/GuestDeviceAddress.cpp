@@ -166,6 +166,9 @@ struct Registry
 	// Physical-backing population at the last complete scan of physical ranges.
 	Core::VirtualMemory::SharedBackingPopulation scanned_population;
 	bool                                         population_scanned = false;
+	// Ordering point and host-write epoch read before that scan's query.
+	uint64_t scanned_ordering   = 0;
+	uint64_t scanned_host_write = 0;
 	// Advances on every chunk added or removed. A refresh that found no chunk
 	// changed stays valid while this and the tracker's evidence version hold.
 	uint64_t chunk_version          = 0;
@@ -2165,6 +2168,13 @@ void GuestDeviceAddressValidateOverlays(GpuQueueId consumer)
 	}
 }
 
+static std::atomic<uint64_t> g_ordering_points {0};
+
+void GuestDeviceAddressNoteOrderingPoint() noexcept
+{
+	g_ordering_points.fetch_add(1, std::memory_order_acq_rel);
+}
+
 static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Registry* registry, GuestDeviceAddressTable* table,
 	                                                    SubmissionId* dependency)
 {
@@ -2177,9 +2187,19 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 	// Query before scanning: a page populated during the scan changes the next query.
 	// Only partly imported physical ranges can gain pages; without one the backing is
 	// not queried and the scan is left unrecorded, so the next prepare with one scans.
-	const bool                                   partial = !registry->partial.empty();
-	Core::VirtualMemory::SharedBackingPopulation population;
-	const bool known    = partial && Kernel::Memory::KernelQueryPhysicalPopulation(&population);
+	const bool partial = !registry->partial.empty();
+	// Read before the query: an ordering point during the scan makes the next preparation query again.
+	const uint64_t ordering   = g_ordering_points.load(std::memory_order_acquire);
+	const uint64_t host_write = GpuDirtyPageTracker::HostWriteEpoch();
+	const bool     unordered  = registry->population_scanned && registry->scanned_ordering == ordering &&
+	                       registry->scanned_host_write == host_write;
+	Core::VirtualMemory::SharedBackingPopulation population = registry->scanned_population;
+	bool                                         known      = partial && unordered;
+	if (partial && !unordered)
+	{
+		const DebugStatsScopedTimer population_timer(DebugStatsRecordGuestAddressPopulation);
+		known = Kernel::Memory::KernelQueryPhysicalPopulation(&population);
+	}
 	const bool physical = partial && (!known || !registry->population_scanned || population != registry->scanned_population);
 	// Ranges number in the thousands for some titles: time each phase once
 	// per preparation, not once per range.
@@ -2269,6 +2289,8 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 	}
 	registry->scanned_population = population;
 	registry->population_scanned = known;
+	registry->scanned_ordering   = ordering;
+	registry->scanned_host_write = host_write;
 	table->address               = registry->table.device;
 	table->entry_count           = registry->table.entries;
 	return GuestDeviceAddressPrepareResult::Ready;

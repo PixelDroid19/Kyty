@@ -2434,6 +2434,15 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 	}
 	m_active_run_begin                       = data;
 	m_active_run_end                         = data != nullptr ? data + num_dw : nullptr;
+	// Work submitted or resumed may read guest writes ordered before it; every exit
+	// ends the stretch of packets that change no guest memory.
+	struct OrderingPointScope
+	{
+		OrderingPointScope() { GuestDeviceAddressNoteOrderingPoint(); }
+		~OrderingPointScope() { GuestDeviceAddressNoteOrderingPoint(); }
+		OrderingPointScope(const OrderingPointScope&)            = delete;
+		OrderingPointScope& operator=(const OrderingPointScope&) = delete;
+	} const ordering_point_scope;
 	const bool submit_fault_trace            = VulkanSubmitFaultTraceEnabled();
 	// Recent-draw records name the packet that emitted them; every exit restores
 	// the enclosing run's packet.
@@ -2448,10 +2457,16 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 		GraphicsRenderMemoryFree(reinterpret_cast<uint64_t>(source_data), static_cast<size_t>(num_dw) * 4);
 	}
 
-	auto* cmd = data;
-	auto  dw  = num_dw;
+	auto* cmd             = data;
+	auto  dw              = num_dw;
+	bool  ordering_packet = false;
 	for (;;)
 	{
+		// Noted once the packet completed, so a wait's producer wrote before the point.
+		if (ordering_packet)
+		{
+			GuestDeviceAddressNoteOrderingPoint();
+		}
 		if (dw == 0)
 		{
 			break;
@@ -2459,9 +2474,10 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 
 		if (dw > num_dw) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw > num_dw condition ignored (continuing)\n"); }
 
-		m_packet = cmd;
+		m_packet        = cmd;
+		ordering_packet = DrawFrontClassifyPacket(cmd, dw) == DrawFrontPacket::Other;
 		// The replay reads packets, registers and guest memory only between packets that change nothing else.
-		if (m_draw_front != nullptr && m_draw_front->Live() && DrawFrontClassifyPacket(cmd, dw) == DrawFrontPacket::Other)
+		if (ordering_packet && m_draw_front != nullptr && m_draw_front->Live())
 		{
 			m_draw_front->Stop();
 		}
