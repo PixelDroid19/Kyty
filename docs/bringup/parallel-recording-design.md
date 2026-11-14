@@ -222,3 +222,30 @@ the command processor"): a second thread replays register packets on a shadow co
 prepares the shader input information of direct indexed draws, the per-draw class priced at 7.5 ms per
 frame above. Measured in the world with the paired in-run A/B: 10.54 -> 8.31 us per draw. The submit
 contract is unchanged; the replay restarts every 4.5-15 draws, at the next packet it does not admit.
+
+## Recomputed on `6a6a5818a` (2026-11-14)
+
+`PPSA17221 - Minecraft` world, 100-150 s of one run, 5,300-5,600 draws per frame, 28-33 fps,
+agent stage counters (no temporary timers). The draw tail is already recorded on the replay thread
+(Vulkan driver 3.2 % of the command-processor thread), so command emission here is encoding only.
+
+| Stage | us per draw | Class |
+| --- | --- | --- |
+| State setup (index range, vertex streams, device-address preparation, resolution cohorts) | 1.73 | A |
+| Materialization (colour and depth targets) | 0.44 | A |
+| Resource binding without descriptor finalization | 1.48 | A |
+| Pipeline setup | 0.68 | B with a shared cache |
+| Descriptor finalization | 0.44 | B with per-worker pools |
+| Command emission | 0.39 | B |
+| Rest of the draw processor (render lock, unattributed) | 0.60 | unknown |
+| Draw processor | 5.76 | |
+| Command-processor run | 6.28 | |
+
+- Stage A is about 3.65 us per draw, 4.2 with the unattributed rest. Moving every class-B stage off
+  the thread leaves about 4.3-4.8 us of the 6.28: 1.3-1.45x, about 23-26 ms per frame at 5,400
+  draws. That would reach 38-43 fps in this scene only if the per-segment cost (secondary command
+  buffers and the state each one re-emits, "Risks") stays near zero, which is not measured.
+- The stage classes are read from where each timer sits in `GraphicsRenderDraw.cpp`; the nesting
+  of the memory-object lookups (0.68 us per draw, inside state setup, materialization and binding)
+  was not separated.
+
