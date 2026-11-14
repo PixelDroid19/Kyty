@@ -178,19 +178,6 @@ bool FragmentTransportBuildShadeModule(const ShaderCode& code, const ShaderPixel
 	return ShaderToolchain::Run(source, binary, error);
 }
 
-namespace {
-
-VkDescriptorSetLayout CreateEmptySetLayout(VkDevice device)
-{
-	VkDescriptorSetLayoutCreateInfo info {};
-	info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	info.bindingCount = 0;
-	VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-	return vkCreateDescriptorSetLayout(device, &info, nullptr, &layout) == VK_SUCCESS ? layout : VK_NULL_HANDLE;
-}
-
-} // namespace
-
 bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipeline_cache, const ShaderBindResources& ps_bind,
                                           const Vector<uint32_t>& binary, bool require_subgroup_size,
                                           VkDescriptorSetLayout transport_layout, VkPipelineLayout* layout, VkPipeline* pipeline,
@@ -212,7 +199,7 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 		return false;
 	}
 
-	const VkDescriptorSetLayout empty_layout = CreateEmptySetLayout(device);
+	const VkDescriptorSetLayout empty_layout = EmptyDescriptorSetLayout(device);
 	if (empty_layout == VK_NULL_HANDLE)
 	{
 		*error = "empty set layout creation failed";
@@ -231,7 +218,6 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 	const uint32_t ps_slot = ps_bind.descriptor_set_slot;
 	if (ps_slot >= 2u || (has_ps_set && ps_layout == VK_NULL_HANDLE))
 	{
-		vkDestroyDescriptorSetLayout(device, empty_layout, nullptr);
 		*error = String8::FromPrintf("pixel descriptor set unavailable: slot=%u layout=%d", ps_slot, has_ps_set ? 1 : 0);
 		return false;
 	}
@@ -294,7 +280,6 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 		step                       = "vkCreateComputePipelines";
 	}
 	if (module != VK_NULL_HANDLE) { vkDestroyShaderModule(device, module, nullptr); }
-	vkDestroyDescriptorSetLayout(device, empty_layout, nullptr);
 	if (result != VK_SUCCESS)
 	{
 		if (*layout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, *layout, nullptr); }

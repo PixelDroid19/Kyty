@@ -331,7 +331,7 @@ static void CreateLayout(VkDescriptorSetLayout* set_layouts, uint32_t* set_layou
 
 // Placeholder set for guest stages a host shader does not read. It stays alive
 // for the device lifetime, so pipelines keep a stable layout identity.
-static VkDescriptorSetLayout EmptyDescriptorSetLayout(VkDevice device)
+VkDescriptorSetLayout EmptyDescriptorSetLayout(VkDevice device)
 {
 	static std::once_flag    once;
 	static VkDescriptorSetLayout layout = VK_NULL_HANDLE;

@@ -2104,6 +2104,9 @@ void TraceRenderTargetLifetimeDepthClearPass(uint64_t submit_id, const RenderDep
 	                                         const VulkanFramebuffer& framebuffer);
 void TraceRenderTargetLifetimeResolve(uint64_t submit_id, const RenderColorInfo& source, const RenderColorInfo& destination);
 void SetDynamicParams(CommandBuffer* buffer, VkCommandBuffer vk_buffer, VulkanPipeline* pipeline);
+// A descriptor set layout with no bindings, created once and kept for the device's lifetime, so pipeline
+// layouts built from it stay valid while their pipelines are in use.
+VkDescriptorSetLayout EmptyDescriptorSetLayout(VkDevice device);
 
 // A pixel stage that needs the capture, shade and resolve strategy. The facts
 // text records host capabilities, program contract verdicts, plan sizing and
