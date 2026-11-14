@@ -1175,6 +1175,16 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   4.4 % of draws that miss because the front is behind. Not built.
   With a51a6bc97 the world's heavy scene measured 33.5 ms of command processing per frame
   against 33.3 ms for 30 fps (fence waits 1.5 ms per frame).
+- **Priced, not built: reusing the previous graphics pipeline while no context register changed
+  (PPSA17221 - Minecraft world, 2026-11-14).** A temporary counter of context-register packets
+  (`IT_SET_CONTEXT_REG` and the indirect context-register blocks; a first version that counted only
+  the former never moved, so it is the live-check case) beside the graphics pipeline lookup: 97.7 %
+  of lookups follow the previous one with no context-register packet between them, and every one of
+  those returned the previous pipeline. A lookup hit costs about 350 ns: 114 ns building the key,
+  190 ns in `PipelineCache::Find` (including two clock reads) and the lease and statistics. A memo
+  would still check shader identity and keep the lease, so it would remove about 0.2-0.25 us per
+  draw, inside the 0.22 us per-draw run spread. Not built; the census compared only the returned
+  pointer, and `IT_CLEAR_STATE`, `IT_ONE_REG_WRITE` and direct context writes were not counted.
 - **Measured: profile-guided build on 2b27ac3c4 (2026-11-14).** `KYTY_PGO=GENERATE` in a separate
   build directory, trained by one PPSA17221 - Minecraft world run and one PPSA21567 - ASTRO BOT
   dunes run, then `KYTY_PGO=USE` (a cache change needs `cmake -S source -B <dir>`; without
