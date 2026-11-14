@@ -355,7 +355,13 @@ only where Kyty's own traces agree.
     - PPSA21402 - Balatro reaches gameplay with the worker; stage 1 and an eager-replay
       control show the same screen.
     - The fragment-transport and guest depth-stencil copy paths were not reached by any of
-      the three titles.
+      the three titles. An ASTRO BOT run on the pause-menu route (200 s) with
+      `KYTY_TRANSPORT_DUMP` set wrote no transport program, so it did not reach them either.
+    - That run's thread-safety layer reported one `UNASSIGNED-Threading-Info` "Couldn't find
+      VkEvent" on reset, set and destroy of one handle. `LabelManager::Destroy`
+      (`Label.cpp`) destroys a label's event outside the manager's lock while another
+      thread may create one, and the driver reused the address; the layer's own bookkeeping
+      then loses the new event. Vulkan allows this, so it is not an application error.
   - Thread safety: validation limited to thread safety reported nothing on the Minecraft
     world, on Balatro and on the ASTRO BOT dunes with the worker. Skipping the drain on purpose produced
     `UNASSIGNED-Threading-MultipleThreads-Write` and an abort, so the check was live.
