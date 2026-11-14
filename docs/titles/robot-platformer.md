@@ -59,12 +59,22 @@ so where the robot stands depends on how long the loads took).
   wave32 program recorded below as `0x874bd13f`). Recipes carry no program hash, so only the BVH
   kernel and that wave32 program are matched to their GPU time; how much frame time the other spilling
   programs take is not established.
-- **Defect, open.** Status 139 has ended two diagnostic runs, both in scenes off the dunes route:
-  the probes engaged from boot (intro crowd scene, 185 s, no log line, no core dump), and a run
-  that also doubled the BVH kernel's cross-part exchanges (ship cinematic). The second left a crash
-  context: a guest-thread execute fault at address 0. Both builds carried temporary probes; no run
-  of a clean build has shown it. Direction: rerun the cinematic on a clean build and, if it
-  recurs, trace the caller of the null call from the crash context's stack.
+- **Split-wave rendezvous result trimmed (2026-11-14, translator t216).** The split-wave publish
+  function returned the minimum of the sequence words its spin loop read; callers use only the parity
+  of the exchange number, which equals that minimum whenever the spin succeeds. Returning the number
+  itself frees the loop's loads after it. Offline, the BVH kernel went from 358 to 285 maximum live
+  registers and 622:2,426 to 474:2,133 spills:fills, and four other width-8 recipes compiled at
+  283-287; the 41 recipes shared with the t215 census are unchanged. One run on the dunes route
+  (capture checked, close-up dune scene) measured 17.7-18.1 fps against 16.4-16.9 fps the run before
+  without the change: within run-to-run noise, so no frame-rate gain is claimed.
+- **Status 139 off the route is the title's own command-buffer assert (2026-11-14).** It ended two
+  diagnostic runs and one run of a build without probes (ship cinematic, then `hub_crashsite_tutorial`
+  loading). The crash context's "execute fault at address 0" is how the host reports the guest's
+  `int 0x42` abort: the faulting instruction is that trap in the title's "buffer full" handler of its
+  command-buffer writer, reached when a reservation does not fit ("There are too many objects/batches in
+  this scene."). This is the hub-start assert recorded in this file (bone matrices embedded per draw when
+  the builder reads a skeleton between the palette clear and its publish), not a null call and not caused
+  by the probes. The dunes route avoids it only when it stays on time.
 - **Excluded as a measurement: doubled exchanges off-route.** The run with doubled exchanges
   slowed boot so much that the timed route ended in the ship cinematic; its per-group figures
   come from another scene and price nothing.

@@ -462,8 +462,10 @@ static String8 SplitWavePartWords(uint32_t parts, const char* tag)
 	return text;
 }
 
-// Publishes this part's word of the next exchange and waits until every other
-// part published its word of the same exchange.
+// Publishes this part's word of the next exchange, waits until every other
+// part published its word of the same exchange and returns that exchange's
+// number. The number, not the spin's last reads, is returned: callers need only
+// its parity, and a result taken from the reads keeps all of them live.
 static String8 SplitWavePublishFunction(uint32_t parts)
 {
 	String8 text = R"(
@@ -529,10 +531,10 @@ OpBranchConditional %%split_publish_done %%split_publish_merge %%split_publish_c
 OpBranch %%split_publish_header
 %%split_publish_merge = OpLabel
 OpMemoryBarrier %%split_scope_workgroup %%split_acquire
-OpReturnValue %s
+OpReturnValue %%split_publish_n
 OpFunctionEnd
 )",
-	                            sequence.c_str(), sequence.c_str());
+	                            sequence.c_str());
 	return text;
 }
 
