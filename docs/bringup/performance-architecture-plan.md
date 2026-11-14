@@ -998,15 +998,29 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   same stretch; `PhysicalImportCoversResidentBlock` now notes the point a submission gives.
   Pricing counters (removed): 98.3-99.1 % of Minecraft world preparations and 83 % of
   ASTRO BOT dunes preparations fell in such a stretch. A new `guest_address_population`
-  stat times each query. Measured: ASTRO BOT dunes 100-150 s, 593 -> 46 ns per preparation
-  outside residency and refresh, 159,000 queries for about 546,000 preparations, fps
-  unchanged (18.3 / 17.9, GPU-bound). Minecraft world+2..22 s: 122 queries in 2.88 million
-  preparations, guest-address preparation 3.50 -> 0.83 ms per frame and command processing
-  36.3 -> 35.2 ms per frame against the slow pre-change run (26.3 -> 26.9 fps, one run per
-  arm, partial state of the new run not recorded); the rest of the spread lies elsewhere
-  (draw state setup and resource binding). Unit tests 2,662 pass, CTest gates pass,
-  `playable-regression` on PPSA06084 - Superliminal 12/15 (the same three pre-existing
-  failures).
+  stat times each query; `population_calls / prepare_calls` labels a run's state (near zero:
+  no partial range; about 1 % or more on Minecraft, about 29 % on ASTRO BOT: the reuse is
+  engaged).
+  Measured: ASTRO BOT dunes 100-150 s, 593 -> 46 ns per preparation outside residency and
+  refresh, 159,000 queries for about 546,000 preparations, fps unchanged at about 18
+  (GPU-bound). The Minecraft run after the change (122 queries in 2.88 million
+  preparations) had no partial range, so the Minecraft effect is not demonstrated yet; it
+  needs a same-build run in the partial state.
+  Shadow check (temporary, removed): on every reused ASTRO BOT preparation the population
+  was queried anyway, and when it had moved the unimported spans of the partial ranges were
+  asked for populated pages. Of about 700,000 reused preparations, 115-135 saw the
+  population move and 63-76 found a span with new pages, in load and in gameplay (about
+  270 MB gained between 110 and 135 s, while the level streams). Each was imported at the
+  next ordering point, 2-36 preparations later. A user-mode page-fault sample of gameplay
+  saw only four faults in those spans, all from the command processor's own index scan
+  reading hole pages, so the writers are kernel-mode (file reads into guest memory). Such
+  data reaches the GPU through a later submission or a wait on its completion, both
+  ordering points. The consolidated wait (`GraphicsRun.cpp`, `WaitRegMem32`) applies only
+  to a label stored earlier on the same graphics queue, so a CPU-written value takes the
+  suspending path; `GraphicsWriteGuest` runs only on the guest thread (prim-state export).
+  Unit tests 2,662 pass, CTest gates pass, `playable-regression` on PPSA06084 -
+  Superliminal 12/15 (the same three pre-existing failures; that title's run was not
+  checked for a partial range).
   The same profile puts `memset` at about 3 % of the command processor thread and about a
   fifth of the draw-front thread. The zeroed objects are per-draw value types:
   `PreparedDrawInputs` is 18,368 bytes (vertex inputs 10,544, pixel inputs 7,752) and
