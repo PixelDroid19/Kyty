@@ -1187,6 +1187,24 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   would still check shader identity and keep the lease, so it would remove about 0.2-0.25 us per
   draw, inside the 0.22 us per-draw run spread. Not built; the census compared only the returned
   pointer, and `IT_CLEAR_STATE`, `IT_ONE_REG_WRITE` and direct context writes were not counted.
+  A temporary memo that also counted `IT_CLEAR_STATE`, `IT_ONE_REG_WRITE`, the context restore and
+  the reset, and compared framebuffer, topology, sample locations and both shader ids, returned the
+  same pipeline as the lookup on every candidate (8.17 M Minecraft calls, 751 k on PPSA21567 - ASTRO
+  BOT). In 4 s wall-clock blocks over four Minecraft world runs it removed 0.34 us per draw of
+  command-processor time (se 0.11, t -3.0) and 0.32 us of frame time (t -2.1), at 3,000-3,600
+  draws per frame. Not shipped: the key also reads state that no context register carries, so a
+  context stamp cannot cover it. `ConsumeDepthMetaClear` rewrites `depth_clear_enable` and
+  `suppress_depth_write` from submit-time meta-clear events, the depth-stencil copy passes its own
+  read-only depth info, the shader-register packets for the vertex and pixel programs write context
+  fields, and the key reads `ps_input_info` fields directly. A safe memo would compare each of those
+  inputs, which approaches rebuilding the key. The candidate check never reported a mismatch, so
+  that check was never shown to fire.
+- **Excluded: testing the previous hit before the pipeline index walk (PPSA17221 - Minecraft world,
+  2026-11-14).** `PipelineCache::Find` compared the last found entry with its own equality before
+  hashing; it matched 23-79 % of lookups per 5 s window, and the index walk averaged about one entry
+  per call. A temporary switch alternated it in 4 s blocks over two world runs: -0.04 us per draw of
+  command-processor time (se 0.19, t -0.2), +0.09 us of frame time (t 0.4). The lookup cost is the
+  key build, not the walk; reverted.
 - **Profile after the replay thread (PPSA17221 - Minecraft world, 2026-11-14).** A 10 s user-mode
   profile of the world with the draw tail on its replay thread: the Vulkan driver holds 3.2 % of the
   command-processor thread (12.5 % before), libc about 15 % (mutexes 6.4 %, memset 2 %), and no symbol
