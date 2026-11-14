@@ -67,6 +67,12 @@ so where the robot stands depends on how long the loads took).
   283-287; the 41 recipes shared with the t215 census are unchanged. One run on the dunes route
   (capture checked, close-up dune scene) measured 17.7-18.1 fps against 16.4-16.9 fps the run before
   without the change: within run-to-run noise, so no frame-rate gain is claimed.
+- **Excluded: remembering each invocation's last address-table entry (2026-11-14).** A translator
+  variant tried the entry of the invocation's previous guest-address translation before the directory
+  and the binary search (entries are disjoint, so a containing entry is the search's answer). Unit tests
+  with real device loads passed; one run on the dunes route (capture checked, close-up dune scene)
+  measured 17.6-18.4 fps against 17.7-18.1 fps without it. The dependent reads of the address search are
+  not what bounds the title's compute time; the variant was not kept.
 - **Status 139 off the route is the title's own command-buffer assert (2026-11-14).** It ended two
   diagnostic runs and one run of a build without probes (ship cinematic, then `hub_crashsite_tutorial`
   loading). The crash context's "execute fault at address 0" is how the host reports the guest's
