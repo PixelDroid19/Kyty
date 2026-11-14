@@ -91,14 +91,12 @@ Intel Arc A770, two runs with a temporary diagnostic (not committed).
   by an earlier packet of the same batch (every batch of this title qualifies), the robot platformer
   boots, and this title again runs 23.0-25.5 fps against 20.0-21.2 serial for a minute in the world.
   The drain skip is still unsafe (`docs/bringup/performance-architecture-plan.md`, section 6).
-- **Death screen lacks letters (open, defect at `6baccd17e`).** With no input the player is killed
+- **Death screen lacks letters (open, cause localized 2026-11-14: CPU glyph writes after the atlas's
+  storage image exists never reach it; see the record below).** With no input the player is killed
   about 20-25 s after the world loads (night, zombie). The death message and the respawn button miss
   letters: "Kyty was slain by Zombie" shows as "yty was slain  y  om ie" and "RESPAWN" as "R SPAWN".
   It is seen in three runs: one batch in flight, the serial return with the release-drain skip, and a
-  run whose submit and release behaviour is unchanged (a read-only census of the command words). The
-  cause is not localized. Suggested direction: compare the font texture's guest bytes with the host
-  image once the death screen appears, to tell a texture update that does not reach the host from
-  glyphs the title never wrote.
+  run whose submit and release behaviour is unchanged (a read-only census of the command words).
 
 ## Sandbox title: shader inputs of indexed draws prepared ahead of the command processor (2026-11-12, built)
 
@@ -1399,7 +1397,7 @@ per-stream copy for vertex data; it does not change the frame time of this title
     missed the title screen on both binaries, and a diagnostic agent tap took both to the intro
     cinematic; residency was 0.19 against 0.17 ms per frame.
 
-## Sandbox title: letters missing from the death message (2026-11-10, open)
+## Sandbox title: letters missing from the death message (2026-11-10, open, cause localized 2026-11-14)
 
 - Observed (Intel, strict, the world route of the frame-load record, world saved at night): at 130 s
   the player has been killed and the death screen shows "yty was slain  y  om ie" for "Kyty was slain by
@@ -1425,9 +1423,38 @@ per-stream copy for vertex data; it does not change the frame time of this title
   reach the death screen (the player was alive at 160 s), so it gave no answer.
 - The pause menu, captured in a later run, renders all its text, but none of it contains K, Z, E or b,
   so it does not test this defect.
-- Direction: when the death screen is reached again, dump the small sources without gaps and log
-  every write to the atlas range, to tell whether the missing glyphs' sources are never produced,
-  produced empty, or produced and not copied.
+- Correction (2026-11-14): the atlas guest bytes do change. The 2026-11-10 probe dumped them only
+  in present windows that missed the changes.
+- Cause localized (2026-11-14, Intel, strict, same world route, temporary probes on texture binds,
+  color-target binds and the object update path; runs m352-m359, death screen reached in m352, m353,
+  m356 and m359):
+  - The title fills the 1024x1024 R8 atlas (tile mode 9) two ways. A compute dispatch copies
+    small R8 sources into it through a storage binding: about 35 sources while the menus load, and
+    7 when the death screen opens (thin P and G, bold R, S, P, W and N). The CPU also writes glyphs
+    straight into the atlas's guest memory: "Back" before the first dispatch; "F" about 280
+    presents later; and, as the death screen opens, the bold title "YOU DIED!" plus the letters the
+    message needs, such as K and b, and g and h in a run where another enemy killed the player.
+  - The image every later bind samples is the storage image created at the first dispatch, seeded
+    from the guest bytes of that moment. A dump of it on the death screen holds "Back" and every
+    compute-copied glyph, but not "F", "YOU DIED!", K or b. Those are exactly the letters missing
+    on screen, and the "You died!" title has been missing from every death-screen capture. The
+    guest bytes hold the reverse: the CPU glyphs and none of the compute ones, because storage
+    images are not written back.
+  - The texture bind prefers the newest storage image at the bound address (`PrepareTextures`,
+    `FindLatestStorageTexture`) for sampled and storage binds alike. That path does not run the
+    object update, so a CPU write made after the storage image exists never reaches it. A trace on
+    the update path logged no update and no cached reuse for the atlas range after its creation.
+  - The CPU and compute glyphs share the same 64 KiB tile blocks (rows 1-132). Re-uploading
+    whole pages or blocks from guest memory would erase the compute glyphs, so a page-granular
+    refresh is not a fix.
+  - Not yet attributed: Z, missing in the first two runs ("Zombie"). It was not in the guest atlas
+    of the runs that dumped it, because a different enemy killed the player there.
+- Direction: either write storage images back to guest memory, so that guest memory holds both
+  writers and a dirty upload is safe, or merge CPU-changed bytes into the live storage image
+  against a snapshot of the guest bytes taken at the last sync. Either change touches the rule
+  that keeps a texture linked under a live storage or render image from re-detiling guest memory
+  (that rule prevents banding), so it must be re-run on PPSA21567 - ASTRO BOT and another title
+  with storage-linked textures, not only here.
 
 ## Sandbox title: snapshot comparisons in the world (2026-10-24, improved)
 
