@@ -52,6 +52,13 @@ so where the robot stands depends on how long the loads took).
   matches a 960x540 image in 8x8 tiles, so the BVH kernel's group count reads as the number of half-
   resolution tiles the guest traces, all of them when the robot fills the view. Both programs spill on
   this host (records of 2026-11-06 and 2026-11-12 below); no translator change was tried in this run.
+- **Register spills across the title's compute programs (offline, 2026-11-14).** The 105 compute
+  pipeline recipes recorded for the title (translator store t215) compiled on ANV: 60 spill. Width 16:
+  60 recipes, 15 of them with 870-1,309 spills and 3,589-5,927 fills; width 8: 39, the BVH kernel's
+  recipe at 622:2,426 and 358 maximum live registers; width 32: 6, one at 2,901:9,982 (the native
+  wave32 program recorded below as `0x874bd13f`). Recipes carry no program hash, so only the BVH
+  kernel and that wave32 program are matched to their GPU time; how much frame time the other spilling
+  programs take is not established.
 - **Defect, open.** Status 139 has ended two diagnostic runs, both in scenes off the dunes route:
   the probes engaged from boot (intro crowd scene, 185 s, no log line, no core dump), and a run
   that also doubled the BVH kernel's cross-part exchanges (ship cinematic). The second left a crash
