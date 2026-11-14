@@ -270,6 +270,20 @@ only where Kyty's own traces agree.
     reaches gameplay at 59.9 fps. Unit tests 2,662 pass, CTest gates 4/4.
   - Still zeroed per draw: `RenderColorInfo` (1.2 KB) four times in the colour
     description, and `PreparedDrawInputs` (about 21 KB) on the preparation thread.
+- **Priced: fence waits (2026-11-14, preloaded `vkWaitForFences` timer with call stacks,
+  Minecraft world, 52 s).** `fence_wait_ns` (2.4 ms per frame) sums every thread. Per second:
+  the present thread waits 25 ms (27.6 waits of 0.91 ms, `WindowDrawBuffer` before the
+  flip), off the command-processor thread. The command processor waits about 20.5 ms per
+  second, about 2 % of its time: 17.4 ms in 18.8 host waits of 0.92 ms from
+  `RetryGuestDeviceAddressDraw` (a draw preparation reports a pending submission on the
+  processor's own queue, which `AwaitOnDevice` cannot order on the device), 1.8 ms in 0.4
+  waits of 4.3 ms from the index-buffer update's `UtilCopyBuffer`, and 1.2 ms from the same
+  retry under `DrawIndexAuto`. At most about 0.7 ms per frame; not the 3 ms lever.
+- **Not built: a memo of the attachment lookup.** 2.41 creates per draw at 320 ns each
+  (about 0.77 us per draw); 86 % are cached hits of the render texture (47 %) and depth
+  buffer (39 %). The split measured on 2026-11-13 (section "Repeated render targets") leaves
+  about 40-70 ns per create to a lookup memo that keeps the side effects, about 0.1 us per
+  draw, under the 3 % run spread.
 - **Most render-pass breaks come from vertex seeding (same counter with caller addresses,
   Minecraft world).** In 20 s: 175 k `BeginRenderPass` from `CommandBuffer::BeginRenderPass`,
   closed by `CloseRenderPass` (175 k), and 134 k barrier, copy and barrier groups from
