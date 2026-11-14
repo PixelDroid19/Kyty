@@ -219,6 +219,10 @@ only where Kyty's own traces agree.
   per draw should cost about 0.1 us, so the full workstream C can move at most about 0.7 us
   per draw off the thread. That is short of the 0.93 us per draw that 30 fps on the
   Minecraft world needs at about 5,450 draws per frame.
+- **Excluded: push-constant dedup (same counter, second run).** Of 4.4 million
+  `vkCmdPushConstants` calls in the window, none repeated the previous call's command
+  buffer, layout, stages, offset, size and bytes, so skipping repeats cannot cut the state
+  the driver emits at `vkCmdDrawIndexed` (0.49 us per draw in this run).
 
 ### E. Internal resolution as a functional option
 
