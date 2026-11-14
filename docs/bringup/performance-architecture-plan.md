@@ -1017,5 +1017,9 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
     33.47 ms at 5,434 draws per frame);
   - lighter scene, 4,195 draws per frame: 35.6 fps, 5.64 us per draw.
   ASTRO BOT dunes: 19.3 / 20.6 fps in the 100-120 / 120-150 s windows, unchanged (GPU-bound).
-  One run per arm and scene. The profile is tied to the revision and to the training titles,
-  so release builds would need a training step; not adopted here.
+  A repeat of the heavy scene on the same PGO binary (5,421 draws per frame) measured 26.0 fps,
+  6.24 us per draw and 36.3 ms of command processing, so the 30.8 fps run is not reproduced
+  and no PGO gain is established: the run-to-run spread of this route (26-31 fps at matching
+  draw counts) is larger than the difference. `playable-regression` on PPSA06084 - Superliminal
+  with the PGO binary: 12/15, the same three pre-existing failures. The profile is tied to the
+  revision and to the training titles, so release builds would need a training step; not adopted.
