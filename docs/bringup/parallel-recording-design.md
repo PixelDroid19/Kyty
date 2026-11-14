@@ -345,15 +345,16 @@ about 7 % of the thread, and must keep the hit checks the cache already makes (o
 same logical generation, same submission). No single part of the ordered work is large enough on its
 own for the 30 % cut that 40 fps needs; the sample count is small (10 s at 199 Hz).
 
-### Excluded: switching off the per-draw statistics (2026-11-14)
+### Not detected: switching off the per-draw statistics (2026-11-14)
 
 In the same profile, 6.5 % of the command-processor samples sit in a statistics frame (clock reads,
 create traces, stage recorders). A temporary switch that turned the statistics clock, the timed
 recorders and the create-trace completion into no-ops in alternate 4 s blocks of the sandbox world
-did engage: the command-processor run counter read zero in the off blocks. Frame time per draw did
-not move: off minus on +0.10 µs/draw, standard error 0.30, 14 pairs; 30.3 fps off against 30.8 on.
-Gating the statistics behind a diagnostics request is therefore not a frame-rate lever on this
-host, and the agent's performance counters stay always on.
+did engage: the command-processor run counter read zero in the off blocks. No change in frame time per draw
+was detected: off minus on +0.10 µs/draw, standard error 0.30, 14 pairs (detection limit about
+0.6 µs/draw, which is above the 0.4 µs/draw the profile share predicts); 30.3 fps off against 30.8
+on. The stage counters cannot split this case because the switch zeroes them. The statistics stay
+always on; a smaller effect is not excluded.
 
 ### Priced, not built: reusing the previous draw's materialized targets (2026-11-14)
 
@@ -393,15 +394,27 @@ item above and saves only the lookups (materialization key and hash, cache looku
 `FindFast`, the extra lock round trips and statistics traces): an estimated half of the measured
 0.53 µs/draw, not measured.
 
-### Excluded: remembering the targets `ResetHash` finds (2026-11-14)
+### Built: remembering the targets `ResetHash` finds, and skipping an unchanged write-back sync (2026-11-14)
 
 `ResetHash` runs at the end of every draw for each colour and depth target and spends most of its
 time finding the same object again (`FindFast` 1.8 %, `GetHeapId` 0.9 % of the command-processor
-samples). Four remembered exact-range finds, valid while the object graph generation and the heap
-index generation are unchanged, answered 98.5 % of the calls in the sandbox world, and a shadow
-check that also ran the full find on every hit counted no mismatch in 16.5 million hits (its one
-deliberately forced mismatch was reported). In alternate 4 s blocks it did not move
-command-processor time (+0.02 µs/draw, standard error 0.19, 14 pairs) or frame time (+0.05,
-standard error 0.37), so it is not shipped. That run and the target-reuse run drew about 4,700 and
-4,500 draws per frame against 5,400 in the two runs before them on the same route; the scene
-reached differs between runs.
+samples). It now keeps four remembered exact-range finds, valid while the object graph generation
+and the heap index generation are unchanged. The cached-hit path of `GpuMemory::CreateObject` also
+skips `SyncWriteBackIndexes` when the use left `read_only` unchanged and the object is not a storage
+buffer: a hit keeps `free`, `in_use` and the callbacks, so the indexes cannot change, while storage
+buffers still record their scan change on every writable use.
+
+Shadow checks ran the full find on every remembered hit and compared the write-back, writable
+storage and host-result indexes on every skipped sync, with one deliberately forced mismatch that
+each reported: no other mismatch in the sandbox world (16.5 million hits, 16.8 million skips), the
+robot-platformer dunes (2.3 million hits, 16.8 million skips) and the deck-builder boot (0.5 million
+hits, 1 million skips). Remembered finds answered 98.5 % of the calls in the sandbox world, 47 % on
+the dunes.
+
+In alternate 4 s blocks of the sandbox world, the first 6 s after the world appears left out, the
+pair cut command emission by 0.102 µs/draw (standard error 0.006) and materialization by 0.029
+(standard error 0.004), 12 pairs; the remembered finds alone cut emission by 0.110 (standard error
+0.006, 13 pairs). Total command-processor time moved by 0.23 µs/draw with a standard error of 0.18,
+below the detection limit of the totals (about 0.35 µs/draw); the stage counters resolve it. The
+draws per frame differed between these runs (3,800-5,400) on the same route; whether the scene
+reached differs is not checked.
