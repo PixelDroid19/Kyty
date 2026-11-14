@@ -2103,7 +2103,7 @@ void TraceRenderTargetLifetimeProbeDepthAttempt(
 void TraceRenderTargetLifetimeDepthClearPass(uint64_t submit_id, const RenderDepthInfo& depth,
 	                                         const VulkanFramebuffer& framebuffer);
 void TraceRenderTargetLifetimeResolve(uint64_t submit_id, const RenderColorInfo& source, const RenderColorInfo& destination);
-void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline);
+void SetDynamicParams(CommandBuffer* buffer, VkCommandBuffer vk_buffer, VulkanPipeline* pipeline);
 
 // A pixel stage that needs the capture, shade and resolve strategy. The facts
 // text records host capabilities, program contract verdicts, plan sizing and

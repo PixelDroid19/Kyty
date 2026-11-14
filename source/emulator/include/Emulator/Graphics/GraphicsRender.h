@@ -5,6 +5,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
+#include "Emulator/Graphics/DeferredStateCommands.h"
 #include "Emulator/Graphics/GraphicsGeState.h"
 #include "Emulator/Kernel/EventQueue.h"
 
@@ -650,6 +651,17 @@ public:
 	[[nodiscard]] VkCommandBuffer RecordOutsideRenderPass();
 	[[nodiscard]] VkCommandBuffer RecordState();
 	[[nodiscard]] VkCommandBuffer RecordInsideRenderPass() const;
+	// A draw's state binds and dynamic state for `target`, a handle RecordState or StateTarget
+	// returned, and its indexed draws inside the open render pass, are encoded here. A continued
+	// render pass hands them to the pool's replay worker; every handle accessor and every command
+	// this class records itself first waits for that worker and replays the rest, so the recorded
+	// order is the order of the calls.
+	[[nodiscard]] VkCommandBuffer        StateTarget();
+	[[nodiscard]] DeferredStateCommands* DeferredState(VkCommandBuffer target);
+	[[nodiscard]] DeferredStateCommands* DeferredDraw();
+	void                                 FlushDeferredState() const;
+	// Hands the encoded commands to the pool's replay worker without waiting.
+	void HandOffDeferredState();
 	// Binds a draw's graphics pipeline unless this recording bound it last on `vk_buffer`. Only pipelines
 	// the pipeline cache leases to this recording come here, so a remembered handle stays unique until reset.
 	void BindDrawPipeline(VkCommandBuffer vk_buffer, VkPipeline pipeline);
@@ -854,6 +866,9 @@ private:
 	std::optional<OpenRenderPass> m_open_render_pass;
 	// The latest command recorded is a full memory barrier. Every recording handle clears it.
 	mutable bool m_latest_full_barrier = false;
+	// Encoded draw-tail commands and the command buffer they replay into.
+	mutable DeferredStateCommands m_deferred;
+	VkCommandBuffer               m_deferred_target = VK_NULL_HANDLE;
 	// Writes stamped before the recording began were recorded in earlier submissions; once a full
 	// memory barrier is recorded, every later command of the recording sees them.
 	uint64_t m_recording_begin_time  = 0;

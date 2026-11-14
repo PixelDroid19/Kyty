@@ -2709,7 +2709,7 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 		    GuestDeviceAddressResolveDrawInput(ctx, address, size, &guest_pages, &guest_offset) &&
 		    GpuMemoryRangeHoldsGuestBytes(address + read_begin, size - read_begin))
 		{
-			vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &guest_pages, &guest_offset);
+			buffer->DeferredState(vk_buffer)->BindVertexBuffers(static_cast<uint32_t>(i), 1, &guest_pages, &guest_offset);
 			continue;
 		}
 
@@ -2764,7 +2764,7 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 					{
 						const uint64_t block_base = in_place->vaddr - in_place->offset;
 						VkDeviceSize   in_place_offset = in_place->buffer->guest_offset + (address - block_base);
-						vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &in_place->buffer->buffer, &in_place_offset);
+						buffer->DeferredState(vk_buffer)->BindVertexBuffers(static_cast<uint32_t>(i), 1, &in_place->buffer->buffer, &in_place_offset);
 						continue;
 					}
 				}
@@ -2773,13 +2773,13 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 		if (vertices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vertices == nullptr condition ignored (continuing)\n"); }
 
 		offset += vertices->guest_offset;
-		vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &vertices->buffer, &offset);
+		buffer->DeferredState(vk_buffer)->BindVertexBuffers(static_cast<uint32_t>(i), 1, &vertices->buffer, &offset);
 	}
 	if (VulkanVertexInputHasEmptyResource(input))
 	{
 		const VkBuffer     zero   = ZeroVertexBuffer(g_render_ctx->GetGraphicCtx());
 		const VkDeviceSize offset = 0;
-		vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(input.buffers_num), 1, &zero, &offset);
+		buffer->DeferredState(vk_buffer)->BindVertexBuffers(static_cast<uint32_t>(input.buffers_num), 1, &zero, &offset);
 	}
 }
 
@@ -5642,7 +5642,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		}
 
 		// After the barriers above: a geometry pass is placed here (see CommandBuffer::BeginGeometryPass).
-		auto* vk_buffer = buffer->RecordState();
+		auto* commands = buffer->DeferredState(buffer->StateTarget());
 		if (need_descriptor)
 		{
 			auto* descriptor_set = g_render_ctx->GetDescriptorCache()->GetDescriptor(
@@ -5655,38 +5655,33 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 
 			EXIT_IF(descriptor_set == nullptr);
 
-			vkCmdBindDescriptorSets(vk_buffer, pipeline_bind_point, layout, bind.descriptor_set_slot, 1, &descriptor_set->set, 0, nullptr);
+			commands->BindDescriptorSet(pipeline_bind_point, layout, bind.descriptor_set_slot, descriptor_set->set);
 		}
 		if (!bind.vsharp_uniform_buffer)
 		{
-			vkCmdPushConstants(vk_buffer, layout, vk_stage, bind.push_constant_offset, bind.push_constant_size, sgprs);
+			commands->PushConstants(layout, vk_stage, bind.push_constant_offset, bind.push_constant_size, sgprs);
 		}
 		if (record_draw_timing) { DebugStatsRecordDrawDescriptorFinalize(BindingStageElapsedNs(finalize_start)); }
 	}
 	EmitDrawMaterialTrace(submit_id, trace_session, &bind);
 }
 
-static void VulkanCmdSetColorWriteEnableEXT(GraphicContext* ctx, VkCommandBuffer command_buffer, uint32_t attachment_count,
-                                            const VkBool32* p_color_write_enables)
+static PFN_vkCmdSetColorWriteEnableEXT ColorWriteEnableFunc(GraphicContext* ctx)
 {
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(ctx->instance == nullptr);
 
 	static auto func =
 	    reinterpret_cast<PFN_vkCmdSetColorWriteEnableEXT>(vkGetInstanceProcAddr(ctx->instance, "vkCmdSetColorWriteEnableEXT"));
-
-	if (func != nullptr)
-	{
-		func(command_buffer, attachment_count, p_color_write_enables);
-	} else
-	{
-		KYTY_LOG_DEBUG("WARNING: vkCmdSetColorWriteEnableEXT not present, skipping\n");
-	}
+	return func;
 }
 
-void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline)
+void SetDynamicParams(CommandBuffer* buffer, VkCommandBuffer vk_buffer, VulkanPipeline* pipeline)
 {
 	KYTY_PROFILER_FUNCTION();
+
+	EXIT_IF(buffer == nullptr);
+	auto* commands = buffer->DeferredState(vk_buffer);
 
 	EXIT_IF(pipeline == nullptr);
 	EXIT_IF(pipeline->static_params == nullptr);
@@ -5694,32 +5689,39 @@ void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline)
 
 	if (pipeline->dynamic_params->vk_dynamic_state_line_width)
 	{
-		vkCmdSetLineWidth(vk_buffer, pipeline->dynamic_params->line_width);
+		commands->SetLineWidth(pipeline->dynamic_params->line_width);
 	}
 
 	if (pipeline->static_params->stencil_test_enable)
 	{
 		if (pipeline->dynamic_params->vk_dynamic_state_stencil_compare_mask)
 		{
-			vkCmdSetStencilCompareMask(vk_buffer, VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.compareMask);
-			vkCmdSetStencilCompareMask(vk_buffer, VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.compareMask);
+			commands->SetStencilCompareMask(VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.compareMask);
+			commands->SetStencilCompareMask(VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.compareMask);
 		}
 		if (pipeline->dynamic_params->vk_dynamic_state_stencil_write_mask)
 		{
-			vkCmdSetStencilWriteMask(vk_buffer, VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.writeMask);
-			vkCmdSetStencilWriteMask(vk_buffer, VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.writeMask);
+			commands->SetStencilWriteMask(VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.writeMask);
+			commands->SetStencilWriteMask(VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.writeMask);
 		}
 		if (pipeline->dynamic_params->vk_dynamic_state_stencil_reference)
 		{
-			vkCmdSetStencilReference(vk_buffer, VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.reference);
-			vkCmdSetStencilReference(vk_buffer, VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.reference);
+			commands->SetStencilReference(VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.reference);
+			commands->SetStencilReference(VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.reference);
 		}
 	}
 
 	if (pipeline->dynamic_params->vk_dynamic_state_color_write_enable_ext && g_render_ctx->GetGraphicCtx()->color_write_enable_supported)
 	{
-		VkBool32 enable = (pipeline->dynamic_params->color_write_enable ? VK_TRUE : VK_FALSE);
-		VulkanCmdSetColorWriteEnableEXT(g_render_ctx->GetGraphicCtx(), vk_buffer, 1, &enable);
+		const VkBool32 enable = (pipeline->dynamic_params->color_write_enable ? VK_TRUE : VK_FALSE);
+		auto*          func   = ColorWriteEnableFunc(g_render_ctx->GetGraphicCtx());
+		if (func != nullptr)
+		{
+			commands->SetColorWriteEnable(func, enable);
+		} else
+		{
+			KYTY_LOG_DEBUG("WARNING: vkCmdSetColorWriteEnableEXT not present, skipping\n");
+		}
 	}
 
 	if (pipeline->dynamic_params->vk_dynamic_state_viewport)
@@ -5739,7 +5741,7 @@ void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline)
 		viewport.height   = xy.height;
 		viewport.minDepth = depth_range.min_depth;
 		viewport.maxDepth = depth_range.max_depth;
-		vkCmdSetViewport(vk_buffer, 0, 1, &viewport);
+		commands->SetViewport(viewport);
 	}
 
 	if (pipeline->dynamic_params->vk_dynamic_state_scissor)
@@ -5770,19 +5772,19 @@ void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline)
 		VkRect2D scissor {};
 		scissor.offset = {left, top};
 		scissor.extent = {static_cast<uint32_t>(right - left), static_cast<uint32_t>(bottom - top)};
-		vkCmdSetScissor(vk_buffer, 0, 1, &scissor);
+		commands->SetScissor(scissor);
 	}
 
 	if (pipeline->dynamic_params->vk_dynamic_state_blend_constants)
 	{
 		const float blend_constants[4] = {pipeline->dynamic_params->blend_color_red, pipeline->dynamic_params->blend_color_green,
 		                                  pipeline->dynamic_params->blend_color_blue, pipeline->dynamic_params->blend_color_alpha};
-		vkCmdSetBlendConstants(vk_buffer, blend_constants);
+		commands->SetBlendConstants(blend_constants);
 	}
 
 	if (pipeline->static_params->depth_bias_enable && pipeline->dynamic_params->vk_dynamic_state_depth_bias)
 	{
-		vkCmdSetDepthBias(vk_buffer, pipeline->dynamic_params->depth_bias_constant_factor, pipeline->dynamic_params->depth_bias_clamp,
+		commands->SetDepthBias(pipeline->dynamic_params->depth_bias_constant_factor, pipeline->dynamic_params->depth_bias_clamp,
 		                  pipeline->dynamic_params->depth_bias_slope_factor);
 	}
 }

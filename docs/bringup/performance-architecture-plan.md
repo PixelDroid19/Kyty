@@ -316,47 +316,51 @@ only where Kyty's own traces agree.
     writes for all later reads in submission order. Writes stamped before the recording
     began were recorded in earlier submissions. No synchronization-validation run was made.
     Cross-queue ordering is the same as for the copy it replaces.
-- **C stages 1 and 2, the draw tail replayed on a worker (2026-11-14, built and measured; under
-  evaluation, not in the tree).**
+- **Built: C stages 1 and 2, the draw tail replayed on a worker (2026-11-14).**
   - What was built:
-    - Stage 1 encoded the indexed draw's tail into a per-buffer list: pipeline, index,
+    - Stage 1 encodes the indexed draw's tail into a per-buffer list: pipeline, index,
       vertex and descriptor-set binds, push constants, dynamic state, the depth-kill
       timestamp and `vkCmdDrawIndexed`.
-    - Every handle accessor, pass begin and close, chunk switch and `End` replayed the list
-      first, so the recorded order did not change.
-    - Stage 2 gave each command pool one replay thread. A render-pass continuation (98.5 %
+    - Every handle accessor, pass begin and close, chunk switch and `End` replays the list
+      first, so the recorded order does not change.
+    - Stage 2 gives each command pool one replay thread. A render-pass continuation (98.5 %
       of `BeginRenderPass` calls on the Minecraft world: 149 k against 2.3 k real begins
-      per second) handed the list over without waiting. Every other accessor, and every
-      reset or free of a pool buffer, drained the thread first.
-  - Stage 1 cost, on the Minecraft world:
+      per second) hands the list over without waiting. Every other accessor, and every
+      reset or free of a pool buffer, drains the thread first.
+    - Callers that keep recording directly into a handle after the helpers (fragment
+      transport, the guest depth-stencil copy, the geometry front and compute dispatch)
+      flush explicitly.
+    - The thread polls for 200 us after each list before it sleeps, so a hand-off during a
+      frame pays no wake-up.
+  - Stage 1 alone, on the Minecraft world:
     - 5.97 us per draw against 6.01 before, inside the run spread.
-    - Replay took about 600 ns per flush, about 300 bytes each.
-  - Stage 2 hand-off: with a 200 us poll window, under 65,536 of 10.1 M hand-offs found work
-    still pending at the next drain.
-  - Stage 2 results, Minecraft world, world+2..40 s, only the seconds at 5,000-5,800 draws
-    per frame (the route changes scene between runs, so whole-window figures do not compare):
-    - Worker, two runs (12 and 36 s in the band): 28.4 and 30.0 fps; command-processor time
-      6.13 and 5.91 us per draw.
-    - No-worker control on the same binary, two runs (38 and 9 s): 27.3 and 26.9 fps; 6.46
-      and 6.48 us per draw. Stage 1 and the build before it (38 and 16 s): 26.7 and 27.2 fps;
-      6.60 and 6.45 us per draw.
-    - About +2.6 fps and -0.5 us per draw in this scene, from two worker runs: the effect is
-      not yet established. A first reading of whole-window figures, which mixed scenes,
-      wrongly concluded that frame time did not change.
+    - Replay takes about 600 ns per flush, about 300 bytes each.
+  - Stage 2 hand-off: under 65,536 of 10.1 M hand-offs found work still pending at the next
+    drain.
+  - Stage 2 results, Minecraft world, world+2..40 s. Only seconds at 5,000-5,800 draws per
+    frame count, because the route changes scene between runs. A run counts with at least
+    10 s in that band; the band and rule were fixed before the last three runs.
+    - Worker, three runs: 28.4, 30.0 and 29.5 fps, 29.6 pooled; command-processor time
+      5.91-6.13 us per draw.
+    - No-worker control on the same binary, three runs: 27.3, 26.6 and 27.8 fps, 27.2
+      pooled; 6.32-6.50 us per draw.
+    - About +2.4 fps (+9 %) and -0.45 us per draw; the two arms do not overlap.
+    - The build without the temporary counters ran 28.6 fps and 6.11 us per draw (7 s in
+      the band).
+    - A first reading of whole-window figures, which mixed scenes, wrongly concluded that
+      frame time did not change.
   - Other titles:
-    - PPSA21402 - Balatro: stage 1 and an eager-replay control show the same gameplay
-      screen.
-    - PPSA21567 - ASTRO BOT: stage 1 renders the dunes correctly.
-    - The fragment-transport and guest depth-stencil copy paths, which needed explicit
-      drains, were not reached by any of the three titles.
-  - Thread safety: a validation run limited to thread safety reported nothing on the
-    Minecraft world with the worker.
-    - Skipping the drain on purpose produced `UNASSIGNED-Threading-MultipleThreads-Write`
-      and an abort, so the check was live.
-    - The command pool is per queue, shared by every slot and segment chunk.
-  - Not yet checked with the worker: PPSA21402 - Balatro, PPSA21567 - ASTRO BOT (GPU-bound,
-    where the polling thread must cost nothing), a worker-mode capture, and thread safety
-    outside the Minecraft world.
+    - PPSA21567 - ASTRO BOT dunes: 20.3 fps with the worker against 19.1 for stage 1 (one
+      run each, GPU-bound); the dunes render correctly.
+    - PPSA21402 - Balatro reaches gameplay with the worker; stage 1 and an eager-replay
+      control show the same screen.
+    - The fragment-transport and guest depth-stencil copy paths were not reached by any of
+      the three titles.
+  - Thread safety: validation limited to thread safety reported nothing on the Minecraft
+    world and on Balatro with the worker. Skipping the drain on purpose produced
+    `UNASSIGNED-Threading-MultipleThreads-Write` and an abort, so the check was live.
+  - Unit tests 2,662 pass, CTest gates 4/4.
+  - Cost: the polling thread uses one host core while frames record.
     The patch is kept in the run evidence, outside the repository.
 
 ### E. Internal resolution as a functional option

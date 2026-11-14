@@ -675,6 +675,8 @@ void CommandPool::DeleteAll()
 				vkDestroyFence(ctx->device, pool->fences[i], nullptr);
 			}
 
+			delete pool->replay;
+			pool->replay = nullptr;
 			vkFreeCommandBuffers(ctx->device, pool->pool, pool->buffers_count, pool->buffers);
 			vkFreeCommandBuffers(ctx->device, pool->pool, pool->buffers_count * VulkanCommandPool::CHUNKS_PER_SLOT, pool->chunks);
 

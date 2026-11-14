@@ -76,6 +76,7 @@ struct PresentationViewStage;
 struct PresentationFsrStage;
 struct PresentationFsr3Stage;
 struct TransientSnapshotPool;
+class DeferredReplayWorker;
 struct VulkanBuffer;
 
 struct VulkanSwapchain
@@ -120,6 +121,9 @@ struct VulkanCommandPool
 	TransientSnapshotPool* snapshots = nullptr;
 	// Fragment-transport storage shared by the command buffers of this pool; owned by the command buffer code.
 	VulkanBuffer* transport_storage = nullptr;
+	// Records draw-tail commands of this pool's command buffers off the command processor; created on
+	// first use and owned by the command buffer code.
+	DeferredReplayWorker* replay = nullptr;
 	// Geometry-pass output shared by the command buffers of this pool, and the smaller ones it replaced, which
 	// recordings in flight may still read; owned by the command buffer code.
 	VulkanBuffer*              geometry_output = nullptr;

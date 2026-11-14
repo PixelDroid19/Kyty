@@ -12,6 +12,7 @@
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/DeferredStateCommands.h"
 #include "Emulator/Graphics/DiagnosticDump.h"
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -2427,6 +2428,7 @@ void CommandBuffer::ReleasePipelineLeases()
 void CommandBuffer::Begin()
 {
 	EXIT_IF(IsInvalid());
+	EXIT_IF(!m_deferred.Empty());
 	m_open_render_pass.reset();
 	{
 		std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
@@ -2705,7 +2707,7 @@ void CommandBuffer::BindDrawPipeline(VkCommandBuffer vk_buffer, VkPipeline pipel
 	{
 		return;
 	}
-	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+	DeferredState(vk_buffer)->BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 	m_draw_pipeline_buffer = vk_buffer;
 	m_draw_pipeline        = pipeline;
 }
@@ -2733,6 +2735,7 @@ VkCommandBuffer CommandBuffer::BeginChunk()
 // close; later commands go to a new one after the segment.
 void CommandBuffer::OpenGeometrySegment(VulkanBuffer* output, uint64_t offset)
 {
+	FlushDeferredState();
 	CloseRenderPass();
 	m_latest_full_barrier = false;
 
@@ -2758,6 +2761,7 @@ static void EndChunk(VkCommandBuffer chunk, int queue, uint32_t slot)
 
 void CommandBuffer::CloseGeometrySegment()
 {
+	FlushDeferredState();
 	auto& segment = m_geometry_segment;
 	if (segment.passes == nullptr)
 	{
@@ -2806,12 +2810,15 @@ void CommandBuffer::ReadImage(const VulkanImage* image)
 
 VkResult CommandBuffer::ResetCommandBuffers()
 {
+	FlushDeferredState();
 	auto result = vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 	for (size_t i = 1; i < m_chunks.size() && result == VK_SUCCESS; i++)
 	{
 		result = vkResetCommandBuffer(m_chunks[i], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 	}
 	m_chunks.clear();
+	m_deferred.Clear();
+	m_deferred_target = VK_NULL_HANDLE;
 	return result;
 }
 
@@ -2843,8 +2850,8 @@ void CommandBuffer::SeparateDepthKillDraw(bool kills_with_depth_write)
 	}
 	// Nothing reads the value: the pipelined write itself keeps the draws apart.
 	m_latest_full_barrier = false;
-	vkCmdWriteTimestamp(m_main, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_draw_separation_pools[pool_index],
-	                    m_draw_separations % kDrawSeparationsPerPool);
+	DeferredState(m_main)->WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_draw_separation_pools[pool_index],
+	                                      m_draw_separations % kDrawSeparationsPerPool);
 	m_draw_separations++;
 }
 
@@ -3393,7 +3400,6 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 {
 	EXIT_IF(IsInvalid());
 	EXIT_IF(framebuffer == nullptr);
-
 	if (m_geometry_segment.passes != nullptr)
 	{
 		for (const auto& target: color->attachment)
@@ -3412,8 +3418,12 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	    RenderPassContinuesAttachments(*framebuffer, *color, *depth, with_color, with_depth))
 	{
 		DebugStatsRecordRenderPassContinuation();
+		// The encoded commands belong inside the continued pass; nothing is recorded here directly.
+		HandOffDeferredState();
 		return;
 	}
+	// Commands encoded before the call belong before the pass.
+	FlushDeferredState();
 	if (Config::GetPresentationFilter() == Config::PresentationFilter::Fsr3)
 	{
 		PresentationFsr3NoteRenderPass(*color, *depth);
@@ -3649,6 +3659,7 @@ void CommandBuffer::CloseRenderPass()
 	}
 	m_open_render_pass.reset();
 	m_latest_full_barrier = false;
+	FlushDeferredState();
 
 	auto* buffer = m_main;
 	vkCmdEndRenderPass(buffer);
@@ -3669,6 +3680,7 @@ void CommandBuffer::CloseRenderPass()
 VkCommandBuffer CommandBuffer::RecordOutsideRenderPass()
 {
 	EXIT_IF(IsInvalid());
+	FlushDeferredState();
 	CloseRenderPass();
 	m_latest_full_barrier = false;
 	m_geometry_hazards++;
@@ -3676,6 +3688,12 @@ VkCommandBuffer CommandBuffer::RecordOutsideRenderPass()
 }
 
 VkCommandBuffer CommandBuffer::RecordState()
+{
+	FlushDeferredState();
+	return StateTarget();
+}
+
+VkCommandBuffer CommandBuffer::StateTarget()
 {
 	EXIT_IF(IsInvalid());
 	m_latest_full_barrier = false;
@@ -3695,7 +3713,56 @@ VkCommandBuffer CommandBuffer::RecordInsideRenderPass() const
 	EXIT_IF(IsInvalid());
 	EXIT_IF(!m_open_render_pass.has_value());
 	m_latest_full_barrier = false;
+	FlushDeferredState();
 	return m_main;
+}
+
+DeferredStateCommands* CommandBuffer::DeferredState(VkCommandBuffer target)
+{
+	EXIT_IF(IsInvalid() || target == VK_NULL_HANDLE);
+	if (target != m_deferred_target)
+	{
+		FlushDeferredState();
+		m_deferred_target = target;
+	}
+	return &m_deferred;
+}
+
+void CommandBuffer::HandOffDeferredState()
+{
+	if (m_deferred.Empty())
+	{
+		return;
+	}
+	if (m_pool->replay == nullptr)
+	{
+		Core::LockGuard lock(m_pool->mutex);
+		if (m_pool->replay == nullptr)
+		{
+			m_pool->replay = new DeferredReplayWorker;
+		}
+	}
+	m_pool->replay->HandOff(m_deferred_target, &m_deferred);
+}
+
+DeferredStateCommands* CommandBuffer::DeferredDraw()
+{
+	EXIT_IF(IsInvalid());
+	EXIT_IF(!m_open_render_pass.has_value());
+	m_latest_full_barrier = false;
+	return DeferredState(m_main);
+}
+
+void CommandBuffer::FlushDeferredState() const
+{
+	if (m_pool->replay != nullptr)
+	{
+		m_pool->replay->Drain();
+	}
+	if (!m_deferred.Empty())
+	{
+		m_deferred.Replay(m_deferred_target);
+	}
 }
 
 void CommandBuffer::FullMemoryBarrier()
@@ -3730,6 +3797,422 @@ bool CommandBuffer::OrderEarlierDeviceWrite(uint64_t device_write_time, VkComman
 	return target == m_main;
 }
 
+
+namespace {
+
+enum class DeferredOp : uint8_t
+{
+	BindPipeline,
+	BindIndexBuffer,
+	BindVertexBuffers,
+	BindDescriptorSet,
+	PushConstants,
+	SetLineWidth,
+	SetStencilCompareMask,
+	SetStencilWriteMask,
+	SetStencilReference,
+	SetColorWriteEnable,
+	SetViewport,
+	SetScissor,
+	SetBlendConstants,
+	SetDepthBias,
+	DrawIndexed,
+	WriteTimestamp,
+};
+
+struct DeferredPipeline
+{
+	VkPipelineBindPoint bind_point;
+	VkPipeline          pipeline;
+};
+struct DeferredIndexBuffer
+{
+	VkBuffer     buffer;
+	VkDeviceSize offset;
+	VkIndexType  type;
+};
+struct DeferredVertexBuffers
+{
+	uint32_t first;
+	uint32_t count;
+};
+struct DeferredDescriptorSet
+{
+	VkPipelineBindPoint bind_point;
+	VkPipelineLayout    layout;
+	uint32_t            slot;
+	VkDescriptorSet     set;
+};
+struct DeferredPushConstants
+{
+	VkPipelineLayout   layout;
+	VkShaderStageFlags stages;
+	uint32_t           offset;
+	uint32_t           size;
+};
+struct DeferredStencilValue
+{
+	VkStencilFaceFlags faces;
+	uint32_t           value;
+};
+struct DeferredColorWrite
+{
+	PFN_vkCmdSetColorWriteEnableEXT func;
+	VkBool32                        enable;
+};
+struct DeferredBlendConstants
+{
+	float constants[4];
+};
+struct DeferredTimestamp
+{
+	VkPipelineStageFlagBits stage;
+	VkQueryPool             pool;
+	uint32_t                query;
+};
+struct DeferredDepthBias
+{
+	float constant_factor;
+	float clamp;
+	float slope_factor;
+};
+struct DeferredDrawIndexed
+{
+	uint32_t index_count;
+	uint32_t instance_count;
+	uint32_t first_index;
+	int32_t  vertex_offset;
+	uint32_t first_instance;
+};
+
+template <typename T>
+T TakeDeferred(const uint8_t* bytes, size_t* position)
+{
+	T value;
+	std::memcpy(&value, bytes + *position, sizeof(T));
+	*position += sizeof(T);
+	return value;
+}
+
+} // namespace
+
+template <typename T>
+void DeferredStateCommands::Append(uint8_t op, const T& args)
+{
+	const size_t position = m_bytes.size();
+	m_bytes.resize(position + 1u + sizeof(T));
+	m_bytes[position] = op;
+	std::memcpy(m_bytes.data() + position + 1u, &args, sizeof(T));
+}
+
+void DeferredStateCommands::AppendBytes(const void* data, size_t size)
+{
+	const size_t position = m_bytes.size();
+	m_bytes.resize(position + size);
+	std::memcpy(m_bytes.data() + position, data, size);
+}
+
+void DeferredStateCommands::BindPipeline(VkPipelineBindPoint bind_point, VkPipeline pipeline)
+{
+	Append(static_cast<uint8_t>(DeferredOp::BindPipeline), DeferredPipeline {bind_point, pipeline});
+}
+
+void DeferredStateCommands::BindIndexBuffer(VkBuffer buffer, VkDeviceSize offset, VkIndexType type)
+{
+	Append(static_cast<uint8_t>(DeferredOp::BindIndexBuffer), DeferredIndexBuffer {buffer, offset, type});
+}
+
+void DeferredStateCommands::BindVertexBuffers(uint32_t first, uint32_t count, const VkBuffer* buffers, const VkDeviceSize* offsets)
+{
+	EXIT_IF(count == 0 || count > VERTEX_BUFFERS_MAX || buffers == nullptr || offsets == nullptr);
+	Append(static_cast<uint8_t>(DeferredOp::BindVertexBuffers), DeferredVertexBuffers {first, count});
+	AppendBytes(buffers, sizeof(VkBuffer) * count);
+	AppendBytes(offsets, sizeof(VkDeviceSize) * count);
+}
+
+void DeferredStateCommands::BindDescriptorSet(VkPipelineBindPoint bind_point, VkPipelineLayout layout, uint32_t slot, VkDescriptorSet set)
+{
+	Append(static_cast<uint8_t>(DeferredOp::BindDescriptorSet), DeferredDescriptorSet {bind_point, layout, slot, set});
+}
+
+void DeferredStateCommands::PushConstants(VkPipelineLayout layout, VkShaderStageFlags stages, uint32_t offset, uint32_t size,
+                                          const void* values)
+{
+	EXIT_IF(size > PUSH_CONSTANT_BYTES_MAX || (size > 0 && values == nullptr));
+	Append(static_cast<uint8_t>(DeferredOp::PushConstants), DeferredPushConstants {layout, stages, offset, size});
+	AppendBytes(values, size);
+}
+
+void DeferredStateCommands::SetLineWidth(float width)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetLineWidth), width);
+}
+
+void DeferredStateCommands::SetStencilCompareMask(VkStencilFaceFlags faces, uint32_t mask)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetStencilCompareMask), DeferredStencilValue {faces, mask});
+}
+
+void DeferredStateCommands::SetStencilWriteMask(VkStencilFaceFlags faces, uint32_t mask)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetStencilWriteMask), DeferredStencilValue {faces, mask});
+}
+
+void DeferredStateCommands::SetStencilReference(VkStencilFaceFlags faces, uint32_t reference)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetStencilReference), DeferredStencilValue {faces, reference});
+}
+
+void DeferredStateCommands::SetColorWriteEnable(PFN_vkCmdSetColorWriteEnableEXT func, VkBool32 enable)
+{
+	EXIT_IF(func == nullptr);
+	Append(static_cast<uint8_t>(DeferredOp::SetColorWriteEnable), DeferredColorWrite {func, enable});
+}
+
+void DeferredStateCommands::SetViewport(const VkViewport& viewport)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetViewport), viewport);
+}
+
+void DeferredStateCommands::SetScissor(const VkRect2D& scissor)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetScissor), scissor);
+}
+
+void DeferredStateCommands::SetBlendConstants(const float constants[4])
+{
+	DeferredBlendConstants args {};
+	std::memcpy(args.constants, constants, sizeof(args.constants));
+	Append(static_cast<uint8_t>(DeferredOp::SetBlendConstants), args);
+}
+
+void DeferredStateCommands::SetDepthBias(float constant_factor, float clamp, float slope_factor)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetDepthBias), DeferredDepthBias {constant_factor, clamp, slope_factor});
+}
+
+void DeferredStateCommands::DrawIndexed(uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset,
+                                        uint32_t first_instance)
+{
+	Append(static_cast<uint8_t>(DeferredOp::DrawIndexed),
+	       DeferredDrawIndexed {index_count, instance_count, first_index, vertex_offset, first_instance});
+}
+
+void DeferredStateCommands::WriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool pool, uint32_t query)
+{
+	Append(static_cast<uint8_t>(DeferredOp::WriteTimestamp), DeferredTimestamp {stage, pool, query});
+}
+
+void DeferredStateCommands::Take(DeferredStateCommands* other)
+{
+	EXIT_IF(other == nullptr || other == this);
+	if (m_bytes.empty())
+	{
+		m_bytes.swap(other->m_bytes);
+	} else
+	{
+		m_bytes.insert(m_bytes.end(), other->m_bytes.begin(), other->m_bytes.end());
+	}
+	other->m_bytes.clear();
+}
+
+void DeferredStateCommands::Replay(VkCommandBuffer vk_buffer)
+{
+	EXIT_IF(vk_buffer == VK_NULL_HANDLE);
+	const uint8_t* bytes    = m_bytes.data();
+	size_t         position = 0;
+	while (position < m_bytes.size())
+	{
+		const auto op = static_cast<DeferredOp>(bytes[position++]);
+		switch (op)
+		{
+			case DeferredOp::BindPipeline:
+			{
+				const auto a = TakeDeferred<DeferredPipeline>(bytes, &position);
+				vkCmdBindPipeline(vk_buffer, a.bind_point, a.pipeline);
+				break;
+			}
+			case DeferredOp::BindIndexBuffer:
+			{
+				const auto a = TakeDeferred<DeferredIndexBuffer>(bytes, &position);
+				vkCmdBindIndexBuffer(vk_buffer, a.buffer, a.offset, a.type);
+				break;
+			}
+			case DeferredOp::BindVertexBuffers:
+			{
+				const auto a = TakeDeferred<DeferredVertexBuffers>(bytes, &position);
+				std::array<VkBuffer, VERTEX_BUFFERS_MAX>     buffers {};
+				std::array<VkDeviceSize, VERTEX_BUFFERS_MAX> offsets {};
+				std::memcpy(buffers.data(), bytes + position, sizeof(VkBuffer) * a.count);
+				position += sizeof(VkBuffer) * a.count;
+				std::memcpy(offsets.data(), bytes + position, sizeof(VkDeviceSize) * a.count);
+				position += sizeof(VkDeviceSize) * a.count;
+				vkCmdBindVertexBuffers(vk_buffer, a.first, a.count, buffers.data(), offsets.data());
+				break;
+			}
+			case DeferredOp::BindDescriptorSet:
+			{
+				const auto a = TakeDeferred<DeferredDescriptorSet>(bytes, &position);
+				vkCmdBindDescriptorSets(vk_buffer, a.bind_point, a.layout, a.slot, 1, &a.set, 0, nullptr);
+				break;
+			}
+			case DeferredOp::PushConstants:
+			{
+				const auto a = TakeDeferred<DeferredPushConstants>(bytes, &position);
+				vkCmdPushConstants(vk_buffer, a.layout, a.stages, a.offset, a.size, bytes + position);
+				position += a.size;
+				break;
+			}
+			case DeferredOp::SetLineWidth: vkCmdSetLineWidth(vk_buffer, TakeDeferred<float>(bytes, &position)); break;
+			case DeferredOp::SetStencilCompareMask:
+			{
+				const auto a = TakeDeferred<DeferredStencilValue>(bytes, &position);
+				vkCmdSetStencilCompareMask(vk_buffer, a.faces, a.value);
+				break;
+			}
+			case DeferredOp::SetStencilWriteMask:
+			{
+				const auto a = TakeDeferred<DeferredStencilValue>(bytes, &position);
+				vkCmdSetStencilWriteMask(vk_buffer, a.faces, a.value);
+				break;
+			}
+			case DeferredOp::SetStencilReference:
+			{
+				const auto a = TakeDeferred<DeferredStencilValue>(bytes, &position);
+				vkCmdSetStencilReference(vk_buffer, a.faces, a.value);
+				break;
+			}
+			case DeferredOp::SetColorWriteEnable:
+			{
+				const auto a = TakeDeferred<DeferredColorWrite>(bytes, &position);
+				a.func(vk_buffer, 1, &a.enable);
+				break;
+			}
+			case DeferredOp::SetViewport:
+			{
+				const auto a = TakeDeferred<VkViewport>(bytes, &position);
+				vkCmdSetViewport(vk_buffer, 0, 1, &a);
+				break;
+			}
+			case DeferredOp::SetScissor:
+			{
+				const auto a = TakeDeferred<VkRect2D>(bytes, &position);
+				vkCmdSetScissor(vk_buffer, 0, 1, &a);
+				break;
+			}
+			case DeferredOp::SetBlendConstants:
+			{
+				const auto a = TakeDeferred<DeferredBlendConstants>(bytes, &position);
+				vkCmdSetBlendConstants(vk_buffer, a.constants);
+				break;
+			}
+			case DeferredOp::SetDepthBias:
+			{
+				const auto a = TakeDeferred<DeferredDepthBias>(bytes, &position);
+				vkCmdSetDepthBias(vk_buffer, a.constant_factor, a.clamp, a.slope_factor);
+				break;
+			}
+			case DeferredOp::DrawIndexed:
+			{
+				const auto a = TakeDeferred<DeferredDrawIndexed>(bytes, &position);
+				vkCmdDrawIndexed(vk_buffer, a.index_count, a.instance_count, a.first_index, a.vertex_offset, a.first_instance);
+				break;
+			}
+			case DeferredOp::WriteTimestamp:
+			{
+				const auto a = TakeDeferred<DeferredTimestamp>(bytes, &position);
+				vkCmdWriteTimestamp(vk_buffer, a.stage, a.pool, a.query);
+				break;
+			}
+			default: EXIT("unknown deferred state command %u\n", static_cast<unsigned>(op));
+		}
+	}
+	m_bytes.clear();
+}
+
+DeferredReplayWorker::DeferredReplayWorker(): m_thread([this] { Run(); }) {}
+
+DeferredReplayWorker::~DeferredReplayWorker()
+{
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_stop = true;
+	}
+	m_wake.notify_one();
+	m_thread.join();
+}
+
+void DeferredReplayWorker::HandOff(VkCommandBuffer target, DeferredStateCommands* commands)
+{
+	EXIT_IF(target == VK_NULL_HANDLE || commands == nullptr);
+	bool wake = false;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		// One target at a time: a command buffer switch drains first.
+		EXIT_IF(!m_pending.Empty() && m_pending_target != target);
+		m_pending_target = target;
+		m_pending.Take(commands);
+		m_has_pending.store(true, std::memory_order_release);
+		wake = m_sleeping;
+	}
+	if (wake)
+	{
+		m_wake.notify_one();
+	}
+}
+
+void DeferredReplayWorker::Drain()
+{
+	std::unique_lock<std::mutex> lock(m_mutex);
+	if (m_pending.Empty() && !m_busy)
+	{
+		return;
+	}
+	if (m_sleeping)
+	{
+		m_wake.notify_one();
+	}
+	m_idle.wait(lock, [this] { return m_pending.Empty() && !m_busy; });
+}
+
+void DeferredReplayWorker::Run()
+{
+	// Draws arrive every few microseconds while a frame records: polling that long keeps a
+	// hand-off from paying a wake-up, and the thread sleeps once the stream pauses.
+	constexpr auto kPollWindow = std::chrono::microseconds(200);
+	for (;;)
+	{
+		const auto poll_start = std::chrono::steady_clock::now();
+		while (!m_has_pending.load(std::memory_order_acquire) && std::chrono::steady_clock::now() - poll_start < kPollWindow)
+		{
+			__builtin_ia32_pause();
+		}
+		VkCommandBuffer target = VK_NULL_HANDLE;
+		{
+			std::unique_lock<std::mutex> lock(m_mutex);
+			m_sleeping = true;
+			m_wake.wait(lock, [this] { return m_stop || !m_pending.Empty(); });
+			m_sleeping = false;
+			if (m_pending.Empty())
+			{
+				return;
+			}
+			m_running.Take(&m_pending);
+			target = m_pending_target;
+			m_has_pending.store(false, std::memory_order_relaxed);
+			m_busy = true;
+		}
+		m_running.Replay(target);
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_busy = false;
+			if (m_pending.Empty())
+			{
+				m_idle.notify_all();
+			}
+		}
+	}
+}
 
 } // namespace Kyty::Libs::Graphics
 

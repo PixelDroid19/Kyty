@@ -1659,7 +1659,8 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
 				auto* vk = buffer->RecordState();
 				buffer->ForgetDrawPipeline();
 				vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline);
-				SetDynamicParams(vk, capture);
+				SetDynamicParams(buffer, vk, capture);
+				buffer->FlushDeferredState();
 				vkCmdSetScissor(vk, 0, 1, &band);
 				vkCmdPushConstants(vk, capture->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters),
 				                   &kernel_parameters);
@@ -1667,6 +1668,7 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
 				bind_index_buffer(vk);
 				BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_first, vertex_records, geometry.indices_snapshotted,
 				                  first_instance, instance_count);
+				buffer->FlushDeferredState();
 				bind_vertex(capture->pipeline_layout);
 				buffer->BeginRenderPass(framebuffer, color_info, depth_info, &sample_locations);
 				draw_geometry(buffer->RecordInsideRenderPass(), instance, chunk_first, chunk_count);
@@ -1681,7 +1683,8 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
 				vk = buffer->RecordOutsideRenderPass();
 				buffer->ForgetDrawPipeline();
 				vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline);
-				SetDynamicParams(vk, resolve);
+				SetDynamicParams(buffer, vk, resolve);
+				buffer->FlushDeferredState();
 				vkCmdSetScissor(vk, 0, 1, &band);
 				vkCmdPushConstants(vk, resolve->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters),
 				                   &kernel_parameters);
@@ -1689,6 +1692,7 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
 				bind_index_buffer(vk);
 				BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_first, vertex_records, geometry.indices_snapshotted,
 				                  first_instance, instance_count);
+				buffer->FlushDeferredState();
 				bind_vertex(resolve->pipeline_layout);
 				buffer->BeginRenderPass(framebuffer, color_info, depth_info, &sample_locations);
 				draw_geometry(buffer->RecordInsideRenderPass(), instance, chunk_first, chunk_count);
@@ -2208,7 +2212,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 		first_instance = 0;
 	}
 	// After the pass, which may move the recording to a new command buffer.
-	auto* vk_buffer = buffer->RecordState();
+	auto* vk_buffer = buffer->StateTarget();
 	if (geometry_pass)
 	{
 		vertex_requirement = ResolveLinearVertexRecords(0u, primitive_plan.draw_count);
@@ -2294,7 +2298,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 			return;
 		}
 		// After the pass, which may move the recording to a new command buffer.
-		vk_buffer = buffer->RecordState();
+		vk_buffer = buffer->StateTarget();
 	} else if (indirect != nullptr)
 	{
 		indirect_args = GraphicsRenderRecordDrawIndexedIndirectArgs(buffer, indirect_source.buffer, indirect_source.offset, index_count,
@@ -2309,7 +2313,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	buffer->SeparateDepthKillDraw(ps_input_info.ps_pixel_kill_enable && depth_info.depth_write_enable && !depth_info.suppress_depth_write);
 	buffer->BindDrawPipeline(vk_buffer, pipeline->pipeline);
 
-	SetDynamicParams(vk_buffer, pipeline);
+	SetDynamicParams(buffer, vk_buffer, pipeline);
 
 	// The vertex range was resolved from the guest indexes; only their snapshot or the
 	// guest pages that hold them have the same values when the GPU reads them. A geometry
@@ -2336,7 +2340,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 			bound = indices->buffer;
 		}
 
-		vkCmdBindIndexBuffer(vk_buffer, bound, guest_index_offset, index_type);
+		buffer->DeferredState(vk_buffer)->BindIndexBuffer(bound, guest_index_offset, index_type);
 		DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start) + index_upload_ns);
 	}
 
@@ -2452,7 +2456,6 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 		vertex_clip_probe->CaptureAttachmentBeforePass(buffer);
 	}
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
-	auto* pass_buffer = buffer->RecordInsideRenderPass();
 	if (vertex_clip_probe != nullptr)
 	{
 		vertex_clip_probe->BeginDepthPassQuery(buffer);
@@ -2460,33 +2463,33 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	uint32_t host_draws = 0;
 	if (indirect_args != nullptr && geometry_pass)
 	{
-		vkCmdDrawIndirect(pass_buffer, indirect_args->buffer, kGeometryIndirectDrawOffset, 1, sizeof(VkDrawIndirectCommand));
+		vkCmdDrawIndirect(buffer->RecordInsideRenderPass(), indirect_args->buffer, kGeometryIndirectDrawOffset, 1, sizeof(VkDrawIndirectCommand));
 		DebugStatsRecordDraw();
 		host_draws++;
 		indirect->recorded = true;
 	} else if (indirect_args != nullptr)
 	{
-		vkCmdDrawIndexedIndirect(pass_buffer, indirect_args->buffer, 0, 1, sizeof(VkDrawIndexedIndirectCommand));
+		vkCmdDrawIndexedIndirect(buffer->RecordInsideRenderPass(), indirect_args->buffer, 0, 1, sizeof(VkDrawIndexedIndirectCommand));
 		DebugStatsRecordDraw();
 		host_draws++;
 		indirect->recorded = true;
 	} else if (geometry_pass)
 	{
 		// The pull stage reads the pass output records; no index buffer applies.
-		vkCmdDraw(pass_buffer, primitive_plan.draw_count, instance_count, 0u, first_instance);
+		vkCmdDraw(buffer->RecordInsideRenderPass(), primitive_plan.draw_count, instance_count, 0u, first_instance);
 		DebugStatsRecordDraw();
 		host_draws++;
 	} else if (primitive_plan.chunked)
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
-			vkCmdDrawIndexed(pass_buffer, primitive_plan.chunk_count, instance_count, i, vertex_offset, first_instance);
+			buffer->DeferredDraw()->DrawIndexed(primitive_plan.chunk_count, instance_count, i, vertex_offset, first_instance);
 			DebugStatsRecordDraw();
 			host_draws++;
 		}
 	} else
 	{
-		vkCmdDrawIndexed(pass_buffer, primitive_plan.draw_count, instance_count, 0, vertex_offset, first_instance);
+		buffer->DeferredDraw()->DrawIndexed(primitive_plan.draw_count, instance_count, 0, vertex_offset, first_instance);
 		DebugStatsRecordDraw();
 		host_draws++;
 	}
@@ -2742,6 +2745,7 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 		// The copy does not track whether its indexes were snapshotted.
 		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input, 0, vertex_records, false, first_instance,
 		                  instance_count);
+		buffer->FlushDeferredState();
 		if (index_buffer != nullptr)
 		{
 			vkCmdBindIndexBuffer(vk_buffer, index_buffer->buffer, 0, index_type);
@@ -2751,6 +2755,8 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 	// transfer/compute commands. Finish it before entering render-pass scope.
 	TraceRenderTargetLifetimeDepthClearPass(submit_id, *depth, *framebuffer);
 	buffer->BeginRenderPass(framebuffer, color, depth, &request.sample_locations);
+	// The draws below record into the held handle directly.
+	buffer->FlushDeferredState();
 	if (guest_geometry)
 	{
 		if (index_buffer != nullptr)
@@ -3268,6 +3274,7 @@ static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const 
 	}
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, front->bind, VK_SHADER_STAGE_COMPUTE_BIT,
 	                DescriptorCache::Stage::Compute, 0, nullptr, vs.gs_regs.chksum, nullptr, nullptr, device_address_table);
+	buffer->FlushDeferredState();
 	auto* segment = batched ? buffer->EndGeometryPass() : nullptr;
 	if (mutation_conflict->sequence != 0)
 	{
@@ -3674,7 +3681,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		first_instance        = 0;
 	}
 	// After the pass, which may move the recording to a new command buffer.
-	auto* vk_buffer = buffer->RecordState();
+	auto* vk_buffer = buffer->StateTarget();
 	const uint32_t actual_vertex_count = primitive_plan.chunked ? index_count : primitive_plan.draw_count;
 	const auto     vertex_requirement  = ResolveLinearVertexRecords(resolved_first_vertex, actual_vertex_count);
 	if (!vertex_requirement.valid)
@@ -3746,7 +3753,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	buffer->SeparateDepthKillDraw(ps_input_info.ps_pixel_kill_enable && depth_info.depth_write_enable && !depth_info.suppress_depth_write);
 	buffer->BindDrawPipeline(vk_buffer, pipeline->pipeline);
 
-	SetDynamicParams(vk_buffer, pipeline);
+	SetDynamicParams(buffer, vk_buffer, pipeline);
 
 	const auto     vertex_buffer_binding_start = DrawStageClock::now();
 	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records, true, first_instance,
@@ -4323,6 +4330,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
 	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask, nullptr,
 	                cs_regs.cs_regs.chksum, nullptr, input_info.storage_image_tile_coverage, &device_address_table);
+	buffer->FlushDeferredState();
 	if (mutation_conflict.Close())
 	{
 		return ComputeDispatchResult::SubmissionCompletionRequired;
