@@ -344,3 +344,13 @@ materialization key hash 12 %, `SyncWriteBackIndexes` 11 %, `GpuMemory::Update` 
 about 7 % of the thread, and must keep the hit checks the cache already makes (object not freed,
 same logical generation, same submission). No single part of the ordered work is large enough on its
 own for the 30 % cut that 40 fps needs; the sample count is small (10 s at 199 Hz).
+
+### Excluded: switching off the per-draw statistics (2026-11-14)
+
+In the same profile, 6.5 % of the command-processor samples sit in a statistics frame (clock reads,
+create traces, stage recorders). A temporary switch that turned the statistics clock, the timed
+recorders and the create-trace completion into no-ops in alternate 4 s blocks of the sandbox world
+did engage: the command-processor run counter read zero in the off blocks. Frame time per draw did
+not move: off minus on +0.10 µs/draw, standard error 0.30, 14 pairs; 30.3 fps off against 30.8 on.
+Gating the statistics behind a diagnostics request is therefore not a frame-rate lever on this
+host, and the agent's performance counters stay always on.
