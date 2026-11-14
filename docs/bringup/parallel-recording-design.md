@@ -249,3 +249,24 @@ agent stage counters (no temporary timers). The draw tail is already recorded on
   of the memory-object lookups (0.68 us per draw, inside state setup, materialization and binding)
   was not separated.
 
+
+### Per-segment cost of a secondary command buffer, measured (2026-11-14)
+
+A standalone Vulkan program outside the repository recorded one frame of 135 render-pass segments of
+40 draws each (pipeline, descriptor set, push constants, scissor and a three-vertex draw per draw;
+six dynamic states per segment). Mode P records all of it in one primary command buffer; mode S
+records each segment in its own secondary, re-emitting the dynamic state, and executes it from the
+primary. Single thread, 190 timed frames, two repeats each agree within 1 %.
+
+| Driver | Record, P | Record, S | GPU, P | GPU, S |
+| --- | --- | --- | --- | --- |
+| ANV, Intel Arc A770 | 14.7 us per segment | 19.4 | 1.14 ms per frame | 4.85 |
+| RADV, Ryzen 5 7600 iGPU | 13.4 | 15.0 | 1.13 | 2.09 |
+
+- On ANV each secondary adds about 27 us of GPU time, 3.7 ms per frame at 135 segments; on RADV about
+  7 us. Recording a secondary costs 4.7 us (ANV) or 1.6 us (RADV) more per segment on the worker.
+- `PPSA17221 - Minecraft` world on the A770 keeps the GPU 70 % busy at 31 fps (about 22.6 ms per
+  frame, same run as above). With 3.7 ms more, the GPU frame is about 26 ms, past the 25 ms of 40
+  fps, so per-segment secondaries cannot reach 40 fps in that scene on this GPU; about 38 is the
+  bound. Fewer, longer secondaries (several segments each) or recording in parallel into primaries
+  submitted in order would avoid the per-secondary GPU cost; neither is measured.
