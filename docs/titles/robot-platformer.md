@@ -73,10 +73,10 @@ so where the robot stands depends on how long the loads took).
   stderr line confirmed both kernels took it. GPU timestamps around each dispatch, on the walking-dunes
   view of the dunes route (capture checked, about 8,000 thread groups a call, the second BVH kernel
   absent in both runs): 1.913-1.919 us per group and 15.4 ms per call without the probe, 2.092-2.095 us
-  and 16.7 ms with it. Two extra rounds per exchange cost 1.3 ms, so the rendezvous the kernel already
-  pays is about 0.65 ms of its 15.4 ms (about 4 %): removing the exchanges' synchronisation cannot bring
-  the 30 fps target; the kernel's time is its own work and spills. The data the exchanges move is not
-  priced. Earlier probe runs that doubled the exchanges of every split-wave program from boot left the
+  and 16.7 ms with it. Two extra rounds per exchange cost 1.3 ms, so the fixed mechanics of one
+  rendezvous are a floor of about 0.65 ms of the 15.4 ms (about 4 %). The added rounds start right after
+  a completed rendezvous, when both halves arrive together, so the time one half waits for the other at
+  the real exchanges is not priced, nor is the data they move. Both runs used the stamped probe build. Earlier probe runs that doubled the exchanges of every split-wave program from boot left the
   route (ship cinematic, world map, the title's command-buffer assert), so the probe was narrowed. The
   walking view differs from the close-up scene of the earlier per-group figures (2.5 us), so the two are
   not compared.
