@@ -1046,6 +1046,18 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   ASTRO BOT dunes 101 -> 24 ns, fps unchanged at about 20 (GPU-bound). Unit tests 2,662
   pass, the CTest gates pass, `playable-regression` on PPSA06084 - Superliminal 12/15 (the
   same three pre-existing failures).
+- **Priced, not a lever: mutex traffic (PPSA17221 - Minecraft world, 2026-11-14).** A
+  user-mode profile of the command-processor thread (no partial range, about 26 fps) has no
+  hotspot above 5.3 %; `pthread_mutex_lock` and unlock together hold about 7.5 % of it. An
+  interposed counter on `pthread_mutex_lock` (1 in 16 calls sampled, all threads) counted
+  about 218 million locks in 20 s, about 78 per draw. 62 % come from the recursive
+  `Core::Mutex`, whose callers (sampled backtraces) are spread: guest thread-key reads 6.4 %,
+  `GpuMemory::CreateObject` 2 x 5.0 %, `ResetHash` 2 x 4.3 %, `GetAllocatedRangePrefix`
+  4.0 %, three `DescriptorCache` paths 3.4 % each, the video-out access gate 2 x 3.2 % and the
+  command processor's index-register setters 3 x 2.9 %; the rest of the locks come from
+  shader memos (`InstructionIndices` 7 %), the guest allocator and the dirty tracker. No
+  site is worth more than a few tens of ns per draw; removing locks one by one is not
+  pursued.
 - **Excluded: dropping the draw-front input reset (PPSA17221 - Minecraft world, 2026-11-14).**
   The draw front supplies 91.6 % of the world's draws; temporary counters in `DrawFront::Take`
   put the misses at 80 % "front behind", 20 % stale host-write epoch and almost no skipped
