@@ -1755,10 +1755,16 @@ KYTY_SYSV_ABI int VideoOutGetResolutionStatus(int handle, VideoOutResolutionStat
 
 	EXIT_IF(g_video_out_context == nullptr);
 
-	if (status == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: status == nullptr condition ignored (continuing)\n"); }
+	if (status == nullptr)
+	{
+		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+	}
 
 	auto session = g_video_out_context->AcquireSession(handle);
-	if (!session) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !session condition ignored (continuing)\n"); }
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
 	*status = session.Get()->resolution;
 
 	return Kernel::OK;

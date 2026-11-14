@@ -1,8 +1,9 @@
-## Soft checks that go on to use a null guest pointer (2026-11-14, defect, open)
+## Soft checks that go on to use a null guest pointer (2026-11-14, one site fixed, pattern open)
 
-`VideoOutGetResolutionStatus` (`source/emulator/src/Graphics/VideoOut.cpp:1752-1764`) logs a warning
-when `status` is null or the handle has no session, then writes through both anyway, so a guest passing
-null faults in the host instead of getting an error code. The warn-and-continue form recurs across the
+`VideoOutGetResolutionStatus` logged a warning when `status` was null or the handle had no session, then
+wrote through both anyway, so a guest passing null faulted in the host instead of getting an error code.
+Fixed: it now returns `VIDEO_OUT_ERROR_INVALID_ADDRESS` and `VIDEO_OUT_ERROR_INVALID_HANDLE`, as its
+neighbouring calls do; valid calls are unchanged (VideoOut unit suites, 43 tests). The warn-and-continue form recurs across the
 emulator (several hundred sites, most in the shader translator and register parsers); only sites that
 dereference what they just found invalid are defects. Not observed in a title. Suggested direction: at
 each such site return the documented error (`VIDEO_OUT_ERROR_INVALID_ADDRESS` or
