@@ -1,3 +1,14 @@
+## Soft checks that go on to use a null guest pointer (2026-11-14, defect, open)
+
+`VideoOutGetResolutionStatus` (`source/emulator/src/Graphics/VideoOut.cpp:1752-1764`) logs a warning
+when `status` is null or the handle has no session, then writes through both anyway, so a guest passing
+null faults in the host instead of getting an error code. The warn-and-continue form recurs across the
+emulator (several hundred sites, most in the shader translator and register parsers); only sites that
+dereference what they just found invalid are defects. Not observed in a title. Suggested direction: at
+each such site return the documented error (`VIDEO_OUT_ERROR_INVALID_ADDRESS` or
+`VIDEO_OUT_ERROR_INVALID_HANDLE` here, as neighbouring calls do) once the code is confirmed by a trace or
+the published contract.
+
 ## Draw plan, binding layer: reuse per shader pair when every descriptor word repeats (2026-11-12, measured, not a lever)
 
 Question: can a draw reuse the bound descriptor set and push constants of the previous draw with the same
