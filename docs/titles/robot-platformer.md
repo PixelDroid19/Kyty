@@ -123,7 +123,12 @@ so where the robot stands depends on how long the loads took).
   from 17.3 to 17.7; a repeat with the call counter confirmed the skip engaged (all-commands barriers
   372 to 20 a frame, render passes unchanged at about 52) and gave 50.8 to 49.9 ms, 17.2 to 17.7 fps:
   guest flush barriers cost about 0.5-1 ms a frame here and are not the lever. The other all-commands
-  barriers, which bracket buffer fills, copies and guest-address publishes, were not priced. A Mesa
+  barriers, which bracket buffer fills, copies and guest-address publishes, drain around the transfers
+  they bracket; stamp pairs around the transfers themselves (same scene, a separate run) gave fills
+  0.34-0.37 ms a frame (64 calls), buffer copies 0.11-0.12 ms (21) and render-pass begins with their
+  load and clear 0.06 ms (52): together about 0.5 ms, not the lever either. On this scene the frame is
+  the guest's draws and dispatches executed serially on the render engine; the title issues its
+  compute in the graphics stream, so the compute engine stays idle by the guest's own ordering. A Mesa
   per-event timing run (`INTEL_MEASURE`) crashed inside the driver and gave no data.
 - **Excluded: remembering each invocation's last address-table entry (2026-11-14).** A translator
   variant tried the entry of the invocation's previous guest-address translation before the directory
