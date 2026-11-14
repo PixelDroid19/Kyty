@@ -357,7 +357,9 @@ only where Kyty's own traces agree.
     - The dunes, Minecraft and Balatro runs did not reach the fragment-transport or the guest
       depth-stencil copy paths. On the ASTRO BOT pause-menu route (300 s), a temporary one-shot
       report at each entry showed fragment transport recorded and the depth-stencil copy not
-      reached; that copy's explicit flush rests on a code read only.
+      reached; that copy's explicit flush rests on a code read only. The same one-shot report
+      stayed silent through 90 s boots of PPSA15552 - Dead Cells, PPSA03355 - Hades,
+      PPSA09076 - DREDGE and PPSA09804 - GRIS.
     - On that route, thread safety plus unique handles and object lifetime reported no
       threading error. Thread safety alone (unique handles off) had reported "Couldn't find
       VkEvent" on one label event (messages capped at five); with handles wrapped it is gone
