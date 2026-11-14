@@ -333,3 +333,14 @@ estimated from the stage timers. 40 fps in the sandbox world (about 4.6 us per d
 ordered work itself to shrink: memory-object lookups and creation inside texture, storage and
 target preparation, and device-address preparation, which together hold about a third of the
 thread.
+
+### Memory-object lookups in the sandbox profile (2026-11-14)
+
+Same profile, 1,765 samples of the command-processor thread, 187 (10.6 %) inside
+`GpuMemory::CreateObject`. Callers: depth-target materialization 40 %, colour targets 28 %, vertex
+buffer binds 15 %, textures 9 %, storage buffers 7.5 %. Inside it: its own code 24 %, the
+materialization key hash 12 %, `SyncWriteBackIndexes` 11 %, `GpuMemory::Update` 10 %, statistics
+10 %, `GetHeapId` 7.5 %. A per-draw memo of the targets would remove at most the target share,
+about 7 % of the thread, and must keep the hit checks the cache already makes (object not freed,
+same logical generation, same submission). No single part of the ordered work is large enough on its
+own for the 30 % cut that 40 fps needs; the sample count is small (10 s at 199 Hz).
