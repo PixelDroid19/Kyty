@@ -223,6 +223,16 @@ only where Kyty's own traces agree.
   `vkCmdPushConstants` calls in the window, none repeated the previous call's command
   buffer, layout, stages, offset, size and bytes, so skipping repeats cannot cut the state
   the driver emits at `vkCmdDrawIndexed` (0.49 us per draw in this run).
+- **Driver split, Minecraft world profile (ANV with its own debug symbols, Gen 12.5).** Of the
+  driver's samples: runtime-state flush 9.9 %, pointer flush (push constants and binding
+  tables) 9.4 %, descriptor-set bind 4.5 %, the draw entry 4.3 %, then state flush, repack and
+  emission 3.4 / 3.3 / 2.6 %, binding mode 2.4 %, dynamic-state copy 2.4 %, sample pattern
+  2.1 %. The runtime-state flush is a long chain of dirty-bit tests with no dominant line. It
+  runs on every draw because index buffers, vertex buffers, descriptor sets and push
+  constants are bound per draw. Dynamic state set to the value already held is filtered by
+  the common runtime, so a repeat-value filter in Kyty would not help. The lever left inside
+  the driver is binding fewer objects per draw. Index and vertex streams in one buffer, with
+  draw offsets, would avoid the per-draw binds. It is not priced.
 
 ### E. Internal resolution as a functional option
 
