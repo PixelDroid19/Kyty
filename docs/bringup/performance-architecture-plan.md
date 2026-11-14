@@ -870,14 +870,18 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   `PA_CL_VS_OUT_CNTL`) before the chain, ran the chain as today and compared. Astro's fill
   and metadata-clear queues are never empty, so the guard uses a queue mutation count rather
   than emptiness (92 % eligible on Astro dunes, 97 % on the Minecraft world). The forced
-  mismatch fired on both titles. Two results falsify the guard as an exactness proof:
-  - 7,858 eligible Minecraft draws (0.11 %) took the `FastReuse` path, counted at the create
-    site. That path calls `Update` because the object's submit id or check hash moved, so a
-    skip would drop a content update. The graph generation does not see it.
-  - The framebuffer object changed twice with identical attachments (cache replacement), so
-    a memoized framebuffer can be stale.
-  Closing both needs the per-target cached check (about 271 ticks per create) and a
-  framebuffer-cache term. Measured window 2,267 ticks (0.60 us) minus the guard (133 ticks),
-  the per-target check and the kept side effects (2.28 x about 436 ticks) leaves about
-  0.3 us per draw: at the build threshold with no margin, and the depth meta-clear consume
-  never fired in either run, so no HTILE-clear title was covered. Not built.
+  mismatch fired on both titles. Two results stop the guard from being an exactness proof:
+  - About 0.12 % of eligible draws on both titles took the `FastReuse` path, counted at the
+    create site, which calls `Update`. Every one was a materialization-cache miss (no alias
+    conflict, hash, submit or parameter change). None followed a cache invalidation. Most
+    followed a slot collision in the direct-mapped cache (92 % on Astro dunes, 31 % on the
+    Minecraft world). The rest (6,773 on Minecraft, 416 on Astro per run) had no recorded
+    collision or invalidation since the repeated draw: an unexplained hole.
+  - With a framebuffer-cache mutation count in the guard, framebuffer identity mismatches
+    fell to 1 in 7.8 million Minecraft draws. That one is also unexplained.
+  Requiring no cache collision cuts eligibility to 91 % (Minecraft) and 78 % (Astro) and
+  still leaves the unexplained misses. Net with counters only would be about 0.4 us per draw
+  (window 2,440 ticks minus guard 130, kept side effects 2.28 x 165 and one lock pair 144);
+  with a per-target cached check instead, about 0.26 us. Depth meta clears were consumed on
+  Astro (about 2,000 to 3,300 per run) but never on an eligible draw. Not built: the guard
+  cannot be shown exact until the remaining misses are explained.
