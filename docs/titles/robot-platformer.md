@@ -6,6 +6,46 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: without the heavy lighting program the close-up scene holds 25 fps (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
+`3faa704ed` plus a temporary probe (not committed) that leaves out only the dispatch call of chosen
+compute programs and keeps their bindings and all other command processing. From 201 s it rotates
+three arms in 5 s blocks for 95 s; the figures are medians of the 1 s agent samples inside blocks 6
+to 18 (two of the first six blocks ran at 8-12 fps whatever the arm). The capture before the window
+shows the robot lying on the dune after landing (the close-up scene); both programs were dispatched
+once a frame in every block.
+
+| Arm | Frame rate | Command processor run a frame | Fence waits a frame | Render engine busy |
+| --- | --- | --- | --- | --- |
+| Everything runs | 19.0 fps | 38.7 ms | 8.7 ms | 86 % |
+| `0x3666fa39` not dispatched | 25.0 fps | 35.8 ms | 1.4 ms | 74 % |
+| `0x3666fa39` and `0x874bd13f` not dispatched | 24.0 fps | 37.8 ms | 1.0 ms | 71 % |
+
+- **`0x3666fa39` is 15.7 ms of engine time a frame here** (86 % of 52.6 ms against 74 % of 40.0 ms).
+  Without it the frame no longer waits on the GPU (fence waits about 1 ms) and holds 25 fps on
+  command processing: 36-38 ms a frame for 751 draws and about 85 dispatches.
+- **`0x874bd13f` frees no engine time.** Leaving it out as well leaves the engine's busy time a frame
+  at 29.6 ms in both arms and the frame rate unchanged. The about 14 ms that dispatch stamps gave it
+  (bill record below) is elapsed time that overlaps other queued work, not exclusive engine time.
+- **What this bounds.** 30 fps in this scene needs both sides at once: the GPU frame under 33 ms,
+  which is the other work (about 30 ms) plus at most about 3 ms for `0x3666fa39`, and command
+  processing under 33 ms. No change to these two programs alone reaches it. The 2026-11-12 record
+  below (26.0 fps and 36.1 ms with every intersection program left out) measured the same ceiling.
+- **What `0x3666fa39` is.** A decode of its guest listing (3,066 instructions; notes kept outside the
+  repository) shows the title's tiled deferred lighting pass, not a traversal kernel: one 16x16 pixel
+  tile per 256-thread group from a compacted tile list, a per-tile light list built in LDS by the
+  group's threads between two barriers, G-buffer reads, a loop over the tile's lights, probe and
+  reflection lookups and two storage-image stores. Its three intersection instructions sit inside
+  the light loop, share one wave-wide stack through lane reads and writes, and only bend a probe
+  lookup direction for glossy pixels; every lane's result depends on its own ray alone. The record of
+  2026-11-09 below priced the traversal at about 1 ms of 24 a call. Earlier records call the program
+  "the BVH kernel"; that names a small part of it. A host-written traversal is therefore worth about
+  1 ms, and a host-written copy of the whole program would be a transcription of the guest program,
+  which the data boundary keeps out of the repository.
+- **Not measured.** Which region of the program holds the 15.7 ms, and what the command processor
+  spends its 36 ms on once the GPU no longer limits the frame.
+
 ## Robot platformer: where the GPU frame goes in dunes gameplay (2026-11-14, measured)
 
 Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot.
@@ -48,9 +88,10 @@ so where the robot stands depends on how long the loads took).
   bracketed too, the stamps cover 366-384 of 381 draws per frame. That run's captures show the robot close
   up in the dunes, at 15.2 fps. Per frame: compute 43-46 ms, draws 11.4-12.0 ms (non-indexed ones 2.1-2.4
   ms). `0x3666fa39` and `0x874bd13f` each dispatched 8,160 groups per call, one call per frame, at 2.5 and
-  1.7 us per group: about 20 and 14 ms. 8,160 is the 120x68 grid, which with one 64-lane wave per group
-  matches a 960x540 image in 8x8 tiles, so the BVH kernel's group count reads as the number of half-
-  resolution tiles the guest traces, all of them when the robot fills the view. Both programs spill on
+  1.7 us per group: about 20 and 14 ms. 8,160 is the 120x68 grid; the program's
+  workgroup is 256 threads, one 16x16 pixel tile, so 8,160 groups are 1920x1088: the full-resolution
+  tile list, all of it when the robot fills the view (corrected 2026-11-14; this bullet first read
+  the grid as 8x8 tiles of a 960x540 image). Both programs spill on
   this host (records of 2026-11-06 and 2026-11-12 below); no translator change was tried in this run.
 - **Register spills across the title's compute programs (offline, 2026-11-14).** The 105 compute
   pipeline recipes recorded for the title (translator store t215) compiled on ANV: 60 spill. Width 16:

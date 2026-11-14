@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: without the heavy lighting program the close-up scene holds 25 fps (2026-11-14, measured)
   - Robot platformer: not running the programs that contain intersection instructions (2026-11-12, rejected)
   - Robot platformer: the reported output size does not move the title's render targets (2026-11-12, excluded)
   - Robot platformer: GPU clock marks and the title's dynamic resolution (2026-11-12, open, frame-rate effect not established)
