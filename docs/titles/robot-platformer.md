@@ -220,9 +220,12 @@ every mark at least 0.1 ms after the previous one drew 6 draws at 2432x1368 and 
   intro cinematic where the run without the spacing is in gameplay; it measured 17.4 fps, 369 draws a
   frame and 31 ms a frame in each of fence and register waits, against 19.5 fps, 592 draws, 12 and 8 ms.
   Whether the spacing delayed the route or the host did was not separated.
-- **Open.** Whether the dynamic resolution follows the marks (one contrast, one run), whether 1920x1080 is
-  its lowest step, and whether correct marks change the frame rate. Next step: the same pair with the
-  scene checked by capture before any figure is compared.
+- **Excluded in the dunes (2026-11-14, one run each, scene checked by capture).** With every mark at least
+  0.15 ms after the previous one from 150 s (after the input route, so the route kept its timing), about
+  66 ms of reported GPU time a frame, the close-up dune scene drew 113,027 draws at 1920x1080 against
+  106,479 without the spacing, the same handful at 2432x1368, nothing new below 1080p, and 15.8 against
+  15.2 fps. The title's resolution does not drop in the dunes when the marks report over-budget frames,
+  so correct marks are a correctness fix there, not a frame-rate lever.
 
 ## Robot platformer: render-target scaling to 960x540 under user play, and a depth-array exit (2026-11-12, exit fixed 2026-11-13)
 
