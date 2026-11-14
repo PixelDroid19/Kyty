@@ -6,6 +6,46 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: where the GPU frame goes in dunes gameplay (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot.
+Baseline: `23c501b05` without diagnostics, 1 s agent samples over 150-210 s. Bill: the same commit plus
+two temporary diagnostics (not committed) that bracket every guest dispatch and every indexed or
+pull draw with bottom-of-pipe timestamps, engaged only from 150 s so the route keeps its timing;
+5 s dumps. Captures at 160, 185 and 210 s show the robot in the dunes in both runs.
+
+- **Baseline.** 18.8 fps in the steady windows, the render engine 89-91 % busy (about 48 ms of GPU
+  per frame), 530 draws per frame. The command processor spends about 27 ms per frame outside
+  fence and register waits (summed thread time) and waits 19-21 ms per frame on fences, so the
+  GPU is the limit. About a third of the windows dip to 15.8-16.8 fps with the engine 77-83 % busy;
+  there the command processor's own work rises to 38-45 ms per frame at the same draw count.
+  Two of the three dip windows start at the capture times (160, 185 s); the one at 177-181 s does not.
+- **Bill, 155-210 s** (19-20 fps with the probes, engine 73-83 % busy, about 40 ms per frame):
+
+  | Per frame | Time |
+  | --- | --- |
+  | Guest dispatches | 18.5-24.5 ms |
+  | of which `0xbf8ee9fc` (13,072 groups, the 2432x1368 grid) | 4.1-5.3 ms |
+  | of which BVH traversal `0x3666fa39` (480-7,700 groups, 2.2 us per group) | 2.8-19.6 ms |
+  | of which `0x61f4e366` | 3.2-3.8 ms when present |
+  | of which `0x874bd13f` (8,160 groups) | 2.2-2.7 ms |
+  | of which `0x8f3da857` | 0.8-2.0 ms |
+  | Indexed and pull draws | 7.4-10.0 ms |
+  | of which on the 1920x1080 targets | 7.6 ms (105 draws) |
+  | Not bracketed (other draws, clears, copies, barriers, gaps) | about 10 ms |
+
+- **Reading.** The BVH kernel's cost follows its group count, which the guest varies with the
+  view: 7,700 groups and 19.6 ms on entry, 1,100-2,700 groups and 2-6 ms on the walk. No program
+  takes more than about 6 ms per frame on the walk; 30 fps needs about 17 ms off a 48 ms frame,
+  so no single program is that lever.
+- **The composite runs on the larger grid.** `0xbf8ee9fc` dispatched 13,072 groups (152x86, the
+  2432x1368 grid) in 12 of 14 dumps and 8,160 (1920x1080) in 2, while the indexed draws render
+  at 1920x1080. Whether the guest picks that grid from its dynamic resolution, and so from the
+  end-of-pipe clock marks (`cross-title.md`, open defect), is not traced.
+- **Defect, not reproduced.** An earlier run of the same probes engaged from boot (intro crowd scene,
+  not the dunes) exited with status 139 at 185 s with no log line and no core dump. It has not
+  recurred; it is recorded against the probe build only.
+
 ## Robot platformer: a guest 960x540 render resolution re-measured on the dunes (2026-11-14, measured)
 
 Intel Arc A770, Mesa ANV, Ryzen 5 7600, `6a6a5818a`, 60 fps present limit, dunes route from the
