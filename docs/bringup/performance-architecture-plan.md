@@ -951,14 +951,15 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   with a per-target cached check instead, about 0.26 us. Depth meta clears were consumed on
   Astro (about 2,000 to 3,300 per run) but never on an eligible draw. Not built: the guard
   cannot be shown exact until the remaining misses are explained.
-- **Excluded: full memory barrier dedup (PPSA21567 - ASTRO BOT dunes, 2026-11-14).** Astro
-  records about 1.3 million `FullMemoryBarrier` calls per run (about 340 per frame). A
-  temporary per-call-site counter ranked the guest sources: ACQUIRE_MEM with a zero size or
-  no colour/depth target 40 %, consolidated WAIT_REG_MEM 18 %, RELEASE_MEM with a non-zero
-  `GCR_CNTL` 19 %, and EVENT_WRITE CS_PARTIAL_FLUSH, FLUSH_AND_INV_CB_META and
-  FLUSH_AND_INV_DB_META the rest. A command interposer counted full barriers recorded right
-  after another full barrier on the same command buffer: zero, so dropping duplicates saves
-  nothing. An unsafe probe that dropped every full barrier reached different scenes
-  (204 against 224 and 356 against 503 draws per frame), so it gives no speed claim; its fps
-  difference was at most about 10 %. A narrower mapping for ACQUIRE_MEM would need evidence
-  of which consumers the guest orders, and is not built.
+- **Excluded: full memory barrier dedup (PPSA21567 - ASTRO BOT dunes, 2026-11-14).** On the
+  dunes route the guest requests about 2.8 million `MemoryBarrier()` calls per run. By share of
+  those requests: EVENT_WRITE (CS_PARTIAL_FLUSH, FLUSH_AND_INV_CB_META, FLUSH_AND_INV_DB_META)
+  36 %, ACQUIRE_MEM with a zero size or no colour/depth target 32 %, consolidated WAIT_REG_MEM
+  17 %, RELEASE_MEM with a non-zero `GCR_CNTL` 15 %. Only about 1.3 million reach
+  `vkCmdPipelineBarrier`: `CommandBuffer::FullMemoryBarrier` already drops a full barrier
+  when the latest recorded barrier was full (`m_latest_full_barrier`), so a command
+  interposer counting full barriers recorded right after another on the same command buffer
+  saw zero, by construction. Nothing is left to deduplicate. An unsafe probe that dropped
+  every full barrier reached different scenes and showed no per-draw gain (27.8 ms per 224
+  draws against 25.6 ms per 204, 48.2 ms per 503 against 43.3 ms per 356). A narrower
+  ACQUIRE_MEM mapping would need evidence of which consumers the guest orders; not pursued.
