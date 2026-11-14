@@ -76,7 +76,17 @@ so where the robot stands depends on how long the loads took).
   and 16.7 ms with it. Two extra rounds per exchange cost 1.3 ms, so the fixed mechanics of one
   rendezvous are a floor of about 0.65 ms of the 15.4 ms (about 4 %). The added rounds start right after
   a completed rendezvous, when both halves arrive together, so the time one half waits for the other at
-  the real exchanges is not priced, nor is the data they move. Both runs used the stamped probe build. Earlier probe runs that doubled the exchanges of every split-wave program from boot left the
+  the real exchanges is not priced, nor is the data they move. Both runs used the stamped probe build.
+- **Frame budget on the dunes route (2026-11-14, t216, stamped probe builds).** Close-up dune scene:
+  compute about 46 ms a frame, 34 ms of it the two BVH kernels, and draws about 12 ms (7 ms at
+  1920x1080, 2.9 ms in the 2048x2048 shadow pass). Walking view: the BVH kernel 15.4 ms and other
+  compute about 6 ms a frame, with the render engine about 19 % idle. Offline, removing the whole
+  address-table lookup from the BVH kernel (not a valid translation, a ceiling only) takes it from
+  475:2,022 to 378:1,488 spills:fills and 285 to 271 live registers with 14 % fewer instructions: at
+  most about 2 ms of the 15.4 ms. 30 fps at native resolution needs more than that ceiling in the
+  walking view and about half of the close-up GPU time, so no single translator lever measured so far
+  reaches it; the kernel compiles at SIMD8 with spills because the guest program alone sits at the
+  register limit (see the BVH pressure record above). Earlier probe runs that doubled the exchanges of every split-wave program from boot left the
   route (ship cinematic, world map, the title's command-buffer assert), so the probe was narrowed. The
   walking view differs from the close-up scene of the earlier per-group figures (2.5 us), so the two are
   not compared.
