@@ -14,6 +14,18 @@ draws per frame: 28-33 fps, mean about 31, with single seconds at 24-28. At abou
 command-processor time per draw, 5,400 draws take about 33 ms, so the frame is the command
 processor's. 40 fps in this scene needs about 4.6 us per draw.
 
+Per-draw command-processor stages in the same run (100-150 s, agent counters): resource binding
+1.92 us, state setup 1.73, pipeline setup 0.68 (lookup 0.20), memory-object lookups 0.68, vertex
+binding 0.49, descriptor finalization 0.44, materialization 0.44, command emission 0.39, fence waits
+0.37. The memory-object lookups are about 2.5 calls per draw, nearly all materialization-cache hits
+for the draw's own colour targets (about 1.2 per draw) and depth buffer (about 1 per draw):
+`MaterializeRenderColorInfo` and `MaterializeRenderDepthInfo` reach `GpuMemory::CreateObject`
+(`GpuMemoryCreate.cpp`), which takes two mutexes and builds a submission-scoped key before the hit.
+No memo of the previous draw's targets exists. One would need the invalidations the cache already
+honours (overlapping creates and deletes, writes by other types, free-slot reuse) and is not built;
+at about 0.23 us per call it is another 5 % lever, like the pipeline memo
+(`docs/bringup/performance-architecture-plan.md`).
+
 ## Sandbox title: draw tail recorded on a replay thread (2026-11-14, measured)
 
 `docs/bringup/performance-architecture-plan.md`, entry "Built: C stages 1 and 2". Intel Arc A770, strict
