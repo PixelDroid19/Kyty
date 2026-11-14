@@ -26,6 +26,17 @@ honours (overlapping creates and deletes, writes by other types, free-slot reuse
 at about 0.23 us per call it is another 5 % lever, like the pipeline memo
 (`docs/bringup/performance-architecture-plan.md`).
 
+User-mode profile of the same world on the same build (10 s, DWARF call graphs; the command-processor
+thread takes as many samples as the replay thread, which still spends most of them reading the
+clock): the indexed draw encloses 88 % of the command-processor thread; `BindDescriptors` 22 %
+(`PrepareTextures` 5.3 %, `PrepareStorageBuffers` 5.2 %, `DescriptorCache::GetDescriptor` 6.3 %),
+`GpuMemory::CreateObject` 11 %, `PrepareGuestDeviceAddressForRead` 8.5 %, `PipelineCache::CreatePipeline`
+8 %, depth and colour materialization 4.3 % and 3.2 %, vertex streams 4.2 %. No function's own time
+passes 3.2 % of the thread: mutex lock and unlock 5.3 % together, the index range scan 3.2 %, draw
+encoding 3.2 %, memset 2.7 %, `GpuMemory::GetHeapId` 2.4 %, statistics clock reads 2.3 %, the
+descriptor hash 2.3 %. A 30 % cut of command-processor time therefore needs a structural change
+(`docs/bringup/parallel-recording-design.md`), not a hot spot.
+
 ## Sandbox title: draw tail recorded on a replay thread (2026-11-14, measured)
 
 `docs/bringup/performance-architecture-plan.md`, entry "Built: C stages 1 and 2". Intel Arc A770, strict
