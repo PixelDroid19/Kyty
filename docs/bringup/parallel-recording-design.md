@@ -277,6 +277,6 @@ primary. Single thread, 190 timed frames, two repeats each agree within 1 %.
   contiguous runs of segments per worker) cost 0.13 ms more GPU per frame than one primary on ANV.
   Recording contiguous runs of segments, one primary per worker run, submitted in order, keeps the
   per-buffer cost near 0.1 ms per frame; per-segment secondaries do not. That grouping, not
-  per-segment secondaries, is the shape this design should take on ANV. The grouped case changed the
-  render-pass count as well, so it bounds the per-buffer cost only; it was not measured with 135
-  passes in 8 buffers.
+  per-segment secondaries, is the shape this design should take on ANV.
+- The same 135 render passes grouped into 8 primaries submitted in order: GPU 1.31 ms per frame
+  against 1.12 for one primary on ANV (+0.19 ms), recording 16.3-16.8 us per segment against 14.7.
