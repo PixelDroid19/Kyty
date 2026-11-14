@@ -308,3 +308,28 @@ So neither stage moves as is: the pipeline lookup needs its inputs snapshotted a
 fields resolved earlier (they follow the shader pair and the registers, not the Vulkan object), and
 descriptor finalization keeps ordered side effects. At most about 0.68 us per draw of pipeline
 setup is movable without splitting the descriptor step, about 11 % of the command-processor time.
+
+### Descriptor binding split by order (2026-11-14, code reading)
+
+`BindDescriptors` (22 % of the command-processor thread in the sandbox world) was read step by step
+for what must run in guest-command order:
+
+- Ordered: `PrepareStorageBuffers` (storage-range reports, guest copies, transient uploads,
+  memory-object creation), `PrepareTextures` (memory-object lookups and creation, image copies,
+  content and write stamps read by later draws), the storage-seed check, the sampled- and
+  storage-image barriers with their layout changes, and in `DescriptorCache::GetDescriptor` the set
+  trim, the uncached-set deferral, the layout transitions that run before the cache lookup (also on
+  hits) and the use records.
+- Free of order: building and hashing the descriptor key, the set lookup, filling the writes and
+  `vkUpdateDescriptorSets` on a newly allocated set, sampler-id lookups and the push-constant
+  payload. In the profile that is about the descriptor hash (2.3 %) and part of `GetDescriptor`
+  (6.3 % in all).
+- So stage B within descriptor binding is a few percent of the thread, not the 0.44 us per draw the
+  finalization timer covers, because the layout transitions inside it are ordered.
+
+Together with the pipeline read-backs above, the work that can leave the command-processor thread
+without changing the memory-object model is at most about 10-15 % of it, not the 1.3-1.45x
+estimated from the stage timers. 40 fps in the sandbox world (about 4.6 us per draw) needs the
+ordered work itself to shrink: memory-object lookups and creation inside texture, storage and
+target preparation, and device-address preparation, which together hold about a third of the
+thread.
