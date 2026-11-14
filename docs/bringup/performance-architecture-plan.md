@@ -1196,15 +1196,15 @@ committed), strict runs, 60 fps present limit. `PPSA17221 - Minecraft` world win
   context stamp cannot cover it. `ConsumeDepthMetaClear` rewrites `depth_clear_enable` and
   `suppress_depth_write` from submit-time meta-clear events, the depth-stencil copy passes its own
   read-only depth info, the shader-register packets for the vertex and pixel programs write context
-  fields, and the key reads `ps_input_info` fields directly. A safe memo would compare each of those
-  inputs, which approaches rebuilding the key. The candidate check never reported a mismatch, so
-  that check was never shown to fire.
+  fields, and the key reads `ps_input_info` fields directly. Whether the depth-stencil copy reaches
+  this lookup, whether the framebuffer key carries the clear flags and whether the pixel-program id
+  covers those `ps_input_info` fields were not checked. The candidate check never reported a
+  mismatch, so that check was never shown to fire.
 - **Excluded: testing the previous hit before the pipeline index walk (PPSA17221 - Minecraft world,
   2026-11-14).** `PipelineCache::Find` compared the last found entry with its own equality before
-  hashing; it matched 23-79 % of lookups per 5 s window, and the index walk averaged about one entry
-  per call. A temporary switch alternated it in 4 s blocks over two world runs: -0.04 us per draw of
-  command-processor time (se 0.19, t -0.2), +0.09 us of frame time (t 0.4). The lookup cost is the
-  key build, not the walk; reverted.
+  hashing; the index walk averaged at most about one entry per call. A temporary switch alternated it in 4 s blocks over two world runs: -0.04 us per draw of
+  command-processor time (se 0.19, t -0.2), +0.09 us of frame time (t 0.4): skipping the index probe
+  is not measurable. Reverted.
 - **Profile after the replay thread (PPSA17221 - Minecraft world, 2026-11-14).** A 10 s user-mode
   profile of the world with the draw tail on its replay thread: the Vulkan driver holds 3.2 % of the
   command-processor thread (12.5 % before), libc about 15 % (mutexes 6.4 %, memset 2 %), and no symbol
