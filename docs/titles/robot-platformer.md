@@ -110,6 +110,15 @@ so where the robot stands depends on how long the loads took).
   The loop-depth split came from a parser that resolved 36 to 66 of the driver's 137 loops, and the
   doubled variant's statistics came from the dumped single-wrapper binary with its return operand
   switched to the second call, not from a separate live dump.
+- **Inlining the address-table helper is not a lever (2026-11-14, t216, offline on the live SPIR-V).**
+  The translator emits the guest-address lookup as one function marked `DontInline`, called 379 times
+  in the first BVH kernel. Recompiling the dumped live SPIR-V with that control changed to `Inline`
+  gives the same driver statistics as the original (34,087 instructions, 390:1,634 spills:fills, 283
+  live registers): ANV inlines the call either way, so the control does not shape register allocation.
+  Replacing every `OpSelect` with its first arm (not a valid translation) collapses the program to
+  3,866 instructions, so it bounds nothing about the guard selects alone. With the doubled-lookup gain
+  above unshippable and these two excluded, the levers measured on the two BVH kernels sum to a few
+  milliseconds of the about 17 ms a frame that 30 fps at native resolution needs in the close-up scene.
 - **Close-up dunes GPU time is command work, not submit gaps or guest flush barriers (2026-11-14, t216,
   probe builds; captures show the close-up dune scene, not the walking view).** Per-command-buffer GPU stamps (start of pipe at begin, end of pipe at end): about 600
   buffers a second, their union covers 94-96 % of wall time, the gaps between buffers 4-5 %; the render
