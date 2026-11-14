@@ -617,6 +617,21 @@ private:
 	[[nodiscard]] bool            DeferredAliasUseConflicts(int heap_id, const Vector<OverlappedBlock>& links, GpuMemoryObjectType type,
 	                                                        const uint64_t* params);
 
+	// The last few cached hits of CreateObject, answered without hashing the key or finding the heap.
+	struct RecentMaterialization
+	{
+		GpuMemoryMaterializationKey key;
+		Materialization             value;
+		uint64_t                    graph_generation = 0;
+		uint64_t                    heap_generation  = 0;
+		uint64_t                    cache_removals   = 0;
+	};
+	static constexpr size_t                                    RECENT_MATERIALIZATIONS = 8;
+	std::array<RecentMaterialization, RECENT_MATERIALIZATIONS> m_recent_materializations {};
+	size_t                                                     m_recent_materialization_next = 0;
+	[[nodiscard]] const RecentMaterialization*                 FindRecentMaterialization(const GpuMemoryMaterializationKey& key) const;
+	void RememberRecentMaterialization(const GpuMemoryMaterializationKey& key, const Materialization& value);
+
 	// The last few targets ResetHash found by exact range: a draw invalidates the same
 	// colour and depth objects again and again while the object graph is unchanged.
 	struct ResetHashFind

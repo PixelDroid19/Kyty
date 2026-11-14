@@ -1205,6 +1205,39 @@ void GpuMemory::CompleteSubmission(SubmissionId submission)
 	                                            { return m_deferred_deletions.AreDependenciesComplete({recording}); });
 }
 
+// A remembered hit is what the materialization cache would answer while no object block entered
+// or left a heap, the heap index is unchanged and the cache has dropped no entry.
+const GpuMemory::RecentMaterialization* GpuMemory::FindRecentMaterialization(const GpuMemoryMaterializationKey& key) const
+{
+	if (!key.Valid())
+	{
+		return nullptr;
+	}
+	const uint64_t graph_generation = m_object_graph_generation.load(std::memory_order_acquire);
+	const uint64_t heap_generation  = m_guest_bytes_generation.load(std::memory_order_acquire);
+	const uint64_t cache_removals   = m_materialization_cache.Removals();
+	for (const auto& recent: m_recent_materializations)
+	{
+		if (recent.graph_generation == graph_generation && recent.heap_generation == heap_generation &&
+		    recent.cache_removals == cache_removals && recent.key == key)
+		{
+			return &recent;
+		}
+	}
+	return nullptr;
+}
+
+void GpuMemory::RememberRecentMaterialization(const GpuMemoryMaterializationKey& key, const Materialization& value)
+{
+	auto& recent                  = m_recent_materializations[m_recent_materialization_next];
+	m_recent_materialization_next = (m_recent_materialization_next + 1u) % RECENT_MATERIALIZATIONS;
+	recent.key                    = key;
+	recent.value                  = value;
+	recent.graph_generation       = m_object_graph_generation.load(std::memory_order_acquire);
+	recent.heap_generation        = m_guest_bytes_generation.load(std::memory_order_acquire);
+	recent.cache_removals         = m_materialization_cache.Removals();
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
                               int vaddr_num, const GpuObject& info)
@@ -1245,7 +1278,21 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	};
 	Vector<Destructor> destructors;
 
-	int heap_id = GetHeapId(vaddr[0], size[0]);
+	GpuMemoryMaterializationKey materialization_key;
+	if (buffer != nullptr)
+	{
+		SubmissionId submission;
+		if (!buffer->GetSubmissionId(&submission))
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n");
+		}
+		materialization_key = GpuMemoryMaterializationKey::Create(submit_id, submission.queue.Value(), submission.sequence, vaddr, size,
+		                                                          vaddr_num, static_cast<uint32_t>(info.type), info.params,
+		                                                          GpuObject::PARAMS_MAX, info.check_hash, info.read_only);
+	}
+	const RecentMaterialization* recent = FindRecentMaterialization(materialization_key);
+
+	int heap_id = recent != nullptr ? recent->value.heap_id : GetHeapId(vaddr[0], size[0]);
 
 	// Guest libc heap (host malloc) is never MapDirectMemory'd. A Construct title
 	// embeds small VS V# tables there (fetch_embedded); register a page cover
@@ -1286,20 +1333,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		}
 	};
 
-	GpuMemoryMaterializationKey materialization_key;
 	if (buffer != nullptr)
 	{
-		SubmissionId submission;
-		if (!buffer->GetSubmissionId(&submission))
-		{
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n");
-		}
-		materialization_key = GpuMemoryMaterializationKey::Create(submit_id, submission.queue.Value(), submission.sequence, vaddr, size,
-		                                                          vaddr_num, static_cast<uint32_t>(info.type), info.params,
-		                                                          GpuObject::PARAMS_MAX, info.check_hash, info.read_only);
-
 		Materialization cached;
-		if (m_materialization_cache.Lookup(materialization_key, &cached) && cached.heap_id == heap_id && cached.object_id >= 0 &&
+		const bool      cache_hit =
+		    recent != nullptr ? (cached = recent->value, true) : m_materialization_cache.Lookup(materialization_key, &cached);
+		if (cache_hit && cached.heap_id == heap_id && cached.object_id >= 0 &&
 		    static_cast<uint32_t>(cached.object_id) < heap.objects.Size())
 		{
 			auto&      h              = heap.objects[cached.object_id];
@@ -1330,6 +1369,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				if (o.read_only != previous_read_only || o.object.type == GpuMemoryObjectType::StorageBuffer)
 				{
 					SyncWriteBackIndexes(heap_id, cached.object_id);
+				}
+				if (recent == nullptr)
+				{
+					RememberRecentMaterialization(materialization_key, cached);
 				}
 				finish_classification();
 				create_stats.Complete(DebugStatsGpuMemoryCreateOutcome::CachedReuse);
