@@ -70,7 +70,8 @@ so where the robot stands depends on how long the loads took).
 - **Split-wave rendezvous cost priced: small (2026-11-14, t216).** A temporary translator probe added two
   sequence-only rendezvous rounds (no value slot written, parity kept) to every exchange of the two BVH
   kernels only, compiled outside the translation cache so every other program kept its t216 SPIR-V; a
-  stderr line confirmed both kernels took it. GPU timestamps around each dispatch, on the walking-dunes
+  stderr line confirmed the first BVH kernel took it (the second, 874bd13f, has no split-wave exchange:
+  its SPIR-V is identical with and without the probe). GPU timestamps around each dispatch, on the walking-dunes
   view of the dunes route (capture checked, about 8,000 thread groups a call, the second BVH kernel
   absent in both runs): 1.913-1.919 us per group and 15.4 ms per call without the probe, 2.092-2.095 us
   and 16.7 ms with it. Two extra rounds per exchange cost 1.3 ms, so the fixed mechanics of one
@@ -82,14 +83,30 @@ so where the robot stands depends on how long the loads took).
   1920x1080, 2.9 ms in the 2048x2048 shadow pass). Walking view: the BVH kernel 15.4 ms and other
   compute about 6 ms a frame, with the render engine about 19 % idle. Offline, removing the whole
   address-table lookup from the BVH kernel (not a valid translation, a ceiling only) takes it from
-  475:2,022 to 378:1,488 spills:fills and 285 to 271 live registers with 14 % fewer instructions: at
-  most about 2 ms of the 15.4 ms. 30 fps at native resolution needs more than that ceiling in the
+  475:2,022 to 378:1,488 spills:fills and 285 to 271 live registers with 14 % fewer instructions: a
+  static estimate of at most about 2 ms of the 15.4 ms; the dynamic share was measured later and the
+  live A/B below shows the driver's register allocation, not the lookup work, moves the time. 30 fps at native resolution needs more than that ceiling in the
   walking view and about half of the close-up GPU time, so no single translator lever measured so far
   reaches it; the kernel compiles at SIMD8 with spills because the guest program alone sits at the
   register limit (see the BVH pressure record above). Earlier probe runs that doubled the exchanges of every split-wave program from boot left the
   route (ship cinematic, world map, the title's command-buffer assert), so the probe was narrowed. The
   walking view differs from the close-up scene of the earlier per-group figures (2.5 us), so the two are
   not compared.
+- **BVH kernel time follows driver spill placement, not lookup cost (2026-11-14, t216).** A temporary
+  probe compiled the first BVH kernel (3666fa39) in a second variant outside the translation cache and
+  alternated the two every four dispatches in one run, so both arms see the same view; the second BVH
+  kernel, compiled twice with identical SPIR-V, timed equal in both arms (1.593 us a group), so the
+  alternation has no bias. Variants: a fresh plain translation timed equal to the cached one; wrapping
+  the address-table lookup so each call runs it twice, the second dependent on the first, was about
+  15 % faster (1.67 against 1.97 us a group, every 5 s window of two runs, about 8,100 groups a call);
+  the same wrapper returning the first result (second call dead) was 4-9 % faster. Driver statistics of
+  the dumped live SPIR-V: plain 390:1,634 spills:fills, single wrapper 385:1,577, doubled 363:1,509,
+  all 283 live registers; the doubled variant moves spills out of the deepest loops (fills at loop depth
+  5: 84 to 57, spills 18 to 4). More lookup work being faster means the kernel's time is set by where the
+  Intel register allocator places spills, not by the lookup. Not shipped: it is an artifact of one
+  driver's heuristic, with no general translation that reproduces it. Hand-edited offline variants did
+  not match the live translator output (plain 40,923 against 34,087 instructions live), so offline
+  figures in this record that came from hand edits are not comparable with live ones.
 - **Excluded: remembering each invocation's last address-table entry (2026-11-14).** A translator
   variant tried the entry of the invocation's previous guest-address translation before the directory
   and the binary search (entries are disjoint, so a containing entry is the search's answer). Unit tests
