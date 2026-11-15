@@ -75,6 +75,44 @@ LIB_DEFINE(InitDialog_1_SigninDialog)
 
 } // namespace LibSigninDialog
 
+namespace LibNpCommerceDialog {
+
+LIB_VERSION("NpCommerce", 1, "NpCommerce", 1, 1);
+
+namespace NpCommerceDialog = Dialog::NpCommerceDialog;
+
+LIB_DEFINE(InitDialog_1_NpCommerceDialog)
+{
+	LIB_FUNC("0aR2aWmQal4", NpCommerceDialog::NpCommerceDialogInitialize);
+	LIB_FUNC("DfSCDRA3EjY", NpCommerceDialog::NpCommerceDialogOpen);
+	LIB_FUNC("IXmfUaze9So", NpCommerceDialog::NpCommerceDialogOpen2);
+	LIB_FUNC("LR5cwFMMCVE", NpCommerceDialog::NpCommerceDialogUpdateStatus);
+	LIB_FUNC("r42bWcQbtZY", NpCommerceDialog::NpCommerceDialogGetResult);
+	LIB_FUNC("m-I92Ab50W8", NpCommerceDialog::NpCommerceDialogTerminate);
+}
+
+} // namespace LibNpCommerceDialog
+
+namespace LibWebBrowserDialog {
+
+LIB_VERSION("WebBrowserDialog", 1, "WebBrowserDialog", 1, 1);
+
+namespace WebBrowserDialog = Dialog::WebBrowserDialog;
+
+LIB_DEFINE(InitDialog_1_WebBrowserDialog)
+{
+	LIB_FUNC("jqb7HntFQFc", WebBrowserDialog::WebBrowserDialogInitialize);
+	LIB_FUNC("FraP7debcdg", WebBrowserDialog::WebBrowserDialogOpen);
+	LIB_FUNC("O7dIZQrwVFY", WebBrowserDialog::WebBrowserDialogOpenForPredeterminedContent);
+	LIB_FUNC("CFTG6a8TjOU", WebBrowserDialog::WebBrowserDialogGetStatus);
+	LIB_FUNC("h1dR-t5ISgg", WebBrowserDialog::WebBrowserDialogUpdateStatus);
+	LIB_FUNC("vCaW0fgVQmc", WebBrowserDialog::WebBrowserDialogGetResult);
+	LIB_FUNC("PSK+Eik919Q", WebBrowserDialog::WebBrowserDialogClose);
+	LIB_FUNC("ocHtyBwHfys", WebBrowserDialog::WebBrowserDialogTerminate);
+}
+
+} // namespace LibWebBrowserDialog
+
 namespace {
 
 constexpr LibraryIdentity SAVE_DATA_DIALOG        = {"SaveDataDialog", 1, "SaveDataDialog", 1, 1};
@@ -162,6 +200,8 @@ LIB_DEFINE(InitDialog_1)
 	LibImeDialog::InitDialog_1_ImeDialog(s);
 	LibErrorDialog::InitDialog_1_ErrorDialog(s);
 	LibSigninDialog::InitDialog_1_SigninDialog(s);
+	LibNpCommerceDialog::InitDialog_1_NpCommerceDialog(s);
+	LibWebBrowserDialog::InitDialog_1_WebBrowserDialog(s);
 	LibSaveDataDialog::InitDialog_1_SaveDataDialog(s);
 	LibSaveDataDialogNative::InitDialog_1_SaveDataDialogNative(s);
 	LibMsgDialog::InitDialog_1_MsgDialog(s);

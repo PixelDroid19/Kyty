@@ -192,6 +192,89 @@ int KYTY_SYSV_ABI SigninDialogTerminate();
 
 } // namespace SigninDialog
 
+namespace NpCommerceDialog {
+
+// The 0x30-byte common dialog header, then the store request; user_data comes back in the result.
+struct NpCommerceDialogParam
+{
+	uint8_t  base[0x30];
+	uint32_t size;
+	int32_t  user_id;
+	uint32_t mode;
+	uint32_t option;
+	uint8_t  products[0x10];
+	uint64_t argument;
+	uint64_t user_data;
+	uint8_t  reserved[32];
+};
+static_assert(sizeof(NpCommerceDialogParam) == 128);
+static_assert(offsetof(NpCommerceDialogParam, user_data) == 88);
+
+// The second form adds a content mode before the product list.
+struct NpCommerceDialogParam2
+{
+	uint8_t  base[0x30];
+	uint32_t size;
+	int32_t  user_id;
+	uint32_t mode;
+	uint32_t option;
+	uint32_t content_mode;
+	uint32_t padding;
+	uint8_t  products[0x10];
+	uint64_t argument;
+	uint64_t user_data;
+	uint8_t  reserved[32];
+};
+static_assert(sizeof(NpCommerceDialogParam2) == 136);
+static_assert(offsetof(NpCommerceDialogParam2, user_data) == 96);
+
+constexpr int32_t RESULT_USER_CANCELED = 1;
+
+struct NpCommerceDialogResult
+{
+	int32_t  result;
+	uint8_t  authorized;
+	uint8_t  padding[3];
+	uint64_t user_data;
+	uint8_t  reserved[32];
+};
+static_assert(sizeof(NpCommerceDialogResult) == 48);
+
+// The emulator has no store: an opened dialog finishes at once as a user dismissing it, without a purchase.
+int KYTY_SYSV_ABI NpCommerceDialogInitialize();
+int KYTY_SYSV_ABI NpCommerceDialogOpen(const NpCommerceDialogParam* param);
+int KYTY_SYSV_ABI NpCommerceDialogOpen2(const NpCommerceDialogParam2* param);
+int KYTY_SYSV_ABI NpCommerceDialogUpdateStatus();
+int KYTY_SYSV_ABI NpCommerceDialogGetResult(NpCommerceDialogResult* result);
+int KYTY_SYSV_ABI NpCommerceDialogTerminate();
+
+} // namespace NpCommerceDialog
+
+namespace WebBrowserDialog {
+
+constexpr int32_t RESULT_USER_CANCELED = 1;
+
+struct WebBrowserDialogResult
+{
+	int32_t  result;
+	uint32_t padding;
+	void*    extended;
+	uint8_t  reserved[240];
+};
+static_assert(sizeof(WebBrowserDialogResult) == 256);
+
+// The emulator has no browser: an opened dialog finishes at once as a user closing it.
+int KYTY_SYSV_ABI WebBrowserDialogInitialize();
+int KYTY_SYSV_ABI WebBrowserDialogOpen(const void* param);
+int KYTY_SYSV_ABI WebBrowserDialogOpenForPredeterminedContent(const void* param);
+int KYTY_SYSV_ABI WebBrowserDialogGetStatus();
+int KYTY_SYSV_ABI WebBrowserDialogUpdateStatus();
+int KYTY_SYSV_ABI WebBrowserDialogGetResult(WebBrowserDialogResult* result);
+int KYTY_SYSV_ABI WebBrowserDialogClose();
+int KYTY_SYSV_ABI WebBrowserDialogTerminate();
+
+} // namespace WebBrowserDialog
+
 } // namespace Kyty::Libs::Dialog
 
 #endif // KYTY_EMU_ENABLED
