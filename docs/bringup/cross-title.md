@@ -7167,17 +7167,51 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
 - **VOP3 opcode sweep.** Each VOP3 opcode 0-0x3ff was parsed and emitted with three VGPR sources in separate child
   processes (local only, not committed). 45 parse, 40 of them emit. Of the five that parse but stop the emitter,
   0x100, 0x101, 0x128 and 0x12A need an SGPR mask in src2, so a VGPR there is an invalid encoding, not a defect.
-  0x341 decodes as `VMadF16`, which the emitter refuses on purpose (its intermediate rounding is not modeled); the
-  RDNA2 opcode table lists no 833 at all. The 979 that do not parse include encodings this shape does not fit, so
-  the sweep is no full list of missing forms.
+  0x341 decoded as `VMadF16`, which the emitter refused; the RDNA2 opcode table lists no 833 at all, and no
+  reference tree checked maps it. It now decodes as an unknown opcode. The 979 that do not parse include encodings
+  this shape does not fit, so the sweep is no full list of missing forms.
+- **Fixed: remaining compares and 16-bit mad.**
+  - Now translated in both encodings: `V_CMPX_*_F64` (every predicate, O and U through the NaN emitter), CMPX O and
+    U on F16, the F and T forms of CMPX on F16, F32, F64, I32, U32, I64 and U64, `V_CMP_{F,LT,EQ,LE,GT,NE,GE,T}_I64`
+    and `V_CMPX_*_I64`/`_U64`. A CMPX stores the lane bit ANDed with EXEC to EXEC and leaves VCC alone (ISA, and
+    three reference trees agree). A signed 64-bit compare takes the high words signed and the low words unsigned.
+    Literal sources follow ISA 6.2: sign extended for the signed forms, zero extended for the unsigned ones; an
+    inline float is its double encoding.
+  - The list item "v_mad_f16" was not a real gap: 0x341 is not an opcode (above). The real 16-bit mad gaps were
+    `v_mad_u16` (VOP3 832, decoded under the wrong name) and `v_mad_i16` (862). Both compute
+    `D.16 = S0.16 * S1.16 + S2.16`; OPSEL[2:0] pick the source halves, OPSEL[3] the destination half, and the other
+    half is kept. Clamp (saturation) is refused.
+  - `EmulatorShaderArithmetic.CmpxAnd64BitComparesWriteTheirMask` evaluates both encodings with VCC preloaded to a
+    sentinel: CMPX F64 LG against NEQ on a NaN, O and U on NaN, EXEC zero staying zero; CMPX O/U/F/TRU on F16;
+    LT_I64 of -1 and 1 against LT_U64, a high word of 0x80000000, a literal 0xffffffff against EQ_I64 and EQ_U64,
+    and the F/T forms. `Mad16WritesTheSelectedHalf` covers both mads, each OPSEL bit and the kept half; clamp and
+    0x341 must stop with status 65. Comparing the high words unsigned, or the low words signed, makes the first
+    test fail.
+  - Output of compares and 16-bit ops that already translated is unchanged: SPIR-V of ten VOPC and two VOP3
+    compares, and of twelve VOP3 16-bit ops at six OPSEL values in both stages, matched before and after (the 16-bit
+    ops differ by blank lines only). The translator version stays 217.
+  - Unit suite: 2691 passed; the four gates pass. No title is known to run these forms (each one stopped the title
+    before), so the title runs below show no regression only.
+- **Fixed: vertex-front storage frontier.** `PPSA21567 - ASTRO BOT` raised `gfx_storage_frontier` in every run on
+  this branch, at 29-50 s. The event detail (`a=unknown src=metadata r=code_unavailable n=2 sg=16 st=276 f=5
+  ds=204`) and a local probe placed it in the fused vertex front (vertex and the compute front variant): the front
+  code reads that V# raw, but not only with dword loads. The by-address proof (`ShaderProveFrontStorageReads`,
+  `Shader.cpp`) declined it, as it should, and then restored the metadata evidence, so the binding stayed unknown and
+  the typed descriptor check reported it on every draw. The proof now keeps the access the front code decodes (raw,
+  typed or mixed), unless the use does not decode, is indirect, or the front redefines the register; the
+  by-address choice is computed later from the same fields and is unchanged. The translator does not read the
+  access, so no shader changes. After the fix, Astro (private cache, warm): child exit 0, no first error,
+  `no_runtime_failure` passes, `visual_compare`, `scene_checkpoint` and `action_response` fail as before, 37-44 fps
+  from 15 to 28 s like the run before it. `PPSA17221 - Minecraft`: child exit 0, no first error, the same three
+  failing, 60 fps. `playable-regression` now keeps the first error's message in `timeline.json`.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
   - `v_dot*` (VOP3P 0x13-0x19): whether gfx1013 has them is not established.
 - **Remaining, in suggested order.** First, stops seen in strict runs, starting with the intermittent `SLoadDwordx4` refusal if it returns.
-  Then undecoded forms: VOP3 24-bit `mul_hi`, 16-bit `mad`, `min3/max3/med3` on 16-bit integers,
+  Then undecoded forms: VOP3 24-bit `mul_hi`, `min3/max3/med3` on 16-bit integers,
   64-bit shifts and `v_mad_i64_i32`; `div_scale`, `div_fmas`, `div_fixup` and the F64 ALU; MUBUF sub-dword and D16
   loads and stores and the remaining atomics; MTBUF stores; DS `_rtn` atomics and sub-dword reads and writes;
   GLOBAL stores and atomics; MIMG `_c`, `_cl`, `_o`, `gather4`, `get_lod` and `msaa_load`; `s_getreg` and
-  `s_setreg`; the missing compares (CMPX F64 in both encodings, CMPX F, O, U and TRU on F16, and the signed 64-bit
-  compares); DPP wave shifts, `row_bcast`, `row_share` and DPP8.
+  `s_setreg`; the class compares other than `v_cmp_class_f32` (VOPC 0x8F, 0x98, 0x9F, 0xA8 and 0xB8); DPP wave
+  shifts, `row_bcast`, `row_share` and DPP8.

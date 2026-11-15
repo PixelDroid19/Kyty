@@ -191,6 +191,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Shader instruction coverage against the RDNA2 ISA, and the vertex-front storage frontier (2026-11-15, fixed in part)
   - Frame generation from the presented image (2026-11-15, not buildable)
   - NGG front proofs repeated for rebuilt vertex programs (2026-11-15, fixed)
   - Staging of large image fills reused after completion (2026-11-15, fixed)
