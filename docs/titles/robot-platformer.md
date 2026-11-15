@@ -694,19 +694,37 @@ so where the robot stands depends on how long the loads took).
   the close-up frame. `0x874bd13f` was not covered: the probe never saw it bind a storage buffer. Its
   equal time in both arms (6.4-6.9 against 6.5 ms per call at 8,160 groups) only shows that the GPU
   clock was comparable. One run per arm; an unrelated compiler ran during parts of both.
-- **Storage placement census (2026-11-15, one native run, dunes, 254 frames in the last 15 s).** A
-  temporary count of the storage bytes every program binds, by placement, joined to per-program GPU
-  stamps:
-  - Compute programs that bind 1 MiB or more of system memory each call (in-place guest imports of
-    2.8-4.5 MiB, one of them written) took about 3 ms of GPU time a frame together. Placement cannot
-    reach the 15 ms the frame needs even if it removed their whole cost.
-  - The rest of the compute time is in programs whose storage inputs are small copies; the two
-    traversal kernels alone took about 10.6 ms a frame in this run.
-  - Draws took about 17 ms a frame (10 ms of it at the full 1920x1080 extent). Their largest storage
-    bindings are in-place guest imports read by the vertex stage, but the count is keyed by the
-    vertex program and the stamps by the pixel program, so how much of the draw time reads system
-    memory is not established. Placing those imports in device memory would also take a copy of
-    guest memory kept coherent with CPU writes, which the earlier probe did not have.
+- **Storage placement census and one device-local A/B (2026-11-15, native, dunes route).** Placement
+  is closed on this route as a fps lever: the exposed time is under 9 ms a frame, and the one program
+  tested was not faster in device-local memory.
+  - Census (one run, 310 frames in the last 15 s). A temporary count of the storage range every
+    program binds, by placement, was joined to per-program GPU stamps. Draws are keyed by vertex
+    program. Bound range is not bytes read, and every stamp is an upper bound.
+    - Compute programs binding 1 MiB or more of system memory per stamped call took 3.65 ms a frame:
+      `0x61f4e366` 1.26, `0x90c95e2d` 0.87, `0x108c4737` 0.79 and `0x51b2a70f` 0.46. All four read
+      and write in-place guest imports of 11-29 MiB per call.
+    - Draws whose vertex program binds 1 MiB or more took 4.77 ms a frame. That is whole-draw time
+      (raster and pixel work included), so it is only a ceiling on vertex fetch from system memory.
+    - No program bound a storage object, the class the 2026-10-29 probe moved; every byte was an
+      in-place import or a small per-submit copy.
+    - `0x874bd13f` (2 storage slots), `0xbf8ee9fc` (1) and `0xe1b1315d` (1) took 7.1 ms of compute a
+      frame. They bind storage, but their slots fall in none of the counted classes; what those slots
+      are and where they live is not established. `0xff2adfc8` binds no storage.
+    - An unrelated compiler ran during part of that run.
+  - A/B on `0x61f4e366`, the largest exposed program. A temporary probe copied all four of its
+    descriptor-bound slots into device-local memory before each dispatch and bound the copies: 32 B,
+    4.5 MiB read-only, and 1.5 MiB and 16 MiB written. The written slots were copied back after the
+    dispatch, outside the stamps, and the log showed every slot moved from host-cached to device-local
+    memory. The route diverged between the arms (the control reached a cutscene, the probe stayed in
+    gameplay), so per-call time is compared within the kernel's two cost modes.
+    - Heavy mode: 37-52 us per group in the control (two 5 s windows) and 45 in the probe (one
+      window), so device-local memory did not make it faster.
+    - Light mode: 2.6-4.8 against 1.6-8.1 us per group.
+    - Ceiling: the saving is at most exposure x (1 - 1/k). With about 8.4 ms exposed, reaching 5 ms a
+      frame needs k of about 3 or more, which the heavy mode rules out. The light mode allows no
+      verdict either way.
+    - One run per arm. The probe's capture shows a different scene, so it was not compared pixel by
+      pixel.
 - **Register spills across the title's compute programs (offline, 2026-11-14).** The 105 compute
   pipeline recipes recorded for the title (translator store t215) compiled on ANV: 60 spill. Width 16:
   60 recipes, 15 of them with 870-1,309 spills and 3,589-5,927 fills; width 8: 39, the BVH kernel's
