@@ -7030,6 +7030,7 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   The counts were read from the parse switches and may be off by a few. About 400 documented forms are not
   decoded. The largest gaps are DS (about 35 of 123), MUBUF (26 of 75), MTBUF (the four `load_format` ops of 16),
   MIMG (about 29 of 130), FLAT and SCRATCH (none), and GLOBAL (loads only). VOP3 decodes 64 of its 114 native ops.
+  On top of that count, 27 VOP1 ops translated in their VOP1 encoding stopped at decode in their VOP3 encoding.
 - **What a missing form does.** `KYTY_NI` and `KYTY_UNKNOWN_OP` at decode, and a missing or refusing emitter at
   `ShaderSpirvGenerator.cpp`, all end in `EXIT`. A missing form therefore stops a strict run; it cannot draw wrong
   pixels. Completing coverage helps titles that stop; it is not a fix for a visual defect in a title that runs.
@@ -7038,20 +7039,35 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   and single runs on `VMaxF32`, `VCvtF16F32`, `VMinF16`, `ImageStore` and others). All are dated 2026-10-31 or
   earlier, and emitter changes landed after them, so whether they still occur was not checked.
 - **Added.** `v_xor3_b32`, `v_alignbit_b32`, `v_perm_b32`, `v_lerp_u8`, `v_mad_i32_i24`, `v_mad_u32_u16` and
-  `v_mad_i32_i16` (VOP3), from the ISA descriptions. Any encoded input or output modifier is refused, since the ISA
-  defines none for these integer operations; `op_sel` stays refused at decode. The gfx10-only opcodes are refused on
-  the earlier generation.
+  `v_mad_i32_i16` (VOP3), from the ISA descriptions. Their ISA entries name no input or output modifier, so an
+  encoded one is refused by the emitter; `op_sel` stays refused at decode. The gfx10-only opcodes are refused on the
+  earlier generation.
+- **Added: VOP3 forms of integer VOP1 ops.** `v_mov_b32`, `v_not_b32`, `v_bfrev_b32`, `v_ffbh_u32`, `v_ffbl_b32` and
+  `v_ffbh_i32` in the VOP3 encoding decode to their VOP1 operation when no modifier is encoded, and stop at decode
+  when one is. The other 21 of the 27 are F64 or float conversions and movrel forms; they are not added.
 - **Verified.** `EmulatorShaderArithmetic.IntegerTernaryByteAndMultiplyAddContracts` runs the generated SPIR-V of
   each op on the CPU contract evaluator for pixel and compute stages, against references written from the ISA text,
   over edge values, every alignbit shift and 256 permute selector patterns. A hand-made wrong sign-bit position in
-  the permute was caught. Unit suite: 2682 passed, 11 skipped; the four gates pass. `PPSA21567 - ASTRO BOT` on
-  `playable-regression`: 11/15 gates as before, first error `gfx_storage_frontier`, interactive at 31 fps at 30 s.
-  No title is known to execute these ops, so they have no title evidence.
+  the permute was caught. `IntegerTernaryRefusesEncodedModifiers` checks that an encoded `neg` or `clamp` stops the
+  emitter (status 65) while the same word without it emits. `IntegerUnaryVop3FormsMatchTheirVop1Forms` compares the
+  two encodings on the evaluator and checks that `neg` stops decode. Unit suite: 2684 passed, 11 skipped; the four
+  gates pass. `PPSA21567 - ASTRO BOT` on `playable-regression` after the first batch: 11/15 gates, the same four
+  failing as in the library record above, first error `gfx_storage_frontier`, interactive. Its 31 fps at 30 s and the
+  34.6 fps of that record are single samples at different times and are not comparable. No title is known to execute
+  the added ops, so they have no title evidence.
+- **Silent modifier paths checked.** The ISA marks nine integer ops as saturating: `v_add_nc_u16`, `v_sub_nc_u16`,
+  `v_mul_lo_u16`, `v_add_nc_i16`, `v_sub_nc_i16`, `v_mad_u16`, `v_mad_i16`, `v_add_nc_i32` and `v_sub_nc_i32`.
+  The five Kyty translates refuse `clamp` (`Recompile_V16_XXX_VdstVsrc0Vsrc1`); the other four are not decoded. The
+  generic three-source integer template ignores `clamp` only for ops whose ISA entries name no saturation.
+  `operand_load_uint` ignores `abs` and `neg`, which the ISA defines only for float operands.
+- **Observed stop rechecked.** `PPSA03969 - F.I.S.T.` ran 167 s on `playable-regression` with exit 0 and no
+  `SLoadDwordx4` refusal, interactive at 9 fps. The stop was intermittent, so one clean run does not close it.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
   - `v_dot*` (VOP3P 0x13-0x19): whether gfx1013 has them is not established.
-- **Remaining, in suggested order.** VOP3 24-bit `mul_hi`, 16-bit `mad`, `min3/max3/med3` on 16-bit integers,
+- **Remaining, in suggested order.** First, any stop seen in a strict run (none is open from the record above).
+  Then undecoded forms: VOP3 24-bit `mul_hi`, 16-bit `mad`, `min3/max3/med3` on 16-bit integers,
   64-bit shifts and `v_mad_i64_i32`; `div_scale`, `div_fmas`, `div_fixup` and the F64 ALU; MUBUF sub-dword and D16
   loads and stores and the remaining atomics; MTBUF stores; DS `_rtn` atomics and sub-dword reads and writes;
   GLOBAL stores and atomics; MIMG `_c`, `_cl`, `_o`, `gather4`, `get_lod` and `msaa_load`; `s_getreg` and
