@@ -7246,11 +7246,23 @@ with `compress=zstd:3,ssd,discard=async`.
   driver rather than the emulator, also waits on the disk was not checked.
 - **Excluded: file status calls.** In one profiled run the title's main thread spent about 85 % of its sampled time
   in the stat call between 89 and 92 s, while the game volume's filesystem driver used 30-50 % of a core with no
-  disk reads and the command-processor thread waited on a lock. A test build resolved an exactly spelled package
-  file with one host lookup (the resolver the APR path already uses) and counted the calls: up to 81 s after launch
-  the title made 27,648 stat calls, 7,382 on the one-lookup path, 752 on existing files that need the full resolve
-  and 19,456 on absent files (it probes numbered variants of its UI files). In that run the calls ran at about 600
-  per second, nearly all absent files, from 66 to 76 s while the title held 32-34 fps, and the drops at 77, 85 and
-  91 s (10, 14 and 9 frames) came after the calls stopped at 81 s. The calls are not the cause of the drops, and
-  the test change was not kept: it reached only 27 % of the calls and showed no measured gain. From 92 s the dunes
-  held 18-22 fps with the GPU 88-94 % busy.
+  disk reads and the command-processor thread was blocked in a futex wait. A test build resolved an exactly spelled
+  package file with one host lookup (the resolver the APR path already uses) and counted the calls: up to 81 s after
+  launch the title made 27,648 stat calls, 7,382 on the one-lookup path, 752 on existing files that need the full
+  resolve and 19,456 on absent files (it probes numbered variants of its UI files). In that run the calls ran at
+  about 600-700 per second, nearly all absent files, from 66 to 76 s while the title held 29-34 fps, so the calls
+  themselves do not slow frames. In that run and in the profiled one the drop came in the second after a burst of
+  these probes ended (77 s and 92 s), which points at the load step that follows them. The test change was not kept:
+  it reached only 27 % of the calls and showed no measured gain.
+- **Drops from texture creation (2026-11-15).** Of 14 seconds under 15 fps in four runs of the dunes route, 9 spent
+  400-600 ms of the second creating GPU objects while 400 MB to 1 GB was uploaded, 3 spent it in draw state setup and
+  2 in both. The command-processor thread was on the CPU in those seconds, not blocked. The large textures
+  (22,413,312 bytes each) cost a median 9.4-13.8 ms to create, of which 4.3-6.0 ms was the upload and 1.2-2.5 ms
+  Vulkan allocation: a fill above the 4 MiB pooled size created, mapped and freed its own staging buffer, paying an
+  allocation and a fault on every page each time. Completed fills now hand such buffers to a free list bounded at
+  128 MiB (db6d7c132). In two runs the same textures took a median 6.9 and 7.9 ms, with the upload at 1.5-1.6 ms and
+  allocation at 0.2-0.3 ms. A first version also kept pooled staging; its free list grew long and Minecraft's dense
+  view cost 8.80 us per draw against 5.82 before, so only dedicated buffers are kept, and the next run measured
+  5.33 us per draw in that view (one run each; the view reached differs between runs). The route desyncs after a
+  hitch, so no frame-rate change is claimed for the dunes; drops from draw state setup and the heavier later scene
+  remain.

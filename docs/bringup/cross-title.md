@@ -6755,3 +6755,18 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   still references the evicted one: the destroy is then invalid Vulkan usage.
 - **Direction.** Lease the pipeline to the recording, as the draw pipeline cache does, or defer the
   destroy until the submissions that used it have completed.
+
+## Staging of large image fills (2026-11-15)
+
+- **Observed.** Every image fill above the 4 MiB pooled size created, mapped and freed its own host-visible staging
+  buffer. On `PPSA21567 - ASTRO BOT` a 22,413,312-byte texture spent 4.3-6.0 ms in the upload and 1.2-2.5 ms in
+  Vulkan allocation of its 9.4-13.8 ms median create, on the command-processor thread, and streaming seconds created
+  dozens of them.
+- **Changed.** Completed fills hand dedicated staging buffers to a free list bounded at 128 MiB, and a fill takes the
+  smallest one that holds it and is at most twice its size (db6d7c132). Pooled staging still goes back to its pool:
+  keeping it too made the list long, and `PPSA17221 - Minecraft` then cost 8.80 us per draw in its dense view against
+  5.82 before.
+- **Verified.** Astro dunes route, two runs: median create 6.9 and 7.9 ms, upload 1.5-1.6 ms. Minecraft world, one
+  run: 5.33 us per draw in the dense view. Unit tests 2668 of 2679 (11 skipped), the three repository gates, and
+  `PPSA06084 - Superliminal` playable-regression at 12 of 15 with the same failing gates as before. Arc A770 on Linux
+  only; other drivers were not run.
