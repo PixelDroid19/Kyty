@@ -4414,6 +4414,26 @@ int KYTY_SYSV_ABI HttpDeleteRequest(int req_id)
 	return OK;
 }
 
+int KYTY_SYSV_ABI HttpGetLastErrno(int req_id, int* err_num)
+{
+	PRINT_NAME();
+
+	KYTY_LOG_DEBUG("\t req_id = %d\n", req_id);
+
+	if (err_num == nullptr)
+	{
+		return HTTP_ERROR_INVALID_VALUE;
+	}
+
+	*err_num = 0;
+
+	EXIT_IF(g_net == nullptr);
+	// Whether an unknown request id is rejected is not agreed on, so it is not answered.
+	EXIT_NOT_IMPLEMENTED(!g_net->HttpValidRequest(Network::Id(req_id)));
+
+	return OK;
+}
+
 } // namespace Http
 
 namespace NetCtl {

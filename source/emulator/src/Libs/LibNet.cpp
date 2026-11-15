@@ -260,6 +260,7 @@ LIB_DEFINE(InitNet_1_Http)
 	LIB_FUNC("P6A3ytpsiYc", Http::HttpDeleteConnection);
 	LIB_FUNC("Cnp77podkCU", Http::HttpCreateRequestWithURL2);
 	LIB_FUNC("qe7oZ+v4PWA", Http::HttpDeleteRequest);
+	LIB_FUNC("0onIrKx9NIE", Http::HttpGetLastErrno);
 	LIB_FUNC("EY28T2bkN7k", Http::HttpAddRequestHeader);
 	LIB_FUNC("1e2BNwI-XzE", Http::HttpSendRequest);
 	LIB_FUNC("Tc-hAYDKtQc", Http::HttpSetResolveTimeOut);
