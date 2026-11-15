@@ -206,7 +206,7 @@ static bool TickToRtcDateTime(uint64_t tick, RtcDateTime* out)
 	}
 
 	const uint64_t time_of_day = tick % MICROSECONDS_PER_DAY;
-	uint64_t       z           = tick / MICROSECONDS_PER_DAY + 307ULL;
+	uint64_t       z           = tick / MICROSECONDS_PER_DAY + 306ULL; // tick 0 is 0001-01-01, 306 days after 0000-03-01
 
 	const int64_t  era = static_cast<int64_t>((z >= 0 ? z : z - 146096ULL) / 146097ULL);
 	const uint32_t doe = static_cast<uint32_t>(z - static_cast<uint64_t>(era) * 146097ULL);
