@@ -43,6 +43,15 @@ window.
 - **960x540 patch, fourth run** (a389, 166-215 s): 25.4 fps; 20-28 fps over 150-192 s at 330-480
   draws, 41-53 fps at 195-201 s with 82-254 draws per frame before a load. The 37-41 fps of the
   older record (469 draws, `6a6a5818a`) was not reproduced; its cause is not established.
+- **Host render-target scaling, unpatched** (a394, `Fixed`, `RenderTargets`, 1280x720, `Fsr`):
+  23.0 fps over 60-215 s, the same by scene as unscaled runs (21 fps at 550-700 draws, 25 at about
+  370, a dip to 16 at 836-885), engine 83-95 % busy. The status reports the display cohort scaled
+  at 1/3 of the 3840x2160 display; no counter shows any offscreen target scaled. This repeats the
+  2026-11-02 exclusion below: the scope plans only targets of the display extent, and the main
+  passes and the lighting kernel's grid keep the guest's 1920x1080. A presentation filter cannot
+  change guest work, so neither `Fsr` nor `Fsr3` is a frame-rate lever here. The bound for any cut
+  of internal resolution is the guest patch, which misses 30 fps in the dunes (27.8) and the
+  close-up (23.4) at 960x540.
 - **Tools** (evidence directory, outside the repository): `pollab.py`, `perf_on_draws.py`
   (enables the profiler on draws per frame instead of the clock).
 
