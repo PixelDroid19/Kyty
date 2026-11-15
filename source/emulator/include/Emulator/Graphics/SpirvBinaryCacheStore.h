@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -114,6 +115,8 @@ private:
 	                                                    const char* extension, const Vector<uint32_t>& binary);
 	void WorkerMain();
 	void PreloadMain();
+	// Called with the queue lock held; empty when the set did not change since it was last written.
+	[[nodiscard]] std::string TakeWorkingSetManifest();
 
 	struct State;
 	State* m_state = nullptr;

@@ -508,6 +508,50 @@ TEST(EmulatorShaderTranslationCache, WorkingSetServesRecordedModulesFromMemoryAn
 	EXPECT_EQ(store.LoadModule(intact, false, &binary), SpirvBinaryCacheLoadResult::Miss);
 }
 
+TEST(EmulatorShaderTranslationCache, WorkingSetKeepsTheLatestSessionUnderItsCap)
+{
+	ScopedShaderModuleCacheDirectory directory;
+	const auto manifest = directory.path / "working-set";
+	SpirvBinaryCacheLimits limits;
+	limits.max_working_set_entries = 1;
+	const auto earlier = ShaderModuleKey::Create(TestShaderId(11, 12, 13), ShaderModuleStage::Pixel, Config::ShaderOptimizationType::None, true);
+	const auto latest  = ShaderModuleKey::Create(TestShaderId(14, 15, 16), ShaderModuleStage::Pixel, Config::ShaderOptimizationType::None, true);
+	const Vector<uint32_t> binary_words {0x07230203u, 0x00010500u, 3u, 4u, 0u};
+	const auto session = [&](const ShaderModuleKey& key)
+	{
+		SpirvBinaryCacheStore store(directory.path, limits);
+		store.StartWorkingSet(manifest);
+		store.WaitForWorkingSet();
+		Vector<uint32_t> binary;
+		EXPECT_EQ(store.LoadModule(key, false, &binary), SpirvBinaryCacheLoadResult::Hit);
+	};
+	{
+		SpirvBinaryCacheStore store(directory.path, limits);
+		ASSERT_EQ(store.StoreModule(earlier, false, binary_words), SpirvBinaryCacheStoreResult::Written);
+		ASSERT_EQ(store.StoreModule(latest, false, binary_words), SpirvBinaryCacheStoreResult::Written);
+	}
+	session(earlier);
+	session(latest);
+	// Replaying a known set must not rewrite the manifest.
+	const auto written = std::filesystem::last_write_time(manifest);
+	session(latest);
+	EXPECT_EQ(std::filesystem::last_write_time(manifest), written);
+
+	SpirvBinaryCacheStore store(directory.path, limits);
+	store.StartWorkingSet(manifest);
+	store.WaitForWorkingSet();
+	for (const auto& entry: std::filesystem::directory_iterator(directory.path))
+	{
+		if (entry.path().extension() == ".spvmod")
+		{
+			std::filesystem::remove(entry.path());
+		}
+	}
+	Vector<uint32_t> binary;
+	EXPECT_EQ(store.LoadModule(latest, false, &binary), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(store.LoadModule(earlier, false, &binary), SpirvBinaryCacheLoadResult::Miss);
+}
+
 TEST(EmulatorShaderTranslationCache, ConcurrentSameKeyDoesNotDuplicateCompilation)
 {
 	ShaderTranslationCache cache(16);
