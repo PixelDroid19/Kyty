@@ -54,6 +54,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <tuple>
@@ -1339,8 +1340,8 @@ struct ShaderVertexProgram
 	std::array<uint32_t, 4> fingerprint {};
 	// Native-wave classification of `code`, computed once per guest width.
 	ShaderNativeWaveVerdict native_wave;
-	// Width-neutrality of the fused NGG front, proved once for this immutable code.
-	ShaderNggFrontVerdict  ngg_front;
+	// Width-neutrality of the fused NGG front, shared by every program with this content.
+	std::shared_ptr<const ShaderNggFrontVerdict> ngg_front;
 	// Scans of front_code that every draw used to repeat.
 	bool                   front_has_getpc              = false;
 	bool                   front_has_global_memory_load = false;
@@ -1378,6 +1379,13 @@ static ShaderVertexProgramCache* g_vs_isa_cache = nullptr;
 static std::mutex                g_vs_isa_cache_mutex;
 static uint64_t                  g_vs_isa_cache_bytes = 0;
 static uint64_t                  g_vs_program_generation = 1;
+// NGG front verdicts by program content. A remapped or evicted program rebuilt from
+// the same bytes reuses the proof instead of repeating it on the command processor.
+// Content keys stay valid across retirement, so neither invalidation clears them.
+using ShaderNggFrontVerdictKey = std::pair<std::array<uint32_t, 4>, bool>; // fingerprint, registered-front parse
+static constexpr size_t kNggFrontVerdictEntries = 4096u;
+static std::map<ShaderNggFrontVerdictKey, std::shared_ptr<const ShaderNggFrontVerdict>>* g_ngg_front_verdicts = nullptr;
+static std::mutex g_ngg_front_verdicts_mutex;
 // Advances with every retirement of vertex programs, under the exclusive lifetime
 // lock, so a lookup remembered under the shared lock holds while it is unchanged.
 static uint64_t g_vs_lookup_generation = 1;
@@ -1562,6 +1570,7 @@ void ShaderInit()
 	g_vertex_offset_sgpr_map = new std::unordered_map<uint64_t, VertexOffsetCacheEntry>();
 	g_shader_continuations   = new std::unordered_map<uint64_t, uint64_t>();
 	g_vs_isa_cache           = new ShaderVertexProgramCache();
+	g_ngg_front_verdicts     = new std::map<ShaderNggFrontVerdictKey, std::shared_ptr<const ShaderNggFrontVerdict>>();
 }
 
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
@@ -2033,6 +2042,16 @@ static std::array<uint32_t, 4> ShaderVertexProgramFingerprint(const ShaderVertex
 	        static_cast<uint32_t>(hash.high64), static_cast<uint32_t>(hash.high64 >> 32u)};
 }
 
+static std::shared_ptr<const ShaderNggFrontVerdict> SharedNggFrontVerdict(const ShaderNggFrontVerdictKey& key)
+{
+	EXIT_IF(g_ngg_front_verdicts == nullptr);
+	std::lock_guard<std::mutex> lock(g_ngg_front_verdicts_mutex);
+	auto& verdicts = *g_ngg_front_verdicts;
+	if (auto found = verdicts.find(key); found != verdicts.end()) { return found->second; }
+	if (verdicts.size() >= kNggFrontVerdictEntries) { verdicts.clear(); }
+	return verdicts[key] = std::make_shared<ShaderNggFrontVerdict>();
+}
+
 static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program)
 {
 	// Budget retained IR capacities, counting shared front/linked storage twice
@@ -2138,6 +2157,7 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 		program->gs_user_data_loads = ShaderFindGsUserDataDescriptorLoads(program->code);
 	}
 	program->fingerprint = ShaderVertexProgramFingerprint(*program, front, back_words);
+	program->ngg_front   = SharedNggFrontVerdict({program->fingerprint, boundary == ShaderParseBoundary::RegisteredFront});
 	ShaderProbeWrite("vs", program->code, nullptr, nullptr);
 	const uint64_t cache_cost = ShaderVertexProgramCacheCost(*program);
 	// This is a cache-retention budget, not a production program-size limit.
@@ -4107,7 +4127,7 @@ uint32_t ShaderVertexStreamRecordOffset(const ShaderVertexInputInfo& input_info)
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Kyty::Core::String8 ShaderVertexNggFrontRefusal(const ShaderVertexInputInfo& info)
 {
-	return info.program != nullptr && info.gs_prolog ? info.program->ngg_front.Refusal(info.native_wave.guest_wave_size)
+	return info.program != nullptr && info.gs_prolog ? info.program->ngg_front->Refusal(info.native_wave.guest_wave_size)
 	                                                  : Kyty::Core::String8();
 }
 
@@ -4285,7 +4305,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		{
 			info->native_wave = info->program->native_wave.Get(info->program->code, guest_wave_size);
 			info->required_subgroup_size =
-			    ShaderApplyNggFrontProof(&info->native_wave, info->program->code, shader_stages, info->program->ngg_front)
+			    ShaderApplyNggFrontProof(&info->native_wave, info->program->code, shader_stages, *info->program->ngg_front)
 			        ? guest_wave_size
 			        : 0u;
 			ShaderAssociateSampledTextureSamplers(info->program->code, &info->bind, kGen5GsFrontUserDataBase,
