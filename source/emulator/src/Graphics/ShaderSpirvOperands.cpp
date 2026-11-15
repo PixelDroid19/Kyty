@@ -1349,6 +1349,61 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 	return true;
 }
 
+uint64_t operand_f64_constant_bits(const ShaderOperand& op)
+{
+	EXIT_IF(!operand_is_constant(op));
+	// ISA 6.2: an inline float is the double of the same value (1/(2*PI) has its own double encoding),
+	// an inline integer is sign extended, and a 32-bit literal is the high word with a zero low word.
+	switch (op.type)
+	{
+		case ShaderOperandType::FloatInlineConstant:
+		{
+			if (op.constant.u == 0x3e22f983u) { return 0x3fc45f306dc9c882ull; }
+			const double value = op.constant.f;
+			uint64_t     bits  = 0;
+			std::memcpy(&bits, &value, sizeof(bits));
+			return bits;
+		}
+		case ShaderOperandType::IntegerInlineConstant: return static_cast<uint64_t>(static_cast<int64_t>(op.constant.i));
+		case ShaderOperandType::LiteralConstant: return static_cast<uint64_t>(op.constant.u) << 32u;
+		default: EXIT("unexpected 64-bit float constant operand\n");
+	}
+	return 0;
+}
+
+bool operand_load_f64_word(Spirv* spirv, const ShaderOperand& op, const String8& result_id, const String8& index, String8* load, int shift)
+{
+	EXIT_IF(load == nullptr || op.size != 2 || (shift != 0 && shift != 1));
+	ShaderOperand unsigned_op = op;
+	unsigned_op.absolute      = false;
+	unsigned_op.negate        = false;
+	// abs and neg act on the sign, which is bit 31 of the high word.
+	const bool    signed_word = shift == 1 && (op.absolute || op.negate);
+	const String8 raw_id      = signed_word ? "f64_unsigned_" + result_id : result_id;
+	if (operand_is_constant(unsigned_op))
+	{
+		const uint64_t bits = operand_f64_constant_bits(unsigned_op);
+		*load = String8("%<result> = OpCopyObject %uint %<word>\n")
+		            .ReplaceStr("<word>", spirv->GetConstantUint(static_cast<uint32_t>(shift == 0 ? bits : bits >> 32u)))
+		            .ReplaceStr("<result>", raw_id)
+		            .ReplaceStr("<index>", index);
+	} else if (!operand_load_uint(spirv, unsigned_op, raw_id, index, load, shift))
+	{
+		return false;
+	}
+	if (!signed_word) { return true; }
+	const String8 abs_id = op.negate ? "f64_abs_" + result_id : result_id;
+	String8       sign   = String8("%<raw>");
+	if (op.absolute)
+	{
+		*load += String8("%<abs> = OpBitwiseAnd %uint %<raw> %uint_0x7fffffff\n");
+		sign = "%<abs>";
+	}
+	if (op.negate) { *load += String8("%<result> = OpBitwiseXor %uint <sign> %uint_0x80000000\n").ReplaceStr("<sign>", sign); }
+	*load = load->ReplaceStr("<abs>", abs_id).ReplaceStr("<raw>", raw_id).ReplaceStr("<result>", result_id).ReplaceStr("<index>", index);
+	return true;
+}
+
 bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load)
 {
 	EXIT_IF(load == nullptr);

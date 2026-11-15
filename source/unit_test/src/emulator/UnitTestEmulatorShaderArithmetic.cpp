@@ -956,6 +956,58 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	std::_Exit(0);
 }
 
+// A 64-bit float source: an inline float is the double of that value, an inline integer is sign extended, a
+// literal is the high word (ISA 6.2), and abs/neg act on the sign of the high word.
+[[noreturn]] void RunF64SourceOperands(ShaderType stage)
+{
+	Initialize();
+	constexpr uint32_t kVccLo = 106u, kLiteral = 255u, kOne = 242u, kTwo = 244u, kInvTwoPi = 248u, kIntOne = 129u;
+	constexpr uint64_t kOneBits = 0x3ff0000000000000ull, kTwoBits = 0x4000000000000000ull;
+	const auto equal = [&](uint32_t src1, uint64_t v01, uint64_t v23, uint32_t modifiers0 = 0u, uint32_t modifiers1 = 0u,
+	                       uint32_t literal = 0u)
+	{
+		std::vector<uint32_t> words = {(0x35u << 26u) | (0x22u << 16u) | modifiers0 | kVccLo, 256u | (src1 << 9u) | modifiers1};
+		if (src1 == kLiteral) { words.push_back(literal); }
+		words.push_back(kEnd);
+		const Program program(Emit(Parse(words, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", static_cast<uint32_t>(v01)}, {"%v1", static_cast<uint32_t>(v01 >> 32u)},
+		                    {"%v2", static_cast<uint32_t>(v23)}, {"%v3", static_cast<uint32_t>(v23 >> 32u)}, {"%vcc_lo", 0u},
+		                    {"%vcc_hi", 0u}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", 1u}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   "%vcc_lo") &
+		       1u;
+	};
+	Equal(equal(258u, kTwoBits, kTwoBits), 1u, "f64 compare reads both VGPR pairs");
+	Equal(equal(258u, kTwoBits, kOneBits), 0u, "f64 compare of different VGPR pairs");
+	Equal(equal(kOne, kOneBits, 0u), 1u, "inline 1.0 is the double 1.0");
+	Equal(equal(kOne, kTwoBits, 0u), 0u, "inline 1.0 differs from 2.0");
+	Equal(equal(kInvTwoPi, 0x3fc45f306dc9c882ull, 0u), 1u, "inline 1/(2*PI) has its double encoding");
+	Equal(equal(kIntOne, 1u, 0u), 1u, "inline integer 1 is the 64-bit pattern 1");
+	Equal(equal(kLiteral, kTwoBits, 0u, 0u, 0u, 0x40000000u), 1u, "a literal is the high word");
+	Equal(equal(kOne, 0xbff0000000000000ull, 0u, 0u, 1u << 30u), 1u, "neg flips the sign of a constant source");
+	Equal(equal(kTwo, 0xc000000000000000ull, 0u, 1u << 8u), 1u, "abs clears the sign of a VGPR source");
+	Equal(equal(kTwo, 0xc000000000000000ull, 0u), 0u, "without abs the sign stays");
+	const auto convert = [&](uint32_t source, uint32_t literal)
+	{
+		std::vector<uint32_t> words = {(0x3fu << 25u) | (16u << 17u) | (0x0Fu << 9u) | source};
+		if (source == kLiteral) { words.push_back(literal); }
+		words.push_back(kEnd);
+		return Evaluate(Program(Emit(Parse(words, stage), 0u, false, false, true).c_str()), 0u);
+	};
+	Equal(convert(kLiteral, 0x40080000u), 0x40400000u, "v_cvt_f32_f64 of a literal high word 3.0");
+	Equal(convert(kInvTwoPi, 0u), 0x3e22f983u, "v_cvt_f32_f64 of inline 1/(2*PI)");
+	const Program widen(Emit(Parse({(0x3fu << 25u) | (16u << 17u) | (0x10u << 9u) | 256u, kEnd}, stage), 0u, false, false, true).c_str());
+	const auto    widened = [&](const char* word)
+	{
+		return widen.Run({{"%v0", 0x3fc00000u}, {"%v16", 0xdeadbeefu}, {"%v17", 0xdeadbeefu}, {"%exec_lo", 1u}, {"%exec_hi", 0u},
+		                  {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                 word);
+	};
+	Equal(widened("%v16"), 0u, "v_cvt_f64_f32 of 1.5 low word");
+	Equal(widened("%v17"), 0x3ff80000u, "v_cvt_f64_f32 of 1.5 high word");
+	std::_Exit(0);
+}
+
 [[noreturn]] void ParseNotWithNegate()
 {
 	Initialize();
@@ -1598,6 +1650,13 @@ TEST(EmulatorShaderArithmetic, HalfNotEqualComparesAreUnordered)
 	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
 	{
 		ASSERT_EXIT(RunHalfNotEqualCompares(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, F64SourcesExpandConstantsAndApplySignModifiers)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunF64SourceOperands(stage), ::testing::ExitedWithCode(0), "");
 	}
 }
 TEST(EmulatorShaderArithmetic, IntegerTernaryRefusesEncodedModifiers)

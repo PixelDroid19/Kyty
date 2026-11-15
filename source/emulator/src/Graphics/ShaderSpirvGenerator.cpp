@@ -3786,9 +3786,20 @@ void Spirv::FindConstants()
 				AddConstantUint(inst.src[i].dpp_row_mask);
 				AddConstantUint(inst.src[i].dpp_bank_mask);
 			}
+			if (inst.src[i].size == 2 && (inst.src[i].absolute || inst.src[i].negate))
+			{
+				AddConstantUint(0x7fffffffu);
+				AddConstantUint(0x80000000u);
+			}
 			if (operand_is_constant(inst.src[i]))
 			{
 				AddConstant(inst.src[i]);
+				if (inst.src[i].size == 2)
+				{
+					const uint64_t f64_bits = operand_f64_constant_bits(inst.src[i]);
+					AddConstantUint(static_cast<uint32_t>(f64_bits));
+					AddConstantUint(static_cast<uint32_t>(f64_bits >> 32u));
+				}
 				// MUBUF/MTBUF soffset is OpStore'd into %temp_int_* (signed).
 				// LiteralConstant only registers as Uint via AddConstant; also
 				// emit the Int twin so GetConstantInt succeeds at recompile.

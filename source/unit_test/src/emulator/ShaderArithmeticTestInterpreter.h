@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // CPU contract evaluator for the first straight-line guest instruction of a
@@ -147,6 +148,8 @@ public:
 			}
 			Fail("undefined label " + label);
 		};
+		// Ids typed %double hold their low and high words in words[0] and words[1].
+		std::unordered_set<std::string> doubles;
 		for (size_t index = 0; index < m_body.size(); ++index)
 		{
 			const auto& t = m_body[index];
@@ -163,6 +166,14 @@ public:
 			const auto& op = t[2];
 			const auto arg = [&](size_t i) { return value(t.at(i)).words[0]; };
 			const auto fp = [&](size_t i) { return Float(arg(i)); };
+			const auto compared = [&](size_t i) -> double {
+				if (doubles.count(t.at(i)) == 0u) { return fp(i); }
+				const auto&    words = value(t.at(i)).words;
+				const uint64_t bits  = words[0] | (static_cast<uint64_t>(words[1]) << 32u);
+				double         d     = 0.0;
+				std::memcpy(&d, &bits, sizeof(d));
+				return d;
+			};
 			Value result;
 			uint32_t& r = result.words[0];
 			if (op == "OpLoad" || op == "OpBitcast" || op == "OpCopyObject") { result = value(t.at(4)); }
@@ -218,12 +229,21 @@ public:
 			else if (op == "OpFSub") { r = Bits(fp(4) - fp(5)); }
 			else if (op == "OpFMul") { r = Bits(fp(4) * fp(5)); }
 			else if (op == "OpFNegate") { r = arg(4) ^ 0x80000000u; }
-			else if (op == "OpFOrdEqual") { r = fp(4) == fp(5); }
-			else if (op == "OpFOrdNotEqual") { r = !std::isnan(fp(4)) && !std::isnan(fp(5)) && fp(4) != fp(5); }
-			else if (op == "OpFUnordNotEqual") { r = std::isnan(fp(4)) || std::isnan(fp(5)) || fp(4) != fp(5); }
-			else if (op == "OpFOrdLessThan") { r = fp(4) < fp(5); }
-			else if (op == "OpFOrdLessThanEqual") { r = fp(4) <= fp(5); }
-			else if (op == "OpFOrdGreaterThan") { r = fp(4) > fp(5); }
+			else if (op == "OpFOrdEqual") { r = compared(4) == compared(5); }
+			else if (op == "OpFOrdNotEqual") { r = !std::isnan(compared(4)) && !std::isnan(compared(5)) && compared(4) != compared(5); }
+			else if (op == "OpFUnordNotEqual") { r = std::isnan(compared(4)) || std::isnan(compared(5)) || compared(4) != compared(5); }
+			else if (op == "OpFOrdLessThan") { r = compared(4) < compared(5); }
+			else if (op == "OpFOrdLessThanEqual") { r = compared(4) <= compared(5); }
+			else if (op == "OpFOrdGreaterThan") { r = compared(4) > compared(5); }
+			else if (op == "OpFConvert" && t.at(3) == "%float" && doubles.count(t.at(4)) != 0u) { r = Bits(static_cast<float>(compared(4))); }
+			else if (op == "OpFConvert" && t.at(3) == "%double")
+			{
+				const double   d    = fp(4);
+				uint64_t       bits = 0;
+				std::memcpy(&bits, &d, sizeof(bits));
+				result.words[0] = static_cast<uint32_t>(bits);
+				result.words[1] = static_cast<uint32_t>(bits >> 32u);
+			}
 			else if (op == "OpIsNan") { r = std::isnan(fp(4)); }
 			else if (op == "OpIsInf") { r = std::isinf(fp(4)); }
 			else if (op == "OpConvertUToF") { r = Bits(static_cast<float>(arg(4))); }
@@ -304,6 +324,7 @@ public:
 				else { Fail("unimplemented extended instruction " + ext); }
 			}
 			else { Fail("unimplemented instruction " + op); }
+			if (t.at(3) == "%double") { doubles.insert(t[0]); }
 			values[t[0]] = result;
 		}
 		if (scc != nullptr) { *scc = value("%scc").words[0]; }

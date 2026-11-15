@@ -1703,19 +1703,19 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_XXX_SmaskVsrc0Vsrc1)
 	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
 	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_lo_<index>", index_str, &load1lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[1], "t1_lo_<index>", index_str, &load1lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_hi_<index>", index_str, &load1hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[1], "t1_hi_<index>", index_str, &load1hi, 1))
 	{
 		return false;
 	}
@@ -1766,11 +1766,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32F64_SVdstSVsrc0)
 
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
@@ -1781,7 +1781,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32F64_SVdstSVsrc0)
         %d0v_<index> = OpCompositeConstruct %v2uint %t0_lo_<index> %t0_hi_<index>
         %d0u_<index> = OpBitcast %ulong %d0v_<index>
         %d0_<index> = OpBitcast %double %d0u_<index>
-        %t_<index> = OpConvertFToF %float %d0_<index>
+        %t_<index> = OpFConvert %float %d0_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
         %exec_keep_<index> = OpLoad %float %<dst>
@@ -1832,7 +1832,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF64F32_SVdst2SVsrc0)
 
 	static const char* text = R"(
     <load0>
-        %d0_<index> = OpConvertFToF %double %t0_<index>
+        %d0_<index> = OpFConvert %double %t0_<index>
         %du_<index> = OpBitcast %ulong %d0_<index>
         %dv_<index> = OpBitcast %v2uint %du_<index>
         %lo_<index> = OpCompositeExtract %uint %dv_<index> 0
@@ -1873,11 +1873,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtI32F64_SVdstSVsrc0)
 
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
@@ -2273,11 +2273,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtU32F64_SVdstSVsrc0)
 
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
@@ -2382,11 +2382,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VF64_Unary_SVdst2SVsrc0)
 
 	if (dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
@@ -2446,11 +2446,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VFractF64_SVdst2SVsrc0)
 
 	if (dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
@@ -2853,19 +2853,19 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_Special_SmaskVsrc0Vsrc1)
 	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
 	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_lo_<index>", index_str, &load1lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[1], "t1_lo_<index>", index_str, &load1lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_hi_<index>", index_str, &load1hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[1], "t1_hi_<index>", index_str, &load1hi, 1))
 	{
 		return false;
 	}
