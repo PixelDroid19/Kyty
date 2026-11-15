@@ -6,6 +6,77 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: splitting register ranges at the light loop recovers 5.9 ms of GPU time (2026-11-14, probe only)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
+`d25d2e373` plus the temporary probe of the record below (not committed), four arms in 2 s blocks in
+one run. The fourth arm runs the translated module of `0x3666fa39` after an offline rewrite of its
+SPIR-V: in the block that enters the light loop and in the loop's merge block, every scalar function
+variable (a guest register) is stored back as itself plus a run-time zero. The rewrite changes no
+result of the program. No translator change is committed; this record prices the rule.
+
+| Arm (blocks 4-48, 11-12 per arm) | Engine ms/frame | Frame ms | Against full |
+| --- | --- | --- | --- |
+| Program as translated | 50.69 | 53.98 | |
+| Program left out | 37.04 | 41.70 | -13.65 |
+| Trace region folded out | 40.36 | 43.19 | -10.33 |
+| Ranges split at the light loop | 44.79 | 46.71 | -5.90 |
+
+The split arm is -4.66 in blocks 4-27 and -6.23 in blocks 28-48, and -5.45 (3 blocks per arm) in the
+scene the route reaches in blocks 56-67. Blocks 49-55 and 68 onwards hold a scene change and are
+left out.
+
+Driver statistics of the same module variants, compiled offline from the stored recipe (method of
+the record below, SIMD8); fills are counted before, inside and after the light loop in the
+generated code:
+
+| Variant | Instructions | Spills:Fills | Max live | Fills before / inside / after |
+| --- | --- | --- | --- | --- |
+| As translated | 34,087 | 390:1634 | 283 | 413 / 666 / 555 |
+| Trace region folded out | 12,149 | 86:214 | 168 | 142 / 6 / 66 |
+| Split at the loop exit | 31,034 | 280:1139 | 270 | 348 / 646 / 145 |
+| Split at the loop entry | 32,651 | 340:1305 | 264 | not counted |
+| Split at entry and exit (the arm above) | 30,423 | 253:938 | 262 | 222 / 577 / 139 |
+| Same, every variable without a liveness test | 30,423 | 253:938 | 262 | same module statistics |
+| Parked in scratch, one index base (19 variables) | 32,704 | 357:1393 | 275 | 399 / 457 / 537 |
+| Parked in scratch, separate reload base | 33,345 | 354:1491 | 259 | 342 / 611 / 538 |
+| Parked with constant indices (control) | 34,087 | 390:1634 | 283 | as translated |
+| Split at every loop | 43,837 | 1322:2687 | 671 | 399 / 2105 / 183 |
+| Split at every loop and selection holding a loop | 61,708 | 2793:4708 | 1361 | 940 / 3528 / 240 |
+| Entry and exit, plus copies of read-only registers after the trace region (9) | 30,306 | 254:921 | 262 | 221 / 563 / 137 |
+| Same, plus copies at the top of the loop body (27) | 31,345 | 285:1108 | 263 | 223 / 572 / 313 |
+
+- **What the rewrite does.** `V = V + z`, with `z` a value the driver cannot fold (the probe uses
+  `NumWorkgroups.y >> 16`, which is zero for any dispatch below 65,536 groups in y), in bit form for
+  float registers. The value after the boundary is a new value for the driver. The record below
+  measured that the driver counts one register range per value (283 against an exact 243), so a
+  register written before the loop and read after it holds one range across the loop; the split
+  ends that range at the boundary.
+- **Engaged.** The run log reports the fourth arm's module loaded from the offline file (200,194
+  words against 196,783) and the arm differs from full in every window.
+- **Where it acts.** Fills after the loop fall from 555 to 139 and before it from 413 to 222; inside
+  the loop they stay (666 to 577). The 5.9 ms is close to the about 7 ms the record below assigns to
+  the code before and after the light loop; the about 4.5 ms it assigns to the loop itself remain.
+- **No liveness needed.** Rewriting all 267 scalar variables at both boundaries gives the same
+  module statistics as rewriting only the 98 and 88 live ones: the driver drops the dead ones.
+- **Excluded without a run: parking in per-thread scratch.** Only 19 variables are untouched by the
+  loop and live after it (the driver's 44 loop-through values include its own subexpressions). With
+  one index base the driver keeps 17 slot addresses in registers across the loop; with a separate
+  reload base the maximum falls to 259 but fills stay at 1491 and the fills after the loop do not
+  move (538). With constant indices the driver folds the array back into values (identical
+  statistics), so a run-time index is what makes a scratch array stick.
+- **Excluded without a run: splitting inside the loop.** A split at every loop, or at every loop and
+  every selection holding a loop, multiplies registers and fills (maximum 671 and 1361). A value
+  rewritten inside a loop becomes one more range across that loop.
+- **Excluded without a run: copies of read-only registers.** Only 9 registers that the loop only
+  reads have two or more reads after the trace region; copying them there changes nothing, and
+  copies at the top of the loop body bring fills back after the loop.
+- **Not verified.** Picture equality of the split arm against full (the rewrite is a no-op by
+  construction; no capture was compared). The rule in the translator, other programs of this title,
+  other titles and other drivers.
+- **Tools** (evidence directory, not in the repository): the SPIR-V rewriter, the fill counter by
+  loop position and the loop-through lister.
+
 ## Robot platformer: the trace region costs GPU time by being compiled in, not by running (2026-11-14, measured)
 
 Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
