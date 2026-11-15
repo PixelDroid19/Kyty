@@ -2747,11 +2747,11 @@ bool ShaderStorageBufferReadsByAddress(const ShaderStorageResources& storage, in
 
 } // namespace
 
-// The vertex front gets no general ISA analysis, so a read-only V# there is
-// proven readable by address from the front code alone. A program with a
-// continuation keeps every buffer in its slot, a consumer whose V# register the
-// front redefines keeps the slot path, and a buffer that fails the proof keeps
-// its evidence.
+// The vertex front gets no general ISA analysis, so the access of each V# is
+// taken from the front code alone; ShaderCalcBindingIndices then reads the
+// read-only dword-loaded ones by address. A program with a continuation keeps
+// its metadata evidence, and a V# whose register the front redefines, or whose
+// use does not decode, keeps it too: the front's reads may not be of that V#.
 static void ShaderProveFrontStorageReads(const ShaderVertexProgram& program, ShaderBindResources* bind, int user_data_register_base)
 {
 	if (!g_storage_address_reads.load(std::memory_order_relaxed) || program.back_bytes != 0u || program.front_scalar_flow == nullptr ||
@@ -2775,23 +2775,16 @@ static void ShaderProveFrontStorageReads(const ShaderVertexProgram& program, Sha
 		}
 		const auto use = AnalyzeShaderStorageUse(program.front_code, storage.start_register[i] + user_data_register_base,
 		                                         &program.front_resource_memo);
-		if (use.access != ShaderStorageAccess::Raw || !use.dword_loads_only)
+		if (use.access == ShaderStorageAccess::Unknown || use.decoded_unknown || use.indirect_descriptor_use || storage.row_redefined[i])
 		{
 			continue;
 		}
-		const auto saved = std::make_tuple(storage.accesses[i], storage.exact_matches[i], storage.dword_loads_only[i],
-		                                   storage.decoded_unknown[i], storage.indirect_descriptor_use[i], storage.raw_tbuffer_use[i]);
 		storage.accesses[i]                = use.access;
 		storage.exact_matches[i]           = true;
-		storage.dword_loads_only[i]        = true;
-		storage.decoded_unknown[i]         = use.decoded_unknown;
-		storage.indirect_descriptor_use[i] = use.indirect_descriptor_use;
+		storage.dword_loads_only[i]        = use.dword_loads_only;
+		storage.decoded_unknown[i]         = false;
+		storage.indirect_descriptor_use[i] = false;
 		storage.raw_tbuffer_use[i]         = use.raw_tbuffer_use;
-		if (!ShaderStorageBufferReadsByAddress(storage, i))
-		{
-			std::tie(storage.accesses[i], storage.exact_matches[i], storage.dword_loads_only[i], storage.decoded_unknown[i],
-			         storage.indirect_descriptor_use[i], storage.raw_tbuffer_use[i]) = saved;
-		}
 	}
 }
 
