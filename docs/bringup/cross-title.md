@@ -7192,15 +7192,20 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     ops differ by blank lines only). The translator version stays 217.
   - Unit suite: 2691 passed; the four gates pass. No title is known to run these forms (each one stopped the title
     before), so the title runs below show no regression only.
-- **Fixed: vertex-front storage frontier.** `PPSA21567 - ASTRO BOT` raised `gfx_storage_frontier` in every run on
-  this branch, at 29-50 s. The event detail (`a=unknown src=metadata r=code_unavailable n=2 sg=16 st=276 f=5
+- **Fixed: vertex-front storage frontier.** `PPSA21567 - ASTRO BOT` raised `gfx_storage_frontier` in five of five
+  private-cache runs before the fix, at 29-50 s; earlier shared-cache runs on this branch were mixed, some clean
+  (above). The event detail (`a=unknown src=metadata r=code_unavailable n=2 sg=16 st=276 f=5
   ds=204`) and a local probe placed it in the fused vertex front (vertex and the compute front variant): the front
   code reads that V# raw, but not only with dword loads. The by-address proof (`ShaderProveFrontStorageReads`,
   `Shader.cpp`) declined it, as it should, and then restored the metadata evidence, so the binding stayed unknown and
   the typed descriptor check reported it on every draw. The proof now keeps the access the front code decodes (raw,
   typed or mixed), unless the use does not decode, is indirect, or the front redefines the register; the
-  by-address choice is computed later from the same fields and is unchanged. The translator does not read the
-  access, so no shader changes. After the fix, Astro (private cache, warm): child exit 0, no first error,
+  by-address choice is computed later from the same fields and is unchanged. Only the raw case was observed; typed
+  and mixed follow the same rule, and no title is known to exercise them. The translator and the shader id do not
+  read the access, and every other reader of it also requires the program code or scalar or guarded-load flags that
+  the front proof does not set, so the buffer binds and translates as before: no visual or frame-rate change is
+  expected, and none was measured. One run per title after the fix; the same message class on another title
+  (`st=8 f=64`, above) was not re-run. No unit test covers the front proof. After the fix, Astro (private cache, warm): child exit 0, no first error,
   `no_runtime_failure` passes, `visual_compare`, `scene_checkpoint` and `action_response` fail as before, 37-44 fps
   from 15 to 28 s like the run before it. `PPSA17221 - Minecraft`: child exit 0, no first error, the same three
   failing, 60 fps. `playable-regression` now keeps the first error's message in `timeline.json`.
