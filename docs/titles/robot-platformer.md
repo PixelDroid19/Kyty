@@ -6,6 +6,53 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: the lighting program's GPU time sits in its trace region (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
+`451e7d292` plus a temporary probe (not committed). Starting 35 s after the first dispatch of
+`0x3666fa39` it rotates seven arms in 2 s blocks: the program as translated, its dispatch call left
+out, and five translations of the same program, compiled outside the translation cache under their
+own pipeline keys, in which one guest conditional branch is always taken. At every block change the
+probe reads the present count and the process's render-engine cycles from its DRM client records,
+which gives engine work per frame. 117 blocks ran; the figures are medians of blocks 14 to 96 (12 per
+arm, the scene where the robot lies on the dune under the tutorial prompt), with the block range in
+brackets. The last three cycles agree within 0.5 ms.
+
+| Arm (instruction index of the forced branch) | Frame | Engine busy | Engine work a frame | Removed |
+| --- | --- | --- | --- | --- |
+| As translated | 51.4 ms | 89 % | 46.1 ms (45.2-47.3) | |
+| Dispatch left out | 37.3 ms | 82 % | 30.5 ms (29.6-31.0) | 15.6 ms |
+| Leaves after the tile's light cull (250) | 37.3 ms | 83 % | 30.9 ms (30.7-31.9) | 15.2 ms |
+| Light loop never entered (1361) | 38.5 ms | 88 % | 33.5 ms (32.6-35.0) | 12.6 ms |
+| Trace region skipped (1437) | 39.6 ms | 88 % | 34.7 ms (28.2-35.3) | 11.4 ms |
+| Shading block skipped (2229) | 51.5 ms | 89 % | 45.8 ms (41.2-47.0) | 0.4 ms |
+| Part of the shading block skipped (2236) | 50.1 ms | 89 % | 43.8 ms (41.3-44.8) | 2.3 ms |
+
+- **Where the time is.** The light cull costs about 0.4 ms and everything outside the light loop about
+  3 ms. The light loop holds 12.6 ms, and 11.4 ms of that is the span the guest itself skips when no
+  lane of the wave traces: 665 of the program's 3,066 instructions, from the branch at index 1437 to
+  its join. The span holds the three `image_bvh_intersect_ray` instructions, the header loads that
+  build the two BVH descriptors, the two-level walk (instances, then triangle lists) with its shared
+  stack in lane reads and writes, and the use of the hit. The two shading-block arms disagree with
+  each other (a part cannot cost more than the whole), so 2 ms is the resolution of this method: each
+  arm is its own compilation, and the record of the doubled lookups (2026-11-14) saw register
+  allocation alone move this program by 15 %.
+- **Corrects the earlier price.** The forced-miss build of 2026-11-09 (23.6 against 24.7 ms a call)
+  priced the node visits after the first one, not the trace: the header loads, the first visit and
+  the lane exchanges ran in both arms. "A host-written traversal is worth about 1 ms" in the record
+  below is withdrawn; the trace region is 11.4 of the program's 15.6 ms in this scene.
+- **What it bounds.** With the region left out the frame is 39.6 ms (25 fps), where the causal test
+  below shows the graphics command thread setting the frame. 30 fps still needs both: engine work at
+  or under about 30 ms a frame and 6 ms less command processing.
+- **Not measured.** How the 11.4 ms divide between the address lookups of the header loads, the node
+  visits and the split-wave exchanges; how many light iterations trace per tile and how many nodes a
+  trace visits in this scene (the 2026-10-30 counts are from another window); the forced-miss arm in
+  this scene. The arms change the picture (lighting on and off every cycle); no image was scored.
+- **Discarded run.** The first attempt started the arms at a fixed 201 s. Boot was slow, the hub
+  loaded during the first cycle, each first use of a variant stalled the command thread for 1-3 s
+  while it compiled, and the run ended at 231 s on the known intermittent guest jump to address 0
+  (`rip 0x9004a0c3e`). The probe was then anchored to the program's first dispatch.
+
 ## Robot platformer: the GPU limits the frame with the lighting program, command processing without it (2026-11-14, causal test)
 
 Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
@@ -49,7 +96,8 @@ the arm and are left out.
 - **Discarded runs.** A first four-arm run with 5 s blocks and 3.9 ms a frame placed nothing: live
   input moved the scene (567 draws a frame, another cinematic at the end). One run stopped at 160 s
   on the title's own buffer-full abort recorded below, before the probe window.
-- **Open.** Which region of `0x3666fa39` holds its 16.5 ms. The per-call shader input analysis and
+- **Open.** The region of `0x3666fa39` that holds its GPU time is priced in the record above; what
+  inside that region costs it is not. The per-call shader input analysis and
   the replay worker's poll are host costs that a memo and a shorter poll would remove; neither is
   measured as a frame-rate gain while the GPU sets the frame.
 
@@ -86,12 +134,13 @@ once a frame in every block.
   reflection lookups and two storage-image stores. Its three intersection instructions sit inside
   the light loop, share one wave-wide stack through lane reads and writes, and only bend a probe
   lookup direction for glossy pixels; every lane's result depends on its own ray alone. The record of
-  2026-11-09 below priced the traversal at about 1 ms of 24 a call. Earlier records call the program
-  "the BVH kernel"; that names a small part of it. A host-written traversal is therefore worth about
-  1 ms, and a host-written copy of the whole program would be a transcription of the guest program,
-  which the data boundary keeps out of the repository.
-- **Not measured.** Which region of the program holds the 15.7 ms. The command path without the
-  program is profiled in the causal-test record above.
+  2026-11-09 below priced the node visits after the first at about 1 ms of 24 a call (forced misses);
+  the region-pricing record above measures the whole trace region at 11.4 of the program's 15.6 ms.
+  Earlier records call the program "the BVH kernel"; the trace is 665 of its 3,066 instructions and
+  most of its GPU time. A host-written copy of the whole program would be a transcription of the
+  guest program, which the data boundary keeps out of the repository.
+- **Measured since.** The region that holds the time: region-pricing record above. The command path
+  without the program is profiled in the causal-test record above.
 
 ## Robot platformer: where the GPU frame goes in dunes gameplay (2026-11-14, measured)
 
@@ -379,7 +428,8 @@ from a compute dispatch without running it when its program contains `ImageBvhIn
   processing a frame, so no GPU-side change alone passes about 26-28 fps here.
 - **What stays possible.** Every intersection reporting a miss keeps all outputs written; the record of
   2026-11-09 below ("paired kernel measurement") priced it at about 1 ms of 24 per call of the heavy
-  program, because the traversal is a small part of it. The title's own renderer selection through a game
+  program. That is the price of the node visits after the first, not of the trace: the trace region as
+  a whole is 11.4 of the program's 15.6 ms (region-pricing record, 2026-11-14). The title's own renderer selection through a game
   patch is the other route and is the guest's configuration; its image was not verified ("Game patch
   trial and geometry cost", 2026-11-01, below).
 
@@ -1353,7 +1403,9 @@ added for the last run.
   to 20.4 ms per frame; not traced.
 - **Where the kernel spends its time.** A temporary build that forces a miss
   at every BVH node ran the kernel at 23.6 against 24.7 ms per call in the same
-  scene, so the traversal costs about 1-2 ms. The rest is straight-line
+  scene, so the node visits after the first cost about 1-2 ms (the trace
+  region as a whole is priced in the 2026-11-14 region record: 11.4 of
+  15.6 ms). The rest was read then as straight-line
   shading (about 1,550 VALU instructions), split-wave exchanges and register
   spills (8 KB of scratch per thread); the kernel is latency-bound. At
   960x540 internal resolution (game patch, not strict) it takes 6.45 ms.
