@@ -696,7 +696,7 @@ so where the robot stands depends on how long the loads took).
   clock was comparable. One run per arm; an unrelated compiler ran during parts of both.
 - **Storage placement census and one device-local A/B (2026-11-15, native, dunes route).** Placement
   is closed on this route as a fps lever: the exposed time is under 9 ms a frame, and the one program
-  tested was not faster in device-local memory.
+  tested ran no faster in device-local memory where the two arms could be compared.
   - Census (one run, 310 frames in the last 15 s). A temporary count of the storage range every
     program binds, by placement, was joined to per-program GPU stamps. Draws are keyed by vertex
     program. Bound range is not bytes read, and every stamp is an upper bound.
@@ -708,23 +708,25 @@ so where the robot stands depends on how long the loads took).
     - No program bound a storage object, the class the 2026-10-29 probe moved; every byte was an
       in-place import or a small per-submit copy.
     - `0x874bd13f` (2 storage slots), `0xbf8ee9fc` (1) and `0xe1b1315d` (1) took 7.1 ms of compute a
-      frame. They bind storage, but their slots fall in none of the counted classes; what those slots
-      are and where they live is not established. `0xff2adfc8` binds no storage.
+      frame. In the counted classes they bound under 0.05 MiB per 5 s, the print resolution; what
+      their slots are and where they live is not established. `0xff2adfc8` binds no storage.
     - An unrelated compiler ran during part of that run.
-  - A/B on `0x61f4e366`, the largest exposed program. A temporary probe copied all four of its
-    descriptor-bound slots into device-local memory before each dispatch and bound the copies: 32 B,
-    4.5 MiB read-only, and 1.5 MiB and 16 MiB written. The written slots were copied back after the
-    dispatch, outside the stamps, and the log showed every slot moved from host-cached to device-local
-    memory. The route diverged between the arms (the control reached a cutscene, the probe stayed in
-    gameplay), so per-call time is compared within the kernel's two cost modes.
-    - Heavy mode: 37-52 us per group in the control (two 5 s windows) and 45 in the probe (one
-      window), so device-local memory did not make it faster.
-    - Light mode: 2.6-4.8 against 1.6-8.1 us per group.
-    - Ceiling: the saving is at most exposure x (1 - 1/k). With about 8.4 ms exposed, reaching 5 ms a
-      frame needs k of about 3 or more, which the heavy mode rules out. The light mode allows no
-      verdict either way.
-    - One run per arm. The probe's capture shows a different scene, so it was not compared pixel by
-      pixel.
+  - A/B on `0x61f4e366`, the largest exposed program. A temporary probe copied four of its five
+    storage slots, the descriptor-bound ones, into device-local memory before each dispatch and bound
+    the copies: 32 B, 4.5 MiB read-only, and 1.5 MiB and 16 MiB written. Its by-address range stayed
+    in system memory. The written slots were copied back after the dispatch, outside the stamps. The
+    log showed the four slots moved from host-cached to device-local memory for the first ten calls;
+    later calls were not logged. The route diverged between the arms: the control reached a cutscene
+    and the probe stayed in gameplay.
+    - At the matched moment, the first 5 s window in which `0x3666fa39` runs, the kernel took
+      1.24 ms per call in the control and 1.25 in the probe.
+    - In the probe's gameplay windows it took 0.10-0.17 ms per call. An earlier no-shadow run in the
+      same gameplay held it below the 8th-ranked program, under about 0.2-0.3 ms per call, so those
+      windows agree with system memory.
+    - Ceiling: the saving is at most exposure x (1 - 1/k). With about 8.4 ms exposed, saving 5 ms a
+      frame needs k of about 3 or more, and neither comparison shows that.
+    - One run per arm. The probe's output was not verified (its capture shows a different scene), and
+      a kernel reading stale data would also run faster.
 - **Register spills across the title's compute programs (offline, 2026-11-14).** The 105 compute
   pipeline recipes recorded for the title (translator store t215) compiled on ANV: 60 spill. Width 16:
   60 recipes, 15 of them with 870-1,309 spills and 3,589-5,927 fills; width 8: 39, the BVH kernel's

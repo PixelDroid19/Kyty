@@ -1761,9 +1761,9 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     group counts ([robot platformer](../titles/robot-platformer.md)).
     On the same route no program bound a storage object, the class this probe
     moved; system-memory storage is in-place guest imports and small copies.
-    A device-local shadow of every slot of the largest exposed program, written
-    slots copied back after the dispatch, left its heavy-mode cost per thread
-    group unchanged (45 against 37-52 us).
+    A device-local shadow of the largest exposed program's descriptor-bound
+    slots, with written slots copied back after the dispatch, left its cost
+    unchanged at the one matched moment (1.25 against 1.24 ms per call).
 
 ## Crash evidence read only for a reported fault (2026-10-23)
 
