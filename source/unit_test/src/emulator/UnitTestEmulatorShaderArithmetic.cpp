@@ -987,6 +987,20 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	Equal(equal(kOne, 0xbff0000000000000ull, 0u, 0u, 1u << 30u), 1u, "neg flips the sign of a constant source");
 	Equal(equal(kTwo, 0xc000000000000000ull, 0u, 1u << 8u), 1u, "abs clears the sign of a VGPR source");
 	Equal(equal(kTwo, 0xc000000000000000ull, 0u), 0u, "without abs the sign stays");
+	// The VOPC encoding of the same compares: src0 any source, vsrc1 a VGPR pair, VCC destination.
+	const auto vopc = [&](uint32_t opcode, uint32_t src0, uint64_t v01, uint64_t v23)
+	{
+		const Program program(Emit(Parse({(0x3eu << 25u) | (opcode << 17u) | (2u << 9u) | src0, kEnd}, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", static_cast<uint32_t>(v01)}, {"%v1", static_cast<uint32_t>(v01 >> 32u)},
+		                    {"%v2", static_cast<uint32_t>(v23)}, {"%v3", static_cast<uint32_t>(v23 >> 32u)}, {"%vcc_lo", 0u},
+		                    {"%vcc_hi", 0u}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", 1u}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   "%vcc_lo") &
+		       1u;
+	};
+	Equal(vopc(0x22u, 256u, kTwoBits, kTwoBits), 1u, "vopc f64 equal of two VGPR pairs");
+	Equal(vopc(0x22u, 256u, kTwoBits, kOneBits | 1u), 0u, "vopc f64 equal reads the low word of vsrc1");
+	Equal(vopc(0x21u, kOne, 0u, kTwoBits), 1u, "vopc f64 less-than of inline 1.0 and a VGPR pair");
 	const auto convert = [&](uint32_t source, uint32_t literal)
 	{
 		std::vector<uint32_t> words = {(0x3fu << 25u) | (16u << 17u) | (0x0Fu << 9u) | source};
