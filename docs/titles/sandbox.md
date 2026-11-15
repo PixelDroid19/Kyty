@@ -14,19 +14,25 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   `VK_ERROR_DEVICE_LOST` on queue 8 (`GraphicsRenderCommandBuffer.cpp`, fence status of a submission slot). The
   other two runs reached and held the world. The kernel log of the previous three days has no other timed-out job
   of the emulator. The symptom matches the record of 2026-10-23 below, whose cause was fixed.
-- **Hung batch (device core dump).** The engine stopped inside driver-internal work, not a guest draw or
+- **Hung batch (device core dump, one unverified decode pass).** The engine stopped inside driver-internal work, not a guest draw or
   dispatch: a flat-colour clear drawn as a rectangle, a pipeline flush, then the state of a second rectangle whose
   pixel shader fetches texels and writes them out (an image copy). Both shaders are straight-line code, the batch
   has no semaphore wait, and the engine reported no page fault. The surface states of the copy were not decoded, so
-  the images involved are not named.
+  the images involved are not named; command opcodes were identified from memory and the batch was not walked
+  past offset 0x980. The shape matches the flip path that clears a flip source never written and then blits it to
+  the swapchain image (`Utils.cpp`), as well as a staging upload; which one it is was not decoded.
 - **Not established.** Which change, if any, is involved. The quiet kernel log predates two commits that changed
   behaviour: db6d7c132 (staging buffers of image fills reused after completion, a texture-load path) and fc40c5e86
-  (width-neutrality verdicts shared between vertex programs with identical content). Four runs used both; one hung.
+  (width-neutrality verdicts shared between vertex programs with identical content). Five runs used db6d7c132, four
+  of them also fc40c5e86 (one under the validation layer); one hung. An older intermittent is also possible: the
+  mechanical-fist platformer's hang (about one run in six, 2026-11-01/02) was a job that also began with driver
+  rectangle operations.
   A run with the Vulkan validation layer reached and held the world with no reset. That run is weak evidence; its
   only report is the format defect below.
 - **Found on the way.** The validation layer reports `VUID-vkCmdDrawIndexed-format-07753` from the first frames:
   a sampled image declared with an unsigned-integer component type is bound to an `R16G16B16A16_SFLOAT` view
-  (set 1, binding 6). The read is undefined behaviour on any driver. Not fixed; direction: compare the guest T#
+  (set 1, binding 6). Whether that slot is read is not established: an empty bank is left unpadded, so index 0 may belong to a bank the
+  shader never samples. Not fixed; direction: compare the guest T#
   number format with the view format chosen for it and the sampled type the translator declares.
 - **Direction.** Decode the copy's surface states in the saved dump to name its source and target, and repeat the
   route a few times with and without db6d7c132's reuse to see whether the rate moves.

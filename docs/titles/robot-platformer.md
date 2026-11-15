@@ -180,7 +180,12 @@ claim; the patch is not shipped and its picture was not compared against the unp
 - **Command work per draw is not constant.** The same draw count costs 35.9 us per draw at
   1920x1080 and 27.8 us at 1280x720, with every stage lower by a similar share (state setup 10.5
   against 8.2, binding 14.8 against 12.2). The cause is not established; the thread sleeps in fence
-  waits for 6.4 ms against 3.1 ms per frame.
+  waits for 6.4 ms against 3.1 ms per frame. Later check (2026-11-15, dunes route at 1920x1080): it is not
+  the host slowing an idle thread. The busiest emulator thread ran at 4.5-5.1 GHz in every second, with no relation
+  between its clock and the cost per draw (r = 0.23), nor with a busy SMT sibling or core migrations (|r| < 0.1).
+  Within one draw band the cost per draw falls as the engine gets busier (r = -0.91 to -0.95 in four runs): the
+  costly seconds are the ones where the command thread limits the GPU. In them every stage rises, most of all
+  texture and storage descriptors and state setup, which points to the draws themselves rather than the host.
 - **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
   less GPU work, and the command thread, which runs 33.4 ms for the same draw count once the GPU
   stops limiting it (second row), has no margin left under 33.3 ms. The measured GPU levers are the

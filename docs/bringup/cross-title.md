@@ -6802,8 +6802,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   rate as a default-off option.
 - **Read.** Its per-frame preparation takes the game's depth buffer and motion vectors, with camera near, far and
   field of view; the interpolation pass always runs the motion-vector pass, and optical flow on the colour only
-  complements it. No colour-only mode exists. The component can run on application-owned images, without its
-  swapchain wrapper.
+  complements it (the component asserts both inputs). No colour-only mode was found. The component can run on application-owned images, without its
+  swapchain wrapper. The fork's own readme names frame interpolation as the one feature it did not port to Linux.
 - **Verdict.** The emulator sees neither which guest target holds motion vectors nor the camera; finding them means
   recognising one title's buffers, which the no-title-specific rule forbids. Not built. Even if it were, it would
   raise only the presented rate and add GPU work to scenes that are already GPU-bound.
