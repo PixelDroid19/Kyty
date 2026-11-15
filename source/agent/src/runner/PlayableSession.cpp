@@ -17,6 +17,23 @@ namespace fs = std::filesystem;
 constexpr size_t kMaxRetainedCaptureBytes = 32u * 1024u * 1024u;
 constexpr size_t kMaxBaselineBytes        = 4u * 1024u * 1024u;
 
+// The message of the first error-kind entry whose code is `code`: the timeline keeps the detail the gate code drops.
+std::string ErrorMessageFor(const std::string& code, const Json& events, const Json& last_error)
+{
+	if (last_error.IsObject() && Strip(ValueText(FirstTruthy(last_error["code"], ""))) == code)
+	{
+		return TruncateCodePoints(ValueText(FirstTruthy(last_error["message"], "")), 240);
+	}
+	for (const Json& event: events.Items())
+	{
+		if (event.IsObject() && Strip(ValueText(FirstTruthy(event["code"], ""))) == code)
+		{
+			return TruncateCodePoints(ValueText(FirstTruthy(event["message"], "")), 240);
+		}
+	}
+	return {};
+}
+
 const std::vector<std::string>& PlayableOptionalKeys()
 {
 	static const std::vector<std::string> keys = {
@@ -228,12 +245,16 @@ bool PlayableSession::ObserveErrors(const std::string& stage)
 			continue;
 		}
 		const Json&       result = ExtractResult(reply.body);
-		const std::string error  = FirstActionableError(FirstTruthy(result["events"], Json::MakeArray()),
-		                                                FirstTruthy(result["event"], Json::MakeObject()));
+		const Json        events     = FirstTruthy(result["events"], Json::MakeArray());
+		const Json        last_error = FirstTruthy(result["event"], Json::MakeObject());
+		const std::string error      = FirstActionableError(events, last_error);
 		if (!error.empty() && m_first_error.empty())
 		{
 			m_first_error = error;
-			m_timeline.Push(TimelineEvent(Elapsed(), "runtime_error").Set("stage", stage).Set("error", error));
+			m_timeline.Push(TimelineEvent(Elapsed(), "runtime_error")
+			                    .Set("stage", stage)
+			                    .Set("error", error)
+			                    .Set("message", ErrorMessageFor(error, events, last_error)));
 		}
 	}
 	if (!observed)
