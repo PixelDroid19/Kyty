@@ -485,7 +485,9 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 		// the upload, so a write racing the upload advances its page again and
 		// is copied next time. Only an update stores them.
 		std::vector<uint64_t> page_generations;
-		if (page_fault_tracking && o.object.type == GpuMemoryObjectType::StorageBuffer && dirty_read[0].tracked)
+		const bool page_runs_object =
+		    o.object.type == GpuMemoryObjectType::StorageBuffer || o.object.type == GpuMemoryObjectType::Texture;
+		if (page_fault_tracking && page_runs_object && dirty_read[0].tracked)
 		{
 			auto& tracker = GpuDirtyPageTracker::Instance();
 			page_generations.resize(tracker.PageCount(h.block.vaddr[0], h.block.size[0]));
@@ -561,7 +563,11 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			// notification, which advances their generation.
 			const auto runs = label_update ? std::vector<GpuByteRun> {}
 			                               : ChangedPageRuns(o.page_generations, page_generations, h.block.vaddr[0], h.block.size[0]);
-			if (runs.empty() || !StorageBufferUploadRuns(ctx, o.object.obj, h.block.vaddr[0], h.block.size[0], runs))
+			const bool runs_uploaded =
+			    !runs.empty() && (o.object.type == GpuMemoryObjectType::Texture
+			                          ? TextureUploadRuns(ctx, o.params, o.object.obj, h.block.vaddr[0], h.block.size[0], runs)
+			                          : StorageBufferUploadRuns(ctx, o.object.obj, h.block.vaddr[0], h.block.size[0], runs));
+			if (!runs_uploaded)
 			{
 				o.update_func(ctx, o.params, o.object.obj, stable_buffer_source_ready ? upload_vaddr : h.block.vaddr, h.block.size,
 				              h.block.vaddr_num);

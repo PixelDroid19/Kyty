@@ -89,6 +89,12 @@ struct TextureSurfaceCopyArrayRange
 
 [[nodiscard]] bool TextureBlockDumpSpecMatches(const char* spec, uint32_t width, uint32_t height, uint64_t vaddr);
 
+// Re-uploads only the layers of a 2D-array texture whose guest bytes lie in
+// `runs` (offsets from vaddr). False when the texture is not such an array or
+// a run leaves it; the caller then uploads the whole texture.
+[[nodiscard]] bool TextureUploadRuns(GraphicContext* ctx, const uint64_t* params, void* obj, uint64_t vaddr, uint64_t size,
+                                     const std::vector<GpuByteRun>& runs);
+
 [[nodiscard]] bool TextureGetSurfaceCopyArrayRange(uint8_t resource_type, uint32_t depth, uint32_t base_array,
                                                    uint32_t levels, uint32_t source_layers,
                                                    TextureSurfaceCopyArrayRange* range);

@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/Tile.h"
 
 #include <cstdint>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -45,6 +46,11 @@ struct Gen5TextureArrayLayout
 // path so a 6-face mip chain does not require a linear allocation of every layer.
 [[nodiscard]] bool Gen5DetileTextureArrayLayer(void* dst, uint64_t dst_size, const void* src, uint64_t src_size,
                                                const Gen5TextureArrayLayout& layout, uint32_t layer);
+// Marks in `touched` (one entry per layer) the layers whose tiled bytes overlap
+// [offset, offset + bytes) of the array allocation. False when the range is
+// empty or leaves the allocation.
+[[nodiscard]] bool Gen5MarkTextureArrayLayersTouched(const Gen5TextureArrayLayout& layout, uint64_t offset, uint64_t bytes,
+                                                     std::vector<uint8_t>* touched);
 
 // Vulkan buffer-image copies for a detiled array. pitch_texels is
 // VkBufferImageCopy::bufferRowLength (texels, including BC block rounding).
