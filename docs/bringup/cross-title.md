@@ -2834,7 +2834,9 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 - **Working set (2026-11-15).** Store loads run on the ring thread, so a
   slow disk stalls rendering (1-2 s per read under a discard backlog in
   `PPSA21567 - Astro Bot`). The store now records each title's loaded
-  entries in a manifest in its compute-recipe directory, and the next
+  entries in a manifest in its compute-recipe directory (this session's
+  loads first, then carried names; rewritten only when the set changed),
+  and the next
   session reads them into memory on a background thread (at most 4,096
   entries and 256 MiB, freed on use, validated like a file read). Evidence
   is in the robot platformer record "Freezes from the pipeline cache and

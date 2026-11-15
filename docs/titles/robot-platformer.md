@@ -7203,8 +7203,10 @@ with `compress=zstd:3,ssd,discard=async`.
   the files into the page cache first did not hold: their pages were evicted during the run, and the stalls moved to
   metadata reads. A diagnostic build that read the run's 358 entries (64.1 MB, 147 ms) into process memory before
   use cut the loads to 36 ms in total (3 ms at most) with no ring-thread stall; that run also had fewer discards
-  (8 s in total), so the host did not match. The shipped version records the entries a title loads, in first-use
-  order, in a manifest inside the title's compute-recipe directory (it follows the translator version). The next
+  (8 s in total), so the host did not match. The shipped version records the entries a title loads in a manifest
+  inside the title's compute-recipe directory (it follows the translator version): this session's loads in
+  first-use order, then the names carried from earlier sessions. It is rewritten only when the set changed; a
+  third run of the same route left it untouched. The next
   session reads the listed entries into memory on a background thread, bounded to 4,096 entries and 256 MiB. Each
   entry is freed when it is loaded and passes the same checks as a file read. Same route, the shipped store in a build
   with diagnostic lookup timers, store pages dropped from the page cache before the second run:
@@ -7239,5 +7241,6 @@ with `compress=zstd:3,ssd,discard=async`.
 - **Still open.** In one run, entering the dunes level dropped to 3 fps for about 3 s, with the ring thread reading
   SPIR-V store files, translating shaders, creating pipelines and creating textures at that point. How much of it was
   disk wait was not measured. Drops to 6-14 fps around 80, 92 and 95 s repeat with the working set read ahead, so
-  they are not store reads; their cause is not identified. Whether the driver's own shader cache, written by the
+  they are not store reads; the 79-80 s drop also stays (7.9 fps) with the native capture moved from 75 to 86 s, so
+  it is not the capture. Their cause is not identified. Whether the driver's own shader cache, written by the
   driver rather than the emulator, also waits on the disk was not checked.
