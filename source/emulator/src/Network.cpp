@@ -9,12 +9,14 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cinttypes>
 #include <cstddef>
@@ -4438,7 +4440,24 @@ int KYTY_SYSV_ABI HttpGetLastErrno(int req_id, int* err_num)
 
 namespace NetCtl {
 
+constexpr int NET_CTL_ERROR_CALLBACK_MAX  = -2143215357; /* 0x80412103 */
+constexpr int NET_CTL_ERROR_ID_NOT_FOUND  = -2143215356; /* 0x80412104 */
+constexpr int NET_CTL_ERROR_INVALID_ID    = -2143215355; /* 0x80412105 */
+constexpr int NET_CTL_ERROR_INVALID_ADDR  = -2143215353; /* 0x80412107 */
 constexpr int NET_CTL_ERROR_NOT_CONNECTED = -2143215352; /* 0x80412108 */
+
+constexpr int NET_CTL_EVENT_TYPE_DISCONNECTED = 1;
+constexpr int NET_CTL_EVENT_TYPE_IPOBTAINED   = 3;
+
+struct NetCtlCallbackSlot
+{
+	NetCtlCallback func       = nullptr;
+	void*          arg        = nullptr;
+	int            last_event = 0;
+};
+
+static std::mutex                            g_net_ctl_callbacks_mutex;
+static std::array<NetCtlCallbackSlot, 8>     g_net_ctl_callbacks;
 
 LIB_NAME("NetCtl", "NetCtl");
 
@@ -4518,10 +4537,37 @@ int KYTY_SYSV_ABI NetCtlGetNatInfo(NetCtlNatInfo* nat_info)
 	return Net::CopyGuestOutput(nat_info, reinterpret_cast<const uint8_t*>(&staged), sizeof(staged));
 }
 
+// A callback learns the connection state on the first check after it registers, then on every change.
 int KYTY_SYSV_ABI NetCtlCheckCallback()
 {
 	PRINT_NAME();
 
+	const int event = Config::NetworkConnected() ? NET_CTL_EVENT_TYPE_IPOBTAINED : NET_CTL_EVENT_TYPE_DISCONNECTED;
+
+	std::array<NetCtlCallbackSlot, g_net_ctl_callbacks.size()> due {};
+	{
+		std::lock_guard lock(g_net_ctl_callbacks_mutex);
+		for (size_t i = 0; i < g_net_ctl_callbacks.size(); i++)
+		{
+			auto& slot = g_net_ctl_callbacks[i];
+			if (slot.func == nullptr || slot.last_event == event)
+			{
+				continue;
+			}
+			slot.last_event = event;
+			due[i]          = slot;
+		}
+	}
+
+	// The guest callback may call back into NetCtl, so it runs without the lock.
+	for (const auto& slot: due)
+	{
+		if (slot.func != nullptr)
+		{
+			(void)Emulator::GuestRuntimePort::Invoke(reinterpret_cast<uint64_t>(slot.func), static_cast<uint64_t>(event),
+			                               reinterpret_cast<uint64_t>(slot.arg), 0);
+		}
+	}
 	return OK;
 }
 
@@ -4536,7 +4582,57 @@ int KYTY_SYSV_ABI NetCtlGetState(int* state)
 	return Net::CopyGuestOutput(state, reinterpret_cast<const uint8_t*>(&staged), sizeof(staged));
 }
 
-int KYTY_SYSV_ABI NetCtlRegisterCallback(NetCtlCallback func, void* /*arg*/, int* cid)
+int KYTY_SYSV_ABI NetCtlRegisterCallback(NetCtlCallback func, void* arg, int* cid)
+{
+	PRINT_NAME();
+
+	if (func == nullptr || cid == nullptr)
+	{
+		return NET_CTL_ERROR_INVALID_ADDR;
+	}
+
+	std::lock_guard lock(g_net_ctl_callbacks_mutex);
+	for (size_t i = 0; i < g_net_ctl_callbacks.size(); i++)
+	{
+		auto& slot = g_net_ctl_callbacks[i];
+		if (slot.func != nullptr)
+		{
+			continue;
+		}
+		const int staged = static_cast<int>(i);
+		if (Net::CopyGuestOutput(cid, reinterpret_cast<const uint8_t*>(&staged), sizeof(staged)) != OK)
+		{
+			return NET_CTL_ERROR_INVALID_ADDR;
+		}
+		slot = {func, arg, 0};
+		return OK;
+	}
+	return NET_CTL_ERROR_CALLBACK_MAX;
+}
+
+int KYTY_SYSV_ABI NetCtlUnregisterCallback(int cid)
+{
+	PRINT_NAME();
+
+	KYTY_LOG_DEBUG("\t cid = %d\n", cid);
+
+	if (cid < 0 || static_cast<size_t>(cid) >= g_net_ctl_callbacks.size())
+	{
+		return NET_CTL_ERROR_INVALID_ID;
+	}
+
+	std::lock_guard lock(g_net_ctl_callbacks_mutex);
+	auto&           slot = g_net_ctl_callbacks[cid];
+	if (slot.func == nullptr)
+	{
+		return NET_CTL_ERROR_ID_NOT_FOUND;
+	}
+	slot = {};
+	return OK;
+}
+
+// The IPv6 table is not delivered to, so its callbacks keep the single id they always had.
+int KYTY_SYSV_ABI NetCtlRegisterCallbackV6(NetCtlCallback func, void* /*arg*/, int* cid)
 {
 	PRINT_NAME();
 

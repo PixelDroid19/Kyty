@@ -2,6 +2,7 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <future>
 #include <thread>
+#include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
 #define KYTY_NETWORK_TEST_HOST_EPOLL 1
@@ -173,6 +175,23 @@ Loader::SymbolResolve NetCtlFunction(const char16_t* nid)
 	return query;
 }
 
+constexpr int NET_CTL_ERROR_ID_NOT_FOUND = static_cast<int>(0x80412104u);
+constexpr int NET_CTL_ERROR_INVALID_ID   = static_cast<int>(0x80412105u);
+constexpr int NET_CTL_ERROR_INVALID_ADDR = static_cast<int>(0x80412107u);
+
+std::vector<int> g_net_ctl_events;
+
+void KYTY_SYSV_ABI RecordNetCtlEvent(int event, void* /*arg*/)
+{
+	g_net_ctl_events.push_back(event);
+}
+
+uint64_t KYTY_SYSV_ABI InvokeNetCtlCallback(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t /*arg2*/)
+{
+	reinterpret_cast<Libs::Network::NetCtl::NetCtlCallback>(target)(static_cast<int>(arg0), reinterpret_cast<void*>(arg1));
+	return 0;
+}
+
 Loader::SymbolResolve NpManagerFunction(const char16_t* nid)
 {
 	Loader::SymbolResolve query {};
@@ -323,8 +342,10 @@ TEST(EmulatorNetwork, NetCtlNatInfoAndScalarOutputsUseGuestMemory)
 	EXPECT_EQ(nat_info->mapped_addr, 0x7f000001u);
 	ASSERT_EQ(get_state(state), 0);
 	EXPECT_EQ(*state, 3);
-	ASSERT_EQ(register_callback(nullptr, nullptr, cid), 0);
-	EXPECT_EQ(*cid, 1);
+	ASSERT_EQ(register_callback(RecordNetCtlEvent, nullptr, cid), 0);
+	EXPECT_GE(*cid, 0);
+	EXPECT_LT(*cid, 8);
+	EXPECT_EQ(Libs::Network::NetCtl::NetCtlUnregisterCallback(*cid), 0);
 
 	*nat_info = {0, -1, -1, 0};
 	EXPECT_EQ(get_nat(reinterpret_cast<Libs::Network::NetCtl::NetCtlNatInfo*>(nat_info)),
@@ -371,7 +392,7 @@ TEST(EmulatorNetwork, NetCtlSiblingOutputsRejectNonGuestFreedAndReadOnlyMemory)
 	EXPECT_EQ(get_nat(reinterpret_cast<Libs::Network::NetCtl::NetCtlNatInfo*>(&host_nat)),
 	          Kyty::Libs::Network::NET_ERROR_EFAULT);
 	EXPECT_EQ(get_state(&host_state), Kyty::Libs::Network::NET_ERROR_EFAULT);
-	EXPECT_EQ(register_callback(nullptr, nullptr, &host_cid), Kyty::Libs::Network::NET_ERROR_EFAULT);
+	EXPECT_EQ(register_callback(RecordNetCtlEvent, nullptr, &host_cid), NET_CTL_ERROR_INVALID_ADDR);
 	EXPECT_EQ(host_nat.stun_status, -1);
 	EXPECT_EQ(host_state, 0x5a5a5a5a);
 	EXPECT_EQ(host_cid, 0x5a5a5a5a);
@@ -382,8 +403,8 @@ TEST(EmulatorNetwork, NetCtlSiblingOutputsRejectNonGuestFreedAndReadOnlyMemory)
 	EXPECT_EQ(get_nat(reinterpret_cast<Libs::Network::NetCtl::NetCtlNatInfo*>(stale_output)),
 	          Kyty::Libs::Network::NET_ERROR_EFAULT);
 	EXPECT_EQ(get_state(reinterpret_cast<int*>(stale_output)), Kyty::Libs::Network::NET_ERROR_EFAULT);
-	EXPECT_EQ(register_callback(nullptr, nullptr, reinterpret_cast<int*>(stale_output)),
-	          Kyty::Libs::Network::NET_ERROR_EFAULT);
+	EXPECT_EQ(register_callback(RecordNetCtlEvent, nullptr, reinterpret_cast<int*>(stale_output)),
+	          NET_CTL_ERROR_INVALID_ADDR);
 
 	const uint64_t read_only_output = AllocateGuestPage();
 	ASSERT_NE(read_only_output, 0u);
@@ -398,13 +419,52 @@ TEST(EmulatorNetwork, NetCtlSiblingOutputsRejectNonGuestFreedAndReadOnlyMemory)
 	EXPECT_EQ(get_nat(reinterpret_cast<Libs::Network::NetCtl::NetCtlNatInfo*>(nat_info)),
 	          Kyty::Libs::Network::NET_ERROR_EFAULT);
 	EXPECT_EQ(get_state(state), Kyty::Libs::Network::NET_ERROR_EFAULT);
-	EXPECT_EQ(register_callback(nullptr, nullptr, cid), Kyty::Libs::Network::NET_ERROR_EFAULT);
+	EXPECT_EQ(register_callback(RecordNetCtlEvent, nullptr, cid), NET_CTL_ERROR_INVALID_ADDR);
 	ASSERT_TRUE(Core::VirtualMemory::Protect(read_only_output, Core::VirtualMemory::GetPageSize(),
 	                                         Core::VirtualMemory::Mode::ReadWrite));
 	EXPECT_EQ(nat_info->stun_status, -1);
 	EXPECT_EQ(*state, 0x5a5a5a5a);
 	EXPECT_EQ(*cid, 0x5a5a5a5a);
 	EXPECT_TRUE(Core::VirtualMemory::Free(read_only_output));
+}
+
+TEST(EmulatorNetwork, NetCtlCallbackLearnsTheStateOnceAndUnregisters)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	ASSERT_TRUE(Config::NetworkConnected());
+
+	::Kyty::Emulator::GuestRuntimePort::Provider provider {};
+	provider.invoke = InvokeNetCtlCallback;
+	::Kyty::Emulator::GuestRuntimePort::Install(provider);
+
+	const uint64_t guest_output = AllocateGuestPage();
+	ASSERT_NE(guest_output, 0u);
+	auto* const cid = reinterpret_cast<int*>(guest_output);
+
+	EXPECT_EQ(Libs::Network::NetCtl::NetCtlRegisterCallback(nullptr, nullptr, cid), NET_CTL_ERROR_INVALID_ADDR);
+	ASSERT_EQ(Libs::Network::NetCtl::NetCtlRegisterCallback(RecordNetCtlEvent, nullptr, cid), 0);
+
+	// The first check reports the connection, a second one with no change reports nothing.
+	g_net_ctl_events.clear();
+	EXPECT_EQ(Libs::Network::NetCtl::NetCtlCheckCallback(), 0);
+	EXPECT_EQ(Libs::Network::NetCtl::NetCtlCheckCallback(), 0);
+	EXPECT_EQ(g_net_ctl_events, std::vector<int>({3}));
+
+	EXPECT_EQ(Libs::Network::NetCtl::NetCtlUnregisterCallback(*cid), 0);
+	EXPECT_EQ(Libs::Network::NetCtl::NetCtlUnregisterCallback(*cid), NET_CTL_ERROR_ID_NOT_FOUND);
+	EXPECT_EQ(Libs::Network::NetCtl::NetCtlUnregisterCallback(-1), NET_CTL_ERROR_INVALID_ID);
+	EXPECT_EQ(Libs::Network::NetCtl::NetCtlUnregisterCallback(8), NET_CTL_ERROR_INVALID_ID);
+
+	g_net_ctl_events.clear();
+	EXPECT_EQ(Libs::Network::NetCtl::NetCtlCheckCallback(), 0);
+	EXPECT_TRUE(g_net_ctl_events.empty());
+
+	::Kyty::Emulator::GuestRuntimePort::Install({});
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_output));
 }
 
 TEST(EmulatorNetwork, NpManagerHasSignedUpRejectsUnprovenOutputWithoutWriting)

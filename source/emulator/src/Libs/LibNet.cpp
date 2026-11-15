@@ -289,7 +289,8 @@ LIB_DEFINE(InitNet_1_NetCtl)
 	LIB_FUNC("iQw3iQPhvUQ", NetCtl::NetCtlCheckCallback);
 	LIB_FUNC("uBPlr0lbuiI", NetCtl::NetCtlGetState);
 	LIB_FUNC("UJ+Z7Q+4ck0", NetCtl::NetCtlRegisterCallback);
-	LIB_FUNC("1NE9OWdBIww", NetCtl::NetCtlRegisterCallback);
+	LIB_FUNC("Rqm2OnZMCz0", NetCtl::NetCtlUnregisterCallback);
+	LIB_FUNC("1NE9OWdBIww", NetCtl::NetCtlRegisterCallbackV6);
 	LIB_FUNC("obuxdTiwkF8", NetCtl::NetCtlGetInfo);
 }
 

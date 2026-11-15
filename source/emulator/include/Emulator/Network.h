@@ -163,6 +163,8 @@ int KYTY_SYSV_ABI  NetCtlGetNatInfo(NetCtlNatInfo* nat_info);
 int KYTY_SYSV_ABI  NetCtlCheckCallback();
 int KYTY_SYSV_ABI  NetCtlGetState(int* state);
 int KYTY_SYSV_ABI  NetCtlRegisterCallback(NetCtlCallback func, void* arg, int* cid);
+int KYTY_SYSV_ABI  NetCtlUnregisterCallback(int cid);
+int KYTY_SYSV_ABI  NetCtlRegisterCallbackV6(NetCtlCallback func, void* arg, int* cid);
 int KYTY_SYSV_ABI  NetCtlGetInfo(int code, NetCtlInfo* info);
 
 } // namespace NetCtl
