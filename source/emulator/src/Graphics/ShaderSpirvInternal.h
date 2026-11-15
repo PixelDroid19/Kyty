@@ -619,6 +619,8 @@ bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id
 uint64_t operand_f64_constant_bits(const ShaderOperand& op);
 // One word (shift 0 low, 1 high) of a 64-bit float source, with its constant expansion and sign modifiers applied.
 bool operand_load_f64_word(Spirv* spirv, const ShaderOperand& op, const String8& result_id, const String8& index, String8* load, int shift);
+// One word of a signed 64-bit integer source; a literal is sign extended.
+bool operand_load_i64_word(Spirv* spirv, const ShaderOperand& op, const String8& result_id, const String8& index, String8* load, int shift);
 String8 get_scc_check(SccCheck scc_check, int dst_num);
 bool UsesArrayed2dImages(const ShaderBindResources* bind, ShaderTextureUsage usage);
 bool UsesUnsignedIntegerImages(const ShaderBindResources* bind);

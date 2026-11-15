@@ -3799,6 +3799,7 @@ void Spirv::FindConstants()
 					const uint64_t f64_bits = operand_f64_constant_bits(inst.src[i]);
 					AddConstantUint(static_cast<uint32_t>(f64_bits));
 					AddConstantUint(static_cast<uint32_t>(f64_bits >> 32u));
+					AddConstantUint(0xffffffffu);
 				}
 				// MUBUF/MTBUF soffset is OpStore'd into %temp_int_* (signed).
 				// LiteralConstant only registers as Uint via AddConstant; also

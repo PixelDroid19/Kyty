@@ -1008,6 +1008,36 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	std::_Exit(0);
 }
 
+// ISA 6.2 for an integer 64-bit source: an inline float is the double encoding, a literal is zero extended for
+// an unsigned source and sign extended for a signed one.
+[[noreturn]] void RunInt64SourceConstants()
+{
+	Initialize();
+	constexpr uint32_t kLiteral = 255u, kOne = 242u, kInlineZero = 128u;
+	const auto run = [&](const std::vector<uint32_t>& words, const char* destination)
+	{
+		const Program program(Emit(Parse(words), 0xc0u, false, false, true).c_str());
+		uint32_t      scc = 0;
+		return EvaluateScalar(program, 0u, 0u, 0u, 0u, 0u, destination, &scc);
+	};
+	const uint32_t ashr = Sop2Word(0x23u, 2u, kLiteral, kInlineZero);
+	Equal(run({ashr, 0x80000000u, kEnd}, "%s3"), 0xffffffffu, "s_ashr_i64 sign extends a negative literal");
+	Equal(run({ashr, 0x80000000u, kEnd}, "%s2"), 0x80000000u, "s_ashr_i64 keeps the literal low word");
+	Equal(run({ashr, 0x7fffffffu, kEnd}, "%s3"), 0u, "s_ashr_i64 of a positive literal");
+	// A constant shift amount or extract control is the usual encoding of both signed 64-bit ops.
+	const Program shift(Emit(Parse({Sop2Word(0x23u, 2u, 0u, 132u), kEnd}), 0xc0u, false, false, true).c_str());
+	uint32_t      scc = 0;
+	Equal(EvaluateScalar(shift, 0u, 0x80000000u, 0u, 0u, 0u, "%s3", &scc), 0xf8000000u, "s_ashr_i64 by an inline 4");
+	const Program extract(Emit(Parse({Sop2Word(0x2Au, 2u, 0u, kLiteral), (8u << 16u) | 4u, kEnd}), 0xc0u, false, false, true).c_str());
+	Equal(EvaluateScalar(extract, 0x00000ff0u, 0u, 0u, 0u, 0u, "%s3", &scc), 0xffffffffu, "s_bfe_i64 with a literal control");
+	Equal(EvaluateScalar(extract, 0x00000ff0u, 0u, 0u, 0u, 0u, "%s2", &scc), 0xffffffffu, "s_bfe_i64 sign extends the field");
+	const auto move = [](uint32_t source) { return (0x17du << 23u) | (2u << 16u) | (4u << 8u) | source; };
+	Equal(run({move(kOne), kEnd}, "%s3"), 0x3ff00000u, "s_mov_b64 of inline 1.0 is the double high word");
+	Equal(run({move(kOne), kEnd}, "%s2"), 0u, "s_mov_b64 of inline 1.0 is the double low word");
+	Equal(run({move(kLiteral), 0x80000000u, kEnd}, "%s3"), 0u, "s_mov_b64 zero extends a literal");
+	std::_Exit(0);
+}
+
 [[noreturn]] void ParseNotWithNegate()
 {
 	Initialize();
@@ -1658,6 +1688,10 @@ TEST(EmulatorShaderArithmetic, F64SourcesExpandConstantsAndApplySignModifiers)
 	{
 		ASSERT_EXIT(RunF64SourceOperands(stage), ::testing::ExitedWithCode(0), "");
 	}
+}
+TEST(EmulatorShaderArithmetic, Int64SourcesExpandConstantsBySignedness)
+{
+	ASSERT_EXIT(RunInt64SourceConstants(), ::testing::ExitedWithCode(0), "");
 }
 TEST(EmulatorShaderArithmetic, IntegerTernaryRefusesEncodedModifiers)
 {

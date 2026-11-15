@@ -244,7 +244,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Lshr_B64_Sdst2Ssrc02Ssrc1)
 KYTY_RECOMPILER_FUNC(Recompile_SAshrI64_Sdst2Ssrc02Ssrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
-	if (inst.dst.size != 2 || inst.src[0].size != 2 || inst.src[1].size != 1)
+	if (inst.dst.size != 2 || inst.src[0].size != 2 || inst.src[1].size > 1)
 	{
 		return false;
 	}
@@ -266,7 +266,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SAshrI64_Sdst2Ssrc02Ssrc1)
 	String8       load1;
 	String8       load2;
 	if (!operand_load_uint(spirv, inst.src[0], "ashr_source_lo_<index>", index_str, &load0, 0) ||
-	    !operand_load_uint(spirv, inst.src[0], "ashr_source_hi_<index>", index_str, &load1, 1) ||
+	    !operand_load_i64_word(spirv, inst.src[0], "ashr_source_hi_<index>", index_str, &load1, 1) ||
 	    !operand_load_uint(spirv, inst.src[1], "ashr_shift_source_<index>", index_str, &load2))
 	{
 		return false;
@@ -404,7 +404,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_I64_Sdst2Ssrc02Ssrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
 	if (inst.type != ShaderInstructionType::SBfeI64 || inst.format != ShaderInstructionFormat::Sdst2Ssrc02Ssrc1 || inst.src_num != 2 ||
-	    inst.dst.size != 2 || inst.src[0].size != 2 || inst.src[1].size != 1)
+	    inst.dst.size != 2 || inst.src[0].size != 2 || inst.src[1].size > 1)
 	{
 		return false;
 	}
@@ -426,7 +426,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_I64_Sdst2Ssrc02Ssrc1)
 	String8       load1;
 	String8       load2;
 	if (!operand_load_uint(spirv, inst.src[0], "bfei64_source_lo_<index>", index_str, &load0, 0) ||
-	    !operand_load_uint(spirv, inst.src[0], "bfei64_source_hi_<index>", index_str, &load1, 1) ||
+	    !operand_load_i64_word(spirv, inst.src[0], "bfei64_source_hi_<index>", index_str, &load1, 1) ||
 	    !operand_load_uint(spirv, inst.src[1], "bfei64_control_<index>", index_str, &load2))
 	{
 		return false;

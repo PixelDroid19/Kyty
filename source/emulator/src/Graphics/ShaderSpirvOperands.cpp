@@ -1288,7 +1288,14 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 		{
 			if (shift < 0 || shift >= 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift < 0 || shift >= 2 condition ignored (continuing)\n"); }
 
-			if (shift == 0)
+			if (op.type == ShaderOperandType::FloatInlineConstant)
+			{
+				// ISA 6.2: a 64-bit operand takes the double encoding of an inline float.
+				const uint64_t bits = operand_f64_constant_bits(op);
+				*load = String8("%<result_id> = OpCopyObject %uint %<id>")
+				            .ReplaceStr("<id>", spirv->GetConstantUint(static_cast<uint32_t>(shift == 1 ? bits >> 32u : bits)))
+				            .ReplaceStr("<result_id>", raw_id);
+			} else if (shift == 0)
 			{
 				String8 id = spirv->GetConstant(op);
 				*load      = String8("%<result_id> = OpBitcast %uint %<id>")
@@ -1401,6 +1408,20 @@ bool operand_load_f64_word(Spirv* spirv, const ShaderOperand& op, const String8&
 	}
 	if (op.negate) { *load += String8("%<result> = OpBitwiseXor %uint <sign> %uint_0x80000000\n").ReplaceStr("<sign>", sign); }
 	*load = load->ReplaceStr("<abs>", abs_id).ReplaceStr("<raw>", raw_id).ReplaceStr("<result>", result_id).ReplaceStr("<index>", index);
+	return true;
+}
+
+bool operand_load_i64_word(Spirv* spirv, const ShaderOperand& op, const String8& result_id, const String8& index, String8* load, int shift)
+{
+	// ISA 6.2: a literal feeding a signed 64-bit source is sign extended.
+	if (op.type != ShaderOperandType::LiteralConstant || op.size != 2 || shift != 1)
+	{
+		return operand_load_uint(spirv, op, result_id, index, load, shift);
+	}
+	*load = String8("%<result> = OpCopyObject %uint %<word>\n")
+	            .ReplaceStr("<word>", spirv->GetConstantUint((op.constant.u & 0x80000000u) != 0u ? 0xffffffffu : 0u))
+	            .ReplaceStr("<result>", result_id)
+	            .ReplaceStr("<index>", index);
 	return true;
 }
 
