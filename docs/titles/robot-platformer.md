@@ -7244,3 +7244,13 @@ with `compress=zstd:3,ssd,discard=async`.
   they are not store reads; the 79-80 s drop also stays (7.9 fps) with the native capture moved from 75 to 86 s, so
   it is not the capture. Their cause is not identified. Whether the driver's own shader cache, written by the
   driver rather than the emulator, also waits on the disk was not checked.
+- **Excluded: file status calls.** In one profiled run the title's main thread spent about 85 % of its sampled time
+  in the stat call between 89 and 92 s, while the game volume's filesystem driver used 30-50 % of a core with no
+  disk reads and the command-processor thread waited on a lock. A test build resolved an exactly spelled package
+  file with one host lookup (the resolver the APR path already uses) and counted the calls: up to 81 s after launch
+  the title made 27,648 stat calls, 7,382 on the one-lookup path, 752 on existing files that need the full resolve
+  and 19,456 on absent files (it probes numbered variants of its UI files). In that run the calls ran at about 600
+  per second, nearly all absent files, from 66 to 76 s while the title held 32-34 fps, and the drops at 77, 85 and
+  91 s (10, 14 and 9 frames) came after the calls stopped at 81 s. The calls are not the cause of the drops, and
+  the test change was not kept: it reached only 27 % of the calls and showed no measured gain. From 92 s the dunes
+  held 18-22 fps with the GPU 88-94 % busy.
