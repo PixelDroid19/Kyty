@@ -359,6 +359,8 @@ static FileDescriptors* InitializeDescriptors()
 
 // Defined with APR helpers; used by KernelOpen/KernelStat for package font fallback.
 static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name);
+static bool TryResolvePackageFile(const char* guest_path, String* host_path, uint64_t* size);
+static void RememberOdHostPath(const String& guest_path, const String& host_path);
 static int HostErrorFromKernel(int error);
 
 static void sec_to_timespec(KernelTimespec* ts, double sec)
@@ -1805,13 +1807,26 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 
 	KYTY_LOG_DEBUG("\t KernelStat: %s\n", path);
 
-	String     path_s         = String::FromUtf8(path);
-	const auto mapped         = g_mount_points->GetRealFilename(path_s);
-	auto       real_file_name = ResolveGuestDeviceFilename(path_s, ResolveExistingHostFile(path_s, mapped));
-	auto       real_directory = mapped.IsEmpty() ? String() : mapped.FixDirectorySlash();
+	// A title can stat its package files hundreds of times a second; the full resolve below costs several
+	// host lookups per path component on a slow host filesystem.
+	String   real_file_name;
+	uint64_t package_size = 0;
+	bool     is_dir       = false;
+	bool     is_package   = TryResolvePackageFile(path, &real_file_name, &package_size);
+	bool     is_file      = is_package;
+	if (is_package)
+	{
+		RememberOdHostPath(String::FromUtf8(path), real_file_name);
+	} else
+	{
+		String     path_s         = String::FromUtf8(path);
+		const auto mapped         = g_mount_points->GetRealFilename(path_s);
+		real_file_name            = ResolveGuestDeviceFilename(path_s, ResolveExistingHostFile(path_s, mapped));
+		const auto real_directory = mapped.IsEmpty() ? String() : mapped.FixDirectorySlash();
 
-	bool is_dir  = Core::File::IsDirectoryExisting(real_file_name) || Core::File::IsDirectoryExisting(real_directory);
-	bool is_file = Core::File::IsFileExisting(real_file_name);
+		is_dir  = Core::File::IsDirectoryExisting(real_file_name) || Core::File::IsDirectoryExisting(real_directory);
+		is_file = Core::File::IsFileExisting(real_file_name);
+	}
 
 	if (!is_dir && !is_file)
 	{
@@ -1836,7 +1851,7 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 		sb->st_blocks  = 0;
 	} else
 	{
-		sb->st_size    = static_cast<int64_t>(Core::File::Size(real_file_name));
+		sb->st_size    = static_cast<int64_t>(is_package ? package_size : Core::File::Size(real_file_name));
 		sb->st_blksize = 512;
 		sb->st_blocks  = (sb->st_size + 511) / 512;
 
