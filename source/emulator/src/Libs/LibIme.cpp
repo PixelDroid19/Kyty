@@ -146,6 +146,16 @@ static int KYTY_SYSV_ABI ImeSetText(const char16_t* text, uint32_t length)
 	return IME_ERROR_NOT_OPENED;
 }
 
+// sceImeSetCaret — NID WLxUN2WMim8 (caret)
+// Moves the caret of the sceImeOpen panel. As with sceImeSetText, no panel is ever open, and the
+// library checks the panel before the argument.
+static int KYTY_SYSV_ABI ImeSetCaret(const void* caret)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t caret = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(caret));
+	return IME_ERROR_NOT_OPENED;
+}
+
 // sceImeUpdate — NID -4GCfYdNF1s
 // Runs on the title's thread; delivers the queued keyboard events to the keyboard handler.
 static int KYTY_SYSV_ABI ImeUpdate(void* handler)
@@ -189,6 +199,7 @@ LIB_DEFINE(InitIme_1)
 	LIB_FUNC("VkqLPArfFdc", Ime::ImeKeyboardGetInfo);
 	LIB_FUNC("ua+13Hk9kKs", Ime::ImeKeyboardSetMode);
 	LIB_FUNC("ieCNrVrzKd4", Ime::ImeSetText);
+	LIB_FUNC("WLxUN2WMim8", Ime::ImeSetCaret);
 	LIB_FUNC("-4GCfYdNF1s", Ime::ImeUpdate);
 }
 

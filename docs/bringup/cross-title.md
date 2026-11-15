@@ -3494,6 +3494,13 @@ checked against the code; none is hit by a title in the current strict runs.
   implementations agree that it returns `0x80BC0002` (not opened) when no panel is open. Kyty
   implements no `sceImeOpen` panel, and the title had made no unresolved `sceImeOpen` call before,
   so no panel is open. `sceImeSetText` now returns that error.
+- Observed (Intel, strict, PPSA17221 - Minecraft, world-entry route, 2026-11-15): 12 s after the
+  world loaded the run stopped with `can't resolve lazy PLT import: WLxUN2WMim8[Ime_v1]`; the
+  previous run of the same route did not make the call. The NID is `sceImeSetCaret` (hash of the
+  name, checked against the two NIDs above), which moves the caret of the same panel. Independent
+  implementations agree that it returns `0x80BC0002` without an open panel, before checking its
+  pointer. It now returns that error. The next run of the route reached the world and held 60 s;
+  whether that run made the call is not known (console silent).
 
 ## Four-byte render-target micro tile (2026-10-16)
 
