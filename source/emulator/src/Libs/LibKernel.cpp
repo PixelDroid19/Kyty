@@ -1747,6 +1747,7 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("yDBwVAolDgg", Memory::KernelIsStack);
 	LIB_FUNC("7oxv3PPCumo", Memory::KernelReserveVirtualRange);
 	LIB_FUNC("vSMAm3cxYTY", Memory::KernelMprotect);
+	LIB_FUNC("9bfdLIyuwCY", Memory::KernelMtypeprotect);
 	// Posix dual NIDs for the same Orbis memory helpers.
 	LIB_FUNC("YQOfxL4QfeU", Memory::KernelMprotect);
 	LIB_FUNC("UqDGjXA5yUM", Memory::KernelMunmap);

@@ -4068,6 +4068,14 @@ static bool protect_flexible_gpu_owner(uint64_t vaddr, uint64_t size, int prot, 
 	return false;
 }
 
+// The emulator keeps no memory type per range (host caching is fixed), so only the protection changes.
+int KYTY_SYSV_ABI KernelMtypeprotect(const void* addr, size_t len, int mtype, int prot)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t mtype = %d\n", mtype);
+	return KernelMprotect(addr, len, prot);
+}
+
 int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 {
 	PRINT_NAME();
