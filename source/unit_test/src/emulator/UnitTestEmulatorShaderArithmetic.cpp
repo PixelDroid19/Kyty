@@ -1022,6 +1022,39 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	std::_Exit(0);
 }
 
+// VOPC compares decode to the VOP3 translation; one case per family, NaN where the predicate turns on it.
+[[noreturn]] void RunVopcCompareFamilies(ShaderType stage)
+{
+	Initialize();
+	constexpr uint32_t kHalfOne = 0x3c00u, kHalfNan = 0x7e00u, kFloatNan = 0x7fc00000u, kFloatOne = 0x3f800000u;
+	constexpr uint64_t kDoubleOne = 0x3ff0000000000000ull, kDoubleNan = 0x7ff8000000000000ull;
+	const auto vopc = [&](uint32_t opcode, uint64_t v01, uint64_t v23, const char* word)
+	{
+		const Program program(Emit(Parse({(0x3eu << 25u) | (opcode << 17u) | (2u << 9u) | 256u, kEnd}, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", static_cast<uint32_t>(v01)}, {"%v1", static_cast<uint32_t>(v01 >> 32u)},
+		                    {"%v2", static_cast<uint32_t>(v23)}, {"%v3", static_cast<uint32_t>(v23 >> 32u)}, {"%vcc_lo", 0u},
+		                    {"%vcc_hi", 0u}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", 1u}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   word) &
+		       1u;
+	};
+	Equal(vopc(0xCFu, kHalfOne, kHalfOne, "%vcc_lo"), 1u, "v_cmp_o_f16 of two numbers");
+	Equal(vopc(0xCFu, kHalfNan, kHalfOne, "%vcc_lo"), 0u, "v_cmp_o_f16 with a NaN");
+	Equal(vopc(0xE8u, kHalfOne, kHalfNan, "%vcc_lo"), 1u, "v_cmp_u_f16 with a NaN");
+	Equal(vopc(0xE8u, kHalfOne, kHalfOne, "%vcc_lo"), 0u, "v_cmp_u_f16 of two numbers");
+	Equal(vopc(0x27u, kDoubleOne, kDoubleOne, "%vcc_lo"), 1u, "v_cmp_o_f64 of two numbers");
+	Equal(vopc(0x27u, kDoubleOne, kDoubleNan, "%vcc_lo"), 0u, "v_cmp_o_f64 with a NaN");
+	Equal(vopc(0x28u, kDoubleNan, kDoubleOne, "%vcc_lo"), 1u, "v_cmp_u_f64 with a NaN");
+	Equal(vopc(0x28u, kDoubleOne, kDoubleOne, "%vcc_lo"), 0u, "v_cmp_u_f64 of two numbers");
+	Equal(vopc(0x18u, kFloatNan, kFloatOne, "%exec_lo"), 1u, "v_cmpx_u_f32 keeps the lane on a NaN");
+	Equal(vopc(0x18u, kFloatOne, kFloatOne, "%exec_lo"), 0u, "v_cmpx_u_f32 clears the lane of two numbers");
+	Equal(vopc(0x99u, 0xffffu, 1u, "%exec_lo"), 1u, "v_cmpx_lt_i16 compares signed");
+	Equal(vopc(0xB9u, 0xffffu, 1u, "%exec_lo"), 0u, "v_cmpx_lt_u16 compares unsigned");
+	Equal(vopc(0xFDu, kHalfNan, kHalfNan, "%exec_lo"), 1u, "v_cmpx_neq_f16 keeps the lane on a NaN");
+	Equal(vopc(0xFDu, kHalfOne, kHalfOne, "%exec_lo"), 0u, "v_cmpx_neq_f16 clears the lane of equal halves");
+	std::_Exit(0);
+}
+
 // ISA 6.2 for an integer 64-bit source: an inline float is the double encoding, a literal is zero extended for
 // an unsigned source and sign extended for a signed one.
 [[noreturn]] void RunInt64SourceConstants()
@@ -1701,6 +1734,13 @@ TEST(EmulatorShaderArithmetic, F64SourcesExpandConstantsAndApplySignModifiers)
 	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
 	{
 		ASSERT_EXIT(RunF64SourceOperands(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, VopcComparesMatchTheirVop3Translation)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunVopcCompareFamilies(stage), ::testing::ExitedWithCode(0), "");
 	}
 }
 TEST(EmulatorShaderArithmetic, Int64SourcesExpandConstantsBySignedness)

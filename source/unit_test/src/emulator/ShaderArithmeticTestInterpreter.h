@@ -244,8 +244,8 @@ public:
 				result.words[0] = static_cast<uint32_t>(bits);
 				result.words[1] = static_cast<uint32_t>(bits >> 32u);
 			}
-			else if (op == "OpIsNan") { r = std::isnan(fp(4)); }
-			else if (op == "OpIsInf") { r = std::isinf(fp(4)); }
+			else if (op == "OpIsNan") { r = std::isnan(compared(4)); }
+			else if (op == "OpIsInf") { r = std::isinf(compared(4)); }
 			else if (op == "OpConvertUToF") { r = Bits(static_cast<float>(arg(4))); }
 			else if (op == "OpConvertSToF") { r = Bits(static_cast<float>(static_cast<int32_t>(arg(4)))); }
 			else if (op == "OpConvertFToU")

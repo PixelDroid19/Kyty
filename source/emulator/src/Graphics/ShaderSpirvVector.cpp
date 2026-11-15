@@ -2784,8 +2784,20 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 	return true;
 }
 
+// A special-compare predicate is every non-null param line, in order; the ordered and unordered forms need four.
+static String8 SpecialComparePredicate(const char* const* param)
+{
+	String8 predicate;
+	for (int i = 0; i < 4 && param[i] != nullptr; i++)
+	{
+		predicate += param[i];
+		predicate += "\n";
+	}
+	return predicate;
+}
+
 /* Packed-f16 special compares (false/ordered/unordered/true) that write VCC.
- * param[0] selects the predicate body operating on %hc0_/%hc1_. */
+ * The param lines form the predicate body operating on %hc0_/%hc1_. */
 KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_Special_SmaskVsrc0Vsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -2829,7 +2841,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_Special_SmaskVsrc0Vsrc1)
 	                   .ReplaceStr("<clear_high>", clear_high)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<predicate>", param[0])
+	                   .ReplaceStr("<predicate>", SpecialComparePredicate(param))
 	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
@@ -2894,7 +2906,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_Special_SmaskVsrc0Vsrc1)
 	                   .ReplaceStr("<load0hi>", load0hi)
 	                   .ReplaceStr("<load1lo>", load1lo)
 	                   .ReplaceStr("<load1hi>", load1hi)
-	                   .ReplaceStr("<predicate>", param[0])
+	                   .ReplaceStr("<predicate>", SpecialComparePredicate(param))
 	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
