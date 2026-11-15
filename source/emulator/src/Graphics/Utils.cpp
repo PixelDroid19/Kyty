@@ -1222,9 +1222,80 @@ public:
 			}
 		}
 		Destroy(&completed);
+
+		std::vector<VulkanBuffer> free;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			free.swap(m_free);
+			m_free_bytes = 0;
+		}
+		for (auto& staging: free)
+		{
+			VulkanDeleteBuffer(m_ctx, &staging);
+		}
+	}
+
+	// A fill reuses the staging of a completed one: a new buffer per fill costs an allocation and a first-touch
+	// fault on every page of its mapping, milliseconds for a large texture.
+	VulkanBuffer TakeStaging(GraphicContext* ctx, uint64_t size)
+	{
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			const auto best = FindFreeLocked(ctx, size);
+			if (best != m_free.end())
+			{
+				VulkanBuffer staging = *best;
+				m_free_bytes -= staging.descriptor_range;
+				m_free.erase(best);
+				return staging;
+			}
+		}
+		VulkanBuffer staging {};
+		staging.usage           = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+		staging.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		VulkanCreateBuffer(ctx, size, &staging);
+		return staging;
 	}
 
 private:
+	static constexpr uint64_t FREE_BYTES_MAX = 128ull * 1024ull * 1024ull;
+
+	// The smallest free staging that holds `size` and is at most twice as large.
+	std::vector<VulkanBuffer>::iterator FindFreeLocked(const GraphicContext* ctx, uint64_t size)
+	{
+		auto best = m_free.end();
+		if (ctx != m_ctx)
+		{
+			return best;
+		}
+		for (auto it = m_free.begin(); it != m_free.end(); ++it)
+		{
+			const uint64_t capacity = it->descriptor_range;
+			if (capacity >= size && capacity / 2 <= size && (best == m_free.end() || capacity < best->descriptor_range))
+			{
+				best = it;
+			}
+		}
+		return best;
+	}
+
+	// Only a dedicated allocation is kept: a pooled staging is already cheap to get, and keeping small ones would make
+	// the free list long.
+	void Recycle(VulkanBuffer* staging)
+	{
+		if (staging->memory.pool_block == nullptr)
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_free_bytes + staging->descriptor_range <= FREE_BYTES_MAX)
+			{
+				m_free_bytes += staging->descriptor_range;
+				m_free.push_back(*staging);
+				return;
+			}
+		}
+		VulkanDeleteBuffer(m_ctx, staging);
+	}
+
 	static constexpr uint64_t OPEN_BYTES_MAX = 64ull * 1024ull * 1024ull;
 	// The util command pool has CommandProcessorSubmissionSlots::SlotCount buffers shared with synchronous transfers.
 	static constexpr size_t IN_FLIGHT_MAX = 4;
@@ -1301,16 +1372,18 @@ private:
 			delete batch.buffer;
 			for (auto& staging: batch.staging)
 			{
-				VulkanDeleteBuffer(m_ctx, &staging);
+				Recycle(&staging);
 			}
 		}
 	}
 
-	std::mutex        m_mutex;
-	GraphicContext*   m_ctx = nullptr;
-	Batch             m_open;
-	std::deque<Batch> m_in_flight;
-	uint64_t          m_last_id = 0;
+	std::mutex                m_mutex;
+	GraphicContext*           m_ctx = nullptr;
+	Batch                     m_open;
+	std::deque<Batch>         m_in_flight;
+	uint64_t                  m_last_id = 0;
+	std::vector<VulkanBuffer> m_free;
+	uint64_t                  m_free_bytes = 0;
 };
 
 static ImageFillQueue g_image_fills;
@@ -1322,10 +1395,7 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* image, const void* src_data
 	EXIT_IF(image == nullptr);
 
 	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
-	VulkanBuffer               staging_buffer {};
-	staging_buffer.usage           = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-	staging_buffer.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-	VulkanCreateBuffer(ctx, size, &staging_buffer);
+	VulkanBuffer               staging_buffer = g_image_fills.TakeStaging(ctx, size);
 
 	void* data = nullptr;
 	VulkanMapMemory(ctx, &staging_buffer.memory, &data);
