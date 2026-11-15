@@ -671,6 +671,13 @@ so where the robot stands depends on how long the loads took).
   tile list, all of it when the robot fills the view (corrected 2026-11-14; this bullet first read
   the grid as 8x8 tiles of a 960x540 image). Both programs spill on
   this host (records of 2026-11-06 and 2026-11-12 below); no translator change was tried in this run.
+- **The BVH grids follow the guest's resolution (2026-11-15, one run with the 960x540 measurement
+  patch).** With the same per-program GPU stamps on the dunes route, `0x874bd13f` dispatched 2,040 groups
+  per call (60x34 tiles, a quarter of 8,160) at 1.2 ms a call, and `0x3666fa39` 920-1,000 groups at
+  1.4-1.5 ms, against 8,160 and up to about 7,250 groups per call in native runs (one of them on an
+  older probe build: 6.2 and 16.6 ms a call). The guest sizes both grids from its render resolution, so
+  emulator-side scaling cannot shrink them; at native resolution only their cost per group is open.
+  The patched run held 30.7 fps at 520-580 draws per flip with the GPU 86-90 % busy.
 - **Register spills across the title's compute programs (offline, 2026-11-14).** The 105 compute
   pipeline recipes recorded for the title (translator store t215) compiled on ANV: 60 spill. Width 16:
   60 recipes, 15 of them with 870-1,309 spills and 3,589-5,927 fills; width 8: 39, the BVH kernel's
