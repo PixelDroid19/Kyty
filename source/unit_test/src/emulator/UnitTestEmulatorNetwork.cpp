@@ -392,7 +392,7 @@ TEST(EmulatorNetwork, NetCtlSiblingOutputsRejectNonGuestFreedAndReadOnlyMemory)
 	EXPECT_EQ(get_nat(reinterpret_cast<Libs::Network::NetCtl::NetCtlNatInfo*>(&host_nat)),
 	          Kyty::Libs::Network::NET_ERROR_EFAULT);
 	EXPECT_EQ(get_state(&host_state), Kyty::Libs::Network::NET_ERROR_EFAULT);
-	EXPECT_EQ(register_callback(RecordNetCtlEvent, nullptr, &host_cid), NET_CTL_ERROR_INVALID_ADDR);
+	EXPECT_EQ(register_callback(RecordNetCtlEvent, nullptr, &host_cid), Kyty::Libs::Network::NET_ERROR_EFAULT);
 	EXPECT_EQ(host_nat.stun_status, -1);
 	EXPECT_EQ(host_state, 0x5a5a5a5a);
 	EXPECT_EQ(host_cid, 0x5a5a5a5a);
@@ -404,7 +404,7 @@ TEST(EmulatorNetwork, NetCtlSiblingOutputsRejectNonGuestFreedAndReadOnlyMemory)
 	          Kyty::Libs::Network::NET_ERROR_EFAULT);
 	EXPECT_EQ(get_state(reinterpret_cast<int*>(stale_output)), Kyty::Libs::Network::NET_ERROR_EFAULT);
 	EXPECT_EQ(register_callback(RecordNetCtlEvent, nullptr, reinterpret_cast<int*>(stale_output)),
-	          NET_CTL_ERROR_INVALID_ADDR);
+	          Kyty::Libs::Network::NET_ERROR_EFAULT);
 
 	const uint64_t read_only_output = AllocateGuestPage();
 	ASSERT_NE(read_only_output, 0u);
@@ -419,7 +419,7 @@ TEST(EmulatorNetwork, NetCtlSiblingOutputsRejectNonGuestFreedAndReadOnlyMemory)
 	EXPECT_EQ(get_nat(reinterpret_cast<Libs::Network::NetCtl::NetCtlNatInfo*>(nat_info)),
 	          Kyty::Libs::Network::NET_ERROR_EFAULT);
 	EXPECT_EQ(get_state(state), Kyty::Libs::Network::NET_ERROR_EFAULT);
-	EXPECT_EQ(register_callback(RecordNetCtlEvent, nullptr, cid), NET_CTL_ERROR_INVALID_ADDR);
+	EXPECT_EQ(register_callback(RecordNetCtlEvent, nullptr, cid), Kyty::Libs::Network::NET_ERROR_EFAULT);
 	ASSERT_TRUE(Core::VirtualMemory::Protect(read_only_output, Core::VirtualMemory::GetPageSize(),
 	                                         Core::VirtualMemory::Mode::ReadWrite));
 	EXPECT_EQ(nat_info->stun_status, -1);

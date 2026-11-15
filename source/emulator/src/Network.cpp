@@ -4600,9 +4600,10 @@ int KYTY_SYSV_ABI NetCtlRegisterCallback(NetCtlCallback func, void* arg, int* ci
 			continue;
 		}
 		const int staged = static_cast<int>(i);
-		if (Net::CopyGuestOutput(cid, reinterpret_cast<const uint8_t*>(&staged), sizeof(staged)) != OK)
+		const int result = Net::CopyGuestOutput(cid, reinterpret_cast<const uint8_t*>(&staged), sizeof(staged));
+		if (result != OK)
 		{
-			return NET_CTL_ERROR_INVALID_ADDR;
+			return result;
 		}
 		slot = {func, arg, 0};
 		return OK;
