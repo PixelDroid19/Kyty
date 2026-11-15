@@ -6842,8 +6842,9 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   a title run.
 - **Added.**
   - `sceKernelChmod`, `chmod` and `rmdir` (009217843). chmod sets the host file's permission bits, so a later
-    `fstat` reports them; under the read-only application mount it returns EPERM and leaves the bits alone
-    (da2870fc7).
+    `fstat` reports them. Under the application mount it returns EPERM and leaves the bits alone (da2870fc7); one
+    reference refuses there with that code and another does not, so the refusal is kept to protect the user's
+    install, and the error code rests on one source.
   - `sceRtcFormatRFC3339` and `sceRtcParseRFC3339` (dda2197f8): centiseconds and `Z` or `±hh:mm`; parsing needs a
     zone, keeps six fraction digits and ignores trailing text.
   - `sceHttpUriEscape` (4f227bdff): percent-encodes every byte outside the unreserved set with upper-case hex; a
@@ -6851,8 +6852,10 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   - The store dialog (six entries) and the web browser dialog (eight entries) (2b45fbbc5). With no store or browser
     in the emulator an opened dialog finishes at once as dismissed by the user, without a purchase; the store
     result returns 1, as two references agree.
-  - Json arrays, objects and values the guest builds (25 members: constructors, copies, destructors, `push_back`,
+  - Json arrays, objects and values the guest builds (24 members: constructors, copies, destructors, `push_back`,
     `size`, `back`, `empty`, `operator[]`, `clear`, assignment, `set`, `referArray`, `referObject`) (a16056c0b).
+    Setting a value to the string, array or object type now gives it an empty container, as both references with
+    the entry do, so it can be referred to and filled at once.
     Their containers are tracked by container, not by wrapper address, and released by the destructors, as two of
     three references do; object construction now writes only the 8-byte wrapper that two references agree on, not
     16 bytes. `referArray` and `referObject` on a value of another type fail: one reference returns null, another
@@ -6872,3 +6875,5 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   file changes the user's install. One reference refuses every such mutation with EPERM; applying it to the other
   paths needs a title run, since it changes what titles that write there see.
 - **Verified.** Unit tests 2676 of 2687 (11 skipped) and the repository gates, on Linux.
+  `PPSA06084 - Superliminal`, which loads two modules importing the changed Json entries, passed playable-regression
+  at 12 of 15 with the same three failing gates as before; whether the run called those entries was not observed.
