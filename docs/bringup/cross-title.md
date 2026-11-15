@@ -7073,7 +7073,11 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   immediate-form `s_barrier` entry have no effect on a sequential translation (the RDNA2 `s_barrier` decodes with no
   immediate and gets a real barrier). `s_trap` is skipped because a trap is not taken while `TRAP_EN` is 0 (ISA
   section 3.4, Status registers) and Kyty models no trap handler; the console's `TRAP_EN` state is not established,
-  so the skip is Kyty's model, not a measured result. Not audited: the MUBUF flag bits.
+  so the skip is Kyty's model, not a measured result. MUBUF and MTBUF flag bits: `Spirv::GenerateSource` passes
+  every instruction through `ShaderInstructionLoweringPreconditions`, which refuses a buffer access with LDS (data
+  returned to LDS), TFE (an extra status VGPR) or a reserved bit set, including the legacy ADDR64 bit; SLC and DLC
+  are cache policies (ISA MUBUF field table), and GLC selects the returned value of an atomic and is a cache policy
+  otherwise. No flag is dropped silently.
 - **Fixed: `s_sendmsg` messages.** Every `s_sendmsg` was skipped, including GS output (type 2) and GS done (type 3),
   which carry the geometry stream. ISA section 12.5.1 lists save wave, stall wave gen, halt waves, ordered PS done
   and GS alloc req (4-7 and 9) as hardware signals; only those are skipped now, and every other type stops the
