@@ -185,7 +185,15 @@ claim; the patch is not shipped and its picture was not compared against the unp
   between its clock and the cost per draw (r = 0.23), nor with a busy SMT sibling or core migrations (|r| < 0.1).
   Within one draw band the cost per draw falls as the engine gets busier (r = -0.91 to -0.95 in four runs): the
   costly seconds are the ones where the command thread limits the GPU. In them every stage rises, most of all
-  texture and storage descriptors and state setup, which points to the draws themselves rather than the host.
+  texture and storage descriptors and state setup, which points to the draws themselves. The check sampled only the
+  emulator's three busiest threads; other host load was not measured.
+- **Two further command-thread costs (2026-11-15, same run, agent counters).** Guest-address residency rises from
+  about 0.9 ms to 37-65 ms per second in five slow seconds at an unchanged call count; it is the import of physical
+  pages the title populates while it streams (page query, window export and import), real loading work of about
+  2 ms per frame in those seconds. Memory-object lookups cost about 10 calls per draw at 0.6-1.4 us each in steady
+  seconds (8-12 us per draw, 13-15 % of the thread); almost all are cached reuses, and the slow ones are texture
+  loads, whose staging cost db6d7c132 already reduced. Neither names a cause with a small fix; moving residency off
+  the command thread or folding the per-draw lookups are larger changes, not started.
 - **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
   less GPU work, and the command thread, which runs 33.4 ms for the same draw count once the GPU
   stops limiting it (second row), has no margin left under 33.3 ms. The measured GPU levers are the
