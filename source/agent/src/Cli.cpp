@@ -44,7 +44,7 @@ void PrintUsage()
 	                     "  kyty_agent --endpoint ENDPOINT pad down|up BUTTON\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad tap BUTTON [--press-samples 1|2] [--at-present N [--repeat R --present-delta D]]\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad hold BUTTON --delta N [--timeout-ms N]\n"
-	                     "  kyty_agent --endpoint ENDPOINT pad axis AXIS VALUE|clear\n"
+	                     "  kyty_agent --endpoint ENDPOINT pad axis AXIS VALUE\n"
 	                     "  kyty_agent --endpoint ENDPOINT wait-ready [--timeout-ms N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT wait-present (--min N|--delta N) [--timeout-ms N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT wait-frame (--min N|--delta N) [--timeout-ms N]\n"
@@ -589,10 +589,17 @@ int Main(int argc, char** argv)
 				std::fprintf(stderr, "kyty_agent: pad axis requires AXIS VALUE\n");
 				return 125;
 			}
-			const char* axis  = argv[i++];
-			const char* value = argv[i++];
-			char        req[256];
-			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_axis\",\"args\":{\"axis\":\"%s\",\"value\":%s}}",
+			const char*   axis  = argv[i++];
+			const char*   text  = argv[i++];
+			char*         end   = nullptr;
+			const auto    value = std::strtoul(text, &end, 10);
+			if (*text == '\0' || *end != '\0' || value > 255)
+			{
+				std::fprintf(stderr, "kyty_agent: pad axis VALUE must be 0..255 (pad clear releases every axis)\n");
+				return 125;
+			}
+			char req[256];
+			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_axis\",\"args\":{\"axis\":\"%s\",\"value\":%lu}}",
 			              JsonEscape(axis).c_str(), value);
 			return Call(endpoint, req);
 		}
