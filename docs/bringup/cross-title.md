@@ -6870,6 +6870,23 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   - `sceLibcInternalHeapErrorReportForGame` logs the error and returns 0 (5c9a09c9c).
   - `sceKernelMtypeprotect` changes the protection only (493e292a4): the emulator keeps no memory type per range.
     The references disagree on a zero length and on what the type does.
+  - `sceKernelSyncOnAddressWait32` and `sceKernelSyncOnAddressWait64` (6708adb94): no flags argument, an aligned
+    32- or 64-bit value, a microsecond timeout through a pointer; a value that already differs returns 0, as two
+    references do (a third returns EAGAIN). Titles import them from their bundled libc.
+  - `scePadIsRemoteController` writes false for the local pad, after the handle check and a null check (db2ea235d).
+    Not covered by a unit test.
+  - `sceAjmDecAt9ParseConfigData` (b541e860f): channels, rate, frame and superframe samples per channel and the
+    superframe size, from the decoder Kyty already opens. A config the decoder refuses (nonzero bits with no
+    established contract) returns invalid parameter, where the references would parse it.
+  - `sceHttp2GetMemoryPoolStats` writes the pool size the title passed and zero use, as the library keeps its state
+    in host memory (154118a75). Not covered by a unit test.
+  - `sceKernelCheckReachability` (bac2d2081, 993680943): invalid argument for null, name too long past 255 bytes,
+    otherwise whether the path stats, which includes the entropy devices; every stat failure reports ENOENT, as two
+    references do.
+  - `sceGameLiveStreamingInitialize` returns 0 and `sceGameLiveStreamingGetCurrentStatus2` writes a zeroed 72-byte
+    status with the invalid user id (43e05c32b). One reference also requires a 0x4000-byte heap and refuses the
+    status before initialization; that rests on one source and is not applied. `Terminate` and `GetProgramInfo`, which
+    the same titles import, appear in one reference only and are not done.
 - **Fixed in existing code.** Tick-to-date conversion counted tick 0 as 307 days after 0000-03-01 instead of 306,
   so every Rtc conversion from a tick reported the next calendar day (39a73af92).
 - **Not done, references disagree.** `sce::Json::Value::serialize`: one reference writes doubles through
@@ -6882,6 +6899,40 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
 - **Not done, references disagree.** The AMPR command-buffer entries `WaitOnAddress`, `WriteCounterOnCompletion` and
   the three `WriteAddressFrom*CounterOnCompletion` forms: argument lists, bounds and packet layouts differ between
   all three references, and one records the counter writes as plain zero writes.
+- **Not done, references disagree.**
+  - `sceNetCtlGetResult`: an error code against a host exception for an unknown event.
+  - `sceNetGetMemoryPoolStats`: a 32-byte against a 24-byte result.
+  - `sceNetResolverStartNtoaMultipleRecords`: which flags are accepted.
+  - `sceHttpWaitRequest`: returns at once in one reference and blocks in another.
+  - `sceHttpCreateRequestWithURL`: whether the method and URL are validated.
+  - `sceNpAbortRequest`: always success against not found.
+  - `sceNpUniversalDataSystemEventEstimateSize` and `EventToString`: constants against computed sizes, and whether
+    the size includes the terminator.
+  - The NpTrophy2 icon and group-info entries: the references agree only on a zero size; one returns not found and
+    another throws.
+  - `sceKernelGetPageTableStats`: the totals.
+  - `sceKernelMemoryPoolCommit`: page against 64 KiB alignment.
+  - `scePthreadCancel`: blocking or not.
+  - `sceUltFinalize`: busy check.
+  - `sceAppContentTemporaryDataFormat`: whether it clears the directory.
+  - `sceConvertKeycodeGetImeKeyboardType`: a resolved against a fixed type.
+  - `sceSystemServiceLoadExec`: the accepted path prefixes.
+  - `sceKernelGetOpenPsId`: the identifier bytes.
+  - `sceKernelGetCompiledSdkVersion`: one stub, and an offset into the process parameters from one source.
+  - `mmap`: anonymous only against file mappings.
+  - `sceAudioInHqOpen`: validated in one reference only.
+  - `sceNpSessionSignalingCreateContext2`: one source, which ignores its output pointer.
+- **Not done, needs Kyty state the references do not cover.** `sceNpCheckNpReachability` and
+  `sceNpGetAccountLanguage2` return signed out in two references, but Kyty's configuration can sign the local
+  user in, and no reference covers that case. `sceImeOpen`, `sceImeClose`, `sceImeGetPanelSize` and
+  `sceImeSetTextGeometry` need the on-screen panel that Kyty does not implement (`sceImeSetText` already reports no
+  open panel); an Open that succeeds without a panel would be a placeholder.
+- **Agreed, deferred.** `sceKernelAddTimerEvent` (periodic, microseconds, clear on read) and
+  `sceKernelAddHRTimerEvent` (one shot, `timespec`, EFAULT and EINVAL checks): two references agree, but the event
+  queue has no deadline-driven wakeup, and the installed titles import them only from `fakelib/` modules, a directory
+  Kyty does not load beside the executable. Whether a title loads those modules by path was not checked.
+  `sceKernelMemoryPoolBatch`, `sceNgs2SystemGetInfo` and `sceAjmDecMp3ParseFrame`: the entry or result layout was read
+  in one reference only.
 - **Deferred.** Font, Psml, Acm, the image codecs, Voice and Share were not started.
 - **Open defect.** `KernelUnlink`, `KernelRmdir` and `KernelMkdir` (`source/emulator/src/Kernel/FileSystem.cpp`) and
   opens for writing do not refuse paths under the application mount, so a title that removes or writes a package
@@ -6889,6 +6940,9 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   paths needs a title run, since it changes what titles that write there see.
 - **Open defect.** `NpCreateAsyncRequest` (`source/emulator/src/Network.cpp`) warns on a null parameter and then
   reads through it; a title passing null crashes instead of getting an argument error.
-- **Verified.** Unit tests 2676 of 2687 (11 skipped) and the repository gates, on Linux.
+- **Verified.** Unit tests 2679 of 2690 (11 skipped) and the repository gates, on Linux.
   `PPSA06084 - Superliminal`, which loads two modules importing the changed Json entries, passed playable-regression
   at 12 of 15 with the same three failing gates as before; whether the run called those entries was not observed.
+  `PPSA17221 - Minecraft`, whose bundled libc imports the sized address waits, passed playable-regression at 12 of 15
+  on 43e05c32b and held 60 fps interactive; the three failing gates have no baseline, checkpoint or action route in
+  that run's scratch. Whether the run called the waits was not observed.
