@@ -6905,6 +6905,11 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     no stop or exception.
   - `sceImeParamInit` (3159341e9): zeroes the 0x60-byte open parameter and sets the invalid user id at its start;
     a null pointer is ignored. Not covered by a unit test.
+  - `sceShareGetRunningStatus` writes 0, no share feature running, as two references do (e5da1d1b0). They differ on
+    the error for a null status, so a null status stops the emulator instead of answering. Not covered by a unit
+    test. `PPSA34971 - Hollow Knight Voidheart Edition`, an importer, printed no Share call in a 75 s console-logged
+    run, and passed playable-regression at 11 of 15, interactive at 60 fps with a clean exit; its first error,
+    `gfx_storage_frontier`, was not compared against a baseline.
 - **Fixed in existing code.** Tick-to-date conversion counted tick 0 as 307 days after 0000-03-01 instead of 306,
   so every Rtc conversion from a tick reported the next calendar day (39a73af92).
   `sceAgcGetIsTrinityMode` takes a pointer and two references write `false` through it; Kyty returned 0 in a register
@@ -6977,7 +6982,21 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   Kyty does not load beside the executable. Whether a title loads those modules by path was not checked.
   `sceKernelMemoryPoolBatch`, `sceNgs2SystemGetInfo` and `sceAjmDecMp3ParseFrame`: the entry or result layout was read
   in one reference only.
-- **Deferred.** Font, Psml, Acm, the image codecs, Voice and Share were not started.
+- **Families compared, not done.**
+  - Acm (six entries, imported by nine titles including `PPSA17221 - Minecraft` and `PPSA21567 - ASTRO BOT`): no
+    reference runs the FFT, reverb or panner; batches complete at once with nothing computed, which would be a
+    success placeholder. The context and batch error codes and the job builders' argument lists also differ.
+  - PNG and JPEG decoders: the references agree on the header fields, the decode return value and `Delete`, but not
+    on the memory size the title must allocate or the handle `Create` writes into it, and they differ on palette
+    alpha, the pitch errors and the JPEG pixel formats.
+  - PNG and JPEG encoders: both implementing references encode, but the memory size, handle alignment and output
+    fields differ.
+  - Psml MFSR: one reference builds a dispatch packet, one returns not initialized, one zeroes the buffer; the
+    packet sizes differ.
+  - Font writing, string and character entries (25): the WritingLine and WritingInit layouts differ, and one entry
+    exists in one reference only.
+  - `sceVoiceWriteToIPort`: no reference delivers samples.
+  - Share capture, current status, application-title content and SharePlay terminate entries: one source each.
 - **Open defect.** `KernelUnlink`, `KernelRmdir` and `KernelMkdir` (`source/emulator/src/Kernel/FileSystem.cpp`) and
   opens for writing do not refuse paths under the application mount, so a title that removes or writes a package
   file changes the user's install. One reference refuses every such mutation with EPERM; applying it to the other
@@ -6996,4 +7015,7 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   TRAVELER II recorded it too; for ASTRO BOT no earlier run summary was kept, so it was not compared against a
   baseline. The other failing gates are the same missing baseline, checkpoint and action route. Whether either run
   called the changed entries was not observed. On the build with the NetCtl fault code kept,
-  `PPSA17221 - Minecraft` passed playable-regression at 12 of 15 with no runtime failure and held 60 fps.
+  `PPSA17221 - Minecraft` passed playable-regression at 12 of 15 with no runtime failure and held 60 fps. The
+  sized address waits, `scePadIsRemoteController` and `sceKernelCheckReachability` print their names and did not
+  appear in the 90 s console-logged run, so Minecraft did not call them in that time; `sceAgcGetIsTrinityMode` prints
+  nothing, so that run says nothing about it.
