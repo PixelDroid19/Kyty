@@ -1755,6 +1755,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     copy. Vertex buffers have no CPU reader, but they were only tested together
     with the snapshot pool, so their placement alone is not excluded. The GPU
     gain is not measured.
+  - Later (2026-11-15): for one title's heaviest compute kernel, whose storage
+    inputs are small read-only per-submit copies, device-local copies bound in
+    their place did not lower its GPU time per thread group
+    ([robot platformer](../titles/robot-platformer.md)).
 
 ## Crash evidence read only for a reported fault (2026-10-23)
 

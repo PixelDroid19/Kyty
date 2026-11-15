@@ -682,6 +682,15 @@ so where the robot stands depends on how long the loads took).
   the two kernels took about 2.4 ms and all stamped compute about 8.5 ms while the engine was busy about
   30 ms; draws were not stamped, so where 540p's GPU time goes is open. A compiler from an unrelated
   process ran from 96 s of that run.
+- **Placement of the traversal kernel's storage data is not its cost (2026-11-15, excluded).**
+  `0x3666fa39` binds five storage buffers, all small read-only per-submit copies (16 B to 17.9 KB,
+  descriptor-bound) in host-cached system memory; none is imported guest memory. A temporary probe
+  copied them into device-local memory before each dispatch and bound the copies (engagement checked
+  per binding). Per-program GPU stamps, native resolution, same route: about 1.56 us per group at
+  about 650 groups per call against 1.5 us at about 950 groups in system memory (the 540p run) and
+  2.0-2.1 us at about 7,300 groups in the control run; `0x874bd13f`, at 8,160 groups in both arms, took
+  6.4-6.9 against 6.5 ms per call. The cost per group follows the group count, not where the bytes
+  live. One run per arm; an unrelated compiler ran during parts of both.
 - **Register spills across the title's compute programs (offline, 2026-11-14).** The 105 compute
   pipeline recipes recorded for the title (translator store t215) compiled on ANV: 60 spill. Width 16:
   60 recipes, 15 of them with 870-1,309 spills and 3,589-5,927 fills; width 8: 39, the BVH kernel's
