@@ -1867,6 +1867,26 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 	return OK;
 }
 
+// Paths longer than the kernel's 255-byte limit are refused before any lookup.
+constexpr size_t KERNEL_PATH_NAME_MAX = 255;
+
+// sceKernelCheckReachability — NID uWyW3v98sU4. Whether the path names something the title can reach.
+int KYTY_SYSV_ABI KernelCheckReachability(const char* path)
+{
+	PRINT_NAME();
+
+	if (path == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	if (strnlen(path, KERNEL_PATH_NAME_MAX + 1) > KERNEL_PATH_NAME_MAX)
+	{
+		return KERNEL_ERROR_ENAMETOOLONG;
+	}
+	FileStat sb {};
+	return KernelStat(path, &sb) == OK ? OK : KERNEL_ERROR_ENOENT;
+}
+
 int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 {
 	PRINT_NAME();

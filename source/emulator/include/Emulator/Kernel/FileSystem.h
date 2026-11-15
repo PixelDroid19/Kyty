@@ -140,6 +140,7 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 int64_t KYTY_SYSV_ABI KernelWritev(int d, const KernelIovec* iov, int count);
 int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence);
 int KYTY_SYSV_ABI     KernelStat(const char* path, FileStat* sb);
+int KYTY_SYSV_ABI     KernelCheckReachability(const char* path);
 int KYTY_SYSV_ABI     KernelFstat(int d, FileStat* sb);
 int KYTY_SYSV_ABI     KernelFcntl(int d, int command, int64_t argument);
 int KYTY_SYSV_ABI     KernelFtruncate(int d, int64_t length);

@@ -2072,4 +2072,23 @@ TEST(EmulatorKernelProcess, ChmodSetsTheModeAFileDescriptorReports)
 	EXPECT_EQ(Kernel::FileSystem::KernelChmod(nullptr, 0600), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
+TEST(EmulatorKernelProcess, ReachabilityNamesTheMountedPathsThatExist)
+{
+	EnsureFileSystemSubsystem();
+
+	const String root = U"/tmp/kyty_reachability_test/";
+	ASSERT_TRUE(Core::File::CreateDirectories(root));
+	{
+		Core::File file;
+		ASSERT_TRUE(file.Create(root + U"present.bin"));
+	}
+	Kernel::FileSystem::Mount(root, U"/data/");
+
+	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability("/data/present.bin"), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability("/data/missing.bin"), LibKernel::KERNEL_ERROR_ENOENT);
+	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability(nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	const std::string too_long = "/data/" + std::string(250, 'a');
+	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability(too_long.c_str()), LibKernel::KERNEL_ERROR_ENAMETOOLONG);
+}
+
 UT_END();
