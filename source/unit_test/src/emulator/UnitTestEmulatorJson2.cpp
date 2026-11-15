@@ -518,6 +518,7 @@ TEST(EmulatorJson2, BuildsArraysObjectsAndValuesTheGuestConstructs)
 	auto* count         = Lookup<size_t (*)(const void*)>(&symbols, u"RBw+4NukeGQ");
 	auto* index_uint    = Lookup<const TestJsonValue* (*)(const void*, uint64_t)>(&symbols, u"XlWbvieLj2M");
 	auto* refer_key     = Lookup<TestJsonValue* (*)(void*, const void*)>(&symbols, u"wLsJlmgEIaI");
+	auto* set_type      = Lookup<void (*)(void*, uint32_t)>(&symbols, u"IKQimvG9Wqs");
 	for (const char16_t* nid: {u"JP-PtKMiI1E", u"HJ8GpRT1aiw", u"zQtLRTqceMY", u"9uP25i6ipno", u"rQGJeNjOuUk", u"bAM9Qwofus0", u"OJPTonqdg0I", u"a+W7HHlwpBs", u"5JmzZt8twAo", u"ERuf9y0DY84", u"oH8aBmLU+fc", u"urOpESTBZmo", u"9KUZFjI1IxA", u"0CAesfH963Q", u"cG1VE2HMl6c", u"UeuWT+yNdCQ", u"0lLK8+kDqmE", u"x4AUdbhpRB0", u"sOmU4vnx3s0", u"b9V6fmppLXY", u"sZIoMRGO+jk", u"iZeYfOxtMRg", u"3xUXnmUkXfo", u"fSb2oQTNrgA", u"WTtYf+cNnXI", u"n6FC+l9DU70", u"dFCphqnd+a4", u"nM5XqdeXFPw", u"-NxEk7XLkDY", u"RBw+4NukeGQ", u"XlWbvieLj2M", u"wLsJlmgEIaI"})
 	{
 		ASSERT_NE(symbols.Find(JsonFunc(nid)), nullptr) << nid;
@@ -525,6 +526,11 @@ TEST(EmulatorJson2, BuildsArraysObjectsAndValuesTheGuestConstructs)
 
 	GuestJsonPage page;
 	ASSERT_NE(page.address, 0u);
+	// Guest strings are read through guest memory, so the literals live in the page too.
+	auto* hi = page.Slot<char>(10);
+	std::strcpy(hi, "hi");
+	auto* kyty = page.Slot<char>(11);
+	std::strcpy(kyty, "kyty");
 	auto* array = page.Slot<void>(0);
 	ASSERT_EQ(array_ctor(array), array);
 	EXPECT_TRUE(page.WrapperTailIntact(0));
@@ -545,7 +551,7 @@ TEST(EmulatorJson2, BuildsArraysObjectsAndValuesTheGuestConstructs)
 	value_double(number, 1.5);
 	push_back(array, number);
 	value_dtor(number);
-	value_cstr(number, "hi");
+	value_cstr(number, hi);
 	push_back(array, number);
 	EXPECT_TRUE(page.CanaryIntact(1));
 	EXPECT_FALSE(array_empty(array));
@@ -578,7 +584,7 @@ TEST(EmulatorJson2, BuildsArraysObjectsAndValuesTheGuestConstructs)
 	auto* member = object_index(object, key);
 	ASSERT_NE(member, nullptr);
 	EXPECT_EQ(member->type, JsonNull);
-	set_cstr(member, "kyty");
+	set_cstr(member, kyty);
 	EXPECT_EQ(object_index(object, key_copy), member);
 
 	auto* object_twin = page.Slot<void>(6);
@@ -617,7 +623,20 @@ TEST(EmulatorJson2, BuildsArraysObjectsAndValuesTheGuestConstructs)
 	EXPECT_EQ(text->type, JsonObject);
 	EXPECT_EQ(count(text), 1u);
 
-	for (auto* value: {number, listed, described, duplicate, text})
+	// A value given a container type can be referred to and filled at once.
+	auto* body = page.Slot<TestJsonValue>(12);
+	value_long(body, 1);
+	set_type(body, JsonArray);
+	push_back(refer_array(body), number);
+	EXPECT_EQ(count(body), 1u);
+	set_type(body, JsonObject);
+	object_index(refer_object(body), key)->type = JsonBoolean;
+	EXPECT_EQ(count(body), 1u);
+	EXPECT_EQ(refer_key(body, key)->type, JsonBoolean);
+	set_type(body, JsonString);
+	EXPECT_STREQ(static_cast<const TestJsonString*>(body->pointer)->data, "");
+
+	for (auto* value: {number, listed, described, duplicate, text, body})
 	{
 		value_dtor(value);
 	}
@@ -627,7 +646,7 @@ TEST(EmulatorJson2, BuildsArraysObjectsAndValuesTheGuestConstructs)
 	object_dtor(object_twin);
 	array_dtor(array);
 	array_dtor(array); // a second destruction finds no container and does nothing
-	for (int n = 0; n < 10; n++)
+	for (int n = 0; n < 12; n++)
 	{
 		EXPECT_TRUE(page.CanaryIntact(n)) << n;
 	}

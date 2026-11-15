@@ -461,13 +461,31 @@ static void KYTY_SYSV_ABI JsonValueSetString(JsonValue* self, const JsonString* 
 	}
 }
 
+static JsonArray*  JsonNewOwnedArray();
+static JsonObject* JsonNewOwnedObject();
+static void        JsonValueOwnString(JsonValue* self, const std::string& text);
+
+// Both references give a string, array or object type an empty container, so it can be referred to and filled.
 static void KYTY_SYSV_ABI JsonValueSetType(JsonValue* self, uint32_t type)
 {
 	PRINT_NAME();
 	JsonValueClear(self);
-	if (self != nullptr)
+	if (self == nullptr)
 	{
-		self->type = type;
+		return;
+	}
+	self->type = type;
+	if (type == JsonValueTypeString)
+	{
+		JsonValueOwnString(self, std::string());
+	}
+	else if (type == JsonValueTypeArray)
+	{
+		self->ptr = JsonNewOwnedArray();
+	}
+	else if (type == JsonValueTypeObject)
+	{
+		self->ptr = JsonNewOwnedObject();
 	}
 }
 
@@ -1128,6 +1146,22 @@ static void KYTY_SYSV_ABI JsonValueToString(const JsonValue* self, JsonString* d
 	destination->data = replacement;
 }
 
+static JsonArray* JsonNewOwnedArray()
+{
+	auto* array  = new JsonArray {};
+	array->items = new std::vector<JsonValue*>;
+	JsonTrackOwned(array, JsonValueTypeArray);
+	return array;
+}
+
+static JsonObject* JsonNewOwnedObject()
+{
+	auto* object    = new JsonObject {};
+	object->members = new std::map<std::string, JsonValue*>;
+	JsonTrackOwned(object, JsonValueTypeObject);
+	return object;
+}
+
 class JsonValueCopier
 {
 public:
@@ -1155,20 +1189,22 @@ public:
 	}
 
 	// Copies the elements behind a guest Array wrapper into output, as a value of array type.
-	bool CopyArrayItems(JsonValue* output, const std::vector<JsonValue*>* items, void* parent)
+	bool CopyArrayItems(JsonValue* output, const std::vector<JsonValue*>* items, JsonValue* position, void* parent)
 	{
 		output->type      = JsonValueTypeArray;
 		output->parent    = parent;
 		output->rootparam = m_rootparam;
-		return CopyArray(output, items, output, 0);
+		return CopyArray(output, items, position, 0);
 	}
 
-	bool CopyObjectMembers(JsonValue* output, const std::map<std::string, JsonValue*>* members, void* parent)
+	// position is where output will live, which its children name as their parent.
+	bool CopyObjectMembers(JsonValue* output, const std::map<std::string, JsonValue*>* members, JsonValue* position,
+	                       void* parent)
 	{
 		output->type      = JsonValueTypeObject;
 		output->parent    = parent;
 		output->rootparam = m_rootparam;
-		return CopyObject(output, members, output, 0);
+		return CopyObject(output, members, position, 0);
 	}
 
 	JsonValue* Clone(const JsonValue* source, JsonValue* parent) { return CopyChild(source, parent, 0); }
@@ -1203,12 +1239,10 @@ private:
 
 	bool CopyArray(JsonValue* output, const std::vector<JsonValue*>* items, JsonValue* position, uint32_t depth)
 	{
-		if (items == nullptr) { return true; }
-		if (items->size() > m_nodes) { return false; }
-		auto* array = new JsonArray {};
-		array->items = new std::vector<JsonValue*>;
+		if (items != nullptr && items->size() > m_nodes) { return false; }
+		auto* array = JsonNewOwnedArray();
 		output->ptr = array;
-		JsonTrackOwned(array, JsonValueTypeArray);
+		if (items == nullptr) { return true; }
 		for (const auto* item: *items)
 		{
 			auto* child = CopyChild(item, position, depth);
@@ -1220,12 +1254,10 @@ private:
 
 	bool CopyObject(JsonValue* output, const std::map<std::string, JsonValue*>* members, JsonValue* position, uint32_t depth)
 	{
-		if (members == nullptr) { return true; }
-		if (members->size() > m_nodes) { return false; }
-		auto* object = new JsonObject {};
-		object->members = new std::map<std::string, JsonValue*>;
+		if (members != nullptr && members->size() > m_nodes) { return false; }
+		auto* object = JsonNewOwnedObject();
 		output->ptr = object;
-		JsonTrackOwned(object, JsonValueTypeObject);
+		if (members == nullptr) { return true; }
 		for (const auto& [key, item]: *members)
 		{
 			if (!ReserveBytes(key.size())) { return false; }
@@ -1749,8 +1781,10 @@ static void* KYTY_SYSV_ABI JsonValueCStringCtor(JsonValue* self, const char* val
 {
 	PRINT_NAME();
 	EXIT_IF(self == nullptr);
+	std::string text;
+	EXIT_IF(!JsonReadCString(value, JsonMaxDocumentBytes, &text));
 	JsonValueInit(self);
-	JsonValueOwnString(self, value != nullptr ? value : "");
+	JsonValueOwnString(self, text);
 	return self;
 }
 
@@ -1771,7 +1805,7 @@ static void* KYTY_SYSV_ABI JsonValueArrayCtor(JsonValue* self, const JsonArray* 
 	EXIT_IF(self == nullptr);
 	JsonValueInit(self);
 	JsonValueCopier copier(nullptr);
-	EXIT_IF(!copier.CopyArrayItems(self, JsonArrayItems(value), nullptr));
+	EXIT_IF(!copier.CopyArrayItems(self, JsonArrayItems(value), self, nullptr));
 	return self;
 }
 
@@ -1781,7 +1815,7 @@ static void* KYTY_SYSV_ABI JsonValueObjectCtor(JsonValue* self, const JsonObject
 	EXIT_IF(self == nullptr);
 	JsonValueInit(self);
 	JsonValueCopier copier(nullptr);
-	EXIT_IF(!copier.CopyObjectMembers(self, JsonObjectMembers(value), nullptr));
+	EXIT_IF(!copier.CopyObjectMembers(self, JsonObjectMembers(value), self, nullptr));
 	return self;
 }
 
@@ -1815,7 +1849,8 @@ static void KYTY_SYSV_ABI JsonValueSetCString(JsonValue* self, const char* value
 {
 	PRINT_NAME();
 	EXIT_IF(self == nullptr || value == nullptr);
-	const std::string text(value);
+	std::string text;
+	EXIT_IF(!JsonReadCString(value, JsonMaxDocumentBytes, &text));
 	JsonValueClear(self);
 	JsonValueOwnString(self, text);
 }
@@ -1827,7 +1862,7 @@ static void KYTY_SYSV_ABI JsonValueSetObject(JsonValue* self, const JsonObject* 
 	JsonValue       replacement {};
 	JsonValueCopier copier(self->rootparam);
 	// Copy before releasing the destination: the object may be one of its children.
-	EXIT_IF(!copier.CopyObjectMembers(&replacement, JsonObjectMembers(value), self->parent));
+	EXIT_IF(!copier.CopyObjectMembers(&replacement, JsonObjectMembers(value), self, self->parent));
 	JsonValueClear(self);
 	*self = replacement;
 }
