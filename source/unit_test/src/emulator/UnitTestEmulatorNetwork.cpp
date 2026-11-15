@@ -1341,6 +1341,26 @@ TEST(EmulatorNetwork, HttpUriParseUsesCallerOwnedPool)
 	EXPECT_TRUE(PointsIntoPool(parsed.fragment, pool.data(), pool.size()));
 }
 
+TEST(EmulatorNetwork, HttpUriEscapeEncodesBytesOutsideTheUnreservedSet)
+{
+	using namespace Libs::Network::Http;
+
+	constexpr char source[] = "a b/\xc3\xa9-_.~Z9";
+	uint64_t       required_size = 0;
+	ASSERT_EQ(HttpUriEscape(nullptr, &required_size, 0, source), OK);
+	EXPECT_EQ(required_size, sizeof("a%20b%2F%C3%A9-_.~Z9"));
+
+	std::array<char, 32> out {};
+	ASSERT_EQ(HttpUriEscape(out.data(), nullptr, out.size(), source), OK);
+	EXPECT_STREQ(out.data(), "a%20b%2F%C3%A9-_.~Z9");
+
+	out.fill('x');
+	EXPECT_EQ(HttpUriEscape(out.data(), &required_size, required_size - 1, source), Libs::Network::HTTP_ERROR_OUT_OF_MEMORY);
+	EXPECT_EQ(out[0], 'x');
+	EXPECT_EQ(HttpUriEscape(nullptr, nullptr, 0, source), Libs::Network::HTTP_ERROR_INVALID_VALUE);
+	EXPECT_EQ(HttpUriEscape(out.data(), &required_size, out.size(), nullptr), Libs::Network::HTTP_ERROR_INVALID_VALUE);
+}
+
 TEST(EmulatorNetwork, HttpUriParsePreservesExplicitZeroPort)
 {
 	using namespace Libs::Network::Http;

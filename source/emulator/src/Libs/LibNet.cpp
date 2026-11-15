@@ -258,6 +258,7 @@ LIB_DEFINE(InitNet_1_Http)
 	LIB_FUNC("T-mGo9f3Pu4", Http::HttpSetAutoRedirect);
 	LIB_FUNC("qFg2SuyTJJY", Http::HttpSetAuthEnabled);
 	LIB_FUNC("IWalAn-guFs", Http::HttpUriParse);
+	LIB_FUNC("YuOW3dDAKYc", Http::HttpUriEscape);
 }
 
 } // namespace LibHttp
