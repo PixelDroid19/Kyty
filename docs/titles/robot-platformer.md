@@ -257,13 +257,14 @@ claim; the patch is not shipped and its picture was not compared against the unp
     0.70 GB/s cold with eight readers, 10.6 GB/s from page cache; no claim that it causes the dips.
   - Open: a 0 fps freeze at 104-108 s in two runs with a foreign build loading the host (IO
     pressure 270-525), not repeated in three later runs.
-  - Package stats: from about 30 s to 90 s one guest thread calls `KernelStat` on `/app0` files
-    700-1,000 times a second, and the FUSE daemon serving the install sits at about 570 ms of CPU a
-    second (saturated) in both runs measured. Early on, 65-90 % of the paths repeat; later the calls
-    are about 700 distinct absent paths a second. `KernelStat` now takes the package fast path that
-    APR resolution already used (an exactly spelled regular file below `/app0` with no patch
-    directory, one lookup), which answered 20-50 % of the early calls and raised the stat rate from
-    about 800-900 to 950-1,080 a second (one run per arm). No CPU or fps change is claimed. Open:
+  - Package stats: from about 30 s to 90 s the guest calls `KernelStat` on `/app0` files 700-1,000
+    times a second, and the FUSE daemon serving the install uses 525-570 ms of CPU a second in the
+    runs measured with and without the change below. Early on, 65-90 % of the paths repeat; later
+    the calls are about 700 distinct absent paths a second. `KernelStat` now takes the package fast
+    path that APR resolution already used (an exactly spelled regular file below `/app0` with no
+    patch directory: a status, a size and a time lookup, plus an existence check for `.odx` paths),
+    which answered 20-50 % of the early calls. No effect on stat rate, CPU or fps was measured: the
+    stat rate varies between runs of each arm more than between arms. Open:
     an absent path still runs the full resolve (patch, extension alias, data segment, companion and
     font candidates, each a host lookup); answering it fast needs a cached, bounded index of the
     read-only package that proves every candidate absent.
