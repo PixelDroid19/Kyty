@@ -1757,8 +1757,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     gain is not measured.
   - Later (2026-11-15): for one title's heaviest compute kernel, whose storage
     inputs are small read-only per-submit copies, device-local copies bound in
-    their place did not lower its GPU time per thread group
-    ([robot platformer](../titles/robot-platformer.md)).
+    their place gave no gain above about 1.2-1.3x per thread group at small
+    group counts ([robot platformer](../titles/robot-platformer.md)).
 
 ## Crash evidence read only for a reported fault (2026-10-23)
 
