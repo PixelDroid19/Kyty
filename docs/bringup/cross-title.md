@@ -6893,13 +6893,14 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     not check, so an unknown id stops the emulator instead of answering. Not covered by a unit test.
   - NetCtl callbacks (35ca18e50): `sceNetCtlRegisterCallback` fills one of eight slots and returns its index,
     invalid address for a null function or output and callback max when full, and keeps Kyty's fault error for an
-    output it cannot write, where only one reference reports invalid address; `sceNetCtlUnregisterCallback` returns
+    output it cannot write, as a third reference does, where only one reports invalid address; `sceNetCtlUnregisterCallback` returns
     invalid id outside 0..7 and id not found for an empty slot; `sceNetCtlCheckCallback` calls each callback with
     IP obtained (3) or disconnected (1) on the first check after it registers and then only when the state changes,
     outside the registry lock. Two references agree on all of it; they differ on where the connection state comes
     from, and Kyty uses the same configured state `sceNetCtlGetState` reports. One reference also refuses every call
     before `sceNetCtlInit` and keeps a separate IPv6 table it delivers to; neither is applied, and
-    `sceNetCtlRegisterCallbackV6` keeps its old single id. In a 90 s console-logged run `PPSA17221 - Minecraft`
+    `sceNetCtlRegisterCallbackV6` keeps its old single id. The third reference registers the same way but its check
+    never calls a callback. In a 90 s console-logged run `PPSA17221 - Minecraft`
     registered one callback at 3.5 s and kept calling the check (412 calls) and `sceNetCtlGetInfo` to the end, with
     no stop or exception.
   - `sceImeParamInit` (3159341e9): zeroes the 0x60-byte open parameter and sets the invalid user id at its start;
@@ -6919,7 +6920,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   - The Np state callbacks (`sceNpCheckCallback`, `sceNpRegisterStateCallbackA`): two references agree that
     registration rejects a null or repeated callback and returns a positive id, and that the first check after it
     delivers the state once, but one always delivers signed out and the other delivers signed in for the configured
-    user, so the delivered state is not agreed. The UDS context registry, `scePlayGoTerminate` and
+    user, so the delivered state is not agreed; the third reference returns 0 from both and delivers nothing. The UDS
+    context registry, `scePlayGoTerminate` and
     `sceSystemServiceSetNoticeScreenSkipFlag`: state that no Kyty path reads yet, or callbacks with no state change to
     report while signed out. Voice is deferred with its family.
   The rest have extra behavior in one reference only.
@@ -6987,7 +6989,7 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   `PPSA17221 - Minecraft`, whose bundled libc imports the sized address waits, passed playable-regression at 12 of 15
   on 43e05c32b and again on 1b39cd18a, which also imports the Trinity query, and held 60 fps interactive; the three failing gates have no baseline, checkpoint or action route in
   that run's scratch. Whether the run called the waits was not observed.
-  On the build of 3159341e9, `PPSA09809 - OCTOPATH TRAVELER II`, which imports the live streaming and HTTP errno
+  On a build of the tree committed as 3159341e9 (the binary is stamped 3b007097e, its parent), `PPSA09809 - OCTOPATH TRAVELER II`, which imports the live streaming and HTTP errno
   entries, reached interactive at about 55 fps on the engine splash after 34 s and exited cleanly, 11 of 15, and
   `PPSA21567 - ASTRO BOT`, which imports the Trinity query, rendered the studio logo interactive at 37 fps after 30 s
   and exited cleanly, 11 of 15. Both report `gfx_storage_frontier` as the first error. Earlier runs of OCTOPATH
