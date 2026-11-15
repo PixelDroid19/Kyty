@@ -219,14 +219,18 @@ claim; the patch is not shipped and its picture was not compared against the unp
   again waited on fences 6-8 times per frame, but with the GPU 92-94 % busy. Why skipping those
   re-uploads adds fence waits is not established. The change was reverted. Direction: a narrower rule
   needs its own measurement of the write-back path.
-- **Short dips on the dunes route can be host CPU contention (2026-11-15, one covered dip).** Dips to
-  9-17 fps with the GPU 39-75 % busy and few fence waits fell at different route positions in three
-  runs (78-80 s in two, 56-67 s and 72-74 s in a third), so they do not follow the scene. In them every
-  per-draw phase took about twice as long and command emission about seven times as long (4 to 29 us
-  per draw). The one dip covered by per-thread scheduler samples coincided with the emulator's
-  threads waiting 760-2,400 ms a second to run against about 300 normally (the command thread 289 ms
-  against 2-3), while unrelated host processes were compiling. A dip measured on a shared host is not
-  evidence of an emulator stall until its run delay is read.
+- **Short dips on the dunes route (2026-11-15, cause open).** Two classes:
+  - Scene-linked: two runs fall to 9-15 fps with the GPU 40-56 % busy at 78-80 s, just before draws
+    per flip fall to about 45; the 31-68 ms window exports recorded near 77-80 s
+    ([cross-title](../bringup/cross-title.md)) are the lead. A third run reached that point about 9 s
+    later and ended before it.
+  - Unattributed: that third run fell to 9-17 fps at 56-67 s (GPU 39-75 % busy, few fence waits), where
+    each per-draw phase took about twice as long and command emission about seven times as long (4 to
+    29 us per draw). No scheduler samples cover it. Samples that did cover 72-86 s showed the
+    emulator's threads waiting 2,400 ms a second to run at 74 s (300 normally), but fps was 28.7 then,
+    and agent snapshots were being taken in that second.
+  A dip on a shared host needs passive scheduler and pressure samples over the whole run before it is
+  attributed.
 - **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
   less GPU work, and the command thread, which runs 33.4 ms for the same draw count once the GPU
   stops limiting it (second row), has no margin left under 33.3 ms. The measured GPU levers are the
