@@ -181,6 +181,44 @@ TEST(EmulatorPad, PadReadReturnsCurrentStateAfterHistoryIsDrained)
 	AgentPadClear();
 }
 
+TEST(EmulatorPad, LiveAxisOffRestWinsOverAnAgentAxis)
+{
+	EnsurePadSubsystems();
+
+	ASSERT_EQ(PadInit(), 0);
+	ASSERT_EQ(PadOpen(1, 0, 0, nullptr), 1);
+
+	// An agent that released a stick by writing its rest value must not pin the user's stick there.
+	AgentPadClear();
+	AgentPadSetAxis(Axis::LeftY, 128);
+	AgentPadSetAxis(Axis::TriggerLeft, 0);
+	ControllerAxis(CONTROLLER_KEYBOARD_ID, Axis::LeftY, 0);
+	ControllerAxis(CONTROLLER_KEYBOARD_ID, Axis::TriggerLeft, 255);
+
+	constexpr size_t kLeftY = sizeof(uint32_t) + 1;
+	constexpr size_t kL2    = 0x08;
+	alignas(uint64_t) std::array<uint8_t, 256> state {};
+	ASSERT_EQ(PadReadState(1, reinterpret_cast<PadData*>(state.data())), 0);
+	EXPECT_EQ(state[kLeftY], 0u);
+	EXPECT_EQ(state[kL2], 255u);
+
+	alignas(uint64_t) std::array<uint8_t, 64 * 256> history {};
+	const int read = PadRead(1, reinterpret_cast<PadData*>(history.data()), 64);
+	ASSERT_GE(read, 1);
+	const uint8_t* last = history.data() + static_cast<size_t>(read - 1) * kPadDataBytes;
+	EXPECT_EQ(last[kLeftY], 0u);
+	EXPECT_EQ(last[kL2], 255u);
+
+	// With the user's stick at rest the agent value still applies.
+	ControllerAxis(CONTROLLER_KEYBOARD_ID, Axis::LeftY, 128);
+	ControllerAxis(CONTROLLER_KEYBOARD_ID, Axis::TriggerLeft, 0);
+	AgentPadSetAxis(Axis::LeftY, 30);
+	ASSERT_EQ(PadReadState(1, reinterpret_cast<PadData*>(state.data())), 0);
+	EXPECT_EQ(state[kLeftY], 30u);
+
+	AgentPadClear();
+}
+
 TEST(EmulatorPad, PadReadStateWritesOneCompleteRecordAndNothingBeyondIt)
 {
 	EnsurePadSubsystems();

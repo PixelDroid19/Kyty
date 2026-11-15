@@ -799,37 +799,28 @@ static void AgentPadApplyToButtonsAndAxes(bool advance_tap, uint32_t* buttons, u
 	{
 		*buttons |= g_agent_pad.buttons | tap_bits;
 	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::LeftX)] && left_x != nullptr)
+	// A live axis off rest wins, as over a route: an agent that released a stick by writing its rest value
+	// must not pin the user's stick there for the rest of the session.
+	const auto apply_axis = [](Axis axis, uint8_t rest, uint8_t* value)
 	{
-		*left_x = g_agent_pad.axes[static_cast<int>(Axis::LeftX)];
-	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::LeftY)] && left_y != nullptr)
-	{
-		*left_y = g_agent_pad.axes[static_cast<int>(Axis::LeftY)];
-	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::RightX)] && right_x != nullptr)
-	{
-		*right_x = g_agent_pad.axes[static_cast<int>(Axis::RightX)];
-	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::RightY)] && right_y != nullptr)
-	{
-		*right_y = g_agent_pad.axes[static_cast<int>(Axis::RightY)];
-	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::TriggerLeft)] && l2 != nullptr)
-	{
-		*l2 = g_agent_pad.axes[static_cast<int>(Axis::TriggerLeft)];
-		if (*l2 > 0 && buttons != nullptr)
+		if (g_agent_pad.axis_set[static_cast<int>(axis)] && value != nullptr && *value == rest)
 		{
-			*buttons |= PAD_BUTTON_L2;
+			*value = g_agent_pad.axes[static_cast<int>(axis)];
 		}
-	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::TriggerRight)] && r2 != nullptr)
+	};
+	apply_axis(Axis::LeftX, 128, left_x);
+	apply_axis(Axis::LeftY, 128, left_y);
+	apply_axis(Axis::RightX, 128, right_x);
+	apply_axis(Axis::RightY, 128, right_y);
+	apply_axis(Axis::TriggerLeft, 0, l2);
+	apply_axis(Axis::TriggerRight, 0, r2);
+	if (l2 != nullptr && *l2 > 0 && buttons != nullptr)
 	{
-		*r2 = g_agent_pad.axes[static_cast<int>(Axis::TriggerRight)];
-		if (*r2 > 0 && buttons != nullptr)
-		{
-			*buttons |= PAD_BUTTON_R2;
-		}
+		*buttons |= PAD_BUTTON_L2;
+	}
+	if (r2 != nullptr && *r2 > 0 && buttons != nullptr)
+	{
+		*buttons |= PAD_BUTTON_R2;
 	}
 }
 

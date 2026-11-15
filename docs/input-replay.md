@@ -71,4 +71,7 @@ Keyboard and active physical-controller button holds have separate ownership.
 Releasing or disconnecting one source preserves a button held by the other,
 including its transition history. Each stick and trigger axis follows the
 source moved farthest from rest; script and agent overlays continue to merge
-after the host state.
+after the host state. An agent axis, like a route axis, applies only while the
+live axis is at rest (128 for a stick, 0 for a trigger): an agent that releases
+a stick by writing its rest value does not pin the user's stick for the rest of
+the session (`pad clear` releases every agent axis).
