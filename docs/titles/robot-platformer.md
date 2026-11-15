@@ -188,10 +188,13 @@ claim; the patch is not shipped and its picture was not compared against the unp
   texture and storage descriptors and state setup, which points to the draws themselves. The check sampled only the
   emulator's three busiest threads; other host load was not measured.
 - **Two further command-thread costs (2026-11-15, same run, agent counters).** Guest-address residency rises from
-  about 0.9 ms to 37-65 ms per second in five slow seconds at an unchanged call count; it is the import of physical
-  pages the title populates while it streams (page query, window export and import), real loading work of about
-  2 ms per frame in those seconds. Memory-object lookups cost about 10 calls per draw at 0.6-1.4 us each in steady
-  seconds (8-12 us per draw, 13-15 % of the thread); almost all are cached reuses, and the slow ones are texture
+  about 0.9 ms to 37-65 ms per second in five slow seconds at an unchanged call count. Each such second has a
+  longest single preparation of 13-19 ms against under 5 us in quiet seconds, so the time is a few long calls,
+  not a repeated per-preparation cost; the timed span is the import of physical pages the title populates while it
+  streams (page query, window export and import), and which part of a long call dominates was not measured. Memory-object
+  lookups run about 10 calls per draw at a measured 0.6-1.4 us each, timing overhead included, in steady seconds
+  (8-12 us per draw, 10-19 % of command-processor run time; the paying thread was not established). In steady
+  seconds 90-93 % are cached reuses and the rest fast reuses; the slow ones are texture
   loads, whose staging cost db6d7c132 already reduced. Neither names a cause with a small fix; moving residency off
   the command thread or folding the per-draw lookups are larger changes, not started.
 - **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
