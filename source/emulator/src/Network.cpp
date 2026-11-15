@@ -4729,13 +4729,13 @@ int KYTY_SYSV_ABI NpCreateAsyncRequest(const NpCreateAsyncRequestParameter* para
 {
 	PRINT_NAME();
 
-	if (param == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	KYTY_LOG_DEBUG("\t size              = %" PRIu64 "\n", param->size);
-	KYTY_LOG_DEBUG("\t cpu_affinity_mask = %" PRIu64 "\n", param->cpu_affinity_mask);
-	KYTY_LOG_DEBUG("\t thread_priority   = %d\n", param->thread_priority);
-
-	if (g_np_request_id >= 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	// The parameter only tunes the worker thread; the request is created without one.
+	if (param != nullptr)
+	{
+		KYTY_LOG_DEBUG("\t size              = %" PRIu64 "\n", param->size);
+		KYTY_LOG_DEBUG("\t cpu_affinity_mask = %" PRIu64 "\n", param->cpu_affinity_mask);
+		KYTY_LOG_DEBUG("\t thread_priority   = %d\n", param->thread_priority);
+	}
 
 	return ++g_np_request_id;
 }
@@ -4750,8 +4750,6 @@ int KYTY_SYSV_ABI NpCreateRequest()
 int KYTY_SYSV_ABI NpDeleteRequest(int req_id)
 {
 	PRINT_NAME();
-
-	if (req_id != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t req_id = %d\n", req_id);
 
