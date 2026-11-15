@@ -1961,6 +1961,21 @@ TEST(EmulatorKernelMemory, SyncOnAddressRejectsUnsupportedFlagsAndUnalignedAddre
 	EXPECT_EQ(KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value) + 1u, 0, &timeout, 0), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
+TEST(EmulatorKernelMemory, SyncOnAddressWait64ComparesTheWholeAlignedValue)
+{
+	using namespace Kernel::SyncOnAddress;
+	EnsureMemorySubsystemInitialized();
+
+	alignas(8) uint64_t values[2] = {0x1'00000000ull, 0};
+	const auto          address   = reinterpret_cast<uint64_t>(&values[0]);
+	uint32_t            timeout   = 0;
+	// Only the high word differs from the expected value, so the wait returns at once.
+	EXPECT_EQ(KernelSyncOnAddressWait64(address, 0, &timeout), OK);
+	EXPECT_EQ(KernelSyncOnAddressWait64(address, 0x1'00000000ull, &timeout), LibKernel::KERNEL_ERROR_ETIMEDOUT);
+	EXPECT_EQ(KernelSyncOnAddressWait64(address + 4u, 0, &timeout), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelSyncOnAddressWait32(address + 4u, 1, &timeout), LibKernel::KERNEL_ERROR_ETIMEDOUT);
+}
+
 TEST(EmulatorKernelMemory, SyncOnAddressWakeReleasesMatchingWaiter)
 {
 	using namespace Kernel::SyncOnAddress;

@@ -152,6 +152,22 @@ int WaitWhileEqual(uint64_t address, T expected, const std::chrono::nanoseconds*
 	return result;
 }
 
+// The sized waits: an aligned value, and an optional aligned timeout in microseconds (null waits indefinitely).
+template <typename T>
+int WaitWhileEqualFor(uint64_t address, T expected, const uint32_t* timeout)
+{
+	if (address == 0 || (address % alignof(T)) != 0 || (timeout != nullptr && (reinterpret_cast<uintptr_t>(timeout) % alignof(uint32_t)) != 0))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	if (timeout == nullptr)
+	{
+		return WaitWhileEqual(address, expected, nullptr);
+	}
+	const std::chrono::nanoseconds timeout_ns = std::chrono::microseconds(__atomic_load_n(timeout, __ATOMIC_ACQUIRE));
+	return WaitWhileEqual(address, expected, &timeout_ns);
+}
+
 int UmtxWait(uint64_t address, uint64_t expected, uint64_t timeout_size, const void* timeout)
 {
 	if (timeout == nullptr)
@@ -176,21 +192,32 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWait(uint64_t address, uint32_t expected_va
 {
 	PRINT_NAME();
 
-	if (address == 0 || (address % alignof(uint32_t)) != 0 || flags != kSupportedWaitFlags ||
-	    (timeout != nullptr && (reinterpret_cast<uintptr_t>(timeout) % alignof(uint32_t)) != 0))
-	{
-		return KERNEL_ERROR_EINVAL;
-	}
-
 	KYTY_LOG_DEBUG("\t address = 0x%016" PRIx64 " expected = 0x%08" PRIx32 " timeout = %p flags = 0x%08" PRIx32 "\n", address,
 	               expected_value, static_cast<const void*>(timeout), flags);
 
-	if (timeout == nullptr)
+	if (flags != kSupportedWaitFlags)
 	{
-		return WaitWhileEqual(address, expected_value, nullptr);
+		return KERNEL_ERROR_EINVAL;
 	}
-	const std::chrono::nanoseconds timeout_ns = std::chrono::microseconds(__atomic_load_n(timeout, __ATOMIC_ACQUIRE));
-	return WaitWhileEqual(address, expected_value, &timeout_ns);
+	return WaitWhileEqualFor(address, expected_value, timeout);
+}
+
+int KYTY_SYSV_ABI KernelSyncOnAddressWait32(uint64_t address, uint32_t expected_value, const uint32_t* timeout)
+{
+	PRINT_NAME();
+
+	KYTY_LOG_DEBUG("\t address = 0x%016" PRIx64 " expected = 0x%08" PRIx32 " timeout = %p\n", address, expected_value,
+	               static_cast<const void*>(timeout));
+	return WaitWhileEqualFor(address, expected_value, timeout);
+}
+
+int KYTY_SYSV_ABI KernelSyncOnAddressWait64(uint64_t address, uint64_t expected_value, const uint32_t* timeout)
+{
+	PRINT_NAME();
+
+	KYTY_LOG_DEBUG("\t address = 0x%016" PRIx64 " expected = 0x%016" PRIx64 " timeout = %p\n", address, expected_value,
+	               static_cast<const void*>(timeout));
+	return WaitWhileEqualFor(address, expected_value, timeout);
 }
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWake(uint64_t address, int64_t wake_count)
