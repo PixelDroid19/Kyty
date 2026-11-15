@@ -16,29 +16,33 @@ scene from the run's captures. Three runs, one instrument each:
 
 - Run a385, `1f28471be` built clean: once a second, `/proc/<pid>/task/<tid>/schedstat` of every
   task (on-CPU time, run-queue wait, timeslices) and 18 `kyty_agent threads` snapshots 2 s apart.
-- Run a386, same build inside the user-space sampling profiler, disabled except for 190-194 s
-  (199 Hz, stacks): it only names the host threads by thread id, because every task reports the
-  same name. Scheduler figures are read outside that window.
+- Run a386, same build started inside the user-space sampling profiler, which samples only in
+  190-194 s (199 Hz, stacks): it names the host threads by thread id, because every task reports
+  the same name. Every a386 figure below comes from that wrapped run, read outside those seconds.
 - Run a388, the same source with a temporary per-second bill of each graphics ring thread (wait for
   the next batch, submit-to-dequeue latency, run-lock wait, batch body in wall and thread CPU time,
   suspended-run waits, submission waits). The host was not quiet after 174 s of that run (all tasks
   waited 48 ms per frame for a core against 17 ms in a386, and a draw cost 48 us against 28), so
-  only 153-171 s is quoted as figures. A run before it stopped at 161 s on the title's own abort at
-  hub load and gave no window.
+  only 153-171 s is quoted as figures. The scheduler samples start at 168 s: the host is known
+  quiet for 168-171 s only (18.6 ms per frame over all tasks); before that the claim rests on a
+  flat frame rate. A run before it stopped at 161 s on the title's own abort at hub load and gave
+  no window.
 
 | Run, seconds | Scene (draws per frame) | fps | Frame ms | GPU work ms/frame | Engine busy | Command runs ms/frame, all rings |
 | --- | --- | --- | --- | --- | --- | --- |
 | a385, 176-206 | free play beside a rock (357) | 33.9 | 29.5 | 23.0 | 78.2 % | 28.6, 4.6 in fence waits |
-| a386, 196-214 | dunes with the tutorial prompt (758) | 27.8 | 35.9 | 29.9 | 83.3 % | 34.1, 1.5 in fence waits |
-| a388, 153-171 | close-up landing (386) | 23.6 | 42.3 | 37.4 | 88.4 % | 34.7, 15.8 in fence waits |
+| a386 (profiler-wrapped), 196-214 | dunes with the tutorial prompt (758) | 27.8 | 35.9 | 29.9 | 83.3 % | 34.1, 1.5 in fence waits |
+| a386 (profiler-wrapped), 151-177 | close-up landing (392) | 23.4 | 42.7 | 37.2 | 87.0 % | 36.7, 12.2 in fence waits |
+| a388 (probe build), 153-171 | close-up landing (386) | 23.6 | 42.3 | 37.4 | 88.4 % | 34.7, 15.8 in fence waits |
 
 - **The 960x540 internal resolution does not hold 30 fps on this route.** The dunes scene gains
   about 1 fps over 1280x720 (27.8 against 26.2-27.2 in the record below) and the close-up landing
-  scene still spends 37.4 ms of GPU work per frame (40.3 at 1280x720, 50.8 unpatched). The
-  37-41 fps recorded for this patch on 2026-11-14 belongs to a lighter scene (469 draws per frame),
-  as does the first row.
-- **Host threads in the dunes scene** (a386, 197-211 s, 28.0 fps, frame 35.7 ms; names from the
-  profile stacks):
+  scene still spends 37.2-37.4 ms of GPU work per frame in two runs (40.3 at 1280x720, 50.8
+  unpatched). The 37-41 fps recorded for this patch earlier on 2026-11-14 is another scene (walking
+  the dunes, 469 draws per frame) on an older commit (`6a6a5818a`) and was not reproduced: the
+  first row has fewer draws and a lower frame rate, and that gap is unexplained.
+- **Host threads in the dunes scene** (a386, the profiler-wrapped run, 197-211 s, 28.0 fps, frame
+  35.7 ms; names from the profile stacks):
 
   | Thread | CPU ms/frame | Run-queue wait ms/frame | Share of a core | Timeslices per frame |
   | --- | --- | --- | --- | --- |
@@ -70,12 +74,13 @@ scene from the run's captures. Three runs, one instrument each:
   the ring. In the disturbed window of the same run (196-212 s, 708 draws, 20.2 fps) the shape is
   the same with the CPU share larger: no batch queued 3.47 ms, bodies 45.89 ms of which 35.88 on
   the CPU and 1.42 in suspended-run waits, cycle 49.37 of 49.62 ms.
-- **What this prices.** The time the earlier accounting left "outside the runs" (subsection "The
-  command thread" below) is the 2.7-3.5 ms per frame in which the guest has not yet submitted the
-  next batch, plus waits between the runs of one batch. That accounting understated it: the
-  run counter adds the runs of every ring thread. The remaining frame is the batch bodies, where
-  the thread either works (dunes: 28.2 of 35.7 ms) or is blocked on GPU results (close-up landing:
-  20.5 of 42.3 ms).
+- **What this prices.** In these runs the draw ring has no batch queued for 2.7-3.5 ms per frame;
+  the rest of its cycle is batch bodies, where the thread either works (dunes: 28.2 of 35.7 ms) or
+  is blocked (close-up landing: 20.5 of 42.3 ms). Inference, not measured on the same run: the
+  6.6 ms that the earlier accounting left "outside the runs" (subsection "The command thread"
+  below; unpatched resolution, lighting program left out, another scene) is this wait for the next
+  batch plus waits between the runs of one batch. That accounting cannot be exact either way: its
+  run counter adds the runs of every ring thread.
 - **Guest side** (a385, 18 snapshots): the main thread was in a mutex wait in 10 and asleep in 7;
   the 11 job workers were idle on their semaphore in 16 or 17; three guest threads were never in a
   wait. `sync-waits` reported its tracking disabled and gave nothing.
@@ -121,7 +126,8 @@ claim; the patch is not shipped and its picture was not compared against the unp
   run, so the row excludes a large gain and prices nothing.
 - **At 1280x720 both limits sit together.** The engine is still 90 % busy at 38.1 ms and the
   command thread runs 33.4 ms of the frame, so 30 fps is not held at that resolution either. An
-  earlier run at 960x540 on `6a6a5818a` held 37-41 fps with the engine 78 % busy (record below).
+  earlier run at 960x540 on `6a6a5818a` held 37-41 fps with the engine 78 % busy (record below); later
+  runs at 960x540 held 33.9, 27.8 and 23.4-23.6 fps in three other scenes (record above).
 - **Command work per draw is not constant.** The same draw count costs 35.9 us per draw at
   1920x1080 and 27.8 us at 1280x720, with every stage lower by a similar share (state setup 10.5
   against 8.2, binding 14.8 against 12.2). The cause is not established; the thread sleeps in fence
@@ -184,7 +190,9 @@ written into the translator.
 
 ### The command thread: wait counters hold 1.2 ms, 6.6 ms outside its runs is unpriced
 
-Priced later the same day in the record "at 960x540 the draw ring's cycle is the frame" above.
+A later record the same day ("at 960x540 the draw ring's cycle is the frame", above) measures the
+draw ring's cycle directly, in 960x540 runs of other scenes; that it accounts for this 6.6 ms is
+an inference.
 
 The per-second performance snapshots of run a379 (record below) were mapped to the arm that was
 live, keeping only snapshots that lie inside one 2 s block (`armperf.py`; block edges from the
@@ -686,6 +694,10 @@ run with a game patch is not a strict run and supports no compatibility claim.
 | --- | --- | --- | --- | --- |
 | No patch | 18.9 | 20-21 | 91 % | 525 |
 | 960x540 patch | 31.9 | 37-41 after 166 s; 14-16 before | 78 % | 469 |
+
+Later the same day the same patch held 33.9, 27.8 and 23.4-23.6 fps in three other scenes of this
+route (record "at 960x540 the draw ring's cycle is the frame" at the top); the 37-41 fps was not
+reproduced.
 
 - **Scenes differ.** The input route is timed, and the faster run walks the dunes and the cliff
   path. The unpatched run stands next to a rock in the dunes during the window. Both include one
@@ -1321,7 +1333,8 @@ site.
   no wave64 lowering design is written. The one lever of that size is
   internal resolution: at a 960x540 game patch the BVH kernel took 6.45
   instead of 22.64 ms ("Internal resolution is the lever", measured then at
-  16.6-18.1 fps against 12-13; 37-41 fps on 2026-11-14, record at the top). The GPU sum there was
+  16.6-18.1 fps against 12-13; 37-41 fps in one scene on 2026-11-14 and 23-34 fps in three others,
+  records at the top). The GPU sum there was
   still 36.0 ms per frame, so lower resolution gains fps but does not reach
   60 either.
 - **Decision: no command-processor change for the dunes.**
