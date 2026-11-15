@@ -834,6 +834,84 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	std::_Exit(0);
 }
 
+// References written from the RDNA2 ISA descriptions of each opcode.
+uint32_t PermuteByteReference(uint32_t src0, uint32_t src1, uint32_t select)
+{
+	const uint64_t in = (uint64_t {src0} << 32u) | src1;
+	if (select >= 13u)
+	{
+		return 0xffu;
+	}
+	if (select == 12u)
+	{
+		return 0u;
+	}
+	if (select >= 8u)
+	{
+		return ((in >> (16u * (select - 8u) + 15u)) & 1u) != 0u ? 0xffu : 0u;
+	}
+	return static_cast<uint32_t>(in >> (8u * select)) & 0xffu;
+}
+
+uint32_t SignExtend(uint32_t value, uint32_t bits)
+{
+	const uint32_t sign  = 1u << (bits - 1u);
+	const uint32_t field = value & ((sign << 1u) - 1u);
+	return (field ^ sign) - sign;
+}
+
+[[noreturn]] void RunIntegerTernaryContracts(ShaderType stage)
+{
+	Initialize();
+	const Program  xor3(Emit(Parse(Ternary(0x178u), stage), 0u, false, false, true).c_str());
+	const Program  alignbit(Emit(Parse(Ternary(0x14eu), stage), 0u, false, false, true).c_str());
+	const Program  perm(Emit(Parse(Ternary(0x344u), stage), 0u, false, false, true).c_str());
+	const Program  mad_i24(Emit(Parse(Ternary(0x142u), stage), 0u, false, false, true).c_str());
+	const Program  mad_u16(Emit(Parse(Ternary(0x373u), stage), 0u, false, false, true).c_str());
+	const Program  mad_i16(Emit(Parse(Ternary(0x375u), stage), 0u, false, false, true).c_str());
+	const Program  lerp(Emit(Parse(Ternary(0x14du), stage), 0u, false, false, true).c_str());
+	const uint32_t values[] = {0u,          1u,          0x7fu,       0x80u,       0xffu,       0x8000u,     0x00ffffffu,
+	                           0x00800000u, 0x7fffffffu, 0x80000000u, 0xffffffffu, 0x12345678u, 0x89abcdefu, 0xfedcba98u};
+	for (uint32_t a: values)
+	{
+		for (uint32_t b: values)
+		{
+			for (uint32_t c: values)
+			{
+				Equal(Evaluate(xor3, a, b, c), a ^ b ^ c, "v_xor3_b32");
+				Equal(Evaluate(mad_i24, a, b, c), SignExtend(a, 24u) * SignExtend(b, 24u) + c, "v_mad_i32_i24");
+				Equal(Evaluate(mad_u16, a, b, c), (a & 0xffffu) * (b & 0xffffu) + c, "v_mad_u32_u16");
+				Equal(Evaluate(mad_i16, a, b, c), SignExtend(a, 16u) * SignExtend(b, 16u) + c, "v_mad_i32_i16");
+				uint32_t average = 0;
+				for (uint32_t k = 0; k < 4u; k++)
+				{
+					const uint32_t shift = 8u * k;
+					average |= ((((a >> shift) & 0xffu) + ((b >> shift) & 0xffu) + ((c >> shift) & 1u)) >> 1u) << shift;
+				}
+				Equal(Evaluate(lerp, a, b, c), average, "v_lerp_u8");
+			}
+			for (uint32_t shift = 0; shift < 64u; shift++)
+			{
+				const uint64_t pair = (uint64_t {a} << 32u) | b;
+				Equal(Evaluate(alignbit, a, b, shift), static_cast<uint32_t>(pair >> (shift & 31u)), "v_alignbit_b32");
+			}
+			for (uint32_t select = 0; select < 256u; select++)
+			{
+				const uint32_t selects =
+				    select | (((select + 5u) & 0xffu) << 8u) | (((select + 9u) & 0xffu) << 16u) | (((select * 7u) & 0xffu) << 24u);
+				uint32_t expected = 0;
+				for (uint32_t k = 0; k < 4u; k++)
+				{
+					expected |= PermuteByteReference(a, b, (selects >> (8u * k)) & 0xffu) << (8u * k);
+				}
+				Equal(Evaluate(perm, a, b, selects), expected, "v_perm_b32");
+			}
+		}
+	}
+	Equal(Evaluate(perm, 1u, 2u, 3u, 0xdeadbeefu, 0u), 0xdeadbeefu, "inactive v_perm_b32");
+	std::_Exit(0);
+}
+
 [[noreturn]] void RunSdwaHalfDestination(ShaderType stage = ShaderType::Pixel)
 {
 	Initialize();
@@ -1437,6 +1515,13 @@ TEST(EmulatorShaderArithmetic, FloatToIntegerConversionsSaturateWithoutUndefined
 TEST(EmulatorShaderArithmetic, ComputeFloatToIntegerConversionsSaturateWithoutUndefinedSpirvConversions)
 {
 	ASSERT_EXIT(RunFloatToIntegerConversionContracts(ShaderType::Compute), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, IntegerTernaryByteAndMultiplyAddContracts)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunIntegerTernaryContracts(stage), ::testing::ExitedWithCode(0), "");
+	}
 }
 TEST(EmulatorShaderArithmetic, CanonicalFp16EncodingsAssembleAndValidate) { ASSERT_EXIT(RunCanonicalModules(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, Fp16NarrowingValuesRoundingAndExec) { ASSERT_EXIT(RunNarrowing(), ::testing::ExitedWithCode(0), ""); }

@@ -13,9 +13,9 @@
 
 namespace Kyty::Libs::Graphics {
 
-static KYTY_RECOMPILER_FUNC(RecompileBitfieldExtract32)
+// Integer operations define no input or output modifiers (ISA 6.2), so an encoded one is refused, not ignored.
+static bool HasNoVectorModifiers(const ShaderInstruction& inst)
 {
-	const auto& inst = code.GetInstructions().At(index);
 	if (inst.dst.clamp || inst.dst.multiplier != 1.0f || inst.vop3_op_sel != 0u || inst.vop3_omod != 0u || inst.vop_sdwa)
 	{
 		return false;
@@ -27,9 +27,106 @@ static KYTY_RECOMPILER_FUNC(RecompileBitfieldExtract32)
 			return false;
 		}
 	}
+	return true;
+}
+
+static KYTY_RECOMPILER_FUNC(RecompileBitfieldExtract32)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (!HasNoVectorModifiers(inst))
+	{
+		return false;
+	}
 	return inst.type == ShaderInstructionType::SBfeU32 || inst.type == ShaderInstructionType::SBfeI32 ?
 	           Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1(index, code, dst_source, spirv, param, scc_check) :
 	           Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2(index, code, dst_source, spirv, param, scc_check);
+}
+
+static KYTY_RECOMPILER_FUNC(RecompileIntegerTernary32)
+{
+	if (!HasNoVectorModifiers(code.GetInstructions().At(index)))
+	{
+		return false;
+	}
+	return Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2(index, code, dst_source, spirv, param, scc_check);
+}
+
+// v_perm_b32: each result byte k is byte_permute({src0, src1}, src2 byte k). Selectors 0-7 pick a byte
+// (src1 holds bytes 0-3), 8-11 replicate the sign bit of byte 1, 3, 5 or 7, 12 gives 0x00 and 13+ 0xff.
+static KYTY_RECOMPILER_FUNC(RecompileVPermB32)
+{
+	if (!HasNoVectorModifiers(code.GetInstructions().At(index)))
+	{
+		return false;
+	}
+	static constexpr const char* permute_byte = R"(
+%pm_sel<k>_<index> = OpBitFieldUExtract %uint %t2_<index> %uint_<shift> %uint_8
+%pm_high<k>_<index> = OpUGreaterThanEqual %bool %pm_sel<k>_<index> %uint_4
+%pm_word<k>_<index> = OpSelect %uint %pm_high<k>_<index> %t0_<index> %t1_<index>
+%pm_lane<k>_<index> = OpBitwiseAnd %uint %pm_sel<k>_<index> %uint_3
+%pm_shift<k>_<index> = OpShiftLeftLogical %uint %pm_lane<k>_<index> %uint_3
+%pm_byte<k>_<index> = OpBitFieldUExtract %uint %pm_word<k>_<index> %pm_shift<k>_<index> %uint_8
+%pm_sign_src<k>_<index> = OpBitwiseAnd %uint %pm_sel<k>_<index> %uint_2
+%pm_sign_high<k>_<index> = OpINotEqual %bool %pm_sign_src<k>_<index> %uint_0
+%pm_sign_word<k>_<index> = OpSelect %uint %pm_sign_high<k>_<index> %t0_<index> %t1_<index>
+%pm_sign_odd<k>_<index> = OpBitwiseAnd %uint %pm_sel<k>_<index> %uint_1
+%pm_sign_top<k>_<index> = OpINotEqual %bool %pm_sign_odd<k>_<index> %uint_0
+%pm_sign_pos<k>_<index> = OpSelect %uint %pm_sign_top<k>_<index> %uint_31 %uint_15
+%pm_sign_bit<k>_<index> = OpBitFieldUExtract %uint %pm_sign_word<k>_<index> %pm_sign_pos<k>_<index> %uint_1
+%pm_sign_set<k>_<index> = OpINotEqual %bool %pm_sign_bit<k>_<index> %uint_0
+%pm_sign<k>_<index> = OpSelect %uint %pm_sign_set<k>_<index> %uint_255 %uint_0
+%pm_is_zero<k>_<index> = OpIEqual %bool %pm_sel<k>_<index> %uint_12
+%pm_const<k>_<index> = OpSelect %uint %pm_is_zero<k>_<index> %uint_0 %uint_255
+%pm_is_sign<k>_<index> = OpULessThan %bool %pm_sel<k>_<index> %uint_12
+%pm_tail<k>_<index> = OpSelect %uint %pm_is_sign<k>_<index> %pm_sign<k>_<index> %pm_const<k>_<index>
+%pm_is_byte<k>_<index> = OpULessThan %bool %pm_sel<k>_<index> %uint_8
+%pm_value<k>_<index> = OpSelect %uint %pm_is_byte<k>_<index> %pm_byte<k>_<index> %pm_tail<k>_<index>
+%pm_put<k>_<index> = OpShiftLeftLogical %uint %pm_value<k>_<index> %uint_<shift>
+)";
+	String8                      text;
+	for (uint32_t k = 0; k < 4u; k++)
+	{
+		text +=
+		    String8(permute_byte).ReplaceStr("<k>", String8::FromPrintf("%u", k)).ReplaceStr("<shift>", String8::FromPrintf("%u", 8u * k));
+	}
+	text += R"(
+%pm_low_<index> = OpBitwiseOr %uint %pm_put0_<index> %pm_put1_<index>
+%pm_high_<index> = OpBitwiseOr %uint %pm_put2_<index> %pm_put3_<index>
+%t_<index> = OpBitwiseOr %uint %pm_low_<index> %pm_high_<index>
+)";
+	const char* const permute[4] = {text.c_str(), "", nullptr, nullptr};
+	return Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2(index, code, dst_source, spirv, permute, scc_check);
+}
+
+// v_lerp_u8: result byte k is (src0 byte k + src1 byte k + bit 8k of src2) >> 1.
+static KYTY_RECOMPILER_FUNC(RecompileVLerpU8)
+{
+	if (!HasNoVectorModifiers(code.GetInstructions().At(index)))
+	{
+		return false;
+	}
+	static constexpr const char* average_byte = R"(
+%lp_a<k>_<index> = OpBitFieldUExtract %uint %t0_<index> %uint_<shift> %uint_8
+%lp_b<k>_<index> = OpBitFieldUExtract %uint %t1_<index> %uint_<shift> %uint_8
+%lp_round<k>_<index> = OpBitFieldUExtract %uint %t2_<index> %uint_<shift> %uint_1
+%lp_ab<k>_<index> = OpIAdd %uint %lp_a<k>_<index> %lp_b<k>_<index>
+%lp_sum<k>_<index> = OpIAdd %uint %lp_ab<k>_<index> %lp_round<k>_<index>
+%lp_half<k>_<index> = OpShiftRightLogical %uint %lp_sum<k>_<index> %uint_1
+%lp_put<k>_<index> = OpShiftLeftLogical %uint %lp_half<k>_<index> %uint_<shift>
+)";
+	String8                      text;
+	for (uint32_t k = 0; k < 4u; k++)
+	{
+		text +=
+		    String8(average_byte).ReplaceStr("<k>", String8::FromPrintf("%u", k)).ReplaceStr("<shift>", String8::FromPrintf("%u", 8u * k));
+	}
+	text += R"(
+%lp_low_<index> = OpBitwiseOr %uint %lp_put0_<index> %lp_put1_<index>
+%lp_high_<index> = OpBitwiseOr %uint %lp_put2_<index> %lp_put3_<index>
+%t_<index> = OpBitwiseOr %uint %lp_low_<index> %lp_high_<index>
+)";
+	const char* const average[4] = {text.c_str(), "", nullptr, nullptr};
+	return Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2(index, code, dst_source, spirv, average, scc_check);
 }
 
 const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFormat::Format format)
@@ -838,6 +935,35 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
                                                                                                                                   "%tu1_<index> = OpBitwiseAnd %uint %t1_<index> %uint_0x00ffffff",
                                                                                                                                   "%tm_<index> = OpFunctionCall %uint %mul_lo_uint %tu0_<index> %tu1_<index>",
                                                                                                                                   "%t_<index> = OpIAdd %uint %tm_<index> %t2_<index>"}},
+	{RecompileIntegerTernary32, ShaderInstructionType::VXor3B32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
+	 {"%tx_<index> = OpBitwiseXor %uint %t0_<index> %t1_<index>", "%t_<index> = OpBitwiseXor %uint %tx_<index> %t2_<index>"}},
+	// v_alignbit_b32: dst = low dword of ({src0, src1} >> src2[4:0]); a zero shift returns src1.
+	{RecompileIntegerTernary32, ShaderInstructionType::VAlignbitB32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
+	 {"%ts_<index> = OpBitwiseAnd %uint %t2_<index> %uint_31\n"
+	  "%tz_<index> = OpIEqual %bool %ts_<index> %uint_0",
+	  "%tr_<index> = OpISub %uint %uint_32 %ts_<index>\n"
+	  "%tl_<index> = OpBitwiseAnd %uint %tr_<index> %uint_31",
+	  "%tlo_<index> = OpShiftRightLogical %uint %t1_<index> %ts_<index>\n"
+	  "%thi_<index> = OpShiftLeftLogical %uint %t0_<index> %tl_<index>\n"
+	  "%to_<index> = OpBitwiseOr %uint %tlo_<index> %thi_<index>",
+	  "%t_<index> = OpSelect %uint %tz_<index> %t1_<index> %to_<index>"}},
+	{RecompileVPermB32, ShaderInstructionType::VPermB32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {""}},
+	// v_mad_i32_i24: dst = sext(src0[23:0]) * sext(src1[23:0]) + src2, low 32 bits.
+	{RecompileIntegerTernary32, ShaderInstructionType::VMadI32I24, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
+	 {"%ti0_<index> = OpBitFieldSExtract %uint %t0_<index> %uint_0 %uint_24",
+	  "%ti1_<index> = OpBitFieldSExtract %uint %t1_<index> %uint_0 %uint_24",
+	  "%tm_<index> = OpIMul %uint %ti0_<index> %ti1_<index>", "%t_<index> = OpIAdd %uint %tm_<index> %t2_<index>"}},
+	// v_mad_u32_u16: dst = src0[15:0] * src1[15:0] + src2.
+	{RecompileIntegerTernary32, ShaderInstructionType::VMadU32U16, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
+	 {"%tu0_<index> = OpBitwiseAnd %uint %t0_<index> %uint_0x0000ffff",
+	  "%tu1_<index> = OpBitwiseAnd %uint %t1_<index> %uint_0x0000ffff",
+	  "%tm_<index> = OpIMul %uint %tu0_<index> %tu1_<index>", "%t_<index> = OpIAdd %uint %tm_<index> %t2_<index>"}},
+	// v_mad_i32_i16: dst = sext(src0[15:0]) * sext(src1[15:0]) + src2.
+	{RecompileIntegerTernary32, ShaderInstructionType::VMadI32I16, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
+	 {"%ti0_<index> = OpBitFieldSExtract %uint %t0_<index> %uint_0 %uint_16",
+	  "%ti1_<index> = OpBitFieldSExtract %uint %t1_<index> %uint_0 %uint_16",
+	  "%tm_<index> = OpIMul %uint %ti0_<index> %ti1_<index>", "%t_<index> = OpIAdd %uint %tm_<index> %t2_<index>"}},
+	{RecompileVLerpU8, ShaderInstructionType::VLerpU8, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {""}},
 
 	    // clang-format on
 	};

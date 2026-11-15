@@ -3459,6 +3459,14 @@ void Spirv::FindConstants()
 		}
 	}
 	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU16U32}) || spirv_uses_i16(m_code)) { AddConstantUint(0xffffu); }
+	if (m_code.HasAnyOf({ShaderInstructionType::VAlignbitB32, ShaderInstructionType::VPermB32, ShaderInstructionType::VMadI32I24,
+	                     ShaderInstructionType::VMadU32U16, ShaderInstructionType::VMadI32I16, ShaderInstructionType::VLerpU8}))
+	{
+		for (uint32_t value: {0u, 1u, 2u, 3u, 4u, 8u, 12u, 15u, 16u, 24u, 31u, 32u, 255u, 0xffffu})
+		{
+			AddConstantUint(value);
+		}
+	}
 	if (m_code.HasAnyOf({ShaderInstructionType::VAddI16, ShaderInstructionType::VAddU16, ShaderInstructionType::VSubI16,
 	                     ShaderInstructionType::VSubU16, ShaderInstructionType::VMulI16, ShaderInstructionType::VMulU16,
 	                     ShaderInstructionType::VMinI16, ShaderInstructionType::VMinU16, ShaderInstructionType::VMaxI16,

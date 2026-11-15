@@ -657,6 +657,13 @@ enum class ShaderInstructionType : uint32_t
 	VPkSubU16,
 	VPkMaxU16,
 	VPkMinU16,
+	VXor3B32,
+	VAlignbitB32,
+	VPermB32,
+	VMadI32I24,
+	VMadU32U16,
+	VMadI32I16,
+	VLerpU8,
 
 	ZMax
 };

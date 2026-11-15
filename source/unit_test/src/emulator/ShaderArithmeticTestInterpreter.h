@@ -173,6 +173,7 @@ public:
 			else if (op == "OpNot") { r = ~arg(4); }
 			else if (op == "OpIAdd") { r = arg(4) + arg(5); }
 			else if (op == "OpISub") { r = arg(4) - arg(5); }
+			else if (op == "OpIMul") { r = arg(4) * arg(5); }
 			else if (op == "OpShiftLeftLogical" || op == "OpShiftRightLogical" || op == "OpShiftRightArithmetic")
 			{
 				const auto shift = arg(5);

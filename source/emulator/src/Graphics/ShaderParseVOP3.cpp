@@ -640,7 +640,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			};
 			break;
 		case 0x141: inst.type = ShaderInstructionType::VMadF32; break;
-		case 0x142: KYTY_NI("v_mad_i32_i24"); break;
+		case 0x142: inst.type = ShaderInstructionType::VMadI32I24; break;
 		case 0x143: inst.type = ShaderInstructionType::VMadU32U24; break;
 		case 0x144: inst.type = ShaderInstructionType::VCubeIdF32; break;
 		case 0x145: inst.type = ShaderInstructionType::VCubescF32; break;
@@ -651,8 +651,8 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x14A: inst.type = ShaderInstructionType::VBfiB32; break;
 		case 0x14b: inst.type = ShaderInstructionType::VFmaF32; break;
 		case 0x14C: KYTY_NI("v_fma_f64"); break;
-		case 0x14D: KYTY_NI("v_lerp_u8"); break;
-		case 0x14E: KYTY_NI("v_alignbit_b32"); break;
+		case 0x14D: inst.type = ShaderInstructionType::VLerpU8; break;
+		case 0x14E: inst.type = ShaderInstructionType::VAlignbitB32; break;
 		case 0x14F: KYTY_NI("v_alignbyte_b32"); break;
 		case 0x150: KYTY_NI("v_mullit_f32"); break;
 		case 0x151: inst.type = ShaderInstructionType::VMin3F32; break;
@@ -715,6 +715,13 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.src[2].size = 2;
 			break;
 		case 0x177: KYTY_NI("v_mad_i64_i32"); break;
+		case 0x178:
+			if (!next_gen)
+			{
+				KYTY_NI("v_xor3_b32");
+			}
+			inst.type = ShaderInstructionType::VXor3B32;
+			break;
 		case 0x303: binary16(ShaderInstructionType::VAddU16); break;
 		case 0x304: binary16(ShaderInstructionType::VSubU16); break;
 		case 0x305: binary16(ShaderInstructionType::VMulU16); break;
@@ -775,7 +782,13 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x341: inst.type = ShaderInstructionType::VMadF16; break;
 		case 0x342: KYTY_NI("v_interp_p1ll_f16"); break;
 		case 0x343: KYTY_NI("v_interp_p1lv_f16"); break;
-		case 0x344: KYTY_NI("v_perm_b32"); break;
+		case 0x344:
+			if (!next_gen)
+			{
+				KYTY_NI("v_perm_b32");
+			}
+			inst.type = ShaderInstructionType::VPermB32;
+			break;
 		case 0x345: inst.type = ShaderInstructionType::VXadU32; break;
 		case 0x346: inst.type = ShaderInstructionType::VLshlAddU32; break;
 		case 0x347: inst.type = ShaderInstructionType::VAddLshlU32; break;
@@ -902,8 +915,20 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 				KYTY_NI("v_or3_u32");
 			};
 			break;
-		case 0x373: KYTY_NI("v_mad_u32_u16"); break;
-		case 0x375: KYTY_NI("v_mad_i32_i16"); break;
+		case 0x373:
+			if (!next_gen)
+			{
+				KYTY_NI("v_mad_u32_u16");
+			}
+			inst.type = ShaderInstructionType::VMadU32U16;
+			break;
+		case 0x375:
+			if (!next_gen)
+			{
+				KYTY_NI("v_mad_i32_i16");
+			}
+			inst.type = ShaderInstructionType::VMadI32I16;
+			break;
 
 		/* VOP1 using VOP3 encoding */
 		case 0x180:
