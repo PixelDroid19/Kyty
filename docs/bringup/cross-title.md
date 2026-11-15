@@ -6860,6 +6860,16 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     three references do; object construction now writes only the 8-byte wrapper that two references agree on, not
     16 bytes. `referArray` and `referObject` on a value of another type fail: one reference returns null, another
     converts a null value.
+  - `sceNetRecvfrom` and `sceNetGetsockname` in the net library, over the socket layer the POSIX names already used
+    (505a72822).
+  - `sceAudioInGetSilentState`: 0 while the host microphone feeds the port, 1 (no device) otherwise, invalid handle
+    for an unknown or closed port (1a771ec8a). One reference returns a distinct code for an unused port.
+  - `sceAjmBatchErrorDump` clears the caller's error record and returns 0 (1a771ec8a).
+  - `sceNpCreateRequest` takes no parameters and returns ids from the counter the asynchronous form uses, never
+    reused, as two references do; a third reuses freed slots (08eaccc79).
+  - `sceLibcInternalHeapErrorReportForGame` logs the error and returns 0 (5c9a09c9c).
+  - `sceKernelMtypeprotect` changes the protection only (493e292a4): the emulator keeps no memory type per range.
+    The references disagree on a zero length and on what the type does.
 - **Fixed in existing code.** Tick-to-date conversion counted tick 0 as 307 days after 0000-03-01 instead of 306,
   so every Rtc conversion from a tick reported the next calendar day (39a73af92).
 - **Not done, references disagree.** `sce::Json::Value::serialize`: one reference writes doubles through
@@ -6869,11 +6879,16 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   computed from the parameters). The web browser result was taken from the reference that writes 1; another writes 0.
 - **Excluded.** A leap second (`...:60Z`) in RFC 3339 parsing: one reference returns success and leaves the tick
   unchanged; Kyty keeps its invalid-second error.
+- **Not done, references disagree.** The AMPR command-buffer entries `WaitOnAddress`, `WriteCounterOnCompletion` and
+  the three `WriteAddressFrom*CounterOnCompletion` forms: argument lists, bounds and packet layouts differ between
+  all three references, and one records the counter writes as plain zero writes.
 - **Deferred.** Font, Psml, Acm, the image codecs, Voice and Share were not started.
 - **Open defect.** `KernelUnlink`, `KernelRmdir` and `KernelMkdir` (`source/emulator/src/Kernel/FileSystem.cpp`) and
   opens for writing do not refuse paths under the application mount, so a title that removes or writes a package
   file changes the user's install. One reference refuses every such mutation with EPERM; applying it to the other
   paths needs a title run, since it changes what titles that write there see.
+- **Open defect.** `NpCreateAsyncRequest` (`source/emulator/src/Network.cpp`) warns on a null parameter and then
+  reads through it; a title passing null crashes instead of getting an argument error.
 - **Verified.** Unit tests 2676 of 2687 (11 skipped) and the repository gates, on Linux.
   `PPSA06084 - Superliminal`, which loads two modules importing the changed Json entries, passed playable-regression
   at 12 of 15 with the same three failing gates as before; whether the run called those entries was not observed.
