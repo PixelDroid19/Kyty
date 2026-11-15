@@ -6997,10 +6997,14 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     exists in one reference only.
   - `sceVoiceWriteToIPort`: no reference delivers samples.
   - Share capture, current status, application-title content and SharePlay terminate entries: one source each.
-- **Open defect.** `KernelUnlink`, `KernelRmdir` and `KernelMkdir` (`source/emulator/src/Kernel/FileSystem.cpp`) and
-  opens for writing do not refuse paths under the application mount, so a title that removes or writes a package
-  file changes the user's install. One reference refuses every such mutation with EPERM; applying it to the other
-  paths needs a title run, since it changes what titles that write there see.
+- **Fixed: mutations under the application mount.** Opens with a write, append, create or truncate flag (which
+  also covers libc `fopen` in a write mode), unlink, rename from or to it, mkdir, rmdir and chmod of a path whose
+  lexically normal form is `/app0` or under `/app0/` return EPERM and leave the user's install untouched; reads are
+  unchanged. One reference refuses every listed call with EPERM; the error code rests on that source, and the
+  refusal itself on the package being a read-only mount on the console. The unit test
+  `ApplicationMountRefusesEveryMutation` covers each call, a `..` path and an untouched sibling mount.
+  `PPSA17221 - Minecraft` (12 of 15, 60 fps) and `PPSA21567 - ASTRO BOT` (11 of 15, interactive, clean exit, the
+  same first error as before) were unchanged. Whether either run attempted such a write was not observed.
 - **Verified.** Unit tests 2680 of 2691 (11 skipped) and the repository gates, on Linux, with the NetCtl
   fault code kept.
   `PPSA06084 - Superliminal`, which loads two modules importing the changed Json entries, passed playable-regression
