@@ -6,6 +6,46 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: unpatched frame rate by scene, the transient command-bound dip, and a replay-worker poll A/B (2026-11-15, measured)
+
+Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, silent console, late dunes route from the
+world-map slot, `1f28471be` source (later commits are documentation), no game patch unless stated.
+The wall-clock route reaches different scenes from run to run; each figure names its run and
+window.
+
+- **Unpatched frame rate depends on the scene.** a390 170-210 s: 25.5 fps at 349 draws per frame,
+  engine 94 % busy. a391 and a392 150-215 s: 20-22 fps at 510-610 draws, engine 90-96 % busy.
+  The 19-20 fps quoted in earlier records belongs to their scenes (525-772 draws). No unpatched
+  window reached 30 fps.
+- **A transient dip set by command processing.** a390 150-158 s (1080p) and a385 150-159 s
+  (960x540 patch) drop to 13-17 fps with the engine 56-69 % busy. Draws per second stay at about
+  13,000-14,500 while the cost per draw rises from about 29 us to 54-63 us; it falls back over
+  5-6 s as the scene settles. Every stage of a draw grows (a390, per draw, dip against 170-210 s:
+  state setup 20.2 against 9.2 us, resource binding 18.8 against 12.1, pipeline setup 5.6 against
+  2.1, emission 4.6 against 2.4). Two counters move with it: guest-address preparations that
+  re-query physical population (64-71 % of draws against 16-20 %; they run when an ordering point
+  or a host write intervened since the previous preparation), and compute-pipeline lookups (706
+  per frame against 105, with 104 dispatches in both), which points at draws that carry a compute
+  geometry front. Neither is shown to be the cause: no profile of the dip exists, because a391
+  and a392 never reached it (no window above 800 draws per frame). Its ceiling at about 29 us per
+  draw would be about 24 fps, not 30.
+- **Stops to zero frames per second.** a389 (960x540 patch) 208-210 s: 0.5-0.7 s of pipeline
+  creation and 0.24-0.29 s of SPIR-V work in each second, at an area change. a388 (probe build,
+  960x540 patch) 176, 181 and 183 s: command runs of 0.73, 1.96 and 0.85 s with under 0.5 ms of
+  pipeline creation; what they waited on is not established.
+- **Replay-worker poll, in-run A/B** (a390, temporary probe `diag-poll-20261115.patch`: the
+  worker's 200 us poll window off in odd 4 s wall-clock blocks, on in even ones; a snapshot counts
+  only inside one block). Steady scene 165-212 s: 25.46 against 25.42 fps, 28.6 against 28.9 us
+  per draw, engine 94 % in both, worker 33.7 % against 3.8 % of a core. In the dip (150-164 s,
+  five snapshots per arm, 866 against 900 draws per frame) poll off read 56.8 against 51.5 us per
+  draw and 15.1 against 16.8 fps. The dip result rests on too few, unequal snapshots: a cost of
+  the poll's removal is not established and neither is its absence. Not shipped.
+- **960x540 patch, fourth run** (a389, 166-215 s): 25.4 fps; 20-28 fps over 150-192 s at 330-480
+  draws, 41-53 fps at 195-201 s with 82-254 draws per frame before a load. The 37-41 fps of the
+  older record (469 draws, `6a6a5818a`) was not reproduced; its cause is not established.
+- **Tools** (evidence directory, outside the repository): `pollab.py`, `perf_on_draws.py`
+  (enables the profiler on draws per frame instead of the clock).
+
 ## Robot platformer: at 960x540 the draw ring's cycle is the frame; the scheduler holds 0.2 ms of it (2026-11-14, measured)
 
 Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, silent console, late dunes route from the

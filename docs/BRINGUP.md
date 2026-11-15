@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: unpatched frame rate by scene, the transient command-bound dip, and a replay-worker poll A/B (2026-11-15, measured)
   - Robot platformer: at 960x540 the draw ring's cycle is the frame; the scheduler holds 0.2 ms of it (2026-11-14, measured)
   - Robot platformer: a 1920x1080 output with a 1280x720 internal resolution removes under a third of the GPU work and still misses 30 fps (2026-11-14, measured)
   - Robot platformer: the loop-boundary range split fails the cross-recipe sweep and stays a probe result (2026-11-14, offline)
