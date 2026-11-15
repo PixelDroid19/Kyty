@@ -2042,6 +2042,13 @@ TEST(EmulatorGraphicsState, PipelineCacheCheckpointsAreDirtyAndRateLimited)
 	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget / 2, budget / 2), budget);
 	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget - 1, 2), budget);
 	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget, 1), budget);
+
+	constexpr VkPipelineCreationFeedbackFlags valid = VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT;
+	constexpr VkPipelineCreationFeedbackFlags hit   = VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+	EXPECT_FALSE(PipelineCacheCreationAddsEntry(VK_SUCCESS, valid | hit));
+	EXPECT_TRUE(PipelineCacheCreationAddsEntry(VK_SUCCESS, valid));
+	EXPECT_TRUE(PipelineCacheCreationAddsEntry(VK_SUCCESS, hit));
+	EXPECT_FALSE(PipelineCacheCreationAddsEntry(VK_ERROR_OUT_OF_HOST_MEMORY, valid));
 }
 
 TEST(EmulatorGraphicsState, SpirvBinaryCacheRequiresExactSourceAndCompileOptions)

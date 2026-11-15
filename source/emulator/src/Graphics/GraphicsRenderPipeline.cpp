@@ -893,7 +893,11 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	VkGraphicsPipelineCreateInfo pipeline_info {};
 	pipeline_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-	pipeline_info.pNext               = nullptr;
+	VkPipelineCreationFeedback           feedback {};
+	VkPipelineCreationFeedbackCreateInfo feedback_info {};
+	feedback_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+	feedback_info.pPipelineCreationFeedback = &feedback;
+	pipeline_info.pNext               = &feedback_info;
 	pipeline_info.flags               = 0;
 	pipeline_info.stageCount          = shader_stage_count;
 	pipeline_info.pStages             = shader_stages;
@@ -917,6 +921,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	const auto     vk_create_start = DebugStatsClock::now();
 	const VkResult create_result =
 	    vkCreateGraphicsPipelines(gctx->device, gctx->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline->pipeline);
+	PipelineCacheStoreRecordCreation(create_result, feedback);
 	const auto vk_create_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - vk_create_start).count();
 	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(vk_create_ns));
 
@@ -1094,12 +1099,19 @@ static VkResult CreateComputePipelineFromRecipe(GraphicContext* gctx, const Comp
 	                                                               : vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, layout);
 	if (result == VK_SUCCESS)
 	{
+		VkPipelineCreationFeedback           feedback {};
+		VkPipelineCreationFeedbackCreateInfo feedback_info {};
+		feedback_info.sType                     = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+		feedback_info.pPipelineCreationFeedback = &feedback;
+
 		VkComputePipelineCreateInfo info {};
 		info.sType             = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		info.pNext             = &feedback_info;
 		info.stage             = comp_shader_stage_info;
 		info.layout            = *layout;
 		info.basePipelineIndex = -1;
 		result                 = vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, pipeline);
+		PipelineCacheStoreRecordCreation(result, feedback);
 	}
 	vkDestroyShaderModule(gctx->device, comp_shader_module, nullptr);
 	return result;
@@ -2018,7 +2030,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			p.pipeline->writes_guest_memory = writes_guest_memory;
 			StorePipeline(transport_slot, p);
 			AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(transport_slot)]);
-			m_driver_cache_dirty = true;
+			m_driver_cache_dirty = m_driver_cache_dirty || PipelineCacheStoreTakeAddedEntries();
 			SaveDriverCacheIfDue();
 			return m_pipelines[static_cast<int>(transport_slot)].pipeline;
 		}
@@ -2072,7 +2084,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
-	m_driver_cache_dirty = true;
+	m_driver_cache_dirty = m_driver_cache_dirty || PipelineCacheStoreTakeAddedEntries();
 	SaveDriverCacheIfDue();
 	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(miss_ns));
@@ -2151,7 +2163,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
-	m_driver_cache_dirty = true;
+	m_driver_cache_dirty = m_driver_cache_dirty || PipelineCacheStoreTakeAddedEntries();
 	SaveDriverCacheIfDue();
 	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));
@@ -2218,7 +2230,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
-	m_driver_cache_dirty = true;
+	m_driver_cache_dirty = m_driver_cache_dirty || PipelineCacheStoreTakeAddedEntries();
 	SaveDriverCacheIfDue();
 	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));

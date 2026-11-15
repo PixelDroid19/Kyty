@@ -86,6 +86,21 @@ enum class PipelineCacheStoreSaveResult
 	Failed
 };
 
+// A pipeline the driver did not find in the application cache adds an entry the
+// cache file lacks. Feedback without the valid bit counts as an added entry.
+[[nodiscard]] constexpr bool PipelineCacheCreationAddsEntry(VkResult result, VkPipelineCreationFeedbackFlags flags)
+{
+	constexpr VkPipelineCreationFeedbackFlags hit =
+	    VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT | VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+	return result == VK_SUCCESS && (flags & hit) != hit;
+}
+
+// Pipelines that hit the cache must not mark it dirty: the driver may serialize
+// an unchanged cache in a different byte order, so a save would rewrite the
+// whole file.
+void               PipelineCacheStoreRecordCreation(VkResult result, const VkPipelineCreationFeedback& feedback);
+[[nodiscard]] bool PipelineCacheStoreTakeAddedEntries();
+
 [[nodiscard]] std::vector<uint8_t>         PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& properties);
 [[nodiscard]] PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineCache cache,
                                                                   const VkPhysicalDeviceProperties& properties,

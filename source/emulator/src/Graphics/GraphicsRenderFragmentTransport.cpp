@@ -8,6 +8,7 @@
 #include "Emulator/Graphics/FragmentTransportShade.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
@@ -271,12 +272,19 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 		stage.module = module;
 		stage.pName  = "main";
 
+		VkPipelineCreationFeedback           feedback {};
+		VkPipelineCreationFeedbackCreateInfo feedback_info {};
+		feedback_info.sType                     = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+		feedback_info.pPipelineCreationFeedback = &feedback;
+
 		VkComputePipelineCreateInfo pipeline_info {};
 		pipeline_info.sType        = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		pipeline_info.pNext        = &feedback_info;
 		pipeline_info.stage        = stage;
 		pipeline_info.layout       = *layout;
 		pipeline_info.basePipelineIndex = -1;
 		result                     = vkCreateComputePipelines(device, pipeline_cache, 1, &pipeline_info, nullptr, pipeline);
+		PipelineCacheStoreRecordCreation(result, feedback);
 		step                       = "vkCreateComputePipelines";
 	}
 	if (module != VK_NULL_HANDLE) { vkDestroyShaderModule(device, module, nullptr); }
