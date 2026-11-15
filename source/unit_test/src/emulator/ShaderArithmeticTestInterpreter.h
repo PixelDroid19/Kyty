@@ -220,6 +220,7 @@ public:
 			else if (op == "OpFNegate") { r = arg(4) ^ 0x80000000u; }
 			else if (op == "OpFOrdEqual") { r = fp(4) == fp(5); }
 			else if (op == "OpFOrdNotEqual") { r = !std::isnan(fp(4)) && !std::isnan(fp(5)) && fp(4) != fp(5); }
+			else if (op == "OpFUnordNotEqual") { r = std::isnan(fp(4)) || std::isnan(fp(5)) || fp(4) != fp(5); }
 			else if (op == "OpFOrdLessThan") { r = fp(4) < fp(5); }
 			else if (op == "OpFOrdLessThanEqual") { r = fp(4) <= fp(5); }
 			else if (op == "OpFOrdGreaterThan") { r = fp(4) > fp(5); }
@@ -240,7 +241,13 @@ public:
 				if (!std::isfinite(fp(4)) || fp(4) < -2147483648.0 || fp(4) >= 2147483648.0) { Fail("undefined conversion"); }
 				r = static_cast<uint32_t>(static_cast<int32_t>(fp(4)));
 			}
-			else if (op == "OpCompositeExtract") { r = value(t.at(4)).words.at(std::strtoul(t.at(5).c_str(), nullptr, 0)); }
+			// The fixture runs one lane, invocation 0, so a ballot holds only that lane's predicate.
+			else if (op == "OpGroupNonUniformBallot") { r = arg(5) != 0u ? 1u : 0u; }
+			else if (op == "OpCompositeConstruct")
+			{
+				if (t.size() > 8u) { Fail("composite wider than four words"); }
+				for (size_t i = 4; i < t.size(); ++i) { result.words.at(i - 4u) = arg(i); }
+			} else if (op == "OpCompositeExtract") { r = value(t.at(4)).words.at(std::strtoul(t.at(5).c_str(), nullptr, 0)); }
 			else if (op == "OpExtInst")
 			{
 				const auto& ext = t.at(5);

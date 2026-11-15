@@ -928,6 +928,34 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	std::_Exit(0);
 }
 
+// V_CMP_NEQ_F16 is !(S0 == S1), so a NaN input compares true; V_CMP_LG_F16 is ordered and compares false.
+[[noreturn]] void RunHalfNotEqualCompares(ShaderType stage)
+{
+	Initialize();
+	constexpr uint32_t kVccLo = 106u;
+	constexpr uint32_t kOne = 0x3c00u, kTwo = 0x4000u, kNan = 0x7e00u;
+	const auto compare = [&](uint32_t opcode, const char* destination, uint32_t a, uint32_t b)
+	{
+		const Program program(Emit(Parse({(0x35u << 26u) | (opcode << 16u) | kVccLo, 256u | (257u << 9u), kEnd}, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", a}, {"%v1", b}, {"%vcc_lo", 0u}, {"%vcc_hi", 0u}, {"%gl_SubgroupInvocationID", 0u},
+		                    {"%exec_lo", 1u}, {"%exec_hi", 0u}, {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   destination) &
+		       1u;
+	};
+	for (const auto& [opcode, destination]: {std::pair {0xEDu, "%vcc_lo"}, std::pair {0xFDu, "%exec_lo"}})
+	{
+		Equal(compare(opcode, destination, kOne, kOne), 0u, "not-equal of equal halves");
+		Equal(compare(opcode, destination, kOne, kTwo), 1u, "not-equal of different halves");
+		Equal(compare(opcode, destination, kNan, kOne), 1u, "not-equal with a NaN half");
+		Equal(compare(opcode, destination, kNan, kNan), 1u, "not-equal of two NaN halves");
+	}
+	Equal(compare(0xCDu, "%vcc_lo", kNan, kOne), 0u, "less-or-greater with a NaN half");
+	// V_CMP_NEQ_F64 reads both sources as register pairs (v[0:1], v[2:3]); the fixture holds no
+	// doubles, so it is only emitted and validated.
+	static_cast<void>(Emit(Parse({(0x35u << 26u) | (0x2Du << 16u) | kVccLo, 256u | (258u << 9u), kEnd}, stage), 0u, false, false, true));
+	std::_Exit(0);
+}
+
 [[noreturn]] void ParseNotWithNegate()
 {
 	Initialize();
@@ -1564,6 +1592,13 @@ TEST(EmulatorShaderArithmetic, IntegerUnaryVop3FormsMatchTheirVop1Forms)
 		ASSERT_EXIT(RunIntegerUnaryVop3Forms(stage), ::testing::ExitedWithCode(0), "");
 	}
 	ASSERT_EXIT(ParseNotWithNegate(), ::testing::ExitedWithCode(65), "");
+}
+TEST(EmulatorShaderArithmetic, HalfNotEqualComparesAreUnordered)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunHalfNotEqualCompares(stage), ::testing::ExitedWithCode(0), "");
+	}
 }
 TEST(EmulatorShaderArithmetic, IntegerTernaryRefusesEncodedModifiers)
 {
