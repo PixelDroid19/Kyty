@@ -117,18 +117,16 @@ static const char* OperandModifierPrefix(const ShaderOperand& op)
 static String8 operand_to_str(ShaderOperand op)
 {
 	String8 ret = "???";
+	// A constant prints the same whatever size the decoder gave the source it feeds.
 	switch (op.type)
 	{
 		case ShaderOperandType::LiteralConstant:
-			EXIT_IF(op.size != 0 && op.size != 2); // the decoder sizes a constant feeding a 64-bit source as 2
 			return String8::FromPrintf("%s%f (%u)", OperandModifierPrefix(op), op.constant.f, op.constant.u);
 			break;
 		case ShaderOperandType::IntegerInlineConstant:
-			EXIT_IF(op.size != 0 && op.size != 2);
 			return String8::FromPrintf("%s%d", OperandModifierPrefix(op), op.constant.i);
 			break;
 		case ShaderOperandType::FloatInlineConstant:
-			EXIT_IF(op.size != 0 && op.size != 2);
 			return String8::FromPrintf("%s%f", OperandModifierPrefix(op), op.constant.f);
 			break;
 		default: break;
@@ -202,6 +200,12 @@ static String8 operand_array_to_str(ShaderOperand op, int n)
 			if (n == 2)
 			{
 				ret = String8::FromPrintf("%d", op.constant.i);
+			}
+			break;
+		case ShaderOperandType::FloatInlineConstant:
+			if (n == 2)
+			{
+				ret = String8::FromPrintf("%f", op.constant.f);
 			}
 			break;
 		default: break;
