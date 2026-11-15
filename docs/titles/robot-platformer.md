@@ -229,6 +229,27 @@ claim; the patch is not shipped and its picture was not compared against the unp
     29 us per draw). No scheduler samples cover it. Samples that did cover 72-86 s showed the
     emulator's threads waiting 2,400 ms a second to run at 74 s (300 normally), but fps was 28.7 then,
     and agent snapshots were being taken in that second.
+  - Passive samples (five runs, per-second scheduler, pressure, disk and process IO; one run with a
+    user-space CPU profile). In the one clean run the 78 s dip (12 fps) is a burst of first-use
+    texture creation on the command thread: 111 creates, `upload_ns` 215 ms (27 ms for one upload),
+    `guest_address_residency_ns` 86 ms, `detile_ns` 54 ms, `draw_descriptor_texture_ns` 353 ms,
+    `command_processor_run_max_ns` 291 ms, fence waits 19 ms, and GPU busy cycles fall to about a
+    fifth. The command thread's user-space samples stay at about 540 a second in steady and dip
+    windows; in the dip they move to detile, memcpy, XXH3 hashing and block creation. Whether the
+    rest of `upload_ns` is kernel time (first-touch faults on new staging) or a wait for in-flight
+    fills is not measured, and the three counters above are not shown to be disjoint.
+  - Excluded for these dips: swap activity, cgroup memory events (all zero) and process block reads
+    in the dip second (0 MB at 78 s; reads of 0.4-0.9 GB/s come one to three seconds later).
+  - Guest file IO runs synchronously on the calling thread: `SubmitCommandBuffer`
+    (`Libs/LibAmpr.cpp:786`) executes its reads inline (`ExecuteActions`, line 812; `ExecuteRead`,
+    line 671, 4 MiB chunks), the kernel AIO submit (`Kernel/Aio.cpp:66`) runs each request inline and
+    reports it completed, and `KernelPread` (`Kernel/FileSystem.cpp:1587`) holds the file mutex. A
+    temporary probe measured up to 300-700 ms a second of such blocking per streaming thread at about
+    0.9 GB/s. The blocking did not line up with the dips (a 698 ms block at 77 s came with no dip), so
+    it is not shown to cause them. The install volume is a FUSE NTFS mount: 1.16 GB/s cold serial,
+    0.70 GB/s cold with eight readers, 10.6 GB/s from page cache; no claim that it causes the dips.
+  - Open: a 0 fps freeze at 104-108 s in two runs with a foreign build loading the host (IO
+    pressure 270-525), not repeated in three later runs.
   A dip on a shared host needs passive scheduler and pressure samples over the whole run before it is
   attributed.
 - **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
