@@ -174,6 +174,10 @@ public:
 			else if (op == "OpIAdd") { r = arg(4) + arg(5); }
 			else if (op == "OpISub") { r = arg(4) - arg(5); }
 			else if (op == "OpIMul") { r = arg(4) * arg(5); }
+			else if (op == "OpBitReverse")
+			{
+				for (uint32_t bit = 0; bit < 32u; ++bit) { r |= ((arg(4) >> bit) & 1u) << (31u - bit); }
+			}
 			else if (op == "OpShiftLeftLogical" || op == "OpShiftRightLogical" || op == "OpShiftRightArithmetic")
 			{
 				const auto shift = arg(5);
@@ -252,6 +256,19 @@ public:
 					uint32_t word = arg(6);
 					r = UINT32_MAX;
 					while (word != 0u) { ++r; word >>= 1u; }
+				}
+				else if (ext == "FindILsb")
+				{
+					const uint32_t word = arg(6);
+					r = UINT32_MAX;
+					for (uint32_t bit = 0; bit < 32u && r == UINT32_MAX; ++bit) { r = ((word >> bit) & 1u) != 0u ? bit : UINT32_MAX; }
+				}
+				else if (ext == "FindSMsb")
+				{
+					// The most significant bit that differs from the sign bit; -1 for 0 and -1.
+					const uint32_t word = (arg(6) & 0x80000000u) != 0u ? ~arg(6) : arg(6);
+					r = UINT32_MAX;
+					for (uint32_t bit = 0; bit < 32u; ++bit) { r = ((word >> bit) & 1u) != 0u ? bit : r; }
 				}
 				else if (ext == "UnpackHalf2x16")
 				{

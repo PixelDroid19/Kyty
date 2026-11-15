@@ -86,6 +86,18 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		inst.src_num = 2;
 	};
 
+	// The VOP3 form of an integer VOP1 op is the VOP1 op when it encodes no modifier; the ISA defines none for them.
+	const auto unmodified_vop1 = [&](ShaderInstructionType type)
+	{
+		if (abs != 0u || neg != 0u || clamp != 0u || omod != 0u)
+		{
+			EXIT("unsupported VOP3 modifiers on an integer VOP1 op: opcode=0x%03" PRIx32 " abs=%u neg=%u clamp=%u omod=%u pc=0x%08" PRIx32
+			     " crc32=0x%08" PRIx32 "\n",
+			     opcode, abs, neg, clamp, omod, pc, dst->GetCrc32());
+		}
+		inst.type = type;
+	};
+
 	if (opcode >= 0 && opcode <= 0xff)
 	{
 		/* VOPC using VOP3 encoding */
@@ -936,7 +948,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.format  = ShaderInstructionFormat::Empty;
 			inst.src_num = 0;
 			break;
-		case 0x181: KYTY_NI("v_mov_b32"); break;
+		case 0x181: unmodified_vop1(ShaderInstructionType::VMovB32); break;
 		case 0x182:
 			// VOP3 encoding of v_readfirstlane_b32: SGPR destination in VDST.
 			inst.type    = ShaderInstructionType::VReadfirstlaneB32;
@@ -995,11 +1007,11 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x1B4: KYTY_NI("v_sqrt_f64"); break;
 		case 0x1b5: inst.type = ShaderInstructionType::VSinF32; break;
 		case 0x1b6: inst.type = ShaderInstructionType::VCosF32; break;
-		case 0x1B7: KYTY_NI("v_not_b32"); break;
-		case 0x1B8: KYTY_NI("v_bfrev_b32"); break;
-		case 0x1B9: KYTY_NI("v_ffbh_u32"); break;
-		case 0x1BA: KYTY_NI("v_ffbl_b32"); break;
-		case 0x1BB: KYTY_NI("v_ffbh_i32"); break;
+		case 0x1B7: unmodified_vop1(ShaderInstructionType::VNotB32); break;
+		case 0x1B8: unmodified_vop1(ShaderInstructionType::VBfrevB32); break;
+		case 0x1B9: unmodified_vop1(ShaderInstructionType::VFfbhU32); break;
+		case 0x1BA: unmodified_vop1(ShaderInstructionType::VFfblB32); break;
+		case 0x1BB: unmodified_vop1(ShaderInstructionType::VFfbhI32); break;
 		case 0x1BC: KYTY_NI("v_frexp_exp_i32_f64"); break;
 		case 0x1BD: KYTY_NI("v_frexp_mant_f64"); break;
 		case 0x1BE: KYTY_NI("v_fract_f64"); break;

@@ -912,6 +912,40 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	std::_Exit(0);
 }
 
+// The VOP3 encoding of an integer VOP1 op without modifiers computes what its VOP1 encoding computes.
+[[noreturn]] void RunIntegerUnaryVop3Forms(ShaderType stage)
+{
+	Initialize();
+	for (uint32_t opcode: {0x01u, 0x37u, 0x38u, 0x39u, 0x3au, 0x3bu})
+	{
+		const Program vop1(Emit(Parse(Unary(opcode, false), stage), 0u, false, false, true).c_str());
+		const Program vop3(Emit(Parse(Unary(opcode, true), stage), 0u, false, false, true).c_str());
+		for (uint32_t value: {0u, 1u, 0x80u, 0x00010000u, 0x7fffffffu, 0x80000000u, 0xfffffffeu, 0xffffffffu, 0x12345678u})
+		{
+			Equal(Evaluate(vop3, value), Evaluate(vop1, value), "VOP3 form of an integer VOP1 op");
+		}
+	}
+	std::_Exit(0);
+}
+
+[[noreturn]] void ParseNotWithNegate()
+{
+	Initialize();
+	static_cast<void>(Parse(Unary(0x37u, true, 256u, 0u, 1u << 29u)));
+	std::_Exit(0);
+}
+
+// The emitter refuses (EXIT, status 65) instead of dropping a modifier the ISA does not define here.
+[[noreturn]] void EmitXor3WithModifier(uint32_t word0_bits, uint32_t word1_bits)
+{
+	Initialize();
+	auto words = Ternary(0x178u);
+	words[0] |= word0_bits;
+	words[1] |= word1_bits;
+	static_cast<void>(Emit(Parse(words), 0u, false, false, true));
+	std::_Exit(0);
+}
+
 [[noreturn]] void RunSdwaHalfDestination(ShaderType stage = ShaderType::Pixel)
 {
 	Initialize();
@@ -1522,6 +1556,20 @@ TEST(EmulatorShaderArithmetic, IntegerTernaryByteAndMultiplyAddContracts)
 	{
 		ASSERT_EXIT(RunIntegerTernaryContracts(stage), ::testing::ExitedWithCode(0), "");
 	}
+}
+TEST(EmulatorShaderArithmetic, IntegerUnaryVop3FormsMatchTheirVop1Forms)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunIntegerUnaryVop3Forms(stage), ::testing::ExitedWithCode(0), "");
+	}
+	ASSERT_EXIT(ParseNotWithNegate(), ::testing::ExitedWithCode(65), "");
+}
+TEST(EmulatorShaderArithmetic, IntegerTernaryRefusesEncodedModifiers)
+{
+	ASSERT_EXIT(EmitXor3WithModifier(0u, 0u), ::testing::ExitedWithCode(0), "");
+	ASSERT_EXIT(EmitXor3WithModifier(0u, 1u << 29u), ::testing::ExitedWithCode(65), "");
+	ASSERT_EXIT(EmitXor3WithModifier(1u << 15u, 0u), ::testing::ExitedWithCode(65), "");
 }
 TEST(EmulatorShaderArithmetic, CanonicalFp16EncodingsAssembleAndValidate) { ASSERT_EXIT(RunCanonicalModules(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, Fp16NarrowingValuesRoundingAndExec) { ASSERT_EXIT(RunNarrowing(), ::testing::ExitedWithCode(0), ""); }

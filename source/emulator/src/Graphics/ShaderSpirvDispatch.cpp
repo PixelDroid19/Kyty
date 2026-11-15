@@ -13,7 +13,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-// Integer operations define no input or output modifiers (ISA 6.2), so an encoded one is refused, not ignored.
+// The ISA entries of these integer operations name no input or output modifier, so an encoded one is refused, not ignored.
 static bool HasNoVectorModifiers(const ShaderInstruction& inst)
 {
 	if (inst.dst.clamp || inst.dst.multiplier != 1.0f || inst.vop3_op_sel != 0u || inst.vop3_omod != 0u || inst.vop_sdwa)
