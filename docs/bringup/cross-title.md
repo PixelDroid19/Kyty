@@ -6777,18 +6777,20 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
 
 - **Observed.** The width-neutrality proof of a fused NGG front walks every vertex and primitive count of the wave
   (4,097 analyzer passes at wave 64) and took up to 21 ms per program on the command-processor thread. It was held
-  per vertex program, and a program retired by a code remap and rebuilt from the same bytes proved it again. On the
+  per vertex program, and a program rebuilt from the same bytes proved it again. On the
   `PPSA21567 - ASTRO BOT` dunes route one run made 309 proofs of 59 distinct programs: 2,357 ms of the 2,421 ms
-  were paired with a fingerprint, 1,909 ms of them on code already proved. The same key was rebuilt up to six
-  times in a run with no cache clear and no uncached program, so the retirements come from range invalidation.
+  were paired with a fingerprint, 1,909 ms of them on code already proved. The same address and checksum were
+  inserted up to six times in a run with no cache clear and no uncached program; the cause was not established.
 - **Changed.** Programs take their verdict from a registry keyed by the content fingerprint and the parse boundary,
   bounded at 4,096 entries and not flushed by invalidation (fc40c5e86).
 - **Verified.** Same route: 59 proofs and 427 ms (against 238 and 1,890 ms, and 309 and 2,421 ms, in two runs
   before). A cross-check run recomputed the proof on the first draw of every program and compared it with the
-  shared verdict: 175 checks, 117 of them on reused content, no mismatch. Unit tests 2668 of 2679 (11 skipped),
+  shared verdict: at least 175 checks, 117 of them on reused content, no mismatch. Every verdict on the route was
+  lane local, so the run cannot show a collision between keys; the key rests on the analyzers reading only the
+  instructions, labels, continuation pc, debug commands and shader type, all covered by the fingerprint or fixed. Unit tests 2668 of 2679 (11 skipped),
   the repository gates, `PPSA06084 - Superliminal` playable-regression at 12 of 15 with the same failing gates as
-  before, and `PPSA17221 - Minecraft` world route rendered (that run spent most seconds in a lighter view than the
-  reference run, so its per-draw figure is not compared). Arc A770 on Linux only.
+  before, and `PPSA17221 - Minecraft` world route at 5.35 us per draw and 31.1 fps in the dense view (5.33 and 31.1
+  before). One of three Minecraft runs on this commit hung the GPU at world entry; see the sandbox title record. Arc A770 on Linux only.
 - **Limit.** No drop or fps change is claimed: in a run before the change 334 ms of proofs in one second caused no
-  drop, and later drops had under 10 ms of proof. Why the guest remaps the same code is not established; each
+  drop, and later drops had under 10 ms of proof. Why the same code is rebuilt is not established; each
   rebuild still repeats the parse and the other per-program analyses.

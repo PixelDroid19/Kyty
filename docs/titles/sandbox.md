@@ -6,6 +6,20 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Sandbox title: GPU hang at world entry again (2026-11-15, open, intermittent)
+
+- **Observed (Intel A770, Mesa ANV on Xe, strict run, 60 fps present limit, world route, fc40c5e86).** One of
+  three runs stopped 32 s after launch, right after the route entered play: the kernel reported "Timedout job" and an
+  engine reset on the render engine for the emulator, and the run ended with `vkGetFenceStatus` returning
+  `VK_ERROR_DEVICE_LOST` on queue 8 (`GraphicsRenderCommandBuffer.cpp`, fence status of a submission slot). The
+  other two runs reached and held the world. The kernel log of the previous three days has no other timed-out job
+  of the emulator. The symptom matches the record of 2026-10-23 below, whose cause was fixed.
+- **Not established.** Whether the change in that commit is involved: it only shares width-neutrality verdicts
+  between vertex programs with identical content, and a cross-check found no verdict that differed from a fresh
+  proof. The device core dump was saved with the run's evidence and not read.
+- **Direction.** Repeat the route with the validation layer, as on 2026-10-23, and read the core dump's active
+  batch to name the hung command buffer.
+
 ## Sandbox title: world frame rate at `6a6a5818a` (2026-11-14, measured)
 
 `PPSA17221 - Minecraft`, Intel Arc A770, Ryzen 5 7600, 60 fps present limit, saved world, one run,

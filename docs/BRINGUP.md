@@ -133,6 +133,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Platformer pair: index range over a depth target (2026-10-16)
   - Insect sequel: intermittent depth/index overlap (2026-10-16, open)
 - [Sandbox title](titles/sandbox.md)
+  - Sandbox title: GPU hang at world entry again (2026-11-15, open, intermittent)
   - Sandbox title: release census and draw-front coverage under the serial submit (2026-11-12, measured)
   - Sandbox title: boot pauses with no GPU work before the main menu (2026-11-11, open, intermittent)
   - Sandbox title: vertex-front buffers read by device address (2026-11-11, built, command-processor time only)
