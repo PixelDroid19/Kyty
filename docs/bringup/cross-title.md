@@ -6838,8 +6838,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
 ## Library entries confirmed by several references (2026-11-15)
 
 - **Scope.** Imports that installed titles name and Kyty did not register, where the published reference
-  implementations agree on the contract. Each entry below is registered and contract-tested; none was exercised by
-  a title run.
+  implementations agree on the contract. Each entry below is registered; an entry without a unit test says so.
+  Whether a title run called any of them was not observed.
 - **Added.**
   - `sceKernelChmod`, `chmod` and `rmdir` (009217843). chmod sets the host file's permission bits, so a later
     `fstat` reports them. Under the application mount it returns EPERM and leaves the bits alone (da2870fc7); one
@@ -6885,8 +6885,22 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     references do.
   - `sceGameLiveStreamingInitialize` returns 0 and `sceGameLiveStreamingGetCurrentStatus2` writes a zeroed 72-byte
     status with the invalid user id (43e05c32b). One reference also requires a 0x4000-byte heap and refuses the
-    status before initialization; that rests on one source and is not applied. `Terminate` and `GetProgramInfo`, which
-    the same titles import, appear in one reference only and are not done.
+    status before initialization; that rests on one source and is not applied. `sceGameLiveStreamingTerminate`
+    returns 0 (3b007097e), as both references do after an initialization; `GetProgramInfo`, which the same titles
+    import, appears in one reference only and is not done. Not covered by a unit test.
+  - `sceHttpGetLastErrno` (e05608956): invalid value for a null output, otherwise it writes 0 and returns 0 for a live
+    request, as two references do. One of them also returns invalid id for an unknown request and the other does
+    not check, so an unknown id stops the emulator instead of answering. Not covered by a unit test.
+  - NetCtl callbacks (35ca18e50): `sceNetCtlRegisterCallback` fills one of eight slots and returns its index,
+    invalid address for a null function or output and callback max when full; `sceNetCtlUnregisterCallback` returns
+    invalid id outside 0..7 and id not found for an empty slot; `sceNetCtlCheckCallback` calls each callback with
+    IP obtained (3) or disconnected (1) on the first check after it registers and then only when the state changes,
+    outside the registry lock. Two references agree on all of it; they differ on where the connection state comes
+    from, and Kyty uses the same configured state `sceNetCtlGetState` reports. One reference also refuses every call
+    before `sceNetCtlInit` and keeps a separate IPv6 table it delivers to; neither is applied, and
+    `sceNetCtlRegisterCallbackV6` keeps its old single id.
+  - `sceImeParamInit` (3159341e9): zeroes the 0x60-byte open parameter and sets the invalid user id at its start;
+    a null pointer is ignored. Not covered by a unit test.
 - **Fixed in existing code.** Tick-to-date conversion counted tick 0 as 307 days after 0000-03-01 instead of 306,
   so every Rtc conversion from a tick reported the next calendar day (39a73af92).
   `sceAgcGetIsTrinityMode` takes a pointer and two references write `false` through it; Kyty returned 0 in a register
@@ -6899,8 +6913,10 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   - `sceSaveDataTerminate`: busy while slots are mounted, but one reference counts initializations and Kyty keeps none.
   - `sceSystemServiceHideSplashScreen`: two references hide a splash screen Kyty never shows.
   - `sceAgcSuspendPoint`: two references drain submitted GPU work; Kyty's entry does no GPU work on purpose.
-  - The Np and NetCtl state callbacks (`sceNpCheckCallback`, `sceNpRegisterStateCallbackA`,
-    `sceNetCtlCheckCallback`), the UDS context registry, `scePlayGoTerminate` and
+  - The Np state callbacks (`sceNpCheckCallback`, `sceNpRegisterStateCallbackA`): two references agree that
+    registration rejects a null or repeated callback and returns a positive id, and that the first check after it
+    delivers the state once, but one always delivers signed out and the other delivers signed in for the configured
+    user, so the delivered state is not agreed. The UDS context registry, `scePlayGoTerminate` and
     `sceSystemServiceSetNoticeScreenSkipFlag`: state that no Kyty path reads yet, or callbacks with no state change to
     report while signed out. Voice is deferred with its family.
   The rest have extra behavior in one reference only.
@@ -6915,6 +6931,13 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   the three `WriteAddressFrom*CounterOnCompletion` forms: argument lists, bounds and packet layouts differ between
   all three references, and one records the counter writes as plain zero writes.
 - **Not done, references disagree.**
+  - `sceNpEntitlementAccessGenerateTransactionId`: one reference always reports signed out, another writes a
+    counter string; the null error codes differ.
+  - `sceSaveDataConvert`: the parameter layout after the source name and the validation differ, and one reference
+    stops on the valid path.
+  - `sceAgcJumpPatchSetTarget`: one reference overwrites the whole high-address dword, another keeps its upper 16
+    bits; a bad packet is an error code in one and an exception in the other.
+  - `sceSslGetMemoryPoolStats`: one source.
   - `sceNetCtlGetResult`: an error code against a host exception for an unknown event.
   - `sceNetGetMemoryPoolStats`: a 32-byte against a 24-byte result.
   - `sceNetResolverStartNtoaMultipleRecords`: which flags are accepted.
@@ -6953,9 +6976,15 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   opens for writing do not refuse paths under the application mount, so a title that removes or writes a package
   file changes the user's install. One reference refuses every such mutation with EPERM; applying it to the other
   paths needs a title run, since it changes what titles that write there see.
-- **Verified.** Unit tests 2679 of 2690 (11 skipped) and the repository gates, on Linux.
+- **Verified.** Unit tests 2680 of 2691 (11 skipped) and the repository gates, on Linux, on 3159341e9.
   `PPSA06084 - Superliminal`, which loads two modules importing the changed Json entries, passed playable-regression
   at 12 of 15 with the same three failing gates as before; whether the run called those entries was not observed.
   `PPSA17221 - Minecraft`, whose bundled libc imports the sized address waits, passed playable-regression at 12 of 15
   on 43e05c32b and again on 1b39cd18a, which also imports the Trinity query, and held 60 fps interactive; the three failing gates have no baseline, checkpoint or action route in
   that run's scratch. Whether the run called the waits was not observed.
+  On the build of 3159341e9, `PPSA09809 - OCTOPATH TRAVELER II`, which imports the live streaming and HTTP errno
+  entries, reached interactive at about 55 fps on the engine splash after 34 s and exited cleanly, 11 of 15, and
+  `PPSA21567 - ASTRO BOT`, which imports the Trinity query, rendered the studio logo interactive at 37 fps after 30 s
+  and exited cleanly, 11 of 15. Both report `gfx_storage_frontier` as the first error, as earlier runs of both
+  titles did; the other failing gates are the same missing baseline, checkpoint and action route. Whether either
+  run called the changed entries was not observed.
