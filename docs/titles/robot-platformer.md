@@ -204,6 +204,18 @@ claim; the patch is not shipped and its picture was not compared against the unp
   draws per flip: 650 draws per flip 20.4 → 17.3 fps, 600 23.3 → 19.3, 250 32.7 → 29.0 (2-25
   seconds per band). Compression is a net gain on this scene, so its resolves are not where the GPU time
   goes. One run per arm.
+- **Storage buffers rehashed on edge-only changes (2026-11-15, excluded as a fix).** Storage buffers of
+  8 MiB and more at page-unaligned addresses were hashed in full 30-60 times a second because a
+  neighbour wrote their shared first or last page; their interior pages were unchanged. A change that
+  let the existing storage-edge hashes declare such a buffer clean cut storage hashing from 1,680 to
+  355 ms over the run (48.8 to 9.4 GiB) with unchanged fps in light bands, but in the 525-700 draws
+  per flip band command-buffer fence waits rose from about 1.7 to 6.3 per frame (50-150 to 250-335
+  ms per second) while the GPU's busy share fell from 82-96 % to 67-82 %, and fps fell (650 draws per
+  flip 20.4 → 14.3). A check run that hashed every edge-clean buffer in full anyway found 22,765
+  mismatches in 28,000 decisions, all on buffers whose content came from a device write-back and none
+  on CPU uploads: their recorded hash predates the write-back, so the full hash was re-uploading the
+  written-back bytes, and skipping that changes which path later uses take. One run per arm; the
+  change was reverted. Direction: a narrower rule needs its own measurement of the write-back path.
 - **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
   less GPU work, and the command thread, which runs 33.4 ms for the same draw count once the GPU
   stops limiting it (second row), has no margin left under 33.3 ms. The measured GPU levers are the

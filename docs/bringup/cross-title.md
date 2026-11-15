@@ -6286,7 +6286,7 @@ memory stayed within run-to-run noise (8.3-9.4 GiB), not separately isolated.
   12.4 ms median (145 imports, 8.5 ms median over all 262, p90 14.6 ms) against 0.28 ms median for the
   import; windows of 2-34 MiB, whose pages were already resident, took about 10 us per MiB. In gameplay a
   window was opened for as few as 15 resident pages and populated the other 16,369 in one call (31 ms);
-  the long spans populated 8.1 of 9.2 GiB only by pinning. Exports of 31-68 ms near 77-80 s lie 3-5 times
+  the long spans populated 7.9 of 9.0 GiB only by pinning. Exports of 31-68 ms near 77-80 s lie 3-5 times
   above the populate line; the timer included the physical-memory lock wait and the run's memory limit was
   not read, so those outliers are not attributed. In an earlier run of the route these imports were 37-65
   ms of command-thread time in five seconds at 26-30 fps, about 6 % of those seconds. Smaller windows would
