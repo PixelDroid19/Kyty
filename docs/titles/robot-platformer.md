@@ -7184,29 +7184,37 @@ with `compress=zstd:3,ssd,discard=async`.
 - **Fix 1.** Pipeline creation chains creation feedback. Only a pipeline the driver did not find in the application
   cache marks the cache dirty.
 
-  | Run | Disk writes | Read wait | SPIR-V reads over 1 s |
-  | --- | --- | --- | --- |
-  | Before | 77,500 | 260 s | several, stacked up to 5-6 s |
-  | After | 6,934 | 18 s | none |
+  | Run (one each) | Disk writes | Read wait |
+  | --- | --- | --- |
+  | Before | 77,500 | 260 s |
+  | After | 6,934 | 18 s |
 
   The cache file was not rewritten after the fix. With an empty cache file it was still saved (43.9 MB), so new
-  pipelines are kept.
+  pipelines are kept. The fix removes one producer of the stall, not the stall: two later runs with no cache save
+  still had SPIR-V reads of 0.5-2.0 s (4.6 s and 5.3 s in total).
+- **The disk side.** The volume is a DRAM-less NVMe drive that takes 1.6-2.0 s per discard. btrfs held 4.7-5.1 GB of
+  freed extents waiting for discard during these runs, and nothing the emulator wrote during a run refilled it. The
+  run with the most discards between 40 and 60 s (95, 18.8 s of discard time, reads waiting 18.2 s) fell to 0 fps for
+  several seconds in that window. The run with none there stayed at 19.8 fps or above. Mount options and trim policy
+  are host settings; the emulator side is that the ring thread reads the SPIR-V store synchronously.
 - **Cause 2: every `DMA_DATA` store re-detiled the whole 192-layer array.** Each store of 4-64 KiB into the 17.3 MB
   array cost 6-9 ms. 192 such flushes per run summed to 1.8 s, in a burst at 65-76 s of the route.
 - **Fix 2.** Texture updates use the page-generation runs that storage buffers already use. The layers those runs
   cover are detiled and uploaded. An empty baseline, label updates, backing versions and other texture kinds keep the
   full upload. One binary with a diagnostic switch for the full path gave both arms:
 
-  | Arm | Flushes of 5 ms or more | Lowest fps, 65-76 s |
-  | --- | --- | --- |
-  | Full upload | 192 | 1.9 |
-  | Touched layers | 12 | no second under 15 |
+  | Arm | Flushes of 5 ms or more |
+  | --- | --- |
+  | Full upload | 192 |
+  | Touched layers | 12 |
+
+  Neither arm had the disk sampler, so their frame rates are not compared here.
 
   The 190 partial uploads sent 1 layer (144 times), 2 layers (45) or 8 layers (1). A diagnostic hash of each layer's
   guest bytes found no untouched layer that had changed in those 190 uploads; on the first one it reported a touched
   layer as changed, so the check engaged. The two arms reached different shots at the capture times (the faster arm
   is about 10 s ahead in the cinematic), so pictures were not compared frame for frame. Neither capture shows
   corruption.
-- **Still open.** Entering the dunes level drops to 3 fps for about 3 s. The ring thread reads SPIR-V store files,
-  translates shaders, creates pipelines and creates textures synchronously at that point. Smaller dips of 8-14 fps
-  remain at 82-87 s; their cause was not identified.
+- **Still open.** In one run, entering the dunes level dropped to 3 fps for about 3 s, with the ring thread reading
+  SPIR-V store files, translating shaders, creating pipelines and creating textures at that point. How much of it was
+  disk wait was not measured. Dips of 8-14 fps at 82-87 s in two runs have no identified cause.
