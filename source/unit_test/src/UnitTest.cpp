@@ -86,6 +86,7 @@ UT_LINK(EmulatorMediaLifetimes);
 UT_LINK(EmulatorPipelineLifetime);
 UT_LINK(EmulatorPad);
 UT_LINK(EmulatorIme);
+UT_LINK(EmulatorRtc);
 UT_LINK(EmulatorLibcString);
 UT_LINK(EmulatorLoaderTls);
 UT_LINK(EmulatorModuleLoad);
