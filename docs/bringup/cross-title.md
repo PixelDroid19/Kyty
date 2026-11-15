@@ -6851,9 +6851,17 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   - The store dialog (six entries) and the web browser dialog (eight entries) (2b45fbbc5). With no store or browser
     in the emulator an opened dialog finishes at once as dismissed by the user, without a purchase; the store
     result returns 1, as two references agree.
+  - Json arrays, objects and values the guest builds (25 members: constructors, copies, destructors, `push_back`,
+    `size`, `back`, `empty`, `operator[]`, `clear`, assignment, `set`, `referArray`, `referObject`) (a16056c0b).
+    Their containers are tracked by container, not by wrapper address, and released by the destructors, as two of
+    three references do; object construction now writes only the 8-byte wrapper that two references agree on, not
+    16 bytes. `referArray` and `referObject` on a value of another type fail: one reference returns null, another
+    converts a null value.
 - **Fixed in existing code.** Tick-to-date conversion counted tick 0 as 307 days after 0000-03-01 instead of 306,
   so every Rtc conversion from a tick reported the next calendar day (39a73af92).
-- **Not done, references disagree.** `sceHttpUriBuild` (option 0 behaviour, `//` without a scheme, default port
+- **Not done, references disagree.** `sce::Json::Value::serialize`: one reference writes doubles through
+  `std::to_string` and escapes nothing; another truncates to six fraction digits in a legacy mode and escapes `/`
+  and control bytes; the third has none. `sceHttpUriBuild` (option 0 behaviour, `//` without a scheme, default port
   omission, the error for a null element) and `sceImeDialogGetPanelSizeExtended` (a fixed 1920x1080 against a size
   computed from the parameters). The web browser result was taken from the reference that writes 1; another writes 0.
 - **Excluded.** A leap second (`...:60Z`) in RFC 3339 parsing: one reference returns success and leaves the tick
@@ -6863,4 +6871,4 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   opens for writing do not refuse paths under the application mount, so a title that removes or writes a package
   file changes the user's install. One reference refuses every such mutation with EPERM; applying it to the other
   paths needs a title run, since it changes what titles that write there see.
-- **Verified.** Unit tests 2675 of 2686 (11 skipped) and the repository gates, on Linux.
+- **Verified.** Unit tests 2676 of 2687 (11 skipped) and the repository gates, on Linux.
