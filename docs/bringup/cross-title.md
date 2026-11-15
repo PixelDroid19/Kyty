@@ -6790,7 +6790,20 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   instructions, labels, continuation pc, debug commands and shader type, all covered by the fingerprint or fixed. Unit tests 2668 of 2679 (11 skipped),
   the repository gates, `PPSA06084 - Superliminal` playable-regression at 12 of 15 with the same failing gates as
   before, and `PPSA17221 - Minecraft` world route at 5.35 us per draw and 31.1 fps in the dense view (5.33 and 31.1
-  before). One of three Minecraft runs on this commit hung the GPU at world entry; see the sandbox title record. Arc A770 on Linux only.
+  before). One of four Minecraft runs since the staging change before it hung the GPU at world entry, cause open; see
+  the sandbox title record. Arc A770 on Linux only.
 - **Limit.** No drop or fps change is claimed: in a run before the change 334 ms of proofs in one second caused no
   drop, and later drops had under 10 ms of proof. Why the same code is rebuilt is not established; each
   rebuild still repeats the parse and the other per-program analyses.
+
+## Frame generation from the presented image (2026-11-15, not buildable)
+
+- **Question.** Whether the frame-generation component of the MIT-licensed FidelityFX SDK can raise the presented
+  rate as a default-off option.
+- **Read.** Its per-frame preparation takes the game's depth buffer and motion vectors, with camera near, far and
+  field of view; the interpolation pass always runs the motion-vector pass, and optical flow on the colour only
+  complements it. No colour-only mode exists. The component can run on application-owned images, without its
+  swapchain wrapper.
+- **Verdict.** The emulator sees neither which guest target holds motion vectors nor the camera; finding them means
+  recognising one title's buffers, which the no-title-specific rule forbids. Not built. Even if it were, it would
+  raise only the presented rate and add GPU work to scenes that are already GPU-bound.

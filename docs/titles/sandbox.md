@@ -14,11 +14,22 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   `VK_ERROR_DEVICE_LOST` on queue 8 (`GraphicsRenderCommandBuffer.cpp`, fence status of a submission slot). The
   other two runs reached and held the world. The kernel log of the previous three days has no other timed-out job
   of the emulator. The symptom matches the record of 2026-10-23 below, whose cause was fixed.
-- **Not established.** Whether the change in that commit is involved: it only shares width-neutrality verdicts
-  between vertex programs with identical content, and a cross-check found no verdict that differed from a fresh
-  proof. The device core dump was saved with the run's evidence and not read.
-- **Direction.** Repeat the route with the validation layer, as on 2026-10-23, and read the core dump's active
-  batch to name the hung command buffer.
+- **Hung batch (device core dump).** The engine stopped inside driver-internal work, not a guest draw or
+  dispatch: a flat-colour clear drawn as a rectangle, a pipeline flush, then the state of a second rectangle whose
+  pixel shader fetches texels and writes them out (an image copy). Both shaders are straight-line code, the batch
+  has no semaphore wait, and the engine reported no page fault. The surface states of the copy were not decoded, so
+  the images involved are not named.
+- **Not established.** Which change, if any, is involved. The quiet kernel log predates two commits that changed
+  behaviour: db6d7c132 (staging buffers of image fills reused after completion, a texture-load path) and fc40c5e86
+  (width-neutrality verdicts shared between vertex programs with identical content). Four runs used both; one hung.
+  A run with the Vulkan validation layer reached and held the world with no reset. That run is weak evidence; its
+  only report is the format defect below.
+- **Found on the way.** The validation layer reports `VUID-vkCmdDrawIndexed-format-07753` from the first frames:
+  a sampled image declared with an unsigned-integer component type is bound to an `R16G16B16A16_SFLOAT` view
+  (set 1, binding 6). The read is undefined behaviour on any driver. Not fixed; direction: compare the guest T#
+  number format with the view format chosen for it and the sampled type the translator declares.
+- **Direction.** Decode the copy's surface states in the saved dump to name its source and target, and repeat the
+  route a few times with and without db6d7c132's reuse to see whether the rate moves.
 
 ## Sandbox title: world frame rate at `6a6a5818a` (2026-11-14, measured)
 

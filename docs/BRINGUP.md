@@ -191,6 +191,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Frame generation from the presented image (2026-11-15, not buildable)
   - NGG front proofs repeated for rebuilt vertex programs (2026-11-15, fixed)
   - Staging of large image fills reused after completion (2026-11-15, fixed)
   - End-of-pipe clock marks of one submission share one value (2026-11-12, defect, fixed 2026-11-14)
