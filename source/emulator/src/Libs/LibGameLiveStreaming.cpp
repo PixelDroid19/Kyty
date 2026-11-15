@@ -28,11 +28,17 @@ struct GameLiveStreamingStatus2
 };
 static_assert(sizeof(GameLiveStreamingStatus2) == 72);
 
-// The emulator has no broadcast service: the library starts, and no user is ever streaming.
+// The emulator has no broadcast service: the library starts and stops, and no user is ever streaming.
 static int KYTY_SYSV_ABI GameLiveStreamingInitialize(size_t heap_size)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t heap_size = 0x%016" PRIx64 "\n", static_cast<uint64_t>(heap_size));
+	return OK;
+}
+
+static int KYTY_SYSV_ABI GameLiveStreamingTerminate()
+{
+	PRINT_NAME();
 	return OK;
 }
 
@@ -53,6 +59,7 @@ static int KYTY_SYSV_ABI GameLiveStreamingGetCurrentStatus2(GameLiveStreamingSta
 LIB_DEFINE(InitGameLiveStreaming_1)
 {
 	LIB_FUNC("kvYEw2lBndk", GameLiveStreaming::GameLiveStreamingInitialize);
+	LIB_FUNC("9yK6Fk8mKOQ", GameLiveStreaming::GameLiveStreamingTerminate);
 	LIB_FUNC("lK8dLBNp9OE", GameLiveStreaming::GameLiveStreamingGetCurrentStatus2);
 }
 
