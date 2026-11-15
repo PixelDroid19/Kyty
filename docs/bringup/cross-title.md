@@ -7128,9 +7128,18 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
 - **Fixed: VOPC compare decode.** The VOPC and VOP3 compare opcodes are the same numbers, but VOPC refused 42
   that VOP3 already translated: the F64 compares, CMPX F, O, U and TRU on F32, CMPX on I16 and U16, and the F16 F,
   O, U, TRU and CMPX N forms. VOPC now decodes them to the same instructions, with a VGPR pair for the F64 `vsrc1`.
-  A 64-bit compare with SDWA or DPP stops the title, since those select 32-bit lanes. The F64 test now runs the
-  VOPC equal and less-than forms, one with inline 1.0. Unit suite: 2687 passed; the four gates pass. No title is
-  recorded stopping on these forms, so no title run was made for this change.
+  A 64-bit compare with SDWA or DPP stops the title, since those select 32-bit lanes; this covers the U64 compares
+  too, which VOPC accepted with SDWA before. A local sweep of the 42 through parse and emit found 38 emitting. The
+  other four, O and U on F16 and F64, failed in either encoding: their dispatch entries hold a four-line predicate,
+  but the special-compare emitters used only the first line, so `%t2` was never defined and the module did not
+  assemble. Both emitters now take every line. `EmulatorShaderArithmetic.VopcComparesMatchTheirVop3Translation`
+  evaluates one case per family through VOPC: O and U on F16 and F64 with a NaN, CMPX U on F32, CMPX LT on I16 and
+  U16, and CMPX NEQ on F16 with a NaN, reading VCC or EXEC; the F64 test runs the VOPC equal and less-than forms.
+  The evaluator's `OpIsNan` and `OpIsInf` read a double operand as a float until this change. Unit suite: 2688
+  passed; the four gates pass. `PPSA21567 - ASTRO BOT`: 11/15, the same four failing, first error
+  `gfx_storage_frontier`, interactive at 40-46 fps from 26 to 30.3 s; the last sample, at the stop, is a loading
+  screen. `PPSA17221 - Minecraft`: child exit 0, no first error, interactive, 57.8 fps at 29.7 s, the same three
+  gates failing. Neither log names a refused form. No title is known to run these compares.
 - **VOP3 opcode sweep.** Each VOP3 opcode 0-0x3ff was parsed and emitted with three VGPR sources in separate child
   processes (local only, not committed). 45 parse, 40 of them emit. Of the five that parse but stop the emitter,
   0x100, 0x101, 0x128 and 0x12A need an SGPR mask in src2, so a VGPR there is an invalid encoding, not a defect.
