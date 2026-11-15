@@ -6,7 +6,7 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
-## Robot platformer: a 0.44x guest resolution removes under a third of the GPU work and still misses 30 fps (2026-11-14, measured)
+## Robot platformer: a 1920x1080 output with a 1280x720 internal resolution removes under a third of the GPU work and still misses 30 fps (2026-11-14, measured)
 
 Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, silent console, `1f28471be` built clean (no
 probe), late dunes route from the world-map slot, one run per patch, per-second performance
@@ -23,12 +23,14 @@ claim; the patch is not shipped and its picture was not compared against the unp
 | 1920x1080 / 1280x720, 150-174 s | before the dunes (390) | 22.7 | 44.1 | 40.3 | 91.3 % | | |
 | 1920x1080 / 1920x1080, 150-215 s | another scene (550) | 18.6 | 53.7 | 46.2 | 86.0 % | 48.9, 17.0 in fence waits | |
 
-- **Most of the GPU frame does not follow the internal resolution.** 0.44 times the pixels takes
-  13.7 ms off 48.0 ms in the dunes and 10.5 ms off 50.8 ms in the scene before them. A line through
-  each pair leaves 22 ms and 32 ms of GPU work per frame at zero pixels (two points per scene, not a
-  fit). The 13.7 ms agrees with the two lighting programs scaling with the pixel count (about
-  25 ms at 1920x1080 in the dunes: 13.65 ms measured for `0x3666fa39` in the record below, the rest
-  for `0x874bd13f`) while draws and the other dispatches stay.
+- **Most of the GPU frame does not follow the internal resolution.** The patched rows change two
+  things at once: the output from 3840x2160 to 1920x1080 and the internal resolution to 0.44 times
+  the pixels. Together they take 13.7 ms off 48.0 ms in the dunes and 10.5 ms off 50.8 ms in the
+  scene before them. A line through each pair leaves 22 ms and 32 ms of GPU work per frame at zero
+  internal pixels (two points per scene, not a fit). Inference, not measured: 13.7 ms is what two
+  lighting programs of about 25 ms would lose if they scaled with the pixel count while draws and
+  the other dispatches stayed; only `0x3666fa39` was measured in a dunes scene (13.65 ms, record
+  below), `0x874bd13f` was not.
 - **The output resolution alone is not the cost.** With the output at 1920x1080 and the internal
   resolution unchanged the frame stays at 53.7 ms. The route landed in a different scene in that
   run, so the row excludes a large gain and prices nothing.
@@ -40,7 +42,8 @@ claim; the patch is not shipped and its picture was not compared against the unp
   against 8.2, binding 14.8 against 12.2). The cause is not established; the thread sleeps in fence
   waits for 6.4 ms against 3.1 ms per frame.
 - **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
-  less GPU work and about 10 ms less command work at once. The measured GPU levers are the range
+  less GPU work, and the command thread, which runs 33.4 ms for the same draw count once the GPU
+  stops limiting it (second row), has no margin left under 33.3 ms. The measured GPU levers are the range
   split of the lighting program (5.9 ms, probe only, fails its sweep) and nothing else above 1 ms;
   no general rule recorded so far closes the gap on this GPU.
 - **Runs.** The first attempt with the 1280x720 patch exited with status 139 at 144 s in the hub
@@ -94,7 +97,7 @@ written into the translator.
   narrower forms on a SPIR-V listing), `sweep_split.py` (the before/after table over recipe stores),
   `loopshape.py` (where the entry function's code sits relative to its loops).
 
-### The command thread works, it does not wait
+### The command thread: wait counters hold 1.2 ms, 6.6 ms outside its runs is unpriced
 
 The per-second performance snapshots of run a379 (record below) were mapped to the arm that was
 live, keeping only snapshots that lie inside one 2 s block (`armperf.py`; block edges from the
@@ -115,11 +118,13 @@ and 105 dispatches per frame):
 | WAIT_REG_MEM | 0.35 |
 | Flip-done waits | 0.04 |
 
-The wait counters account for 1.2 ms of the frame. With the program as translated the same counters
-read 33.2 ms of runs and 4.9 ms of fence waits in a 43.9 ms frame. This agrees with the causal test
-of 2026-11-14 (delay per draw passes 1:1 into the frame, the thread uses 75-80 % of a core): the
-6 ms that 30 fps needs from this thread is work per draw and per dispatch, not a wait to remove.
-Three snapshots per arm on a probe build; the figures size the parts, they are not a benchmark.
+The wait counters hold 1.2 ms of the frame, and fence waits are timed inside the runs. That leaves
+6.6 ms per frame outside the runs and outside every wait counter (38.3 - 31.7), which matches the
+75-80 % of a core the thread used in the causal test of 2026-11-14. That time is not priced: it may
+be the gap between a guest submit and the run that serves it (about 20 runs per frame), run-queue
+delay, or the guest's own pace. With the program as translated the same counters read 33.2 ms of
+runs and 4.9 ms of fence waits in a 43.9 ms frame. Three snapshots per arm on a probe build; the
+figures size the parts, they are not a benchmark.
 
 ## Robot platformer: splitting register ranges at the light loop recovers 5.9 ms of GPU time (2026-11-14, probe only)
 
