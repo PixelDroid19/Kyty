@@ -6,6 +6,53 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: the GPU limits the frame with the lighting program, command processing without it (2026-11-14, causal test)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
+`fe853a27b` plus a temporary probe (not committed). From 201 s it rotates four arms in 3 s blocks:
+the dispatch call of `0x3666fa39` issued or left out, crossed with a busy-wait of 10 us after every
+draw on the graphics command thread (the probe counts the waits: 7.5-7.7 ms a frame). Figures are
+block medians of blocks 16 to 31, four per arm, in the scene where the robot lies on the dune under
+the tutorial prompt (about 752 draws a frame). The first 16 blocks include two at 10-15 fps whatever
+the arm and are left out.
+
+| Arm | Frame | Engine busy | Engine work a frame | Fence waits a frame |
+| --- | --- | --- | --- | --- |
+| Program runs | 52.6 ms | 88 % | 46.6 ms | 10.0 ms |
+| Program runs, +7.6 ms on the command thread | 52.7 ms | 87 % | 46.4 ms | 5.9 ms |
+| Program left out | 39.3 ms | 76 % | 30.1 ms | 1.5 ms |
+| Program left out, +7.5 ms on the command thread | 46.9 ms | 65 % | 31.0 ms | 1.0 ms |
+
+- **With the program the GPU sets the frame.** 7.6 ms more command processing changes nothing
+  (k = 0.01 ms of frame per ms added): the command thread has at least that much slack and the engine
+  is busy 46.6 ms of every 52.6 ms frame.
+- **Without it the graphics command thread sets the frame.** Every millisecond added to it is a
+  millisecond of frame (k = 1.02), although the thread uses only 75-80 % of one core.
+- **Budget for 30 fps in this scene.** Both limits are above 33.3 ms: engine work has to fall from
+  46.6 ms to about 30 ms (the program accounts for 16.5 ms of it), and the command path from 39.3 ms
+  by 6 ms. Either alone leaves the frame above 33.3 ms.
+- **Where the command path spends its time** (user-space CPU profile, 199 Hz for 20 s, program left
+  out for the whole window, 42 ms frames; 1 % of the samples is about 1 ms a frame):
+  - Graphics command thread, 31.6 %: indexed draws 18.8 % (descriptor binding 12.5 %, of which
+    texture preparation 6.2 %, guest memory object lookup 4.6 %, storage buffers 3.4 %), handlers
+    reached through nop packets 7.3 %, auto-index draws 5.8 %, dispatches 4.1 %, completed-submission
+    publication 2.2 %. Shader input analysis repeated on every call is 3.2 % for pixel programs and
+    1.6 % for compute programs. No single function is above 1.6 % by itself.
+  - Draw-front thread, 13.8 %: 10.3 % is the same pixel-program input analysis (usage parsing 7.4 %).
+  - Deferred replay worker, 19 %: 14.7 % is clock reads inside its 200 us poll window
+    (`DeferredReplayWorker::Run`, `GraphicsRenderCommandBuffer.cpp`). Draws arrive tens of
+    microseconds apart here, so the worker polls through the whole frame: 45 % of one core that does
+    no work.
+  - Guest threads: none above 2 % of the samples. In 20 `threads` snapshots the guest main thread
+    was in a mutex wait in 13 and asleep in 5. One guest thread yields in a loop; its CPU share
+    follows the fence waits (36 % of a core with the program, 8-9 % without).
+- **Discarded runs.** A first four-arm run with 5 s blocks and 3.9 ms a frame placed nothing: live
+  input moved the scene (567 draws a frame, another cinematic at the end). One run stopped at 160 s
+  on the title's own buffer-full abort recorded below, before the probe window.
+- **Open.** Which region of `0x3666fa39` holds its 16.5 ms. The per-call shader input analysis and
+  the replay worker's poll are host costs that a memo and a shorter poll would remove; neither is
+  measured as a frame-rate gain while the GPU sets the frame.
+
 ## Robot platformer: without the heavy lighting program the close-up scene holds 25 fps (2026-11-14, measured)
 
 Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
@@ -23,8 +70,8 @@ once a frame in every block.
 | `0x3666fa39` and `0x874bd13f` not dispatched | 24.0 fps | 37.8 ms | 1.0 ms | 71 % |
 
 - **`0x3666fa39` is 15.7 ms of engine time a frame here** (86 % of 52.6 ms against 74 % of 40.0 ms).
-  Without it the frame no longer waits on the GPU (fence waits about 1 ms) and holds 25 fps on
-  command processing: 36-38 ms a frame for 751 draws and about 85 dispatches.
+  Without it the frame no longer waits on the GPU (fence waits about 1 ms) and holds 25 fps; the
+  causal test above shows the graphics command thread then sets the frame.
 - **`0x874bd13f` frees no engine time.** Leaving it out as well leaves the engine's busy time a frame
   at 29.6 ms in both arms and the frame rate unchanged. The about 14 ms that dispatch stamps gave it
   (bill record below) is elapsed time that overlaps other queued work, not exclusive engine time.
@@ -43,8 +90,8 @@ once a frame in every block.
   "the BVH kernel"; that names a small part of it. A host-written traversal is therefore worth about
   1 ms, and a host-written copy of the whole program would be a transcription of the guest program,
   which the data boundary keeps out of the repository.
-- **Not measured.** Which region of the program holds the 15.7 ms, and what the command processor
-  spends its 36 ms on once the GPU no longer limits the frame.
+- **Not measured.** Which region of the program holds the 15.7 ms. The command path without the
+  program is profiled in the causal-test record above.
 
 ## Robot platformer: where the GPU frame goes in dunes gameplay (2026-11-14, measured)
 
