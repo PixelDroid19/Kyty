@@ -185,6 +185,7 @@ int KYTY_SYSV_ABI  NpRegisterNpReachabilityStateCallback(void* callback, void* u
 int KYTY_SYSV_ABI  NpGetNpId(int user_id, NpId* np_id);
 int KYTY_SYSV_ABI  NpGetOnlineId(int user_id, NpOnlineId* online_id);
 int KYTY_SYSV_ABI  NpCreateAsyncRequest(const NpCreateAsyncRequestParameter* param);
+int KYTY_SYSV_ABI  NpCreateRequest();
 int KYTY_SYSV_ABI  NpDeleteRequest(int req_id);
 int KYTY_SYSV_ABI  NpCheckNpAvailability(int req_id, const char* user, void* result);
 int KYTY_SYSV_ABI  NpPollAsync(int req_id, int* result);

@@ -4723,6 +4723,8 @@ int KYTY_SYSV_ABI NpGetOnlineId(int user_id, NpOnlineId* online_id)
 	return OK;
 }
 
+static std::atomic_int g_np_request_id = 0;
+
 int KYTY_SYSV_ABI NpCreateAsyncRequest(const NpCreateAsyncRequestParameter* param)
 {
 	PRINT_NAME();
@@ -4733,11 +4735,16 @@ int KYTY_SYSV_ABI NpCreateAsyncRequest(const NpCreateAsyncRequestParameter* para
 	KYTY_LOG_DEBUG("\t cpu_affinity_mask = %" PRIu64 "\n", param->cpu_affinity_mask);
 	KYTY_LOG_DEBUG("\t thread_priority   = %d\n", param->thread_priority);
 
-	static std::atomic_int id = 0;
+	if (g_np_request_id >= 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
-	if (id >= 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	return ++g_np_request_id;
+}
 
-	return ++id;
+// sceNpCreateRequest (NID GpLQDNKICac): the synchronous form takes no parameters; ids are never reused.
+int KYTY_SYSV_ABI NpCreateRequest()
+{
+	PRINT_NAME();
+	return ++g_np_request_id;
 }
 
 int KYTY_SYSV_ABI NpDeleteRequest(int req_id)
