@@ -2038,6 +2038,69 @@ TEST(EmulatorKernelProcess, PosixSemDestroyWakesBlockedWaiter)
 	EXPECT_EQ(result.get(), Posix::POSIX_EINVAL);
 }
 
+TEST(EmulatorKernelProcess, ApplicationMountRefusesEveryMutation)
+{
+	EnsureFileSystemSubsystem();
+
+	const String root = U"/tmp/kyty_app0_read_only_test/";
+	const String data = U"/tmp/kyty_app0_read_only_test_data/";
+	Core::File::DeleteDirectories(root);
+	Core::File::DeleteDirectories(data);
+	ASSERT_TRUE(Core::File::CreateDirectories(root + U"sub/"));
+	ASSERT_TRUE(Core::File::CreateDirectories(data));
+	{
+		Core::File file;
+		ASSERT_TRUE(file.Create(root + U"asset.bin"));
+		file.Write("asset", 5);
+	}
+	{
+		Core::File file;
+		ASSERT_TRUE(file.Create(data + U"save.bin"));
+	}
+	Kernel::FileSystem::Mount(root, U"/app0/");
+	Kernel::FileSystem::Mount(data, U"/data/");
+
+	constexpr int write_only = 0x0001;
+	constexpr int read_write = 0x0002;
+	constexpr int append     = 0x0008;
+	constexpr int create     = 0x0200;
+	constexpr int truncate   = 0x0400;
+	for (const int flags: {write_only, read_write, append, create, truncate, write_only | create | truncate})
+	{
+		EXPECT_EQ(Kernel::FileSystem::KernelOpen("/app0/asset.bin", flags, 0666), LibKernel::KERNEL_ERROR_EPERM);
+	}
+	EXPECT_EQ(Kernel::FileSystem::KernelOpen("/app0/new.bin", write_only | create, 0666), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelOpen("/app0/sub/../asset.bin", read_write, 0), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelUnlink("/app0/asset.bin"), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelRename("/app0/asset.bin", "/data/asset.bin"), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelRename("/data/save.bin", "/app0/save.bin"), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelMkdir("/app0/made", 0755), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelRmdir("/app0/sub"), LibKernel::KERNEL_ERROR_EPERM);
+
+	// The install is untouched and still reads.
+	EXPECT_TRUE(Core::File::IsFileExisting(root + U"asset.bin"));
+	EXPECT_FALSE(Core::File::IsFileExisting(root + U"new.bin"));
+	EXPECT_FALSE(Core::File::IsFileExisting(root + U"save.bin"));
+	EXPECT_FALSE(Core::File::IsDirectoryExisting(root + U"made"));
+	EXPECT_TRUE(Core::File::IsDirectoryExisting(root + U"sub"));
+	EXPECT_TRUE(Core::File::IsFileExisting(data + U"save.bin"));
+	const int fd = Kernel::FileSystem::KernelOpen("/app0/asset.bin", 0, 0);
+	ASSERT_GE(fd, 0);
+	Kernel::FileSystem::FileStat stat {};
+	ASSERT_EQ(Kernel::FileSystem::KernelFstat(fd, &stat), OK);
+	EXPECT_EQ(stat.st_size, 5);
+	EXPECT_EQ(Kernel::FileSystem::KernelClose(fd), OK);
+
+	// Other mounts still change.
+	EXPECT_EQ(Kernel::FileSystem::KernelMkdir("/data/made", 0755), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelRmdir("/data/made"), OK);
+
+	Kernel::FileSystem::Umount(U"/app0/");
+	Kernel::FileSystem::Umount(U"/data/");
+	Core::File::DeleteDirectories(root);
+	Core::File::DeleteDirectories(data);
+}
+
 TEST(EmulatorKernelProcess, ChmodSetsTheModeAFileDescriptorReports)
 {
 	EnsureFileSystemSubsystem();
