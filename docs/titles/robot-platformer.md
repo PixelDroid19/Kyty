@@ -6,6 +6,91 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: at 960x540 the draw ring's cycle is the frame; the scheduler holds 0.2 ms of it (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, silent console, late dunes route from the
+world-map slot, the user-supplied game patch that sets a 1920x1080 output and a 960x540 internal
+resolution (same terms as the record below: not a strict run, no compatibility claim, picture not
+compared). The wall-clock route lands in a different scene from run to run, so each row names its
+scene from the run's captures. Three runs, one instrument each:
+
+- Run a385, `1f28471be` built clean: once a second, `/proc/<pid>/task/<tid>/schedstat` of every
+  task (on-CPU time, run-queue wait, timeslices) and 18 `kyty_agent threads` snapshots 2 s apart.
+- Run a386, same build inside the user-space sampling profiler, disabled except for 190-194 s
+  (199 Hz, stacks): it only names the host threads by thread id, because every task reports the
+  same name. Scheduler figures are read outside that window.
+- Run a388, the same source with a temporary per-second bill of each graphics ring thread (wait for
+  the next batch, submit-to-dequeue latency, run-lock wait, batch body in wall and thread CPU time,
+  suspended-run waits, submission waits). The host was not quiet after 174 s of that run (all tasks
+  waited 48 ms per frame for a core against 17 ms in a386, and a draw cost 48 us against 28), so
+  only 153-171 s is quoted as figures. A run before it stopped at 161 s on the title's own abort at
+  hub load and gave no window.
+
+| Run, seconds | Scene (draws per frame) | fps | Frame ms | GPU work ms/frame | Engine busy | Command runs ms/frame, all rings |
+| --- | --- | --- | --- | --- | --- | --- |
+| a385, 176-206 | free play beside a rock (357) | 33.9 | 29.5 | 23.0 | 78.2 % | 28.6, 4.6 in fence waits |
+| a386, 196-214 | dunes with the tutorial prompt (758) | 27.8 | 35.9 | 29.9 | 83.3 % | 34.1, 1.5 in fence waits |
+| a388, 153-171 | close-up landing (386) | 23.6 | 42.3 | 37.4 | 88.4 % | 34.7, 15.8 in fence waits |
+
+- **The 960x540 internal resolution does not hold 30 fps on this route.** The dunes scene gains
+  about 1 fps over 1280x720 (27.8 against 26.2-27.2 in the record below) and the close-up landing
+  scene still spends 37.4 ms of GPU work per frame (40.3 at 1280x720, 50.8 unpatched). The
+  37-41 fps recorded for this patch on 2026-11-14 belongs to a lighter scene (469 draws per frame),
+  as does the first row.
+- **Host threads in the dunes scene** (a386, 197-211 s, 28.0 fps, frame 35.7 ms; names from the
+  profile stacks):
+
+  | Thread | CPU ms/frame | Run-queue wait ms/frame | Share of a core | Timeslices per frame |
+  | --- | --- | --- | --- | --- |
+  | Graphics ring thread that carries the draws | 28.19 | 0.17 | 79.0 % | 122 |
+  | Deferred replay worker | 17.89 | 0.09 | 50.1 % | 18 |
+  | Draw-front thread | 10.47 | 0.13 | 29.3 % | 224 |
+  | Guest thread that yields in a loop | 4.27 | 0.17 | 12.0 % | 7 |
+  | Graphics ring thread that carries the dispatches | 3.93 | 0.35 | 11.0 % | 339 |
+  | Guest job workers, each of 11 | 1.54 | 0.71-0.83 | 4.3 % | 49 |
+  | Guest thread that submits command buffers | 1.52 | 0.15 | 4.3 % | 12 |
+
+  The draw ring thread waits 0.17 ms per frame for a core: the scheduler is not what it waits on.
+  It is off the CPU 7.3 ms of each 35.7 ms frame; the wait counters hold 3.2 ms of that (fence
+  1.50, render lock 0.83, WAIT_REG_MEM 0.48, flip done 0.37; the counters do not say which ring).
+- **The draw ring's cycle** (a388, 153-171 s, frame 42.3 ms; four graphics ring threads exist, the
+  one with the draws takes 5 batches per frame):
+
+  | Per frame | ms |
+  | --- | --- |
+  | No batch queued, waiting for the next submit (0.45 ms of it on the CPU, publishing completions) | 2.71 |
+  | Waiting for the run lock | 0.00 |
+  | Batch bodies, wall | 39.45 |
+  | - on the CPU | 18.97 |
+  | - blocked | 20.48 |
+  | - - of which waits of a suspended run for a value not yet written | 7.72 |
+  | Cycle | 42.16 |
+
+  A batch waits 4.1 ms on average between its submit and its dequeue, so the guest submits ahead of
+  the ring. In the disturbed window of the same run (196-212 s, 708 draws, 20.2 fps) the shape is
+  the same with the CPU share larger: no batch queued 3.47 ms, bodies 45.89 ms of which 35.88 on
+  the CPU and 1.42 in suspended-run waits, cycle 49.37 of 49.62 ms.
+- **What this prices.** The time the earlier accounting left "outside the runs" (subsection "The
+  command thread" below) is the 2.7-3.5 ms per frame in which the guest has not yet submitted the
+  next batch, plus waits between the runs of one batch. That accounting understated it: the
+  run counter adds the runs of every ring thread. The remaining frame is the batch bodies, where
+  the thread either works (dunes: 28.2 of 35.7 ms) or is blocked on GPU results (close-up landing:
+  20.5 of 42.3 ms).
+- **Guest side** (a385, 18 snapshots): the main thread was in a mutex wait in 10 and asleep in 7;
+  the 11 job workers were idle on their semaphore in 16 or 17; three guest threads were never in a
+  wait. `sync-waits` reported its tracking disabled and gave nothing.
+- **Deferred replay worker.** 359 of its 374 profile samples are its poll loop (clock reads and the
+  loop itself): half a core that replays almost nothing in this scene
+  (`DeferredReplayWorker::Run`, `kPollWindow`, `GraphicsRenderCommandBuffer.cpp`). It is a resource
+  cost, not a measured frame cost. A shorter window moves the cost to a wake-up on the draw ring
+  thread for every hand-off; handing work off in larger pieces would let the worker sleep. Neither
+  is built.
+- **Not established.** What the guest does in the 2.7-3.5 ms before its next submit. Which ring
+  holds each counted wait. The split of the 20.5 ms blocked in the close-up scene beyond its
+  suspended-run waits. Each scene has one window of one run; a388 is a probe build.
+- **Tools** (evidence directory, outside the repository): `schedsample.py`, `schedperf.py`,
+  `ringbill.py`, `diag-ring-20261114.patch`.
+
 ## Robot platformer: a 1920x1080 output with a 1280x720 internal resolution removes under a third of the GPU work and still misses 30 fps (2026-11-14, measured)
 
 Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, silent console, `1f28471be` built clean (no
@@ -98,6 +183,8 @@ written into the translator.
   `loopshape.py` (where the entry function's code sits relative to its loops).
 
 ### The command thread: wait counters hold 1.2 ms, 6.6 ms outside its runs is unpriced
+
+Priced later the same day in the record "at 960x540 the draw ring's cycle is the frame" above.
 
 The per-second performance snapshots of run a379 (record below) were mapped to the arm that was
 live, keeping only snapshots that lie inside one 2 s block (`armperf.py`; block edges from the
