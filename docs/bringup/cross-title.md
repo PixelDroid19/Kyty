@@ -6281,6 +6281,17 @@ memory stayed within run-to-run noise (8.3-9.4 GiB), not separately isolated.
 - **Open:** one Astro run per side after a repeat of the baseline; the first use of a chunk now
   imports 64 MiB at once and that single stall was not timed. Storage objects bound in place keep
   their own windows (35 of 36 lie inside a chunk window on Astro).
+- **Later (2026-11-15, Astro dunes route, Mesa 26.3, temporary timers around the export and the import):**
+  the first-use stall is the export (pin and `udmabuf` creation), not the device import. 64 MiB windows took
+  12.4 ms median (145 imports, 8.5 ms median over all 262, p90 14.6 ms) against 0.28 ms median for the
+  import; windows of 2-34 MiB, whose pages were already resident, took about 10 us per MiB. In gameplay a
+  window was opened for as few as 15 resident pages and populated the other 16,369 in one call (31 ms);
+  the long spans populated 8.1 of 9.2 GiB only by pinning. Exports of 31-68 ms near 77-80 s lie 3-5 times
+  above the populate line; the timer included the physical-memory lock wait and the run's memory limit was
+  not read, so those outliers are not attributed. In an earlier run of the route these imports were 37-65
+  ms of command-thread time in five seconds at 26-30 fps, about 6 % of those seconds. Smaller windows would
+  undo the submit cost above, so no change was made; moving the export off the command thread is the
+  direction, not started.
 
 ## Huge pages for direct memory: not adopted, GPU reads go through the IOMMU (2026-10-31)
 

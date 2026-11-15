@@ -196,7 +196,14 @@ claim; the patch is not shipped and its picture was not compared against the unp
   (8-12 us per draw, 10-19 % of command-processor run time; the paying thread was not established). In steady
   seconds 90-93 % are cached reuses and the rest fast reuses; the slow ones are texture
   loads, whose staging cost db6d7c132 already reduced. Neither names a cause with a small fix; moving residency off
-  the command thread or folding the per-draw lookups are larger changes, not started.
+  the command thread or folding the per-draw lookups are larger changes, not started. The residency
+  imports are timed in `cross-title.md` ("Physical windows are whole 64 MiB chunks", 2026-11-15 entry).
+- **Colour compression is not the GPU cost (2026-11-15, weak exclusion).** One run with the driver's
+  colour compression disabled (`INTEL_DEBUG=noccs`, passed through the inherited environment; the
+  child's environment was not read) against one without, same binary, save and route, compared by
+  draws per flip: 650 draws per flip 20.4 → 17.3 fps, 600 23.3 → 19.3, 250 32.7 → 29.0 (2-25
+  seconds per band). Compression is a net gain on this scene, so its resolves are not where the GPU time
+  goes. One run per arm.
 - **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
   less GPU work, and the command thread, which runs 33.4 ms for the same draw count once the GPU
   stops limiting it (second row), has no margin left under 33.3 ms. The measured GPU levers are the
