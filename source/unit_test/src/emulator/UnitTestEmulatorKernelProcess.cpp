@@ -2048,17 +2048,27 @@ TEST(EmulatorKernelProcess, ChmodSetsTheModeAFileDescriptorReports)
 		Core::File file;
 		ASSERT_TRUE(file.Create(root + U"save.bin"));
 	}
-	Kernel::FileSystem::Mount(root, U"/app0/");
+	Kernel::FileSystem::Mount(root, U"/data/");
 
-	ASSERT_EQ(Kernel::FileSystem::KernelChmod("/app0/save.bin", 0640), OK);
-	const int fd = Kernel::FileSystem::KernelOpen("/app0/save.bin", 0, 0);
+	ASSERT_EQ(Kernel::FileSystem::KernelChmod("/data/save.bin", 0640), OK);
+	const int fd = Kernel::FileSystem::KernelOpen("/data/save.bin", 0, 0);
 	ASSERT_GE(fd, 0);
 	Kernel::FileSystem::FileStat stat {};
 	ASSERT_EQ(Kernel::FileSystem::KernelFstat(fd, &stat), OK);
 	EXPECT_EQ(stat.st_mode & 07777u, 0640u);
 	EXPECT_EQ(Kernel::FileSystem::KernelClose(fd), OK);
 
-	EXPECT_EQ(Kernel::FileSystem::KernelChmod("/app0/missing.bin", 0600), LibKernel::KERNEL_ERROR_ENOENT);
+	EXPECT_EQ(Kernel::FileSystem::KernelChmod("/data/missing.bin", 0600), LibKernel::KERNEL_ERROR_ENOENT);
+
+	// The package mount refuses, and the host file keeps its bits.
+	Kernel::FileSystem::Mount(root, U"/app0/");
+	EXPECT_EQ(Kernel::FileSystem::KernelChmod("/app0/save.bin", 0600), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelChmod("/app0", 0700), LibKernel::KERNEL_ERROR_EPERM);
+	const int app_fd = Kernel::FileSystem::KernelOpen("/app0/save.bin", 0, 0);
+	ASSERT_GE(app_fd, 0);
+	ASSERT_EQ(Kernel::FileSystem::KernelFstat(app_fd, &stat), OK);
+	EXPECT_EQ(stat.st_mode & 07777u, 0640u);
+	EXPECT_EQ(Kernel::FileSystem::KernelClose(app_fd), OK);
 	EXPECT_EQ(Kernel::FileSystem::KernelChmod(nullptr, 0600), LibKernel::KERNEL_ERROR_EINVAL);
 }
 

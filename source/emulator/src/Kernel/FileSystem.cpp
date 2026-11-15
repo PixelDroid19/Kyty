@@ -29,6 +29,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -2330,6 +2331,12 @@ int KYTY_SYSV_ABI KernelChmod(const char* path, uint16_t mode)
 	}
 	KYTY_LOG_DEBUG("\t path = %s\n", path);
 	KYTY_LOG_DEBUG("\t mode = %04" PRIo16 "\n", mode);
+	// The application package is a read-only mount, and its host files are the user's install.
+	const std::string_view guest_path(path);
+	if (guest_path == "/app0" || guest_path.substr(0, 6) == "/app0/")
+	{
+		return KERNEL_ERROR_EPERM;
+	}
 	const auto path_s    = String::FromUtf8(path);
 	const auto real_file = g_mount_points->GetRealFilename(path_s);
 	const auto real_dir  = g_mount_points->GetRealDirectory(path_s);
