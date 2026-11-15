@@ -7071,8 +7071,24 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   `FloatOutputModifier`); `V_RCP_IFLAG_F32` computes `1.0 / S0.f` like `V_RCP_F32` and differs only in the integer
   exception flag, which Kyty does not model; `s_waitcnt`, `s_waitcnt_depctr`, `s_inst_prefetch` and the
   immediate-form `s_barrier` entry have no effect on a sequential translation (the RDNA2 `s_barrier` decodes with no
-  immediate and gets a real barrier). Not audited: `s_sendmsg` and `s_trap` being skipped, and the MUBUF flag
-  bits.
+  immediate and gets a real barrier). `s_trap` is skipped because a trap is not taken while `TRAP_EN` is 0 (ISA
+  section 3, the `STATUS` table) and Kyty models no trap handler. Not audited: the MUBUF flag bits.
+- **Fixed: `s_sendmsg` messages.** Every `s_sendmsg` was skipped, including GS output (type 2) and GS done (type 3),
+  which carry the geometry stream. ISA section 12.5.1 lists save wave, stall wave gen, halt waves, ordered PS done
+  and GS alloc req (4-7 and 9) as hardware signals; only those are skipped now, and every other type stops the
+  translation. A local count over a cold translation of `PPSA17221 - Minecraft` and `PPSA21567 - ASTRO BOT` found
+  only type 9 in either title, and `s_trap 1` in Astro. `EmulatorShaderArithmetic.SendmsgDropsOnlyMessagesWithoutShaderEffect`
+  covers types 9 and 7 (skipped) and GS emit, GS done and type 8 (refused).
+- **Translator version 217.** The NaN result of `v_cmp_neq_f16`, inline floats in 64-bit integer sources and
+  sign-extended literals in `s_ashr_i64` and `s_bfe_i64` change shaders that already translated, so the version is
+  raised to drop the cached modules. The title runs quoted above for those fixes ran on version 216 with a warm
+  shared cache, so they loaded modules from older translators; they show no regression only. Cold runs with private
+  caches on the build that has all of these fixes: Minecraft interactive at 60 fps at 29.3 s, Astro interactive at
+  42.8 fps at 30.3 s, the same gates failing as before. On the committed version 217 build, with the shared cache
+  cold: Minecraft child exit 0, no first error, interactive, 54.6-60 fps at 28.7-29.4 s, `visual_compare`,
+  `scene_checkpoint` and `action_response` failing; Astro child exit 0, no first error, interactive, 40.2-41.5 fps
+  at 30.0-30.7 s, the same three failing (one sample; earlier runs on this branch had `no_runtime_failure` fail
+  with `gfx_storage_frontier`). Neither log names a refused form.
 - **Observed stop rechecked.** `PPSA03969 - F.I.S.T.` ran 167 s on `playable-regression` with exit 0 and no
   `SLoadDwordx4` refusal, interactive at 9 fps. The stop was intermittent, so one clean run does not close it. Both
   title runs above used the binary of the first batch; the second batch and `PPSA17221 - Minecraft` had no title
