@@ -1,10 +1,12 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Kyty/UnitTest.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -427,6 +429,208 @@ TEST(EmulatorJson2, ReportsEmptyAndNullObjectIteratorsEqual)
 	EXPECT_FALSE(fns.object_ne(&begin_iter, &one_null));
 	EXPECT_FALSE(fns.object_ne(&one_null, &begin_iter));
 	fns.object_destroy(&begin_iter);
+}
+
+namespace {
+
+// Guest-constructed wrappers placed in guest memory, each at its 8-byte size and followed by a canary, so a
+// constructor writing past the wrapper is caught.
+struct GuestJsonPage
+{
+	static constexpr uint64_t CANARY = 0xC0DEC0DEC0DEC0DEull;
+
+	GuestJsonPage()
+	{
+		address = Kyty::Core::VirtualMemory::Alloc(0, Kyty::Core::VirtualMemory::GetPageSize(),
+		                                           Kyty::Core::VirtualMemory::Mode::ReadWrite);
+		if (address != 0)
+		{
+			std::memset(reinterpret_cast<void*>(address), 0xA5, Kyty::Core::VirtualMemory::GetPageSize());
+		}
+	}
+	~GuestJsonPage()
+	{
+		if (address != 0) { (void)Kyty::Core::VirtualMemory::Free(address); }
+	}
+	// Slot n is 48 bytes: a 32-byte value or an 8-byte wrapper, then the canary at +40.
+	template <typename T>
+	T* Slot(int n) const
+	{
+		auto* base = reinterpret_cast<uint8_t*>(address + static_cast<uint64_t>(n) * 48u);
+		std::memcpy(base + 40, &CANARY, sizeof(CANARY));
+		return reinterpret_cast<T*>(base);
+	}
+	bool CanaryIntact(int n) const
+	{
+		uint64_t value = 0;
+		std::memcpy(&value, reinterpret_cast<const uint8_t*>(address + static_cast<uint64_t>(n) * 48u) + 40, sizeof(value));
+		return value == CANARY;
+	}
+	// A wrapper only owns its first 8 bytes: bytes 8..39 must keep the fill.
+	bool WrapperTailIntact(int n) const
+	{
+		const auto* base = reinterpret_cast<const uint8_t*>(address + static_cast<uint64_t>(n) * 48u);
+		for (int i = 8; i < 40; i++)
+		{
+			if (base[i] != 0xA5) { return false; }
+		}
+		return CanaryIntact(n);
+	}
+
+	uint64_t address = 0;
+};
+
+} // namespace
+
+TEST(EmulatorJson2, BuildsArraysObjectsAndValuesTheGuestConstructs)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libJson2_1", &symbols));
+	auto* array_ctor    = Lookup<void* (*)(void*)>(&symbols, u"JP-PtKMiI1E");
+	auto* array_dtor    = Lookup<void (*)(void*)>(&symbols, u"HJ8GpRT1aiw");
+	auto* push_back     = Lookup<void (*)(void*, const void*)>(&symbols, u"zQtLRTqceMY");
+	auto* array_empty   = Lookup<bool (*)(const void*)>(&symbols, u"9uP25i6ipno");
+	auto* array_size    = Lookup<size_t (*)(const void*)>(&symbols, u"rQGJeNjOuUk");
+	auto* array_back    = Lookup<const TestJsonValue* (*)(const void*)>(&symbols, u"bAM9Qwofus0");
+	auto* object_ctor   = Lookup<void* (*)(void*)>(&symbols, u"OJPTonqdg0I");
+	auto* object_copy   = Lookup<void* (*)(void*, const void*)>(&symbols, u"a+W7HHlwpBs");
+	auto* object_dtor   = Lookup<void (*)(void*)>(&symbols, u"5JmzZt8twAo");
+	auto* object_index  = Lookup<TestJsonValue* (*)(void*, const void*)>(&symbols, u"ERuf9y0DY84");
+	auto* object_clear  = Lookup<void (*)(void*)>(&symbols, u"oH8aBmLU+fc");
+	auto* object_assign = Lookup<void* (*)(void*, const void*)>(&symbols, u"urOpESTBZmo");
+	auto* string_cctor  = Lookup<void* (*)(void*, const char*)>(&symbols, u"9KUZFjI1IxA");
+	auto* string_copy   = Lookup<void* (*)(void*, const void*)>(&symbols, u"0CAesfH963Q");
+	auto* string_dtor   = Lookup<void (*)(void*)>(&symbols, u"cG1VE2HMl6c");
+	auto* value_bool    = Lookup<void* (*)(void*, bool)>(&symbols, u"UeuWT+yNdCQ");
+	auto* value_long    = Lookup<void* (*)(void*, int64_t)>(&symbols, u"0lLK8+kDqmE");
+	auto* value_ulong   = Lookup<void* (*)(void*, uint64_t)>(&symbols, u"x4AUdbhpRB0");
+	auto* value_double  = Lookup<void* (*)(void*, double)>(&symbols, u"sOmU4vnx3s0");
+	auto* value_cstr    = Lookup<void* (*)(void*, const char*)>(&symbols, u"b9V6fmppLXY");
+	auto* value_string  = Lookup<void* (*)(void*, const void*)>(&symbols, u"sZIoMRGO+jk");
+	auto* value_array   = Lookup<void* (*)(void*, const void*)>(&symbols, u"iZeYfOxtMRg");
+	auto* value_object  = Lookup<void* (*)(void*, const void*)>(&symbols, u"3xUXnmUkXfo");
+	auto* value_copy    = Lookup<void* (*)(void*, const void*)>(&symbols, u"fSb2oQTNrgA");
+	auto* value_dtor    = Lookup<void (*)(void*)>(&symbols, u"WTtYf+cNnXI");
+	auto* set_cstr      = Lookup<void (*)(void*, const char*)>(&symbols, u"n6FC+l9DU70");
+	auto* set_object    = Lookup<void (*)(void*, const void*)>(&symbols, u"dFCphqnd+a4");
+	auto* refer_array   = Lookup<void* (*)(void*)>(&symbols, u"nM5XqdeXFPw");
+	auto* refer_object  = Lookup<void* (*)(void*)>(&symbols, u"-NxEk7XLkDY");
+	auto* count         = Lookup<size_t (*)(const void*)>(&symbols, u"RBw+4NukeGQ");
+	auto* index_uint    = Lookup<const TestJsonValue* (*)(const void*, uint64_t)>(&symbols, u"XlWbvieLj2M");
+	auto* refer_key     = Lookup<TestJsonValue* (*)(void*, const void*)>(&symbols, u"wLsJlmgEIaI");
+	for (const char16_t* nid: {u"JP-PtKMiI1E", u"HJ8GpRT1aiw", u"zQtLRTqceMY", u"9uP25i6ipno", u"rQGJeNjOuUk", u"bAM9Qwofus0", u"OJPTonqdg0I", u"a+W7HHlwpBs", u"5JmzZt8twAo", u"ERuf9y0DY84", u"oH8aBmLU+fc", u"urOpESTBZmo", u"9KUZFjI1IxA", u"0CAesfH963Q", u"cG1VE2HMl6c", u"UeuWT+yNdCQ", u"0lLK8+kDqmE", u"x4AUdbhpRB0", u"sOmU4vnx3s0", u"b9V6fmppLXY", u"sZIoMRGO+jk", u"iZeYfOxtMRg", u"3xUXnmUkXfo", u"fSb2oQTNrgA", u"WTtYf+cNnXI", u"n6FC+l9DU70", u"dFCphqnd+a4", u"nM5XqdeXFPw", u"-NxEk7XLkDY", u"RBw+4NukeGQ", u"XlWbvieLj2M", u"wLsJlmgEIaI"})
+	{
+		ASSERT_NE(symbols.Find(JsonFunc(nid)), nullptr) << nid;
+	}
+
+	GuestJsonPage page;
+	ASSERT_NE(page.address, 0u);
+	auto* array = page.Slot<void>(0);
+	ASSERT_EQ(array_ctor(array), array);
+	EXPECT_TRUE(page.WrapperTailIntact(0));
+	EXPECT_TRUE(array_empty(array));
+	EXPECT_EQ(array_size(array), 0u);
+	EXPECT_EQ(array_back(array)->type, JsonNull);
+
+	auto* number = page.Slot<TestJsonValue>(1);
+	value_long(number, -5);
+	push_back(array, number);
+	value_dtor(number);
+	value_ulong(number, 7);
+	push_back(array, number);
+	value_dtor(number);
+	value_bool(number, true);
+	push_back(array, number);
+	value_dtor(number);
+	value_double(number, 1.5);
+	push_back(array, number);
+	value_dtor(number);
+	value_cstr(number, "hi");
+	push_back(array, number);
+	EXPECT_TRUE(page.CanaryIntact(1));
+	EXPECT_FALSE(array_empty(array));
+	ASSERT_EQ(array_size(array), 5u);
+	EXPECT_EQ(array_back(array)->type, JsonString);
+
+	// A value built from the array owns a copy: growing the array afterwards leaves it alone.
+	auto* listed = page.Slot<TestJsonValue>(2);
+	value_array(listed, array);
+	push_back(array, number);
+	ASSERT_EQ(listed->type, JsonArray);
+	ASSERT_EQ(count(listed), 5u);
+	EXPECT_EQ(index_uint(listed, 0)->integer, -5);
+	EXPECT_EQ(index_uint(listed, 1)->type, JsonUInteger);
+	EXPECT_EQ(index_uint(listed, 1)->uinteger, 7u);
+	EXPECT_EQ(index_uint(listed, 3)->real, 1.5);
+	EXPECT_EQ(refer_array(listed), listed->pointer);
+
+	auto* key = page.Slot<TestJsonString>(3);
+	string_cctor(key, "name");
+	auto* key_copy = page.Slot<TestJsonString>(4);
+	ASSERT_EQ(string_copy(key_copy, key), key_copy);
+	EXPECT_TRUE(page.WrapperTailIntact(4));
+	EXPECT_NE(key_copy->data, key->data);
+	EXPECT_STREQ(key_copy->data, "name");
+
+	auto* object = page.Slot<void>(5);
+	ASSERT_EQ(object_ctor(object), object);
+	EXPECT_TRUE(page.WrapperTailIntact(5));
+	auto* member = object_index(object, key);
+	ASSERT_NE(member, nullptr);
+	EXPECT_EQ(member->type, JsonNull);
+	set_cstr(member, "kyty");
+	EXPECT_EQ(object_index(object, key_copy), member);
+
+	auto* object_twin = page.Slot<void>(6);
+	object_copy(object_twin, object);
+	EXPECT_TRUE(page.WrapperTailIntact(6));
+	object_clear(object);
+	auto* described = page.Slot<TestJsonValue>(7);
+	value_object(described, object);
+	EXPECT_EQ(count(described), 0u);
+	value_dtor(described);
+	value_object(described, object_twin);
+	ASSERT_EQ(count(described), 1u);
+	const auto* copied = refer_key(described, key);
+	ASSERT_NE(copied, nullptr);
+	EXPECT_NE(copied, object_index(object_twin, key));
+	EXPECT_STREQ(static_cast<const TestJsonString*>(copied->pointer)->data, "kyty");
+	EXPECT_EQ(refer_object(described), described->pointer);
+
+	EXPECT_EQ(object_assign(object, object_twin), object);
+	value_dtor(described);
+	value_object(described, object);
+	EXPECT_EQ(count(described), 1u);
+
+	auto* duplicate = page.Slot<TestJsonValue>(8);
+	value_copy(duplicate, described);
+	EXPECT_TRUE(page.CanaryIntact(8));
+	ASSERT_EQ(duplicate->type, JsonObject);
+	EXPECT_NE(duplicate->pointer, described->pointer);
+	EXPECT_EQ(count(duplicate), 1u);
+
+	auto* text = page.Slot<TestJsonValue>(9);
+	value_string(text, key);
+	ASSERT_EQ(text->type, JsonString);
+	EXPECT_STREQ(static_cast<const TestJsonString*>(text->pointer)->data, "name");
+	set_object(text, object_twin);
+	EXPECT_EQ(text->type, JsonObject);
+	EXPECT_EQ(count(text), 1u);
+
+	for (auto* value: {number, listed, described, duplicate, text})
+	{
+		value_dtor(value);
+	}
+	string_dtor(key);
+	string_dtor(key_copy);
+	object_dtor(object);
+	object_dtor(object_twin);
+	array_dtor(array);
+	array_dtor(array); // a second destruction finds no container and does nothing
+	for (int n = 0; n < 10; n++)
+	{
+		EXPECT_TRUE(page.CanaryIntact(n)) << n;
+	}
 }
 
 UT_END();
