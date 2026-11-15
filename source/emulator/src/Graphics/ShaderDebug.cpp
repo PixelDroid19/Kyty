@@ -120,15 +120,15 @@ static String8 operand_to_str(ShaderOperand op)
 	switch (op.type)
 	{
 		case ShaderOperandType::LiteralConstant:
-			EXIT_IF(op.size != 0);
+			EXIT_IF(op.size != 0 && op.size != 2); // the decoder sizes a constant feeding a 64-bit source as 2
 			return String8::FromPrintf("%s%f (%u)", OperandModifierPrefix(op), op.constant.f, op.constant.u);
 			break;
 		case ShaderOperandType::IntegerInlineConstant:
-			EXIT_IF(op.size != 0);
+			EXIT_IF(op.size != 0 && op.size != 2);
 			return String8::FromPrintf("%s%d", OperandModifierPrefix(op), op.constant.i);
 			break;
 		case ShaderOperandType::FloatInlineConstant:
-			EXIT_IF(op.size != 0);
+			EXIT_IF(op.size != 0 && op.size != 2);
 			return String8::FromPrintf("%s%f", OperandModifierPrefix(op), op.constant.f);
 			break;
 		default: break;
