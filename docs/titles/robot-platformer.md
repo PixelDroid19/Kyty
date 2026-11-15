@@ -6,6 +6,47 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: a 0.44x guest resolution removes under a third of the GPU work and still misses 30 fps (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, silent console, `1f28471be` built clean (no
+probe), late dunes route from the world-map slot, one run per patch, per-second performance
+snapshots and the render engine's busy counters over the stated seconds. The guest resolution is
+changed with a user-supplied game patch file that rewrites the title's own resolution table
+(`docs/game-patches.md`). A run with a game patch is not a strict run and supports no compatibility
+claim; the patch is not shipped and its picture was not compared against the unpatched one.
+
+| Guest output / internal | Scene (draws per frame) | fps | Frame ms | GPU work ms/frame | Engine busy | Command runs ms/frame | us per draw |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 3840x2160 / 1920x1080 (unpatched), 196-213 s | dunes (772) | 19.1 | 52.3 | 48.0 | 91.7 % | 42.7, 6.4 in fence waits | 35.9 |
+| 1920x1080 / 1280x720, 183-213 s | dunes (765) | 26.2 | 38.1 | 34.3 | 90.0 % | 33.4, 3.1 in fence waits | 27.8 |
+| 3840x2160 / 1920x1080 (unpatched), 153-180 s | before the dunes (386) | 18.9 | 52.9 | 50.8 | 96.0 % | | |
+| 1920x1080 / 1280x720, 150-174 s | before the dunes (390) | 22.7 | 44.1 | 40.3 | 91.3 % | | |
+| 1920x1080 / 1920x1080, 150-215 s | another scene (550) | 18.6 | 53.7 | 46.2 | 86.0 % | 48.9, 17.0 in fence waits | |
+
+- **Most of the GPU frame does not follow the internal resolution.** 0.44 times the pixels takes
+  13.7 ms off 48.0 ms in the dunes and 10.5 ms off 50.8 ms in the scene before them. A line through
+  each pair leaves 22 ms and 32 ms of GPU work per frame at zero pixels (two points per scene, not a
+  fit). The 13.7 ms agrees with the two lighting programs scaling with the pixel count (about
+  25 ms at 1920x1080 in the dunes: 13.65 ms measured for `0x3666fa39` in the record below, the rest
+  for `0x874bd13f`) while draws and the other dispatches stay.
+- **The output resolution alone is not the cost.** With the output at 1920x1080 and the internal
+  resolution unchanged the frame stays at 53.7 ms. The route landed in a different scene in that
+  run, so the row excludes a large gain and prices nothing.
+- **At 1280x720 both limits sit together.** The engine is still 90 % busy at 38.1 ms and the
+  command thread runs 33.4 ms of the frame, so 30 fps is not held at that resolution either. An
+  earlier run at 960x540 on `6a6a5818a` held 37-41 fps with the engine 78 % busy (record below).
+- **Command work per draw is not constant.** The same draw count costs 35.9 us per draw at
+  1920x1080 and 27.8 us at 1280x720, with every stage lower by a similar share (state setup 10.5
+  against 8.2, binding 14.8 against 12.2). The cause is not established; the thread sleeps in fence
+  waits for 6.4 ms against 3.1 ms per frame.
+- **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
+  less GPU work and about 10 ms less command work at once. The measured GPU levers are the range
+  split of the lighting program (5.9 ms, probe only, fails its sweep) and nothing else above 1 ms;
+  no general rule recorded so far closes the gap on this GPU.
+- **Runs.** The first attempt with the 1280x720 patch exited with status 139 at 144 s in the hub
+  load, a fault in guest code; whether it is the hub-start assert recorded on 2026-10-30 was not
+  checked. The repeat ran clean.
+
 ## Robot platformer: the loop-boundary range split fails the cross-recipe sweep and stays a probe result (2026-11-14, offline)
 
 Intel Arc A770, Mesa ANV on Xe (Mesa 26.3 development build), SIMD8, driver shader cache disabled. No
