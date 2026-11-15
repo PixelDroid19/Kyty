@@ -7066,7 +7066,7 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
   - `v_dot*` (VOP3P 0x13-0x19): whether gfx1013 has them is not established.
-- **Remaining, in suggested order.** First, any stop seen in a strict run (none is open from the record above).
+- **Remaining, in suggested order.** First, stops seen in strict runs, starting with the intermittent `SLoadDwordx4` refusal if it returns.
   Then undecoded forms: VOP3 24-bit `mul_hi`, 16-bit `mad`, `min3/max3/med3` on 16-bit integers,
   64-bit shifts and `v_mad_i64_i32`; `div_scale`, `div_fmas`, `div_fixup` and the F64 ALU; MUBUF sub-dword and D16
   loads and stores and the remaining atomics; MTBUF stores; DS `_rtn` atomics and sub-dword reads and writes;
