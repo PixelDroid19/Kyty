@@ -7042,8 +7042,9 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   `v_mad_i32_i16` (VOP3), from the ISA descriptions. Their ISA entries name no input or output modifier, so an
   encoded one is refused by the emitter; `op_sel` stays refused at decode. The gfx10-only opcodes are refused on the
   earlier generation. The `v_perm_b32` byte numbering (selectors 0-3 name bytes of S1, 4-7 bytes of S0) follows the
-  `{S0, S1}` pair convention of `v_alignbit_b32`; it was not checked against an independent source, and the local
-  reference trees hold no translation of it.
+  `{S0, S1}` pair convention of `v_alignbit_b32`. One independent emulator translation agrees on every selector
+  range (0-7 bytes, 8-11 the sign of bit 15 or 31, 12 zero, 13 and above 0xff); that is one secondary source, not
+  a hardware check.
 - **Added: VOP3 forms of integer VOP1 ops.** `v_mov_b32`, `v_not_b32`, `v_bfrev_b32`, `v_ffbh_u32`, `v_ffbl_b32` and
   `v_ffbh_i32` in the VOP3 encoding decode to their VOP1 operation when no modifier is encoded, and stop at decode
   when one is. The other 21 of the 27 are F64 or float conversions and movrel forms; they are not added.
@@ -7085,6 +7086,43 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     after the fix: 11/15 gates, the same four failing, first error `gfx_storage_frontier`, interactive, 31.4 fps at
     29.6 s (one sample, not a speed claim). No title is known to run these compares on a NaN, so there is no visual
     before and after.
+- **Fixed: 64-bit float sources.**
+  - The instruction dump (`ShaderDebug.cpp`, `operand_to_str`) stopped on any constant not sized 0, but the decoder
+    sizes a constant feeding a 64-bit source as 2. Every F64 op or 64-bit compare taking an inline or literal
+    constant therefore ended the run. The dump now accepts size 2.
+  - `operand_load_uint` gave a 64-bit constant the 32-bit float bits as its low word and zero (or all ones for a
+    negative integer) as its high word, so inline 1.0 read as a tiny denormal. ISA section 6.2: an inline float is
+    the double of that value (1/(2*PI) is `0x3fc45f306dc9c882`), an inline integer is sign extended, and a 32-bit
+    literal is the high word with a zero low word. It also dropped `abs` and `neg` with a warning.
+    `operand_load_f64_word` now loads every source word of the seven F64 emitters (compares, conversions, unary,
+    fract) with that expansion and with `abs`/`neg` on bit 31 of the high word.
+  - `v_cvt_f32_f64` and `v_cvt_f64_f32` emitted `OpConvertFToF`, which SPIR-V does not define, so they never
+    assembled; they now use `OpFConvert`.
+  - `EmulatorShaderArithmetic.F64SourcesExpandConstantsAndApplySignModifiers` runs `V_CMP_EQ_F64` on the evaluator
+    with two VGPR pairs, inline 1.0, 1/(2*PI), an inline integer, a literal, `neg` on a constant and `abs` on a VGPR,
+    and both conversions with a literal, 1/(2*PI) and 1.5. The evaluator gained double compares and `OpFConvert`.
+    Putting the literal back in the low word makes it fail. Unit suite: 2686 passed, 11 skipped; the four gates pass.
+  - `PPSA21567 - ASTRO BOT` after these fixes: 11/15 gates, the same four failing, first error
+    `gfx_storage_frontier`, interactive, 33.6 fps at 29.6 s (one sample). `PPSA17221 - Minecraft`: child exit 0, no
+    first error, interactive, 60 fps at 30.5 s; `visual_compare`, `scene_checkpoint` and `action_response` fail. No
+    earlier run of this binary set exists to compare those gates against. No title is known to run F64 code.
+  - Fixed: integer 64-bit sources. `operand_load_uint` now gives an inline float in any 64-bit source its double
+    encoding (`s_mov_b64` with inline 1.0 read the float bits). The only signed 64-bit sources emitted are the first
+    operands of `s_ashr_i64` and `s_bfe_i64`; `operand_load_i64_word` sign extends a literal there, where the
+    unsigned path zero extended it. Both ops also refused any constant second operand, because the decoder sizes a
+    constant 0 and they demanded 1; they now accept it. The dump printed no 64-bit inline float
+    (`operand_array_to_str`) and no longer asserts a constant's size. Signed 64-bit vector compares have no
+    emitter and stop the title. `EmulatorShaderArithmetic.Int64SourcesExpandConstantsBySignedness` covers both
+    ops with positive and negative literals, an inline shift and a literal control word, and `s_mov_b64` with
+    inline 1.0 and a literal. Unit suite: 2687 passed, 11 skipped; the four gates pass. Re-run on that build:
+    Astro 11/15, the same four failing, first error `gfx_storage_frontier`, interactive, 33.0 fps at 30.4 s;
+    Minecraft child exit 0, no first error, interactive, 60 fps at 29.5 s, the same three gates failing.
+- **VOP3 opcode sweep.** Each VOP3 opcode 0-0x3ff was parsed and emitted with three VGPR sources in separate child
+  processes (local only, not committed). 45 parse, 40 of them emit. Of the five that parse but stop the emitter,
+  0x100, 0x101, 0x128 and 0x12A need an SGPR mask in src2, so a VGPR there is an invalid encoding, not a defect.
+  0x341 decodes as `VMadF16`, which the emitter refuses on purpose (its intermediate rounding is not modeled); the
+  RDNA2 opcode table lists no 833 at all. The 979 that do not parse include encodings this shape does not fit, so
+  the sweep is no full list of missing forms.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
