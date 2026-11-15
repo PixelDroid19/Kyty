@@ -6,7 +6,102 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
-## Robot platformer: the lighting program's GPU time sits in its trace region (2026-11-14, measured)
+## Robot platformer: the trace region costs GPU time by being compiled in, not by running (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
+`c5cf3199e` plus the temporary probe of the record below (not committed), six arms in 2 s blocks in
+the same scene. Two more kinds of arm: every `image_bvh_intersect_ray` reports a miss without
+loading a node, and a guest branch taken under a condition the compiler cannot fold (the count word
+of the guest address table in the program's uniform block is not zero: true on every dispatch).
+
+Run 1, medians of blocks 18 to 92, 12-13 per arm:
+
+| Arm (instruction index) | Frame | Engine work a frame | Removed |
+| --- | --- | --- | --- |
+| As translated | 52.8 ms | 48.1 ms (47.2-49.3) | |
+| Dispatch left out | 37.0 ms | 32.6 ms (32.1-33.6) | 15.4 ms |
+| Trace region skipped, branch folded at compile time (1437) | 40.9 ms | 36.5 ms (36.2-39.6) | 11.6 ms |
+| Every intersect reports a miss (1550, 1582, 1767) | 52.6 ms | 47.9 ms (46.5-48.6) | 0.2 ms |
+| Bottom-level walk skipped, branch folded (1485) | 46.6 ms | 42.1 ms (41.2-42.9) | 6.0 ms |
+| Trace region skipped under the run-time condition (1437) | 52.7 ms | 48.0 ms (47.0-49.5) | 0.0 ms |
+
+Run 2, the control, medians of blocks 18 to 79, 10-11 per arm. The first half of the window is
+about 4 ms a frame heavier in every arm; the differences hold within 1.7 ms in each half:
+
+| Arm (instruction index) | Frame | Engine work a frame | Removed |
+| --- | --- | --- | --- |
+| As translated | 61.3 ms | 50.7 ms (45.7-54.1) | |
+| Dispatch left out | 45.2 ms | 35.5 ms (30.1-37.3) | 15.2 ms |
+| Trace region skipped, branch folded (1437) | 49.0 ms | 39.1 ms (33.6-41.4) | 11.6 ms |
+| Trace region skipped under the run-time condition (1437) | 57.2 ms | 50.1 ms (45.0-53.6) | 0.5 ms |
+| Leaves after the light cull under the run-time condition (250) | 44.5 ms | 35.8 ms (29.9-37.8) | 14.9 ms |
+| Light loop never entered under the run-time condition (1361) | 51.8 ms | 45.6 ms (41.5-48.7) | 5.1 ms |
+
+- **The run-time condition engages.** Leaving after the light cull under it recovers 14.9 of the
+  15.2 ms of leaving the dispatch out, so the arms that use it do skip their region on every thread.
+- **Running the region costs nothing measurable here.** Skipped at run time it returns 0.0 and
+  0.5 ms; with every intersect a miss, 0.2 ms. The method resolves about 2 ms.
+- **Having it in the compiled program costs 11.6 ms a frame**, in both runs: the same skip folded at
+  compile time removes the region from the program and with it three quarters of the program's cost.
+  Half the region (the bottom-level walk) removes half of that.
+- **The cost lands on the rest of the program.** With the light loop never entered at run time
+  5.1 ms come back, against 12.6 ms when the loop is folded out (record below). About 7 ms of the
+  region's presence is paid in the code before and after the light loop, about 4.5 ms in the light
+  loop outside the region.
+- **Driver statistics of the same variants** (their stored compute recipes compiled offline,
+  `VK_KHR_pipeline_executable_properties`, shader cache disabled, SIMD8):
+
+  | Variant | Instructions | Loops | Spills:fills | Scratch a thread | Maximum live registers | Removed |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | As translated | 34,087 | 137 | 390:1634 | 8,192 B | 283 | |
+  | Trace region skipped at run time | 34,086 | 137 | 390:1634 | 8,192 B | 283 | 0.0-0.5 ms |
+  | Every intersect a miss | 28,602 | 125 | 412:1390 | 8,192 B | 228 | 0.2 ms |
+  | Bottom-level walk folded out | 23,255 | 88 | 271:1042 | 4,096 B | 242 | 6.0 ms |
+  | Trace region folded out | 12,149 | 39 | 86:214 | 2,048 B | 168 | 11.6 ms |
+
+  The region is 65 % of the compiled program for 22 % of the guest instructions. The GPU time follows
+  the scratch traffic, not the instructions that run. By position in the assembly of the translated
+  program, the first 12,000 instructions hold 487 scratch loads, the next 18,000 (the light loop)
+  369 and the last 10,300 (the shading after the loop) 778; the variant without the region holds 214
+  in all.
+- **Why the rest of the program pays** (final NIR from `INTEL_DEBUG=cs`, exact CFG liveness, one
+  register per value at SIMD8 against 128 registers):
+
+  | Point | Live values |
+  | --- | --- |
+  | Before the light loop | 150 (31 uniform, 119 per-lane) |
+  | Trace region entry | 164 |
+  | Peak, inside the region | 243 (83 uniform, 160 per-lane) |
+  | Trace region exit | 160 |
+  | After the light loop | 112 |
+  | Peak without the region | 158 (47 uniform, 111 per-lane) |
+
+  At the peak 95 values live only inside the region, 95 pass through it untouched (18 uniform, 77
+  per-lane; 44 of them are not touched by the whole light loop) and 51 are used on both sides. The
+  pass-through values have 162 definitions and 1,900 uses outside the region, 268 of them inside
+  the light loop. One continuous range per value peaks at 282, the driver reports 283: ranges with
+  holes add about 40 to the exact figure, not the gap the 2026-11-12 record below claimed. Which
+  values the allocator sends to scratch was not traced; 1,634 fills against 1,900 uses of values
+  that only pass through is consistent with those values being loaded from scratch at every use.
+- **Tool defect, earlier figures withdrawn.** The liveness script behind the 2026-11-12 table read
+  successors only from the line that closes a block; an empty block prints them on its header line,
+  so liveness never crossed an empty else arm (471 of 1,431 blocks). Fixed, it matches a hand count
+  on a 60-instruction test program (10 values: 3 uniform, 7 per-lane). "Exact 126", "51 under
+  exact" and "exact 102" in that record are wrong; see the correction there. The guest-listing pass
+  of that record (122 registers) uses another script and was not re-checked.
+- **Scratch is reachable from a translation.** A function-local array indexed by a run-time value
+  compiles on this driver to scratch stores and loads (test program: a 96-element array becomes
+  `store_scratch_intel` / `load_scratch_intel`, 384 bytes of scratch a thread). Not tried: keeping
+  the pass-through values there across the region.
+- **What it bounds.** 11.6 ms a frame is the ceiling of any translation change that stops the
+  region from pushing other values out of registers. At that ceiling the frame is about 40 ms
+  (25 fps) and the graphics command thread sets it (causal test below).
+- **Not measured.** How often a thread enters the region in this scene; the same split for
+  `0x874bd13f`; any other GPU or driver. The arms change the picture; no image was scored.
+- **Discarded run.** One run left the dunes route for the opening cinematic; the program was not
+  dispatched after block 40.
+
+## Robot platformer: removing the trace region removes most of the lighting program's GPU time (2026-11-14, measured)
 
 Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
 `451e7d292` plus a temporary probe (not committed). Starting 35 s after the first dispatch of
@@ -28,10 +123,11 @@ brackets. The last three cycles agree within 0.5 ms.
 | Shading block skipped (2229) | 51.5 ms | 89 % | 45.8 ms (41.2-47.0) | 0.4 ms |
 | Part of the shading block skipped (2236) | 50.1 ms | 89 % | 43.8 ms (41.3-44.8) | 2.3 ms |
 
-- **Where the time is.** The light cull costs about 0.4 ms and everything outside the light loop about
-  3 ms. The light loop holds 12.6 ms, and 11.4 ms of that is the span the guest itself skips when no
-  lane of the wave traces: 665 of the program's 3,066 instructions, from the branch at index 1437 to
-  its join. The span holds the three `image_bvh_intersect_ray` instructions, the header loads that
+- **Where the time goes away.** The light cull costs about 0.4 ms and, with the light loop folded
+  out, everything outside it about 3 ms. Folding the light loop out removes 12.6 ms, and 11.4 ms of
+  that goes with the span the guest itself skips when no lane of the wave traces: 665 of the
+  program's 3,066 instructions, from the branch at index 1437 to its join. The record above shows
+  that this is the cost of having the span in the compiled program, not of running it. The span holds the three `image_bvh_intersect_ray` instructions, the header loads that
   build the two BVH descriptors, the two-level walk (instances, then triangle lists) with its shared
   stack in lane reads and writes, and the use of the hit. The two shading-block arms disagree with
   each other (a part cannot cost more than the whole), so 2 ms is the resolution of this method: each
@@ -40,14 +136,15 @@ brackets. The last three cycles agree within 0.5 ms.
 - **Corrects the earlier price.** The forced-miss build of 2026-11-09 (23.6 against 24.7 ms a call)
   priced the node visits after the first one, not the trace: the header loads, the first visit and
   the lane exchanges ran in both arms. "A host-written traversal is worth about 1 ms" in the record
-  below is withdrawn; the trace region is 11.4 of the program's 15.6 ms in this scene.
+  below is withdrawn; removing the trace region from the compiled program removes 11.4 of the
+  program's 15.6 ms in this scene.
 - **What it bounds.** With the region left out the frame is 39.6 ms (25 fps), where the causal test
   below shows the graphics command thread setting the frame. 30 fps still needs both: engine work at
   or under about 30 ms a frame and 6 ms less command processing.
-- **Not measured.** How the 11.4 ms divide between the address lookups of the header loads, the node
-  visits and the split-wave exchanges; how many light iterations trace per tile and how many nodes a
-  trace visits in this scene (the 2026-10-30 counts are from another window); the forced-miss arm in
-  this scene. The arms change the picture (lighting on and off every cycle); no image was scored.
+- **Not measured.** How many light iterations trace per tile and how many nodes a trace visits in
+  this scene (the 2026-10-30 counts are from another window). The forced-miss arm and the split
+  between running the span and compiling it in are in the record above. The arms change the
+  picture (lighting on and off every cycle); no image was scored.
 - **Discarded run.** The first attempt started the arms at a fixed 201 s. Boot was slow, the hub
   loaded during the first cycle, each first use of a variant stalled the command thread for 1-3 s
   while it compiled, and the run ended at 231 s on the known intermittent guest jump to address 0
@@ -135,9 +232,9 @@ once a frame in every block.
   the light loop, share one wave-wide stack through lane reads and writes, and only bend a probe
   lookup direction for glossy pixels; every lane's result depends on its own ray alone. The record of
   2026-11-09 below priced the node visits after the first at about 1 ms of 24 a call (forced misses);
-  the region-pricing record above measures the whole trace region at 11.4 of the program's 15.6 ms.
-  Earlier records call the program "the BVH kernel"; the trace is 665 of its 3,066 instructions and
-  most of its GPU time. A host-written copy of the whole program would be a transcription of the
+  the region-pricing records above show that removing the whole trace region from the compiled
+  program removes 11.4 of the program's 15.6 ms, while running it costs nothing measurable.
+  Earlier records call the program "the BVH kernel"; the trace is 665 of its 3,066 instructions. A host-written copy of the whole program would be a transcription of the
   guest program, which the data boundary keeps out of the repository.
 - **Measured since.** The region that holds the time: region-pricing record above. The command path
   without the program is profiled in the causal-test record above.
@@ -520,6 +617,18 @@ of the driver's 358 live registers does the guest itself need?
   per-lane NIR registers span the point, against 51 under exact liveness:
   register webs whose live ranges have holes. The last 90 registers come from
   the back end's own lowering; not traced.
+
+  **Correction (2026-11-14).** The "exact" row and the two exact figures after
+  it are wrong. The script read a block's successors only from the line that
+  closes it; an empty block prints them on its header line, so liveness never
+  crossed an empty else arm and the exact figure came out far too low. Fixed
+  and re-run on the translator 216 module (34,087 instructions, 390:1634, 283
+  maximum live): exact 243 (83 uniform, 160 per-lane), one continuous range
+  per value 282, driver 283. Holes in register webs add about 40, not 140: the
+  program's values are live, and 95 of them only pass through the trace region
+  (record of 2026-11-14 above). "51 under exact" and the holes conclusion are
+  withdrawn. The exact figure of the guard ablation below (102) has the same
+  defect and was not re-run; its compiled statistics stand.
 - **Guards explain little of the holes.** The same module with every select
   on the guest EXEC replaced by its new value (unsound, offline ceiling)
   compiles to 33,141 instructions, 462:1464, 331 maximum live; hull 247,
@@ -777,6 +886,11 @@ Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14, translator 210, offline.
 The question: can a different translation of the BVH traversal kernel
 `0x3666fa39`, 19.7 of the 44.4 ms dunes GPU bill (record below), cut its
 scratch spills enough to save 3 ms per frame?
+
+**Later (2026-11-14).** The record at the top of this file prices the scratch
+traffic of this program at 11.6 ms a frame and counts 95 values that only pass
+through its trace region. "No translation lever" covers the variants tried
+here, not a translation that keeps those values out of the allocator's way.
 
 - **Module.** A strict 211 s run of the dunes route on `aa282cbf4` with
   temporary probes and a private copy of the shader store logged the
