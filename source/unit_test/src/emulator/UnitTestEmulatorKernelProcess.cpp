@@ -2086,6 +2086,8 @@ TEST(EmulatorKernelProcess, ReachabilityNamesTheMountedPathsThatExist)
 
 	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability("/data/present.bin"), OK);
 	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability("/data/missing.bin"), LibKernel::KERNEL_ERROR_ENOENT);
+	// The entropy devices have no mount; the kernel serves them.
+	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability("/dev/urandom"), OK);
 	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability(nullptr), LibKernel::KERNEL_ERROR_EINVAL);
 	const std::string too_long = "/data/" + std::string(250, 'a');
 	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability(too_long.c_str()), LibKernel::KERNEL_ERROR_ENAMETOOLONG);
