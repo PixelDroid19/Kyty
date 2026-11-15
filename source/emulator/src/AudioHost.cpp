@@ -487,6 +487,12 @@ bool HostAudio::AudioInValid(Id handle)
 	return !m_impl->shutting_down && Impl::IsValid(m_impl->in_ports, handle);
 }
 
+bool HostAudio::AudioInRecording(Id handle)
+{
+	Core::LockGuard lock(m_impl->mutex);
+	return !m_impl->shutting_down && Impl::IsValid(m_impl->in_ports, handle) && m_impl->in_ports[handle.GetId()].stream != nullptr;
+}
+
 uint32_t HostAudio::AudioInInput(Id handle, void* dest)
 {
 	if (dest == nullptr)

@@ -2030,6 +2030,18 @@ int KYTY_SYSV_ABI AjmBatchStartBuffer(uint32_t context, uint8_t* batch_buffer, u
 	return OK;
 }
 
+// sceAjmBatchErrorDump (NID WfAiBW8Wcek): the dump is a developer aid; the caller gets a cleared error record.
+int KYTY_SYSV_ABI AjmBatchErrorDump(const void* info, AjmBatchError* error)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t info = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
+	if (error != nullptr)
+	{
+		*error = AjmBatchError {};
+	}
+	return OK;
+}
+
 int KYTY_SYSV_ABI AjmBatchWait(uint32_t context, uint32_t batch_id, uint32_t timeout, AjmBatchError* error)
 {
 	PRINT_NAME();
