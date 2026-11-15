@@ -7072,11 +7072,15 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   exception flag, which Kyty does not model; `s_waitcnt`, `s_waitcnt_depctr`, `s_inst_prefetch` and the
   immediate-form `s_barrier` entry have no effect on a sequential translation (the RDNA2 `s_barrier` decodes with no
   immediate and gets a real barrier). `s_trap` is skipped because a trap is not taken while `TRAP_EN` is 0 (ISA
-  section 3, the `STATUS` table) and Kyty models no trap handler. Not audited: the MUBUF flag bits.
+  section 3.4, Status registers) and Kyty models no trap handler; the console's `TRAP_EN` state is not established,
+  so the skip is Kyty's model, not a measured result. Not audited: the MUBUF flag bits.
 - **Fixed: `s_sendmsg` messages.** Every `s_sendmsg` was skipped, including GS output (type 2) and GS done (type 3),
   which carry the geometry stream. ISA section 12.5.1 lists save wave, stall wave gen, halt waves, ordered PS done
   and GS alloc req (4-7 and 9) as hardware signals; only those are skipped now, and every other type stops the
-  translation. A local count over a cold translation of `PPSA17221 - Minecraft` and `PPSA21567 - ASTRO BOT` found
+  SPIR-V translation. The NGG passthrough proof and the geometry-wave classifier already accepted type 9 alone. Only
+  two titles ran with this filter, for 30 s each; a later `s_sendmsg` stop on another title is this filter
+  refusing a message, not a new defect. The geometry translator version stays at 98: those modules are transport
+  shaders the host builds for a pixel shader, not translated guest instructions. A local count over a cold translation of `PPSA17221 - Minecraft` and `PPSA21567 - ASTRO BOT` found
   only type 9 in either title, and `s_trap 1` in Astro. `EmulatorShaderArithmetic.SendmsgDropsOnlyMessagesWithoutShaderEffect`
   covers types 9 and 7 (skipped) and GS emit, GS done and type 8 (refused).
 - **Translator version 217.** The NaN result of `v_cmp_neq_f16`, inline floats in 64-bit integer sources and
