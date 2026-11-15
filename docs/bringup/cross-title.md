@@ -7125,6 +7125,12 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     `gfx_storage_frontier`, interactive, 33.0 fps at 30.4 s; `PPSA17221 - Minecraft` child exit 0, no first error,
     interactive, 60 fps at 29.5 s, the same three gates failing. Neither title is known to run this code, so the
     runs show no regression only; the evaluator tests verify the fixes.
+- **Fixed: VOPC compare decode.** The VOPC and VOP3 compare opcodes are the same numbers, but VOPC refused 42
+  that VOP3 already translated: the F64 compares, CMPX F, O, U and TRU on F32, CMPX on I16 and U16, and the F16 F,
+  O, U, TRU and CMPX N forms. VOPC now decodes them to the same instructions, with a VGPR pair for the F64 `vsrc1`.
+  A 64-bit compare with SDWA or DPP stops the title, since those select 32-bit lanes. The F64 test now runs the
+  VOPC equal and less-than forms, one with inline 1.0. Unit suite: 2687 passed; the four gates pass. No title is
+  recorded stopping on these forms, so no title run was made for this change.
 - **VOP3 opcode sweep.** Each VOP3 opcode 0-0x3ff was parsed and emitted with three VGPR sources in separate child
   processes (local only, not committed). 45 parse, 40 of them emit. Of the five that parse but stop the emitter,
   0x100, 0x101, 0x128 and 0x12A need an SGPR mask in src2, so a VGPR there is an invalid encoding, not a defect.
@@ -7140,5 +7146,5 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   64-bit shifts and `v_mad_i64_i32`; `div_scale`, `div_fmas`, `div_fixup` and the F64 ALU; MUBUF sub-dword and D16
   loads and stores and the remaining atomics; MTBUF stores; DS `_rtn` atomics and sub-dword reads and writes;
   GLOBAL stores and atomics; MIMG `_c`, `_cl`, `_o`, `gather4`, `get_lod` and `msaa_load`; `s_getreg` and
-  `s_setreg`; the missing compares (every VOPC-encoded F64 compare, the CMPX F64 forms, and most CMPX F16 forms in
-  the VOPC encoding); DPP wave shifts, `row_bcast`, `row_share` and DPP8.
+  `s_setreg`; the missing compares (CMPX F64 in both encodings, CMPX F, O, U and TRU on F16, and the signed 64-bit
+  compares); DPP wave shifts, `row_bcast`, `row_share` and DPP8.
