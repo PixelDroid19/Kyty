@@ -541,7 +541,12 @@ void SpirvBinaryCacheStore::WorkerMain()
 				m_state->queue.pop_front();
 			} else
 			{
-				stop                 = m_state->stopping;
+				stop = m_state->stopping;
+				if (stop)
+				{
+					// The reader stops at its next entry; the last flush needs the names it carried.
+					m_state->preload_finished.wait(lock, [this] { return m_state->preload_done; });
+				}
 				const auto now       = std::chrono::steady_clock::now();
 				const bool flush_due = stop || now - m_state->working_set_flushed >= k_working_set_flush_interval;
 				// Until the read finishes the names of earlier sessions are not known.
