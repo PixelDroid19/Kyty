@@ -10,6 +10,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
+#include "Emulator/Graphics/ComputePipelinePrecompile.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/Tile.h"
@@ -18,6 +19,7 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/PipelineCacheStore.h"
+#include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Graphics/Window.h"
@@ -133,6 +135,13 @@ void GraphicsRenderCreateContext()
 
 	if (ctx != nullptr && ctx->device != nullptr && ctx->pipeline_cache == nullptr)
 	{
+		// The per-title directory follows the translator version, so its working set never names stale modules.
+		if (const auto directory = Config::ShaderCacheEnabled() ? ComputePipelinePrecompileDirectory() : std::filesystem::path();
+		    !directory.empty())
+		{
+			SpirvBinaryCacheDefaultStore().StartWorkingSet(directory / "spirv-working-set");
+		}
+
 		VkPhysicalDeviceProperties properties {};
 		vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
 		auto initial_data = PipelineCacheStoreLoad(properties);

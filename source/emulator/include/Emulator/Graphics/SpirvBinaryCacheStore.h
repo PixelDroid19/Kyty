@@ -28,6 +28,9 @@ struct SpirvBinaryCacheLimits
 	size_t max_pending_entries   = 64u;
 	size_t max_pending_bytes     = 8u * 1024u * 1024u;
 	size_t max_completed_entries = 1024u;
+	// Bounds the entries a title used in earlier sessions that are read into memory ahead of use.
+	size_t max_working_set_entries = 4096u;
+	size_t max_working_set_bytes   = 256u * 1024u * 1024u;
 };
 
 enum class SpirvBinaryCacheLoadResult
@@ -92,6 +95,12 @@ public:
 	[[nodiscard]] SpirvBinaryCacheAsyncStats AsyncStats() const;
 	void                                      Drain();
 	void                                      SetWriteHookForTesting(WriteHookForTesting hook, void* opaque);
+	// Records in `manifest` the entries this store loads, and reads the entries it
+	// already lists into memory on a background thread: a load that runs on the
+	// render path then does not wait on the disk. Only the first call takes effect.
+	void StartWorkingSet(std::filesystem::path manifest);
+	// Blocks until the background read of the working set has finished.
+	void WaitForWorkingSet();
 
 private:
 	[[nodiscard]] SpirvBinaryCacheLoadResult LoadEntry(const uint8_t* identity, size_t identity_size, uint32_t optimization,
@@ -104,6 +113,7 @@ private:
 	                                                    bool validation_enabled, uint64_t key_low, uint64_t key_high,
 	                                                    const char* extension, const Vector<uint32_t>& binary);
 	void WorkerMain();
+	void PreloadMain();
 
 	struct State;
 	State* m_state = nullptr;
