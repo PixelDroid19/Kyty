@@ -43,9 +43,9 @@ claim; the patch is not shipped and its picture was not compared against the unp
   waits for 6.4 ms against 3.1 ms per frame.
 - **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
   less GPU work, and the command thread, which runs 33.4 ms for the same draw count once the GPU
-  stops limiting it (second row), has no margin left under 33.3 ms. The measured GPU levers are the range
-  split of the lighting program (5.9 ms, probe only, fails its sweep) and nothing else above 1 ms;
-  no general rule recorded so far closes the gap on this GPU.
+  stops limiting it (second row), has no margin left under 33.3 ms. The measured GPU levers are the
+  range split of the lighting program (5.9 ms, probe only, fails its sweep) and nothing else above 1
+  ms; no general rule recorded so far closes the gap on this GPU.
 - **Runs.** The first attempt with the 1280x720 patch exited with status 139 at 144 s in the hub
   load, a fault in guest code; whether it is the hub-start assert recorded on 2026-10-30 was not
   checked. The repeat ran clean.
