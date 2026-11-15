@@ -6892,13 +6892,16 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     request, as two references do. One of them also returns invalid id for an unknown request and the other does
     not check, so an unknown id stops the emulator instead of answering. Not covered by a unit test.
   - NetCtl callbacks (35ca18e50): `sceNetCtlRegisterCallback` fills one of eight slots and returns its index,
-    invalid address for a null function or output and callback max when full; `sceNetCtlUnregisterCallback` returns
+    invalid address for a null function or output and callback max when full, and keeps Kyty's fault error for an
+    output it cannot write, where only one reference reports invalid address; `sceNetCtlUnregisterCallback` returns
     invalid id outside 0..7 and id not found for an empty slot; `sceNetCtlCheckCallback` calls each callback with
     IP obtained (3) or disconnected (1) on the first check after it registers and then only when the state changes,
     outside the registry lock. Two references agree on all of it; they differ on where the connection state comes
     from, and Kyty uses the same configured state `sceNetCtlGetState` reports. One reference also refuses every call
     before `sceNetCtlInit` and keeps a separate IPv6 table it delivers to; neither is applied, and
-    `sceNetCtlRegisterCallbackV6` keeps its old single id.
+    `sceNetCtlRegisterCallbackV6` keeps its old single id. In a 90 s console-logged run `PPSA17221 - Minecraft`
+    registered one callback at 3.5 s and kept calling the check (412 calls) and `sceNetCtlGetInfo` to the end, with
+    no stop or exception.
   - `sceImeParamInit` (3159341e9): zeroes the 0x60-byte open parameter and sets the invalid user id at its start;
     a null pointer is ignored. Not covered by a unit test.
 - **Fixed in existing code.** Tick-to-date conversion counted tick 0 as 307 days after 0000-03-01 instead of 306,
@@ -6927,8 +6930,9 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   computed from the parameters). The web browser result was taken from the reference that writes 1; another writes 0.
 - **Excluded.** A leap second (`...:60Z`) in RFC 3339 parsing: one reference returns success and leaves the tick
   unchanged; Kyty keeps its invalid-second error.
-- **Not done, references disagree.** The AMPR command-buffer entries `WaitOnAddress`, `WriteCounterOnCompletion` and
-  the three `WriteAddressFrom*CounterOnCompletion` forms: argument lists, bounds and packet layouts differ between
+- **Not done, references disagree.** The AMPR command-buffer entries `WaitOnAddress`, its
+  `sceAmprMeasureCommandSizeWaitOnAddress`, `WriteCounterOnCompletion` and the three
+  `WriteAddressFrom*CounterOnCompletion` forms: argument lists, bounds and packet layouts differ between
   all three references, and one records the counter writes as plain zero writes.
 - **Not done, references disagree.**
   - `sceNpEntitlementAccessGenerateTransactionId`: one reference always reports signed out, another writes a
@@ -6976,7 +6980,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   opens for writing do not refuse paths under the application mount, so a title that removes or writes a package
   file changes the user's install. One reference refuses every such mutation with EPERM; applying it to the other
   paths needs a title run, since it changes what titles that write there see.
-- **Verified.** Unit tests 2680 of 2691 (11 skipped) and the repository gates, on Linux, on 3159341e9.
+- **Verified.** Unit tests 2680 of 2691 (11 skipped) and the repository gates, on Linux, with the NetCtl
+  fault code kept.
   `PPSA06084 - Superliminal`, which loads two modules importing the changed Json entries, passed playable-regression
   at 12 of 15 with the same three failing gates as before; whether the run called those entries was not observed.
   `PPSA17221 - Minecraft`, whose bundled libc imports the sized address waits, passed playable-regression at 12 of 15
@@ -6985,6 +6990,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   On the build of 3159341e9, `PPSA09809 - OCTOPATH TRAVELER II`, which imports the live streaming and HTTP errno
   entries, reached interactive at about 55 fps on the engine splash after 34 s and exited cleanly, 11 of 15, and
   `PPSA21567 - ASTRO BOT`, which imports the Trinity query, rendered the studio logo interactive at 37 fps after 30 s
-  and exited cleanly, 11 of 15. Both report `gfx_storage_frontier` as the first error, as earlier runs of both
-  titles did; the other failing gates are the same missing baseline, checkpoint and action route. Whether either
-  run called the changed entries was not observed.
+  and exited cleanly, 11 of 15. Both report `gfx_storage_frontier` as the first error. Earlier runs of OCTOPATH
+  TRAVELER II recorded it too; for ASTRO BOT no earlier run summary was kept, so it was not compared against a
+  baseline. The other failing gates are the same missing baseline, checkpoint and action route. Whether either run
+  called the changed entries was not observed. On the build with the NetCtl fault code kept,
+  `PPSA17221 - Minecraft` passed playable-regression at 12 of 15 with no runtime failure and held 60 fps.
