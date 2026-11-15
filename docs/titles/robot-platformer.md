@@ -212,10 +212,13 @@ claim; the patch is not shipped and its picture was not compared against the unp
   per flip band command-buffer fence waits rose from about 1.7 to 6.3 per frame (50-150 to 250-335
   ms per second) while the GPU's busy share fell from 82-96 % to 67-82 %, and fps fell (650 draws per
   flip 20.4 → 14.3). A check run that hashed every edge-clean buffer in full anyway found 22,765
-  mismatches in 28,000 decisions, all on buffers whose content came from a device write-back and none
-  on CPU uploads: their recorded hash predates the write-back, so the full hash was re-uploading the
-  written-back bytes, and skipping that changes which path later uses take. One run per arm; the
-  change was reverted. Direction: a narrower rule needs its own measurement of the write-back path.
+  mismatches in 28,000 decisions (decisions, not buffers: a skipped buffer mismatches again on every
+  later visit), all on buffers whose content came from a device write-back and none on CPU uploads:
+  their recorded hash predates the write-back, so the full hash was re-uploading the written-back
+  bytes. That check run, slowed by its own hashing, reached only 750-800 draws per flip, where it
+  again waited on fences 6-8 times per frame, but with the GPU 92-94 % busy. Why skipping those
+  re-uploads adds fence waits is not established. The change was reverted. Direction: a narrower rule
+  needs its own measurement of the write-back path.
 - **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
   less GPU work, and the command thread, which runs 33.4 ms for the same draw count once the GPU
   stops limiting it (second row), has no margin left under 33.3 ms. The measured GPU levers are the
