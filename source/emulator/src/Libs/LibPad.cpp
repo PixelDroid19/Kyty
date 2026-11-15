@@ -20,6 +20,7 @@ LIB_DEFINE(InitPad_1)
 	// scePadGetHandle — returns the handle from PadOpen for the same user/type/index.
 	LIB_FUNC("u1GRHp+oWoY", Controller::PadGetHandle);
 	LIB_FUNC("clVvL4ZDntw", Controller::PadSetMotionSensorState);
+	LIB_FUNC("fCWdlnmB1Ks", Controller::PadIsRemoteController);
 	LIB_FUNC("vDLMoJLde8I", Controller::PadSetTiltCorrectionState);
 	LIB_FUNC("r44mAxdSG+U", Controller::PadSetAngularVelocityDeadbandState);
 	LIB_FUNC("rIZnR6eSpvk", Controller::PadResetOrientation);

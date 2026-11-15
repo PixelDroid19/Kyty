@@ -1723,6 +1723,23 @@ int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable)
 	return OK;
 }
 
+// The one pad is the host's local controller, never a remote-play client.
+int KYTY_SYSV_ABI PadIsRemoteController(int handle, bool* is_remote)
+{
+	PRINT_NAME();
+
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	if (is_remote == nullptr)
+	{
+		return PAD_ERROR_INVALID_ARG;
+	}
+	*is_remote = false;
+	return OK;
+}
+
 int KYTY_SYSV_ABI PadSetTiltCorrectionState(int handle, bool enable)
 {
 	PRINT_NAME();

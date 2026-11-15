@@ -142,6 +142,7 @@ int KYTY_SYSV_ABI PadOpenExt(int user_id, int type, int index, const void* param
 int KYTY_SYSV_ABI PadClose(int handle);
 int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index);
 int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable);
+int KYTY_SYSV_ABI PadIsRemoteController(int handle, bool* is_remote);
 int KYTY_SYSV_ABI PadSetTiltCorrectionState(int handle, bool enable);
 int KYTY_SYSV_ABI PadSetAngularVelocityDeadbandState(int handle, bool enable);
 int KYTY_SYSV_ABI PadResetOrientation(int handle);
