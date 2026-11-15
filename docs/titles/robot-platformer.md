@@ -40,6 +40,10 @@ window.
   five snapshots per arm, 866 against 900 draws per frame) poll off read 56.8 against 51.5 us per
   draw and 15.1 against 16.8 fps. The dip result rests on too few, unequal snapshots: a cost of
   the poll's removal is not established and neither is its absence. Not shipped.
+  **Excluded (2026-11-15, m472):** the same probe on the PPSA17221 - Minecraft world route (about
+  5,450 draws per frame, 20 and 21 one-second samples inside single 4 s blocks) read 30.5 fps with
+  the poll and 23.5 fps without it (5.8 against 7.3 us of command processing per draw). The poll's
+  half core buys about 7 fps on a dense draw stream; removing it is not a resource fix.
 - **960x540 patch, fourth run** (a389, 166-215 s): 25.4 fps; 20-28 fps over 150-192 s at 330-480
   draws, 41-53 fps at 195-201 s with 82-254 draws per frame before a load. The 37-41 fps of the
   older record (469 draws, `6a6a5818a`) was not reproduced; its cause is not established.
