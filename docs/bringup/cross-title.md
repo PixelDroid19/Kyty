@@ -7023,3 +7023,36 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   sized address waits, `scePadIsRemoteController` and `sceKernelCheckReachability` print their names and did not
   appear in the 90 s console-logged run, so Minecraft did not call them in that time; `sceAgcGetIsTrinityMode` prints
   nothing, so that run says nothing about it.
+
+## Shader instruction coverage against the RDNA2 ISA (2026-11-15)
+
+- **Inventory.** The decoder was compared against the opcode tables of the RDNA2 ISA reference, per encoding.
+  The counts were read from the parse switches and may be off by a few. About 400 documented forms are not
+  decoded. The largest gaps are DS (about 35 of 123), MUBUF (26 of 75), MTBUF (the four `load_format` ops of 16),
+  MIMG (about 29 of 130), FLAT and SCRATCH (none), and GLOBAL (loads only). VOP3 decodes 64 of its 114 native ops.
+- **What a missing form does.** `KYTY_NI` and `KYTY_UNKNOWN_OP` at decode, and a missing or refusing emitter at
+  `ShaderSpirvGenerator.cpp`, all end in `EXIT`. A missing form therefore stops a strict run; it cannot draw wrong
+  pixels. Completing coverage helps titles that stop; it is not a fix for a visual defect in a title that runs.
+- **Run evidence.** The recorded agent runs were searched for shader stops. None stopped at decode. The 46 shader
+  stops are emitter refusals of decoded forms (`SLoadDwordx4` in `PPSA03969 - F.I.S.T.` and `PPSA21567 - ASTRO BOT`,
+  and single runs on `VMaxF32`, `VCvtF16F32`, `VMinF16`, `ImageStore` and others). All are dated 2026-10-31 or
+  earlier, and emitter changes landed after them, so whether they still occur was not checked.
+- **Added.** `v_xor3_b32`, `v_alignbit_b32`, `v_perm_b32`, `v_lerp_u8`, `v_mad_i32_i24`, `v_mad_u32_u16` and
+  `v_mad_i32_i16` (VOP3), from the ISA descriptions. Any encoded input or output modifier is refused, since the ISA
+  defines none for these integer operations; `op_sel` stays refused at decode. The gfx10-only opcodes are refused on
+  the earlier generation.
+- **Verified.** `EmulatorShaderArithmetic.IntegerTernaryByteAndMultiplyAddContracts` runs the generated SPIR-V of
+  each op on the CPU contract evaluator for pixel and compute stages, against references written from the ISA text,
+  over edge values, every alignbit shift and 256 permute selector patterns. A hand-made wrong sign-bit position in
+  the permute was caught. Unit suite: 2682 passed, 11 skipped; the four gates pass. `PPSA21567 - ASTRO BOT` on
+  `playable-regression`: 11/15 gates as before, first error `gfx_storage_frontier`, interactive at 31 fps at 30 s.
+  No title is known to execute these ops, so they have no title evidence.
+- **Held.**
+  - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
+    It is not added until a second published source settles the selector width.
+  - `v_dot*` (VOP3P 0x13-0x19): whether gfx1013 has them is not established.
+- **Remaining, in suggested order.** VOP3 24-bit `mul_hi`, 16-bit `mad`, `min3/max3/med3` on 16-bit integers,
+  64-bit shifts and `v_mad_i64_i32`; `div_scale`, `div_fmas`, `div_fixup` and the F64 ALU; MUBUF sub-dword and D16
+  loads and stores and the remaining atomics; MTBUF stores; DS `_rtn` atomics and sub-dword reads and writes;
+  GLOBAL stores and atomics; MIMG `_c`, `_cl`, `_o`, `gather4`, `get_lod` and `msaa_load`; `s_getreg` and
+  `s_setreg`; the missing VOPC compares; DPP wave shifts, `row_bcast`, `row_share` and DPP8.
