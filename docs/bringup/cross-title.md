@@ -6889,6 +6889,21 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     the same titles import, appear in one reference only and are not done.
 - **Fixed in existing code.** Tick-to-date conversion counted tick 0 as 307 days after 0000-03-01 instead of 306,
   so every Rtc conversion from a tick reported the next calendar day (39a73af92).
+  `sceAgcGetIsTrinityMode` takes a pointer and two references write `false` through it; Kyty returned 0 in a register
+  and never wrote it, so the title read whatever byte was there (1b39cd18a). `sceNpCreateAsyncRequest` read through a
+  null parameter; it now creates the request without it, as two references do (ed0c07646).
+- **Existing entries left as they are.** Of the entries that only log and return a constant, the references agree on
+  more only for these, each not applied:
+  - The sanitizer replacement getters: two references return a zeroed static object where Kyty returns null; its
+    size is not agreed, and the bundled libc of 31 titles runs with null today.
+  - `sceSaveDataTerminate`: busy while slots are mounted, but one reference counts initializations and Kyty keeps none.
+  - `sceSystemServiceHideSplashScreen`: two references hide a splash screen Kyty never shows.
+  - `sceAgcSuspendPoint`: two references drain submitted GPU work; Kyty's entry does no GPU work on purpose.
+  - The Np and NetCtl state callbacks (`sceNpCheckCallback`, `sceNpRegisterStateCallbackA`,
+    `sceNetCtlCheckCallback`), the UDS context registry, `scePlayGoTerminate` and
+    `sceSystemServiceSetNoticeScreenSkipFlag`: state that no Kyty path reads yet, or callbacks with no state change to
+    report while signed out. Voice is deferred with its family.
+  The rest have extra behavior in one reference only.
 - **Not done, references disagree.** `sce::Json::Value::serialize`: one reference writes doubles through
   `std::to_string` and escapes nothing; another truncates to six fraction digits in a legacy mode and escapes `/`
   and control bytes; the third has none. `sceHttpUriBuild` (option 0 behaviour, `//` without a scheme, default port
@@ -6938,11 +6953,9 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   opens for writing do not refuse paths under the application mount, so a title that removes or writes a package
   file changes the user's install. One reference refuses every such mutation with EPERM; applying it to the other
   paths needs a title run, since it changes what titles that write there see.
-- **Open defect.** `NpCreateAsyncRequest` (`source/emulator/src/Network.cpp`) warns on a null parameter and then
-  reads through it; a title passing null crashes instead of getting an argument error.
 - **Verified.** Unit tests 2679 of 2690 (11 skipped) and the repository gates, on Linux.
   `PPSA06084 - Superliminal`, which loads two modules importing the changed Json entries, passed playable-regression
   at 12 of 15 with the same three failing gates as before; whether the run called those entries was not observed.
   `PPSA17221 - Minecraft`, whose bundled libc imports the sized address waits, passed playable-regression at 12 of 15
-  on 43e05c32b and held 60 fps interactive; the three failing gates have no baseline, checkpoint or action route in
+  on 43e05c32b and again on 1b39cd18a, which also imports the Trinity query, and held 60 fps interactive; the three failing gates have no baseline, checkpoint or action route in
   that run's scratch. Whether the run called the waits was not observed.
