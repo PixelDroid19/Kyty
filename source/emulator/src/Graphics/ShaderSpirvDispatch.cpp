@@ -625,7 +625,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_SWqmB64_Sdst2Ssrc02,            ShaderInstructionType::SWqmB64,             ShaderInstructionFormat::Sdst2Ssrc02, {""}, SccCheck::NonZero},
 
 	{Recompile_Skip,                           ShaderInstructionType::SInstPrefetch,       ShaderInstructionFormat::Imm,         {""}},
-	{Recompile_Skip,                           ShaderInstructionType::SSendmsg,            ShaderInstructionFormat::Imm,         {""}},
+	{Recompile_SSendmsg,                       ShaderInstructionType::SSendmsg,            ShaderInstructionFormat::Imm,         {""}},
     {Recompile_Skip,                           ShaderInstructionType::SWaitcnt,            ShaderInstructionFormat::Imm,         {""}},
     {Recompile_VCmp_XXX_U64,                   ShaderInstructionType::VCmpLtU64,           ShaderInstructionFormat::Sdst2Ssrc02Ssrc12, {"lt"}},
     {Recompile_VCmp_XXX_U64,                   ShaderInstructionType::VCmpEqU64,           ShaderInstructionFormat::Sdst2Ssrc02Ssrc12, {"eq"}},

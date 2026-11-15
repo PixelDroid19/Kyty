@@ -1103,6 +1103,13 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	std::_Exit(0);
 }
 
+[[noreturn]] void EmitSendmsg(uint32_t message)
+{
+	Initialize();
+	static_cast<void>(Emit(Parse({(0x17fu << 23u) | (0x10u << 16u) | message, kEnd}), 0u, false, false, true));
+	std::_Exit(0);
+}
+
 [[noreturn]] void RunSdwaHalfDestination(ShaderType stage = ShaderType::Pixel)
 {
 	Initialize();
@@ -1746,6 +1753,14 @@ TEST(EmulatorShaderArithmetic, VopcComparesMatchTheirVop3Translation)
 TEST(EmulatorShaderArithmetic, Int64SourcesExpandConstantsBySignedness)
 {
 	ASSERT_EXIT(RunInt64SourceConstants(), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, SendmsgDropsOnlyMessagesWithoutShaderEffect)
+{
+	ASSERT_EXIT(EmitSendmsg(9u), ::testing::ExitedWithCode(0), "");
+	ASSERT_EXIT(EmitSendmsg(7u), ::testing::ExitedWithCode(0), "");
+	ASSERT_EXIT(EmitSendmsg(0x22u), ::testing::ExitedWithCode(65), "");
+	ASSERT_EXIT(EmitSendmsg(3u), ::testing::ExitedWithCode(65), "");
+	ASSERT_EXIT(EmitSendmsg(8u), ::testing::ExitedWithCode(65), "");
 }
 TEST(EmulatorShaderArithmetic, IntegerTernaryRefusesEncodedModifiers)
 {

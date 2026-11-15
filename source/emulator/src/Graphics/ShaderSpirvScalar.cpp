@@ -1460,7 +1460,17 @@ KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02)
 	return true;
 }
 
-/* SInstPrefetch, SWaitcnt, SSendmsg */
+// ISA 12.5.1: save wave, stall wave gen, halt waves, ordered PS done and GS alloc req signal the hardware and leave
+// shader state alone. GS output and GS done carry the geometry stream, and any other type is not listed, so those
+// stop the translation instead of being dropped.
+KYTY_RECOMPILER_FUNC(Recompile_SSendmsg)
+{
+	const auto&    inst    = code.GetInstructions().At(index);
+	const uint32_t message = inst.src[0].constant.u & 0xfu;
+	return message >= 4u && message <= 9u && message != 8u;
+}
+
+/* SInstPrefetch, SWaitcnt */
 KYTY_RECOMPILER_FUNC(Recompile_Skip)
 {
 	return true;
