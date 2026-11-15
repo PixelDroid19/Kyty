@@ -2038,4 +2038,28 @@ TEST(EmulatorKernelProcess, PosixSemDestroyWakesBlockedWaiter)
 	EXPECT_EQ(result.get(), Posix::POSIX_EINVAL);
 }
 
+TEST(EmulatorKernelProcess, ChmodSetsTheModeAFileDescriptorReports)
+{
+	EnsureFileSystemSubsystem();
+
+	const String root = U"/tmp/kyty_chmod_test/";
+	ASSERT_TRUE(Core::File::CreateDirectories(root));
+	{
+		Core::File file;
+		ASSERT_TRUE(file.Create(root + U"save.bin"));
+	}
+	Kernel::FileSystem::Mount(root, U"/app0/");
+
+	ASSERT_EQ(Kernel::FileSystem::KernelChmod("/app0/save.bin", 0640), OK);
+	const int fd = Kernel::FileSystem::KernelOpen("/app0/save.bin", 0, 0);
+	ASSERT_GE(fd, 0);
+	Kernel::FileSystem::FileStat stat {};
+	ASSERT_EQ(Kernel::FileSystem::KernelFstat(fd, &stat), OK);
+	EXPECT_EQ(stat.st_mode & 07777u, 0640u);
+	EXPECT_EQ(Kernel::FileSystem::KernelClose(fd), OK);
+
+	EXPECT_EQ(Kernel::FileSystem::KernelChmod("/app0/missing.bin", 0600), LibKernel::KERNEL_ERROR_ENOENT);
+	EXPECT_EQ(Kernel::FileSystem::KernelChmod(nullptr, 0600), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
 UT_END();

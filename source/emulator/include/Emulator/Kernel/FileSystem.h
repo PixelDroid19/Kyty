@@ -153,6 +153,7 @@ int KYTY_SYSV_ABI     KernelGetdirentries(int fd, char* buf, int nbytes, int64_t
 int KYTY_SYSV_ABI     KernelGetdents(int fd, char* buf, int nbytes);
 int KYTY_SYSV_ABI     KernelMkdir(const char* path, uint16_t mode);
 int KYTY_SYSV_ABI     KernelRmdir(const char* path);
+int KYTY_SYSV_ABI     KernelChmod(const char* path, uint16_t mode);
 int KYTY_SYSV_ABI     KernelDup(int old_d);
 int KYTY_SYSV_ABI     KernelDup2(int old_d, int new_d);
 int KYTY_SYSV_ABI     KernelPoll(struct KernelPollFd* fds, uint32_t count, int /*timeout*/);

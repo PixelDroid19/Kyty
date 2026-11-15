@@ -2320,6 +2320,31 @@ int KYTY_SYSV_ABI KernelRmdir(const char* path)
 	return OK;
 }
 
+int KYTY_SYSV_ABI KernelChmod(const char* path, uint16_t mode)
+{
+	PRINT_NAME();
+	EXIT_IF(g_mount_points == nullptr);
+	if (path == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	KYTY_LOG_DEBUG("\t path = %s\n", path);
+	KYTY_LOG_DEBUG("\t mode = %04" PRIo16 "\n", mode);
+	const auto path_s    = String::FromUtf8(path);
+	const auto real_file = g_mount_points->GetRealFilename(path_s);
+	const auto real_dir  = g_mount_points->GetRealDirectory(path_s);
+	const bool is_dir    = Core::File::IsDirectoryExisting(real_dir);
+	if (!is_dir && !Core::File::IsFileExisting(real_file))
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	// The host file carries the permission bits, so a later fstat reports the new mode.
+	std::error_code error;
+	std::filesystem::permissions(std::filesystem::u8path((is_dir ? real_dir : real_file).C_Str()),
+	                             static_cast<std::filesystem::perms>(mode & 07777u), error);
+	return error ? KernelErrorFromHost(error.default_error_condition().value()) : OK;
+}
+
 static Core::Mutex                          g_apr_mutex;
 static std::unordered_map<uint32_t, String>  g_apr_id_to_host;
 // One id per resolved guest path, handed out in resolution order: ids hashed from the path collide among the
