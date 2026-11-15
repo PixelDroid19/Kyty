@@ -5184,7 +5184,9 @@ TEST(EmulatorGraphicsState, Gen5AgcSizeHelpersAndTrinityMode)
 	EXPECT_EQ(GraphicsCbNopGetSize(1), 4u);
 	EXPECT_EQ(GraphicsCbDispatchGetSize(), 20u);
 	EXPECT_EQ(GraphicsCbSetShRegisterRangeDirectGetSize(3), 20u);
-	EXPECT_EQ(GraphicsGetIsTrinityMode(), 0u);
+	bool is_trinity_mode = true;
+	EXPECT_EQ(GraphicsGetIsTrinityMode(&is_trinity_mode), OK);
+	EXPECT_FALSE(is_trinity_mode);
 	EXPECT_EQ(GraphicsDebugRaiseException(0x1234u), OK);
 
 	uint32_t write_cmd[4] = {KYTY_PM4(4, Pm4::IT_WRITE_DATA, 0u), 0u, 0u, 0u};

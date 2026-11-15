@@ -3470,10 +3470,12 @@ uint32_t KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirectGetSize(uint32_t num_va
 	return 4u * num_values + 8u;
 }
 
-uint64_t KYTY_SYSV_ABI GraphicsGetIsTrinityMode()
+int KYTY_SYSV_ABI GraphicsGetIsTrinityMode(bool* is_trinity_mode)
 {
-	// Non-Pro Prospero reports 0. Do not invent Pro/Trinity features.
-	return 0;
+	// The answer goes through the pointer; a non-Pro Prospero reports false. Do not invent Pro/Trinity features.
+	EXIT_IF(is_trinity_mode == nullptr);
+	*is_trinity_mode = false;
+	return OK;
 }
 
 int KYTY_SYSV_ABI GraphicsDebugRaiseException(uint32_t exception_id)
