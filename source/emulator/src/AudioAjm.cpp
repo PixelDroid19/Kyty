@@ -2030,6 +2030,30 @@ int KYTY_SYSV_ABI AjmBatchStartBuffer(uint32_t context, uint8_t* batch_buffer, u
 	return OK;
 }
 
+// sceAjmDecAt9ParseConfigData (NID 1t3ixYNXyuc): the stream layout the four ATRAC9 config bytes describe.
+int KYTY_SYSV_ABI AjmDecAt9ParseConfigData(const uint8_t* config, AjmDecAt9ConfigDataInfo* info)
+{
+	PRINT_NAME();
+
+	if (config == nullptr || info == nullptr)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	std::string error;
+	const auto  decoder = AjmDecoder::OpenAtrac9FromConfig(config, AJM_AT9_CONFIG_DATA_SIZE, &error);
+	if (decoder == nullptr)
+	{
+		KYTY_LOG_ERROR("sceAjmDecAt9ParseConfigData: %s\n", error.c_str());
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	info->channels           = decoder->Channels();
+	info->sample_rate        = decoder->SampleRate();
+	info->frame_samples      = decoder->Atrac9FrameSamples();
+	info->superframe_samples = decoder->Atrac9FrameSamples() * decoder->Atrac9FramesPerSuperframe();
+	info->superframe_size    = decoder->BlockAlign();
+	return OK;
+}
+
 // sceAjmBatchErrorDump (NID WfAiBW8Wcek): the dump is a developer aid; the caller gets a cleared error record.
 int KYTY_SYSV_ABI AjmBatchErrorDump(const void* info, AjmBatchError* error)
 {

@@ -1914,4 +1914,14 @@ uint32_t ElementaryAudioDecoder::BlockAlign() const
 	return state_->block_align;
 }
 
+uint32_t ElementaryAudioDecoder::Atrac9FrameSamples() const
+{
+	return state_->atrac9_frame_samples;
+}
+
+uint32_t ElementaryAudioDecoder::Atrac9FramesPerSuperframe() const
+{
+	return state_->atrac9_frames;
+}
+
 } // namespace Kyty::Emulator::AudioVideoBackend

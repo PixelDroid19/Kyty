@@ -2880,6 +2880,29 @@ TEST(EmulatorAudio, ComputesHostQueueCapacityFromTimeAndFormat)
 	EXPECT_EQ(AudioPcmQueueBytes(0, 2, AudioPcmFormat::Signed16, 60), 0u);
 }
 
+TEST(EmulatorAudio, ParsesTheAtrac9ConfigIntoTheStreamLayout)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// 48 kHz stereo, 80-byte frames, four frames per superframe.
+	const uint8_t                config[] = {0xfe, 0x72, 0x09, 0xf0};
+	Ajm::AjmDecAt9ConfigDataInfo info {};
+	ASSERT_EQ(Ajm::AjmDecAt9ParseConfigData(config, &info), 0);
+	EXPECT_EQ(info.channels, 2u);
+	EXPECT_EQ(info.sample_rate, 48000u);
+	EXPECT_EQ(info.frame_samples, 256u);
+	EXPECT_EQ(info.superframe_samples, 1024u);
+	EXPECT_EQ(info.superframe_size, 320u);
+
+	const uint8_t no_sync[] = {0x00, 0x72, 0x09, 0xf0};
+	EXPECT_EQ(Ajm::AjmDecAt9ParseConfigData(no_sync, &info), static_cast<int>(0x80930005u));
+	EXPECT_EQ(Ajm::AjmDecAt9ParseConfigData(config, nullptr), static_cast<int>(0x80930005u));
+}
+
 TEST(EmulatorAudio, UnregistersCapturedAjmCodecModule)
 {
 	if (!Config::IsInitialized())

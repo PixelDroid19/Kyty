@@ -195,6 +195,9 @@ public:
 	[[nodiscard]] uint32_t    SampleRate() const;
 	// Returns zero for Opus, whose packets have variable length.
 	[[nodiscard]] uint32_t BlockAlign() const;
+	// The ATRAC9 frame layout of a superframe; zero for Opus.
+	[[nodiscard]] uint32_t Atrac9FrameSamples() const;
+	[[nodiscard]] uint32_t Atrac9FramesPerSuperframe() const;
 
 private:
 	struct ExpectedFormat

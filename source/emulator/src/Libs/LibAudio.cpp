@@ -126,6 +126,7 @@ LIB_DEFINE(InitAudio_1_Ajm)
 	LIB_FUNC("fFFkk0xfGWs", Ajm::AjmBatchStartBuffer);
 	LIB_FUNC("-qLsfDAywIY", Ajm::AjmBatchWait);
 	LIB_FUNC("WfAiBW8Wcek", Ajm::AjmBatchErrorDump);
+	LIB_FUNC("1t3ixYNXyuc", Ajm::AjmDecAt9ParseConfigData);
 	LIB_FUNC("NVDXiUesSbA", Ajm::AjmBatchCancel);
 	LIB_FUNC("AxhcqVv5AYU", Ajm::AjmStrError);
 	LIB_FUNC("ezM2OhNxzck", Ajm::AjmBatchJobInitialize);
