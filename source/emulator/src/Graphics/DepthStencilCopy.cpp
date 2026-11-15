@@ -4,6 +4,7 @@
 #include "Kyty/Core/DbgAssert.h"
 
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanVertexInputLayout.h"
 
@@ -630,8 +631,15 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	pipeline_info.renderPass          = request.render_pass;
 	pipeline_info.subpass             = 0;
 
+	VkPipelineCreationFeedback           feedback {};
+	VkPipelineCreationFeedbackCreateInfo feedback_info {};
+	feedback_info.sType                     = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+	feedback_info.pPipelineCreationFeedback = &feedback;
+	pipeline_info.pNext                     = &feedback_info;
+
 	VkPipeline pipeline = nullptr;
 	const auto result = vkCreateGraphicsPipelines(m_device, context->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline);
+	PipelineCacheStoreRecordCreation(result, feedback);
 	if (fragment_module != nullptr)
 	{
 		vkDestroyShaderModule(m_device, fragment_module, nullptr);

@@ -2,6 +2,7 @@
 
 #include "Emulator/Graphics/FragmentTransportShaders.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/Utils.h"
@@ -107,8 +108,14 @@ VkPipeline CreateKernelPipeline(VkDevice device, VkPipelineCache cache, VkPipeli
 	info.stage.pName  = "main";
 	info.layout       = layout;
 	info.basePipelineIndex = -1;
+	VkPipelineCreationFeedback           feedback {};
+	VkPipelineCreationFeedbackCreateInfo feedback_info {};
+	feedback_info.sType                     = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+	feedback_info.pPipelineCreationFeedback = &feedback;
+	info.pNext                              = &feedback_info;
 	VkPipeline pipeline = VK_NULL_HANDLE;
 	const auto result   = vkCreateComputePipelines(device, cache, 1, &info, nullptr, &pipeline);
+	PipelineCacheStoreRecordCreation(result, feedback);
 	vkDestroyShaderModule(device, module, nullptr);
 	return result == VK_SUCCESS ? pipeline : VK_NULL_HANDLE;
 }
