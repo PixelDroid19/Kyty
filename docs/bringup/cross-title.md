@@ -6764,9 +6764,11 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   dozens of them.
 - **Changed.** Completed fills hand dedicated staging buffers to a free list bounded at 128 MiB, and a fill takes the
   smallest one that holds it and is at most twice its size (db6d7c132). Pooled staging still goes back to its pool:
-  keeping it too made the list long, and `PPSA17221 - Minecraft` then cost 8.80 us per draw in its dense view against
+  keeping it too, `PPSA17221 - Minecraft` then cost 8.80 us per draw in its dense view against
   5.82 before.
 - **Verified.** Astro dunes route, two runs: median create 6.9 and 7.9 ms, upload 1.5-1.6 ms. Minecraft world, one
   run: 5.33 us per draw in the dense view. Unit tests 2668 of 2679 (11 skipped), the three repository gates, and
   `PPSA06084 - Superliminal` playable-regression at 12 of 15 with the same failing gates as before. Arc A770 on Linux
   only; other drivers were not run.
+- **Limit.** The free list is released only when the test fixture unbinds a context, like the in-flight fills;
+  replacing the graphics context during a title would need the same release.

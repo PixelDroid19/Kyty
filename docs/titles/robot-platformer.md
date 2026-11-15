@@ -7254,15 +7254,20 @@ with `compress=zstd:3,ssd,discard=async`.
   themselves do not slow frames. In that run and in the profiled one the drop came in the second after a burst of
   these probes ended (77 s and 92 s), which points at the load step that follows them. The test change was not kept:
   it reached only 27 % of the calls and showed no measured gain.
-- **Drops from texture creation (2026-11-15).** Of 14 seconds under 15 fps in four runs of the dunes route, 9 spent
-  400-600 ms of the second creating GPU objects while 400 MB to 1 GB was uploaded, 3 spent it in draw state setup and
-  2 in both. The command-processor thread was on the CPU in those seconds, not blocked. The large textures
+- **Drops from texture creation (2026-11-15).** Of 14 seconds under 15 fps in four runs of the dunes route (two of
+  them on the stat test build), 9 spent 363-599 ms of the second creating GPU objects while 247 MB to 1,011 MB was
+  uploaded, 3 spent 460-492 ms in draw state setup and 2 stayed under both thresholds (250 ms). In the three create
+  and setup seconds of the one run sampled per thread, the command-processor thread was on the CPU; in the profiled
+  run's setup second at 92 s it sat about 75 % in a futex wait. The large textures
   (22,413,312 bytes each) cost a median 9.4-13.8 ms to create, of which 4.3-6.0 ms was the upload and 1.2-2.5 ms
   Vulkan allocation: a fill above the 4 MiB pooled size created, mapped and freed its own staging buffer, paying an
   allocation and a fault on every page each time. Completed fills now hand such buffers to a free list bounded at
   128 MiB (db6d7c132). In two runs the same textures took a median 6.9 and 7.9 ms, with the upload at 1.5-1.6 ms and
-  allocation at 0.2-0.3 ms. A first version also kept pooled staging; its free list grew long and Minecraft's dense
-  view cost 8.80 us per draw against 5.82 before, so only dedicated buffers are kept, and the next run measured
+  allocation at 0.2-0.3 ms. A first version also kept pooled staging, and Minecraft's dense view then cost 8.80 us per
+  draw against 5.82 before (the list length was not measured), so only dedicated buffers are kept, and the next run measured
   5.33 us per draw in that view (one run each; the view reached differs between runs). The route desyncs after a
-  hitch, so no frame-rate change is claimed for the dunes; drops from draw state setup and the heavier later scene
-  remain.
+  hitch, so no frame-rate change is claimed for the dunes. In the run on the final build the five seconds under
+  15 fps were two of draw state setup (439 and 514 ms) and three in the heavier later scene (668-733 draws per frame)
+  with neither counter high; none was texture creation, and 8 of its 25 large textures still made two allocations.
+  The free list is not released when the graphics context is replaced, which only the test fixture does today;
+  in-flight fills had the same limit before.
