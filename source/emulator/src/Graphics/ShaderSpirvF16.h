@@ -809,8 +809,6 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	}
 	if (arithmetic && mode.ieee) { return reject("unsupported-arithmetic-ieee-mode"); }
 	if (integer_output && inst.dst.clamp) { return reject("unsupported-integer-clamp"); }
-	// Legacy MAD's intermediate rounding is not the fused-half contract.
-	if (inst.type == ShaderInstructionType::VMadF16) { return reject("unsupported-legacy-mad"); }
 	const bool host_half = arithmetic && OperatesInHostHalf(mode, inst.type);
 	const auto typed = [&](const String8& source) { return host_half ? source.ReplaceStr("%float", "%half") : source; };
 	String8 text;

@@ -228,8 +228,10 @@ bool ShaderInstructionTypeChangesExec(ShaderInstructionType type)
 		return true;
 	}
 	const auto value = static_cast<uint32_t>(type);
-	if (value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxEqF32) &&
-	    value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxUF32))
+	if ((value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxEqF32) &&
+	     value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxUF32)) ||
+	    (value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxLtF64) &&
+	     value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxGeU64)))
 	{
 		return true;
 	}

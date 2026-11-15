@@ -1055,6 +1055,111 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	std::_Exit(0);
 }
 
+// CMPX F64, CMPX O/U/F/TRU F16 and the signed and unsigned 64-bit compares, in the VOPC and VOP3 encodings. A v_cmpx
+// writes EXEC = result AND incoming EXEC and leaves VCC alone; a signed 64-bit compare is signed on the high word only.
+[[noreturn]] void RunWideCompareForms(ShaderType stage)
+{
+	Initialize();
+	constexpr uint32_t kHalfOne = 0x3c00u, kHalfNan = 0x7e00u, kVcc = 106u, kSentinel = 0x5a5a5a5au, kLiteral = 255u;
+	constexpr uint64_t kDoubleOne = 0x3ff0000000000000ull, kDoubleTwo = 0x4000000000000000ull, kDoubleNan = 0x7ff8000000000000ull;
+	constexpr uint64_t kMinusOne = UINT64_MAX, kLowHighBit = 0x80000000ull;
+	const auto run = [&](std::vector<uint32_t> words, uint64_t v01, uint64_t v23, const char* word, uint32_t exec = 1u)
+	{
+		words.push_back(kEnd);
+		const Program program(Emit(Parse(words, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", static_cast<uint32_t>(v01)}, {"%v1", static_cast<uint32_t>(v01 >> 32u)},
+		                    {"%v2", static_cast<uint32_t>(v23)}, {"%v3", static_cast<uint32_t>(v23 >> 32u)}, {"%vcc_lo", kSentinel},
+		                    {"%vcc_hi", kSentinel}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", exec}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", exec}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   word);
+	};
+	const auto vopc = [&](uint32_t opcode, uint64_t v01, uint64_t v23, const char* word, uint32_t exec = 1u)
+	{ return run({(0x3eu << 25u) | (opcode << 17u) | (2u << 9u) | 256u}, v01, v23, word, exec); };
+	const auto vop3 = [&](uint32_t opcode, uint64_t v01, uint64_t v23, const char* word)
+	{ return run({(0x35u << 26u) | (opcode << 16u) | kVcc, 256u | (258u << 9u)}, v01, v23, word); };
+	// CMPX F64: the predicate strings of the VCC forms, with EXEC as the destination.
+	Equal(vopc(0x35u, kDoubleNan, kDoubleOne, "%exec_lo") & 1u, 0u, "v_cmpx_lg_f64 is ordered");
+	Equal(vopc(0x3Du, kDoubleNan, kDoubleOne, "%exec_lo") & 1u, 1u, "v_cmpx_neq_f64 is unordered");
+	Equal(vopc(0x31u, kDoubleOne, kDoubleTwo, "%exec_lo") & 1u, 1u, "v_cmpx_lt_f64 of 1.0 and 2.0");
+	Equal(vopc(0x31u, kDoubleTwo, kDoubleOne, "%exec_lo") & 1u, 0u, "v_cmpx_lt_f64 of 2.0 and 1.0");
+	Equal(vopc(0x37u, kDoubleOne, kDoubleNan, "%exec_lo") & 1u, 0u, "v_cmpx_o_f64 with a NaN");
+	Equal(vopc(0x38u, kDoubleOne, kDoubleNan, "%exec_lo") & 1u, 1u, "v_cmpx_u_f64 with a NaN");
+	Equal(vopc(0x31u, kDoubleOne, kDoubleTwo, "%vcc_lo"), kSentinel, "v_cmpx_lt_f64 leaves VCC alone");
+	Equal(vopc(0x31u, kDoubleOne, kDoubleTwo, "%exec_lo", 0u) & 1u, 0u, "a true v_cmpx_lt_f64 keeps an inactive lane off");
+	Equal(vop3(0x3Du, kDoubleNan, kDoubleOne, "%exec_lo") & 1u, 1u, "VOP3 v_cmpx_neq_f64 is unordered");
+	Equal(vopc(0x30u, kDoubleOne, kDoubleOne, "%exec_lo") & 1u, 0u, "v_cmpx_f_f64 clears the lane");
+	Equal(vopc(0x3Fu, kDoubleOne, kDoubleNan, "%exec_lo") & 1u, 1u, "v_cmpx_tru_f64 keeps the lane");
+	// CMPX F16 F/O/U/TRU.
+	Equal(vopc(0xDFu, kHalfOne, kHalfNan, "%exec_lo") & 1u, 0u, "v_cmpx_o_f16 with a NaN");
+	Equal(vopc(0xDFu, kHalfOne, kHalfOne, "%exec_lo") & 1u, 1u, "v_cmpx_o_f16 of two numbers");
+	Equal(vopc(0xF8u, kHalfNan, kHalfOne, "%exec_lo") & 1u, 1u, "v_cmpx_u_f16 with a NaN");
+	Equal(vopc(0xF8u, kHalfOne, kHalfOne, "%exec_lo") & 1u, 0u, "v_cmpx_u_f16 of two numbers");
+	Equal(vop3(0xF8u, kHalfNan, kHalfOne, "%exec_lo") & 1u, 1u, "VOP3 v_cmpx_u_f16 with a NaN");
+	Equal(vopc(0xD8u, kHalfOne, kHalfOne, "%exec_lo") & 1u, 0u, "v_cmpx_f_f16 clears the lane");
+	Equal(vopc(0xFFu, kHalfNan, kHalfOne, "%exec_lo") & 1u, 1u, "v_cmpx_tru_f16 keeps the lane");
+	// 64-bit integers: the high word decides the sign, the low word compares unsigned.
+	Equal(vopc(0xA1u, kMinusOne, 1u, "%vcc_lo") & 1u, 1u, "v_cmp_lt_i64 of -1 and 1");
+	Equal(vopc(0xE1u, kMinusOne, 1u, "%vcc_lo") & 1u, 0u, "v_cmp_lt_u64 of 0xffff...ffff and 1");
+	Equal(vopc(0xA1u, kLowHighBit, 1u, "%vcc_lo") & 1u, 0u, "v_cmp_lt_i64 compares the low word unsigned");
+	Equal(vopc(0xA4u, kLowHighBit, 1u, "%vcc_lo") & 1u, 1u, "v_cmp_gt_i64 compares the low word unsigned");
+	Equal(vop3(0xA6u, 1u, kMinusOne, "%vcc_lo") & 1u, 1u, "VOP3 v_cmp_ge_i64 of 1 and -1");
+	Equal(vopc(0xA7u, 0u, 1u, "%vcc_lo") & 1u, 1u, "v_cmp_t_i64");
+	Equal(vopc(0xE0u, 0u, 0u, "%vcc_lo") & 1u, 0u, "v_cmp_f_u64");
+	Equal(vopc(0xE7u, 0u, 1u, "%vcc_lo") & 1u, 1u, "v_cmp_t_u64");
+	Equal(vopc(0xB1u, kMinusOne, 1u, "%exec_lo") & 1u, 1u, "v_cmpx_lt_i64 of -1 and 1");
+	Equal(vopc(0xF1u, kMinusOne, 1u, "%exec_lo") & 1u, 0u, "v_cmpx_lt_u64 of 0xffff...ffff and 1");
+	Equal(vopc(0xB1u, kMinusOne, 1u, "%vcc_lo"), kSentinel, "v_cmpx_lt_i64 leaves VCC alone");
+	Equal(vopc(0xF5u, 1u, 2u, "%exec_lo", 0u) & 1u, 0u, "a true v_cmpx_ne_u64 keeps an inactive lane off");
+	Equal(vop3(0xF2u, 0x100000002ull, 0x100000002ull, "%exec_lo") & 1u, 1u, "VOP3 v_cmpx_eq_u64");
+	Equal(vop3(0xB0u, 0u, 0u, "%exec_lo") & 1u, 0u, "VOP3 v_cmpx_f_i64 clears the lane");
+	Equal(vop3(0xF7u, 0u, 1u, "%exec_lo") & 1u, 1u, "VOP3 v_cmpx_t_u64 keeps the lane");
+	Equal(vopc(0x90u, 0u, 0u, "%exec_lo") & 1u, 0u, "v_cmpx_f_i32 clears the lane");
+	Equal(vopc(0xD7u, 0u, 1u, "%exec_lo") & 1u, 1u, "v_cmpx_t_u32 keeps the lane");
+	// ISA 6.2: a 32-bit literal is sign extended for a signed source and zero extended for an unsigned one.
+	const auto literal = [&](uint32_t opcode, uint64_t v01)
+	{ return run({(0x35u << 26u) | (opcode << 16u) | kVcc, 256u | (kLiteral << 9u), 0xffffffffu}, v01, 0u, "%vcc_lo") & 1u; };
+	Equal(literal(0xA2u, kMinusOne), 1u, "a literal 0xffffffff is -1 for v_cmp_eq_i64");
+	Equal(literal(0xE2u, kMinusOne), 0u, "a literal 0xffffffff is not 0xffff...ffff for v_cmp_eq_u64");
+	Equal(literal(0xE2u, 0xffffffffull), 1u, "a literal 0xffffffff zero extends for v_cmp_eq_u64");
+	std::_Exit(0);
+}
+
+// v_mad_u16 / v_mad_i16: D.16 = S0.16 * S1.16 + S2.16; OPSEL[2:0] pick the source halves and OPSEL[3] the
+// destination half, the other half kept.
+[[noreturn]] void RunMad16(ShaderType stage)
+{
+	Initialize();
+	const auto mad = [&](uint32_t opcode, uint32_t op_sel, uint32_t a, uint32_t b, uint32_t c, uint32_t old)
+	{
+		const Program program(Emit(Parse({(0x35u << 26u) | (opcode << 16u) | (op_sel << 11u) | 16u, 256u | (257u << 9u) | (258u << 18u), kEnd},
+		                                 stage),
+		                           0u, false, false, true)
+		                          .c_str());
+		return Evaluate(program, a, b, c, old);
+	};
+	Equal(mad(0x340u, 0u, 0xffffu, 2u, 3u, 0xa5a51234u), 0xa5a50001u, "v_mad_u16 keeps the low 16 bits and the high half");
+	Equal(mad(0x340u, 8u, 0xffffu, 2u, 3u, 0xa5a51234u), 0x00011234u, "v_mad_u16 with OPSEL[3] writes the high half");
+	Equal(mad(0x340u, 1u, 0x00050000u, 3u, 1u, 0u), 16u, "v_mad_u16 with OPSEL[0] reads the high half of src0");
+	Equal(mad(0x340u, 4u, 2u, 3u, 0x00070000u, 0u), 13u, "v_mad_u16 with OPSEL[2] reads the high half of src2");
+	Equal(mad(0x35Eu, 0u, 0xfffeu, 3u, 0x0010u, 0xffff0000u), 0xffff000au, "v_mad_i16 of -2 * 3 + 16");
+	std::_Exit(0);
+}
+
+[[noreturn]] void EmitMad16WithClamp()
+{
+	Initialize();
+	static_cast<void>(Emit(Parse({(0x35u << 26u) | (0x340u << 16u) | (1u << 15u) | 16u, 256u | (257u << 9u) | (258u << 18u), kEnd}), 0u,
+	                       false, false, true));
+	std::_Exit(0);
+}
+
+[[noreturn]] void ParseVop3Opcode833()
+{
+	Initialize();
+	static_cast<void>(Parse({(0x35u << 26u) | (0x341u << 16u) | 16u, 256u | (257u << 9u) | (258u << 18u), kEnd}));
+	std::_Exit(0);
+}
+
 // ISA 6.2 for an integer 64-bit source: an inline float is the double encoding, a literal is zero extended for
 // an unsigned source and sign extended for a signed one.
 [[noreturn]] void RunInt64SourceConstants()
@@ -1749,6 +1854,22 @@ TEST(EmulatorShaderArithmetic, VopcComparesMatchTheirVop3Translation)
 	{
 		ASSERT_EXIT(RunVopcCompareFamilies(stage), ::testing::ExitedWithCode(0), "");
 	}
+}
+TEST(EmulatorShaderArithmetic, CmpxAnd64BitComparesWriteTheirMask)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunWideCompareForms(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, Mad16WritesTheSelectedHalf)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunMad16(stage), ::testing::ExitedWithCode(0), "");
+	}
+	ASSERT_EXIT(EmitMad16WithClamp(), ::testing::ExitedWithCode(65), "");
+	ASSERT_EXIT(ParseVop3Opcode833(), ::testing::ExitedWithCode(65), "");
 }
 TEST(EmulatorShaderArithmetic, Int64SourcesExpandConstantsBySignedness)
 {

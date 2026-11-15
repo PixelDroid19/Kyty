@@ -45,6 +45,7 @@ extern const char SBUFFER_LOAD_DWORD_16[];
 extern const char EMBEDDED_SHADER_VS_0[];
 extern const char EMBEDDED_SHADER_PS_0[];
 extern const char EXECZ[];
+extern const char CMPX_EXEC_STORE[];
 extern const char SCC_NZ_1[];
 extern const char SCC_NZ_2[];
 extern const char SCC_EXEC_NZ_2[];

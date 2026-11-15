@@ -1683,6 +1683,26 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1)
 	return true;
 }
 
+// The tail that stores lane bit %t3_<index>. A v_cmpx writes EXEC only; the others write VCC, VCC_HI or an SGPR pair
+// with the high word cleared.
+static bool CompareMaskStore(const ShaderInstruction& inst, String8* store)
+{
+	if (ShaderInstructionTypeStartsWith(inst.type, "VCmpx"))
+	{
+		*store = String8(CMPX_EXEC_STORE).ReplaceStr("<execz>", EXECZ);
+		return true;
+	}
+	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
+	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
+
+	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
+	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
+	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	*store = String8("OpStore %<dst0> %t3_<index>\n").ReplaceStr("<dst0>", dst_value0.value) + clear_high;
+	return true;
+}
+
 /* Generalized f64 compare: operands are register pairs. Recombine each pair
  * into a double, compare (param[0]) and write the VCC lane mask. */
 KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_XXX_SmaskVsrc0Vsrc1)
@@ -1696,12 +1716,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_XXX_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
-	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
-
-	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
-	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
+	String8 store;
+	if (!CompareMaskStore(inst, &store)) { return false; }
 
 	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
@@ -1733,13 +1749,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_XXX_SmaskVsrc0Vsrc1)
           %d1_<index> = OpBitcast %double %d1u_<index>
           %t2_<index> = <param> %bool %d0_<index> %d1_<index>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
-          OpStore %<dst0> %t3_<index>
-          <clear_high>
+          <store>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
-	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<clear_high>", clear_high)
+	                   .ReplaceStr("<store>", store)
 	                   .ReplaceStr("<load0lo>", load0lo)
 	                   .ReplaceStr("<load0hi>", load0hi)
 	                   .ReplaceStr("<load1lo>", load1lo)
@@ -2700,9 +2713,9 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpxF16_XXX_SmaskVsrc0Vsrc1)
 	return true;
 }
 
-/* Generalized packed 16-bit integer ALU: extend both operands (signed when
- * param[1]=="s"), apply param[0] in 32 bits, truncate the result to the low
- * 16 bits and store. */
+/* Generalized packed 16-bit integer ALU: extend the two or three operands
+ * (signed when param[1]=="s"), apply param[0] in 32 bits, truncate the result
+ * to 16 bits and store it in the destination half OPSEL[3] selects. */
 KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -2729,8 +2742,14 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 	{
 		return false;
 	}
+	const bool ternary = inst.src_num == 3;
+	String8    load2;
+	if (ternary && !operand_load_uint(spirv, inst.src[2], "t2_<index>", index_str, &load2))
+	{
+		return false;
+	}
 
-	// OPSEL[1:0] pick the source halves (ISA 6.2.5).
+	// OPSEL[2:0] pick the source halves (ISA 6.2.5).
 	const auto half = [&](int source) {
 		return String8(R"(
         %h<s>_<index> = <op> %uint %t<s>_<index> <count>
@@ -2739,26 +2758,28 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 		    .ReplaceStr("<count>", (inst.vop3_op_sel >> source) & 1u ? "%<uint_16>" : "");
 	};
 	const bool is_signed = (param[1] != nullptr && strcmp(param[1], "s") == 0);
-	String8 extend = half(0) + half(1);
-	if (is_signed)
-	{
-		extend += R"(
-        %i0s_<index> = OpShiftLeftLogical %uint %h0_<index> %<uint_16>
-        %i0x_<index> = OpShiftRightArithmetic %uint %i0s_<index> %<uint_16>
-        %i1s_<index> = OpShiftLeftLogical %uint %h1_<index> %<uint_16>
-        %i1x_<index> = OpShiftRightArithmetic %uint %i1s_<index> %<uint_16>
+	const char* extension = is_signed ? R"(
+        %i<s>s_<index> = OpShiftLeftLogical %uint %h<s>_<index> %<uint_16>
+        %i<s>x_<index> = OpShiftRightArithmetic %uint %i<s>s_<index> %<uint_16>
+)"
+	                                  : R"(
+        %i<s>x_<index> = OpBitwiseAnd %uint %h<s>_<index> %<uint_ffff>
 )";
-	} else
+	const int sources = ternary ? 3 : 2;
+	String8   extend;
+	for (int source = 0; source < sources; source++)
 	{
-		extend += R"(
-        %i0x_<index> = OpBitwiseAnd %uint %h0_<index> %<uint_ffff>
-        %i1x_<index> = OpBitwiseAnd %uint %h1_<index> %<uint_ffff>
-)";
+		extend += half(source);
+	}
+	for (int source = 0; source < sources; source++)
+	{
+		extend += String8(extension).ReplaceStr("<s>", String8::FromPrintf("%d", source));
 	}
 
 	static const char* text = R"(
     <load0>
     <load1>
+    <load2>
     <extend>
         <param0>
         %tdst_<index> = OpLoad %float %<dst>
@@ -2773,6 +2794,7 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 	*dst_source += String8(text)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<load2>", load2)
 	                   .ReplaceStr("<extend>", extend)
 	                   .ReplaceStr("<param0>", param[0])
 	                   .ReplaceStr("<dst>", dst_value.value)
@@ -2807,12 +2829,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_Special_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
-	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
-
-	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
-	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
+	String8 store;
+	if (!CompareMaskStore(inst, &store)) { return false; }
 
 	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
@@ -2832,13 +2850,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_Special_SmaskVsrc0Vsrc1)
           %hc1_<index> = OpCompositeExtract %float %hc1v_<index> 0
           <predicate>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
-          OpStore %<dst0> %t3_<index>
-          <clear_high>
+          <store>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
-	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<clear_high>", clear_high)
+	                   .ReplaceStr("<store>", store)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<predicate>", SpecialComparePredicate(param))
@@ -2858,12 +2873,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_Special_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
-	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
-
-	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
-	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
+	String8 store;
+	if (!CompareMaskStore(inst, &store)) { return false; }
 
 	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
@@ -2895,13 +2906,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_Special_SmaskVsrc0Vsrc1)
           %d1_<index> = OpBitcast %double %d1u_<index>
           <predicate>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
-          OpStore %<dst0> %t3_<index>
-          <clear_high>
+          <store>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
-	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<clear_high>", clear_high)
+	                   .ReplaceStr("<store>", store)
 	                   .ReplaceStr("<load0lo>", load0lo)
 	                   .ReplaceStr("<load0hi>", load0hi)
 	                   .ReplaceStr("<load1lo>", load1lo)

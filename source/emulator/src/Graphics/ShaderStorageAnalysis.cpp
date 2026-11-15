@@ -1873,7 +1873,8 @@ bool ShaderTileControlFlowIsLinear(const ShaderInstruction& inst, bool final_ins
 	if ((type >= ShaderInstructionType::SAndSaveexecB32 && type <= ShaderInstructionType::SOrn1SaveexecB32) ||
 	    (type >= ShaderInstructionType::SAndSaveexecB64 && type <= ShaderInstructionType::SXorSaveexecB64) ||
 	    (type >= ShaderInstructionType::VCmpLtU64 && type <= ShaderInstructionType::VCmpGeU64) ||
-	    (type >= ShaderInstructionType::VCmpEqF32 && type <= ShaderInstructionType::VCmpxUF32))
+	    (type >= ShaderInstructionType::VCmpEqF32 && type <= ShaderInstructionType::VCmpxUF32) ||
+	    (type >= ShaderInstructionType::VCmpxLtF64 && type <= ShaderInstructionType::VCmpTU64))
 	{
 		return false;
 	}

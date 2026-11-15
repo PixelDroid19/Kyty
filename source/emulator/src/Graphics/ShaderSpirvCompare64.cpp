@@ -1,76 +1,79 @@
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvInternal.h"
+#include "ShaderSpirvTemplates.h"
+
+#include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
-namespace {
 
-// Loads word `word` of a 64-bit source. Inline integers sign-extend to 64 bits;
-// a 32-bit literal's 64-bit extension is not established, so it fails closed.
-bool LoadWord64(Spirv* spirv, const ShaderOperand& operand, int word, const String8& id, String8* output)
+// v_cmp(x)_{f,lt,eq,le,gt,ne,ge,t}_{i64,u64}: lane predicate %t3_<index> (0/1) from the 64-bit comparison of
+// (hi, lo) word pairs. param[0] names the predicate (f, lt, eq, le, gt, ne, ge or t) and param[1] is "s" for the
+// signed forms, which compare the high words signed and the low words unsigned. ISA 6.2: a literal source is zero
+// extended for the unsigned forms and sign extended for the signed ones. A v_cmpx writes EXEC only; the others store
+// the lane bit to the SGPR pair with the high word cleared.
+KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_64)
 {
-	if (operand.type == ShaderOperandType::IntegerInlineConstant)
+	const auto& inst      = code.GetInstructions().At(index);
+	const bool  is_signed = param[1] != nullptr && strcmp(param[1], "s") == 0;
+	const auto  i         = String8::FromPrintf("%u", index);
+	for (int source = 0; source < 2; source++)
 	{
-		const uint32_t value = word == 0 ? operand.constant.u : (operand.constant.i < 0 ? 0xffffffffu : 0u);
-		*output += String8::FromPrintf("%%%s = OpCopyObject %%uint %%%s\n", id.c_str(), spirv->GetConstantUint(value).c_str());
-		return true;
+		// Input modifiers are float-only; an integer compare has no meaning for them.
+		if (inst.src[source].absolute || inst.src[source].negate) { return false; }
 	}
-	const auto value = operand_numeric_variable_to_str(operand, word);
-	if (value.value.IsEmpty())
+	const auto load = [&](const ShaderOperand& operand, int word, const char* id, String8* output)
+	{
+		String8 text;
+		const bool loaded = is_signed ? operand_load_i64_word(spirv, operand, id, i, &text, word)
+		                              : operand_load_uint(spirv, operand, id, i, &text, word);
+		*output += text + "\n";
+		return loaded;
+	};
+	String8 source;
+	if (!load(inst.src[0], 0, "c64_a_lo_<index>", &source) || !load(inst.src[0], 1, "c64_a_hi_<index>", &source) ||
+	    !load(inst.src[1], 0, "c64_b_lo_<index>", &source) || !load(inst.src[1], 1, "c64_b_hi_<index>", &source))
 	{
 		return false;
 	}
-	if (value.type == SpirvType::Float)
+	String8 store;
+	if (ShaderInstructionTypeStartsWith(inst.type, "VCmpx"))
 	{
-		*output += String8::FromPrintf("%%%s_f = OpLoad %%float %%%s\n%%%s = OpBitcast %%uint %%%s_f\n", id.c_str(), value.value.c_str(),
-		                               id.c_str(), id.c_str());
-		return true;
-	}
-	if (value.type == SpirvType::Uint)
+		store = String8(CMPX_EXEC_STORE).ReplaceStr("<execz>", EXECZ);
+	} else
 	{
-		*output += String8::FromPrintf("%%%s = OpLoad %%uint %%%s\n", id.c_str(), value.value.c_str());
-		return true;
-	}
-	return false;
-}
-
-} // namespace
-
-// v_cmp_{lt,eq,le,gt,ne,ge}_u64: lane predicate %t3_<index> (0/1) from the
-// unsigned 64-bit comparison of (hi, lo) word pairs, then the per-lane result
-// stored like the 32-bit compares. param[0] names the predicate: Lt, Eq, Le,
-// Gt, Ne or Ge.
-KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U64)
-{
-	const auto& inst = code.GetInstructions().At(index);
-	const auto  dst0 = operand_variable_to_str(inst.dst, 0);
-	const auto  dst1 = operand_variable_to_str(inst.dst, 1);
-	const auto  i    = String8::FromPrintf("%u", index);
-	String8     source;
-	if (dst0.type != SpirvType::Uint || !LoadWord64(spirv, inst.src[0], 0, "c64_a_lo_" + i, &source) ||
-	    !LoadWord64(spirv, inst.src[0], 1, "c64_a_hi_" + i, &source) || !LoadWord64(spirv, inst.src[1], 0, "c64_b_lo_" + i, &source) ||
-	    !LoadWord64(spirv, inst.src[1], 1, "c64_b_hi_" + i, &source))
-	{
-		return false;
+		const auto dst0 = operand_variable_to_str(inst.dst, 0);
+		const auto dst1 = operand_variable_to_str(inst.dst, 1);
+		if (dst0.type != SpirvType::Uint) { return false; }
+		store = String8("OpStore %<dst0> %t3_<index>\nOpStore %<dst1> %uint_0\n").ReplaceStr("<dst0>", dst0.value).ReplaceStr("<dst1>", dst1.value);
 	}
 	source += R"(
-%c64_hi_eq_<i> = OpIEqual %bool %c64_a_hi_<i> %c64_b_hi_<i>
-%c64_lo_eq_<i> = OpIEqual %bool %c64_a_lo_<i> %c64_b_lo_<i>
-%c64_eq_<i> = OpLogicalAnd %bool %c64_hi_eq_<i> %c64_lo_eq_<i>
-%c64_hi_lt_<i> = OpULessThan %bool %c64_a_hi_<i> %c64_b_hi_<i>
-%c64_lo_lt_<i> = OpULessThan %bool %c64_a_lo_<i> %c64_b_lo_<i>
-%c64_lo_part_<i> = OpLogicalAnd %bool %c64_hi_eq_<i> %c64_lo_lt_<i>
-%c64_lt_<i> = OpLogicalOr %bool %c64_hi_lt_<i> %c64_lo_part_<i>
-%c64_le_<i> = OpLogicalOr %bool %c64_lt_<i> %c64_eq_<i>
-%c64_gt_<i> = OpLogicalNot %bool %c64_le_<i>
-%c64_ge_<i> = OpLogicalNot %bool %c64_lt_<i>
-%c64_ne_<i> = OpLogicalNot %bool %c64_eq_<i>
-%t3_<i> = OpSelect %uint %c64_<pred>_<i> %uint_1 %uint_0
-               OpStore %<dst0> %t3_<i>
-               OpStore %<dst1> %uint_0
+%c64_hi_eq_<index> = OpIEqual %bool %c64_a_hi_<index> %c64_b_hi_<index>
+%c64_lo_eq_<index> = OpIEqual %bool %c64_a_lo_<index> %c64_b_lo_<index>
+%c64_eq_<index> = OpLogicalAnd %bool %c64_hi_eq_<index> %c64_lo_eq_<index>
+%c64_hi_lt_<index> = <hi_less> %bool %c64_a_hi_<index> %c64_b_hi_<index>
+%c64_lo_lt_<index> = OpULessThan %bool %c64_a_lo_<index> %c64_b_lo_<index>
+%c64_lo_part_<index> = OpLogicalAnd %bool %c64_hi_eq_<index> %c64_lo_lt_<index>
+%c64_lt_<index> = OpLogicalOr %bool %c64_hi_lt_<index> %c64_lo_part_<index>
+%c64_le_<index> = OpLogicalOr %bool %c64_lt_<index> %c64_eq_<index>
+%c64_gt_<index> = OpLogicalNot %bool %c64_le_<index>
+%c64_ge_<index> = OpLogicalNot %bool %c64_lt_<index>
+%c64_ne_<index> = OpLogicalNot %bool %c64_eq_<index>
+<constant>%t3_<index> = OpSelect %uint %c64_<pred>_<index> %uint_1 %uint_0
+<store>
 )";
-	*dst_source += source.ReplaceStr("<pred>", param[0]).ReplaceStr("<dst0>", dst0.value).ReplaceStr("<dst1>", dst1.value).ReplaceStr("<i>", i);
+	// The always-false and always-true forms ignore the comparison.
+	const bool constant_false = strcmp(param[0], "f") == 0;
+	const bool constant_true  = strcmp(param[0], "t") == 0;
+	const auto constant       = constant_false || constant_true
+	                                ? String8::FromPrintf("%%c64_%s_<index> = OpIEqual %%bool %%uint_0 %%uint_%d\n", param[0], constant_false ? 1 : 0)
+	                                : String8 {};
+	*dst_source += source.ReplaceStr("<constant>", constant)
+	                   .ReplaceStr("<hi_less>", is_signed ? "OpSLessThan" : "OpULessThan")
+	                   .ReplaceStr("<pred>", param[0])
+	                   .ReplaceStr("<store>", store)
+	                   .ReplaceStr("<index>", i);
 	return true;
 }
 

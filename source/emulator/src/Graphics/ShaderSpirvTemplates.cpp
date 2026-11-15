@@ -1618,6 +1618,15 @@ const char EXECZ[] = R"(
                OpStore %execz %z196_<index>
 )";
 
+// v_cmpx: EXEC keeps the lane bit %t3_<index> ANDed with the incoming EXEC; <execz> takes EXECZ.
+const char CMPX_EXEC_STORE[] = R"(
+        %texec_<index> = OpLoad %uint %exec_lo
+        %tmasked_<index> = OpBitwiseAnd %uint %t3_<index> %texec_<index>
+               OpStore %exec_lo %tmasked_<index>
+               OpStore %exec_hi %uint_0
+        <execz>
+)";
+
 const char SCC_NZ_1[] = R"(
         %snz1_118_<index> = OpLoad %uint %<dst>
         %snz1_121_<index> = OpINotEqual %bool %snz1_118_<index> %uint_0
