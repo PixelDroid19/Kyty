@@ -7041,7 +7041,9 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
 - **Added.** `v_xor3_b32`, `v_alignbit_b32`, `v_perm_b32`, `v_lerp_u8`, `v_mad_i32_i24`, `v_mad_u32_u16` and
   `v_mad_i32_i16` (VOP3), from the ISA descriptions. Their ISA entries name no input or output modifier, so an
   encoded one is refused by the emitter; `op_sel` stays refused at decode. The gfx10-only opcodes are refused on the
-  earlier generation.
+  earlier generation. The `v_perm_b32` byte numbering (selectors 0-3 name bytes of S1, 4-7 bytes of S0) follows the
+  `{S0, S1}` pair convention of `v_alignbit_b32`; it was not checked against an independent source, and the local
+  reference trees hold no translation of it.
 - **Added: VOP3 forms of integer VOP1 ops.** `v_mov_b32`, `v_not_b32`, `v_bfrev_b32`, `v_ffbh_u32`, `v_ffbl_b32` and
   `v_ffbh_i32` in the VOP3 encoding decode to their VOP1 operation when no modifier is encoded, and stop at decode
   when one is. The other 21 of the 27 are F64 or float conversions and movrel forms; they are not added.
@@ -7055,13 +7057,34 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   failing as in the library record above, first error `gfx_storage_frontier`, interactive. Its 31 fps at 30 s and the
   34.6 fps of that record are single samples at different times and are not comparable. No title is known to execute
   the added ops, so they have no title evidence.
-- **Silent modifier paths checked.** The ISA marks nine integer ops as saturating: `v_add_nc_u16`, `v_sub_nc_u16`,
+- **Integer clamp paths checked.** The ISA marks nine integer ops as saturating: `v_add_nc_u16`, `v_sub_nc_u16`,
   `v_mul_lo_u16`, `v_add_nc_i16`, `v_sub_nc_i16`, `v_mad_u16`, `v_mad_i16`, `v_add_nc_i32` and `v_sub_nc_i32`.
   The five Kyty translates refuse `clamp` (`Recompile_V16_XXX_VdstVsrc0Vsrc1`); the other four are not decoded. The
-  generic three-source integer template ignores `clamp` only for ops whose ISA entries name no saturation.
-  `operand_load_uint` ignores `abs` and `neg`, which the ISA defines only for float operands.
+  generic three-source integer template (`Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2`) ignores `clamp`, which is right
+  only for ops whose ISA entries name no saturation.
+- **Not checked.** ISA section 6.2 names negate and absolute value as VOP3 input modifiers and `ABS` as a
+  floating-point absolute value, but does not say what they do on integer operands. `operand_load_uint` and the
+  generic integer template drop both without refusing, so an integer op encoded with them runs without them. Also
+  not audited: `omod` under IEEE mode, the `V_RCP_IFLAG_F32` alias, the skipped SOPP ops and the MUBUF flag bits.
 - **Observed stop rechecked.** `PPSA03969 - F.I.S.T.` ran 167 s on `playable-regression` with exit 0 and no
-  `SLoadDwordx4` refusal, interactive at 9 fps. The stop was intermittent, so one clean run does not close it.
+  `SLoadDwordx4` refusal, interactive at 9 fps. The stop was intermittent, so one clean run does not close it. Both
+  title runs above used the binary of the first batch; the second batch and `PPSA17221 - Minecraft` had no title
+  run. The 9 fps is one sample of one run and is not compared with any recorded figure.
+- **Fixed: compare semantics and decode.**
+  - `V_CMP_NEQ_F16` is `!(S0 == S1)` in the ISA, true on a NaN input. It was emitted as an ordered not-equal
+    (`OpFOrdNotEqual`), false on NaN, so a lane comparing a NaN got the opposite mask bit. It now uses
+    `OpFUnordNotEqual`, like the F32 form.
+  - Every VOP3 `V_CMP_*_F64` sized only src0 as a register pair, so a VGPR src1 stopped the emitter (status 65).
+    Both sources are now pairs.
+  - `V_CMP_NEQ_F64` and `V_CMPX_NEQ_F16` were decoded with no emitter; they now use their sibling emitters.
+  - `EmulatorShaderArithmetic.HalfNotEqualComparesAreUnordered` evaluates NEQ and CMPX_NEQ on F16 with equal,
+    different and NaN inputs and LG_F16 with a NaN, and emits and validates NEQ_F64; the evaluator holds no doubles,
+    so F64 results are not evaluated. Restoring the ordered op makes it fail. The evaluator gained
+    `OpFUnordNotEqual`, `OpCompositeConstruct` and a one-lane `OpGroupNonUniformBallot`.
+  - Unit suite: 2685 passed, 11 skipped; the four gates pass. `PPSA21567 - ASTRO BOT` on `playable-regression`
+    after the fix: 11/15 gates, the same four failing, first error `gfx_storage_frontier`, interactive, 31.4 fps at
+    29.6 s (one sample, not a speed claim). No title is known to run these compares on a NaN, so there is no visual
+    before and after.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
@@ -7071,4 +7094,5 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   64-bit shifts and `v_mad_i64_i32`; `div_scale`, `div_fmas`, `div_fixup` and the F64 ALU; MUBUF sub-dword and D16
   loads and stores and the remaining atomics; MTBUF stores; DS `_rtn` atomics and sub-dword reads and writes;
   GLOBAL stores and atomics; MIMG `_c`, `_cl`, `_o`, `gather4`, `get_lod` and `msaa_load`; `s_getreg` and
-  `s_setreg`; the missing VOPC compares; DPP wave shifts, `row_bcast`, `row_share` and DPP8.
+  `s_setreg`; the missing compares (every VOPC-encoded F64 compare, the CMPX F64 forms, and most CMPX F16 forms in
+  the VOPC encoding); DPP wave shifts, `row_bcast`, `row_share` and DPP8.
