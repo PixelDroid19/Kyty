@@ -6834,3 +6834,33 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
 - **Verdict.** The emulator sees neither which guest target holds motion vectors nor the camera; finding them means
   recognising one title's buffers, which the no-title-specific rule forbids. Not built. Even if it were, it would
   raise only the presented rate and add GPU work to scenes that are already GPU-bound.
+
+## Library entries confirmed by several references (2026-11-15)
+
+- **Scope.** Imports that installed titles name and Kyty did not register, where the published reference
+  implementations agree on the contract. Each entry below is registered and contract-tested; none was exercised by
+  a title run.
+- **Added.**
+  - `sceKernelChmod`, `chmod` and `rmdir` (009217843). chmod sets the host file's permission bits, so a later
+    `fstat` reports them; under the read-only application mount it returns EPERM and leaves the bits alone
+    (da2870fc7).
+  - `sceRtcFormatRFC3339` and `sceRtcParseRFC3339` (dda2197f8): centiseconds and `Z` or `±hh:mm`; parsing needs a
+    zone, keeps six fraction digits and ignores trailing text.
+  - `sceHttpUriEscape` (4f227bdff): percent-encodes every byte outside the unreserved set with upper-case hex; a
+    query with a null output returns the size including the terminator.
+  - The store dialog (six entries) and the web browser dialog (eight entries) (2b45fbbc5). With no store or browser
+    in the emulator an opened dialog finishes at once as dismissed by the user, without a purchase; the store
+    result returns 1, as two references agree.
+- **Fixed in existing code.** Tick-to-date conversion counted tick 0 as 307 days after 0000-03-01 instead of 306,
+  so every Rtc conversion from a tick reported the next calendar day (39a73af92).
+- **Not done, references disagree.** `sceHttpUriBuild` (option 0 behaviour, `//` without a scheme, default port
+  omission, the error for a null element) and `sceImeDialogGetPanelSizeExtended` (a fixed 1920x1080 against a size
+  computed from the parameters). The web browser result was taken from the reference that writes 1; another writes 0.
+- **Excluded.** A leap second (`...:60Z`) in RFC 3339 parsing: one reference returns success and leaves the tick
+  unchanged; Kyty keeps its invalid-second error.
+- **Deferred.** Font, Psml, Acm, the image codecs, Voice and Share were not started.
+- **Open defect.** `KernelUnlink`, `KernelRmdir` and `KernelMkdir` (`source/emulator/src/Kernel/FileSystem.cpp`) and
+  opens for writing do not refuse paths under the application mount, so a title that removes or writes a package
+  file changes the user's install. One reference refuses every such mutation with EPERM; applying it to the other
+  paths needs a title run, since it changes what titles that write there see.
+- **Verified.** Unit tests 2675 of 2686 (11 skipped) and the repository gates, on Linux.
