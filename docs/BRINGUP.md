@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: the loop-boundary range split fails the cross-recipe sweep and stays a probe result (2026-11-14, offline)
   - Robot platformer: splitting register ranges at the light loop recovers 5.9 ms of GPU time (2026-11-14, probe only)
   - Robot platformer: the trace region costs GPU time by being compiled in, not by running (2026-11-14, measured)
   - Robot platformer: removing the trace region removes most of the lighting program's GPU time (2026-11-14, measured)

@@ -6,6 +6,80 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: the loop-boundary range split fails the cross-recipe sweep and stays a probe result (2026-11-14, offline)
+
+Intel Arc A770, Mesa ANV on Xe (Mesa 26.3 development build), SIMD8, driver shader cache disabled. No
+title runs: every stored compute recipe whose entry function holds a loop was compiled as translated
+and again after the rewrite of the record below, applied as a rule: at every outermost loop of the
+entry function, in the block that enters the loop (when it has a single one that only falls into the
+header) and at the start of the loop's merge block, every scalar function variable is stored back as
+itself plus a run-time zero. The gate was that no recipe gets worse. It fails, so the rule is not
+written into the translator.
+
+| Store | Recipes with a loop | Fewer spills + fills | Same | More |
+| --- | --- | --- | --- | --- |
+| PPSA21567 - ASTRO BOT | 60 | 36 | 9 | 15 |
+| PPSA03969 - F.I.S.T.: Forged In Shadow Torch | 9 | 0 | 3 | 6 |
+| PPSA07393 - Gori: Cuddly Carnage | 9 | 1 | 3 | 5 |
+| PPSA01341 - Demon's Souls | 5 | 0 | 4 | 1 |
+| PPSA17221 - Minecraft | 4 | 0 | 3 | 1 |
+| PPSA09809 - OCTOPATH TRAVELER II | 3 | 0 | 1 | 2 |
+| PPSA04220 - JoJo's Bizarre Adventure: All-Star Battle R | 1 | 0 | 1 | 0 |
+| All | 91 | 37 | 24 | 30 |
+
+- **The gains sit in this title.** 13 of the 36 gains in this title's store are compilations of
+  the lighting program itself (the same module shape, including the arms the probe runs stored);
+  the 60 rows hold 46 distinct module shapes. Outside this title the rule gains once and loses 15
+  times.
+- **Losses are not marginal.** Spills:fills go 104:321 -> 597:1184 on a Minecraft program,
+  53:161 -> 93:1224 on a Demon's Souls program, 622:1593 -> 1380:2236 and 2901:9982 -> 4848:14221
+  on two other programs of this title, and 0:0 -> 41:107 on a Gori: Cuddly Carnage program that
+  did not spill at all.
+- **No narrower form passes.** Over nine losing and five gaining recipes, three narrower forms were
+  compiled: the exit only, only the registers the loop never references, only the registers the loop
+  never writes. They make 6, 5 and 7 of the 14 worse; four recipes get worse under every form.
+- **No structural property separates the two groups.** The share of the entry function before,
+  inside and after its outermost loops, the number of outermost loops and the number of registers
+  written inside them overlap between gains and losses (a program with 23 % / 51 % / 24 % loses, one
+  with 32 % / 52 % / 14 % gains).
+- **The driver's cycle estimate cannot choose.** For the lighting program it reads 1.536e9 as
+  translated, 1.574e9 with the split that measured 5.9 ms faster, and 0.808e9 for the parked form
+  that the statistics of the record below exclude.
+- **What stays open.** Choosing per pipeline from the spill and fill counts the driver reports for
+  both compilations would never pick a worse count, at the price of compiling such programs twice.
+  It is not built: the only evidence that the static count tracks GPU time is three compilations of
+  this one program (1634, 938 and 214 fills against 13.65, 7.75 and 3.3 ms per frame).
+- **Tools** (evidence directory, never in the repository): `splitloops.py` (the rule and its
+  narrower forms on a SPIR-V listing), `sweep_split.py` (the before/after table over recipe stores),
+  `loopshape.py` (where the entry function's code sits relative to its loops).
+
+### The command thread works, it does not wait
+
+The per-second performance snapshots of run a379 (record below) were mapped to the arm that was
+live, keeping only snapshots that lie inside one 2 s block (`armperf.py`; block edges from the
+probe's lines, shifted by the sub-second offset that best matches flips to presents, mean error
+1.6 fps). In the second scene of that run (blocks 56-67, three snapshots per arm, about 630 draws
+and 105 dispatches per frame):
+
+| Per frame, lighting program left out | ms |
+| --- | --- |
+| Frame | 38.3 |
+| Command processor runs | 31.7 |
+| Draw processing (632 calls, 33 us each) | 21.1 |
+| - resource binding (texture descriptors 4.7, storage 1.5, finalize 1.5) | 8.4 |
+| - draw state setup | 6.8 |
+| - pipeline setup, emission, materialization | 3.9 |
+| Dispatch processing (105 calls, 57 us each) | 6.0 |
+| Fence waits | 0.84 |
+| WAIT_REG_MEM | 0.35 |
+| Flip-done waits | 0.04 |
+
+The wait counters account for 1.2 ms of the frame. With the program as translated the same counters
+read 33.2 ms of runs and 4.9 ms of fence waits in a 43.9 ms frame. This agrees with the causal test
+of 2026-11-14 (delay per draw passes 1:1 into the frame, the thread uses 75-80 % of a core): the
+6 ms that 30 fps needs from this thread is work per draw and per dispatch, not a wait to remove.
+Three snapshots per arm on a probe build; the figures size the parts, they are not a benchmark.
+
 ## Robot platformer: splitting register ranges at the light loop recovers 5.9 ms of GPU time (2026-11-14, probe only)
 
 Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
