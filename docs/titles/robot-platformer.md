@@ -7214,8 +7214,10 @@ with `compress=zstd:3,ssd,discard=async`.
   | Records the set | none | 413 | 374 ms | 33 ms |
   | Reads the set ahead | 451 entries | 429 | 73 ms | 2 ms |
 
-  The host had little discard backlog during this pair (no ring-thread stall in either run), so the 20 s case was not
-  reproduced on the shipped code. The drops at 80, 92 and 95 s appear in both runs, so they are not store reads.
+  The second run had the busier disk: 970 discards taking 11.4 s and 103 s of read wait on the device, against 5.7 s
+  and 10.8 s in the first (the 20.4 s run had 28.9 s and 86 s). Device counters include every process on the host,
+  and the second run's 40,000 writes were not attributed. The drops at 80, 92 and 95 s appear in both runs, so they
+  are not store reads.
 - **Cause 2: every `DMA_DATA` store re-detiled the whole 192-layer array.** Each store of 4-64 KiB into the 17.3 MB
   array cost 6-9 ms. 192 such flushes per run summed to 1.8 s, in a burst at 65-76 s of the route.
 - **Fix 2.** Texture updates use the page-generation runs that storage buffers already use. The layers those runs
