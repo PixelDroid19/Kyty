@@ -7065,8 +7065,14 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   only for ops whose ISA entries name no saturation.
 - **Not checked.** ISA section 6.2 names negate and absolute value as VOP3 input modifiers and `ABS` as a
   floating-point absolute value, but does not say what they do on integer operands. `operand_load_uint` and the
-  generic integer template drop both without refusing, so an integer op encoded with them runs without them. Also
-  not audited: `omod` under IEEE mode, the `V_RCP_IFLAG_F32` alias, the skipped SOPP ops and the MUBUF flag bits.
+  generic integer template drop both without refusing, so an integer op encoded with them runs without them; with
+  no defined result to match, this stays as is. Checked against the ISA and found correct: `omod` is ignored under
+  IEEE mode and with output denormals on, and otherwise flushes to +0 (section 6.2, matched by
+  `FloatOutputModifier`); `V_RCP_IFLAG_F32` computes `1.0 / S0.f` like `V_RCP_F32` and differs only in the integer
+  exception flag, which Kyty does not model; `s_waitcnt`, `s_waitcnt_depctr`, `s_inst_prefetch` and the
+  immediate-form `s_barrier` entry have no effect on a sequential translation (the RDNA2 `s_barrier` decodes with no
+  immediate and gets a real barrier). Not audited: `s_sendmsg` and `s_trap` being skipped, and the MUBUF flag
+  bits.
 - **Observed stop rechecked.** `PPSA03969 - F.I.S.T.` ran 167 s on `playable-regression` with exit 0 and no
   `SLoadDwordx4` refusal, interactive at 9 fps. The stop was intermittent, so one clean run does not close it. Both
   title runs above used the binary of the first batch; the second batch and `PPSA17221 - Minecraft` had no title
@@ -7114,9 +7120,11 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     (`operand_array_to_str`) and no longer asserts a constant's size. Signed 64-bit vector compares have no
     emitter and stop the title. `EmulatorShaderArithmetic.Int64SourcesExpandConstantsBySignedness` covers both
     ops with positive and negative literals, an inline shift and a literal control word, and `s_mov_b64` with
-    inline 1.0 and a literal. Unit suite: 2687 passed, 11 skipped; the four gates pass. Re-run on that build:
-    Astro 11/15, the same four failing, first error `gfx_storage_frontier`, interactive, 33.0 fps at 30.4 s;
-    Minecraft child exit 0, no first error, interactive, 60 fps at 29.5 s, the same three gates failing.
+    inline 1.0 and a literal; zero extending the literal again makes it fail. Unit suite: 2687 passed, 11 skipped;
+    the four gates pass. Re-run on that build: `PPSA21567 - ASTRO BOT` 11/15, the same four failing, first error
+    `gfx_storage_frontier`, interactive, 33.0 fps at 30.4 s; `PPSA17221 - Minecraft` child exit 0, no first error,
+    interactive, 60 fps at 29.5 s, the same three gates failing. Neither title is known to run this code, so the
+    runs show no regression only; the evaluator tests verify the fixes.
 - **VOP3 opcode sweep.** Each VOP3 opcode 0-0x3ff was parsed and emitted with three VGPR sources in separate child
   processes (local only, not committed). 45 parse, 40 of them emit. Of the five that parse but stop the emitter,
   0x100, 0x101, 0x128 and 0x12A need an SGPR mask in src2, so a VGPR there is an invalid encoding, not a defect.
