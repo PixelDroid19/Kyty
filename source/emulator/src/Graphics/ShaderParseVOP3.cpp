@@ -269,7 +269,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x8C: inst.type = ShaderInstructionType::VCmpGtI16; break;
 		case 0x8D: inst.type = ShaderInstructionType::VCmpNeI16; break;
 		case 0x8E: inst.type = ShaderInstructionType::VCmpGeI16; break;
-		case 0x8F: KYTY_NI("v_cmp_class_f16"); break;
+		case 0x8F: inst.type = ShaderInstructionType::VCmpClassF16; break;
 		case 0x90: inst.type = ShaderInstructionType::VCmpxFF32; break;
 		case 0x91: inst.type = ShaderInstructionType::VCmpxLtI32; break;
 		case 0x92: inst.type = ShaderInstructionType::VCmpxEqI32; break;
@@ -278,14 +278,14 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x95: inst.type = ShaderInstructionType::VCmpxNeI32; break;
 		case 0x96: inst.type = ShaderInstructionType::VCmpxGeI32; break;
 		case 0x97: inst.type = ShaderInstructionType::VCmpxTruF32; break;
-		case 0x98: KYTY_NI("v_cmpx_class_f32"); break;
+		case 0x98: inst.type = ShaderInstructionType::VCmpxClassF32; break;
 		case 0x99: inst.type = ShaderInstructionType::VCmpxLtI16; break;
 		case 0x9A: inst.type = ShaderInstructionType::VCmpxEqI16; break;
 		case 0x9B: inst.type = ShaderInstructionType::VCmpxLeI16; break;
 		case 0x9C: inst.type = ShaderInstructionType::VCmpxGtI16; break;
 		case 0x9D: inst.type = ShaderInstructionType::VCmpxNeI16; break;
 		case 0x9E: inst.type = ShaderInstructionType::VCmpxGeI16; break;
-		case 0x9F: KYTY_NI("v_cmpx_class_f16"); break;
+		case 0x9F: inst.type = ShaderInstructionType::VCmpxClassF16; break;
 		case 0xA0:
 			inst.type        = ShaderInstructionType::VCmpFU64;
 			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
@@ -334,7 +334,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.src[0].size = 2;
 			inst.src[1].size = 2;
 			break;
-		case 0xA8: KYTY_NI("v_cmp_class_f64"); break;
+		case 0xA8: inst.type = ShaderInstructionType::VCmpClassF64; inst.src[0].size = 2; break;
 		case 0xA9: inst.type = ShaderInstructionType::VCmpLtU16; break;
 		case 0xAA: inst.type = ShaderInstructionType::VCmpEqU16; break;
 		case 0xAB: inst.type = ShaderInstructionType::VCmpLeU16; break;
@@ -379,7 +379,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.src[1].size = 2;
 			break;
 		case 0xB7: inst.type = ShaderInstructionType::VCmpxTruF32; inst.src[0].size = 2; inst.src[1].size = 2; break;
-		case 0xB8: KYTY_NI("v_cmpx_class_f64"); break;
+		case 0xB8: inst.type = ShaderInstructionType::VCmpxClassF64; inst.src[0].size = 2; break;
 		case 0xB9: inst.type = ShaderInstructionType::VCmpxLtU16; break;
 		case 0xBA: inst.type = ShaderInstructionType::VCmpxEqU16; break;
 		case 0xBB: inst.type = ShaderInstructionType::VCmpxLeU16; break;

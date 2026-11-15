@@ -3822,10 +3822,20 @@ void Spirv::FindConstants()
 			// V_LOG_F32 of +-0 is -infinity; GLSL Log2 leaves it undefined.
 			AddConstantUint(0xff800000u);
 		}
-		if (inst.type == ShaderInstructionType::VCmpClassF32)
+		if (const int width = ShaderFloatClassWidth(inst.type); width != 0)
 		{
 			for (uint32_t value = 0; value < 10u; ++value) { AddConstantUint(value); }
-			for (const uint32_t mask: {0x7f800000u, 0x007fffffu, 0x00400000u, 0x80000000u, 0x7fffffffu}) { AddConstantUint(mask); }
+			if (width == 16)
+			{
+				for (const uint32_t mask: {0x7c00u, 0x03ffu, 0x0200u, 0x8000u, 0x7fffu}) { AddConstantUint(mask); }
+			} else
+			{
+				for (const uint32_t mask: {0x7f800000u, 0x007fffffu, 0x00400000u, 0x80000000u, 0x7fffffffu}) { AddConstantUint(mask); }
+			}
+			if (width == 64)
+			{
+				for (const uint32_t mask: {0x7ff00000u, 0x000fffffu, 0x00080000u}) { AddConstantUint(mask); }
+			}
 		}
 		if (inst.type == ShaderInstructionType::ImageBvhIntersectRay)
 		{

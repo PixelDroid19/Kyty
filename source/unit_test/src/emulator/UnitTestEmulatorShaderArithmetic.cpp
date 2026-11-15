@@ -1124,6 +1124,58 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	std::_Exit(0);
 }
 
+// v_cmp(x)_class: the S1 mask bits are signaling NaN, quiet NaN, -inf, -normal, -denormal, -0, +0, +denormal,
+// +normal and +inf. A v_cmpx writes EXEC and leaves VCC alone.
+[[noreturn]] void RunClassForms(ShaderType stage)
+{
+	Initialize();
+	constexpr uint32_t kVcc = 106u, kSentinel = 0x5a5a5a5au;
+	const auto run = [&](std::vector<uint32_t> words, uint64_t value, uint32_t mask, const char* word, uint32_t exec = 1u)
+	{
+		words.push_back(kEnd);
+		const Program program(Emit(Parse(words, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", static_cast<uint32_t>(value)}, {"%v1", static_cast<uint32_t>(value >> 32u)}, {"%v2", mask},
+		                    {"%vcc_lo", kSentinel}, {"%vcc_hi", kSentinel}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", exec},
+		                    {"%exec_hi", 0u}, {"%exec_lane_lo", exec}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   word);
+	};
+	const auto vopc = [&](uint32_t opcode, uint64_t value, uint32_t bit, const char* word, uint32_t exec = 1u)
+	{ return run({(0x3eu << 25u) | (opcode << 17u) | (2u << 9u) | 256u}, value, 1u << bit, word, exec) & 1u; };
+	// modifiers: VOP3 abs bits 8-10 of the first dword, neg bits 29-31 of the second.
+	const auto vop3 = [&](uint32_t opcode, uint64_t value, uint32_t bit, const char* word, uint32_t abs, uint32_t neg)
+	{ return run({(0x35u << 26u) | (opcode << 16u) | (abs << 8u) | kVcc, 256u | (258u << 9u) | (neg << 29u)}, value, 1u << bit, word) & 1u; };
+	// F16 reads the low half only.
+	Equal(vopc(0x8Fu, 0x3c00u, 8u, "%vcc_lo"), 1u, "v_cmp_class_f16 of +1.0 is +normal");
+	Equal(vopc(0x8Fu, 0x3c00u, 3u, "%vcc_lo"), 0u, "v_cmp_class_f16 of +1.0 is not -normal");
+	Equal(vopc(0x8Fu, 0xffff3c00u, 8u, "%vcc_lo"), 1u, "v_cmp_class_f16 ignores the high half");
+	Equal(vopc(0x8Fu, 0x7e00u, 1u, "%vcc_lo"), 1u, "v_cmp_class_f16 quiet NaN");
+	Equal(vopc(0x8Fu, 0x7d00u, 0u, "%vcc_lo"), 1u, "v_cmp_class_f16 signaling NaN");
+	Equal(vopc(0x8Fu, 0x7d00u, 1u, "%vcc_lo"), 0u, "v_cmp_class_f16 signaling NaN is not quiet");
+	Equal(vopc(0x8Fu, 0x8001u, 4u, "%vcc_lo"), 1u, "v_cmp_class_f16 -denormal");
+	Equal(vopc(0x8Fu, 0x7c00u, 9u, "%vcc_lo"), 1u, "v_cmp_class_f16 +inf");
+	Equal(vop3(0x8Fu, 0xbc00u, 8u, "%vcc_lo", 1u, 0u), 1u, "VOP3 v_cmp_class_f16 with abs of -1.0 is +normal");
+	// F64: the low word carries fraction bits only.
+	Equal(vopc(0xA8u, 0x3ff0000000000000ull, 8u, "%vcc_lo"), 1u, "v_cmp_class_f64 of +1.0 is +normal");
+	Equal(vopc(0xA8u, 1u, 7u, "%vcc_lo"), 1u, "v_cmp_class_f64 of the smallest denormal");
+	Equal(vopc(0xA8u, 1u, 6u, "%vcc_lo"), 0u, "v_cmp_class_f64 of the smallest denormal is not +0");
+	Equal(vopc(0xA8u, 0x7ff0000000000001ull, 0u, "%vcc_lo"), 1u, "v_cmp_class_f64 low fraction bit makes a signaling NaN");
+	Equal(vopc(0xA8u, 0x7ff0000000000001ull, 9u, "%vcc_lo"), 0u, "v_cmp_class_f64 signaling NaN is not +inf");
+	Equal(vopc(0xA8u, 0x7ff8000000000000ull, 1u, "%vcc_lo"), 1u, "v_cmp_class_f64 quiet NaN");
+	Equal(vopc(0xA8u, 0x8000000000000000ull, 5u, "%vcc_lo"), 1u, "v_cmp_class_f64 -0");
+	Equal(vop3(0xA8u, 0x3ff0000000000000ull, 3u, "%vcc_lo", 0u, 1u), 1u, "VOP3 v_cmp_class_f64 with neg of +1.0 is -normal");
+	// CMPX writes EXEC.
+	Equal(vopc(0x98u, 0x3f800000u, 8u, "%exec_lo"), 1u, "v_cmpx_class_f32 of +1.0 keeps the lane");
+	Equal(vopc(0x98u, 0x3f800000u, 3u, "%exec_lo"), 0u, "v_cmpx_class_f32 of +1.0 as -normal clears the lane");
+	Equal(run({(0x3eu << 25u) | (0x98u << 17u) | (2u << 9u) | 256u}, 0x3f800000u, 1u << 8u, "%vcc_lo"), kSentinel,
+	      "v_cmpx_class_f32 leaves VCC alone");
+	Equal(vopc(0x98u, 0x3f800000u, 8u, "%exec_lo", 0u), 0u, "a true v_cmpx_class_f32 keeps an inactive lane off");
+	Equal(vopc(0x9Fu, 0x7e00u, 1u, "%exec_lo"), 1u, "v_cmpx_class_f16 quiet NaN");
+	Equal(vopc(0xB8u, 0xfff0000000000000ull, 2u, "%exec_lo"), 1u, "v_cmpx_class_f64 -inf");
+	Equal(vopc(0xB8u, 0xfff0000000000000ull, 9u, "%exec_lo"), 0u, "v_cmpx_class_f64 -inf is not +inf");
+	Equal(vop3(0xB8u, 0x7ff8000000000000ull, 1u, "%exec_lo", 0u, 0u), 1u, "VOP3 v_cmpx_class_f64 quiet NaN");
+	std::_Exit(0);
+}
+
 // v_mad_u16 / v_mad_i16: D.16 = S0.16 * S1.16 + S2.16; OPSEL[2:0] pick the source halves and OPSEL[3] the
 // destination half, the other half kept.
 [[noreturn]] void RunMad16(ShaderType stage)
@@ -1860,6 +1912,13 @@ TEST(EmulatorShaderArithmetic, CmpxAnd64BitComparesWriteTheirMask)
 	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
 	{
 		ASSERT_EXIT(RunWideCompareForms(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, ClassComparesClassifyEachWidth)
+{
+	for (ShaderType stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunClassForms(stage), ::testing::ExitedWithCode(0), "");
 	}
 }
 TEST(EmulatorShaderArithmetic, Mad16WritesTheSelectedHalf)

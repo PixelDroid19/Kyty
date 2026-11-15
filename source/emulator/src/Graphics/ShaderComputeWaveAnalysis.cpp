@@ -845,29 +845,67 @@ ShaderComputeWaveInstructionKind ClassifySpecificComputeWaveInstruction(const Sh
 }
 } // namespace
 
+// A double source: a register pair, or a constant the decoder sized as one.
+static bool IsDoubleSource(const ShaderOperand& operand)
+{
+	if (!ComputeWaveOperandIsPlain(operand) || operand.size != 2) { return false; }
+	switch (operand.type)
+	{
+		case ShaderOperandType::Vgpr: return ComputeWaveRegisterRangeIsValid(operand.register_id, operand.size, kMaxVgpr);
+		case ShaderOperandType::Sgpr:
+			return ComputeWaveRegisterRangeIsValid(operand.register_id, operand.size, kMaxSgpr) && (operand.register_id % 2 == 0);
+		case ShaderOperandType::IntegerInlineConstant:
+		case ShaderOperandType::FloatInlineConstant:
+		case ShaderOperandType::LiteralConstant: return true;
+		default: return false;
+	}
+}
+
+int ShaderFloatClassWidth(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::VCmpClassF16:
+		case ShaderInstructionType::VCmpxClassF16: return 16;
+		case ShaderInstructionType::VCmpClassF32:
+		case ShaderInstructionType::VCmpxClassF32: return 32;
+		case ShaderInstructionType::VCmpClassF64:
+		case ShaderInstructionType::VCmpxClassF64: return 64;
+		default: return 0;
+	}
+}
+
 bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction)
 {
 	if (!ShaderInstructionLoweringPreconditions(instruction)) { return false; }
+	const int width = ShaderFloatClassWidth(instruction.type);
+	if (width == 0) { return false; }
 	const auto& dst = instruction.dst;
 	// VOPC SDWA has scalar destination fields, not the VOP2 destination-select
-	// fields. Admit DWORD sources without sign extension or reserved controls.
+	// fields. Admit DWORD sources without sign extension or reserved controls;
+	// only the F32 form classifies a whole dword.
 	constexpr uint32_t unsupported_sdwa = (1u << 19u) | (1u << 22u) | (1u << 27u) | (1u << 30u);
+	const bool         sdwa_defined     = !instruction.vop_sdwa || (width == 32 && (instruction.vop_sdwa_ctrl & unsupported_sdwa) == 0u);
+	// v_cmpx's decoded VCC destination is a placeholder; EXEC is the target.
+	const bool exec_compare = ShaderInstructionTypeStartsWith(instruction.type, "VCmpx");
+	const bool dst_defined  = exec_compare || (IsScalarPairVariable(dst) && dst.type != ShaderOperandType::ExecLo);
 	// abs and neg on the classified float only move its sign bit.
 	ShaderOperand value = instruction.src[0];
 	value.absolute      = false;
 	value.negate        = false;
-	return instruction.type == ShaderInstructionType::VCmpClassF32 &&
-	       instruction.format == ShaderInstructionFormat::SmaskVsrc0Vsrc1 && instruction.src_num == 2 &&
-	       instruction.vop3_op_sel == 0u && instruction.vop3_omod == 0u &&
-	       (!instruction.vop_sdwa || (instruction.vop_sdwa_ctrl & unsupported_sdwa) == 0u) &&
-	       IsUnusedDestination(instruction.dst2) && IsScalarPairVariable(dst) && dst.type != ShaderOperandType::ExecLo &&
-	       IsTask3MaskSource(value) && IsTask3MaskSource(instruction.src[1]);
+	// An F16 inline float is a half encoding, which the integer load does not produce.
+	const auto mask_source = [&](const ShaderOperand& operand)
+	{ return IsTask3MaskSource(operand) && (width != 16 || operand.type != ShaderOperandType::FloatInlineConstant); };
+	const bool value_defined = width == 64 ? IsDoubleSource(value) : mask_source(value);
+	return instruction.format == ShaderInstructionFormat::SmaskVsrc0Vsrc1 && instruction.src_num == 2 && instruction.vop3_op_sel == 0u &&
+	       instruction.vop3_omod == 0u && sdwa_defined && IsUnusedDestination(instruction.dst2) && dst_defined && value_defined &&
+	       mask_source(instruction.src[1]);
 }
 
 bool ShaderComputeWaveGenericCompareSupported(const ShaderInstruction& instruction)
 {
 	if (!ShaderInstructionLoweringPreconditions(instruction)) { return false; }
-	if (instruction.type == ShaderInstructionType::VCmpClassF32) { return ShaderFloatClassComparisonSupported(instruction); }
+	if (ShaderFloatClassWidth(instruction.type) != 0) { return ShaderFloatClassComparisonSupported(instruction); }
 	const auto name = ShaderInstructionTypeName(instruction.type);
 	// SDWA compares carry the same undefined fields as the vector forms: source
 	// selects 7 and reserved bits 22 and 30 are refused, not lowered as defined values.

@@ -701,6 +701,12 @@ enum class ShaderInstructionType : uint32_t
 	VCmpGeI64,
 	VCmpFU64,
 	VCmpTU64,
+	// Float class compares other than v_cmp_class_f32; the v_cmpx forms write EXEC.
+	VCmpClassF16,
+	VCmpClassF64,
+	VCmpxClassF16,
+	VCmpxClassF32,
+	VCmpxClassF64,
 
 	ZMax
 };
@@ -2341,6 +2347,8 @@ struct ShaderBindResources
 [[nodiscard]] bool ShaderHasImageAtomic(const ShaderCode& code);
 [[nodiscard]] bool ShaderImageAtomicSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderImageAtomicResourceSupported(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind);
+// 16, 32 or 64 for a v_cmp(x)_class form, 0 otherwise.
+[[nodiscard]] int  ShaderFloatClassWidth(ShaderInstructionType type);
 [[nodiscard]] bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction);
 [[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
 	                                                int user_data_register_base);

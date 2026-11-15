@@ -231,7 +231,9 @@ bool ShaderInstructionTypeChangesExec(ShaderInstructionType type)
 	if ((value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxEqF32) &&
 	     value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxUF32)) ||
 	    (value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxLtF64) &&
-	     value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxGeU64)))
+	     value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxGeU64)) ||
+	    (value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxClassF16) &&
+	     value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxClassF64)))
 	{
 		return true;
 	}
