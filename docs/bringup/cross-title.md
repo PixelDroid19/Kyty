@@ -6415,6 +6415,14 @@ reuse it.
 Going faster exposed a further stop, fixed: a 2688x1512 storage view over a 336x189x32 volume at the same address, a
 recycled arena the multi-parent path already accepted; the single-parent path now compares layouts the same way.
 
+**Correction (2026-11-15).** "A session with no new pipeline writes nothing" did not hold. Every pipeline creation
+marked the cache dirty, including hits, and the driver serializes an unchanged cache in a different byte order. The
+digest check therefore saw a new blob, and `PPSA21567 - Astro Bot` rewrote its 136 MB blob about 25 s into every launch.
+On a btrfs volume with asynchronous discard, that write burst stalled the disk long enough to block SPIR-V store reads
+on the ring thread for 1-2 s each. Pipeline creation now chains creation feedback, and only a pipeline the driver did
+not find in the application cache marks the cache dirty. Evidence is in the robot platformer record "Freezes from the
+pipeline cache and array uploads (2026-11-15)".
+
 ## Guest small-block free lists corrupted by partial-line device writes (2026-11-01, fixed 2026-11-02)
 
 Host: Ryzen 5 7600, Arc A770, ANV Mesa 26.2.5, clean LTO build, 60 fps limit. Fixed by `0c26c49a8`.

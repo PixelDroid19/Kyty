@@ -6408,7 +6408,8 @@ profile showed `UtilFillImage` under `DMA_DATA` at 5 % of the main ring thread, 
 the flushes are bursts: 0 in most 5 s windows, about 150 in one. Deferring them on
 one run gave 19.9 fps against a same-code spread of 18.0-20.5.
 That spread came from the stall recorded under "Array uploads under guest stores", so a window mean could not judge
-this trial. Deferral has not been retested since; the fix there batches the uploads instead.
+this trial. Deferral has not been retested since; the fix there batches the uploads instead, and
+"Freezes from the pipeline cache and array uploads (2026-11-15)" re-uploads only the layers a store touched.
 
 Main ring thread after these changes, 150 samples: 54 % busy and flat, 22 % fence
 waits, 16 % register wait polls. No guest thread is busy. `DRAW_INDEX_INDIRECT`
@@ -6516,7 +6517,8 @@ timestamp dumps rather than by a window mean.
   | Utility fence wait time (burst dumps) | 1.94 s | 0.34 s |
 
   Frames over the last nine dumps go from 923 to 959. Frames in the burst still dip to 87-104 against about 110, and
-  the array is still re-detiled in full for each store. Validation over a 110 s run reports no copy error; it did report 46
+  the array was still re-detiled in full for each store until 2026-11-15 (see "Freezes from the pipeline cache and array
+  uploads"). Validation over a 110 s run reports no copy error; it did report 46
   `vkCmdDispatch` messages, so the layer was active, and whether those predate this change was not checked. A capture after the burst shows no corruption. `PPSA09809 - OCTOPATH TRAVELER II`
   reached only its loading screen in an 85 s run, so its cube arrays were not checked.
 - **The 16 % tail is a different thing.** It stays at 15-18 % of GPU time and about 5 ms per frame while submits per
@@ -7164,3 +7166,47 @@ neutral value. That is a limited input observation, not sustained gameplay or
 visual-equivalence validation. The manual capture's automated color heuristic
 reported `hot_corruption`; its verdict alone cannot establish corruption in a
 sand-colored scene without a reference comparison.
+
+## Freezes from the pipeline cache and array uploads (2026-11-15)
+
+`PPSA21567 - Astro Bot`, Arc A770, Mesa 26.3.0-devel (git 34ad0a45aab), kernel 7.2.15, dunes route with the 60 fps
+present cap, diagnostic builds, one run per arm. The game is on an NTFS volume; caches are on a btrfs volume mounted
+with `compress=zstd:3,ssd,discard=async`.
+
+- **Observed.** Freezes of 1-6 s in the first two minutes, with the ring thread blocked in `read()` of SPIR-V store
+  files of 5-380 KB. Each read took 1.2-2.0 s with no major fault. The thread was in uninterruptible sleep in btrfs
+  metadata reads (`read_extent_buffer_pages`).
+- **Cause 1: the pipeline cache was rewritten on every launch.** The 136 MB driver blob was saved about 25 s after
+  boot even when every pipeline hit it. The driver serializes an unchanged cache in a different byte order, so the
+  blob had the same size and a new digest. A host sampler showed a burst of about 22,000 writes to the disk, a second
+  in which none of 4 requests completed, then reads that waited 5.0 s in total and discards that took 2.0 s. The frame
+  rate reached 0 fps in that second.
+- **Fix 1.** Pipeline creation chains creation feedback. Only a pipeline the driver did not find in the application
+  cache marks the cache dirty.
+
+  | Run | Disk writes | Read wait | SPIR-V reads over 1 s |
+  | --- | --- | --- | --- |
+  | Before | 77,500 | 260 s | several, stacked up to 5-6 s |
+  | After | 6,934 | 18 s | none |
+
+  The cache file was not rewritten after the fix. With an empty cache file it was still saved (43.9 MB), so new
+  pipelines are kept.
+- **Cause 2: every `DMA_DATA` store re-detiled the whole 192-layer array.** Each store of 4-64 KiB into the 17.3 MB
+  array cost 6-9 ms. 192 such flushes per run summed to 1.8 s, in a burst at 65-76 s of the route.
+- **Fix 2.** Texture updates use the page-generation runs that storage buffers already use. The layers those runs
+  cover are detiled and uploaded. An empty baseline, label updates, backing versions and other texture kinds keep the
+  full upload. One binary with a diagnostic switch for the full path gave both arms:
+
+  | Arm | Flushes of 5 ms or more | Lowest fps, 65-76 s |
+  | --- | --- | --- |
+  | Full upload | 192 | 1.9 |
+  | Touched layers | 12 | no second under 15 |
+
+  The 190 partial uploads sent 1 layer (144 times), 2 layers (45) or 8 layers (1). A diagnostic hash of each layer's
+  guest bytes found no untouched layer that had changed in those 190 uploads; on the first one it reported a touched
+  layer as changed, so the check engaged. The two arms reached different shots at the capture times (the faster arm
+  is about 10 s ahead in the cinematic), so pictures were not compared frame for frame. Neither capture shows
+  corruption.
+- **Still open.** Entering the dunes level drops to 3 fps for about 3 s. The ring thread reads SPIR-V store files,
+  translates shaders, creates pipelines and creates textures synchronously at that point. Smaller dips of 8-14 fps
+  remain at 82-87 s; their cause was not identified.
