@@ -7193,10 +7193,29 @@ with `compress=zstd:3,ssd,discard=async`.
   pipelines are kept. The fix removes one producer of the stall, not the stall: two later runs with no cache save
   still had SPIR-V reads of 0.5-2.0 s (4.6 s and 5.3 s in total).
 - **The disk side.** The volume is a DRAM-less NVMe drive that takes 1.6-2.0 s per discard. btrfs held 4.7-5.1 GB of
-  freed extents waiting for discard during these runs, and nothing the emulator wrote during a run refilled it. The
+  freed extents waiting for discard during these runs. In one run the backlog grew from 3.3 to 4.8 GB while the title
+  ran, and the driver's own shader cache was written in that run; which writes refilled it was not separated. The
   run with the most discards between 40 and 60 s (95, 18.8 s of discard time, reads waiting 18.2 s) fell to 0 fps for
   several seconds in that window. The run with none there stayed at 19.8 fps or above. Mount options and trim policy
   are host settings; the emulator side is that the ring thread reads the SPIR-V store synchronously.
+- **Fix 3: the store reads a title's working set ahead of use.** In a run with a large discard backlog, store loads
+  on the ring thread summed to 20.4 s, with 260 ring-thread stalls inside `read()` and no shader compile. Reading
+  the files into the page cache first did not hold: their pages were evicted during the run, and the stalls moved to
+  metadata reads. A diagnostic build that read the run's 358 entries (64.1 MB, 147 ms) into process memory before
+  use cut the loads to 36 ms in total (3 ms at most) with no ring-thread stall; that run also had fewer discards
+  (8 s in total), so the host did not match. The shipped version records the entries a title loads, in first-use
+  order, in a manifest inside the title's compute-recipe directory (it follows the translator version). The next
+  session reads the listed entries into memory on a background thread, bounded to 4,096 entries and 256 MiB. Each
+  entry is freed when it is loaded and passes the same checks as a file read. Same route, the shipped store in a build
+  with diagnostic lookup timers, store pages dropped from the page cache before the second run:
+
+  | Run | Manifest | Store loads | Total | Longest |
+  | --- | --- | --- | --- | --- |
+  | Records the set | none | 413 | 374 ms | 33 ms |
+  | Reads the set ahead | 451 entries | 429 | 73 ms | 2 ms |
+
+  The host had little discard backlog during this pair (no ring-thread stall in either run), so the 20 s case was not
+  reproduced on the shipped code. The drops at 80, 92 and 95 s appear in both runs, so they are not store reads.
 - **Cause 2: every `DMA_DATA` store re-detiled the whole 192-layer array.** Each store of 4-64 KiB into the 17.3 MB
   array cost 6-9 ms. 192 such flushes per run summed to 1.8 s, in a burst at 65-76 s of the route.
 - **Fix 2.** Texture updates use the page-generation runs that storage buffers already use. The layers those runs
@@ -7217,4 +7236,6 @@ with `compress=zstd:3,ssd,discard=async`.
   corruption.
 - **Still open.** In one run, entering the dunes level dropped to 3 fps for about 3 s, with the ring thread reading
   SPIR-V store files, translating shaders, creating pipelines and creating textures at that point. How much of it was
-  disk wait was not measured. Dips of 8-14 fps at 82-87 s in two runs have no identified cause.
+  disk wait was not measured. Drops to 6-14 fps around 80, 92 and 95 s repeat with the working set read ahead, so
+  they are not store reads; their cause is not identified. Whether the driver's own shader cache, written by the
+  driver rather than the emulator, also waits on the disk was not checked.
