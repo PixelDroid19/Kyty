@@ -883,6 +883,36 @@ static int KYTY_SYSV_ABI Http2Init(int libnet_mem_id, int libssl_ctx_id, size_t 
 	return context_id;
 }
 
+struct Http2MemoryPoolStats
+{
+	size_t  pool_size;
+	size_t  max_inuse_size;
+	size_t  current_inuse_size;
+	int32_t reserved;
+};
+static_assert(sizeof(Http2MemoryPoolStats) == 32);
+
+// The library state lives in host memory, so none of the pool the title handed to sceHttp2Init is in use.
+static int KYTY_SYSV_ABI Http2GetMemoryPoolStats(int lib_http2_context_id, Http2MemoryPoolStats* stats)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t lib_http2_context_id = %d\n", lib_http2_context_id);
+
+	if (stats == nullptr)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+	std::lock_guard lock(g_http2_registry.mutex);
+	const auto      context = g_http2_registry.contexts.find(lib_http2_context_id);
+	if (context == g_http2_registry.contexts.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	*stats           = {};
+	stats->pool_size = context->second.pool_size;
+	return OK;
+}
+
 static int KYTY_SYSV_ABI Http2CreateTemplate(int lib_http2_context_id, const char* user_agent, int http_version,
                                              int is_auto_proxy_configuration)
 {
@@ -1444,6 +1474,7 @@ static int KYTY_SYSV_ABI Http2DeleteRequest(int request_id)
 LIB_DEFINE(InitNet_1_Http2)
 {
 	LIB_FUNC("3JCe3lCbQ8A", LibHttp2::Http2Init);
+	LIB_FUNC("otUQuZa-mv0", LibHttp2::Http2GetMemoryPoolStats);
 	LIB_FUNC("YiBUtz-pGkc", LibHttp2::Http2Term);
 	LIB_FUNC("+wCt7fCijgk", LibHttp2::Http2CreateTemplate);
 	LIB_FUNC("pDom5-078DA", LibHttp2::Http2DeleteTemplate);
