@@ -7204,7 +7204,7 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   and mixed follow the same rule, and no title is known to exercise them. The translator and the shader id do not
   read the access, and every other reader of it also requires the program code or scalar or guarded-load flags that
   the front proof does not set, so the buffer binds and translates as before: no visual or frame-rate change is
-  expected, and none was measured. One run per title after the fix. The same message class on the same title
+  expected, and none was measured. One run per title after the fix. The same message class on `PPSA09809 - OCTOPATH TRAVELER II`
   (`st=8 f=64` at 20.6 s, above) was re-run later and is not covered by this fix ("typed storage read only by format loads",
   below). No unit test covers the non-extended part of the front proof; one was not added because the fix only stops
   discarding evidence the analysis already tests (the extended part has one, below). After the fix, Astro (private cache, warm): child exit 0, no first error,
@@ -7258,13 +7258,27 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   `no_runtime_failure` passes; the gates without a reference (`scene_checkpoint`, `action_response`,
   `visual_compare`) fail as before, 60 fps. The recorded `st=8 f=64 ds=22c` event (same title, same 20.6 s window,
   same metadata/no-code shape) did not occur: the run passes that window and keeps no first error at all. Whether it
-  was another descriptor of the same row is not established; other routes were not run. Astro (warm private cache): no first error, median 57.6 fps over the last 40
-  samples. Minecraft (warm): no first error, 60 fps; in one of two runs the scripted tap landed in the loading stall
-  and the input gates failed, which the repeat did not reproduce. The same program also restores lanes 8-11 (EUD
-  dwords 36-39) into s[0:3] for an `image_sample_lz` sampler; it raises no event. The sample lowering takes the
-  sampler index from the restored SGPR value, and the EUD load fills those dwords from the static row mapped there;
-  a bounded probe showed that row is an extended sampler (`start=52`), so the readback resolves to the right
-  sampler. When
+  was another descriptor of the same row is not established; other routes were not run. On the final code, Astro and Minecraft (warm
+  private caches): no first error, `no_runtime_failure` passes, the three gates without a reference fail as before;
+  no frame-rate claim (scenes differ between runs). On an earlier revision of the proof, one of two Minecraft runs
+  had the scripted tap land in the loading stall and failed the input gates; the repeat and the final-code run
+  passed them. The same program also restores lanes 8-11 (EUD
+  dwords 36-39) into s[0:3] for an `image_sample_lz` sampler; it raises no event. Reading the code: the
+  `image_sample_lz` lowering indexes the sampler array with the restored SGPR value, which the EUD load fills from
+  the static row mapped there, and a bounded probe showed that row is an extended sampler (`start=52`); the value
+  was not evaluated at run time. The static lookup (`ShaderFindImageSamplerDescriptor`, `ShaderResources.cpp`)
+  matches by register, dynamic records, scalar copies and constant samplers, none of which follows a lane
+  readback, so the same probe saw it return -1 for that sample (pc 572,
+  `s[0:3]`, texture 2, in the code the sampled-texture association pass scans). That pass
+  (`ShaderAssociateSampledTextureSamplers`, `ShaderResources.cpp`) builds `sampler_indices_mask`, which
+  `ShouldUseGen5Srgb` (`GraphicsRenderBind.cpp`) reads to choose the texture's sRGB view, so texture 2 binds with
+  mask 0 and the default gamma. Latent here: the probe printed every sampler of that bind and none sets force or
+  skip degamma, so the choice for that texture (format 77) is the default either way. It would bind the wrong view
+  when a sampler that reaches a sample only through a lane readback sets either bit. The gradient and gather-compare
+  lowerings (`ShaderSpirvImage.cpp`) refuse a sample whose sampler resolves to -1; neither is on this path. Not
+  fixed, because no installed title is shown to depend on it and the change would alter view selection for every
+  title. Direction: feed `copied_image_descriptors`, which the lookup already honours by consumer pc, from the same
+  lane-spill tracking the storage proof uses. When
   the 6.5 s event started is not established; finding it needs a bisection, which was not run.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
