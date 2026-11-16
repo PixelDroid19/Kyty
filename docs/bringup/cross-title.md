@@ -7389,9 +7389,15 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   ids (temporary, one run), the guest's main thread and two other guest threads each use a full core of user time
   with no page faults through the loading window, and the main thread keeps doing so in gameplay at 60 fps, which
   reads as a spin wait; three other guest threads take 30,000-120,000 minor page faults per 0.3 s with 30-60 %
-  of their time in the kernel. Direction: compare each failing request's size with the largest free range in its
-  pool (one crash had 54 MiB free in total), find what the spinning main thread waits on, and find which memory
-  the faulting threads populate.
+  of their time in the kernel. Later the same day: stack samples of the main thread (five of five during loading)
+  land in the TSC read of the title's own event loop, which polls the user-service event queue, the save-data
+  dialog status and the TSC with no sleep, so the spin is the title's event pump, not a wait Kyty leaves
+  unanswered. The faults are first touches of Kyty's shared guest-memory backing: the process's shared resident
+  set grows from 0.4 to 2.9 GB between 4.6 and 5.6 s while anonymous memory stays at 0.37 GB. The failing
+  request, read from the stack frame of the upload routine in 30 crash reports, is 1.4-4 MiB (9 of them exactly
+  4 MiB) against the pool's two 256 MiB blocks, so the pool fails when it is almost entirely in use, not on an
+  oversized request. Direction: find what returns this pool's allocations to it (the condition the title waits on
+  before releasing an upload), and whether the free figure the sampler reads counts the largest contiguous range.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
