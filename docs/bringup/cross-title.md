@@ -7397,20 +7397,24 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   set grows from 0.4 to 2.9 GB between 4.6 and 5.6 s while anonymous memory stays at 0.37 GB. The failing
   request, read from the stack frame of the upload routine in 30 crash reports, is 1.4-4 MiB (9 of them exactly
   4 MiB) against the pool's two 256 MiB blocks, so the pool fails when it is almost entirely in use, not on an
-  oversized request. The failing call is the title's texture creation, which takes this pool for three of its
-  texture kinds and logs and leaves a null base when the allocation fails; the size it asks for is the title's
-  own arithmetic on pitch, height and format tables, with no import in between. Capacity and request size are
-  therefore both the title's, and what differs under Kyty is how many textures are alive at the peak. The upload
-  then queues a command for the renderer's own thread on a mutex and condition-variable queue (56 code
-  references). The loader then waits on a condition variable until the queue's completed sequence reaches its
-  command, and the renderer thread publishes as completed the sequence it recorded for its current frame slot,
-  so textures go back to the pool one frame slot at a time (the queue holds four per-slot lists). The title
-  imports no CPU-side GPU wait at all (no event-queue or flip wait; its only sleeps are two non-frame retry
-  loops), so the renderer's pace comes from its own queues, the GPU-side waits it records in its command
-  buffers, and the time each submit call takes. Direction: measure how long the renderer thread spends inside
-  the submit calls during loading and how often its frame slot advances, and compare with the pool's low points;
-  a submit that blocks longer than a queue append, or a slot that advances only on a GPU result, would make the
-  peak Kyty's contract.
+  oversized request. The failing call is the title's resource creation, which takes this pool for three of its
+  resource kinds and logs and leaves a null base when the allocation fails; the upload routine calls it with its
+  own byte size (arithmetic on pitch, height and format tables, no import in between), copies rows into the
+  result and queues a command that owns the object, which fits a transient upload buffer rather than a resident
+  texture. Capacity and request size are therefore both the title's; what differs under Kyty is how many of
+  these buffers are alive at the peak. The command goes to the renderer's own thread on a mutex and
+  condition-variable queue, and the loader waits until the queue's completed sequence reaches its command. The
+  renderer thread advances a slot index modulo a slot count, and for the new slot reads a 64-bit value through a
+  pointer and compares it with the value it expects; while the value is lower it spins with pause instructions,
+  and only then frees the objects held for that slot back to the pool and publishes the slot's sequence as
+  completed. The value is a memory label of the kind the title's command buffers write at end of pipe, so the
+  release is gated on a value Kyty's GPU emulation produces, and the label latency measured earlier (0.4 ms idle,
+  as long as the stall otherwise) is the latency of this release. Not shown: that the label is written by an
+  end-of-pipe event in Kyty's queue (its address was not traced to a packet), and that the extra latency raises
+  the peak past the pool (earlier pool samples did not line up with stalls). The import table also has 78
+  entries whose names were not resolved, so the absence of an event-queue or flip wait elsewhere is not
+  established. Direction: trace the label address to the packet that writes it, and measure the time from that
+  packet's submit to the label write against the pool's low points in the same run.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
