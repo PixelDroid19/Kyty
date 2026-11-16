@@ -7237,8 +7237,7 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   extended user data (`ext=1`, slot 6) with no program code: `ShaderProveFrontStorageReads` (`Shader.cpp`) skips
   extended V#s, so the binding stays unknown and the typed check at `GraphicsRenderBind.cpp` (`PrepareStorageBuffers`)
   reports it on every draw that uses it; the binding itself proceeds. Open. Suggested direction: follow the front's
-  scalar load of the extended slot to the SGPRs it fills and analyse the uses of those, as the dynamic scalar load
-  mapping does for other stages. The recorded `st=8 f=64 ds=22c` event (above) has the same swizzle and reason
+  scalar load of the extended slot to the SGPRs it fills and analyse the uses of those. The recorded `st=8 f=64 ds=22c` event (above) has the same swizzle and reason
   but was not seen in these runs; the timeline keeps only the first error, so whether it still occurs is not
   established, and when the 6.5 s event started is not established either. Minecraft (warm private cache): exit
   0, no first error, 60 fps.
