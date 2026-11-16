@@ -7204,8 +7204,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   and mixed follow the same rule, and no title is known to exercise them. The translator and the shader id do not
   read the access, and every other reader of it also requires the program code or scalar or guarded-load flags that
   the front proof does not set, so the buffer binds and translates as before: no visual or frame-rate change is
-  expected, and none was measured. One run per title after the fix. The same message class on another title
-  (`st=8 f=64`, above) was re-run later and is not covered by this fix ("typed storage read only by format loads",
+  expected, and none was measured. One run per title after the fix. The same message class on the same title
+  (`st=8 f=64` at 20.6 s, above) was re-run later and is not covered by this fix ("typed storage read only by format loads",
   below). No unit test covers the non-extended part of the front proof; one was not added because the fix only stops
   discarding evidence the analysis already tests (the extended part has one, below). After the fix, Astro (private cache, warm): child exit 0, no first error,
   `no_runtime_failure` passes, `visual_compare`, `scene_checkpoint` and `action_response` fail as before, 37-44 fps
@@ -7256,14 +7256,16 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   and the live `s_endpgm` case; disabling the two-SGPR refusal or the pointer check makes it fail. After the fix,
   OCTOPATH (private cache, on the final code): no first error and
   `no_runtime_failure` passes; the gates without a reference (`scene_checkpoint`, `action_response`,
-  `visual_compare`) fail as before, 60 fps. The recorded `st=8 f=64 ds=22c` event did not occur on this route, which
-  does not show it is gone on others. Astro (warm private cache): no first error, median 57.6 fps over the last 40
+  `visual_compare`) fail as before, 60 fps. The recorded `st=8 f=64 ds=22c` event (same title, same 20.6 s window,
+  same metadata/no-code shape) did not occur: the run passes that window and keeps no first error at all. Whether it
+  was another descriptor of the same row is not established; other routes were not run. Astro (warm private cache): no first error, median 57.6 fps over the last 40
   samples. Minecraft (warm): no first error, 60 fps; in one of two runs the scripted tap landed in the loading stall
   and the input gates failed, which the repeat did not reproduce. The same program also restores lanes 8-11 (EUD
-  dwords 36-39) into s[0:3] for an `image_sample_lz` sampler; it raises no event and was not examined further. Open
-  question: how that sampler operand resolves when its S# arrives through a readback rather than from a mapped
-  load. When
-  the 6.5 s event started is not established.
+  dwords 36-39) into s[0:3] for an `image_sample_lz` sampler; it raises no event. The sample lowering takes the
+  sampler index from the restored SGPR value, and the EUD load fills those dwords from the static row mapped there;
+  a bounded probe showed that row is an extended sampler (`start=52`), so the readback resolves to the right
+  sampler. When
+  the 6.5 s event started is not established; finding it needs a bisection, which was not run.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
