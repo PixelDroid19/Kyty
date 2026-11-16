@@ -6308,6 +6308,9 @@ memory stayed within run-to-run noise (8.3-9.4 GiB), not separately isolated.
   ms of command-thread time in five seconds at 26-30 fps, about 6 % of those seconds. Smaller windows would
   undo the submit cost above, so no change was made; moving the export off the command thread is the
   direction, not started.
+- **Later (2026-11-16, `PPSA03355 - Hades` boot):** the same export, 8-16 ms per 64 MiB window, is the whole
+  command-thread cost of the loading draws before the title's intermittent boot stop; see "Early stops seen in
+  the same sweep".
 
 ## Huge pages for direct memory: not adopted, GPU reads go through the IOMMU (2026-10-31)
 
@@ -7336,9 +7339,23 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   the amount alive depends on how fast Kyty completes that GPU work; this link is not shown (no run has moved the
   crash rate by changing GPU completion), and the guest's release condition was not read. Rates seen: 1 crash in 4,
   4 in 4 with the sampler at 200 ms, 3 in 4 and 1 in 3 with it at 100 ms, so the probe itself changes timing.
-  Direction: tie the guest's frees to the label or wait it releases on (time-stamp the label writes and the
-  pool's free total together), then measure Kyty's submit-to-label latency during loading; a fix belongs in that
-  latency, not in the allocator.
+  Where the command-processor time goes in that window (2026-11-16, local timers, 100 ms buckets, one run each):
+  the cost is 3 indexed draws (`DRAW_INDEX_OFFSET_2`, 6 indices) per 100 ms taking 10-120 ms each, all of it in
+  the guest-device-address preparation, in its residency phase over the physical ranges. Each such draw opens one
+  or more 64 MiB physical windows, and the export (pin and `udmabuf` creation) took 8-16 ms per window whose pages
+  the guest had not written, against 0.3-0.9 ms for the device import; the rest, about 3 ms per preparation, is
+  the populated-page query over a 2.6-2.9 GiB span not yet imported. A run's 31 windows cost about 160 ms of
+  export, about 100 ms of it in the first preparation. GPU labels fire 0.4 ms after the command processor creates
+  them when it is idle; in the buckets with an expensive draw the longest delay equals that draw's command time
+  (65.0 against 65.1 ms, 76.4 against 76.5, 88.4 against 88.5), so the delay is the command-thread stall, not GPU
+  completion. Between those draws the guest submits few labels (4-13 per 100 ms) while the command thread is idle,
+  so the low label rate is not only the stall. The run with these timers survived and still had the stalls, so the
+  stall alone does not decide the crash; no run has yet removed it. A prepopulation arm (`fallocate` of the
+  physical range inside the first export) is not evidence either way: it put a 590-740 ms stall into the loading
+  window and moved the per-preparation cost into the unpopulated-span search (16 ms).
+  Direction: move the window export off the command thread (the open direction in "Physical windows are whole
+  64 MiB chunks"), or prepopulate before guest threads run, then judge by the pool's per-cycle low point and the
+  label rate rather than the crash rate; a fix belongs in Kyty's command-thread latency, not in the allocator.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
