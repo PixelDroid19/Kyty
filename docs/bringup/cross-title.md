@@ -7246,19 +7246,23 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   and format from the restored SGPR values. `ShaderEudDescriptorReadOnlyByFormatLoads` (`ShaderResources.cpp`) now
   follows each word through SGPRs and static spill lanes and proves the row typed and read only by format loads
   when every EUD load that reaches it loads exactly its four dwords, no other instruction reads the EUD pointer,
-  every reader is a whole-V# format load, no word lives in two SGPRs or two lanes at once, and the V# is dead before
-  any branch. Anything else leaves the row unknown, as before. A record was not added for it: a record claims every
+  every SGPR reader is a whole-V# format load, a parked lane is read only by a `v_readlane` of a constant lane, no
+  word lives in two SGPRs or two lanes at once, and the V# is dead before any branch (reaching `s_endpgm` with it
+  live is accepted). Anything else leaves the row unknown, as before. A record was not added for it: a record claims every
   read of its destination until the last consumer, and here s[0:3] carries another V# inside that window. The
   access is not part of the shader id and the translator does not read it, so only the false event goes. A unit test
-  covers the proof and its refusals (lane refilled, spill VGPR rewritten, partial readback, a word in two SGPRs, store
-  and raw consumers, a load covering part of the V#, a copied pointer); disabling the two-SGPR refusal or the
-  pointer check makes it fail. After the fix, OCTOPATH (cold private cache): no first error and
+  covers the proof and its refusals (lane refilled, spill VGPR rewritten or read as vector data, partial readback, a
+  word in two SGPRs, store and raw consumers, a load covering part of the V#, a copied pointer, a branch while live)
+  and the live `s_endpgm` case; disabling the two-SGPR refusal or the pointer check makes it fail. After the fix,
+  OCTOPATH (private cache, on the final code): no first error and
   `no_runtime_failure` passes; the gates without a reference (`scene_checkpoint`, `action_response`,
   `visual_compare`) fail as before, 60 fps. The recorded `st=8 f=64 ds=22c` event did not occur on this route, which
   does not show it is gone on others. Astro (warm private cache): no first error, median 57.6 fps over the last 40
   samples. Minecraft (warm): no first error, 60 fps; in one of two runs the scripted tap landed in the loading stall
   and the input gates failed, which the repeat did not reproduce. The same program also restores lanes 8-11 (EUD
-  dwords 36-39) into s[0:3] for an `image_sample_lz` sampler; it raises no event and was not examined further. When
+  dwords 36-39) into s[0:3] for an `image_sample_lz` sampler; it raises no event and was not examined further. Open
+  question: how that sampler operand resolves when its S# arrives through a readback rather than from a mapped
+  load. When
   the 6.5 s event started is not established.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
