@@ -7413,8 +7413,16 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   end-of-pipe event in Kyty's queue (its address was not traced to a packet), and that the extra latency raises
   the peak past the pool (earlier pool samples did not line up with stalls). The import table also has 78
   entries whose names were not resolved, so the absence of an event-queue or flip wait elsewhere is not
-  established. Direction: trace the label address to the packet that writes it, and measure the time from that
-  packet's submit to the label write against the pool's low points in the same run.
+  established. Measured later the same day (temporary sampler reading the gate's record every 5 ms, one run
+  that crashed): the queue has two slots whose labels sit in one guest page; the renderer was behind its label
+  for 0-5 ms per 100 ms through the whole loading window, and in the last 300 ms before the crash, while the
+  pool's second block drained from 256 MiB to under 12 MiB, the command processor was idle (0.0-0.1 ms of packet
+  work per 100 ms) and the slot advanced 0-3 times per 100 ms. The label gate is therefore not what holds the
+  release back. The renderer function is not a dedicated thread: the title hands it to its own job system as a
+  job (or calls it inline when the queue is in synchronous mode), so its pace is that of a job worker; two
+  samples of the job workers that use a full core showed them in file opens, sleeps, timed condition waits,
+  formatting and mutex calls, not in the renderer. Direction: find which worker runs the renderer job during
+  loading and what it spends its time on between slot advances.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
