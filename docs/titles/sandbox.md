@@ -35,8 +35,40 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   (set 1, binding 6). Whether that slot is read is not established: an empty bank is left unpadded, so index 0 may belong to a bank the
   shader never samples. Not fixed; direction: compare the guest T#
   number format with the view format chosen for it and the sampled type the translator declares.
-- **Direction.** Name the copy's source and target from the emulator side (the flip path and staging uploads
+- **Direction (superseded by the follow-up below).** Name the copy's source and target from the emulator side (the flip path and staging uploads
   submitted just before the reset), since the dump cannot, and repeat the route a few times with and without db6d7c132's reuse to see whether the rate moves.
+- **Follow-up (2026-11-15, c3b4c6d5d, same host, Mesa ANV git 26.3.0 at 34ad0a45aab; open, driver defect).**
+  - *Observed.* Two strict runs hung back to back on the title screen, 12.7 s and 20.1 s after launch, while
+    loading after the first button press (`vkWaitSemaphores (queue timeline) failed: result=-4`); seven runs that
+    followed held. A third hang was caught by launching the emulator directly (`kyty_agent playable-regression`
+    passes only its own allowlist of variables to the child, so `KYTY_SUBMIT_FAULT_*`, `KYTY_RECENT_DRAW_*` and
+    `KYTY_VULKAN_VALIDATION` set around it never reach the emulator; four agent runs made for this were therefore
+    uninstrumented) with a pad route tapping cross every 3 s.
+  - *Hung work, named from the emulator.* The submit-fault report and the recent-draw ring name the unfinished
+    command buffer: it opens with a pair of non-indexed 4-vertex triangle-strip guest draws with the same vertex
+    and pixel programs, followed by UI draws and a 240x135 dispatch. In the frames before and after, the same pair
+    sits in the middle of a command buffer; in the hung frame a submission landed right before it (the idle-GPU
+    submit is timing-dependent). In all three device core dumps the job starts at the batch address, sets a
+    1920-wide D32 depth buffer with stencil and HiZ, draws the pair with the pixel shader disabled and with
+    TBIMR enabled (bit 13 of `3DPRIMITIVE` and `3DSTATE_TBIMR_TILE_PASS_INFO`, named from the gen12.5 genxml),
+    and stops at the depth-stall `PIPE_CONTROL` that follows. A compute walker found next to the chunk belongs to
+    an adjacent batch, not provably the job before; an in-batch compute-to-3D switch is excluded for this hang.
+  - *Reproducer.* A local diagnostic that submits before the first 4-vertex auto draw of each pair hangs the GPU
+    within seconds of launch in every control run (5 of 5).
+  - *Discriminators, forced reproducer.* `INTEL_DEBUG=reemit` (all state re-emitted for every draw): 40 s and
+    about 6500 forced submits, no reset (one run). `INTEL_DEBUG=nofc`: hangs. `INTEL_DEBUG=nohiz`: hangs (that the
+    flag engaged was not checked). Driconf `intel_tbimr=false` (the driver confirmed the override): the TBIMR pair
+    no longer hangs, but the run hangs later in a different job of driver-internal rectangle operations followed by
+    a switch to another HiZ depth buffer, again at a depth-stall `PIPE_CONTROL` (one dump).
+  - *Vulkan usage.* With the validation layer (core checks only, the known `VUID-vkCmdDrawIndexed-format-07753`
+    filtered, since validation errors stop the run) the forced reproducer hangs and the layer reports nothing
+    else. The earlier "validation run held the world" above predates the stop on the first error.
+  - *Not established.* The driver state that the full re-emit restores; no ingredient the emulator controls was
+    named, so nothing was changed in Kyty. The dw-3180 group of the same programs also opens a command buffer every
+    frame and completes; its depth and stencil state was not compared with the hung pair's.
+  - *Direction.* Compare the hung pair's Vulkan state with the dw-3180 group's, read where `reemit` acts in the
+    driver at the installed commit, and report the reproducer to the driver upstream (needs the maintainer's
+    approval).
 
 ## Sandbox title: world frame rate at `6a6a5818a` (2026-11-14, measured)
 
