@@ -379,7 +379,12 @@ KYTY_SCRIPT_FUNC(kyty_load_param_json_func)
 		EXIT("invalid args\n");
 	}
 
-	Loader::SystemContentLoadParamJson(Scripts::ArgGetVar(0).ToString());
+	const auto file_name = Scripts::ArgGetVar(0).ToString();
+	if (!Loader::SystemContentLoadParamJson(file_name))
+	{
+		EXIT("content metadata not loaded (missing, unreadable, or without titleId and contentVersion): %s\n",
+		     file_name.utf8_str().GetData());
+	}
 
 	return 0;
 }
