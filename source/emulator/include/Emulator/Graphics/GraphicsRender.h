@@ -799,14 +799,17 @@ public:
 		VkQueryPool pool  = VK_NULL_HANDLE;
 		uint32_t    query = 0;
 	};
-	// Records a bottom-of-pipe timestamp at this point of the stream; it is readable once the submission completed
-	// and until the recording begins again.
-	TimestampQuery WriteTimestamp();
+	// Records a bottom-of-pipe timestamp at this point of the stream into a query its caller owns and keeps unreset
+	// until the submission completed and the value was read.
+	void WriteTimestamp(const TimestampQuery& query);
 	[[nodiscard]] bool AwaitsSubmissionOnDevice(SubmissionId submission) const;
 	[[nodiscard]] const std::vector<SubmissionId>& DeviceAwaitedSubmissions() const { return m_device_awaited; }
 
 private:
 	friend class PipelineCache;
+
+	// A timestamp nobody reads, in a query the recording owns and resets when it begins again.
+	void WriteSeparatingTimestamp();
 
 	struct OpenRenderPass
 	{

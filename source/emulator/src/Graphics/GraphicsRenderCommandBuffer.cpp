@@ -2834,10 +2834,10 @@ void CommandBuffer::SeparateDepthKillDraw(bool kills_with_depth_write)
 		return;
 	}
 	// Nothing reads the value: the pipelined write itself keeps the draws apart.
-	WriteTimestamp();
+	WriteSeparatingTimestamp();
 }
 
-CommandBuffer::TimestampQuery CommandBuffer::WriteTimestamp()
+void CommandBuffer::WriteSeparatingTimestamp()
 {
 	EXIT_IF(IsInvalid());
 	auto*          gctx       = g_render_ctx->GetGraphicCtx();
@@ -2857,11 +2857,15 @@ CommandBuffer::TimestampQuery CommandBuffer::WriteTimestamp()
 		vkResetQueryPool(gctx->device, query_pool, 0, kTimestampsPerPool);
 		m_timestamp_pools.push_back(query_pool);
 	}
-	m_latest_full_barrier = false;
-	const TimestampQuery written {m_timestamp_pools[pool_index], m_timestamps % kTimestampsPerPool};
-	DeferredState(m_main)->WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, written.pool, written.query);
+	WriteTimestamp({m_timestamp_pools[pool_index], m_timestamps % kTimestampsPerPool});
 	m_timestamps++;
-	return written;
+}
+
+void CommandBuffer::WriteTimestamp(const TimestampQuery& query)
+{
+	EXIT_IF(IsInvalid() || query.pool == VK_NULL_HANDLE);
+	m_latest_full_barrier = false;
+	DeferredState(m_main)->WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query.pool, query.query);
 }
 
 VkDescriptorSet CommandBuffer::AllocateTransportDescriptorSet(VkDescriptorSetLayout layout)

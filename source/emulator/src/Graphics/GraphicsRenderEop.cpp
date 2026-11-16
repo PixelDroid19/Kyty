@@ -304,6 +304,67 @@ static GpuClockCalibration CurrentClockCalibration(const GraphicContext& gctx)
 	return calibration;
 }
 
+// Timestamp queries of end-of-pipe clock marks. A mark's label reads its query when the submission is published,
+// which can come after the recording's command buffer began again, so the mark owns the query instead of the
+// recording and returns it only after that read.
+class ClockMarkQueries
+{
+public:
+	CommandBuffer::TimestampQuery Acquire()
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_free.empty())
+		{
+			AddPoolLocked();
+		}
+		const auto query = m_free.back();
+		m_free.pop_back();
+		return query;
+	}
+
+	void Release(const CommandBuffer::TimestampQuery& query)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		vkResetQueryPool(g_render_ctx->GetGraphicCtx()->device, query.pool, query.query, 1);
+		m_free.push_back(query);
+	}
+
+private:
+	static constexpr uint32_t kQueriesPerPool = 64;
+	static constexpr size_t   kMaxPools       = 64;
+
+	void AddPoolLocked()
+	{
+		if (m_pools.size() >= kMaxPools)
+		{
+			EXIT("end-of-pipe clock marks in flight exceed %zu\n", kMaxPools * kQueriesPerPool);
+		}
+		const auto&           gctx = *g_render_ctx->GetGraphicCtx();
+		VkQueryPoolCreateInfo info {};
+		info.sType             = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+		info.queryType         = VK_QUERY_TYPE_TIMESTAMP;
+		info.queryCount        = kQueriesPerPool;
+		VkQueryPool pool       = VK_NULL_HANDLE;
+		const auto  result     = vkCreateQueryPool(gctx.device, &info, nullptr, &pool);
+		if (result != VK_SUCCESS)
+		{
+			EXIT("vkCreateQueryPool failed: result=%d\n", static_cast<int>(result));
+		}
+		vkResetQueryPool(gctx.device, pool, 0, kQueriesPerPool);
+		m_pools.push_back(pool);
+		for (uint32_t query = 0; query < kQueriesPerPool; query++)
+		{
+			m_free.push_back({pool, query});
+		}
+	}
+
+	std::mutex                                 m_mutex;
+	std::vector<VkQueryPool>                   m_pools;
+	std::vector<CommandBuffer::TimestampQuery> m_free;
+};
+
+static ClockMarkQueries g_clock_mark_queries;
+
 // Guest counter value at the end-of-pipe timestamp `query` of `pool`, written by a completed submission on a queue
 // whose timestamps keep `valid_bits` bits.
 static uint64_t ClockMarkCounter(VkQueryPool pool, uint32_t query, uint32_t valid_bits)
@@ -335,14 +396,13 @@ void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandB
 		return;
 	}
 
-	Core::LockGuard lock(g_render_ctx->GetMutex());
-
 	const auto&    gctx       = *g_render_ctx->GetGraphicCtx();
 	const uint32_t valid_bits = gctx.queues[buffer->GetQueueIndex()].timestamp_valid_bits;
 	// Without calibrated timestamps the mark carries the time its submission was seen complete.
 	if (gctx.get_calibrated_timestamps == nullptr || valid_bits == 0)
 	{
-		uint64_t args[LABEL_ARGS_MAX] = {reinterpret_cast<uint64_t>(dst_gpu_addr)};
+		Core::LockGuard lock(g_render_ctx->GetMutex());
+		uint64_t        args[LABEL_ARGS_MAX] = {reinterpret_cast<uint64_t>(dst_gpu_addr)};
 		RecordTransientLabel64(
 		    buffer, dst_gpu_addr, 0,
 		    [](SubmissionId /*submission*/, const uint64_t* args)
@@ -354,7 +414,18 @@ void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t /*submit_id*/, CommandB
 		return;
 	}
 
-	const auto mark                  = buffer->WriteTimestamp();
+	// Labels complete exactly only on a command-processor recording with a submission.
+	SubmissionId recording;
+	if (buffer->GetParent() == nullptr || !buffer->GetSubmissionId(&recording))
+	{
+		EXIT("end-of-pipe clock mark requires a command-processor recording with a submission\n");
+	}
+	const auto mark = g_clock_mark_queries.Acquire();
+	// The deferred release runs at publication after the label has read the query.
+	GpuMemoryDeferUntilSubmissionsComplete({recording}, [mark]() { g_clock_mark_queries.Release(mark); });
+
+	Core::LockGuard lock(g_render_ctx->GetMutex());
+	buffer->WriteTimestamp(mark);
 	uint64_t   args[LABEL_ARGS_MAX] = {reinterpret_cast<uint64_t>(dst_gpu_addr), reinterpret_cast<uint64_t>(mark.pool), mark.query,
 	                                   valid_bits};
 	RecordTransientLabel64(
