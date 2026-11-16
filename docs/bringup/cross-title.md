@@ -7382,11 +7382,16 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   importing when the range is registered moved 65-125 ms per 256 MiB block onto the guest's mapping thread and
   left 26-29 ms per block in the populated-page query on the command thread (one run, survived). The guest's
   settings for this pool (read from its code): the renderer's initialisation creates it with memory type 3, block
-  size from a field of the settings structure the title passes in (immediate default 0xfc0000) and maximum block
-  count from another field (immediate default 4); the observed 256 MiB and 2 are therefore set by the title, and
-  where it takes them from was not traced. Direction: compare each failing request's size with the largest free
-  range in its pool (one crash had 54 MiB free in total), and trace the two settings fields to their source; if
-  either comes from a value Kyty returns, capacity is Kyty's contract, not timing.
+  size from a field of the settings structure its only caller passes in (immediate default 0xfc0000) and maximum
+  block count from another field (immediate default 4), and that caller fills the two fields with the immediates
+  0x10000000 and 2 just before the call. The capacity is the title's own constant, not a value Kyty returns, so
+  the pool's peak under Kyty is higher than the title was built for. With host thread names set from guest thread
+  ids (temporary, one run), the guest's main thread and two other guest threads each use a full core of user time
+  with no page faults through the loading window, and the main thread keeps doing so in gameplay at 60 fps, which
+  reads as a spin wait; three other guest threads take 30,000-120,000 minor page faults per 0.3 s with 30-60 %
+  of their time in the kernel. Direction: compare each failing request's size with the largest free range in its
+  pool (one crash had 54 MiB free in total), find what the spinning main thread waits on, and find which memory
+  the faulting threads populate.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
