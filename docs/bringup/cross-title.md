@@ -7293,6 +7293,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   print of every Superliminal texture whose sampler mask includes sampler 3 (not limited to the pc 552 shader,
   capped at 40 lines, with and without the change) showed formats 130, 50 and 56 and sampler 3 with neither force
   nor skip degamma, choosing the default view in every line; so the change is latent there in the printed binds.
+  A 120 s run on the final binary with cross pressed every 3 s (no recorded route exists; the scene reached was not
+  checked) ran to the time limit without a stop and mostly at the 60 fps limit.
   Limits: boot scenes only, ten titles stopped early, and the probe reports only gained resolutions, not lost ones.
 - **Early stops seen in the same sweep, not caused by this change.** `PPSA03355 - Hades` stops at about 5 s of
   boot in about half of the runs (exit 139), with the old copy flow as well: the guest's `memcpy` writes
