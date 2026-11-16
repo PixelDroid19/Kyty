@@ -7423,10 +7423,11 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   samples of the job workers that use a full core showed them in file opens, sleeps, timed condition waits,
   formatting and mutex calls, not in the renderer. Measured 2026-11-16 (temporary per-thread sampler, the worker
   identified by a sample inside the renderer's label spin, two runs on the same binary, both crashed): in the
-  control the worker that runs the renderer job spent 20-40 ms user and 40-60 ms kernel per 100 ms with 35-63k
+  control that worker (the consumer thread below also calls the same spin, so which thread it was is not
+  established) spent 20-40 ms user and 40-60 ms kernel per 100 ms with 35-63k
   minor faults per 100 ms (about one per 4 KiB, 140-250 MiB of first touch), most user samples in one title store
-  loop writing 16-byte rows at computed offsets; its condition waits on the queue's idle and completion conditions
-  were seen but short. The arm populated every writable direct-memory mapping at map time
+  loop writing 16-byte rows at computed offsets. A whole-process condition-wait counter in that run read near zero;
+  the later per-thread measurement below contradicts it and supersedes it. The arm populated every writable direct-memory mapping at map time
   (`MADV_POPULATE_WRITE`, 7.4 GiB in 2.7 s on the mapping threads): the worker's faults fell to 0-3 per 100 ms
   and it went almost idle, but the pool still emptied (low 1.9 MiB against 12.0 MiB in the control, both read
   only while the pool had a block) and the same null write ended the run. The arm is confounded: one 3 GiB
@@ -7442,7 +7443,7 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   about 27 references and none was traced to an event Kyty delivers. The main thread's hottest host address in
   the two runs sampled for it was `clock_gettime` in the vDSO, reached through the time imports
   of the title's event pump, i.e. the title's own pacing loop. Measured afterwards (four runs on
-  temporary samplers, two crashed, one reached 60 fps; Kyty still at the same HEAD):
+  temporary samplers, three crashed, one reached 60 fps; Kyty still at the same HEAD):
   - The consumer limits. In all four runs the producer counter stayed more than one ahead in 18-20 of 20
     samples per 100 ms through loading, so the main thread waits on the consumer, not the reverse.
   - Wall-clock samples of the consumer alone (200 Hz, 196 samples from 4.0 s to the crash at 5.0 s, the
@@ -7450,19 +7451,28 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
     Kyty's graphics submit waiting for the batch's decode (`GraphicsRing::Submit`, decode completion), 63 of
     those 84 samples reached from `CommandBuffer::AllocateDW` when the command buffer filled; 34 % in the
     title's wait until the queue's renderer has finished all submitted work; 21 % blocked on a futex inside
-    `LibcMspaceFree`, reached from `ApplicationHeap::Free` through the guest. Which mutex that futex belongs to
-    was not resolved.
+    the consumer's own copy on the CPU: libc `memmove` (instruction addresses spread across the copy loop, around
+    the crash address) called from the title's upload routine at the crash's return site, with first-touch faults
+    (2-30k minor faults per 100 ms on that thread). That matches its CPU counters (about 100 ms user and 80 ms
+    kernel from 4.4 to 5.0 s).
   - The submit wait is the command processor's own time on those batches: per 100 ms window the submitter
-    waited 97-173 ms while `CommandProcessor::Run` took 32-169 ms on the same batches, plus one 470 ms flush;
-    suspended `WAIT_REG_MEM` waits, with a GPU or a host producer, took 0 ms. The temporary slow-resource
-    counter reported no slow creations in that window. This is the recorded contract ("A graphics submit
-    returns after its batch is decoded"), so the loading rate here is the command processor's decode rate.
-  - Allocator note for the same window: `MSpaceFree` (`source/lib/Core/src/MSpace.cpp`, about line
-    909) holds the process-wide mspace registry mutex across the arena free, so frees in unrelated arenas
-    serialize behind it; whether that is the futex above is not shown.
-  Open: what the command processor does inside those ~100 ms batches. The recorded candidate is the physical
-  window export (8-16 ms per 64 MiB window, measured earlier in this entry); a
-  wall-clock sample of the command-processor thread during them would settle it.
+    waited about 980 ms over 1.3 s. About half matches `CommandProcessor::Run` on the same batches (windows of
+    173/169, 99/99, 101/101 and 97/97 ms wait/run); the other half is one 493 ms wait whose batch ran 7 ms while
+    the command processor spent 470 ms after the decode in the flush span (buffer flush, API flip and the
+    submission-completion wait, which runs after the decode completion is signalled and holds the thread
+    before the next batch). Which of those three calls took it was not measured; the three windows before it
+    show no submits and no `Run`, the same shape as the idle command processor recorded earlier in this entry.
+    Suspended `WAIT_REG_MEM` waits, with a GPU or a host producer, took 0 ms, and the temporary slow-resource
+    counter reported no slow creations in that window. The submit wait itself is the recorded contract ("A
+    graphics submit returns after its batch is decoded").
+  - Code note, not linked to this title: `MSpaceFree` (`source/lib/Core/src/MSpace.cpp`, about line 909)
+    holds the process-wide mspace registry mutex across the arena free, so frees in unrelated arenas serialize
+    behind it.
+  Open: which call holds the 470 ms flush span, and what `Run` does inside the ~100 ms batches (the recorded
+  candidate is the physical window export, 8-16 ms per 64 MiB window, measured earlier in this entry); also what
+  the thread that signals the queue's completion condition does while the consumer waits on it (34 %). A
+  wall-clock sample of the command-processor thread and of that signaller, with the flush span split into its
+  three calls, would settle them.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
