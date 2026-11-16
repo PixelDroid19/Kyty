@@ -7321,7 +7321,15 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   user-data base: `ShaderEudDescriptorLoadIsUnmapped` (`ShaderResources.cpp`), `ShaderScalarLoadNeedsGuestAddress`
   (`Shader.cpp`) and `recompile_sload_guest` (`ShaderSpirvBuffer.cpp`). Not changed; no installed title is shown to
   reach them with a non-zero base. Direction: subtract the base as `ShaderMatchesEudPointer` does, with a test per
-  reader. When the 6.5 s event started is not established; finding it needs a bisection, which was not run.
+  reader.
+- **Onset of the OCTOPATH format-load frontier event: as old as the boot that reaches it.** A bisection of
+  `PPSA09809 - OCTOPATH TRAVELER II` (cold private cache, no input, Debug console filtered to the frontier line)
+  found the `st=2 f=11` event, and an `st=1 f=5` sibling, on every commit that boots past it. With a 40 s window it
+  pointed at the guest-path cache commit of 2026-10-15, but its parent emits the same events at about 40 s and the
+  2026-10-14 main squash at about 43 s: that commit only shortened loading. First-parent `main` from 2026-10-01 and
+  2026-08-28 stops with signal 11 about 2 s into boot, so older commits cannot show the event; commits before
+  2026-08-04 lack the Debug frontier line. The event therefore started with the boot reaching that shader, not with
+  a change to the bind check, and the format-load fix above removes both events (one run on the fixed head).
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
