@@ -7302,8 +7302,13 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   every report). A probe at the out-of-space return of the core allocator (`MSpace.cpp`) printed nothing; the
   null-mspace returns of the Libc wrappers (`LibCInternal.cpp`, `LibCStandard.cpp`), the size-above-32-bit returns
   and the calloc overflow returns were not probed. When it passes the boot it holds 60 fps at the 60 fps limit.
-  Direction: probe those returns first, then name the guest import whose result is the null destination with
-  `KYTY_CRASH_REPORT`. Other stops, each in one boot:
+  A later probe on every null return of the core allocator and of the Libc allocation, mspace and standard
+  wrappers (51 sites, three lines each) printed nothing before a crash of the same shape (write at 0x40, 0x1f00
+  bytes, base register zero; one crash in two runs); no site fired in those runs, so that it would print was not
+  shown by a hand case. With Debug console logging three runs of 20 s survived, so the crash also depends on
+  timing. Direction: the null base is not an allocator result; read the guest instructions before the return
+  address to name the call or field that holds it, and compare thread order in a crashing and a surviving run.
+  Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
   - `PPSA18391 - Afterdream`: double free in the guest's exit handlers (`cxa_finalize`); reproduces with the old
@@ -7316,7 +7321,9 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   - `PPSA06438 - Let's Build A Zoo`: VideoOut flip with an invalid index (`VideoOut.cpp:2621`).
   - `PPSA38010 - Suika Game` and `PPSA20052 - Worms Armageddon Anniversary Edition`: unresolved imports in
     `Json2` and `NetCtl` (`RuntimeLinker.cpp:1164`).
-  - `PPSA05496 - Builder's Journey`: add-on content loaded before the title id (`KytyEmulator.cpp:401`).
+  - `PPSA05496 - Builder's Journey`: the install has no `sce_sys` folder. The parameter-file load ignored its
+    failure, so the run stopped later at the add-on step with a message about call order; the load now stops
+    the run at once and names the missing file.
 - **Open, found on the way.** Three other readers compare a register with `extended.start_register` without the
   user-data base: `ShaderEudDescriptorLoadIsUnmapped` (`ShaderResources.cpp`), `ShaderScalarLoadNeedsGuestAddress`
   (`Shader.cpp`) and `recompile_sload_guest` (`ShaderSpirvBuffer.cpp`). Not changed; no installed title is shown to
