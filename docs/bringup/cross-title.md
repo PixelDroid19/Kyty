@@ -6319,11 +6319,15 @@ memory stayed within run-to-run noise (8.3-9.4 GiB), not separately isolated.
   count, a mixed one is split in halves, and a mixed range of 16 pages or fewer, or any range when the kernel
   lacks the call, is walked with `SEEK_DATA` as before. Measured outside Kyty on the same host with the two
   algorithms over a 256 MiB memfd: fully populated 23.2 ms -> 1.2-1.3 ms, half removed 11.7-12.2 ms -> 1.3 ms,
-  16 of every 32 pages 11.6 ms both, every other page in one half 17.3 ms -> 12.9-13.1 ms, identical flags in
-  all five patterns. `CoreVirtualMemory.PopulatedSharedBackingPagesMatchMixedLargeInterval` covers the split
+  16 of every 32 pages 10.4-11.6 ms both ways, every other page in one half 17.3 ms -> 12.9-13.1 ms; a quarter
+  swapped out with `MADV_PAGEOUT` (cachestat reported 16,384 of 65,536 pages evicted) 22.4 ms -> 2.1 ms with
+  every page still flagged; 2 GiB with 16 of every 32 pages 126 ms -> 122 ms, 2 GiB full 240 ms -> 13.7 ms;
+  identical flags in every pattern. A page wrongly reported empty would be left out of the GPU import, so the
+  swapped-out case matters. `CoreVirtualMemory.PopulatedSharedBackingPagesMatchMixedLargeInterval` covers the split
   (it fails when the fully populated branch is broken by hand). In one `PPSA03355 - Hades` loading window the
-  command thread's samples inside the query fell from about 25 to 3; that run's other timings are not
-  comparable (another workload held two host cores and free memory was lower). No frame-rate claim.
+  command thread's samples inside the query fell from 22 of 206 to 4 of 102 (against 24 and 21 inside the
+  window export); that run's other timings are not comparable (another workload held two host cores, free
+  memory was lower and the thread missed samples while in the kernel). No frame-rate claim.
 - **Later (2026-11-16, `PPSA03355 - Hades` boot):** the same export, 8-16 ms per 64 MiB window, is the whole
   command-thread cost of the window-opening loading draws before the title's intermittent boot stop, which it
   does not cause; see "Early stops seen in
@@ -7486,14 +7490,15 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   three calls, would settle them.
   Measured next (two runs, same samplers plus the command-processor thread and the condition's signaller,
   flush span split): the 470 ms flush did not recur (buffer flush 0.1-1.2 ms per 100 ms, flip and
-  submission-completion waits 0). `Run` is where the submitter waits, and the command thread is mostly not on
-  a CPU in it: in a 237 ms `Run` it used one tick of user time. Its wall samples in loading windows are
-  waits for an admission slot in the VideoOut flip queue (about 165 ms in the first loading burst), the
-  physical window export (`udmabuf` creation) and the populated-page query (fixed above); between batches it
-  waits for the next one. The signaller is a title worker: about half of its samples are in the title store
+  submission-completion waits 0). `Run` is where the submitter waits. Inside it the command thread's wall
+  samples are, in the first loading burst, about 155 ms in `FlipQueue::Wait` (an earlier flip of the same
+  display buffer has not completed; that burst made 14 frames in about 200 ms against the 60 fps present limit
+  these runs use, so this is flip pacing), and otherwise the physical window export (`udmabuf` creation) and
+  the populated-page query (fixed above), which are kernel CPU time: 4-8 kernel ticks per 100 ms in windows
+  with 54-126 ms of `Run`. Between batches it waits for the next one. The signaller is a title worker: about half of its samples are in the title store
   loop recorded above, with 9-53k minor faults per 100 ms (host first touch of direct memory) and 30-70 ms
-  kernel time per 100 ms, the rest waiting. Open: why the flip queue has no free slot during loading, and the
-  export and first-touch costs, whose earlier recorded remedies (huge pages, populate ahead) are excluded or
+  kernel time per 100 ms, the rest waiting. Open: the window export on the command thread and host first
+  touch of direct memory; their earlier recorded remedies (huge pages, populate ahead) are excluded or
   confounded.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
