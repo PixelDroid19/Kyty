@@ -1713,6 +1713,18 @@ std::vector<uint32_t> ModifiedBinary(uint32_t opcode, bool clamp, uint32_t omod)
 
 ShaderType g_float_mode_stage = ShaderType::Pixel;
 
+// v_add_f32_e64 v16, -|v0|, -|v1|: every source of one instruction carries both
+// input modifiers, so each must lower to its own module ids.
+void RunNegatedAbsoluteSources(ShaderType stage)
+{
+	Initialize();
+	const std::vector<uint32_t> words {(0x35u << 26u) | ((3u + 0x100u) << 16u) | (3u << 8u) | 16u, 256u | (257u << 9u) | (3u << 29u),
+	                                   kEnd};
+	const Program program(Emit(Parse(words, stage), 0xc0u, false, false, true).c_str());
+	Equal(Evaluate(program, Bits(2.0f), Bits(-3.0f)), Bits(-5.0f), "-|2| + -|-3|");
+	std::_Exit(0);
+}
+
 Program FloatModeProgram(const std::vector<uint32_t>& words, uint8_t float_mode, bool ieee, bool dx10)
 {
 	return Program(Emit(Parse(words, g_float_mode_stage), float_mode, ieee, dx10, true).c_str());
@@ -1890,6 +1902,13 @@ TEST(EmulatorShaderArithmetic, FloatToIntegerConversionsSaturateWithoutUndefined
 TEST(EmulatorShaderArithmetic, ComputeFloatToIntegerConversionsSaturateWithoutUndefinedSpirvConversions)
 {
 	ASSERT_EXIT(RunFloatToIntegerConversionContracts(ShaderType::Compute), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, NegatedAbsoluteModifiersOnTwoSources)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunNegatedAbsoluteSources(stage), ::testing::ExitedWithCode(0), "");
+	}
 }
 TEST(EmulatorShaderArithmetic, IntegerTernaryByteAndMultiplyAddContracts)
 {
