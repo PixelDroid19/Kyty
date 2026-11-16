@@ -6313,6 +6313,17 @@ memory stayed within run-to-run noise (8.3-9.4 GiB), not separately isolated.
   each: 26-29 ms per fully populated 256 MiB span and 334 ms for 3.4 GiB on `PPSA03355 - Hades`. Exporting
   windows off the command thread or populating ahead makes more spans fully populated, so this query has to get
   cheaper first. Suggested direction: one bounded query per run of data pages instead of per page.
+  **Fixed (2026-11-16):** the query counts a range's data pages with one `cachestat(2)` call (bounded to the
+  range; a shmem page holds data while it is cached or swapped out, which cachestat reports as cached and
+  evicted, the same pages `SEEK_DATA` treats as data). A range with no data or only data is settled by that
+  count, a mixed one is split in halves, and a mixed range of 16 pages or fewer, or any range when the kernel
+  lacks the call, is walked with `SEEK_DATA` as before. Measured outside Kyty on the same host with the two
+  algorithms over a 256 MiB memfd: fully populated 23.2 ms -> 1.2-1.3 ms, half removed 11.7-12.2 ms -> 1.3 ms,
+  16 of every 32 pages 11.6 ms both, every other page in one half 17.3 ms -> 12.9-13.1 ms, identical flags in
+  all five patterns. `CoreVirtualMemory.PopulatedSharedBackingPagesMatchMixedLargeInterval` covers the split
+  (it fails when the fully populated branch is broken by hand). In one `PPSA03355 - Hades` loading window the
+  command thread's samples inside the query fell from about 25 to 3; that run's other timings are not
+  comparable (another workload held two host cores and free memory was lower). No frame-rate claim.
 - **Later (2026-11-16, `PPSA03355 - Hades` boot):** the same export, 8-16 ms per 64 MiB window, is the whole
   command-thread cost of the window-opening loading draws before the title's intermittent boot stop, which it
   does not cause; see "Early stops seen in
@@ -7473,6 +7484,17 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   the thread that signals the queue's completion condition does while the consumer waits on it (34 %). A
   wall-clock sample of the command-processor thread and of that signaller, with the flush span split into its
   three calls, would settle them.
+  Measured next (two runs, same samplers plus the command-processor thread and the condition's signaller,
+  flush span split): the 470 ms flush did not recur (buffer flush 0.1-1.2 ms per 100 ms, flip and
+  submission-completion waits 0). `Run` is where the submitter waits, and the command thread is mostly not on
+  a CPU in it: in a 237 ms `Run` it used one tick of user time. Its wall samples in loading windows are
+  waits for an admission slot in the VideoOut flip queue (about 165 ms in the first loading burst), the
+  physical window export (`udmabuf` creation) and the populated-page query (fixed above); between batches it
+  waits for the next one. The signaller is a title worker: about half of its samples are in the title store
+  loop recorded above, with 9-53k minor faults per 100 ms (host first touch of direct memory) and 30-70 ms
+  kernel time per 100 ms, the rest waiting. Open: why the flip queue has no free slot during loading, and the
+  export and first-touch costs, whose earlier recorded remedies (huge pages, populate ahead) are excluded or
+  confounded.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
