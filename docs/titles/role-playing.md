@@ -486,9 +486,11 @@ Intel A770, strict 180-230 s runs of the traveler route with scripted movement.
   stride-2 R16_UINT shape came back at 6.5 s as a typed V# read only by
   `BUFFER_LOAD_FORMAT`, fixed by the format-load admission
   (`docs/bringup/cross-title.md`, "typed storage read only by format loads").
-  The next event, at 19.6-22.8 s, is a vertex-stage V# from extended user data
-  (`ext=1`, slot 6, `st=4 f=29 ds=22c`) that has no program code; no dynamic
-  scalar-load record covers its EUD dwords 24-27. It is open.
+  The next event, at 19.6-22.8 s, was a vertex-stage V# from extended user
+  data (`st=4 f=29 ds=22c`, EUD dwords 24-27) that the front parks in VGPR
+  lanes before its format load; fixed by following the spill
+  (`docs/bringup/cross-title.md`, "extended V# read through a lane spill").
+  The strict run now has no first error on this route.
 - **DCC clear formats.** The clear key is format-independent, but the decode
   table knew four host formats. R8/RG8 masks, R16/RG16, R32/RG32,
   RGBA16F/32F and the packed 16/32-bit formats could not materialise a pending

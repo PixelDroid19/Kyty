@@ -7206,8 +7206,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   the front proof does not set, so the buffer binds and translates as before: no visual or frame-rate change is
   expected, and none was measured. One run per title after the fix. The same message class on another title
   (`st=8 f=64`, above) was re-run later and is not covered by this fix ("typed storage read only by format loads",
-  below). No unit test covers the front proof; one was not added because the fix only stops discarding evidence the
-  analysis already tests. After the fix, Astro (private cache, warm): child exit 0, no first error,
+  below). No unit test covers the non-extended part of the front proof; one was not added because the fix only stops
+  discarding evidence the analysis already tests (the extended part has one, below). After the fix, Astro (private cache, warm): child exit 0, no first error,
   `no_runtime_failure` passes, `visual_compare`, `scene_checkpoint` and `action_response` fail as before, 37-44 fps
   from 15 to 28 s like the run before it. `PPSA17221 - Minecraft`: child exit 0, no first error, the same three
   failing, 60 fps. `playable-regression` now keeps the first error's message in `timeline.json`.
@@ -7233,21 +7233,33 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   The frontier never stopped the bind, so binding and translation are unchanged; only the false event goes. The
   16-bit decode was checked by reading the generated function, not by evaluating it. After the fix, OCTOPATH
   (private cache): exit 0, 60 fps, and the first event is now `a=unknown r=code_unavailable c=0 sg=40 sl=6 st=4
-  f=29 ds=22c` at 22.8 s (19.6 s in a repeat). A bounded local probe placed it in the vertex stage, on a V# from
-  extended user data (`ext=1`, slot 6) with no program code: `ShaderProveFrontStorageReads` (`Shader.cpp`) skips
-  extended V#s, so the binding stays unknown and the typed check at `GraphicsRenderBind.cpp` (`PrepareStorageBuffers`)
-  reports it on every draw that uses it; the binding itself proceeds. Open. Two more bounded probes narrowed it:
-  the V# is extended user-data row `start=40` (EUD dwords 24-27) of two vertex programs. Its sibling extended rows
-  are classified through dynamic scalar-load records, but no record covers dwords 24-27 (the records cover 0-23
-  and 28 onwards), and the row is not a duplicate of the program's vertex-stream row, which has another base. The
-  static register analysis returns unknown for every extended row of a front, so it cannot tell whether a reader
-  exists. Classifying the row as unused metadata would drop its binding, which is the riskier side, so it was not
-  done. Suggested direction: find whether any scalar load in the front or main code reads EUD dwords 24-27 without
-  producing a record; if one does, the defect is in the record builder, and if none does, the row can be proven
-  unread as code-available stages already prove it. In the last probe run every frontier event had this one shape;
-  the recorded `st=8 f=64 ds=22c` event (above) did not occur on that route, which does not show it is gone on
-  others. When the 6.5 s event started is not established. Minecraft (warm private cache): exit
-  0, no first error, 60 fps.
+  f=29 ds=22c` at 22.8 s (19.6 s in a repeat), fixed below ("extended V# read through a lane spill"). Minecraft
+  (warm private cache): exit 0, no first error, 60 fps.
+- **Fixed: extended V# read through a lane spill.** The OCTOPATH event above came from extended user-data row
+  `start=40` (EUD dwords 24-27) of two vertex programs. `ShaderProveFrontStorageReads` (`Shader.cpp`) skipped
+  extended rows, and the dynamic scalar-load mapping, which classifies the sibling extended rows, declined this one:
+  the front loads the V# with `s_load_dwordx4 s[0:3]`, parks the four words in lanes 0-3 of a VGPR with
+  `v_writelane`, reuses s[0:3] for another V#, restores the words with `v_readlane` and reads them with one
+  `buffer_load_format_xy`. The mapping stops at the first non-consumer read of the destination, so no record covers
+  the row, and the binding stayed unknown with no code, which the bind-time typed check reported on every draw. The
+  SPIR-V was already right: the static row fills the loaded words, and the format-load lowering takes slot, stride
+  and format from the restored SGPR values. `ShaderEudDescriptorReadOnlyByFormatLoads` (`ShaderResources.cpp`) now
+  follows each word through SGPRs and static spill lanes and proves the row typed and read only by format loads
+  when every EUD load that reaches it loads exactly its four dwords, no other instruction reads the EUD pointer,
+  every reader is a whole-V# format load, no word lives in two SGPRs or two lanes at once, and the V# is dead before
+  any branch. Anything else leaves the row unknown, as before. A record was not added for it: a record claims every
+  read of its destination until the last consumer, and here s[0:3] carries another V# inside that window. The
+  access is not part of the shader id and the translator does not read it, so only the false event goes. A unit test
+  covers the proof and its refusals (lane refilled, spill VGPR rewritten, partial readback, a word in two SGPRs, store
+  and raw consumers, a load covering part of the V#, a copied pointer); disabling the two-SGPR refusal or the
+  pointer check makes it fail. After the fix, OCTOPATH (cold private cache): no first error and
+  `no_runtime_failure` passes; the gates without a reference (`scene_checkpoint`, `action_response`,
+  `visual_compare`) fail as before, 60 fps. The recorded `st=8 f=64 ds=22c` event did not occur on this route, which
+  does not show it is gone on others. Astro (warm private cache): no first error, median 57.6 fps over the last 40
+  samples. Minecraft (warm): no first error, 60 fps; in one of two runs the scripted tap landed in the loading stall
+  and the input gates failed, which the repeat did not reproduce. The same program also restores lanes 8-11 (EUD
+  dwords 36-39) into s[0:3] for an `image_sample_lz` sampler; it raises no event and was not examined further. When
+  the 6.5 s event started is not established.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
