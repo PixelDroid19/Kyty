@@ -7315,17 +7315,19 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   the base at zero; the copy then writes through it. A crash report with memory windows shows that structure zero,
   as the error path leaves it, so the earlier reading "a consumer ran before its producer" is excluded. Three crash
   reports read back the request from the caller's stack: sizes 0x219b00, 0x292e00 and 0x400000, the same pool
-  selector, no flags, so the request is valid and the failing size varies. A local crash-handler probe read the
-  allocator's pool globals: all four pools are set (non-null), the selected pool holds one 256 MiB block. A local
+  selector, no flags, so the request is valid and the failing size varies. The allocator's error codes are Vulkan
+  result values (-2 out of device memory, -1000011001 validation failed), and a local crash-handler probe read its
+  four pool globals: all are set (non-null); the selected pool's header holds the fields 3, 0x10000000 (256 MiB), 0
+  and 2, read as memory type, block size, minimum and maximum block count (layout inferred, not shown). A local
   probe on every result of the kernel direct and flexible memory calls (allocate, map, batch map, reserve; shown to
-  print by a hand case that logged the successful calls) printed no error before the crash. The guest grows that
-  pool with further 256 MiB blocks through a callback registered at allocator creation (it calls
-  `sceKernelAllocateDirectMemory` and `sceKernelMapDirectMemory`): a run that survived 12 s made 4 more such
-  allocations; the crashing run made none before failing, so the allocator gave up without trying to grow. The
-  title imports none of the direct-memory size queries, so the decision is internal to the guest; why it did not
-  grow is open. Direction: find the guest condition that refuses to grow (a block count or budget limit, or a
-  concurrent allocation on another thread) and which Kyty-visible result or timing feeds it; compare the growth
-  allocations' timing in a crashing and a surviving run.
+  print by a hand case that logged the successful calls) printed no error before the crash, so the failing request
+  never reached a kernel reservation. With timestamps, four runs of 20 s (none crashed) create three pools at
+  3.6-3.7 s (256 MiB, 3 GiB, 64 MiB) and add 256 MiB blocks at 4.6-4.8 s, 5.0-5.2 s and, in some runs, 5.4 s,
+  through a callback registered at allocator creation; the crashes come at 5-6 s, inside that growth window. Which
+  pool each 256 MiB block belongs to, and how many blocks the selected pool held when it failed, was not measured:
+  no run of that round crashed. Direction: dump the selected pool's block list in a crash report and match the
+  block bases to the mapped addresses; if the pool is at its maximum, compare how much is live in it with a
+  surviving run (frames presented and submits completed by then); if it is below, find what refused the growth.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
