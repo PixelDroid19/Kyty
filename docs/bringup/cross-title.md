@@ -7441,8 +7441,28 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   slot's label, then increments its counter. The writers read so far are title code; the producer counter has
   about 27 references and none was traced to an event Kyty delivers. The main thread's hottest host address in
   the two runs sampled for it was `clock_gettime` in the vDSO, reached through the time imports
-  of the title's event pump, i.e. the title's own pacing loop. Open: which side of that handshake limits the
-  frame rate during loading, measured on one run without the populate arm.
+  of the title's event pump, i.e. the title's own pacing loop. Measured afterwards (four runs on
+  temporary samplers, two crashed, one reached 60 fps; Kyty still at the same HEAD):
+  - The consumer limits. In all four runs the producer counter stayed more than one ahead in 18-20 of 20
+    samples per 100 ms through loading, so the main thread waits on the consumer, not the reverse.
+  - Wall-clock samples of the consumer alone (200 Hz, 196 samples from 4.0 s to the crash at 5.0 s, the
+    thread bound by its wait on the handshake condition, return addresses found by a stack scan): 43 % in
+    Kyty's graphics submit waiting for the batch's decode (`GraphicsRing::Submit`, decode completion), 63 of
+    those 84 samples reached from `CommandBuffer::AllocateDW` when the command buffer filled; 34 % in the
+    title's wait until the queue's renderer has finished all submitted work; 21 % blocked on a futex inside
+    `LibcMspaceFree`, reached from `ApplicationHeap::Free` through the guest. Which mutex that futex belongs to
+    was not resolved.
+  - The submit wait is the command processor's own time on those batches: per 100 ms window the submitter
+    waited 97-173 ms while `CommandProcessor::Run` took 32-169 ms on the same batches, plus one 470 ms flush;
+    suspended `WAIT_REG_MEM` waits, with a GPU or a host producer, took 0 ms. The temporary slow-resource
+    counter reported no slow creations in that window. This is the recorded contract ("A graphics submit
+    returns after its batch is decoded"), so the loading rate here is the command processor's decode rate.
+  - Allocator note for the same window: `MSpaceFree` (`source/lib/Core/src/MSpace.cpp`, about line
+    909) holds the process-wide mspace registry mutex across the arena free, so frees in unrelated arenas
+    serialize behind it; whether that is the futex above is not shown.
+  Open: what the command processor does inside those ~100 ms batches. The recorded candidate is the physical
+  window export (8-16 ms per 64 MiB window, measured earlier in this entry); a
+  wall-clock sample of the command-processor thread during them would settle it.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
