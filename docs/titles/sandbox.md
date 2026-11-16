@@ -71,13 +71,19 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     the probe fired was not shown). The nine dispatches add 657 dwords (73 each), the whole shift. A probe on every
     one-group dispatch that was shown to fire (400 lines, submissions 6 to 50, about 22 per frame) found none of
     them a proven uniform fill or a depth metadata fill and none followed by a depth or stencil store-back, so the
-    emulator records each as a plain `vkCmdDispatch`; the probe's cap ran out before submission 80. In that run the
-    hang came at guest submission 190, so the hang point varies between 75 and 190 across forced runs and the
-    dispatches added at submission 80 are not tied to it.
+    emulator records each as a plain `vkCmdDispatch`; the probe's cap ran out before submission 80, and it was not
+    keyed on the program, so it is not shown to cover one of the 1x1x1 dispatches of program `0xaeaaef95`; its
+    store-back count was never seen non-zero, so that part is unverified. In all five runs with a draw ring the hung
+    submission has the same shape: 101 (once 91) records with 31 dispatches of that program, after a frame with 22
+    and one with none, whatever its guest number (73 to 81); one run without a ring hung at 190. Skipping
+    `vkCmdDispatch` for that program alone (more than 1000 skipped by the hang, the forced pair still recorded) hung
+    at the same frame shape and the usual job sequence (377), so those dispatches are not needed for the hang.
   - *Excluded or narrowed.* HiZ (`nohiz` verified), fast clears (`nofc`), TBIMR as the sole cause, an in-batch
-    compute-to-3D switch, a pair at a batch start on its own, a different depth target, fill proofs, fill
-    propagation and depth or stencil store-backs after the one-group dispatches (up to submission 50); the transient
-    vertex copy only with a probe not shown to fire.
+    compute-to-3D switch, a pair at a batch start on its own, a different depth target, the dispatches of program
+    `0xaeaaef95` (skip shown to fire); the transient vertex copy only with a probe not shown to fire.
+  - *Fault report on this path.* In one forced run the loss was first seen by the end-of-pipe clock-mark read
+    (`vkGetQueryPoolResults` returned not-ready after its fence read as completed), which exited without a submit
+    fault report; that read now writes the report before stopping (not yet exercised by a run).
   - *Discriminators, forced reproducer.* `INTEL_DEBUG=reemit` (all state re-emitted for every draw): 40 s and
     about 6500 forced submits, no reset (one run). `INTEL_DEBUG=nofc`: hangs. `INTEL_DEBUG=nohiz`: hangs with the
     same shape; the dump shows the flag engaged (`3DSTATE_HIER_DEPTH_BUFFER` has a null address), so HiZ is
