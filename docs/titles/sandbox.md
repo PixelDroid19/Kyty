@@ -68,13 +68,16 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     in the dump's batch memory uses the same depth, stencil and HiZ addresses. The hung pair fetches its four
     vertices from a 48-byte buffer of its own, while another instance in the dump fetches from a large one; with
     a probe that disabled the transient read-only vertex copy the run still hung with the same 48-byte buffer (that
-    the probe fired was not shown). The nine dispatches add 657 dwords (73 each), the whole shift. The first twenty
-    one-group dispatches of the boot are not proven uniform fills, so no fill propagation follows them; those at
-    submission 80 were not printed. No depth or stencil store-back on an image 1920 or more texels wide was
-    recorded before the hang (one run; that probe was not shown to fire on any image).
+    the probe fired was not shown). The nine dispatches add 657 dwords (73 each), the whole shift. A probe on every
+    one-group dispatch that was shown to fire (400 lines, submissions 6 to 50, about 22 per frame) found none of
+    them a proven uniform fill or a depth metadata fill and none followed by a depth or stencil store-back, so the
+    emulator records each as a plain `vkCmdDispatch`; the probe's cap ran out before submission 80. In that run the
+    hang came at guest submission 190, so the hang point varies between 75 and 190 across forced runs and the
+    dispatches added at submission 80 are not tied to it.
   - *Excluded or narrowed.* HiZ (`nohiz` verified), fast clears (`nofc`), TBIMR as the sole cause, an in-batch
-    compute-to-3D switch, a pair at a batch start on its own, a different depth target; the transient vertex copy
-    and a depth or stencil store-back on a 1920-wide image only with probes not shown to fire.
+    compute-to-3D switch, a pair at a batch start on its own, a different depth target, fill proofs, fill
+    propagation and depth or stencil store-backs after the one-group dispatches (up to submission 50); the transient
+    vertex copy only with a probe not shown to fire.
   - *Discriminators, forced reproducer.* `INTEL_DEBUG=reemit` (all state re-emitted for every draw): 40 s and
     about 6500 forced submits, no reset (one run). `INTEL_DEBUG=nofc`: hangs. `INTEL_DEBUG=nohiz`: hangs with the
     same shape; the dump shows the flag engaged (`3DSTATE_HIER_DEPTH_BUFFER` has a null address), so HiZ is
@@ -91,9 +94,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     the pairs that complete at a batch start (their render targets and the work submitted just before them were
     not compared); no ingredient the emulator controls was named, so nothing was changed in Kyty. No setting was
     measured for frame rate.
-  - *Direction.* Name what the emulator records for the nine one-group dispatches of submission 80 (fill
-    proof, propagation, store-back, with probes that are shown to fire) and suppress it in one forced run; read where
-    `reemit` acts in the driver at the installed commit; report the reproducer to the driver upstream (needs the
+  - *Direction.* Read where `reemit` acts in the driver at the installed commit and compare that state for the
+    hung pair against a completing one; report the reproducer to the driver upstream (needs the
     maintainer's approval).
 
 ## Sandbox title: world frame rate at `6a6a5818a` (2026-11-14, measured)
