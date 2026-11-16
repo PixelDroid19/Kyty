@@ -60,14 +60,21 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     the guest clears depth and stencil with two quads. Only this pair hangs at a command-buffer start: in a forced
     run the pairs at dw 1707, 2321, 2461, 2978, 3180 and 3764 open a command buffer with the same vertex and pixel
     programs and complete, so a pair at a batch start is not enough on its own.
-  - *The hung frame.* Two forced runs on kernel 7.3.4 hang at the same guest submission (80). In submission 79 the
-    same pair sits 657 dwords earlier (dw 3764), opens a command buffer and completes; submission 80 adds nine
+  - *The hung frame.* Forced runs on kernel 7.3.4 hang at guest submission 75, 80 or 82. In the run that hung at
+    80 (the one whose draw ring was compared), submission 79 holds the same pair 657 dwords earlier (dw 3764),
+    which opens a command buffer and completes; submission 80 adds nine
     one-group dispatches of one compute program at the start of the frame and four UI draws after the pair, and
     the three command buffers before the pair have the same shape in both frames. Every instance of the pair left
     in the dump's batch memory uses the same depth, stencil and HiZ addresses. The hung pair fetches its four
-    vertices from a 48-byte buffer of its own, while another instance in the dump fetches from a large one; a
-    probe that disabled the transient read-only vertex copy left that 48-byte buffer unchanged and still hung, so
-    it does not come from that copy.
+    vertices from a 48-byte buffer of its own, while another instance in the dump fetches from a large one; with
+    a probe that disabled the transient read-only vertex copy the run still hung with the same 48-byte buffer (that
+    the probe fired was not shown). The nine dispatches add 657 dwords (73 each), the whole shift. The first twenty
+    one-group dispatches of the boot are not proven uniform fills, so no fill propagation follows them; those at
+    submission 80 were not printed. No depth or stencil store-back on an image 1920 or more texels wide was
+    recorded before the hang (one run; that probe was not shown to fire on any image).
+  - *Excluded or narrowed.* HiZ (`nohiz` verified), fast clears (`nofc`), TBIMR as the sole cause, an in-batch
+    compute-to-3D switch, a pair at a batch start on its own, a different depth target; the transient vertex copy
+    and a depth or stencil store-back on a 1920-wide image only with probes not shown to fire.
   - *Discriminators, forced reproducer.* `INTEL_DEBUG=reemit` (all state re-emitted for every draw): 40 s and
     about 6500 forced submits, no reset (one run). `INTEL_DEBUG=nofc`: hangs. `INTEL_DEBUG=nohiz`: hangs with the
     same shape; the dump shows the flag engaged (`3DSTATE_HIER_DEPTH_BUFFER` has a null address), so HiZ is
@@ -84,9 +91,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     the pairs that complete at a batch start (their render targets and the work submitted just before them were
     not compared); no ingredient the emulator controls was named, so nothing was changed in Kyty. No setting was
     measured for frame rate.
-  - *Direction.* Name the render targets and preceding submission of the dw-4421 pair against a completing
-    batch-start pair, read where `reemit` acts in the driver at the installed commit, and report the reproducer to
-    the driver upstream (needs the maintainer's approval).
+  - *Direction.* Name what the emulator records for the nine one-group dispatches of submission 80 (fill
+    proof, propagation, store-back, with probes that are shown to fire) and suppress it in one forced run; read where
+    `reemit` acts in the driver at the installed commit; report the reproducer to the driver upstream (needs the
+    maintainer's approval).
 
 ## Sandbox title: world frame rate at `6a6a5818a` (2026-11-14, measured)
 
