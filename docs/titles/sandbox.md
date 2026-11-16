@@ -85,10 +85,15 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     left in batch memory (whether that one had executed is not shown) emit the same 15 non-`PIPE_CONTROL` packets
     from the stencil-write `3DSTATE_WM_DEPTH_STENCIL` to the second `3DPRIMITIVE`, identical except the
     blend-state pointer offset (`0x7824` dword 1); one hung instance carries one extra plain `PIPE_CONTROL` between
-    the quads, the other does not. The state the pair itself emits does not separate the hang.
+    the quads, the other does not. Compared from the real batch starts (offset 0 of the 4 KiB batch, the pair at
+    0x3ac in all), the whole batch differs only in dynamic-state pointer offsets and in
+    `3DSTATE_VERTEX_BUFFERS`: the hung pair of the two 7.3.4 dumps reads a 48-byte buffer, the sibling a large one.
+    The earlier dump of the same hang (same pair, same offsets) reads the large buffer, so the 48-byte buffer is
+    not needed for the hang. No difference in what the emulator records separates the hung pair.
   - *Fault report on this path.* In one forced run the loss was first seen by the end-of-pipe clock-mark read
     (`vkGetQueryPoolResults` returned not-ready after its fence read as completed), which exited without a submit
-    fault report; that read now writes the report before stopping (not yet exercised by a run).
+    fault report. The read now repeats with the wait flag, which returns the device loss itself, and writes the
+    report with that result before stopping (not yet exercised by a run).
   - *Discriminators, forced reproducer.* `INTEL_DEBUG=reemit` (all state re-emitted for every draw): 40 s and
     about 6500 forced submits, no reset (one run). `INTEL_DEBUG=nofc`: hangs. `INTEL_DEBUG=nohiz`: hangs with the
     same shape; the dump shows the flag engaged (`3DSTATE_HIER_DEPTH_BUFFER` has a null address), so HiZ is
