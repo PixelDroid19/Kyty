@@ -148,7 +148,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     `scene_checkpoint` and `action_response` fail as in every earlier run of this session (no baseline or
     checkpoint configured). Limits: only the non-indexed draw path repeats; only the stencil-only to
     depth-writing order was tested; the natural hang (about 2 of 12 runs) is not shown gone by these runs; other
-    Intel drivers are not covered.
+    Intel drivers are not covered; the repeat runs on every GPU that uses Intel's Mesa driver, not only the
+    family that needs the driver workaround; frame rate with the repeat was not measured.
   - *Direction.* The driver workaround keys on "depth or stencil writes enabled" as one value; a switch from
     stencil-only to depth-only writes does not trigger it. Report the reproducer and the A/B result upstream
     (needs the maintainer's approval); when the driver is fixed, the repeat can be removed.

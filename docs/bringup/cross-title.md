@@ -7309,10 +7309,13 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   one time in eight, so timing is suspected, not shown). Not probed: `LibC.cpp` and the kernel memory-mapping
   calls. The guest code before the return address (main image, read locally, not recorded) is a row-by-row copy
   loop: the destination is a base plus row times pitch plus an offset, and the base is the first field of a
-  structure that an internal guest function fills through an out-parameter just before the loop; that function
-  calls one import first. So the null base is a field written by guest code, not the return of an import or of
-  the allocators. Direction: name that import (its stub uses relocation slot 0x8c of the main image) and compare
-  its result in a crashing and a surviving run.
+  structure that an internal guest function returns through an out-parameter just before the loop; that function
+  calls at least one import. Who stores that field is not known: it can be an import or mapping result. A crash
+  report with memory windows (`KYTY_CRASH_MEMORY=1`, one crash in three runs of 20 s) shows that object all zero
+  over the 48 bytes captured, while the word before it holds two pointers: the copy read an object that had not
+  been filled yet, which fits a consumer running before its producer rather than a failed reservation (one
+  crash, so not shown to repeat). Direction: name that import (its stub uses relocation slot 0x8c of the main image) and compare
+  its result in a crashing and a surviving run, then find the guest thread or callback that fills the object.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
