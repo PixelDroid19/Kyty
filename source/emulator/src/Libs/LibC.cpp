@@ -117,14 +117,36 @@ struct KytyCxaException
 	_Unwind_Exception   unwindHeader;
 };
 
+// A dependent exception mirrors the primary header up to the unwind header, so
+// the runtime finds either one from the same unwind-header offset.
 struct KytyCxaDependentException
 {
-	void*               primaryException;
+	void*                primaryException;
 	void (*exceptionDestructor)(void*);
-	void*               unexpectedHandler;
-	void*               terminateHandler;
-	_Unwind_Exception   unwindHeader;
+	void*                unexpectedHandler;
+	void*                terminateHandler;
+	KytyCxaException*    nextException;
+	int                  handlerCount;
+	int                  handlerSwitchValue;
+	const unsigned char* actionRecord;
+	const unsigned char* languageSpecificData;
+	void*                catchTemp;
+	void*                adjustedPtr;
+	_Unwind_Exception    unwindHeader;
 };
+static_assert(offsetof(KytyCxaDependentException, unwindHeader) == offsetof(KytyCxaException, unwindHeader));
+
+// The shared reference count std::exception_ptr and __cxa_end_catch both use sits
+// in front of the primary header that __cxa_allocate_exception returns.
+struct KytyCxaRefcountedException
+{
+	int              referenceCount;
+	KytyCxaException exc;
+};
+
+// Exception classes compare as 64-bit values, "GNUCC++" in the high bytes.
+constexpr uint64_t kCxaPrimaryExceptionClass   = 0x474e5543432b2b00ull;
+constexpr uint64_t kCxaDependentExceptionClass = 0x474e5543432b2b01ull;
 
 struct KytyCxaEhGlobals
 {
@@ -4298,17 +4320,39 @@ static KYTY_SYSV_ABI void cxa_rethrow()
 }
 
 // std::exception_ptr support, absent from the statically-linked libstdc++.
-// Shared-exception refcounts are tracked in a side table keyed by the thrown
-// object so the host libstdc++ header layout is never probed for a field it
-// does not carry.
-static std::unordered_map<void*, unsigned>& CxaSharedRefcounts()
+static KytyCxaRefcountedException* CxaRefcountedHeader(void* thrown_exception)
 {
-	static std::unordered_map<void*, unsigned> refcounts;
-	return refcounts;
+	return static_cast<KytyCxaRefcountedException*>(thrown_exception) - 1;
 }
 
-// __cxa_current_primary_exception — the primary (non-dependent) unwind header
-// for the exception currently being propagated or handled.
+static KYTY_SYSV_ABI void cxa_increment_exception_refcount(void* thrown_exception)
+{
+	if (thrown_exception != nullptr)
+	{
+		__atomic_add_fetch(&CxaRefcountedHeader(thrown_exception)->referenceCount, 1, __ATOMIC_ACQ_REL);
+	}
+}
+
+// The last reference destroys and frees the thrown object, as __cxa_end_catch does.
+static KYTY_SYSV_ABI void cxa_decrement_exception_refcount(void* thrown_exception)
+{
+	if (thrown_exception == nullptr)
+	{
+		return;
+	}
+	auto* header = CxaRefcountedHeader(thrown_exception);
+	if (__atomic_sub_fetch(&header->referenceCount, 1, __ATOMIC_ACQ_REL) == 0)
+	{
+		if (header->exc.exceptionDestructor != nullptr)
+		{
+			header->exc.exceptionDestructor(thrown_exception);
+		}
+		__cxa_free_exception(thrown_exception);
+	}
+}
+
+// __cxa_current_primary_exception — the thrown object of the exception being
+// handled, with a new reference; null for none or a foreign exception.
 static KYTY_SYSV_ABI void* cxa_current_primary_exception()
 {
 	auto* globals = static_cast<KytyCxaEhGlobals*>(__cxa_get_globals());
@@ -4316,35 +4360,36 @@ static KYTY_SYSV_ABI void* cxa_current_primary_exception()
 	{
 		return nullptr;
 	}
-	return &globals->caughtExceptions->unwindHeader;
+	auto*          header          = globals->caughtExceptions;
+	const uint64_t exception_class = header->unwindHeader.exception_class;
+	void*          thrown_exception = nullptr;
+	if (exception_class == kCxaPrimaryExceptionClass)
+	{
+		thrown_exception = header + 1;
+	} else if (exception_class == kCxaDependentExceptionClass)
+	{
+		thrown_exception = reinterpret_cast<KytyCxaDependentException*>(header)->primaryException;
+	} else
+	{
+		return nullptr;
+	}
+	cxa_increment_exception_refcount(thrown_exception);
+	return thrown_exception;
 }
 
-static KYTY_SYSV_ABI void cxa_increment_exception_refcount(void* thrown_exception)
+// Releases a dependent exception and the primary reference it holds.
+static void CxaDependentExceptionCleanup(_Unwind_Reason_Code /*code*/, _Unwind_Exception* unwind_header)
 {
-	if (thrown_exception != nullptr)
-	{
-		CxaSharedRefcounts()[thrown_exception]++;
-	}
-}
-
-static KYTY_SYSV_ABI void cxa_decrement_exception_refcount(void* thrown_exception)
-{
-	if (thrown_exception == nullptr)
-	{
-		return;
-	}
-	auto& table = CxaSharedRefcounts();
-	auto  it    = table.find(thrown_exception);
-	if (it != table.end() && --it->second == 0)
-	{
-		table.erase(it);
-		__cxa_free_exception(thrown_exception);
-	}
+	auto* dep = reinterpret_cast<KytyCxaDependentException*>(reinterpret_cast<char*>(unwind_header) -
+	                                                         offsetof(KytyCxaDependentException, unwindHeader));
+	void* primary = dep->primaryException;
+	__cxa_free_dependent_exception(dep);
+	cxa_decrement_exception_refcount(primary);
 }
 
 // __cxa_rethrow_primary_exception — raise a dependent exception that refers to
-// the still-live primary. Mirrors libc++abi: bump the primary's refcount, then
-// raise a dependent object whose unwind header carries the dependent marker.
+// the still-live primary: bump the primary's refcount, then raise a dependent
+// object whose unwind header carries the dependent class.
 static KYTY_SYSV_ABI void cxa_rethrow_primary_exception(void* thrown_exception)
 {
 	if (thrown_exception == nullptr)
@@ -4359,10 +4404,10 @@ static KYTY_SYSV_ABI void cxa_rethrow_primary_exception(void* thrown_exception)
 	dep->exceptionDestructor = primary->exceptionDestructor;
 	dep->unexpectedHandler   = primary->unexpectedHandler;
 	dep->terminateHandler    = primary->terminateHandler;
-	std::memcpy(&dep->unwindHeader.exception_class, "GNUCC++\x01", 8);
-	dep->unwindHeader.exception_cleanup = [](_Unwind_Reason_Code, _Unwind_Exception* e) {
-		__cxa_free_dependent_exception(reinterpret_cast<KytyCxaDependentException*>(e));
-	};
+	dep->unwindHeader.exception_class   = kCxaDependentExceptionClass;
+	dep->unwindHeader.exception_cleanup = CxaDependentExceptionCleanup;
+	// __cxa_begin_catch takes this exception off the uncaught count.
+	static_cast<KytyCxaEhGlobals*>(__cxa_get_globals())->uncaughtExceptions++;
 	_Unwind_RaiseException(&dep->unwindHeader);
 	EXIT("__cxa_rethrow_primary_exception returned (no landing pad) obj=%p\n", thrown_exception);
 }

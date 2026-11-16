@@ -13,6 +13,9 @@ list(FILTER unit_test_src EXCLUDE REGEX "/UnitTestDisabled\\.cpp$")
 # The standalone runner owns main(); keep it out of the static archive so
 # fc_script (which also defines main) can link unit_test without a clash.
 list(FILTER unit_test_src EXCLUDE REGEX "/UnitTestMain\\.cpp$")
+# This test throws and catches host exceptions to drive the guest std::exception_ptr exports.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorLibcExceptionPtr.cpp"
+	PROPERTIES COMPILE_OPTIONS "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fexceptions>")
 
 # Supervisor tests are listed explicitly (no recursive glob expansion for new
 # modules). The supervisor only exists when KYTY_BUILD_DEVTOOLS is enabled;
