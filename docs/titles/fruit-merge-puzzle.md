@@ -21,8 +21,11 @@ methodology, frontier and the index of every record.
   whose DCC carries the key together with a live head event for the same range is cleared to
   the head word (`GraphicsRenderAttachments.cpp`, `ConsumeColorBlockHeads`).
 - Verified: the title reaches the play field and drops fruit with score updates (scripted
-  route, 65 s). Minecraft and Astro Bot strict runs reach their worlds and never decode the key.
-  `kyty_unit_test` passes (2699 run, 0 failed) with the DCC key tests updated.
+  route, 100 s, 60 fps). The play field also needs `Value::serialize(String&)` from libJson2
+  (NID `R7FDWtcN6f8`, implemented separately): without it the run stops on that unresolved
+  import about 59 s in. Minecraft and Astro Bot strict runs reach their worlds and never decode
+  the key. `kyty_unit_test`: 2712 run, 2701 passed, 11 skipped (host virtual-memory and
+  AvPlayer media-backend cases), 0 failed.
 - Open: texture reads of a surface under key 0x10 still drop the clear. The guest also writes
   R8 and RG8 typed stores (strides 1 and 2) into the DCC of the display buffers; those
   descriptors are outside the supported storage formats and only reach the storage frontier.
