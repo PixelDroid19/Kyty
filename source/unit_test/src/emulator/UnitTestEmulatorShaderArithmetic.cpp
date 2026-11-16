@@ -1173,6 +1173,20 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	Equal(vopc(0xB8u, 0xfff0000000000000ull, 2u, "%exec_lo"), 1u, "v_cmpx_class_f64 -inf");
 	Equal(vopc(0xB8u, 0xfff0000000000000ull, 9u, "%exec_lo"), 0u, "v_cmpx_class_f64 -inf is not +inf");
 	Equal(vop3(0xB8u, 0x7ff8000000000000ull, 1u, "%exec_lo", 0u, 0u), 1u, "VOP3 v_cmpx_class_f64 quiet NaN");
+	// F64 constants: an inline float is the double, an inline integer extends, a literal is the high word.
+	const auto constant = [&](std::vector<uint32_t> words, uint32_t bit) { return run(std::move(words), 0u, 1u << bit, "%vcc_lo") & 1u; };
+	Equal(constant({(0x3eu << 25u) | (0xA8u << 17u) | (2u << 9u) | 242u}, 8u), 1u, "v_cmp_class_f64 of the inline 1.0 is +normal");
+	Equal(constant({(0x3eu << 25u) | (0xA8u << 17u) | (2u << 9u) | 128u}, 6u), 1u, "v_cmp_class_f64 of the inline 0 is +0");
+	Equal(constant({(0x3eu << 25u) | (0xA8u << 17u) | (2u << 9u) | 255u, 0x7ff00000u}, 9u), 1u,
+	      "v_cmp_class_f64 of the literal 0x7ff00000 is +inf");
+	std::_Exit(0);
+}
+
+// The integer load does not produce the half encoding of an F16 inline float.
+[[noreturn]] void EmitClassF16WithInlineFloat()
+{
+	Initialize();
+	static_cast<void>(Emit(Parse({(0x3eu << 25u) | (0x8Fu << 17u) | (2u << 9u) | 242u, kEnd}), 0u, false, false, true));
 	std::_Exit(0);
 }
 
@@ -1920,6 +1934,7 @@ TEST(EmulatorShaderArithmetic, ClassComparesClassifyEachWidth)
 	{
 		ASSERT_EXIT(RunClassForms(stage), ::testing::ExitedWithCode(0), "");
 	}
+	ASSERT_EXIT(EmitClassF16WithInlineFloat(), ::testing::ExitedWithCode(65), "");
 }
 TEST(EmulatorShaderArithmetic, Mad16WritesTheSelectedHalf)
 {
