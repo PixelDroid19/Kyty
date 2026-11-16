@@ -7324,10 +7324,21 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   never reached a kernel reservation. With timestamps, four runs of 20 s (none crashed) create three pools at
   3.6-3.7 s (256 MiB, 3 GiB, 64 MiB) and add 256 MiB blocks at 4.6-4.8 s, 5.0-5.2 s and, in some runs, 5.4 s,
   through a callback registered at allocator creation; the crashes come at 5-6 s, inside that growth window. Which
-  pool each 256 MiB block belongs to, and how many blocks the selected pool held when it failed, was not measured:
-  no run of that round crashed. Direction: dump the selected pool's block list in a crash report and match the
-  block bases to the mapped addresses; if the pool is at its maximum, compare how much is live in it with a
-  surviving run (frames presented and submits completed by then); if it is below, find what refused the growth.
+  pool each 256 MiB block belongs to was read from a later crash report with the pool dumped: the selected pool
+  holds 2 blocks of 256 MiB, the maximum its header gives, and its first block (mapped at the first growth address) carries about
+  2400 allocations with about 0.5 MiB free, so the pool is full, not refusing to grow. A local sampler (every
+  100 ms, reading the pool's block list and each block's free total) shows, in one surviving and one crashing run:
+  from about 3.8 s the first block keeps about 88 MiB free; at 4.5-5.4 s, while the title loads, transient
+  allocations fill both blocks and are freed again within 100 ms (free space swings between about 0.3 MiB and
+  the whole block), and the crashing run fails at that point with 0.7 MiB and 54 MiB free; after 5.5 s the pool
+  stays at its idle level. In the same window the GPU labels Kyty completes drop from about 60 to 14-20 per
+  100 ms. Reading: the pool holds data in flight, likely upload memory released when the GPU finishes with it, so
+  the amount alive depends on how fast Kyty completes that GPU work; this link is not shown (no run has moved the
+  crash rate by changing GPU completion), and the guest's release condition was not read. Rates seen: 1 crash in 4,
+  4 in 4 with the sampler at 200 ms, 3 in 4 and 1 in 3 with it at 100 ms, so the probe itself changes timing.
+  Direction: tie the guest's frees to the label or wait it releases on (time-stamp the label writes and the
+  pool's free total together), then measure Kyty's submit-to-label latency during loading; a fix belongs in that
+  latency, not in the allocator.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
