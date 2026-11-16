@@ -233,6 +233,56 @@ ShaderCode LoadedBufferFillCode()
 	return loaded;
 }
 
+// v_lshl_add_u32 v4, s8, 6, v0; s_buffer_load_dwordx4 s[4:7], s[4:7], 0; s_waitcnt; v_mov_b32 v0..v3, s4..s7;
+// buffer_store_format_xyzw v[0:3], v4, s[0:3], 0 idxen; s_endpgm
+ShaderCode LoadedQuadBufferFillCode()
+{
+	UniformBufferFillPattern pattern {};
+	pattern.workgroup_register = 8;
+	pattern.index_register     = 4;
+	pattern.workgroup_shift    = 6;
+	for (int component = 0; component < 4; ++component)
+	{
+		pattern.value_registers[component] = 4 + component;
+	}
+	auto code = UniformBufferFillCode(pattern);
+
+	ShaderInstruction load {};
+	load.type    = ShaderInstructionType::SBufferLoadDwordx4;
+	load.format  = ShaderInstructionFormat::Sdst4SvSoffset;
+	load.dst     = UniformBufferFillSgpr(4, 4);
+	load.src[0]  = UniformBufferFillSgpr(4, 4);
+	load.src[1]  = UniformBufferFillInline(0u);
+	load.src_num = 2;
+
+	ShaderInstruction wait {};
+	wait.type              = ShaderInstructionType::SWaitcnt;
+	wait.format            = ShaderInstructionFormat::Imm;
+	wait.src[0].type       = ShaderOperandType::LiteralConstant;
+	wait.src[0].constant.u = 0u;
+	wait.src_num           = 1;
+
+	const auto& instructions = code.GetInstructions();
+	ShaderCode  loaded {};
+	loaded.SetType(ShaderType::Compute);
+	uint32_t pc = 0;
+	for (uint32_t i = 0; i < instructions.Size(); ++i)
+	{
+		auto instruction = instructions.At(i);
+		instruction.pc   = pc;
+		pc += 4u;
+		loaded.GetInstructions().Add(instruction);
+		if (i != 0u) { continue; }
+		for (auto inserted: {load, wait})
+		{
+			inserted.pc = pc;
+			pc += 4u;
+			loaded.GetInstructions().Add(inserted);
+		}
+	}
+	return loaded;
+}
+
 UniformBufferFillPattern UniformBufferFillTestPattern()
 {
 	return {
@@ -345,6 +395,36 @@ TEST(EmulatorComputeColorFill, ComputeUniformBufferFillRecognizesLoadedStore)
 	auto workgroup_in_source = LoadedBufferFillCode();
 	workgroup_in_source.GetInstructions()[0].src[0] = UniformBufferFillSgpr(5);
 	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(workgroup_in_source).valid);
+}
+
+TEST(EmulatorComputeColorFill, ComputeUniformBufferFillRecognizesLoadedQuadStore)
+{
+	const auto evidence = AnalyzeShaderComputeUniformBufferFill(LoadedQuadBufferFillCode());
+	ASSERT_TRUE(evidence.valid);
+	EXPECT_FALSE(evidence.value_is_constant);
+	EXPECT_EQ(evidence.value_buffer_register, 4);
+	EXPECT_EQ(evidence.record_bytes, 16u);
+	EXPECT_EQ(evidence.destination_start_register, 0);
+	EXPECT_EQ(evidence.workgroup_register, 8);
+	EXPECT_EQ(evidence.workgroup_shift, 6u);
+
+	auto nonzero_offset = LoadedQuadBufferFillCode();
+	nonzero_offset.GetInstructions()[1].src[1] = UniformBufferFillInline(16u);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(nonzero_offset).valid);
+
+	// The stored components must be the loaded words in order.
+	auto swapped = LoadedQuadBufferFillCode();
+	swapped.GetInstructions()[4].src[0] = UniformBufferFillSgpr(7);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(swapped).valid);
+
+	auto single_word = LoadedQuadBufferFillCode();
+	single_word.GetInstructions()[1].type   = ShaderInstructionType::SBufferLoadDword;
+	single_word.GetInstructions()[1].format = ShaderInstructionFormat::SdstSvSoffset;
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(single_word).valid);
+
+	auto source_is_destination = LoadedQuadBufferFillCode();
+	source_is_destination.GetInstructions()[7].src[1] = UniformBufferFillSgpr(4, 4);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(source_is_destination).valid);
 }
 
 TEST(EmulatorComputeColorFill, ComputeUniformBufferFillRejectsClobberedIndexAndNonScalarValues)

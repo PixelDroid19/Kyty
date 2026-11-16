@@ -379,14 +379,16 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	// with GPU writes behind it has no stable value here. The bound read-only
 	// view uploads these guest bytes even inside a stale surface of a reused
 	// range, so the dispatch writes the value read here.
-	uint32_t loaded_word = 0;
+	// The 4-byte form loads one word, the 16-byte form one word per component.
+	std::array<uint32_t, 4> loaded_words {};
 	if (loaded_value)
 	{
-		const int   source_index = 1 - destination_index;
-		const auto& source       = buffers.buffers[source_index];
+		const int      source_index = 1 - destination_index;
+		const auto&    source       = buffers.buffers[source_index];
+		const uint32_t loaded_bytes = proof.record_bytes == 16u ? 16u : 4u;
 		if (buffers.start_register[source_index] != proof.value_buffer_register || !binding_is_exact(source_index, true) ||
-		    source.Base48() == 0u || ShaderBufferByteSize(source.Stride(), source.NumRecords()) < sizeof(loaded_word) ||
-		    !GpuMemoryCaptureSnapshotReadOnlyBuffer(source.Base48(), sizeof(loaded_word), &loaded_word, nullptr, nullptr,
+		    source.Base48() == 0u || ShaderBufferByteSize(source.Stride(), source.NumRecords()) < loaded_bytes ||
+		    !GpuMemoryCaptureSnapshotReadOnlyBuffer(source.Base48(), loaded_bytes, loaded_words.data(), nullptr, nullptr,
 		                                            GpuMemorySnapshotAdmission::StorageView))
 		{
 			return false;
@@ -417,10 +419,11 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 		{
 			return false;
 		}
-		for (uint32_t component = 0; component < words.size(); ++component)
+		for (uint32_t component = 0; component < words.size() && !loaded_value; ++component)
 		{
 			if (!user_sgpr(proof.value_registers[component], &words[component])) { return false; }
 		}
+		if (loaded_value) { words = loaded_words; }
 	} else if (proof.value_is_constant || loaded_value)
 	{
 		// BUF_FMT_32_UINT, one record per invocation; the store writes X only.
@@ -431,7 +434,7 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 		{
 			return false;
 		}
-		words.fill(loaded_value ? loaded_word : proof.constant_value);
+		words.fill(loaded_value ? loaded_words[0] : proof.constant_value);
 	} else
 	{
 		// BUF_FMT_32_UINT. A period of 1 repeats the first value; the count must

@@ -1867,7 +1867,8 @@ struct ShaderComputeUniformBufferFillEvidence
 	bool     value_is_constant          = false;
 	uint32_t constant_value             = 0;
 	// The loaded form stores the first word of the one-descriptor source at
-	// this SGPR, read with s_buffer_load_dword, the same way.
+	// this SGPR, read with s_buffer_load_dword, the same way; with 16-byte
+	// records it stores the first four words, read with s_buffer_load_dwordx4.
 	int      value_buffer_register      = -1;
 };
 
