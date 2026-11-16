@@ -3605,6 +3605,13 @@ private:
 	std::array<Entry, Capacity> m_entries {};
 };
 
+// Unmapped PRT pages are not host-readable; only a fully physical range is read directly.
+static bool RangeIsPhysical(uint64_t vaddr, uint64_t size)
+{
+	Kernel::Memory::KernelMappedRange mapped {};
+	return Kernel::Memory::KernelQueryMappedRange(vaddr, size, &mapped) && mapped.kind == Kernel::Memory::KernelMappedRangeKind::Physical;
+}
+
 // A sampled depth surface with HTILE reads its tiles' clear value where a tile is cleared. Its guest
 // bytes are the sampled values only when every word of its HTILE is one known clear word (zero: [0, 0];
 // 0xfffffff0: [1, 1]) and every sampled element of the single layer already holds that value.
@@ -3619,7 +3626,7 @@ static bool HtileClearMatchesGuestDepth(uint64_t htile_addr, uint64_t depth_addr
 	const uint32_t z_format  = fmt == 22u ? 3u : 1u;
 	if (htile_addr == 0u || bytes == 0u || layer == 0u ||
 	    !TileGetDepthSize(width, height, 0, z_format, 0, true, true, true, &stencil, &htile, &depth) || htile.size == 0u ||
-	    !Kernel::Memory::KernelRangeResidentOrPrt(htile_addr, htile.size) || !Kernel::Memory::KernelRangeResidentOrPrt(depth_addr, layer))
+	    !RangeIsPhysical(htile_addr, htile.size) || !RangeIsPhysical(depth_addr, layer))
 	{
 		return false;
 	}
