@@ -96,7 +96,8 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     fault report. The read now repeats with the wait flag and writes the report with that result before stopping
     (not yet exercised by a run). In the installed driver the waiting read polls availability and device status
     for at most 2 s, returns the device loss when the status reports it, and otherwise marks the device lost on
-    timeout; other drivers were not read.
+    timeout. The AMD driver at the same commit polls a timestamp for at most twice its reset timeout and returns
+    the device loss on timeout; other drivers were not read.
   - *Discriminators, forced reproducer.* `INTEL_DEBUG=reemit` (all state re-emitted for every draw): 40 s and
     about 6500 forced submits, no reset (one run). `INTEL_DEBUG=nofc`: hangs. `INTEL_DEBUG=nohiz`: hangs with the
     same shape; the dump shows the flag engaged (`3DSTATE_HIER_DEPTH_BUFFER` has a null address), so HiZ is
@@ -116,13 +117,29 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - *What `reemit` adds (driver source at the installed commit, read only).* The flag marks every graphics
     hardware state dirty at each draw flush (all but the index buffer, stream-out declarations, line stipple and
     disabled features), so the whole set, `TBIMR` tile pass info and the workaround packets included, is emitted
-    before every draw. Without it the dump shows only `3DSTATE_WM_DEPTH_STENCIL` and `3DSTATE_CONSTANT_ALL`
-    between the two quads. One of those workaround states, required on this GPU family, emits a `PIPE_CONTROL`
+    before every draw. Without it the dumps show only `3DSTATE_WM_DEPTH_STENCIL` and `3DSTATE_CONSTANT_ALL`
+    between the two quads, plus one `PIPE_CONTROL` with no flags in one of the two hung batches. One of those workaround states, required on this GPU family, emits a `PIPE_CONTROL`
     with the pixel-shader stall sync only when "depth or stencil writes enabled" changes; the hung pair goes from
     stencil-only writes to depth-only writes, so that value stays true and no stall is emitted between the quads,
-    while `reemit` emits it before each. Untested lead: no run isolated that stall from the rest of the set.
-  - *Direction.* Report the reproducer and this contrast to the driver upstream (needs the maintainer's
-    approval); a fix in Kyty would need a run showing that a stall between the quads alone avoids the hang.
+    while `reemit` emits it before each. A `PIPE_CONTROL` with only that stall sits right before the first quad in
+    every dumped batch, consistent with the workaround being active on this GPU. The completing sibling pairs have no stall
+    between their quads either, so the missing stall is at most a necessary condition.
+  - *Isolating run (2026-11-16, forced reproducer, kernel 7.3.4, temporary DIAG not committed).* After each
+    4-vertex draw with stencil test, no depth writes and a dynamic stencil write mask, the draw is repeated once:
+    - arm A, write mask 0 for the repeat (no depth or stencil writes, so the driver emits the stall before the
+      repeat and again before the second quad): 3 of 3 runs of 60 s clean, at least 6000 repeats and about
+      11000 forced submits each, no device dump;
+    - arm B, same repeat with the original write mask (writes stay enabled, no stall): 3 of 3 runs lost the
+      device within the first 500 forced submits, with a dump;
+    - controls: no repeat hung (dump) within the first 500 forced submits; `INTEL_DEBUG=reemit` clean (60 s,
+      about 11000 forced submits), now on the current kernel.
+    With `INTEL_DEBUG=pc` the arm A run emitted about 262000 stall-only `PIPE_CONTROL`s, but the driver labels
+    them with a generic reason, so the count is not tied to the workaround by the log; the tie comes from the
+    driver source. Result: a write-state change between the quads, which makes the driver emit its
+    pixel-shader stall, avoids the hang; keeping the writes enabled does not.
+  - *Direction.* The driver workaround keys on "depth or stencil writes enabled" as one value; a switch from
+    stencil-only to depth-only writes does not trigger it. Report the reproducer and the A/B result upstream
+    (needs the maintainer's approval).
 
 ## Sandbox title: world frame rate at `6a6a5818a` (2026-11-14, measured)
 

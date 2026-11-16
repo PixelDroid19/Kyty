@@ -7339,7 +7339,9 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   2026-10-16 merge, at about 40 s. A first bisection with a 40 s window pointed at the guest-path cache commit of
   2026-10-15, but its parent emits the same events at about 40 s: that commit only shortened loading. Commits
   before 2026-08-04 lack the Debug frontier line. The event therefore started when the boot first reached that
-  shader, not with a change to the bind check. The format-load fix above removes both events: none in one 40 s
+  shader, not with a change to the bind check; this holds for first-parent `main` only, since the commits
+  inside the #11 merge were not run. Each run with the 120 s window stopped at 59-60 s on an error that was not
+  examined. The format-load fix above removes both events: none in one 40 s
   run on the fixed head, while its parent emits them at about 21 s.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
