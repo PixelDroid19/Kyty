@@ -34,6 +34,7 @@ enum class RenderTextureFormat : uint64_t
 	R16Uint,
 	R16G16Uint,
 	R32Uint,
+	R8G8B8A8Snorm,
 };
 
 struct RenderTextureFormatInfo

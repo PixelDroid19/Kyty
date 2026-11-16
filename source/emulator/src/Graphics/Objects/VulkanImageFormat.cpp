@@ -60,6 +60,8 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
                      GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {56, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM,
                      GuestImageNumericType::FloatingPoint},
+    // RDNA2 ISA image format table: 57=8_8_8_8_SNORM; no sRGB form.
+    Gen5ImageFormat {57, VK_FORMAT_R8G8B8A8_SNORM, VK_FORMAT_R8G8B8A8_SNORM, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {60, VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R8G8B8A8_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {62, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {64, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, GuestImageNumericType::FloatingPoint},
@@ -276,6 +278,7 @@ uint32_t VulkanColorTexelBytes(VkFormat format)
 		case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
 		case VK_FORMAT_R8G8B8A8_UNORM:
 		case VK_FORMAT_R8G8B8A8_SRGB:
+		case VK_FORMAT_R8G8B8A8_SNORM:
 		case VK_FORMAT_R8G8B8A8_UINT:
 		case VK_FORMAT_B8G8R8A8_UNORM:
 		case VK_FORMAT_B8G8R8A8_SRGB: return 4u;

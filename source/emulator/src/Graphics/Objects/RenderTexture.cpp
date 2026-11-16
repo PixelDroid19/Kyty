@@ -200,6 +200,10 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	{
 		return {RenderTextureFormat::R8G8B8A8Srgb, 4};
 	}
+	if (format == 0xau && channel_type == 0x1u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R8G8B8A8Snorm, 4};
+	}
 	if (format == 0xau && channel_type == 0x0u && channel_order == 0x1u)
 	{
 		return {RenderTextureFormat::B8G8R8A8Unorm, 4};
@@ -242,6 +246,7 @@ uint32_t RenderTextureBytesPerElement(RenderTextureFormat format)
 		case RenderTextureFormat::R16Uint: return 2;
 		case RenderTextureFormat::R8G8B8A8Unorm:
 		case RenderTextureFormat::R8G8B8A8Srgb:
+		case RenderTextureFormat::R8G8B8A8Snorm:
 		case RenderTextureFormat::B8G8R8A8Unorm:
 		case RenderTextureFormat::B8G8R8A8Srgb:
 		case RenderTextureFormat::R16G16Sfloat:
@@ -461,6 +466,7 @@ uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format)
 		case RenderTextureFormat::R8Unorm: return VK_FORMAT_R8_UNORM;
 		case RenderTextureFormat::R8G8Unorm: return VK_FORMAT_R8G8_UNORM;
 		case RenderTextureFormat::R8G8B8A8Unorm: return VK_FORMAT_R8G8B8A8_UNORM;
+		case RenderTextureFormat::R8G8B8A8Snorm: return VK_FORMAT_R8G8B8A8_SNORM;
 		case RenderTextureFormat::R8G8B8A8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
 		case RenderTextureFormat::B8G8R8A8Unorm: return VK_FORMAT_B8G8R8A8_UNORM;
 		case RenderTextureFormat::B8G8R8A8Srgb: return VK_FORMAT_B8G8R8A8_SRGB;
