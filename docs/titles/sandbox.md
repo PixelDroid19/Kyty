@@ -55,20 +55,29 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     an adjacent batch, not provably the job before; an in-batch compute-to-3D switch is excluded for this hang.
   - *Reproducer.* A local diagnostic that submits before the first 4-vertex auto draw of each pair hangs the GPU
     within seconds of launch in every control run (5 of 5).
+  - *The pair.* Decoded with the genxml field layout of `3DSTATE_WM_DEPTH_STENCIL`, the first draw only writes
+    stencil (test always, pass op replace, reference 0, masks 0xff) and the second only writes depth (test always);
+    the guest clears depth and stencil with two quads. Only this pair hangs at a command-buffer start: in a forced
+    run the pairs at dw 1707, 2321, 2461, 2978 and 3180 open a command buffer, carry the same programs and complete,
+    so a pair at a batch start is not enough on its own.
   - *Discriminators, forced reproducer.* `INTEL_DEBUG=reemit` (all state re-emitted for every draw): 40 s and
-    about 6500 forced submits, no reset (one run). `INTEL_DEBUG=nofc`: hangs. `INTEL_DEBUG=nohiz`: hangs (that the
-    flag engaged was not checked). Driconf `intel_tbimr=false` (the driver confirmed the override): the TBIMR pair
-    no longer hangs, but the run hangs later in a different job of driver-internal rectangle operations followed by
-    a switch to another HiZ depth buffer, again at a depth-stall `PIPE_CONTROL` (one dump).
+    about 6500 forced submits, no reset (one run). `INTEL_DEBUG=nofc`: hangs. `INTEL_DEBUG=nohiz`: hangs with the
+    same shape; the dump shows the flag engaged (`3DSTATE_HIER_DEPTH_BUFFER` has a null address), so HiZ is
+    excluded. Driconf `intel_tbimr=false` (the driver confirmed the override; the hung job's draws carry no TBIMR
+    bit): the two runs hung far later (job sequence 8776 and 15636 against about 350 in the controls), one of them
+    in a different job of driver-internal rectangle operations followed by a depth-buffer switch, again at a
+    depth-stall `PIPE_CONTROL` (one dump). TBIMR off delays the hang; it does not remove it. The `nohiz` run on
+    kernel 7.3.4 hangs like the 7.2.15 runs.
   - *Vulkan usage.* With the validation layer (core checks only, the known `VUID-vkCmdDrawIndexed-format-07753`
     filtered, since validation errors stop the run) the forced reproducer hangs and the layer reports nothing
     else. The earlier "validation run held the world" above predates the stop on the first error.
-  - *Not established.* The driver state that the full re-emit restores; no ingredient the emulator controls was
-    named, so nothing was changed in Kyty. The dw-3180 group of the same programs also opens a command buffer every
-    frame and completes; its depth and stencil state was not compared with the hung pair's.
-  - *Direction.* Compare the hung pair's Vulkan state with the dw-3180 group's, read where `reemit` acts in the
-    driver at the installed commit, and report the reproducer to the driver upstream (needs the maintainer's
-    approval).
+  - *Not established.* The driver state that the full re-emit restores, and what separates the dw-4421 pair from
+    the pairs that complete at a batch start (their render targets and the work submitted just before them were
+    not compared); no ingredient the emulator controls was named, so nothing was changed in Kyty. No setting was
+    measured for frame rate.
+  - *Direction.* Name the render targets and preceding submission of the dw-4421 pair against a completing
+    batch-start pair, read where `reemit` acts in the driver at the installed commit, and report the reproducer to
+    the driver upstream (needs the maintainer's approval).
 
 ## Sandbox title: world frame rate at `6a6a5818a` (2026-11-14, measured)
 
