@@ -7309,13 +7309,23 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   one time in eight, so timing is suspected, not shown). Not probed: `LibC.cpp` and the kernel memory-mapping
   calls. The guest code before the return address (main image, read locally, not recorded) is a row-by-row copy
   loop: the destination is a base plus row times pitch plus an offset, and the base is the first field of a
-  structure that an internal guest function returns through an out-parameter just before the loop; that function
-  calls at least one import. Who stores that field is not known: it can be an import or mapping result. A crash
-  report with memory windows (`KYTY_CRASH_MEMORY=1`, one crash in three runs of 20 s) shows that object all zero
-  over the 48 bytes captured, while the word before it holds two pointers: the copy read an object that had not
-  been filled yet, which fits a consumer running before its producer rather than a failed reservation (one
-  crash, so not shown to repeat). Direction: name that import (its stub uses relocation slot 0x8c of the main image) and compare
-  its result in a crashing and a surviving run, then find the guest thread or callback that fills the object.
+  structure that an internal guest function returns through an out-parameter just before the loop. That function
+  allocates the structure with `posix_memalign` (relocation slot 0x8c), zeroes it, asks the guest's own texture
+  allocator for the memory and, when that allocator returns an error, logs a texture allocation failure and leaves
+  the base at zero; the copy then writes through it. A crash report with memory windows shows that structure zero,
+  as the error path leaves it, so the earlier reading "a consumer ran before its producer" is excluded. Three crash
+  reports read back the request from the caller's stack: sizes 0x219b00, 0x292e00 and 0x400000, the same pool
+  selector, no flags, so the request is valid and the failing size varies. A local crash-handler probe read the
+  allocator's pool globals: all four pools are set (non-null), the selected pool holds one 256 MiB block. A local
+  probe on every result of the kernel direct and flexible memory calls (allocate, map, batch map, reserve; shown to
+  print by a hand case that logged the successful calls) printed no error before the crash. The guest grows that
+  pool with further 256 MiB blocks through a callback registered at allocator creation (it calls
+  `sceKernelAllocateDirectMemory` and `sceKernelMapDirectMemory`): a run that survived 12 s made 4 more such
+  allocations; the crashing run made none before failing, so the allocator gave up without trying to grow. The
+  title imports none of the direct-memory size queries, so the decision is internal to the guest; why it did not
+  grow is open. Direction: find the guest condition that refuses to grow (a block count or budget limit, or a
+  concurrent allocation on another thread) and which Kyty-visible result or timing feeds it; compare the growth
+  allocations' timing in a crashing and a surviving run.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
