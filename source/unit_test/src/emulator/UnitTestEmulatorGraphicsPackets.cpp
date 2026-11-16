@@ -1508,6 +1508,16 @@ TEST(EmulatorGraphicsPackets, BatchWaitProducedByEarlierReleaseIsSelfContained)
 	EXPECT_TRUE(BatchProducesItsOwnWaits(scan, scan));
 }
 
+TEST(EmulatorGraphicsPackets, BatchScanListsTopLevelFlipHandles)
+{
+	// R_FLIP for handle 3, a NOP, then R_FLIP for handle 1: a submit that returns before decode counts both as pending.
+	const uint32_t words[] = {0xC004105Cu, 3u, 0u, 1u, 0u, 0u, 0xC0001000u, 0u, 0xC004105Cu, 1u, 2u, 1u, 0u, 0u};
+	const auto     scan    = ScanBatchMemoryWaits(words, 14u);
+	EXPECT_EQ(scan.flip_handles, (std::vector<uint32_t> {3u, 1u}));
+	// A flip packet cut short by the end of the buffer is not a flip.
+	EXPECT_TRUE(ScanBatchMemoryWaits(words, 4u).flip_handles.empty());
+}
+
 TEST(EmulatorGraphicsPackets, BatchWaitWithoutEarlierProducerStaysSerial)
 {
 	const uint32_t no_producer[] = {0xC0051028u, 0x20000u, 0u, 0xffffffffu, 1u, 3u, 10u};

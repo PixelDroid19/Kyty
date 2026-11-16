@@ -329,7 +329,8 @@ public:
 	void WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_write_dest, uint32_t eop_event_type, uint32_t cache_action,
 	                        uint32_t event_index, uint32_t event_write_source, void* dst_gpu_addr, uint64_t value,
 	                        uint32_t interrupt_selector, uint32_t interrupt_context_id);
-	void Flip();
+	// queued_at_submit: the submit already counted this flip as pending.
+	void Flip(bool queued_at_submit);
 	void Flip(void* dst_gpu_addr, uint32_t value);
 	void FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr, uint32_t value);
 	void QueueQueuedGraphicsInterrupt();
@@ -404,6 +405,20 @@ public:
 	[[nodiscard]] const uint32_t* GetActiveRunEnd() const { return m_active_run_end; }
 
 	[[nodiscard]] const FlipInfo& GetFlip() const { return m_flip; }
+	void                          SetFlipsQueuedAtSubmit(uint32_t count)
+	{
+		EXIT_IF(m_flips_queued_at_submit != 0u);
+		m_flips_queued_at_submit = count;
+	}
+	[[nodiscard]] bool TakeFlipQueuedAtSubmit()
+	{
+		if (m_flips_queued_at_submit == 0u)
+		{
+			return false;
+		}
+		m_flips_queued_at_submit--;
+		return true;
+	}
 	void                          SetFlip(const FlipInfo& flip)
 	{
 		m_flip                        = flip;
@@ -481,6 +496,7 @@ private:
 
 	FlipInfo m_flip;
 	bool     m_flip_issued                 = false;
+	uint32_t m_flips_queued_at_submit      = 0;
 	// Submission that recorded the latest GPU flip to each display buffer
 	// index. Its flip request reaches the flip queue only on completion.
 	struct RecordedFlip
@@ -691,6 +707,8 @@ private:
 		// Its submitter already returned (or may return) before this batch decodes: its memory waits must all be
 		// produced inside it, so it can never need the guest to release its decode.
 		bool                              returns_before_decode = false;
+		// Top-level R_FLIP packets the submit already counted as pending.
+		uint32_t                          flips_queued_at_submit = 0;
 	};
 
 	static void ThreadBatchRun(void* data);

@@ -214,6 +214,10 @@ BatchMemoryWaitScan ScanBatchMemoryWaits(const uint32_t* words, uint32_t num_dw)
 		{
 			written.push_back({address64(1, 2), 4u});
 		}
+		else if (header == 0xC004105Cu && body_dw >= 5u) // IT_NOP + R_FLIP: handle, index, mode, argument
+		{
+			scan.flip_handles.push_back(body[0]);
+		}
 		else if (op == Pm4::IT_INDIRECT_BUFFER || op == Pm4::IT_INDIRECT_BUFFER_CNST)
 		{
 			scan.nested++;

@@ -697,7 +697,7 @@ KYTY_CP_OP_PARSER(cp_op_flip)
 	f.flip_arg  = static_cast<int64_t>(buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u));
 
 	cp->SetFlip(f);
-	cp->Flip();
+	cp->Flip(cp->TakeFlipQueuedAtSubmit());
 
 	return 5;
 }
@@ -1056,7 +1056,7 @@ KYTY_CP_OP_PARSER(cp_op_marker)
 		case 0xd: cp->SetUserDataMarker(HW::UserSgprType::Region); break;
 		case 0x777:
 		{
-			cp->Flip();
+			cp->Flip(false);
 			break;
 		}
 		case 0x778:

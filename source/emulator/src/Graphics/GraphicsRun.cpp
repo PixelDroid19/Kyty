@@ -1613,9 +1613,19 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 			m_previous_follow_completion = buf.follow_completion;
 			// Only a batch whose memory waits are all produced inside itself can leave its decode running: any
 			// other wait may depend on a CPU store the guest makes after this call returns.
-			returns_before_own_decode = BatchProducesItsOwnWaits(ScanBatchMemoryWaits(buf.draw_buffer.data, buf.draw_buffer.num_dw),
-			                                                     ScanBatchMemoryWaits(buf.const_buffer.data, buf.const_buffer.num_dw));
+			const auto draw_scan      = ScanBatchMemoryWaits(buf.draw_buffer.data, buf.draw_buffer.num_dw);
+			returns_before_own_decode = BatchProducesItsOwnWaits(draw_scan, ScanBatchMemoryWaits(buf.const_buffer.data, buf.const_buffer.num_dw));
 			buf.returns_before_decode = returns_before_own_decode;
+			if (returns_before_own_decode)
+			{
+				// The guest may poll IsFlipPending as soon as this submit returns, before the batch decodes, and
+				// unregister the buffers a flip still in it shows: its flips are pending from the submit.
+				for (const uint32_t handle: draw_scan.flip_handles)
+				{
+					VideoOut::VideoOutQueueGpuFlip(static_cast<int>(handle));
+				}
+				buf.flips_queued_at_submit = static_cast<uint32_t>(draw_scan.flip_handles.size());
+			}
 		}
 
 		m_cmd_batches.Add(buf);
@@ -2021,6 +2031,7 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			// The previous batch retired its consolidated wait before it ended.
 			EXIT_IF(cp->TakeConsolidatedPlainWait());
 			cp->SetFlip(buf.flip);
+			cp->SetFlipsQueuedAtSubmit(buf.flips_queued_at_submit);
 			cp->SetSumbitId(++seq);
 
 			struct ScheduledStream
@@ -2115,7 +2126,7 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			// (empty Flip queue → guest ThreadFlag bit 0x1 soft-lock).
 			if (GraphicsBatchNeedsApiFlip(buf.with_api_flip, cp->FlipIssued()))
 			{
-				cp->Flip();
+				cp->Flip(false);
 				flip_submission = cp->BufferFlush();
 			}
 			batch_submission = flip_submission;
@@ -3689,7 +3700,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index, u
 	}
 }
 
-void CommandProcessor::Flip()
+void CommandProcessor::Flip(bool queued_at_submit)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -3700,7 +3711,10 @@ void CommandProcessor::Flip()
 		KYTY_LOG_DEBUG("CommandProcessor::Flip()\n");
 	}
 
-	VideoOut::VideoOutQueueGpuFlip(m_flip.handle);
+	if (!queued_at_submit)
+	{
+		VideoOut::VideoOutQueueGpuFlip(m_flip.handle);
+	}
 	RecordFlipSubmissionLocked();
 	GraphicsRenderWriteAtEndOfPipeOnlyFlip(m_sumbit_id, m_buffer[m_current_buffer], m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                       m_flip.flip_arg);

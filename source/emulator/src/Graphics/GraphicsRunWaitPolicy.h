@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_GRAPHICSRUNWAITPOLICY_H_
 
 #include <cstdint>
+#include <vector>
 
 namespace Kyty::Libs::Graphics {
 
@@ -13,6 +14,7 @@ struct BatchMemoryWaitScan
 	uint32_t own       = 0;
 	uint32_t nested    = 0; // indirect buffers; their content is not scanned
 	uint32_t unparsed  = 0; // headers that cannot be sized; the packets after them are not known
+	std::vector<uint32_t> flip_handles; // VideoOut handle of each top-level R_FLIP packet, in order
 };
 
 // Walks the top level of a PM4 buffer (null or empty is a buffer without waits).
