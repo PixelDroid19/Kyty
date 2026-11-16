@@ -151,7 +151,9 @@ static bool ComputeColorFillUsesGraphicsQueue(CommandBuffer* buffer)
 // Which images sharing bytes with a filled range a resolved fill tolerates.
 enum class ComputeFillAliases
 {
-	// DCC metadata: any image other than an exact color alias refuses the clear.
+	// Color metadata: any image other than an exact color alias refuses the clear,
+	// except a sampled texture that only partly shares the bytes. It never writes
+	// them, and the clear is applied only to a target whose metadata address it is.
 	ExactOnly,
 	// Uniform color fill: images that only partly share the bytes (transient
 	// pool aliases) are left as they are. The dispatch already wrote the fill to
@@ -180,6 +182,11 @@ static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, Com
 		                         entry.type == GpuMemoryObjectType::Texture;
 		if (aliases == ComputeFillAliases::SkipPartial && entry.relation != GpuMemoryOverlapType::Equals &&
 		    (image_alias || entry.type == GpuMemoryObjectType::StorageTexture || entry.type == GpuMemoryObjectType::DepthStencilBuffer))
+		{
+			continue;
+		}
+		if (aliases == ComputeFillAliases::ExactOnly && entry.type == GpuMemoryObjectType::Texture &&
+		    entry.relation != GpuMemoryOverlapType::Equals)
 		{
 			continue;
 		}
