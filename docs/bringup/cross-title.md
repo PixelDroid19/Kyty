@@ -7307,8 +7307,12 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   bytes, base register zero; one crash in two runs); no site fired in those runs, so that it would print was not
   shown by a hand case. With Debug console logging 3 of 3 runs of 20 s survived (at a 50 % rate that happens
   one time in eight, so timing is suspected, not shown). Not probed: `LibC.cpp` and the kernel memory-mapping
-  calls. Direction: read the guest instructions before the return address to name the call or field that holds
-  the null base, and probe the remaining allocation and mapping returns.
+  calls. The guest code before the return address (main image, read locally, not recorded) is a row-by-row copy
+  loop: the destination is a base plus row times pitch plus an offset, and the base is the first field of a
+  structure that an internal guest function fills through an out-parameter just before the loop; that function
+  calls one import first. So the null base is a field written by guest code, not the return of an import or of
+  the allocators. Direction: name that import (its stub uses relocation slot 0x8c of the main image) and compare
+  its result in a crashing and a surviving run.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
