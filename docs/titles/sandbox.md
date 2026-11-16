@@ -124,7 +124,7 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     while `reemit` emits it before each. A `PIPE_CONTROL` with only that stall sits right before the first quad in
     every dumped batch, consistent with the workaround being active on this GPU. The completing sibling pairs have no stall
     between their quads either, so the missing stall is at most a necessary condition.
-  - *Isolating run (2026-11-16, forced reproducer, kernel 7.3.4, temporary DIAG not committed).* After each
+  - *Isolating run (2026-11-16, forced reproducer, kernel 7.3.4, temporary probe not committed).* After each
     4-vertex draw with stencil test, no depth writes and a dynamic stencil write mask, the draw is repeated once:
     - arm A, write mask 0 for the repeat (no depth or stencil writes, so the driver emits the stall before the
       repeat and again before the second quad): 3 of 3 runs of 60 s clean, at least 6000 repeats and about
@@ -137,9 +137,21 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     them with a generic reason, so the count is not tied to the workaround by the log; the tie comes from the
     driver source. Result: a write-state change between the quads, which makes the driver emit its
     pixel-shader stall, avoids the hang; keeping the writes enabled does not.
+  - *Fix.* On Intel's Mesa driver (driver ID), a non-indexed draw that tests stencil and writes neither depth
+    nor color, with a dynamic stencil write mask and no guest memory stores, is repeated once with the stencil
+    write mask at 0, then the mask is restored. The repeat writes nothing; it makes the driver emit its stall
+    before the next draw that writes depth. It is skipped while the vertex-clip depth-pass query is active, since
+    the repeat would count samples twice. Verified on the forced reproducer: 3 of 3 runs of 60 s clean (at least
+    6000 repeats, about 11000 forced submits each), and the same build with the repeat switched off by a
+    temporary probe hung within the first 500 forced submits. `kyty_agent playable-regression` on this title and
+    on `PPSA21567 - ASTRO BOT`: no host crash, no runtime failure, input delivered; `visual_compare`,
+    `scene_checkpoint` and `action_response` fail as in every earlier run of this session (no baseline or
+    checkpoint configured). Limits: only the non-indexed draw path repeats; only the stencil-only to
+    depth-writing order was tested; the natural hang (about 2 of 12 runs) is not shown gone by these runs; other
+    Intel drivers are not covered.
   - *Direction.* The driver workaround keys on "depth or stencil writes enabled" as one value; a switch from
     stencil-only to depth-only writes does not trigger it. Report the reproducer and the A/B result upstream
-    (needs the maintainer's approval).
+    (needs the maintainer's approval); when the driver is fixed, the repeat can be removed.
 
 ## Sandbox title: world frame rate at `6a6a5818a` (2026-11-14, measured)
 
