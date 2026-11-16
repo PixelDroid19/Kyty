@@ -6309,7 +6309,8 @@ memory stayed within run-to-run noise (8.3-9.4 GiB), not separately isolated.
   undo the submit cost above, so no change was made; moving the export off the command thread is the
   direction, not started.
 - **Later (2026-11-16, `PPSA03355 - Hades` boot):** the same export, 8-16 ms per 64 MiB window, is the whole
-  command-thread cost of the loading draws before the title's intermittent boot stop; see "Early stops seen in
+  command-thread cost of the window-opening loading draws before the title's intermittent boot stop, which it is not
+  shown to cause; see "Early stops seen in
   the same sweep".
 
 ## Huge pages for direct memory: not adopted, GPU reads go through the IOMMU (2026-10-31)
@@ -7340,22 +7341,27 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   crash rate by changing GPU completion), and the guest's release condition was not read. Rates seen: 1 crash in 4,
   4 in 4 with the sampler at 200 ms, 3 in 4 and 1 in 3 with it at 100 ms, so the probe itself changes timing.
   Where the command-processor time goes in that window (2026-11-16, local timers, 100 ms buckets, one run each):
-  the cost is 3 indexed draws (`DRAW_INDEX_OFFSET_2`, 6 indices) per 100 ms taking 10-120 ms each, all of it in
-  the guest-device-address preparation, in its residency phase over the physical ranges. Each such draw opens one
+  the largest cost is 3 indexed draws (`DRAW_INDEX_OFFSET_2`, 6 indices) per 100 ms taking 10-120 ms each; in the
+  draws that open physical windows all of it is the guest-device-address preparation, in its residency phase (three
+  other slow draws per run spent 7-12 ms in descriptor and index setup instead, and some 100 ms buckets hold
+  command time outside any slow draw, which includes waits). Each window-opening draw opens one
   or more 64 MiB physical windows, and the export (pin and `udmabuf` creation) took 8-16 ms per window whose pages
   the guest had not written, against 0.3-0.9 ms for the device import; the rest, about 3 ms per preparation, is
   the populated-page query over a 2.6-2.9 GiB span not yet imported. A run's 31 windows cost about 160 ms of
-  export, about 100 ms of it in the first preparation. GPU labels fire 0.4 ms after the command processor creates
+  export, about 80 ms of it in the first preparation (100 ms in all). GPU labels fire 0.4 ms after the command processor creates
   them when it is idle; in the buckets with an expensive draw the longest delay equals that draw's command time
   (65.0 against 65.1 ms, 76.4 against 76.5, 88.4 against 88.5), so the delay is the command-thread stall, not GPU
-  completion. Between those draws the guest submits few labels (4-13 per 100 ms) while the command thread is idle,
-  so the low label rate is not only the stall. The run with these timers survived and still had the stalls, so the
-  stall alone does not decide the crash; no run has yet removed it. A prepopulation arm (`fallocate` of the
+  completion. Between those draws the guest submits few labels (2-9 per 100 ms) while the command thread is idle,
+  so the low label rate is not only the stall. Per 100 ms bucket, the pool's low point does not follow the stalls:
+  the crashing run's last low (7 MiB free at 5.2 s) lies in a bucket without one, and the surviving run reached
+  2-5 MiB free both in buckets without a stall and in buckets with 30 ms ones, so the export is not shown to drive
+  the pool's peak; no run has yet removed it. A prepopulation arm (`fallocate` of the
   physical range inside the first export) is not evidence either way: it put a 590-740 ms stall into the loading
   window and moved the per-preparation cost into the unpopulated-span search (16 ms).
-  Direction: move the window export off the command thread (the open direction in "Physical windows are whole
-  64 MiB chunks"), or prepopulate before guest threads run, then judge by the pool's per-cycle low point and the
-  label rate rather than the crash rate; a fix belongs in Kyty's command-thread latency, not in the allocator.
+  Direction: read the guest's release condition for the pool's transient allocations (what it waits on before
+  freeing) and time-stamp that event against the pool's free total; moving the window export off the command
+  thread (the open direction in "Physical windows are whole 64 MiB chunks") removes the stalls but is not shown to
+  cure this stop. Judge any arm by the pool's per-cycle low point and the label rate, not the crash rate.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
