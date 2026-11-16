@@ -7402,10 +7402,15 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   own arithmetic on pitch, height and format tables, with no import in between. Capacity and request size are
   therefore both the title's, and what differs under Kyty is how many textures are alive at the peak. The upload
   then queues a command for the renderer's own thread on a mutex and condition-variable queue (56 code
-  references); no GPU wait import (event queue, label wait) appears near that queue, so what releases a texture
-  back to the pool was not found. Direction: find the renderer thread's consumer of that queue and the memory
-  value it tests before freeing (a label or fence written by the GPU would make the peak Kyty's contract), and
-  whether the free figure the sampler reads counts the largest contiguous range.
+  references). The loader then waits on a condition variable until the queue's completed sequence reaches its
+  command, and the renderer thread publishes as completed the sequence it recorded for its current frame slot,
+  so textures go back to the pool one frame slot at a time (the queue holds four per-slot lists). The title
+  imports no CPU-side GPU wait at all (no event-queue or flip wait; its only sleeps are two non-frame retry
+  loops), so the renderer's pace comes from its own queues, the GPU-side waits it records in its command
+  buffers, and the time each submit call takes. Direction: measure how long the renderer thread spends inside
+  the submit calls during loading and how often its frame slot advances, and compare with the pool's low points;
+  a submit that blocks longer than a queue append, or a slot that advances only on a GPU result, would make the
+  peak Kyty's contract.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
