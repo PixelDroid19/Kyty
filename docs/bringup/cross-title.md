@@ -7204,8 +7204,10 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   and mixed follow the same rule, and no title is known to exercise them. The translator and the shader id do not
   read the access, and every other reader of it also requires the program code or scalar or guarded-load flags that
   the front proof does not set, so the buffer binds and translates as before: no visual or frame-rate change is
-  expected, and none was measured. One run per title after the fix; the same message class on another title
-  (`st=8 f=64`, above) was not re-run. No unit test covers the front proof. After the fix, Astro (private cache, warm): child exit 0, no first error,
+  expected, and none was measured. One run per title after the fix. The same message class on another title
+  (`st=8 f=64`, above) was re-run later and is not covered by this fix ("typed storage read only by format loads",
+  below). No unit test covers the front proof; one was not added because the fix only stops discarding evidence the
+  analysis already tests. After the fix, Astro (private cache, warm): child exit 0, no first error,
   `no_runtime_failure` passes, `visual_compare`, `scene_checkpoint` and `action_response` fail as before, 37-44 fps
   from 15 to 28 s like the run before it. `PPSA17221 - Minecraft`: child exit 0, no first error, the same three
   failing, 60 fps. `playable-regression` now keeps the first error's message in `timeline.json`.
@@ -7231,9 +7233,15 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   The frontier never stopped the bind, so binding and translation are unchanged; only the false event goes. The
   16-bit decode was checked by reading the generated function, not by evaluating it. After the fix, OCTOPATH
   (private cache): exit 0, 60 fps, and the first event is now `a=unknown r=code_unavailable c=0 sg=40 sl=6 st=4
-  f=29 ds=22c` at 22.8 s. That is the same class as the recorded `st=8 f=64 ds=22c` (above), a code-unavailable V#
-  with an `XY01` attribute swizzle, and is still open. Minecraft (warm private cache): exit 0, no first error,
-  60 fps.
+  f=29 ds=22c` at 22.8 s (19.6 s in a repeat). A bounded local probe placed it in the vertex stage, on a V# from
+  extended user data (`ext=1`, slot 6) with no program code: `ShaderProveFrontStorageReads` (`Shader.cpp`) skips
+  extended V#s, so the binding stays unknown and the typed check at `GraphicsRenderBind.cpp` (`PrepareStorageBuffers`)
+  reports it on every draw that uses it; the binding itself proceeds. Open. Suggested direction: follow the front's
+  scalar load of the extended slot to the SGPRs it fills and analyse the uses of those, as the dynamic scalar load
+  mapping does for other stages. The recorded `st=8 f=64 ds=22c` event (above) has the same swizzle and reason
+  but was not seen in these runs; the timeline keeps only the first error, so whether it still occurs is not
+  established, and when the 6.5 s event started is not established either. Minecraft (warm private cache): exit
+  0, no first error, 60 fps.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.

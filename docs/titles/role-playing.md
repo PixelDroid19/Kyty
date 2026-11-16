@@ -482,7 +482,12 @@ Intel A770, strict 180-230 s runs of the traveler route with scripted movement.
 - **Two-byte raw records.** A raw descriptor with guest stride 2 and format
   R16 describes 16-bit records. The byte-based raw address equation supports
   it; admission only accepted dword strides and stride 1. The strict run no
-  longer emits the raw stride-2 storage frontier.
+  longer emits the raw stride-2 storage frontier. On 2026-11-15 the same
+  stride-2 R16_UINT shape came back at 6.5 s as a typed V# read only by
+  `BUFFER_LOAD_FORMAT`, fixed by the format-load admission
+  (`docs/bringup/cross-title.md`, "typed storage read only by format loads").
+  The next event, at 19.6-22.8 s, is a vertex-stage V# from extended user data
+  (`ext=1`, slot 6, `st=4 f=29 ds=22c`) that has no program code; it is open.
 - **DCC clear formats.** The clear key is format-independent, but the decode
   table knew four host formats. R8/RG8 masks, R16/RG16, R32/RG32,
   RGBA16F/32F and the packed 16/32-bit formats could not materialise a pending
