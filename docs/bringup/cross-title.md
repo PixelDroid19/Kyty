@@ -6324,7 +6324,9 @@ memory stayed within run-to-run noise (8.3-9.4 GiB), not separately isolated.
   every page still flagged; 2 GiB with 16 of every 32 pages 126 ms -> 122 ms, 2 GiB full 240 ms -> 13.7 ms;
   identical flags in every pattern. A page wrongly reported empty would be left out of the GPU import, so the
   swapped-out case matters. `CoreVirtualMemory.PopulatedSharedBackingPagesMatchMixedLargeInterval` covers the split
-  (it fails when the fully populated branch is broken by hand). In one `PPSA03355 - Hades` loading window the
+  (it fails when the fully populated branch is broken by hand). A page allocated with `fallocate` but never written is a hole to
+  `SEEK_DATA` and cached to cachestat; product code only punches holes, but an experiment that preallocates
+  the backing that way now imports those pages and is not comparable with earlier runs. In one `PPSA03355 - Hades` loading window the
   command thread's samples inside the query fell from 22 of 206 to 4 of 102 (against 24 and 21 inside the
   window export); that run's other timings are not comparable (another workload held two host cores, free
   memory was lower and the thread missed samples while in the kernel). No frame-rate claim.
@@ -7500,6 +7502,15 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   kernel time per 100 ms, the rest waiting. Open: the window export on the command thread and host first
   touch of direct memory; their earlier recorded remedies (huge pages, populate ahead) are excluded or
   confounded.
+  - Bound on the export: its samples on the command thread came to about 120 ms of a 1.2 s loading window,
+    so removing it entirely returns at most about a tenth of the consumer's time; the earlier finding that
+    pool lows do not follow command-thread stalls still stands.
+  - A surviving run against three crashed runs, same samplers, from the pool's first block (16 to 20 windows
+    of 100 ms): the pool took in 1,435 MiB against 1,157-1,345 MiB, the consumer advanced 20 frames against
+    2-19, and the surviving run's free low was 2.1 MiB against 8-12 MiB in the crashed ones. Neither the
+    inflow nor the frame rate separates the outcomes, so these samplers do not capture what decides the
+    crash. Declared limit: the stop remains intermittent (about half of the runs) and unexplained; further
+    runs on these samplers are not expected to settle it.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
