@@ -511,6 +511,18 @@ TEST(EmulatorShaderGetpc, ExtendedDescriptorFollowedThroughLaneSpillToFormatLoad
 	EXPECT_FALSE(proves(edited(kRestore, unary(ShaderInstructionType::VWritelaneB32, vgpr(1), sgpr(9), lane(2)))));
 	// The spill VGPR is rewritten before the readback.
 	EXPECT_FALSE(proves(edited(kRestore, unary(ShaderInstructionType::VMovB32, vgpr(1), lane(0), {}))));
+	// The parked words are read as vector data.
+	EXPECT_FALSE(proves(edited(kRestore, unary(ShaderInstructionType::VMovB32, vgpr(2), vgpr(1), {}))));
+	// A branch while the V# is still live.
+	ShaderInstruction branch {};
+	branch.type    = ShaderInstructionType::SBranch;
+	branch.src_num = 1;
+	branch.src[0]  = lane(0);
+	EXPECT_FALSE(proves(edited(kRestore, branch)));
+	// The program ends with the V# still in s[0:3] and the lanes: no reader is left.
+	auto ends_live = program();
+	ends_live.resize(kConsumer + 1);
+	EXPECT_TRUE(proves(ends_live));
 	// Only three words come back to the quad the format load reads.
 	auto partial = program();
 	partial.erase(partial.begin() + static_cast<std::ptrdiff_t>(kRestore + 3));

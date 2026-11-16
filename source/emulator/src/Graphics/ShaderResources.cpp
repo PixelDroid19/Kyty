@@ -1454,9 +1454,24 @@ static bool ShaderDescriptorReadIsFormatLoadOrSpill(const ShaderInstruction& ins
 		}
 		*consumed = true;
 	}
+	// A parked word leaves its lane only through a V_READLANE of that constant lane.
+	int        read_lane   = 0;
+	const bool static_read = inst.type == ShaderInstructionType::VReadlaneB32 && inst.src_num >= 2 && ShaderStaticLane(inst.src[1], &read_lane);
+	auto reads_lane = [&](const ShaderOperand& operand)
+	{
+		return std::any_of(places.begin(), places.end(),
+		                   [&](const auto& place) { return place.vgpr >= 0 && ShaderOperandCoversVgpr(operand, place.vgpr); });
+	};
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		if (reads_lane(inst.src[source]) && !(static_read && source == 0))
+		{
+			return false;
+		}
+	}
 	for (int source = 0; source < inst.mimg_address_num; ++source)
 	{
-		if (reads_word(inst.mimg_address[source]))
+		if (reads_word(inst.mimg_address[source]) || reads_lane(inst.mimg_address[source]))
 		{
 			return false;
 		}
