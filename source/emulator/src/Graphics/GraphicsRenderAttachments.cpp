@@ -57,6 +57,8 @@
 namespace Kyty::Libs::Graphics {
 
 static ComputeColorFillEvents g_compute_color_fills;
+// Pending stores of one word at the head of every DCC block of a surface, keyed by the surface range.
+static ComputeColorFillEvents g_color_block_heads;
 // Pending DCC and CMASK metadata clears, keyed by the metadata range the guest filled.
 static ComputeColorFillEvents g_color_meta_clears;
 
@@ -310,7 +312,7 @@ void InvalidateComputeColorFills(const ShaderBindResources& bind)
 	{
 		if (bind.textures2D.desc[i].usage != ShaderTextureUsage::ReadOnly) { DiscardInPlaceFills(0u, UINT64_MAX); }
 	}
-	if (g_compute_color_fills.Empty() && g_color_meta_clears.Empty())
+	if (g_compute_color_fills.Empty() && g_color_meta_clears.Empty() && g_color_block_heads.Empty())
 	{
 		return;
 	}
@@ -322,10 +324,12 @@ void InvalidateComputeColorFills(const ShaderBindResources& bind)
 		if (resource.Base48() == 0u || size == 0u || resource.Base48() > UINT64_MAX - size)
 		{
 			g_compute_color_fills.DiscardAll();
+			g_color_block_heads.DiscardAll();
 			g_color_meta_clears.DiscardAll();
 			return;
 		}
 		g_compute_color_fills.DiscardOverlaps(resource.Base48(), size);
+		g_color_block_heads.DiscardOverlaps(resource.Base48(), size);
 		g_color_meta_clears.DiscardOverlaps(resource.Base48(), size);
 	}
 	// A DCC clear survives writable image binds: its consumer re-resolves the
@@ -336,15 +340,17 @@ void InvalidateComputeColorFills(const ShaderBindResources& bind)
 		{
 			// No exact writable-image range proof is available at this seam.
 			g_compute_color_fills.DiscardAll();
+			g_color_block_heads.DiscardAll();
 			return;
 		}
 	}
 }
 
 bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x, uint32_t group_y, uint32_t group_z,
-                                     ComputeUniformBufferFill* fill)
+                                     ComputeUniformBufferFill* fill, ComputeBlockHeadFill* heads)
 {
-	EXIT_IF(fill == nullptr);
+	EXIT_IF(fill == nullptr || heads == nullptr);
+	*heads = {};
 	const auto& proof = input.uniform_buffer_fill;
 	const auto& buffers = input.bind.storage_buffers;
 
@@ -413,9 +419,12 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	std::array<uint32_t, 4> words {};
 	if (proof.record_bytes == 16u)
 	{
-		// BUF_FMT_32_32_32_32_UINT, one record per invocation.
-		if (destination.Stride() != 16u || destination.Format() != 75u || destination.DstSelXYZW() != 0xfacu ||
-		    invocations != destination.NumRecords())
+		// BUF_FMT_32_32_32_32_UINT, one record per invocation. A store-format through
+		// BUF_FMT_32_UINT writes X alone; with a 256-byte stride it writes the first
+		// element of every color DCC block.
+		const bool quads       = destination.Stride() == 16u && destination.Format() == 75u && destination.DstSelXYZW() == 0xfacu;
+		const bool block_heads = destination.Stride() == 256u && destination.Format() == 20u && (destination.DstSelXYZW() & 7u) == 4u;
+		if (!(quads || block_heads) || invocations != destination.NumRecords())
 		{
 			return false;
 		}
@@ -424,6 +433,13 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 			if (!user_sgpr(proof.value_registers[component], &words[component])) { return false; }
 		}
 		if (loaded_value) { words = loaded_words; }
+		if (block_heads)
+		{
+			heads->address = destination.Base48();
+			heads->size    = ShaderBufferByteSize(destination.Stride(), destination.NumRecords());
+			heads->word    = words[0];
+			return false;
+		}
 	} else if (proof.value_is_constant || loaded_value)
 	{
 		// BUF_FMT_32_UINT, one record per invocation; the store writes X only.
@@ -571,6 +587,7 @@ bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUnifor
 	ComputeColorFillIdentity identity {};
 	if (!ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true, ComputeFillAliases::SkipPartial)) { return false; }
 	g_compute_color_fills.DiscardOverlaps(identity.address, identity.size);
+	g_color_block_heads.DiscardOverlaps(identity.address, identity.size);
 	const auto images = FindComputeColorFillImages(buffer, identity.address, identity.size);
 	if (!images.IsEmpty()) { return ApplyComputeColorFillImages(buffer, identity, words, images); }
 	SubmissionId submission;
@@ -580,6 +597,22 @@ bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUnifor
 	// writes even when there is no subsequent storage rebind or flush.
 	const auto observation = GpuDirtyPageTracker::Instance().BeginRead(identity.address, identity.size);
 	return observation.tracked && g_compute_color_fills.Publish(identity, submission, words, observation);
+}
+
+bool PublishComputeColorBlockHeads(CommandBuffer* buffer, const ComputeBlockHeadFill& heads)
+{
+	ComputeColorFillIdentity identity {};
+	SubmissionId             submission;
+	if (!ComputeColorFillUsesGraphicsQueue(buffer) ||
+	    !ResolveComputeColorFillIdentity(heads.address, heads.size, &identity, true, ComputeFillAliases::SkipPartial) ||
+	    !buffer->GetSubmissionId(&submission))
+	{
+		g_color_block_heads.DiscardOverlaps(heads.address, heads.size);
+		return false;
+	}
+	const auto observation = GpuDirtyPageTracker::Instance().BeginRead(identity.address, identity.size);
+	const std::array<uint32_t, 4> words {heads.word, heads.word, heads.word, heads.word};
+	return observation.tracked && g_color_block_heads.Publish(identity, submission, words, observation);
 }
 
 // Moves every aspect of a depth-stencil image to new_layout after all earlier accesses.
@@ -1168,6 +1201,27 @@ static void ClearColorAttachmentToWords(CommandBuffer* buffer, const RenderColor
 	                             });
 }
 
+// Under the single-element key every 256-byte block reads as its first element.
+// When one word was stored at every block head of a 4-byte-element target, that
+// word is every texel.
+static void ConsumeColorBlockHeads(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
+{
+	ComputeColorFillIdentity identity {};
+	ComputeColorFillEvent    event {};
+	SubmissionId             submission;
+	if (g_color_block_heads.Empty() || attachment.bytes_per_element != 4u ||
+	    !ResolveComputeColorFillIdentity(attachment.base_addr, attachment.size, &identity, false, ComputeFillAliases::SkipPartial) ||
+	    !buffer->GetSubmissionId(&submission) || !g_color_block_heads.Consume(identity, submission, &event) ||
+	    !GpuDirtyPageTracker::Instance().ReadObservationIsStable(identity.address, identity.size, event.cpu_observation))
+	{
+		return;
+	}
+	(void)ClearColorImageAliases(buffer, identity.address, identity.size,
+	                             FindComputeColorFillImages(buffer, identity.address, identity.size),
+	                             [&](VkFormat format, VkClearColorValue* clear)
+	                             { return GuestUniformFillTexelBytes(format) == 4u && DecodeGuestUniformFillTexel(event.words, format, clear); });
+}
+
 // A render target bound with DCC reads its pending metadata clear: the clear
 // key, or for the register key the target's clear words, becomes its contents.
 static void ConsumeColorDccClear(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
@@ -1181,6 +1235,11 @@ static void ConsumeColorDccClear(CommandBuffer* buffer, const RenderColorAttachm
 	if (code == ColorDccClearCode::Register)
 	{
 		ClearColorAttachmentToWords(buffer, attachment);
+		return;
+	}
+	if (code == ColorDccClearCode::Single)
+	{
+		ConsumeColorBlockHeads(buffer, attachment);
 		return;
 	}
 	(void)ClearColorImageAliases(
@@ -1231,6 +1290,7 @@ static void ConsumeComputeColorFill(CommandBuffer* buffer, uint64_t address, uin
 	    !buffer->GetSubmissionId(&submission))
 	{
 		g_compute_color_fills.DiscardOverlaps(address, size);
+		g_color_block_heads.DiscardOverlaps(address, size);
 		return;
 	}
 	ComputeColorFillEvent event {};
@@ -2327,6 +2387,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		if (attachment.type == RenderColorType::DisplayBuffer)
 		{
 			g_compute_color_fills.DiscardOverlaps(attachment.base_addr, attachment.size);
+			g_color_block_heads.DiscardOverlaps(attachment.base_addr, attachment.size);
 			const auto video_image = VideoOut::VideoOutGetImageForSubmission(attachment.base_addr, buffer);
 			if (video_image.image != attachment.existing_video_image) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: video_image.image != attachment.existing_video_image condition ignored (continuing)\n"); }
 			attachment.vulkan_buffer = video_image.image;
@@ -2366,6 +2427,8 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		ConsumeComputeColorFill(buffer, attachment.base_addr, attachment.size);
 		ConsumeColorDccClear(buffer, attachment);
 		ConsumeColorCmaskClear(buffer, attachment);
+		// Block heads stand for the contents only together with the keys this bind consumed.
+		g_color_block_heads.DiscardOverlaps(attachment.base_addr, attachment.size);
 	}
 }
 
@@ -3225,6 +3288,7 @@ void InvalidateMemoryObject(const RenderColorInfo& r)
 		}
 		const auto& attachment = r.attachment[slot];
 		g_compute_color_fills.DiscardOverlaps(attachment.base_addr, attachment.size);
+		g_color_block_heads.DiscardOverlaps(attachment.base_addr, attachment.size);
 		if (attachment.type == RenderColorType::RenderTexture)
 		{
 			GpuMemoryResetHash(&attachment.base_addr, &attachment.size, 1, GpuMemoryObjectType::RenderTexture);
@@ -3244,6 +3308,7 @@ void InvalidateMemoryObject(const RenderDepthInfo& r)
 		for (int i = 0; i < r.vaddr_num; ++i)
 		{
 			g_compute_color_fills.DiscardOverlaps(r.vaddr[i], r.size[i]);
+			g_color_block_heads.DiscardOverlaps(r.vaddr[i], r.size[i]);
 		}
 		GpuMemoryResetHash(r.vaddr, r.size, r.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer);
 	}

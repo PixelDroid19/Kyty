@@ -4383,8 +4383,9 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	constexpr uint32_t kDispatchComputeShaderEnable = 0x01u;
 	constexpr uint32_t kDispatchPartialThreadGroups = 0x02u;
 	ComputeUniformBufferFill fill;
+	ComputeBlockHeadFill     block_heads;
 	const bool proven_fill = !indirect && (mode & kDispatchComputeShaderEnable) != 0u && (mode & kDispatchPartialThreadGroups) == 0u &&
-	                         ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill);
+	                         ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill, &block_heads);
 	if (!(proven_fill && RecordComputeUniformFillTransfer(buffer, fill)))
 	{
 		if (indirect)
@@ -4404,6 +4405,10 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		(void)PublishComputeColorMetaClear(buffer, fill);
 		(void)PublishUniformDepthMetaFill(submit_id, fill);
 		(void)PublishComputeUniformFillToGuestAddress(buffer, fill);
+	}
+	if (block_heads.size != 0u)
+	{
+		(void)PublishComputeColorBlockHeads(buffer, block_heads);
 	}
 	DebugStatsRecordDispatch();
 	if (VulkanRecentDrawTraceTrail() != nullptr)

@@ -15,6 +15,7 @@ enum class ColorDccClearCode: uint8_t
 	Color    = 0x80, // color channels 1, alpha 0
 	All      = 0xc0, // every channel 1
 	Register = 0x20, // CB_COLOR_CLEAR_WORD0/1; decoded by the color block only
+	Single   = 0x10, // every texel of the block reads as the block's first element
 };
 
 // A uniform metadata fill writes one clear key to every byte of its range.
@@ -28,6 +29,7 @@ enum class ColorDccClearCode: uint8_t
 	switch (key)
 	{
 		case 0x00u:
+		case 0x10u:
 		case 0x20u:
 		case 0x40u:
 		case 0x80u:
@@ -77,10 +79,10 @@ enum class ColorDccClearCode: uint8_t
 // The clear value in logical RGBA. Codes 0x00 and 0xc0 give every channel the
 // same value. Codes 0x40 and 0x80 set alpha apart from the color channels; they
 // are decoded only for four-channel surfaces with alpha in the most
-// significant channel. Register clears are not decoded here.
+// significant channel. Register and single-element clears are not decoded here.
 [[nodiscard]] inline bool ColorDccClearValue(ColorDccClearCode code, bool alpha_on_msb, uint32_t channels, std::array<float, 4>* rgba)
 {
-	if (rgba == nullptr || code == ColorDccClearCode::Register)
+	if (rgba == nullptr || code == ColorDccClearCode::Register || code == ColorDccClearCode::Single)
 	{
 		return false;
 	}

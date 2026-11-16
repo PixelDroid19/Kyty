@@ -639,9 +639,10 @@ TEST(EmulatorComputeColorFill, DccMetadataFillsNameOnlyTheClearKeys)
 	EXPECT_EQ(code, ColorDccClearCode::Zero);
 	ASSERT_TRUE(ColorDccClearCodeFromFill({0x20202020u, 0x20202020u, 0x20202020u, 0x20202020u}, &code));
 	EXPECT_EQ(code, ColorDccClearCode::Register);
-	// The uncompressed key, a single-color key and mixed bytes are not clears.
+	ASSERT_TRUE(ColorDccClearCodeFromFill({0x10101010u, 0x10101010u, 0x10101010u, 0x10101010u}, &code));
+	EXPECT_EQ(code, ColorDccClearCode::Single);
+	// The uncompressed key and mixed bytes are not clears.
 	EXPECT_FALSE(ColorDccClearCodeFromFill({0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}, &code));
-	EXPECT_FALSE(ColorDccClearCodeFromFill({0x10101010u, 0x10101010u, 0x10101010u, 0x10101010u}, &code));
 	EXPECT_FALSE(ColorDccClearCodeFromFill({0x40404000u, 0x40404040u, 0x40404040u, 0x40404040u}, &code));
 	EXPECT_FALSE(ColorDccClearCodeFromFill({0x40404040u, 0x40404040u, 0x40404040u, 0u}, &code));
 }
@@ -657,10 +658,12 @@ TEST(EmulatorComputeColorFill, DccClearKeysDecodeAlphaOnlyWhereItIsTheMostSignif
 	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Alpha, ColorDccAlphaOnMsb(2u), 4u, &rgba));
 	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Alpha, ColorDccAlphaOnMsb(3u), 4u, &rgba));
 	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Color, true, 1u, &rgba));
-	// Uniform keys hold for any channel order; the register key needs the clear words.
+	// Uniform keys hold for any channel order; the register key needs the clear words and
+	// the single-element key the texels of each block.
 	ASSERT_TRUE(ColorDccClearValue(ColorDccClearCode::All, false, 1u, &rgba));
 	EXPECT_EQ(rgba, (std::array<float, 4> {1.0f, 1.0f, 1.0f, 1.0f}));
 	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Register, true, 4u, &rgba));
+	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Single, true, 4u, &rgba));
 }
 
 TEST(EmulatorComputeColorFill, DccFillCoversASurfaceOnlyFromItsBaseWithEveryKey)

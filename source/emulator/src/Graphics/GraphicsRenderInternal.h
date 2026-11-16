@@ -1965,8 +1965,20 @@ struct ComputeUniformBufferFill
 	uint64_t                size    = 0;
 	std::array<uint32_t, 4> words {};
 };
+// A dispatch proven to store `word` as the first 4-byte element of every
+// 256-byte color DCC block of [address, address + size), and nothing else.
+struct ComputeBlockHeadFill
+{
+	uint64_t address = 0;
+	uint64_t size    = 0;
+	uint32_t word    = 0;
+};
+// Returns true for a uniform fill. A block-head store is not one: it returns
+// false with `heads` set (size != 0), and the dispatch must execute.
 [[nodiscard]] bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x, uint32_t group_y,
-                                                   uint32_t group_z, ComputeUniformBufferFill* fill);
+                                                   uint32_t group_z, ComputeUniformBufferFill* fill, ComputeBlockHeadFill* heads);
+// Records that the dispatch just recorded stored the heads of every block of its range.
+bool PublishComputeColorBlockHeads(CommandBuffer* buffer, const ComputeBlockHeadFill& heads);
 // Records a fill of one repeated word as a transfer fill of the exact storage
 // object, with every page flagged written, in place of the dispatch. Returns
 // false, recording nothing, when the dispatch must execute.
