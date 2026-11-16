@@ -5084,45 +5084,21 @@ bool FsNotFoundErrno(int error)
 	return error == 2 /*ENOENT*/ || error == 20 /*ENOTDIR*/ || error == 22 /*EINVAL*/ || error == 63 /*ENAMETOOLONG*/;
 }
 
-int FsStatus(const char* path, uint32_t* permissions, int* error, bool follow_links)
+// The helpers receive guest paths; the kernel file calls map them through the
+// mount table and apply its write policy, so every helper goes through them.
+int FsErrno(int kernel_result)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	const auto      status = follow_links ? std::filesystem::status(path, ec) : std::filesystem::symlink_status(path, ec);
-	if (ec || status.type() == std::filesystem::file_type::not_found)
+	return kernel_result & 0xffff;
+}
+
+// Guest file systems hold no symbolic links, so a stat and an lstat agree.
+int FsStatus(const char* path, uint32_t* permissions, int* error)
+{
+	Kernel::FileSystem::FileStat info {};
+	const int                    result = Kernel::FileSystem::KernelStat(path, &info);
+	if (result != OK)
 	{
-		const int code = ec ? (ec.value() & 0xffff) : 2;
-		if (error != nullptr)
-		{
-			*error = code;
-		}
-		return FsNotFoundErrno(code) ? -1 : 0;
-	}
-	if (permissions != nullptr)
-	{
-		*permissions = static_cast<uint32_t>(status.permissions()) & 0x0fffu;
-	}
-	if (error != nullptr)
-	{
-		*error = 0;
-	}
-	switch (status.type())
-	{
-		case std::filesystem::file_type::regular: return 1;
-		case std::filesystem::file_type::directory: return 2;
-		case std::filesystem::file_type::symlink: return 3;
-		case std::filesystem::file_type::block: return 4;
-		case std::filesystem::file_type::character: return 5;
-		case std::filesystem::file_type::fifo: return 6;
-		case std::filesystem::file_type::socket: return 7;
-		default: return 8;
-	}
-#else
-	struct stat info {};
-	const int   result = follow_links ? ::stat(path, &info) : ::lstat(path, &info);
-	if (result != 0)
-	{
-		const int code = errno & 0xffff;
+		const int code = FsErrno(result);
 		if (error != nullptr)
 		{
 			*error = code;
@@ -5137,8 +5113,7 @@ int FsStatus(const char* path, uint32_t* permissions, int* error, bool follow_li
 	{
 		*error = 0;
 	}
-	return FsModeFileType(static_cast<uint32_t>(info.st_mode));
-#endif
+	return FsModeFileType(info.st_mode);
 }
 
 char* FsReadDir(char* buffer, void* opaque, int* type)
@@ -5175,8 +5150,17 @@ char* FsReadDir(char* buffer, void* opaque, int* type)
 
 void* FsOpenDir(char* buffer, const char* path, int* error, int* type)
 {
-	std::error_code ec;
-	std::filesystem::directory_iterator iterator(path, ec);
+	const auto host = path != nullptr ? Kernel::FileSystem::GetExistingFilename(String::FromUtf8(path)) : String();
+	if (host.IsEmpty())
+	{
+		if (error != nullptr)
+		{
+			*error = 2; // ENOENT
+		}
+		return nullptr;
+	}
+	std::error_code                     ec;
+	std::filesystem::directory_iterator iterator(std::filesystem::u8path(host.C_Str()), ec);
 	if (ec)
 	{
 		if (error != nullptr)
@@ -5230,128 +5214,67 @@ void c_fs_close_dir(void* stream)
 // _ZNSt10filesystem5_StatEPKcPNS_5permsEPi — NID 8KeeeFcEdls.
 int c_fs_stat(const char* path, uint32_t* permissions, int* error)
 {
-	return FsStatus(path, permissions, error, true);
+	return FsStatus(path, permissions, error);
 }
 
 // _ZNSt10filesystem6_LstatEPKcPNS_5permsEPi — NID tizCFt051h8.
 int c_fs_lstat(const char* path, uint32_t* permissions, int* error)
 {
-	return FsStatus(path, permissions, error, false);
+	return FsStatus(path, permissions, error);
 }
 
 // _ZNSt10filesystem10_File_sizeEPKcPi — NID 3U2eeEqUwR0. Unlike the other
 // helpers this stores the raw Sony kernel error code in *error.
 uint64_t c_fs_file_size(const char* path, int* error)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	const auto      size = std::filesystem::file_size(path, ec);
-	if (ec)
-	{
-		if (error != nullptr)
-		{
-			*error = static_cast<int>(0x80020000u | (ec.value() & 0xffff));
-		}
-		return static_cast<uint64_t>(-1);
-	}
-#else
-	struct stat info {};
-	if (::stat(path, &info) != 0)
-	{
-		if (error != nullptr)
-		{
-			*error = static_cast<int>(0x80020000u | (errno & 0xffff));
-		}
-		return static_cast<uint64_t>(-1);
-	}
-	const auto size = static_cast<uint64_t>(info.st_size);
-#endif
+	Kernel::FileSystem::FileStat info {};
+	const int                    result = Kernel::FileSystem::KernelStat(path, &info);
 	if (error != nullptr)
 	{
-		*error = 0;
+		*error = result;
 	}
-	return size;
+	return result == OK ? static_cast<uint64_t>(info.st_size) : static_cast<uint64_t>(-1);
 }
 
 // _ZNSt10filesystem9_Make_dirEPKcS1_ — NID x7pQExTeqBY. The second path, when
 // present, supplies the permissions; EEXIST is reported as success.
 int c_fs_make_dir(const char* path, const char* permissions_source)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	std::filesystem::perms mode = std::filesystem::perms::all;
+	uint16_t mode = 0777;
 	if (permissions_source != nullptr)
 	{
-		const auto status = std::filesystem::status(permissions_source, ec);
-		if (ec || status.type() == std::filesystem::file_type::not_found)
+		Kernel::FileSystem::FileStat info {};
+		const int                    result = Kernel::FileSystem::KernelStat(permissions_source, &info);
+		if (result != OK)
 		{
-			return -(ec ? (ec.value() & 0xffff) : 2);
-		}
-		mode = status.permissions();
-	}
-	if (!std::filesystem::create_directory(path, ec))
-	{
-		return ec ? -(ec.value() & 0xffff) : 0;
-	}
-	// The standard library takes the permissions separately from the creation.
-	std::filesystem::permissions(path, mode, ec);
-	return ec ? -(ec.value() & 0xffff) : 1;
-#else
-	mode_t mode = 0777;
-	if (permissions_source != nullptr)
-	{
-		struct stat info {};
-		if (::stat(permissions_source, &info) != 0)
-		{
-			return -(errno & 0xffff);
+			return -FsErrno(result);
 		}
 		mode = info.st_mode;
 	}
-	if (::mkdir(path, mode) == 0)
+	const int result = Kernel::FileSystem::KernelMkdir(path, mode);
+	if (result == OK)
 	{
 		return 1;
 	}
-	if (errno == 17 /*EEXIST*/)
-	{
-		return 0;
-	}
-	return -(errno & 0xffff);
-#endif
+	return FsErrno(result) == 17 /*EEXIST*/ ? 0 : -FsErrno(result);
 }
 
 // _ZNSt10filesystem11_Remove_dirEPKc — NID YDQxE4cIwa4.
 bool c_fs_remove_dir(const char* path)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	return std::filesystem::remove(path, ec) && !ec;
-#else
-	return ::rmdir(path) == 0;
-#endif
+	return Kernel::FileSystem::KernelRmdir(path) == OK;
 }
 
 // _ZNSt10filesystem7_RenameEPKcS1_ — NID srwl1hhFoUI.
 int c_fs_rename(const char* from, const char* to)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	std::filesystem::rename(from, to, ec);
-	return ec ? (ec.value() & 0xffff) : 0;
-#else
-	return ::rename(from, to) == 0 ? 0 : (errno & 0xffff);
-#endif
+	return FsErrno(Kernel::FileSystem::KernelRename(from, to));
 }
 
 // _ZNSt10filesystem7_UnlinkEPKc — NID Iok1WdvAROg.
 int c_fs_unlink(const char* path)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	const bool removed = std::filesystem::remove(path, ec);
-	return (removed && !ec) ? 0 : (ec ? (ec.value() & 0xffff) : 2);
-#else
-	return ::unlink(path) == 0 ? 0 : (errno & 0xffff);
-#endif
+	return FsErrno(Kernel::FileSystem::KernelUnlink(path));
 }
 
 // _ZNSt10filesystem12_Current_getERA260_c — NID 8VKAqiw7lC0. The guest libc
