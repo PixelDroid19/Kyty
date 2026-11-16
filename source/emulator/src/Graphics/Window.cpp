@@ -3528,8 +3528,11 @@ static void VulkanCreate(WindowContext* ctx)
 	// promoted extension name is absent; default width is not a singleton range.
 	VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control {};
 	VkPhysicalDeviceSubgroupProperties subgroup_properties {};
+	VkPhysicalDeviceDriverProperties   driver_properties {};
 	VkPhysicalDeviceProperties2 physical_device_properties {};
+	driver_properties.sType     = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
 	subgroup_size_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
+	subgroup_size_control.pNext = &driver_properties;
 	subgroup_properties.sType   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
 	subgroup_properties.pNext   = &subgroup_size_control;
 	physical_device_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -3538,6 +3541,7 @@ static void VulkanCreate(WindowContext* ctx)
 	ShaderSetNativeHalfConversion(DeviceHasExactHalfConversion(ctx->graphic_ctx.physical_device));
 	ctx->graphic_ctx.min_storage_buffer_offset_alignment = physical_device_properties.properties.limits.minStorageBufferOffsetAlignment;
 	ctx->graphic_ctx.separate_depth_kill_draws           = device_properties.vendorID == 0x8086u;
+	ctx->graphic_ctx.stencil_only_write_resync           = driver_properties.driverID == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA;
 	ctx->graphic_ctx.subgroup_size       = subgroup_properties.subgroupSize;
 	ctx->graphic_ctx.subgroup_stages     = subgroup_properties.supportedStages;
 	ctx->graphic_ctx.subgroup_operations = subgroup_properties.supportedOperations;

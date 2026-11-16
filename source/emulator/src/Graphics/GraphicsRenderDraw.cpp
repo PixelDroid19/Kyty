@@ -3399,6 +3399,33 @@ static VulkanBuffer* RecordGeometryIndirectPass(uint64_t submit_id, CommandBuffe
 	return header;
 }
 
+// A draw that tests stencil and writes neither depth nor color (see stencil_only_write_resync).
+static bool IsStencilOnlyDraw(const VulkanPipeline& pipeline)
+{
+	const auto& sp = *pipeline.static_params;
+	if (!sp.stencil_test_enable || sp.depth_write_enable || !pipeline.dynamic_params->vk_dynamic_state_stencil_write_mask ||
+	    pipeline.writes_guest_memory)
+	{
+		return false;
+	}
+	return std::all_of(sp.color_mask, sp.color_mask + std::min(sp.color_targets_num, 8u), [](uint32_t m) { return (m & 0xFu) == 0u; });
+}
+
+// Repeats a stencil-only draw with its stencil writes masked off. The repeat writes nothing, but it turns the
+// driver's "depth or stencil writes enabled" state off and on again, so the driver emits its stall before the next
+// depth-writing draw.
+static void RecordStencilOnlyWriteResync(CommandBuffer* buffer, const VulkanPipeline& pipeline, uint32_t vertex_count,
+                                         uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance)
+{
+	const auto& stencil = *pipeline.dynamic_params;
+	auto*       commands = buffer->DeferredState(buffer->RecordInsideRenderPass());
+	commands->SetStencilWriteMask(VK_STENCIL_FACE_FRONT_AND_BACK, 0u);
+	vkCmdDraw(buffer->RecordInsideRenderPass(), vertex_count, instance_count, first_vertex, first_instance);
+	commands = buffer->DeferredState(buffer->RecordInsideRenderPass());
+	commands->SetStencilWriteMask(VK_STENCIL_FACE_FRONT_BIT, stencil.stencil_front.writeMask);
+	commands->SetStencilWriteMask(VK_STENCIL_FACE_BACK_BIT, stencil.stencil_back.writeMask);
+}
+
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
 	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count, int32_t vertex_offset_add,
 	                             uint32_t first_instance, SubmissionId* pending_submission)
@@ -3884,6 +3911,11 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		vkCmdDraw(pass_buffer, primitive_plan.draw_count, instance_count, first_vertex, first_instance);
 		DebugStatsRecordDraw();
 		host_draws++;
+		// The repeat would count samples twice in an active depth-pass query.
+		if (g_render_ctx->GetGraphicCtx()->stencil_only_write_resync && vertex_clip_probe == nullptr && IsStencilOnlyDraw(*pipeline))
+		{
+			RecordStencilOnlyWriteResync(buffer, *pipeline, primitive_plan.draw_count, instance_count, first_vertex, first_instance);
+		}
 	}
 	if (host_draws != 0u)
 	{

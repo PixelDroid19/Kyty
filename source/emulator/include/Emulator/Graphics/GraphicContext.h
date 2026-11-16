@@ -226,6 +226,9 @@ struct GraphicContext
 	// Intel parts lose the device (engine reset, fixed-function units busy, shader units idle) in depth passes that
 	// mix consecutive pixel-killing draws with depth writes, unless a pipelined timestamp separates those draws.
 	bool separate_depth_kill_draws = false;
+	// Intel's Mesa driver emits its pixel-shader stall sync only when "depth or stencil writes enabled" changes, so a
+	// stencil-only draw followed by a depth-writing one gets no stall, which can lose the device.
+	bool stencil_only_write_resync = false;
 	// VK_KHR/EXT_calibrated_timestamps in the host performance counter's domain: end-of-pipe clock marks then carry
 	// the device time of their position in the stream. Null when the device cannot relate the two clocks.
 	PFN_vkGetCalibratedTimestampsKHR get_calibrated_timestamps = nullptr;
