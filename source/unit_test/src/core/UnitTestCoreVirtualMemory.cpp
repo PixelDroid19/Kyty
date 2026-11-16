@@ -1463,6 +1463,49 @@ TEST(CoreVirtualMemory, PopulatedSharedBackingPagesFollowBackingExtents)
 #endif
 }
 
+// A large interval mixes full, empty and scattered extents, including one that crosses its midpoint, so the
+// query has to split it; every page flag must still match the pages written.
+TEST(CoreVirtualMemory, PopulatedSharedBackingPagesMatchMixedLargeInterval)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "population is reported by the Linux memfd backing";
+#else
+	const uint64_t page    = GetPageSize();
+	const uint64_t pages   = 256;
+	SharedBacking* backing = CreateSharedBacking(page * pages);
+	ASSERT_NE(backing, nullptr);
+	const uint64_t view = MapSharedAligned(backing, 0, 0, page * pages, Mode::ReadWrite, page);
+	ASSERT_NE(view, 0u);
+	std::vector<uint8_t> written(pages, 0);
+	const auto write_page = [&](uint64_t index)
+	{
+		reinterpret_cast<volatile uint8_t*>(view)[page * index] = 1;
+		written[index]                                           = 1;
+	};
+	for (uint64_t index = 0; index < 64; ++index)
+	{
+		write_page(index);
+	}
+	for (uint64_t index = 120; index < 200; ++index)
+	{
+		write_page(index);
+	}
+	for (const uint64_t index: {100u, 101u, 211u, 255u})
+	{
+		write_page(index);
+	}
+
+	std::vector<uint8_t> populated(pages, 0xff);
+	ASSERT_TRUE(QueryPopulatedSharedBackingPages(backing, 0, page * pages, populated.data()));
+	EXPECT_EQ(populated, written);
+	std::vector<uint8_t> offset_populated(250, 0xff);
+	ASSERT_TRUE(QueryPopulatedSharedBackingPages(backing, page * 3u, page * 250u, offset_populated.data()));
+	EXPECT_EQ(offset_populated, std::vector<uint8_t>(written.begin() + 3, written.begin() + 253));
+	ASSERT_TRUE(Free(view));
+	DestroySharedBacking(backing);
+#endif
+}
+
 // Large guest heaps must not create one host metadata node per page. This is
 // intentionally sparse so the test exercises the tracking contract without
 // requiring physical memory proportional to the guest reservation.

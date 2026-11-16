@@ -31,6 +31,7 @@
 #include <mach/mach_vm.h>
 #else
 #include <linux/falloc.h>
+#include <linux/mman.h>
 #include <linux/udmabuf.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
@@ -1098,6 +1099,83 @@ bool sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset
 #endif
 }
 
+#if defined(__linux__) && defined(SEEK_DATA)
+// Flags the data pages of [offset, offset + pages) with one SEEK_DATA per data page. SEEK_DATA answers a
+// populated page at once and skips a hole in one query. SEEK_HOLE would walk every populated page up to the
+// next hole, which can lie far past the range.
+static bool walk_shared_backing_data_pages(int fd, uint64_t offset, uint64_t pages, uint64_t page_size, uint8_t* populated)
+{
+	const uint64_t end = offset + pages * page_size;
+	for (uint64_t cursor = offset; cursor < end;)
+	{
+		const off_t data = ::lseek(fd, static_cast<off_t>(cursor), SEEK_DATA);
+		if (data < 0)
+		{
+			return errno == ENXIO;
+		}
+		if (static_cast<uint64_t>(data) >= end)
+		{
+			return true;
+		}
+		const uint64_t page                     = static_cast<uint64_t>(data) / page_size * page_size;
+		populated[(page - offset) / page_size] = 1;
+		cursor                                  = page + page_size;
+	}
+	return true;
+}
+
+// Counts the data pages of [offset, offset + pages) in one call, bounded to the range. A shmem page holds
+// data while it is in the page cache or swapped out; cachestat reports the two as cached and evicted.
+static bool count_shared_backing_data_pages(int fd, uint64_t offset, uint64_t pages, uint64_t page_size, uint64_t* data_pages)
+{
+#ifdef SYS_cachestat
+	cachestat_range range {offset, pages * page_size};
+	struct cachestat stat {};
+	if (::syscall(SYS_cachestat, fd, &range, &stat, 0) != 0)
+	{
+		return false;
+	}
+	*data_pages = stat.nr_cache + stat.nr_evicted;
+	return true;
+#else
+	(void)fd;
+	(void)offset;
+	(void)pages;
+	(void)page_size;
+	(void)data_pages;
+	return false;
+#endif
+}
+
+// A range with no data page or only data pages is settled by one count; a mixed range is split, and a small
+// one, or one the kernel cannot count, is walked page by page.
+static bool mark_shared_backing_data_pages(int fd, uint64_t offset, uint64_t pages, uint64_t page_size, uint8_t* populated)
+{
+	constexpr uint64_t walk_pages = 16;
+	uint64_t           data_pages = 0;
+	if (!count_shared_backing_data_pages(fd, offset, pages, page_size, &data_pages))
+	{
+		return walk_shared_backing_data_pages(fd, offset, pages, page_size, populated);
+	}
+	if (data_pages == 0)
+	{
+		return true;
+	}
+	if (data_pages >= pages)
+	{
+		std::memset(populated, 1, static_cast<size_t>(pages));
+		return true;
+	}
+	if (pages <= walk_pages)
+	{
+		return walk_shared_backing_data_pages(fd, offset, pages, page_size, populated);
+	}
+	const uint64_t half = pages / 2;
+	return mark_shared_backing_data_pages(fd, offset, half, page_size, populated) &&
+	       mark_shared_backing_data_pages(fd, offset + half * page_size, pages - half, page_size, populated + half);
+}
+#endif
+
 bool sys_virtual_query_shared_backing_data_pages(void* backing, uint64_t backing_offset, uint64_t size, uint64_t page_size,
                                                  uint8_t* populated)
 {
@@ -1112,29 +1190,10 @@ bool sys_virtual_query_shared_backing_data_pages(void* backing, uint64_t backing
 	{
 		return false;
 	}
-	// SEEK_DATA answers a populated page at once and skips a hole in one query. SEEK_HOLE
-	// would walk every populated page up to the next hole, which can lie far past the range.
 	std::memset(populated, 0, static_cast<size_t>(size / page_size));
-	const int      saved_errno = errno;
-	const uint64_t end         = backing_offset + size;
-	bool           ok          = true;
-	for (uint64_t cursor = backing_offset; cursor < end;)
-	{
-		const off_t data = ::lseek(shared->fd, static_cast<off_t>(cursor), SEEK_DATA);
-		if (data < 0)
-		{
-			ok = errno == ENXIO;
-			break;
-		}
-		if (static_cast<uint64_t>(data) >= end)
-		{
-			break;
-		}
-		const uint64_t page                            = static_cast<uint64_t>(data) / page_size * page_size;
-		populated[(page - backing_offset) / page_size] = 1;
-		cursor                                         = page + page_size;
-	}
-	errno = saved_errno;
+	const int  saved_errno = errno;
+	const bool ok          = size == 0 || mark_shared_backing_data_pages(shared->fd, backing_offset, size / page_size, page_size, populated);
+	errno                  = saved_errno;
 	return ok;
 #else
 	std::memset(populated, 1, static_cast<size_t>(size / page_size));
