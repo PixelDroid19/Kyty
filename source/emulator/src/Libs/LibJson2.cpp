@@ -1146,6 +1146,113 @@ static void KYTY_SYSV_ABI JsonValueToString(const JsonValue* self, JsonString* d
 	destination->data = replacement;
 }
 
+static std::vector<JsonValue*>*            JsonArrayItems(const void* wrapper);
+static std::map<std::string, JsonValue*>* JsonObjectMembers(const void* wrapper);
+
+static void JsonAppendEscaped(std::string* out, const std::string& text)
+{
+	out->push_back('"');
+	for (const unsigned char c: text)
+	{
+		switch (c)
+		{
+			case '"': *out += "\\\""; break;
+			case '\\': *out += "\\\\"; break;
+			case '\b': *out += "\\b"; break;
+			case '\f': *out += "\\f"; break;
+			case '\n': *out += "\\n"; break;
+			case '\r': *out += "\\r"; break;
+			case '\t': *out += "\\t"; break;
+			default:
+				if (c < 0x20)
+				{
+					char escaped[8];
+					std::snprintf(escaped, sizeof(escaped), "\\u%04x", c);
+					*out += escaped;
+				} else
+				{
+					out->push_back(static_cast<char>(c));
+				}
+		}
+	}
+	out->push_back('"');
+}
+
+// Compact text: no whitespace, object members in key order.
+static void JsonSerializeNode(const JsonValue* node, uint32_t depth, std::string* out)
+{
+	JsonValue value {};
+	EXIT_IF(node == nullptr || !JsonReadValue(node, &value));
+	EXIT_IF(depth > JsonMaxDepth || out->size() > JsonMaxDocumentBytes);
+	switch (value.type)
+	{
+		case JsonValueTypeNull: *out += "null"; return;
+		case JsonValueTypeBoolean: *out += value.boolean ? "true" : "false"; return;
+		case JsonValueTypeInteger: *out += std::to_string(value.integer); return;
+		case JsonValueTypeUInteger: *out += std::to_string(value.uinteger); return;
+		// The text of a real depends on the initializer's float format; no
+		// evidence of it yet.
+		case JsonValueTypeReal: EXIT("JsonSerializeNode: real values are not implemented\n");
+		case JsonValueTypeString:
+		{
+			std::string text;
+			EXIT_IF(value.ptr != nullptr && !JsonReadString(value.ptr, JsonMaxDocumentBytes, &text));
+			JsonAppendEscaped(out, text);
+			return;
+		}
+		case JsonValueTypeArray:
+		{
+			out->push_back('[');
+			const auto* items = value.ptr != nullptr ? JsonArrayItems(value.ptr) : nullptr;
+			for (size_t i = 0; items != nullptr && i < items->size(); i++)
+			{
+				if (i != 0) { out->push_back(','); }
+				JsonSerializeNode((*items)[i], depth + 1, out);
+			}
+			out->push_back(']');
+			return;
+		}
+		case JsonValueTypeObject:
+		{
+			out->push_back('{');
+			const auto* members = value.ptr != nullptr ? JsonObjectMembers(value.ptr) : nullptr;
+			bool first = true;
+			for (const auto& [key, member]: members != nullptr ? *members : std::map<std::string, JsonValue*> {})
+			{
+				if (!first) { out->push_back(','); }
+				first = false;
+				JsonAppendEscaped(out, key);
+				out->push_back(':');
+				JsonSerializeNode(member, depth + 1, out);
+			}
+			out->push_back('}');
+			return;
+		}
+		default: EXIT("JsonSerializeNode: unknown value type %u\n", value.type);
+	}
+}
+
+// Value::serialize(String&) (non-const) appends the value's JSON text to the string.
+static int32_t KYTY_SYSV_ABI JsonValueSerialize(const JsonValue* self, JsonString* destination)
+{
+	PRINT_NAME();
+	JsonString old {};
+	EXIT_IF(self == nullptr || destination == nullptr || !JsonReadStringWrapper(destination, &old) ||
+	        (!JsonOwnsStorage(destination, JsonValueTypeString) &&
+	         !Core::VirtualMemory::IsRangeWritable(reinterpret_cast<uint64_t>(destination), sizeof(*destination))));
+	std::string text;
+	EXIT_IF(!JsonReadString(destination, JsonMaxDocumentBytes, &text));
+	JsonSerializeNode(self, 0, &text);
+	EXIT_IF(text.size() > JsonMaxDocumentBytes);
+	size_t old_bytes = 0;
+	EXIT_IF(old.data != nullptr && !JsonOwnedStringSize(old.data, &old_bytes));
+	char* replacement = JsonAllocateString(text.data(), text.size());
+	EXIT_IF(replacement == nullptr);
+	JsonReleaseString(old.data);
+	destination->data = replacement;
+	return OK;
+}
+
 static JsonArray* JsonNewOwnedArray()
 {
 	auto* array  = new JsonArray {};
@@ -1641,6 +1748,13 @@ static size_t KYTY_SYSV_ABI JsonArraySize(const JsonArray* self)
 	return items != nullptr ? items->size() : 0u;
 }
 
+static size_t KYTY_SYSV_ABI JsonObjectSize(const JsonObject* self)
+{
+	PRINT_NAME();
+	const auto* members = JsonObjectMembers(self);
+	return members != nullptr ? members->size() : 0u;
+}
+
 static const JsonValue* KYTY_SYSV_ABI JsonArrayBack(const JsonArray* self)
 {
 	PRINT_NAME();
@@ -1891,6 +2005,7 @@ LIB_DEFINE(InitJson2_1)
 	LIB_FUNC("0eUrW9JAxM0", Json2::JsonValueDtor);
 	LIB_FUNC("OJPTonqdg0I", Json2::JsonObjectCtor);
 	LIB_FUNC("5JmzZt8twAo", Json2::JsonObjectDtor);
+	LIB_FUNC("fSGHm9RjN5U", Json2::JsonObjectSize);
 	LIB_FUNC("qSmqLXXCPas", Json2::JsonStringCtor);
 	LIB_FUNC("9KUZFjI1IxA", Json2::JsonStringCStringCtor);
 	LIB_FUNC("cG1VE2HMl6c", Json2::JsonStringDtor);
@@ -1913,6 +2028,7 @@ LIB_DEFINE(InitJson2_1)
 	LIB_FUNC("RBw+4NukeGQ", Json2::JsonValueCount);
 	LIB_FUNC("4zrm6VrgIAw", Json2::JsonValueAssign);
 	LIB_FUNC("Ncel8t2Rrpc", Json2::JsonValueToString);
+	LIB_FUNC("R7FDWtcN6f8", Json2::JsonValueSerialize);
 	LIB_FUNC("wLsJlmgEIaI", Json2::JsonValueReferValueKey);
 	LIB_FUNC("+drDFyAS6u4", Json2::JsonInitializerSetGlobalNullAccessCallback);
 	LIB_FUNC("00oCq0RwSAY", Json2::JsonInitializerSetGlobalNullAccessCallback);

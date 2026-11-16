@@ -652,6 +652,58 @@ TEST(EmulatorJson2, BuildsArraysObjectsAndValuesTheGuestConstructs)
 	}
 }
 
+TEST(EmulatorJson2, SerializesObjectsAsCompactKeyOrderedText)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libJson2_1", &symbols));
+	auto* object_ctor  = Lookup<void* (*)(void*)>(&symbols, u"OJPTonqdg0I");
+	auto* object_dtor  = Lookup<void (*)(void*)>(&symbols, u"5JmzZt8twAo");
+	auto* object_index = Lookup<TestJsonValue* (*)(void*, const void*)>(&symbols, u"ERuf9y0DY84");
+	auto* object_size  = Lookup<size_t (*)(const void*)>(&symbols, u"fSGHm9RjN5U");
+	auto* string_cctor = Lookup<void* (*)(void*, const char*)>(&symbols, u"9KUZFjI1IxA");
+	auto* string_dtor  = Lookup<void (*)(void*)>(&symbols, u"cG1VE2HMl6c");
+	auto* value_object = Lookup<void* (*)(void*, const void*)>(&symbols, u"3xUXnmUkXfo");
+	auto* value_dtor   = Lookup<void (*)(void*)>(&symbols, u"WTtYf+cNnXI");
+	auto* set_cstr     = Lookup<void (*)(void*, const char*)>(&symbols, u"n6FC+l9DU70");
+	auto* serialize    = Lookup<int32_t (*)(const void*, void*)>(&symbols, u"R7FDWtcN6f8");
+	ASSERT_NE(serialize, nullptr);
+	ASSERT_NE(object_size, nullptr);
+
+	GuestJsonPage page;
+	ASSERT_NE(page.address, 0u);
+	auto* quoted = page.Slot<char>(10);
+	std::strcpy(quoted, "q\"\n");
+	auto* key_b = page.Slot<TestJsonString>(0);
+	string_cctor(key_b, "b");
+	auto* key_a = page.Slot<TestJsonString>(1);
+	string_cctor(key_a, "a");
+	auto* object = page.Slot<void>(2);
+	object_ctor(object);
+	set_cstr(object_index(object, key_b), quoted);
+	auto* number = object_index(object, key_a);
+	number->type    = JsonInteger;
+	number->integer = -5;
+	EXPECT_EQ(object_size(object), 2u);
+
+	auto* value = page.Slot<TestJsonValue>(3);
+	value_object(value, object);
+	auto* text = page.Slot<TestJsonString>(4);
+	string_cctor(text, "");
+	EXPECT_EQ(serialize(value, text), 0);
+	EXPECT_STREQ(text->data, R"({"a":-5,"b":"q\"\n"})");
+
+	value_dtor(value);
+	object_dtor(object);
+	for (auto* str: {key_a, key_b, text})
+	{
+		string_dtor(str);
+	}
+	for (int n = 0; n < 5; n++)
+	{
+		EXPECT_TRUE(page.CanaryIntact(n)) << n;
+	}
+}
+
 UT_END();
 
 #endif // KYTY_EMU_ENABLED
