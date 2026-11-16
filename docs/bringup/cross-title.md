@@ -7287,7 +7287,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   was another descriptor of the same row is not established; other routes were not run. Re-run on 2026-11-16 on the
   populated-page query change, no input, 45 s at 60 fps (passes the 20.6 s window): `kyty_agent last-error` at
   about 40 s reports no error event (the agent ring holds 512 events and is scanned for the newest error), so the
-  event did not recur in a second run on later code. Not reproduced is not fixed: the cause of the original
+  event did not recur in a second run on later code. A third run of the same shape read the whole ring with
+  `kyty_agent events --last 512`: 50 events in 42 s (49 info, 1 present), no error, so nothing was evicted. Not reproduced is not fixed: the cause of the original
   event is unknown, and only the no-input boot route has been run. On the final code, Astro and Minecraft (warm
   private caches): no first error, `no_runtime_failure` passes, the three gates without a reference fail as before;
   no frame-rate claim (scenes differ between runs). On an earlier revision of the proof, one of two Minecraft runs
