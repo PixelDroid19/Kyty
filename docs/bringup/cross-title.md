@@ -7289,20 +7289,32 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   restore (with rewrite and dynamic-lane negatives) and the shifted pointer.
 - **Which installed titles reach it (2026-11-16, Arc A770, local probe that compares the copy flow with and without
   the two changes).** A 50 s boot without input of every installed title: only `PPSA06084 - Superliminal` gains a
-  resolution (pc 552, sampler 3, base 0, the lane path); the role-playing title is the known case. In Superliminal
-  that sampler sets neither force nor skip degamma in any printed bind, so the chosen view is the default either
-  way: latent there too. Limits: boot scenes only, ten titles stopped early, and the probe reports only gained
-  resolutions, not lost ones.
+  resolution (pc 552, sampler 3, base 0, the lane path); the role-playing title is the known case. A bind-time
+  print of every Superliminal texture whose sampler mask includes sampler 3 (not limited to the pc 552 shader,
+  capped at 40 lines, with and without the change) showed formats 130, 50 and 56 and sampler 3 with neither force
+  nor skip degamma, choosing the default view in every line; so the change is latent there in the printed binds.
+  Limits: boot scenes only, ten titles stopped early, and the probe reports only gained resolutions, not lost ones.
 - **Early stops seen in the same sweep, not caused by this change.** `PPSA03355 - Hades` stops at about 5 s of
   boot in about half of the runs (exit 139), with the old copy flow as well: the guest's `memcpy` writes
   0x1cd0-0x1ef0 bytes to a null-based destination (fault 0x40 or 0x1dc0, return address 0x900308059 in the guest in
-  every report); no mspace allocation returned null before it, so the null comes from
-  elsewhere. When it passes the boot it holds 60 fps at the 60 fps limit. Also: `vkCreateGraphicsPipelines`
-  -13 (`GraphicsRenderPipeline.cpp`), a double free in guest exit handlers (`cxa_finalize`), unsupported
-  storage-image format 69, render-target format 0xa, image numeric format 57, a VideoOut flip with an invalid
-  index, two unresolved imports (`Json2`, `NetCtl`) and an add-on load before the title id; the pipeline failure
-  and the double free reproduce with the old copy flow. Direction for the boot stop: run it with
-  `KYTY_CRASH_REPORT` and name the guest import whose result is the null destination.
+  every report). A probe at the out-of-space return of the core allocator (`MSpace.cpp`) printed nothing; the
+  null-mspace returns of the Libc wrappers (`LibCInternal.cpp`, `LibCStandard.cpp`), the size-above-32-bit returns
+  and the calloc overflow returns were not probed. When it passes the boot it holds 60 fps at the 60 fps limit.
+  Direction: probe those returns first, then name the guest import whose result is the null destination with
+  `KYTY_CRASH_REPORT`. Other stops, each in one boot:
+  - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
+    reproduces with the old copy flow.
+  - `PPSA18391 - Afterdream`: double free in the guest's exit handlers (`cxa_finalize`); reproduces with the old
+    copy flow.
+  - `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition`: unsupported writable storage-image format
+    69.
+  - `PPSA35399 - Castlevania: Belmont's Curse`: unsupported render-target format 0xa
+    (`GraphicsRenderAttachments.cpp`).
+  - `PPSA27604 - SEKTORI`: unsupported image numeric format 57 (`ShaderSpirvImage.cpp:741`).
+  - `PPSA06438 - Let's Build A Zoo`: VideoOut flip with an invalid index (`VideoOut.cpp:2621`).
+  - `PPSA38010 - Suika Game` and `PPSA20052 - Worms Armageddon Anniversary Edition`: unresolved imports in
+    `Json2` and `NetCtl` (`RuntimeLinker.cpp:1164`).
+  - `PPSA05496 - Builder's Journey`: add-on content loaded before the title id (`KytyEmulator.cpp:401`).
 - **Open, found on the way.** Three other readers compare a register with `extended.start_register` without the
   user-data base: `ShaderEudDescriptorLoadIsUnmapped` (`ShaderResources.cpp`), `ShaderScalarLoadNeedsGuestAddress`
   (`Shader.cpp`) and `recompile_sload_guest` (`ShaderSpirvBuffer.cpp`). Not changed; no installed title is shown to
