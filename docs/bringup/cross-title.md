@@ -7427,11 +7427,22 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   minor faults per 100 ms (about one per 4 KiB, 140-250 MiB of first touch), most user samples in one title store
   loop writing 16-byte rows at computed offsets; its condition waits on the queue's idle and completion conditions
   were seen but short. The arm populated every writable direct-memory mapping at map time
-  (`MADV_POPULATE_WRITE`, 7.4 GiB in 2.7 s of boot): the worker's faults fell to 0-3 per 100 ms and it went almost
-  idle, but the slot still advanced 0-1 times per 100 ms, the pool still emptied (low 0 MiB against 12 MiB in the
-  control) and the same null write ended the run. First-touch cost on the renderer's worker is therefore not what
-  holds the release back, and populating direct memory up front is not a fix. Open: what the renderer job waits
-  for when its worker is idle and the slot does not advance (how often the job is submitted, and by whom).
+  (`MADV_POPULATE_WRITE`, 7.4 GiB in 2.7 s on the mapping threads): the worker's faults fell to 0-3 per 100 ms
+  and it went almost idle, but the pool still emptied (low 1.9 MiB against 12.0 MiB in the control, both read
+  only while the pool had a block) and the same null write ended the run. The arm is confounded: one 3 GiB
+  mapping arrived 0.1 s after the pool's first block and its populate held the guest for 1.1 s inside the
+  window, so its slot-advance count (0-1 per 100 ms) is not comparable with the control's (20 advances over the
+  1.4 s the pool lived). It also sped up every other writer of that memory, not only the renderer. Populating
+  direct memory up front is therefore not a fix; that first-touch cost is the brake is neither shown nor
+  excluded. Read offline afterwards: the main thread and a consumer
+  thread hand frames over through two title counters and a condition variable. The main thread's fixed-step
+  update stops producing while the producer counter is more than one ahead; the consumer waits until the
+  producer is ahead, runs a frame step that advances a frame slot and spins in the same label loop on that
+  slot's label, then increments its counter. The writers read so far are title code; the producer counter has
+  about 27 references and none was traced to an event Kyty delivers. The main thread's hottest host address in
+  the two runs sampled for it was `clock_gettime` in the vDSO, reached through the time imports
+  of the title's event pump, i.e. the title's own pacing loop. Open: which side of that handshake limits the
+  frame rate during loading, measured on one run without the populate arm.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
