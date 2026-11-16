@@ -7209,6 +7209,31 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   `no_runtime_failure` passes, `visual_compare`, `scene_checkpoint` and `action_response` fail as before, 37-44 fps
   from 15 to 28 s like the run before it. `PPSA17221 - Minecraft`: child exit 0, no first error, the same three
   failing, 60 fps. `playable-regression` now keeps the first error's message in `timeline.json`.
+- **Fixed: float class compares.** `v_cmp_class_f16`, `v_cmp_class_f64` and `v_cmpx_class_f16/f32/f64`
+  (VOPC 0x8F, 0xA8, 0x9F, 0x98 and 0xB8, and their VOP3 forms) decoded to nothing and stopped the title. One
+  emitter now covers the three widths: F16 classifies the low half, F64 takes sign, exponent and quiet bit from the
+  high word and adds the low word's fraction bits, and a `v_cmpx` writes the lane bit ANDed with EXEC to EXEC and
+  leaves VCC alone. SDWA is accepted only on the F32 form; an F16 inline float source is refused, because the
+  integer load does not produce its half encoding. The `v_cmp_class_f32` output is unchanged (eight VOPC and VOP3
+  cases compared before and after), so the translator version stays. Unit tests evaluate every class bit on both
+  stages and both encodings, the F64 constant forms and the F16 refusal, and fail when the low word or the EXEC
+  store is removed. No installed title is shown to use the new forms; a cold private-cache Astro run (exit 0, no
+  first error, 53-60 fps at the end) shows only that the F32 path did not regress.
+- **Fixed: typed storage read only by format loads.** `PPSA09809 - OCTOPATH TRAVELER II` raised
+  `gfx_storage_frontier` at 6.5 s (`a=typed r=none c=1 x=1 sg=8 u=1 st=2 f=11 ds=004`, an R16_UINT V# that the
+  code reads with `BUFFER_LOAD_FORMAT`). It did not come from the vertex-front fix: the same run with that change
+  reverted raised the identical event. The bind-time typed check (`ShaderGen5StorageDescriptorSupported`) accepted
+  only 32-bit one- and four-component formats, while both format-load lowerings decode every table-47 format and
+  the DST_SEL (`gen5_buffer_format_decode`, `ShaderSpirvBufferFormat.cpp`). Storage analysis now records
+  `format_loads_only` when every consumer of the V# is a format load, with no format store, unknown instruction or
+  indirect use, and the bind accepts such a V# in any decodable format. A V# written by `BUFFER_STORE_FORMAT` keeps
+  the 32-bit rule, since the store helpers encode 32-bit elements only, and discovery without code is unchanged.
+  The frontier never stopped the bind, so binding and translation are unchanged; only the false event goes. The
+  16-bit decode was checked by reading the generated function, not by evaluating it. After the fix, OCTOPATH
+  (private cache): exit 0, 60 fps, and the first event is now `a=unknown r=code_unavailable c=0 sg=40 sl=6 st=4
+  f=29 ds=22c` at 22.8 s. That is the same class as the recorded `st=8 f=64 ds=22c` (above), a code-unavailable V#
+  with an `XY01` attribute swizzle, and is still open. Minecraft (warm private cache): exit 0, no first error,
+  60 fps.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
@@ -7218,5 +7243,4 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   64-bit shifts and `v_mad_i64_i32`; `div_scale`, `div_fmas`, `div_fixup` and the F64 ALU; MUBUF sub-dword and D16
   loads and stores and the remaining atomics; MTBUF stores; DS `_rtn` atomics and sub-dword reads and writes;
   GLOBAL stores and atomics; MIMG `_c`, `_cl`, `_o`, `gather4`, `get_lod` and `msaa_load`; `s_getreg` and
-  `s_setreg`; the class compares other than `v_cmp_class_f32` (VOPC 0x8F, 0x98, 0x9F, 0xA8 and 0xB8); DPP wave
-  shifts, `row_bcast`, `row_share` and DPP8.
+  `s_setreg`; DPP wave shifts, `row_bcast`, `row_share` and DPP8.
