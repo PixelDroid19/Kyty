@@ -164,6 +164,8 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Preschool Unity title: sky-blue speckles on every outline (2026-10-19)
 - [Pixel cave platformer](titles/pixel-cave-platformer.md)
   - Pixel cave platformer: compute fill cost on Intel (2026-10-19)
+- [Fruit-merge puzzle](titles/fruit-merge-puzzle.md)
+  - Fruit-merge puzzle: frozen on the countdown overlay (2026-11-16, fixed)
 - [Puzzle title](titles/puzzle-title.md)
   - Puzzle title on AMD: two causes of the gfx ring timeout (2026-10-17)
 - [Anime fighter](titles/anime-fighter.md)
