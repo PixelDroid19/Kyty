@@ -7272,14 +7272,26 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   `s[0:3]`, texture 2, in the code the sampled-texture association pass scans). That pass
   (`ShaderAssociateSampledTextureSamplers`, `ShaderResources.cpp`) builds `sampler_indices_mask`, which
   `ShouldUseGen5Srgb` (`GraphicsRenderBind.cpp`) reads to choose the texture's sRGB view, so texture 2 binds with
-  mask 0 and the default gamma. Latent here: the probe printed every sampler of that bind and none sets force or
-  skip degamma, so the choice for that texture (format 77) is the default either way. It would bind the wrong view
-  when a sampler that reaches a sample only through a lane readback sets either bit. The gradient and gather-compare
-  lowerings (`ShaderSpirvImage.cpp`) refuse a sample whose sampler resolves to -1; neither is on this path. Not
-  fixed, because no installed title is shown to depend on it and the change would alter view selection for every
-  title. Direction: feed `copied_image_descriptors`, which the lookup already honours by consumer pc, from the same
-  lane-spill tracking the storage proof uses. When
-  the 6.5 s event started is not established; finding it needs a bisection, which was not run.
+  mask 0 and the default gamma. Here the probe printed every sampler of that bind and none sets force or skip
+  degamma, so the choice for that texture (format 77) was the default either way; it would bind the wrong view when
+  a sampler that reaches a sample only through a lane readback sets either bit. The gradient and gather-compare
+  lowerings (`ShaderSpirvImage.cpp`) refuse a sample whose sampler resolves to -1; neither is on this path.
+- **Fixed: samplers restored from lanes and read through a shifted EUD pointer (c3b4c6d5d, translator 218).** The
+  image-descriptor copy flow (`ShaderImageDescriptorAnalysis.cpp`) now tracks up to 32 parked lanes: a
+  `v_writelane` of a constant lane parks the SGPR's origin, a `v_readlane` of the same lane restores it, and any
+  other VGPR write drops the lanes of that VGPR. A second defect sat on the same sample: the flow placed the EUD
+  pointer at the unshifted `extended.start_register`, while that row, like every other, is relative to the
+  user-data base; the sampler came from a scalar load through the shifted pointer and was not matched either.
+  Both feed `copied_image_descriptors`. Verified: in the same scene texture 2 now resolves its sampler (mask 0x4)
+  and no sample leaves the association pass unresolved; the role-playing title, the robot platformer and the
+  sandbox title (the sandbox title's GPU hang is the open driver defect in `docs/titles/sandbox.md`) reach their
+  usual states with no first error; unit 2696/2696 and the four CTest gates pass. Two unit tests cover the lane
+  restore (with rewrite and dynamic-lane negatives) and the shifted pointer.
+- **Open, found on the way.** Three other readers compare a register with `extended.start_register` without the
+  user-data base: `ShaderEudDescriptorLoadIsUnmapped` (`ShaderResources.cpp`), `ShaderScalarLoadNeedsGuestAddress`
+  (`Shader.cpp`) and `recompile_sload_guest` (`ShaderSpirvBuffer.cpp`). Not changed; no installed title is shown to
+  reach them with a non-zero base. Direction: subtract the base as `ShaderMatchesEudPointer` does, with a test per
+  reader. When the 6.5 s event started is not established; finding it needs a bisection, which was not run.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
