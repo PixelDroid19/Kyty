@@ -58,16 +58,25 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - *The pair.* Decoded with the genxml field layout of `3DSTATE_WM_DEPTH_STENCIL`, the first draw only writes
     stencil (test always, pass op replace, reference 0, masks 0xff) and the second only writes depth (test always);
     the guest clears depth and stencil with two quads. Only this pair hangs at a command-buffer start: in a forced
-    run the pairs at dw 1707, 2321, 2461, 2978 and 3180 open a command buffer, carry the same programs and complete,
-    so a pair at a batch start is not enough on its own.
+    run the pairs at dw 1707, 2321, 2461, 2978, 3180 and 3764 open a command buffer with the same vertex and pixel
+    programs and complete, so a pair at a batch start is not enough on its own.
+  - *The hung frame.* Two forced runs on kernel 7.3.4 hang at the same guest submission (80). In submission 79 the
+    same pair sits 657 dwords earlier (dw 3764), opens a command buffer and completes; submission 80 adds nine
+    one-group dispatches of one compute program at the start of the frame and four UI draws after the pair, and
+    the three command buffers before the pair have the same shape in both frames. Every instance of the pair left
+    in the dump's batch memory uses the same depth, stencil and HiZ addresses. The hung pair fetches its four
+    vertices from a 48-byte buffer of its own, while another instance in the dump fetches from a large one; a
+    probe that disabled the transient read-only vertex copy left that 48-byte buffer unchanged and still hung, so
+    it does not come from that copy.
   - *Discriminators, forced reproducer.* `INTEL_DEBUG=reemit` (all state re-emitted for every draw): 40 s and
     about 6500 forced submits, no reset (one run). `INTEL_DEBUG=nofc`: hangs. `INTEL_DEBUG=nohiz`: hangs with the
     same shape; the dump shows the flag engaged (`3DSTATE_HIER_DEPTH_BUFFER` has a null address), so HiZ is
     excluded. Driconf `intel_tbimr=false` (the driver confirmed the override; the hung job's draws carry no TBIMR
     bit): the two runs hung far later (job sequence 8776 and 15636 against about 350 in the controls), one of them
     in a different job of driver-internal rectangle operations followed by a depth-buffer switch, again at a
-    depth-stall `PIPE_CONTROL` (one dump). TBIMR off delays the hang; it does not remove it. The `nohiz` run on
-    kernel 7.3.4 hangs like the 7.2.15 runs.
+    depth-stall `PIPE_CONTROL` (one dump). TBIMR off delays the hang; it does not remove it. On kernel 7.3.4 the
+    `nohiz` run (cold shader cache) hung at job sequence 7975, while two plain controls with a warm cache hung at
+    372 and 381; cache state and the flag are confounded in that run.
   - *Vulkan usage.* With the validation layer (core checks only, the known `VUID-vkCmdDrawIndexed-format-07753`
     filtered, since validation errors stop the run) the forced reproducer hangs and the layer reports nothing
     else. The earlier "validation run held the world" above predates the stop on the first error.
