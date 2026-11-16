@@ -3605,6 +3605,44 @@ private:
 	std::array<Entry, Capacity> m_entries {};
 };
 
+// A sampled depth surface with HTILE reads its tiles' clear value where a tile is cleared. Its guest
+// bytes are the sampled values only when every word of its HTILE is one known clear word (zero: [0, 0];
+// 0xfffffff0: [1, 1]) and every sampled element of the single layer already holds that value.
+static bool HtileClearMatchesGuestDepth(uint64_t htile_addr, uint64_t depth_addr, uint32_t fmt, uint32_t width, uint32_t height,
+                                        uint32_t pitch)
+{
+	const uint32_t bytes     = State::Gen5DepthSampleBytesPerElement(fmt);
+	const uint64_t layer     = State::Gen5DepthSampleLayerBytes(fmt, pitch, height);
+	TileSizeAlign  htile     = {};
+	TileSizeAlign  depth     = {};
+	TileSizeAlign  stencil   = {};
+	const uint32_t z_format  = fmt == 22u ? 3u : 1u;
+	if (htile_addr == 0u || bytes == 0u || layer == 0u ||
+	    !TileGetDepthSize(width, height, 0, z_format, 0, true, true, true, &stencil, &htile, &depth) || htile.size == 0u ||
+	    !Kernel::Memory::KernelRangeResidentOrPrt(htile_addr, htile.size) || !Kernel::Memory::KernelRangeResidentOrPrt(depth_addr, layer))
+	{
+		return false;
+	}
+	DepthMetaPatternSnapshot pattern {};
+	if (!DepthMetaInspectPattern(reinterpret_cast<const void*>(htile_addr), htile.size, &pattern) ||
+	    (pattern.kind != DepthMetaPatternKind::UniformZero && pattern.kind != DepthMetaPatternKind::RecognizedClear))
+	{
+		return false;
+	}
+	// Only the detiled width x height elements are sampled; the rest of the 64 KiB block is padding.
+	const bool           one      = pattern.kind == DepthMetaPatternKind::RecognizedClear;
+	const uint32_t       expected = !one ? 0u : (bytes == 4u ? 0x3f800000u : 0xffffu);
+	std::vector<uint8_t> linear(static_cast<size_t>(width) * height * bytes);
+	TileConvertDepth64KBToLinear(linear.data(), reinterpret_cast<const void*>(depth_addr), width, height, pitch, bytes);
+	for (size_t offset = 0; offset < linear.size(); offset += bytes)
+	{
+		uint32_t element = 0;
+		std::memcpy(&element, linear.data() + offset, bytes);
+		if (element != expected) { return false; }
+	}
+	return true;
+}
+
 static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
                             const ShaderSamplerResources& samplers, VulkanImage** images_sampled, VulkanImage** images_storage,
                             int* images_sampled_view, VulkanImage** images_sampled_depth, int* images_sampled_depth_view,
@@ -4507,7 +4545,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				        fmt, tile, static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()),
 				        static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
 				        static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()),
-				        static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(), r.MetaAddr() != 0u, addr, width,
+				        static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(),
+				        r.MetaAddr() != 0u && (r.Depth() != 0u ||
+				                               !HtileClearMatchesGuestDepth(static_cast<uint64_t>(r.MetaAddr()) << 8u, addr, fmt,
+				                                                            static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+				                                                            static_cast<uint32_t>(pitch))),
+				        addr, width,
 				        height, pitch, size.size, textures.desc[i].sample_operation);
 				materialize_depth = physical_ok && source_ok && shape_ok;
 				// The overlapping objects decide whether guest bytes can be trusted; keep them for the refusal below.
