@@ -81,6 +81,11 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   - *Excluded or narrowed.* HiZ (`nohiz` verified), fast clears (`nofc`), TBIMR as the sole cause, an in-batch
     compute-to-3D switch, a pair at a batch start on its own, a different depth target, the dispatches of program
     `0xaeaaef95` (skip shown to fire); the transient vertex copy only with a probe not shown to fire.
+  - *Packets of the pair.* In both 7.3.4 dumps the hung pair and another instance of the same batch-start pair
+    left in batch memory (whether that one had executed is not shown) emit the same 15 non-`PIPE_CONTROL` packets
+    from the stencil-write `3DSTATE_WM_DEPTH_STENCIL` to the second `3DPRIMITIVE`, identical except the
+    blend-state pointer offset (`0x7824` dword 1); one hung instance carries one extra plain `PIPE_CONTROL` between
+    the quads, the other does not. The state the pair itself emits does not separate the hang.
   - *Fault report on this path.* In one forced run the loss was first seen by the end-of-pipe clock-mark read
     (`vkGetQueryPoolResults` returned not-ready after its fence read as completed), which exited without a submit
     fault report; that read now writes the report before stopping (not yet exercised by a run).
