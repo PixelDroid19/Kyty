@@ -7329,7 +7329,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   2026-10-14 main squash at about 43 s: that commit only shortened loading. First-parent `main` from 2026-10-01 and
   2026-08-28 stops with signal 11 about 2 s into boot, so older commits cannot show the event; commits before
   2026-08-04 lack the Debug frontier line. The event therefore started with the boot reaching that shader, not with
-  a change to the bind check, and the format-load fix above removes both events (one run on the fixed head).
+  a change to the bind check. The format-load fix above removes both events: none in one 40 s run on the fixed
+  head, while its parent emits them at about 21 s.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
