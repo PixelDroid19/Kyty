@@ -6308,9 +6308,14 @@ memory stayed within run-to-run noise (8.3-9.4 GiB), not separately isolated.
   ms of command-thread time in five seconds at 26-30 fps, about 6 % of those seconds. Smaller windows would
   undo the submit cost above, so no change was made; moving the export off the command thread is the
   direction, not started.
+- **Defect (2026-11-16):** the populated-page query (`SysLinuxVirtual.cpp`,
+  `sys_virtual_query_shared_backing_data_pages`) issues one `lseek(SEEK_DATA)` per populated page, about 0.4 us
+  each: 26-29 ms per fully populated 256 MiB span and 334 ms for 3.4 GiB on `PPSA03355 - Hades`. Exporting
+  windows off the command thread or populating ahead makes more spans fully populated, so this query has to get
+  cheaper first. Suggested direction: one bounded query per run of data pages instead of per page.
 - **Later (2026-11-16, `PPSA03355 - Hades` boot):** the same export, 8-16 ms per 64 MiB window, is the whole
-  command-thread cost of the window-opening loading draws before the title's intermittent boot stop, which it is not
-  shown to cause; see "Early stops seen in
+  command-thread cost of the window-opening loading draws before the title's intermittent boot stop, which it
+  does not cause; see "Early stops seen in
   the same sweep".
 
 ## Huge pages for direct memory: not adopted, GPU reads go through the IOMMU (2026-10-31)
@@ -7352,26 +7357,36 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   them when it is idle; in the buckets with an expensive draw the longest delay equals that draw's command time
   (65.0 against 65.1 ms, 76.4 against 76.5, 88.4 against 88.5), so the delay is the command-thread stall, not GPU
   completion. Between those draws the guest submits few labels (2-9 per 100 ms) while the command thread is idle,
-  so the low label rate is not only the stall. Per 100 ms bucket, the pool's low point does not follow the stalls:
-  the crashing run's last low (7 MiB free at 5.2 s) lies in a bucket without one, and the surviving run reached
-  2-5 MiB free both in buckets without a stall and in buckets with 30 ms ones, so the export is not shown to drive
-  the pool's peak; no run has yet removed it. A prepopulation arm (`fallocate` of the
+  so the low label rate is not only the stall. Joined on the command thread's own 100 ms clock over seven runs (four crashed), every pool
+  low under 20 MiB free lies in a bucket with a stall of 23-99 ms or right after one, and three crashes come
+  within 100 ms after a 64-152 ms stall; but the surviving runs also fall to 1-5 MiB free right after stalls of
+  74-84 ms. The 5 ms pool sampler prints nothing during any stall of 50 ms or more after 4.5 s (ten stalls in seven
+  runs: gaps of 65-153 ms, each about the stall's length), so the guest's allocations pause while the command
+  thread stalls and resume after it: a stall delays the bursts but does not raise the peak. Command-thread latency
+  is therefore excluded as the cause of the full pool. A prepopulation arm (`fallocate` of the
   physical range inside the first export) is not evidence either way: it put a 590-740 ms stall into the loading
   window and moved the per-preparation cost into the unpopulated-span search (16 ms).
   What the title does while the command thread is idle (same day, three more runs): presented frames fall from
   4-7 per 100 ms at 4.3-4.5 s to 0-2 per 100 ms through 5.6 s, with 1-8 command-buffer submissions per 100 ms
   after 4.6 s;
-  guest file reads total 3 ms and 5 MiB in the whole window, so the stop is not waiting on storage. `kyty_agent
-  threads` shows the guest's main thread running (not blocked) at every sample from 3.9 to 6.1 s, with three or
-  four other guest threads running and the rest on condition variables or semaphores. Per-thread host counters
+  guest `read`/`pread` calls total 3 ms and 5 MiB in the whole window, too little to feed bursts of hundreds of
+  MiB, so the title loads through a path not timed here. `kyty_agent
+  threads` shows the guest's main thread in no tracked wait at every sample from 3.9 to 6.1 s, as are three or
+  four other guest threads, and the rest on condition variables or semaphores. Per-thread host counters
   over 0.3 s samples at 4.8-5.1 s show three threads at a full core of user time each and two threads taking
   55,000-128,000 minor page faults with 100-180 ms of system time, that is populating 4 KiB pages of shared
   memory; which of these are guest and which are Kyty threads was not mapped (host thread names are not set),
   and the page-fault cost is the open lead in "Huge pages for direct memory".
-  Direction: read the guest's release condition for the pool's transient allocations (what it waits on before
-  freeing) and time-stamp that event against the pool's free total; moving the window export off the command
-  thread (the open direction in "Physical windows are whole 64 MiB chunks") removes the stalls but is not shown to
-  cure this stop. Judge any arm by the pool's per-cycle low point and the label rate, not the crash rate.
+  Two arms that import every window of a physical range ahead (temporary, three runs) are not evidence either
+  way: importing at the first preparation put a 1.1 s stall just before the bursts (both runs crashed), and
+  importing when the range is registered moved 65-125 ms per 256 MiB block onto the guest's mapping thread and
+  left 26-29 ms per block in the populated-page query on the command thread (one run, survived). The guest's
+  settings for this pool (read from its code): the renderer's initialisation creates it with memory type 3, block
+  size from a field of the settings structure the title passes in (immediate default 0xfc0000) and maximum block
+  count from another field (immediate default 4); the observed 256 MiB and 2 are therefore set by the title, and
+  where it takes them from was not traced. Direction: compare each failing request's size with the largest free
+  range in its pool (one crash had 54 MiB free in total), and trace the two settings fields to their source; if
+  either comes from a value Kyty returns, capacity is Kyty's contract, not timing.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
