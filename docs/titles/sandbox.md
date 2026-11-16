@@ -86,14 +86,17 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     from the stencil-write `3DSTATE_WM_DEPTH_STENCIL` to the second `3DPRIMITIVE`, identical except the
     blend-state pointer offset (`0x7824` dword 1); one hung instance carries one extra plain `PIPE_CONTROL` between
     the quads, the other does not. Compared from the real batch starts (offset 0 of the 4 KiB batch, the pair at
-    0x3ac in all), the whole batch differs only in dynamic-state pointer offsets and in
+    0x3ac in all), packet by packet in order, the batch up to the second quad differs only in dynamic-state
+    pointer offsets, the batch-start address, one extra `PIPE_CONTROL` in one dump, and
     `3DSTATE_VERTEX_BUFFERS`: the hung pair of the two 7.3.4 dumps reads a 48-byte buffer, the sibling a large one.
     The earlier dump of the same hang (same pair, same offsets) reads the large buffer, so the 48-byte buffer is
     not needed for the hang. No difference in what the emulator records separates the hung pair.
   - *Fault report on this path.* In one forced run the loss was first seen by the end-of-pipe clock-mark read
     (`vkGetQueryPoolResults` returned not-ready after its fence read as completed), which exited without a submit
-    fault report. The read now repeats with the wait flag, which returns the device loss itself, and writes the
-    report with that result before stopping (not yet exercised by a run).
+    fault report. The read now repeats with the wait flag and writes the report with that result before stopping
+    (not yet exercised by a run). In the installed driver the waiting read polls availability and device status
+    for at most 2 s, returns the device loss when the status reports it, and otherwise marks the device lost on
+    timeout; other drivers were not read.
   - *Discriminators, forced reproducer.* `INTEL_DEBUG=reemit` (all state re-emitted for every draw): 40 s and
     about 6500 forced submits, no reset (one run). `INTEL_DEBUG=nofc`: hangs. `INTEL_DEBUG=nohiz`: hangs with the
     same shape; the dump shows the flag engaged (`3DSTATE_HIER_DEPTH_BUFFER` has a null address), so HiZ is
@@ -110,9 +113,16 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     the pairs that complete at a batch start (their render targets and the work submitted just before them were
     not compared); no ingredient the emulator controls was named, so nothing was changed in Kyty. No setting was
     measured for frame rate.
-  - *Direction.* Read where `reemit` acts in the driver at the installed commit and compare that state for the
-    hung pair against a completing one; report the reproducer to the driver upstream (needs the
-    maintainer's approval).
+  - *What `reemit` adds (driver source at the installed commit, read only).* The flag marks every graphics
+    hardware state dirty at each draw flush (all but the index buffer, stream-out declarations, line stipple and
+    disabled features), so the whole set, `TBIMR` tile pass info and the workaround packets included, is emitted
+    before every draw. Without it the dump shows only `3DSTATE_WM_DEPTH_STENCIL` and `3DSTATE_CONSTANT_ALL`
+    between the two quads. One of those workaround states, required on this GPU family, emits a `PIPE_CONTROL`
+    with the pixel-shader stall sync only when "depth or stencil writes enabled" changes; the hung pair goes from
+    stencil-only writes to depth-only writes, so that value stays true and no stall is emitted between the quads,
+    while `reemit` emits it before each. Untested lead: no run isolated that stall from the rest of the set.
+  - *Direction.* Report the reproducer and this contrast to the driver upstream (needs the maintainer's
+    approval); a fix in Kyty would need a run showing that a stall between the quads alone avoids the hang.
 
 ## Sandbox title: world frame rate at `6a6a5818a` (2026-11-14, measured)
 

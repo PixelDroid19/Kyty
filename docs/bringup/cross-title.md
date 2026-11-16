@@ -7305,9 +7305,10 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   A later probe on every null return of the core allocator and of the Libc allocation, mspace and standard
   wrappers (51 sites, three lines each) printed nothing before a crash of the same shape (write at 0x40, 0x1f00
   bytes, base register zero; one crash in two runs); no site fired in those runs, so that it would print was not
-  shown by a hand case. With Debug console logging three runs of 20 s survived, so the crash also depends on
-  timing. Direction: the null base is not an allocator result; read the guest instructions before the return
-  address to name the call or field that holds it, and compare thread order in a crashing and a surviving run.
+  shown by a hand case. With Debug console logging 3 of 3 runs of 20 s survived (at a 50 % rate that happens
+  one time in eight, so timing is suspected, not shown). Not probed: `LibC.cpp` and the kernel memory-mapping
+  calls. Direction: read the guest instructions before the return address to name the call or field that holds
+  the null base, and probe the remaining allocation and mapping returns.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
@@ -7329,15 +7330,17 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   (`Shader.cpp`) and `recompile_sload_guest` (`ShaderSpirvBuffer.cpp`). Not changed; no installed title is shown to
   reach them with a non-zero base. Direction: subtract the base as `ShaderMatchesEudPointer` does, with a test per
   reader.
-- **Onset of the OCTOPATH format-load frontier event: as old as the boot that reaches it.** A bisection of
+- **Onset of the OCTOPATH format-load frontier event: as old as the boot that reaches it.** On
   `PPSA09809 - OCTOPATH TRAVELER II` (cold private cache, no input, Debug console filtered to the frontier line)
-  found the `st=2 f=11` event, and an `st=1 f=5` sibling, on every commit that boots past it. With a 40 s window it
-  pointed at the guest-path cache commit of 2026-10-15, but its parent emits the same events at about 40 s and the
-  2026-10-14 main squash at about 43 s: that commit only shortened loading. First-parent `main` from 2026-10-01 and
-  2026-08-28 stops with signal 11 about 2 s into boot, so older commits cannot show the event; commits before
-  2026-08-04 lack the Debug frontier line. The event therefore started with the boot reaching that shader, not with
-  a change to the bind check. The format-load fix above removes both events: none in one 40 s run on the fixed
-  head, while its parent emits them at about 21 s.
+  the `st=2 f=11` event, with an `st=1 f=5` sibling, first appears on first-parent `main` at the 2026-10-06
+  integration merge (#11), about 49 s into boot; its parent of 2026-10-01 exits with signal 11 about 2 s into
+  boot, so nothing older can show it. Each later `main` merge checked with a window of at least 120 s emits it (the
+  three merges after #11 at 49-50 s, the 2026-10-14 merge at 43 s), and so do the commits checked inside the
+  2026-10-16 merge, at about 40 s. A first bisection with a 40 s window pointed at the guest-path cache commit of
+  2026-10-15, but its parent emits the same events at about 40 s: that commit only shortened loading. Commits
+  before 2026-08-04 lack the Debug frontier line. The event therefore started when the boot first reached that
+  shader, not with a change to the bind check. The format-load fix above removes both events: none in one 40 s
+  run on the fixed head, while its parent emits them at about 21 s.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
     It is not added until a second published source settles the selector width.
