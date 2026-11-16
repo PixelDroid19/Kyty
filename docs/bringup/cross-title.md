@@ -7236,10 +7236,17 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   f=29 ds=22c` at 22.8 s (19.6 s in a repeat). A bounded local probe placed it in the vertex stage, on a V# from
   extended user data (`ext=1`, slot 6) with no program code: `ShaderProveFrontStorageReads` (`Shader.cpp`) skips
   extended V#s, so the binding stays unknown and the typed check at `GraphicsRenderBind.cpp` (`PrepareStorageBuffers`)
-  reports it on every draw that uses it; the binding itself proceeds. Open. Suggested direction: follow the front's
-  scalar load of the extended slot to the SGPRs it fills and analyse the uses of those. The recorded `st=8 f=64 ds=22c` event (above) has the same swizzle and reason
-  but was not seen in these runs; the timeline keeps only the first error, so whether it still occurs is not
-  established, and when the 6.5 s event started is not established either. Minecraft (warm private cache): exit
+  reports it on every draw that uses it; the binding itself proceeds. Open. Two more bounded probes narrowed it:
+  the V# is extended user-data row `start=40` (EUD dwords 24-27) of two vertex programs. Its sibling extended rows
+  are classified through dynamic scalar-load records, but no record covers dwords 24-27 (the records cover 0-23
+  and 28 onwards), and the row is not a duplicate of the program's vertex-stream row, which has another base. The
+  static register analysis returns unknown for every extended row of a front, so it cannot tell whether a reader
+  exists. Classifying the row as unused metadata would drop its binding, which is the riskier side, so it was not
+  done. Suggested direction: find whether any scalar load in the front or main code reads EUD dwords 24-27 without
+  producing a record; if one does, the defect is in the record builder, and if none does, the row can be proven
+  unread as code-available stages already prove it. In the last probe run every frontier event had this one shape;
+  the recorded `st=8 f=64 ds=22c` event (above) did not occur on that route, which does not show it is gone on
+  others. When the 6.5 s event started is not established. Minecraft (warm private cache): exit
   0, no first error, 60 fps.
 - **Held.**
   - `v_alignbyte_b32`: the RDNA2 text shifts by `8 * S2[4:0]`, which runs past the 64-bit pair for values above 7.
