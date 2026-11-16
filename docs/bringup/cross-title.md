@@ -7287,6 +7287,22 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   sandbox title (the sandbox title's GPU hang is the open driver defect in `docs/titles/sandbox.md`) reach their
   usual states with no first error; unit 2696/2696 and the four CTest gates pass. Two unit tests cover the lane
   restore (with rewrite and dynamic-lane negatives) and the shifted pointer.
+- **Which installed titles reach it (2026-11-16, Arc A770, local probe that compares the copy flow with and without
+  the two changes).** A 50 s boot without input of every installed title: only `PPSA06084 - Superliminal` gains a
+  resolution (pc 552, sampler 3, base 0, the lane path); the role-playing title is the known case. In Superliminal
+  that sampler sets neither force nor skip degamma in any printed bind, so the chosen view is the default either
+  way: latent there too. Limits: boot scenes only, ten titles stopped early, and the probe reports only gained
+  resolutions, not lost ones.
+- **Early stops seen in the same sweep, not caused by this change.** `PPSA03355 - Hades` stops at about 5 s of
+  boot in about half of the runs (exit 139), with the old copy flow as well: the guest's `memcpy` writes
+  0x1cd0-0x1ef0 bytes to a null-based destination (fault 0x40 or 0x1dc0, return address 0x900308059 in the guest in
+  every report); no mspace allocation returned null before it, so the null comes from
+  elsewhere. When it passes the boot it holds 60 fps at the 60 fps limit. Also: `vkCreateGraphicsPipelines`
+  -13 (`GraphicsRenderPipeline.cpp`), a double free in guest exit handlers (`cxa_finalize`), unsupported
+  storage-image format 69, render-target format 0xa, image numeric format 57, a VideoOut flip with an invalid
+  index, two unresolved imports (`Json2`, `NetCtl`) and an add-on load before the title id; the pipeline failure
+  and the double free reproduce with the old copy flow. Direction for the boot stop: run it with
+  `KYTY_CRASH_REPORT` and name the guest import whose result is the null destination.
 - **Open, found on the way.** Three other readers compare a register with `extended.start_register` without the
   user-data base: `ShaderEudDescriptorLoadIsUnmapped` (`ShaderResources.cpp`), `ShaderScalarLoadNeedsGuestAddress`
   (`Shader.cpp`) and `recompile_sload_guest` (`ShaderSpirvBuffer.cpp`). Not changed; no installed title is shown to
