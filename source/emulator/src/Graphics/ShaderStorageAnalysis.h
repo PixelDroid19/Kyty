@@ -274,6 +274,10 @@ bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, co
                                              int user_data_register_base = 0);
 // A whole-descriptor S_LOAD through the EUD pointer whose dwords no resource maps.
 bool ShaderEudDescriptorLoadIsUnmapped(const ShaderBindResources& bind, const ShaderInstruction& sload);
+// Every S_LOAD through the EUD pointer that reaches the V# at eud_offset_dw loads exactly
+// it, and every reader of it, followed through static lane spills, is a BUFFER_LOAD_FORMAT.
+bool ShaderEudDescriptorReadOnlyByFormatLoads(const ShaderCode& code, const ShaderBindResources& bind, int eud_offset_dw,
+                                              int user_data_register_base, const ShaderScalarFlow& scalar_flow);
 void ShaderAccumulateScalarBufferLoadSpan(const ShaderInstruction& inst, uint64_t* required_bytes, bool* dynamic_offset);
 void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                          ShaderParsedUsage* info, const uint32_t* extended_buffer, uint16_t eud_size_dw,

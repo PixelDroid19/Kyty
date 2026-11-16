@@ -2770,9 +2770,26 @@ static void ShaderProveFrontStorageReads(const ShaderVertexProgram& program, Sha
 	auto& storage = bind->storage_buffers;
 	for (int i = 0; i < storage.buffers_num; i++)
 	{
-		if (storage.start_register[i] < 0 || storage.extended[i] || storage.dynamic_sload[i] ||
-		    ShaderStorageResourceHasDynamicSLoad(*bind, i))
+		if (storage.start_register[i] < 0 || storage.dynamic_sload[i] || ShaderStorageResourceHasDynamicSLoad(*bind, i))
 		{
+			continue;
+		}
+		// An extended V# reaches the front only through EUD loads, whose readers
+		// no dynamic mapping covers when the V# travels through a lane spill.
+		if (storage.extended[i])
+		{
+			if (storage.start_register[i] >= 16 &&
+			    ShaderEudDescriptorReadOnlyByFormatLoads(program.front_code, *bind, storage.start_register[i] - 16, user_data_register_base,
+			                                             *program.front_scalar_flow))
+			{
+				storage.accesses[i]                = ShaderStorageAccess::Typed;
+				storage.exact_matches[i]           = true;
+				storage.dword_loads_only[i]        = false;
+				storage.format_loads_only[i]       = true;
+				storage.decoded_unknown[i]         = false;
+				storage.indirect_descriptor_use[i] = false;
+				storage.raw_tbuffer_use[i]         = false;
+			}
 			continue;
 		}
 		const auto use = AnalyzeShaderStorageUse(program.front_code, storage.start_register[i] + user_data_register_base,

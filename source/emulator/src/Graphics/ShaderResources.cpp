@@ -1381,6 +1381,224 @@ bool ShaderEudDescriptorLoadIsUnmapped(const ShaderBindResources& bind, const Sh
 	return false;
 }
 
+// Where one word of a loaded V# lives: an SGPR, a VGPR lane a static
+// V_WRITELANE parked it in, or both (-1 when it is not there).
+struct ShaderDescriptorWordPlace
+{
+	int sgpr = -1;
+	int vgpr = -1;
+	int lane = -1;
+};
+using ShaderDescriptorPlaces = std::array<ShaderDescriptorWordPlace, 4>;
+
+static bool ShaderStaticLane(const ShaderOperand& operand, int* lane)
+{
+	if (operand.type != ShaderOperandType::IntegerInlineConstant || operand.constant.i < 0 || operand.constant.i > 63)
+	{
+		return false;
+	}
+	*lane = operand.constant.i;
+	return true;
+}
+
+// V_WRITELANE of one SGPR into a constant lane, the scalar spill store.
+static bool ShaderScalarSpillStore(const ShaderInstruction& inst, int* lane)
+{
+	return inst.type == ShaderInstructionType::VWritelaneB32 && inst.dst.type == ShaderOperandType::Vgpr && inst.src_num >= 2 &&
+	       inst.src[0].type == ShaderOperandType::Sgpr && inst.src[0].size == 1 && ShaderStaticLane(inst.src[1], lane);
+}
+
+static bool ShaderOperandCoversVgpr(const ShaderOperand& operand, int reg)
+{
+	return operand.type == ShaderOperandType::Vgpr && reg >= operand.register_id && reg < operand.register_id + std::max(operand.size, 1);
+}
+
+static bool ShaderIsBufferFormatLoad(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::BufferLoadFormatX || type == ShaderInstructionType::BufferLoadFormatXy ||
+	       type == ShaderInstructionType::BufferLoadFormatXyz || type == ShaderInstructionType::BufferLoadFormatXyzw;
+}
+
+static bool ShaderDescriptorPlacesLive(const ShaderDescriptorPlaces& places)
+{
+	return std::any_of(places.begin(), places.end(), [](const auto& place) { return place.sgpr >= 0 || place.vgpr >= 0; });
+}
+
+// False when inst reads a word of the V# other than as a whole-V# format load
+// or as the SGPR of a spill store; sets *consumed for a format load.
+static bool ShaderDescriptorReadIsFormatLoadOrSpill(const ShaderInstruction& inst, const ShaderDescriptorPlaces& places, bool* consumed)
+{
+	bool whole = true;
+	for (int word = 0; word < 4; ++word)
+	{
+		whole = whole && places[0].sgpr >= 0 && places[word].sgpr == places[0].sgpr + word;
+	}
+	int        lane  = 0;
+	const bool spill = ShaderScalarSpillStore(inst, &lane);
+	auto reads_word = [&](const ShaderOperand& operand)
+	{
+		return std::any_of(places.begin(), places.end(),
+		                   [&](const auto& place) { return place.sgpr >= 0 && ShaderOperandOverlapsSgprRange(operand, place.sgpr, 1); });
+	};
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		const auto& operand = inst.src[source];
+		if (!reads_word(operand) || (spill && source == 0))
+		{
+			continue;
+		}
+		if (!whole || source != 1 || !ShaderIsBufferFormatLoad(inst.type) || operand.type != ShaderOperandType::Sgpr ||
+		    operand.register_id != places[0].sgpr || operand.size != 4)
+		{
+			return false;
+		}
+		*consumed = true;
+	}
+	for (int source = 0; source < inst.mimg_address_num; ++source)
+	{
+		if (reads_word(inst.mimg_address[source]))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+// Applies inst to where the words live: SGPR writes drop them, a spill store
+// parks them in a lane, a VGPR write drops the lanes, and a V_READLANE of a
+// parked lane brings the word back into an SGPR. False when a word would live
+// in two SGPRs or two lanes, which one place per word cannot follow.
+static bool ShaderMoveDescriptorPlaces(const ShaderInstruction& inst, ShaderDescriptorPlaces* places)
+{
+	std::array<int, 4> restored {-1, -1, -1, -1};
+	int                lane = 0;
+	if (inst.type == ShaderInstructionType::VReadlaneB32 && inst.src_num >= 2 && inst.src[0].type == ShaderOperandType::Vgpr &&
+	    inst.dst.type == ShaderOperandType::Sgpr && inst.dst.size == 1 && ShaderStaticLane(inst.src[1], &lane))
+	{
+		for (int word = 0; word < 4; ++word)
+		{
+			if ((*places)[word].vgpr == inst.src[0].register_id && (*places)[word].lane == lane)
+			{
+				restored[word] = inst.dst.register_id;
+			}
+		}
+	}
+	const bool spill = ShaderScalarSpillStore(inst, &lane);
+	for (int word = 0; word < 4; ++word)
+	{
+		auto& place = (*places)[word];
+		if (place.sgpr >= 0 && ShaderInstructionWritesSgprRange(inst, place.sgpr, 1))
+		{
+			place.sgpr = -1;
+		}
+		const bool lane_written = spill ? place.vgpr == inst.dst.register_id && place.lane == lane
+		                                : place.vgpr >= 0 && (ShaderOperandCoversVgpr(inst.dst, place.vgpr) ||
+		                                                      ShaderOperandCoversVgpr(inst.dst2, place.vgpr));
+		if (lane_written)
+		{
+			place.vgpr = -1;
+			place.lane = -1;
+		}
+		if (spill && place.sgpr == inst.src[0].register_id)
+		{
+			if (place.vgpr >= 0)
+			{
+				return false;
+			}
+			place.vgpr = inst.dst.register_id;
+			place.lane = lane;
+		}
+		if (restored[word] >= 0)
+		{
+			if (place.sgpr >= 0 && place.sgpr != restored[word])
+			{
+				return false;
+			}
+			place.sgpr = restored[word];
+		}
+	}
+	return true;
+}
+
+// Every reader of the V# the S_LOAD at index fills, followed through static
+// lane spills, is a format load of the whole V#, and the V# is dead in SGPRs
+// and lanes before any branch or the program ends.
+static bool ShaderLoadedDescriptorReadOnlyByFormatLoads(const ShaderCode& code, uint32_t index)
+{
+	const auto&            instructions = code.GetInstructions();
+	ShaderDescriptorPlaces places {};
+	for (int word = 0; word < 4; ++word)
+	{
+		places[word].sgpr = instructions.At(index).dst.register_id + word;
+	}
+	bool consumed = false;
+	for (uint32_t next = index + 1; next < instructions.Size() && ShaderDescriptorPlacesLive(places); ++next)
+	{
+		const auto& inst = instructions.At(next);
+		if (inst.type == ShaderInstructionType::SEndpgm)
+		{
+			return consumed;
+		}
+		if (inst.type == ShaderInstructionType::Unknown || inst.type == ShaderInstructionType::SSetpcB64 ||
+		    ShaderInstructionHasStaticBranchTarget(inst.type) || !ShaderDescriptorReadIsFormatLoadOrSpill(inst, places, &consumed) ||
+		    !ShaderMoveDescriptorPlaces(inst, &places))
+		{
+			return false;
+		}
+	}
+	return consumed && !ShaderDescriptorPlacesLive(places);
+}
+
+static bool ShaderIsScalarMemoryLoad(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::SLoadDword || type == ShaderInstructionType::SLoadDwordx2 ||
+	       type == ShaderInstructionType::SLoadDwordx4 || type == ShaderInstructionType::SLoadDwordx8 ||
+	       type == ShaderInstructionType::SLoadDwordx16;
+}
+
+bool ShaderEudDescriptorReadOnlyByFormatLoads(const ShaderCode& code, const ShaderBindResources& bind, int eud_offset_dw,
+                                              int user_data_register_base, const ShaderScalarFlow& scalar_flow)
+{
+	const auto& instructions = code.GetInstructions();
+	if (!bind.extended.used || bind.extended.read_at_runtime || eud_offset_dw < 0 ||
+	    scalar_flow.holding_entry_value.size() != instructions.Size())
+	{
+		return false;
+	}
+	const int pointer = bind.extended.start_register + user_data_register_base;
+	bool      found   = false;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst    = instructions.At(index);
+		const auto& entry   = scalar_flow.holding_entry_value[index];
+		const bool  holding = pointer >= 0 && pointer + 1 < kShaderScalarLivenessSgprs && entry.test(static_cast<size_t>(pointer)) &&
+		                     entry.test(static_cast<size_t>(pointer + 1));
+		if (!holding || !ShaderInstructionReadsSgprRange(inst, pointer, 2))
+		{
+			continue;
+		}
+		// Any other use of the pointer may read the V# where this scan cannot follow it.
+		int offset_dw = 0;
+		if (!ShaderIsScalarMemoryLoad(inst.type) ||
+		    !ShaderMatchesEudPointer(inst.src[0], bind.extended.start_register, user_data_register_base, entry) ||
+		    !ShaderGetSmemConstantDwordOffset(inst, &offset_dw) || inst.dst.type != ShaderOperandType::Sgpr)
+		{
+			return false;
+		}
+		if (offset_dw + inst.dst.size <= eud_offset_dw || offset_dw >= eud_offset_dw + 4)
+		{
+			continue;
+		}
+		if (offset_dw != eud_offset_dw || inst.type != ShaderInstructionType::SLoadDwordx4 || inst.dst.size != 4 ||
+		    !ShaderLoadedDescriptorReadOnlyByFormatLoads(code, index))
+		{
+			return false;
+		}
+		found = true;
+	}
+	return found;
+}
+
 ShaderEudDescriptorLoads ShaderFindEudDescriptorLoads(const ShaderCode& code)
 {
 	ShaderEudDescriptorLoads loads;
