@@ -150,6 +150,12 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
     depth-writing order was tested; the natural hang (about 2 of 12 runs) is not shown gone by these runs; other
     Intel drivers are not covered; the repeat runs on every GPU that uses Intel's Mesa driver, not only the
     family that needs the driver workaround; frame rate with the repeat was not measured.
+  - *Natural route (2026-11-16).* Cross taps alone stop on the Play screen with focus on the Worlds tab. A
+    scripted route of cross every 3 s from 4 s to 37 s, then down at 42 s and 45 s and cross at 48 s and 52 s,
+    loads the saved world: native captures show the Play screen at 47 s and the world at 115 s, with frame
+    rate falling to 2-18 fps while it loads (85-110 s) and back to 51 fps by 120 s. One run on the build with
+    the stencil repeat and the populated-page query change: no hang, no device loss. One run does not bound the
+    natural hang rate (about 2 of 12 earlier).
   - *Direction.* The driver workaround keys on "depth or stencil writes enabled" as one value; a switch from
     stencil-only to depth-only writes does not trigger it. Report the reproducer and the A/B result upstream
     (needs the maintainer's approval); when the driver is fixed, the repeat can be removed.
