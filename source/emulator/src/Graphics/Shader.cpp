@@ -2784,6 +2784,7 @@ static void ShaderProveFrontStorageReads(const ShaderVertexProgram& program, Sha
 		storage.accesses[i]                = use.access;
 		storage.exact_matches[i]           = true;
 		storage.dword_loads_only[i]        = use.dword_loads_only;
+		storage.format_loads_only[i]       = use.format_loads_only;
 		storage.decoded_unknown[i]         = false;
 		storage.indirect_descriptor_use[i] = false;
 		storage.raw_tbuffer_use[i]         = use.raw_tbuffer_use;
@@ -3946,6 +3947,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		bind->storage_buffers.raw_smem_use[i]            = matched_evidence.raw_smem_use;
 		bind->storage_buffers.raw_tbuffer_use[i]         = matched_evidence.raw_tbuffer_use;
 		bind->storage_buffers.dword_loads_only[i]        = evidence.exact_match && exact_evidence.dword_loads_only;
+		bind->storage_buffers.format_loads_only[i]       = evidence.exact_match && exact_evidence.format_loads_only;
 		bind->storage_buffers.raw_smem_required_bytes[i] = matched_evidence.raw_smem_required_bytes;
 		bind->storage_buffers.raw_smem_dynamic_offset[i] = matched_evidence.raw_smem_dynamic_offset;
 

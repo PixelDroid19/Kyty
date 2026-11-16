@@ -3126,7 +3126,10 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 		{
 			// OutOfBounds modes (0..3) are descriptor policy; Vulkan SSBO
 			// robust access covers the common case. Do not hard-fail.
-			if (!ShaderGen5StorageDescriptorSupported(r, storage_buffers.accesses[i]))
+			// BUFFER_STORE_FORMAT encodes 32-bit elements only, so a written typed V# keeps the 32-bit rule.
+			const bool format_loads = storage_buffers.accesses[i] == ShaderStorageAccess::Typed && storage_buffers.format_loads_only[i] &&
+			                          ShaderGen5FormatLoadDescriptorSupported(r);
+			if (!format_loads && !ShaderGen5StorageDescriptorSupported(r, storage_buffers.accesses[i]))
 			{
 				Emulator::Agent::Lifecycle::StorageFrontierContext context {};
 				context.binding         = DescribeStorageBinding(storage_buffers, i);

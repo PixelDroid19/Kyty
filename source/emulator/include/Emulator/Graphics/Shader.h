@@ -1839,6 +1839,8 @@ struct ShaderStorageUseEvidence
 	bool                raw_smem_dynamic_offset = false;
 	// Every instruction that consumes the V# is a raw BUFFER_LOAD_DWORD[x2..x4] or S_BUFFER_LOAD_DWORD[x2..x16].
 	bool dword_loads_only = false;
+	// Every instruction that consumes the V# is a BUFFER_LOAD_FORMAT_*, and no unknown or indirect use can hide another.
+	bool format_loads_only = false;
 };
 
 // Structural evidence for a compute kernel that writes one uniform four-word
@@ -2003,6 +2005,8 @@ struct ShaderStorageResources
 	bool                       unread_stream[BUFFERS_MAX]           = {};
 	// Every consumer is a raw dword load (ShaderStorageUseEvidence::dword_loads_only).
 	bool dword_loads_only[BUFFERS_MAX] = {};
+	// Every consumer is a format load (ShaderStorageUseEvidence::format_loads_only).
+	bool format_loads_only[BUFFERS_MAX] = {};
 	// Some consumer's V# register keeps word 0 but not words 1-2 on some path,
 	// so its row is not the one bound (ShaderCollectRedefinedBufferDescriptors).
 	bool row_redefined[BUFFERS_MAX] = {};
@@ -2066,6 +2070,8 @@ struct ShaderZeroDescriptorLoads
 	return stride == 0 ? static_cast<uint64_t>(records) : static_cast<uint64_t>(stride) * records;
 }
 
+// A V# whose every consumer is a format load: the load decodes any table-47 format and the DST_SEL.
+[[nodiscard]] bool ShaderGen5FormatLoadDescriptorSupported(const ShaderBufferResource& resource);
 [[nodiscard]] bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access);
 [[nodiscard]] bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource);
 // A zero-record raw descriptor is architecturally empty. Such a descriptor

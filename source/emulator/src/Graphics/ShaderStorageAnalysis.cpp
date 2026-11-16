@@ -1347,6 +1347,7 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 	bool     raw_smem_dynamic_offset = false;
 	bool     dword_load              = false;
 	bool     other_consumer          = false;
+	bool     format_store            = false;
 
 	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
 	{
@@ -1450,6 +1451,9 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 				                           inst.type == ShaderInstructionType::SBufferLoadDwordx16;
 				dword_load       = dword_load || is_dword_load;
 				other_consumer   = other_consumer || !is_dword_load;
+				format_store     = format_store || inst.type == ShaderInstructionType::BufferStoreFormatX ||
+				                   inst.type == ShaderInstructionType::BufferStoreFormatXy ||
+				                   inst.type == ShaderInstructionType::BufferStoreFormatXyzw;
 				raw              = raw || candidate_raw;
 				typed            = typed || candidate_typed;
 				guarded_raw_vmem = guarded_raw_vmem || candidate_raw_vmem;
@@ -1479,6 +1483,7 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 		}
 	}
 
+	const bool format_loads_only = typed && !raw && !format_store && !decoded_unknown && !indirect_descriptor_use;
 	if (raw && typed)
 	{
 		return {ShaderStorageAccess::Mixed, decoded_unknown,        indirect_descriptor_use,
@@ -1489,7 +1494,8 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 	{
 		return {ShaderStorageAccess::Typed, decoded_unknown,        indirect_descriptor_use,
 		        guarded_raw_vmem,           raw_smem_use,           raw_tbuffer_use,
-		        raw_smem_required_bytes,    raw_smem_dynamic_offset, dword_load && !other_consumer};
+		        raw_smem_required_bytes,    raw_smem_dynamic_offset, dword_load && !other_consumer,
+		        format_loads_only};
 	}
 	return {raw ? ShaderStorageAccess::Raw : ShaderStorageAccess::Unknown,
 	        decoded_unknown,

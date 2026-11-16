@@ -362,6 +362,54 @@ TEST(EmulatorShaderGetpc, FormatLoadsDecodeDescriptorFormatOnBothPaths)
 	EXPECT_FALSE(binary.IsEmpty());
 }
 
+// A V# read only by format loads binds in any decodable format; a format store keeps the 32-bit rule,
+// since BUFFER_STORE_FORMAT encodes 32-bit elements only.
+TEST(EmulatorShaderGetpc, FormatLoadOnlyStorageAcceptsEveryDecodableFormat)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	ShaderInstruction load {};
+	load.type                 = ShaderInstructionType::BufferLoadFormatX;
+	load.format               = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	load.dst                  = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	load.src[0]               = {.type = ShaderOperandType::Vgpr, .register_id = 5, .size = 1};
+	load.src[1]               = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+	load.src[2].type          = ShaderOperandType::IntegerInlineConstant;
+	load.src_num              = 3;
+	load.buffer_idxen         = true;
+	ShaderInstruction store   = load;
+	store.pc                  = 8;
+	store.type                = ShaderInstructionType::BufferStoreFormatX;
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	const auto analyze = [&](bool with_store)
+	{
+		ShaderCode code;
+		code.SetType(ShaderType::Compute);
+		code.GetInstructions().Add(load);
+		if (with_store) { code.GetInstructions().Add(store); }
+		end.pc = with_store ? 16u : 8u;
+		code.GetInstructions().Add(end);
+		return AnalyzeShaderStorageUse(code, 8);
+	};
+	const auto loads = analyze(false);
+	EXPECT_EQ(loads.access, ShaderStorageAccess::Typed);
+	EXPECT_TRUE(loads.format_loads_only);
+	const auto written = analyze(true);
+	EXPECT_EQ(written.access, ShaderStorageAccess::Typed);
+	EXPECT_FALSE(written.format_loads_only);
+
+	ShaderBufferResource r16 {};
+	r16.fields[1] = 2u << 16u;                    // stride 2
+	r16.fields[2] = 64u;
+	r16.fields[3] = (11u << 12u) | DstSel(4, 0, 0, 0); // R16_UINT
+	EXPECT_TRUE(ShaderGen5FormatLoadDescriptorSupported(r16));
+	EXPECT_FALSE(ShaderGen5StorageDescriptorSupported(r16, ShaderStorageAccess::Typed));
+	r16.fields[3] = DstSel(4, 0, 0, 0); // INVALID
+	EXPECT_FALSE(ShaderGen5FormatLoadDescriptorSupported(r16));
+}
+
 TEST(EmulatorShaderGetpc, OnlyAttributeTableFormatLoadsAreVertexFetches)
 {
 	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }

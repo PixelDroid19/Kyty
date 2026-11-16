@@ -1,4 +1,5 @@
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderBufferFormat.h"
 
 #include "Kyty/Core/DbgAssert.h"
 
@@ -166,6 +167,11 @@ uint32_t ShaderRawBufferByteAddress(const ShaderBufferResource& resource, uint32
 	return byte_address + scalar_offset;
 }
 
+bool ShaderGen5FormatLoadDescriptorSupported(const ShaderBufferResource& resource)
+{
+	return ShaderGen5BufferFormat(resource.Format()) != nullptr;
+}
+
 bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access)
 {
 	if (access == ShaderStorageAccess::Raw)
@@ -243,6 +249,7 @@ void ExcludeUnusedMetadataStorage(ShaderStorageResources* resources, ShaderDynam
 			resources->raw_smem_use[active_count]             = resources->raw_smem_use[source];
 			resources->raw_tbuffer_use[active_count]          = resources->raw_tbuffer_use[source];
 			resources->dword_loads_only[active_count]         = resources->dword_loads_only[source];
+			resources->format_loads_only[active_count]        = resources->format_loads_only[source];
 			resources->raw_smem_required_bytes[active_count]  = resources->raw_smem_required_bytes[source];
 			resources->raw_smem_dynamic_offset[active_count]  = resources->raw_smem_dynamic_offset[source];
 			resources->dynamic_sload[active_count]            = resources->dynamic_sload[source];
