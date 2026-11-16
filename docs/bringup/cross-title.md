@@ -7358,6 +7358,16 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   the pool's peak; no run has yet removed it. A prepopulation arm (`fallocate` of the
   physical range inside the first export) is not evidence either way: it put a 590-740 ms stall into the loading
   window and moved the per-preparation cost into the unpopulated-span search (16 ms).
+  What the title does while the command thread is idle (same day, three more runs): presented frames fall from
+  4-7 per 100 ms at 4.3-4.5 s to 0-2 per 100 ms through 5.6 s, with 1-8 command-buffer submissions per 100 ms
+  after 4.6 s;
+  guest file reads total 3 ms and 5 MiB in the whole window, so the stop is not waiting on storage. `kyty_agent
+  threads` shows the guest's main thread running (not blocked) at every sample from 3.9 to 6.1 s, with three or
+  four other guest threads running and the rest on condition variables or semaphores. Per-thread host counters
+  over 0.3 s samples at 4.8-5.1 s show three threads at a full core of user time each and two threads taking
+  55,000-128,000 minor page faults with 100-180 ms of system time, that is populating 4 KiB pages of shared
+  memory; which of these are guest and which are Kyty threads was not mapped (host thread names are not set),
+  and the page-fault cost is the open lead in "Huge pages for direct memory".
   Direction: read the guest's release condition for the pool's transient allocations (what it waits on before
   freeing) and time-stamp that event against the pool's free total; moving the window export off the command
   thread (the open direction in "Physical windows are whole 64 MiB chunks") removes the stalls but is not shown to
