@@ -7391,13 +7391,21 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   reads as a spin wait; three other guest threads take 30,000-120,000 minor page faults per 0.3 s with 30-60 %
   of their time in the kernel. Later the same day: stack samples of the main thread (five of five during loading)
   land in the TSC read of the title's own event loop, which polls the user-service event queue, the save-data
-  dialog status and the TSC with no sleep, so the spin is the title's event pump, not a wait Kyty leaves
-  unanswered. The faults are first touches of Kyty's shared guest-memory backing: the process's shared resident
+  dialog status and the TSC, none of which sleeps; its two indirect calls are a fixed-step update (it accumulates
+  the elapsed time and advances in fixed steps, skipping a step while more than one frame is queued) and an
+  empty function, so nothing in the loop is meant to block and the spin is the title's own event pump. The faults are first touches of Kyty's shared guest-memory backing: the process's shared resident
   set grows from 0.4 to 2.9 GB between 4.6 and 5.6 s while anonymous memory stays at 0.37 GB. The failing
   request, read from the stack frame of the upload routine in 30 crash reports, is 1.4-4 MiB (9 of them exactly
   4 MiB) against the pool's two 256 MiB blocks, so the pool fails when it is almost entirely in use, not on an
-  oversized request. Direction: find what returns this pool's allocations to it (the condition the title waits on
-  before releasing an upload), and whether the free figure the sampler reads counts the largest contiguous range.
+  oversized request. The failing call is the title's texture creation, which takes this pool for three of its
+  texture kinds and logs and leaves a null base when the allocation fails; the size it asks for is the title's
+  own arithmetic on pitch, height and format tables, with no import in between. Capacity and request size are
+  therefore both the title's, and what differs under Kyty is how many textures are alive at the peak. The upload
+  then queues a command for the renderer's own thread on a mutex and condition-variable queue (56 code
+  references); no GPU wait import (event queue, label wait) appears near that queue, so what releases a texture
+  back to the pool was not found. Direction: find the renderer thread's consumer of that queue and the memory
+  value it tests before freeing (a label or fence written by the GPU would make the peak Kyty's contract), and
+  whether the free figure the sampler reads counts the largest contiguous range.
   Other stops, each in one boot:
   - `PPSA33802 - My Little Puppy`: `vkCreateGraphicsPipelines` result -13 (`GraphicsRenderPipeline.cpp:956`);
     reproduces with the old copy flow.
