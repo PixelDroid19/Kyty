@@ -3739,7 +3739,7 @@ void WindowUpdateTitle()
 		static double s_last_log_time = 0.0;
 		if (t - s_last_log_time >= 1.0)
 		{
-			KYTY_LOG_DEBUG( "KYTY_FPS_LOG frame=%d fps=%.3f t=%.3f\n", frame_num, fps_now, t);
+			std::fprintf(stderr, "KYTY_FPS_LOG frame=%d fps=%.3f t=%.3f\n", frame_num, fps_now, t);
 			s_last_log_time = t;
 		}
 	}
