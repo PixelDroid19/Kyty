@@ -313,6 +313,8 @@ static uint64_t ClockMarkCounter(VkQueryPool pool, uint32_t query, uint32_t vali
 	const auto  result = vkGetQueryPoolResults(gctx.device, pool, query, 1, sizeof(ticks), &ticks, sizeof(ticks), VK_QUERY_RESULT_64_BIT);
 	if (result != VK_SUCCESS)
 	{
+		// After a device loss a fence can read as signaled while its query is not, so this read can be the first to see it.
+		VulkanSubmitFaultReport("clock_mark_query", result);
 		EXIT("end-of-pipe clock mark is not readable after its submission completed: result=%d\n", static_cast<int>(result));
 	}
 	const uint64_t counter = GpuClockMarkHostCounter(CurrentClockCalibration(gctx), ticks, valid_bits, gctx.timestamp_period_ns,
