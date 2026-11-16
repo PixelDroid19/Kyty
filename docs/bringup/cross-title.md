@@ -7505,10 +7505,10 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   - Bound on the export: its samples on the command thread came to about 120 ms of a 1.2 s loading window,
     so removing it entirely returns at most about a tenth of the consumer's time; the earlier finding that
     pool lows do not follow command-thread stalls still stands.
-  - A surviving run against three crashed runs, same samplers, from the pool's first block (16 to 20 windows
-    of 100 ms): the pool took in 1,435 MiB against 1,157-1,345 MiB, the consumer advanced 20 frames against
-    2-19, and the surviving run's free low was 2.1 MiB against 8-12 MiB in the crashed ones. Neither the
-    inflow nor the frame rate separates the outcomes, so these samplers do not capture what decides the
+  - One surviving run against three crashed runs, same samplers, from the pool's first block to the crash or
+    2.0 s (1.4-2.0 s): net pool inflow between 5 ms samples 1,435 MiB in 2.0 s against 1,157-1,345 MiB in
+    1.4-2.0 s, the consumer advanced 20 frames against 14-19, and the free low was 2.1 MiB in the surviving run
+    against 1.9-8.3 MiB in the crashed ones. Neither the inflow nor the frame rate separates the outcomes, so these samplers do not capture what decides the
     crash. Declared limit: the stop remains intermittent (about half of the runs) and unexplained; further
     runs on these samplers are not expected to settle it.
   Other stops, each in one boot:
