@@ -6,6 +6,17 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: progress writes to save-data memory were dropped (2026-11-16, fixed)
+
+- **Observed (live trace, late dunes route).** Every `sceSaveDataSetSaveDataMemory2` call passed a valid
+  data pointer with an entry count of zero, and plausible ranges (13397 bytes at 0, about 3.3 KB at 393216,
+  148267 bytes at 0, and others). Kyty took the count literally and wrote nothing, so the 2 MiB slot stayed
+  zero and progress could not survive a restart.
+- **Fix (`36b94dd3f`).** A zero count with a data pointer writes that one entry; the getter already reads a
+  single entry without a count. The save-data unit test writes through a zero count and reads it back.
+- **Verified.** After the same route the slot file holds 30095 non-zero bytes. Not checked: that the title
+  restores the progress on the next boot.
+
 ## Robot platformer: the studio intro video was black, a UNORM target sampled as sRGB (2026-11-16, fixed)
 
 Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs of 14-18 s from boot.
