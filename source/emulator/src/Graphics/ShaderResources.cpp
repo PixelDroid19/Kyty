@@ -1327,42 +1327,6 @@ const std::vector<ShaderDynamicSLoadUse>& ShaderCodeResourceMemo::DescriptorSLoa
 	return m_descriptor_sload_uses;
 }
 
-static bool ShaderEudDwordHasStaticResource(const ShaderBindResources& bind, int offset_dw)
-{
-	const int  reg    = offset_dw + 16;
-	const auto within = [reg](int start, int dwords) { return reg >= start && reg < start + dwords; };
-	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
-	{
-		if (bind.storage_buffers.extended[i] && !bind.storage_buffers.dynamic_sload[i] && within(bind.storage_buffers.start_register[i], 4))
-		{
-			return true;
-		}
-	}
-	for (int i = 0; i < bind.textures2D.textures_num; ++i)
-	{
-		const auto& texture = bind.textures2D.desc[i];
-		if (texture.extended && !texture.dynamic_sload && within(texture.start_register, 8))
-		{
-			return true;
-		}
-	}
-	for (int i = 0; i < bind.samplers.samplers_num; ++i)
-	{
-		if (bind.samplers.extended[i] && !bind.samplers.dynamic_sload[i] && within(bind.samplers.start_register[i], 4))
-		{
-			return true;
-		}
-	}
-	for (int i = 0; i < bind.gds_pointers.pointers_num; ++i)
-	{
-		if (bind.gds_pointers.extended[i] && within(bind.gds_pointers.start_register[i], 1))
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
 bool ShaderEudDescriptorLoadIsUnmapped(const ShaderBindResources& bind, const ShaderInstruction& sload)
 {
 	int offset_dw = 0;
@@ -1371,14 +1335,53 @@ bool ShaderEudDescriptorLoadIsUnmapped(const ShaderBindResources& bind, const Sh
 	{
 		return false;
 	}
-	for (int word = 0; word < sload.dst.size; ++word)
+	const int words = sload.dst.size;
+	if (words <= 0)
 	{
-		if (!ShaderEudDwordHasStaticResource(bind, offset_dw + word))
+		return false;
+	}
+	EXIT_IF(words > 32);
+	// One pass over the static extended resources marks the loaded words they cover.
+	const int first   = offset_dw + 16;
+	uint32_t  covered = 0;
+	const auto cover  = [&](int start, int dwords)
+	{
+		for (int reg = std::max(start, first); reg < std::min(start + dwords, first + words); ++reg)
 		{
-			return true;
+			covered |= 1u << static_cast<uint32_t>(reg - first);
+		}
+	};
+	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	{
+		if (bind.storage_buffers.extended[i] && !bind.storage_buffers.dynamic_sload[i])
+		{
+			cover(bind.storage_buffers.start_register[i], 4);
 		}
 	}
-	return false;
+	for (int i = 0; i < bind.textures2D.textures_num; ++i)
+	{
+		const auto& texture = bind.textures2D.desc[i];
+		if (texture.extended && !texture.dynamic_sload)
+		{
+			cover(texture.start_register, 8);
+		}
+	}
+	for (int i = 0; i < bind.samplers.samplers_num; ++i)
+	{
+		if (bind.samplers.extended[i] && !bind.samplers.dynamic_sload[i])
+		{
+			cover(bind.samplers.start_register[i], 4);
+		}
+	}
+	for (int i = 0; i < bind.gds_pointers.pointers_num; ++i)
+	{
+		if (bind.gds_pointers.extended[i])
+		{
+			cover(bind.gds_pointers.start_register[i], 1);
+		}
+	}
+	const uint32_t all_words = words == 32 ? ~0u : (1u << static_cast<uint32_t>(words)) - 1u;
+	return covered != all_words;
 }
 
 // Where one word of a loaded V# lives: an SGPR, a VGPR lane a static

@@ -238,7 +238,19 @@ private:
 	mutable std::map<std::pair<uint32_t, int>, bool>                m_written_on_every_path;
 	// Keyed by load PC, last consumer PC, destination register and dword count.
 	mutable std::map<std::tuple<uint32_t, uint32_t, int, int>, ShaderDynamicSLoadSpan> m_dynamic_sload_spans;
-	mutable std::map<std::vector<int32_t>, std::vector<ShaderImageCopyRead>>           m_image_copy_reads;
+	struct LayoutHash
+	{
+		size_t operator()(const std::vector<int32_t>& layout) const
+		{
+			uint64_t hash = 1469598103934665603ull;
+			for (const int32_t value: layout)
+			{
+				hash = (hash ^ static_cast<uint32_t>(value)) * 1099511628211ull;
+			}
+			return static_cast<size_t>(hash);
+		}
+	};
+	mutable std::unordered_map<std::vector<int32_t>, std::vector<ShaderImageCopyRead>, LayoutHash> m_image_copy_reads;
 };
 
 [[nodiscard]] ShaderStorageUseEvidence       AnalyzeShaderStorageUse(const ShaderCode& code, int start_register,

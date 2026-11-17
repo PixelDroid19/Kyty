@@ -453,10 +453,15 @@ int ShaderFindImageStorageTextureDescriptor(const ShaderCode& code, uint32_t ind
 // layouts give equal ShaderAnalyzeImageCopyReads results for one code.
 std::vector<int32_t> ShaderImageCopyLayout(const ShaderBindResources& bind, int user_data_register_base)
 {
-	std::vector<int32_t> layout {user_data_register_base,      bind.textures2D.textures_num,
+	std::vector<int32_t> layout;
+	layout.reserve(8u + 4u * static_cast<size_t>(std::max(bind.textures2D.textures_num, 0)) +
+	               3u * static_cast<size_t>(std::max(bind.samplers.samplers_num, 0)) +
+	               2u * static_cast<size_t>(std::max(bind.gds_pointers.pointers_num, 0)) +
+	               2u * static_cast<size_t>(std::max(bind.direct_sgprs.sgprs_num, 0)) + 7u * bind.dynamic_sloads.records.Size());
+	layout.insert(layout.end(), {user_data_register_base,      bind.textures2D.textures_num,
 	                             bind.samplers.samplers_num,   bind.gds_pointers.pointers_num,
 	                             bind.direct_sgprs.sgprs_num,  bind.extended.used ? 1 : 0,
-	                             bind.extended.start_register, static_cast<int32_t>(bind.extended.eud_size_dw)};
+	                             bind.extended.start_register, static_cast<int32_t>(bind.extended.eud_size_dw)});
 	if (!ValidBind(bind, user_data_register_base))
 	{
 		return layout;
