@@ -204,6 +204,17 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   descriptor setup: about 50-65 ms/s at best, about 1 us per draw, while moving registry rules
   into the bind path. The create statistics cost about
   4 % of the processor thread's samples.
+- **Excluded: a register-keyed memo of the pixel input analysis.** Shadow on the gameplay route
+  (2026-11-17), key = the pixel stage registers, user SGPRs, the shader registers the analysis reads,
+  the colour mask and the vertex fields it reads; 512-entry table per thread; a hash of the whole
+  output compared on every repeat, with an injected mismatch every 4,096 repeats (162 of 162
+  caught). The front analysed about 50,000 draws per second and repeated a key on 24.5 % of them;
+  the processor's inline misses (about 8,400 per second) repeated on 4.1 %. Of the repeats, 6 %
+  on the front and 41 % inline produced a different output under the same host-write epoch: the
+  descriptor words the analysis reads changed while the registers did not. The user SGPRs point at
+  per-draw guest memory, so the inputs rarely repeat; a cache would have to split the
+  program-dependent layout work from the descriptor-dependent part inside `ShaderParseUsage2`, which
+  is a redesign of that function, not a memo.
 - **Excluded: the replay worker sleeping instead of spinning.** `DeferredReplayWorker` polls for
   200 us before sleeping and spends about 27 % of the process's samples in that spin (6-core SMT
   host). With the window set to 0 (interleaved, 2 runs per arm) the processor got slower,
