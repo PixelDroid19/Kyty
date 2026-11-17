@@ -1630,6 +1630,11 @@ static bool ResolvePublicationPiecesLocked(const Registry& registry, uint64_t va
 	return true;
 }
 
+uint64_t GuestDeviceAddressChunkRemovals()
+{
+	return g_chunk_removals.load(std::memory_order_acquire);
+}
+
 bool GuestDeviceAddressResolveDrawInput(const GraphicContext* ctx, uint64_t vaddr, uint64_t size,
                                         VkBuffer_T** buffer, uint64_t* offset, uint64_t* device)
 {

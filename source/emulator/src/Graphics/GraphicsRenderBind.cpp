@@ -55,6 +55,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <memory>
+#include <unordered_map>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -3085,6 +3086,108 @@ static bool StorageGuestPagesAddress(uint64_t addr, uint64_t size, uint64_t* dev
 	       (*device_address & 3u) == 0 && GpuMemoryRangeHoldsGuestBytes(addr, size);
 }
 
+static uint64_t MaxStorageBufferRange()
+{
+	static const uint64_t range = []
+	{
+		VkPhysicalDeviceProperties properties {};
+		vkGetPhysicalDeviceProperties(g_render_ctx->GetGraphicCtx()->physical_device, &properties);
+		return static_cast<uint64_t>(properties.limits.maxStorageBufferRange);
+	}();
+	return range;
+}
+
+// Read-only storage slots bound to imported guest pages. Each view keeps one
+// unique id per buffer, offset and size, so the descriptor sets built with it are
+// found again; the views go when an import does, or when they outgrow the bound.
+class GuestPagesViews
+{
+public:
+	// Called before a draw takes views, never while one holds them.
+	void BeginDraw()
+	{
+		const uint64_t removals = GuestDeviceAddressChunkRemovals();
+		if (removals != m_removals || m_views.size() >= kMaxViews)
+		{
+			Clear();
+			m_removals = removals;
+		}
+	}
+
+	VulkanBuffer* Get(VkBuffer pages, uint64_t offset, uint64_t size)
+	{
+		auto& view = m_views[{pages, offset, size}];
+		if (view == nullptr)
+		{
+			view                   = std::make_unique<VulkanBuffer>();
+			view->buffer           = pages;
+			view->usage            = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+			view->descriptor_range = size;
+			view->guest_offset     = offset;
+			VulkanAssignMemoryUniqueId(&view->memory);
+			// Like a fresh snapshot: a set is cached once its view is bound again.
+			view->uncached_descriptor_sets = true;
+			return view.get();
+		}
+		view->uncached_descriptor_sets = false;
+		return view.get();
+	}
+
+private:
+	static constexpr size_t kMaxViews = 64u * 1024u;
+
+	struct Key
+	{
+		VkBuffer pages  = nullptr;
+		uint64_t offset = 0;
+		uint64_t size   = 0;
+
+		bool operator==(const Key& other) const { return pages == other.pages && offset == other.offset && size == other.size; }
+	};
+	struct KeyHash
+	{
+		size_t operator()(const Key& key) const
+		{
+			return std::hash<uint64_t> {}((reinterpret_cast<uintptr_t>(key.pages) * 0x9E3779B97F4A7C15ull) ^ (key.offset * 31u) ^ key.size);
+		}
+	};
+
+	void Clear()
+	{
+		for (auto& [key, view]: m_views)
+		{
+			g_render_ctx->GetDescriptorCache()->FreeDescriptor(view.get());
+		}
+		m_views.clear();
+	}
+
+	std::unordered_map<Key, std::unique_ptr<VulkanBuffer>, KeyHash> m_views;
+	uint64_t                                                         m_removals = UINT64_MAX;
+};
+
+static GuestPagesViews& StorageGuestPagesViews()
+{
+	thread_local GuestPagesViews views;
+	return views;
+}
+
+// A view of [addr, addr + size) when a draw can read the guest pages in place
+// through a storage slot: the conditions of a by-address read, and a buffer
+// offset the device can bind.
+static bool StorageGuestPagesView(uint64_t addr, uint64_t size, VulkanBuffer** view)
+{
+	auto*    ctx    = g_render_ctx->GetGraphicCtx();
+	VkBuffer pages  = nullptr;
+	uint64_t offset = 0;
+	if (size > MaxStorageBufferRange() || !GuestDeviceAddressResolveDrawInput(ctx, addr, size, &pages, &offset) ||
+	    offset % ctx->min_storage_buffer_offset_alignment != 0u || !GpuMemoryRangeHoldsGuestBytes(addr, size))
+	{
+		return false;
+	}
+	*view = StorageGuestPagesViews().Get(pages, offset, size);
+	return true;
+}
+
 // A V# row read by device address (ShaderStorageResources::by_address): words
 // 0-1 take the address, word 2 the bytes behind it; the stride and word 3 stay.
 // The shader sign-extends bit 47, so canonical high-half addresses fit too.
@@ -3099,9 +3202,10 @@ static void WriteStorageAddressRow(uint64_t device_address, uint64_t backed_byte
 	r->fields[2] = static_cast<uint32_t>(std::min<uint64_t>(backed_bytes, UINT32_MAX));
 }
 
+// `snapshot_slots`: slots whose bytes a later proof reads from an immutable snapshot.
 static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkShaderStageFlags stage,
 	                              const ShaderBindResources& bind, VulkanBuffer** buffers, uint32_t** sgprs,
-	                              uint64_t shader_checksum)
+	                              uint64_t shader_checksum, uint64_t snapshot_slots)
 {
 	KYTY_PROFILER_FUNCTION();
 	const auto& storage_buffers = bind.storage_buffers;
@@ -3112,6 +3216,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 	EXIT_IF(buffer == nullptr);
 
 	bool gen5 = Config::IsNextGen();
+	StorageGuestPagesViews().BeginDraw();
 
 	for (int i = 0; i < storage_buffers.buffers_num; i++)
 	{
@@ -3323,6 +3428,11 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				trace.path   = "device_address_in_place";
 				backed_bytes = materialized_size;
 				buf          = buffer->UploadTransientZeroCarrier(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+			} else if (!by_address && read_only && materialized_size == requested_size &&
+			           (snapshot_slots & (uint64_t {1} << static_cast<uint32_t>(i))) == 0u &&
+			           StorageGuestPagesView(addr, materialized_size, &buf))
+			{
+				trace.path = "guest_pages_in_place";
 			} else
 			{
 				if (materialized_size != requested_size)
@@ -5319,6 +5429,22 @@ static void PrepareDirectSgprs(const ShaderDirectSgprsResources& direct_sgprs, u
 	}
 }
 
+// The storage slots ValidateUploadedStorageSeedCoverage reads its bounds from.
+static uint64_t SeedCoverageBoundsSlots(const ShaderBindResources& bind, uint64_t mask, const ShaderStorageImageTileCoverage* coverage)
+{
+	uint64_t slots = 0;
+	for (int i = 0; coverage != nullptr && i < bind.textures2D.textures_num && i < ShaderTextureResources::RES_MAX; ++i)
+	{
+		const int index = coverage[i].bounds_storage_buffer_index;
+		if ((mask & (uint64_t {1} << static_cast<uint32_t>(i))) != 0u && coverage[i].origin_byte_offset >= 0 && index >= 0 &&
+		    index < DescriptorCache::BUFFERS_MAX)
+		{
+			slots |= uint64_t {1} << static_cast<uint32_t>(index);
+		}
+	}
+	return slots;
+}
+
 static uint64_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const ShaderBindResources& bind,
                                                     VulkanBuffer* const* uploaded_buffers, uint64_t mask,
                                                     const ShaderStorageImageTileCoverage* coverage)
@@ -5476,7 +5602,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.storage_buffers.buffers_num > 0)
 		{
 			const auto stage_start = BindingStageClock::now();
-			PrepareStorageBuffers(submit_id, buffer, vk_stage, bind, storage_buffers, &sgprs_ptr, shader_checksum);
+			PrepareStorageBuffers(submit_id, buffer, vk_stage, bind, storage_buffers, &sgprs_ptr, shader_checksum,
+			                      SeedCoverageBoundsSlots(bind, storage_seed_skip_mask, storage_seed_coverage));
 			if (record_draw_timing) { DebugStatsRecordDrawDescriptorStorage(BindingStageElapsedNs(stage_start)); }
 			need_descriptor = true;
 		}

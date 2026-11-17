@@ -144,6 +144,9 @@ bool GuestDeviceAddressOverlapsRegisteredRange(uint64_t vaddr, uint64_t size);
 [[nodiscard]] bool GuestDeviceAddressResolveDrawInput(const GraphicContext* ctx, uint64_t vaddr,
                                                       uint64_t size, VkBuffer_T** buffer,
                                                       uint64_t* offset, uint64_t* device = nullptr);
+// Moves whenever an imported buffer leaves the registry: a buffer
+// GuestDeviceAddressResolveDrawInput returned stays valid while this is unchanged.
+[[nodiscard]] uint64_t GuestDeviceAddressChunkRemovals();
 
 // Creates `out` directly over the guest pages of [vaddr, vaddr + size), so device
 // writes reach guest memory without a copy and CPU stores reach the device. False:
