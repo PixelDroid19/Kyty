@@ -462,3 +462,26 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   shares (stacks truncated, so lower bounds): `BindDescriptors` 47 % (textures 22 %, descriptor
   cache 10.8 %, storage 7.3 %, samplers 2.2 %), driver 8.3 %, buffer flush and submit about
   11 %, shader input analysis about 11 % (pixel 6.9 %, vertex 2.4 %, redefined buffers 1.6 %).
+
+### Whole-bind repeat shadow (2026-11-17, temporary diagnostic, gameplay, native resolution)
+
+- Each graphics `BindDescriptors` call hashed four parts of its inputs (storage-buffer words; the
+  used texture and sampler words with layout, shader and flags; direct SGPRs with GDS pointers;
+  layout, shader and flags), each in its own 65,536-slot table per stage, and compared the image
+  and sampler arrays handed to the descriptor cache against the last call with the same image key
+  while the object-graph, guest-bytes and materialization-removal counters were unchanged.
+- 13.1 M binds. Same key as the previous call with that key: images and samplers 99.99 % (vertex)
+  and 99.9 % (pixel); storage buffers 23 % and 32 %; direct SGPRs 14 % and 100 %; layout and
+  shader about 100 %. With the counters unchanged the image key held 68 % of binds; the misses
+  were the removal counter 3.96 M, guest bytes 1.45 M and the object graph 41 k. Among 8.9 M
+  valid image hits the arrays differed once, the case forced by hand.
+- So sampled images repeat and storage does not. A memo of the image part is bounded by the
+  texture and sampler stages (about 3.7 us per draw) times its hit rate, and on a hit it still owes
+  the use records, the per-submit dirty-page check of each guest texture and the layout barriers.
+  The first measured raises the hit rate are the removal counter (bumped by cache evictions as well
+  as invalidations) and the global guest-bytes generation. Storage words change on most draws, so
+  they would have to leave the set (by-address or dynamic offsets; see
+  `docs/bringup/cp-draw-plan.md`, "Dynamic offsets and descriptor buffers on Intel Arc").
+- In the same runs the GPU clock (sysfs actual frequency, averaged per second) moved between
+  1,030 and 2,270 MHz of a 2,400 MHz maximum while the device sat idle half the time, so the
+  measured engine time per frame is an upper bound for the work.
