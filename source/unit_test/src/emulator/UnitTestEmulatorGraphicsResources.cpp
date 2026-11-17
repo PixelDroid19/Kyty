@@ -617,6 +617,11 @@ TEST(EmulatorGraphicsResources, WritableNumericAdmissionIgnoresSampledDescriptor
 		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
 		    RequireImageModule(plan.supported && plan.descriptor_view[1] != plan.descriptor_view[2] && plan.extended_formats,
 		                       "R8ui and R32ui use separate exact views");
+		    textures.desc[1].texture.fields[1] = 69u << 20u;
+		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
+		    RequireImageModule(plan.supported && !plan.extended_formats &&
+		                           std::strcmp(ShaderStorageImageViewOf(plan, plan.descriptor_view[1]).image_format, "Rgba16ui") == 0,
+		                       "16_16_16_16_UINT uses the core Rgba16ui view");
 		    textures.desc[1].texture.fields[1] = 70u << 20u;
 		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
 		    RequireImageModule(!plan.supported && std::strstr(plan.reason, "signed writable") != nullptr, "signed bank is unsupported");
