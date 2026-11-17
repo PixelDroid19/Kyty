@@ -386,3 +386,14 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   These runs barely reach the two sites; they do not show the bump is unused where the sites were
   written for. Whether a sampled-only bind should stop counting as a write remains a model change
   that needs those titles and the full regression set.
+- Counted rerun (2026-11-17, counter printed at every power of two and counted the calls that
+  examined a `Texture` and those where its two times differed): `PPSA21567 - Astro Bot` dunes,
+  seed site 1,024 calls with no `Texture` among the overlaps, growth site 128 calls with one
+  `Texture` parent whose times differed; `PPSA09809 - OCTOPATH TRAVELER II` title screen (no
+  input route), seed site never called, growth site 512 calls with five `Texture` parents whose
+  times differed. No decision changed. The other readers cannot see the bump: the storage-cache
+  test (`GpuMemoryCreate.cpp:1530`) reads only storage buffers, storage-image retirement
+  (`GpuMemoryWriteback.cpp:142`) and the in-place fill identity (`:1005`,
+  `GraphicsRenderAttachments.cpp:121`) read only storage objects, and only the two sampled-image
+  binds in `GraphicsRenderBind.cpp` request a `Texture`. The seed site is still untested with a
+  `Texture` overlap.
