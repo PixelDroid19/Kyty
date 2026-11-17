@@ -219,6 +219,7 @@ public:
 			else if (op == "OpINotEqual") { r = arg(4) != arg(5); }
 			else if (op == "OpULessThan") { r = arg(4) < arg(5); }
 			else if (op == "OpSLessThan") { r = static_cast<int32_t>(arg(4)) < static_cast<int32_t>(arg(5)); }
+			else if (op == "OpSGreaterThan") { r = static_cast<int32_t>(arg(4)) > static_cast<int32_t>(arg(5)); }
 			else if (op == "OpULessThanEqual") { r = arg(4) <= arg(5); }
 			else if (op == "OpUGreaterThan") { r = arg(4) > arg(5); }
 			else if (op == "OpUGreaterThanEqual") { r = arg(4) >= arg(5); }
@@ -273,6 +274,8 @@ public:
 				const auto& ext = t.at(5);
 				if (ext == "UMin") { r = std::min(arg(6), arg(7)); }
 				else if (ext == "UMax") { r = std::max(arg(6), arg(7)); }
+				else if (ext == "SMin") { r = static_cast<uint32_t>(std::min(static_cast<int32_t>(arg(6)), static_cast<int32_t>(arg(7)))); }
+				else if (ext == "SMax") { r = static_cast<uint32_t>(std::max(static_cast<int32_t>(arg(6)), static_cast<int32_t>(arg(7)))); }
 				else if (ext == "SClamp")
 				{
 					const auto signed_arg = [&](size_t index) { return static_cast<int32_t>(arg(index)); };

@@ -349,6 +349,23 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	check_subb(3u, 5u, 5u, 1u, UINT32_MAX, 1u, "S_SUBB_U32 equal sources with borrow-in");
 	check_subb(3u, UINT32_MAX, UINT32_MAX, 1u, UINT32_MAX, 1u,
 	           "S_SUBB_U32 UINT32_MAX plus borrow-in does not wrap the borrow test");
+	// S_MIN/S_MAX set SCC when S0 is the strict winner, not when the result is non-zero.
+	const auto check_min_max = [](uint32_t opcode, uint32_t source0, uint32_t source1, uint32_t expected_result,
+	                              uint32_t expected_scc, const char* label) {
+		auto code = Parse({Sop2Word(opcode, 2u, 0u, 1u), kEnd});
+		const Program program(Emit(code, 0xc0u, false, false, true).c_str());
+		uint32_t actual_scc = UINT32_MAX;
+		Equal(EvaluateScalar(program, source0, source1, 0u, 0u, 1u - expected_scc, "%s2", &actual_scc), expected_result, label);
+		Equal(actual_scc, expected_scc, label);
+	};
+	check_min_max(0x07u, 0u, 5u, 0u, 1u, "S_MIN_U32 zero minimum from S0");
+	check_min_max(0x07u, UINT32_MAX, 1u, 1u, 0u, "S_MIN_U32 unsigned compare");
+	check_min_max(0x06u, UINT32_MAX, 1u, UINT32_MAX, 1u, "S_MIN_I32 signed compare");
+	check_min_max(0x08u, 7u, 7u, 7u, 0u, "S_MAX_I32 equal sources");
+	check_min_max(0x08u, UINT32_MAX, 0u, 0u, 0u, "S_MAX_I32 zero maximum from S1");
+	check_min_max(0x09u, 5u, 0u, 5u, 1u, "S_MAX_U32 S0 maximum");
+	check_min_max(0x06u, 5u, 1u, 1u, 0u, "S_MIN_I32 S1 minimum");
+	check_min_max(0x09u, 1u, UINT32_MAX, UINT32_MAX, 0u, "S_MAX_U32 unsigned S1 maximum");
 	{
 		auto code = Parse({Sop2Word(0x05u, 0u, 0u, 1u), kEnd});
 		const Program program(Emit(code, 0xc0u, false, false, true).c_str());
