@@ -259,3 +259,11 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   `WaitReleaseTicket` rate, which a merge would turn into mid-batch submits from guest threads.
 - **Check of `0469499d3` on this title:** heavy-scene run, `last-error` empty, events only
   informational, one capture scored healthy (it landed on the title menu, not the scene).
+- **Built: shader ids compared with `memcmp` (`b0d7c323c`).** On the gameplay route the pipeline
+  lookup spent 161 of the processor thread's 3,193 samples in the element loop of
+  `ShaderId::operator==`. With `memcmp` the lookup fell from 205 to 99 samples and pipeline creation
+  from 299 to 187 (3,185 samples). One run without the profiler (2026-11-17, quiet host): 13.15 us
+  per draw and 17.96 fps against 14.0 and 17 on `ac7cbcbba` (`gp2`); pipeline setup 1.18 against
+  about 2.1 us per draw. Single runs, not interleaved arms. Remaining texture-stage items on that
+  profile: `GpuMemory::CreateObject` 12 % of the thread (statistics about 2.3 %), the VideoOut
+  lookup for every sampled texture that is neither a render target nor a depth target 1.6 %.
