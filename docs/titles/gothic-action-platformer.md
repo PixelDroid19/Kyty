@@ -162,9 +162,10 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   misses), and almost all of them fall at the third or later draw after a front start, not at the
   start (4,200-4,650 of about 4,800 per 2 s; the front was asleep at 99.6 % of starts). So the miss
   is not wake latency. The front thread uses about 0.65 s of CPU per second, about 12 us per draw
-  all included. In a clean profile `ShaderParseUsage2` costs about 7 us per call on the front
-  against about 17 us inline on the processor thread (cause not separated: colder caches on the
-  processor thread, or heavier draws at the miss points). On a loaded host (about 9 fps, half the
+  all included. The pixel input analysis cost about twice as much per call inline on the
+  processor thread as on the front in a loaded run (about 22 against 11 us; not repeated on a
+  quiet host; cause not separated: colder caches on the processor thread, or heavier draws at the
+  miss points). On a loaded host (about 9 fps, half the
   usual draws) the front's lead at a `Take` was usually 3 or more draws and 0 at about 11 % of
   takes; that histogram was not repeated on a quiet host. Excluded: polling the front awake.
   The header comment of `GraphicsRunDrawFront.h` says the replay runs about 4 draws per processor
@@ -195,14 +196,17 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 - **Per-texture guest-upload memo, priced (not built).** `GpuMemory::CreateObject` takes about
   125 ms/s over about 511,000 calls per second in gameplay; textures are about 409,000 of them and
   90 % end in `CachedReuse`, whose remembered-key path already skips the materialization cache.
-  The GPU-owned lookups before it are already skipped by `SampledLookupMissMemo`. A memo above
-  `CreateObject` would still have to take the registry lock for the hit's bookkeeping
-  (`RecordUse`, use counters, read-only merge), so it could remove only the key build, the
-  remembered-key scan, the statistics and the texture descriptor setup: about 50 ms/s at best,
-  under 1 us per draw, with lock-free invalidation as the risk. The create statistics cost about
+  The GPU-owned lookups before it are already skipped by `SampledLookupMissMemo`. On a repeat
+  inside one submission `RecordUse` and `use_num` change nothing, but the hit requires `in_use`,
+  and `GpuMemory::WriteBackObjectLocked` clears it without changing any generation, so a memo
+  above `CreateObject` would still recheck the object under the registry lock. It could remove
+  the backing lock, the key build, the remembered-key scan, the statistics and the texture
+  descriptor setup: about 50-65 ms/s at best, about 1 us per draw, while moving registry rules
+  into the bind path. The create statistics cost about
   4 % of the processor thread's samples.
-- **Excluded: the replay worker's spin hurting the processor thread.** `DeferredReplayWorker`
-  polls for 200 us before sleeping and spends about 27 % of the process's samples in that spin
-  (6-core SMT host). With the window set to 0 (interleaved, 2 runs each) the processor got slower,
-  15.72 / 15.60 against 15.27 / 15.04 us per draw (fps 14.9 / 14.8 against 15.5 / 15.8): the
-  spin saves hand-off wake-ups and does not cost the processor.
+- **Excluded: the replay worker sleeping instead of spinning.** `DeferredReplayWorker` polls for
+  200 us before sleeping and spends about 27 % of the process's samples in that spin (6-core SMT
+  host). With the window set to 0 (interleaved, 2 runs per arm) the processor got slower,
+  15.72 / 15.60 against 15.27 / 15.04 us per draw (fps 14.9 / 14.8 against 15.5 / 15.8). Sleeping
+  adds a wake-up per hand-off, so this shows sleeping is not a gain; it does not show what the
+  spin itself costs the processor thread.
