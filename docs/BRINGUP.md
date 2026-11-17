@@ -198,6 +198,8 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Gothic action platformer](titles/gothic-action-platformer.md)
   - Gothic action platformer: the new-game video presents black (2026-11-16, open)
+- [Twin-stick shooter](titles/twin-stick-shooter.md)
+  - Twin-stick shooter: first strict runs reach the menu, play is not reached (2026-11-17, open)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
   - Shader instruction coverage against the RDNA2 ISA, the vertex-front, format-load and extended lane-spill storage frontiers (2026-11-15, fixed in part)
   - Frame generation from the presented image (2026-11-15, not buildable)
