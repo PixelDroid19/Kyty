@@ -53,6 +53,72 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 
 ## Frame rate in the new-game video scene (2026-11-17, open)
 
+### Status and how to continue (2026-11-17)
+
+Summary of the records below, for whoever picks this up next. Intel Arc A770, Mesa ANV, native
+resolution, `KYTY_PRESENT_FPS_LIMIT=60`, strict runs, gameplay route that reaches the first level
+at about 160 s and samples 150-175 s.
+
+**Where it stands.** Gameplay runs at 18.7-19.3 fps, against 60 fps on the console. The scene
+draws about 3,400 draws per frame in about 158 guest command batches. Not failing: the title is
+playable and renders correctly in gameplay; `kyty_agent playable-regression` passes 12 of 15
+gates, the same three as the reference. Still failing: the frame rate, and the black new-game
+video above.
+
+**Why it is not at native speed.** The command-processor thread limits it, not the GPU:
+- Half resolution does not raise the frame rate, and device timestamps show the GPU idle between
+  submits for about half of each frame. Its work fits about 40 fps (see "Budget for 30 fps").
+- One thread decodes every packet and, for every draw, resolves textures, storage buffers,
+  samplers and render targets into memory objects in guest order, then looks up descriptor sets.
+  That costs about 12.5 us per draw, about 43 ms of a 52 ms frame. The console does none of this:
+  its GPU reads the guest descriptors directly.
+- A frame costs:
+  - about 28 ms in ordinary prepared draws (8.4 us each, 5.4 us of it resource binding);
+  - about 13-14 ms at batch boundaries (the first draw of each batch costs about 65 us: a missing
+    front record and a new command buffer);
+  - flush and submit, about 12 us per batch.
+- No memory object is created or freed per frame. The cost is the volume of ordered lookups
+  (about four per draw) and descriptor work, not churn.
+
+**Done on this branch** (each record below has its numbers):
+- Two draw fronts prepare shader inputs ahead of the processor.
+- Shader ids are carried on the front record.
+- A direct-mapped table holds recent materializations.
+- Texture-stage results are reused within a command buffer (71 % of binds).
+- The draw fronts are woken only from a full ring (+4 %, one pair of runs, indicative).
+
+**Excluded or parked** (do not reopen without new evidence):
+- Starting the fronts on the queued batch: the host-write epoch advances before the first draw in
+  83 % of boundaries.
+- A front-start spin, and texture-stage reuse across command buffers.
+- Skipping target resolution on a render-pass continuation (0.26-0.4 us per draw,
+  `docs/bringup/performance-architecture-plan.md`).
+- A whole descriptor-set memo: storage words change on most draws.
+- Lock-free reuse of sampled-texture requests (parked).
+- Merging batches into one command buffer: about 3 ms per frame, parked because it changes
+  submission order for every title.
+- The draw-tail record thread is already built (one replay thread per pool), so splitting
+  recording off the processor is not a new lever.
+
+**Ceiling of what is priced.** Every local lever together reaches about 21-22 fps: merging
+batches, handing the submit to the replay thread, the sampler-id lookup. 25 fps needs about 2 us
+less per ordinary draw beyond that, and 30 fps about 5 us, mostly from resource binding. No
+priced lever does that today.
+
+**Next directions, in order:**
+1. A freshness rule narrower than the global host-write epoch: only the pages a front record read
+   invalidate it. Each epoch advance now discards the fronts' work, at mid-run and at every batch
+   start. Count first which writes advance the epoch.
+2. Merging consecutive batches that share render targets into one command buffer, behind the
+   existing completion and wait contracts. Price it on Minecraft and Astro Bot first, because it
+   changes submission order everywhere.
+3. A binding model that leaves a draw whose descriptors did not change without per-draw
+   resolution. This is the only direction that reaches 30 fps. It needs the object-removal signal
+   understood first: removals moved in 74 % of cross-buffer binds, cause not found.
+
+Temporary diagnostics used for these records were never committed; they are kept with the run
+evidence outside the repository.
+
 - **Baseline (console logging on).** Strict run, `KYTY_PRESENT_FPS_LIMIT=60`, agent `perf-snapshot` over 6 s
   while the video plays: 9.3 fps, 3,336 draws per frame, 27.2 us per draw in the draw processor. Binding 14.0 us
   (textures 5.8, storage 4.1, descriptor finalization 2.7), state setup 7.5, pipeline setup 3.1. Other
