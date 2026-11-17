@@ -1185,9 +1185,12 @@ int KYTY_SYSV_ABI SaveDataSetSaveDataMemory2(void* set_param)
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
+	// Titles pass a zero count with one entry in data (traced on a shipping
+	// title: every progress write had data_num 0 and a valid range).
+	const uint32_t data_num = set->data != nullptr && set->data_num == 0 ? 1u : set->data_num;
 	std::vector<SaveDataMemoryWriteRange> ranges;
-	ranges.reserve(set->data_num);
-	for (uint32_t index = 0; index < set->data_num; ++index)
+	ranges.reserve(data_num);
+	for (uint32_t index = 0; index < data_num; ++index)
 	{
 		const auto& data = set->data[index];
 		ranges.push_back({data.buf, data.buf_size, data.offset});

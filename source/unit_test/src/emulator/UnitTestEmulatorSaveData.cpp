@@ -431,6 +431,16 @@ TEST(EmulatorSaveData, SaveDataMemoryHleUsesExactSlotAndPersistsBeforeEvent)
 	set_param.slot_id  = k_slot;
 	EXPECT_EQ(set(&set_param), 0);
 
+	// A zero count with a data pointer writes that one entry.
+	std::array<uint8_t, 1>   single_payload {0x64};
+	SaveDataMemoryDataLayout single_data {};
+	single_data.buf      = single_payload.data();
+	single_data.buf_size = single_payload.size();
+	single_data.offset   = 5;
+	set_param.data       = &single_data;
+	set_param.data_num   = 0;
+	EXPECT_EQ(set(&set_param), 0);
+
 	std::array<uint8_t, 8>   round_trip {};
 	SaveDataMemoryDataLayout read_data {};
 	read_data.buf      = round_trip.data();
@@ -440,7 +450,7 @@ TEST(EmulatorSaveData, SaveDataMemoryHleUsesExactSlotAndPersistsBeforeEvent)
 	get_param.data    = &read_data;
 	get_param.slot_id = k_slot;
 	EXPECT_EQ(get(&get_param), 0);
-	EXPECT_EQ(round_trip, (std::array<uint8_t, 8> {0, 0x91, 0x82, 0x73, 0, 0, 0, 0}));
+	EXPECT_EQ(round_trip, (std::array<uint8_t, 8> {0, 0x91, 0x82, 0x73, 0, 0x64, 0, 0}));
 
 	SaveDataMemorySyncLayout sync_param {k_user, k_slot};
 	EXPECT_EQ(sync(&sync_param), 0);
