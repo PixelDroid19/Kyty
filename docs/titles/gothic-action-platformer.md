@@ -621,11 +621,39 @@ Temporary counters, same gameplay route, 16,384 runs in the window:
   itself (4.7 % of draws, one run per batch). After it, the first front hit is the next draw in
   98.5 % of runs; draws without a front record before the first hit are 0.5 % of all draws, and
   after it 1.0 %. Front wake-up latency does not cost draws, so a spinning job wait would gain
-  nothing; the start draws themselves need a front started before the run, which the cross-batch
-  exclusion above already priced.
+  nothing. The start draws themselves are not cheap: see the next section.
 - Texture-stage reuse across command buffers. Of the binds whose inputs were stored under another
   command buffer (21 % of binds), 0.006 % had the frame, materialization removals, guest bytes and
   object graph unchanged; materialization removals moved in 74 % and the frame in 26 %. Reuse across
   buffers would need removals tracked per entry instead of one global counter; even then the frame
   limit leaves at most about 1 ms per frame. Not built.
+
+### Cost of a batch boundary (2026-11-17, temporary counters, native, 60 fps limit)
+
+A run is one guest command batch, and each batch records into a new command buffer. Timed on the
+command-processor thread (stage timers read before and after each draw; prepared draws sampled one
+in 64), in microseconds per draw:
+
+| Stage | Prepared | Not prepared, mid-run | Not prepared, first in a new buffer |
+| --- | --- | --- | --- |
+| State setup | 0.99 | 22.5 | 32.0 |
+| Resource binding (textures) | 5.6 (1.7) | 9.6 (3.7) | 20.6 (11.4) |
+| Pipeline setup | 0.92 | 3.0 | 4.1 |
+| Command emission | 0.22 | 0.48 | 6.1 |
+| Materialization | 0.52 | 0.59 | 2.4 |
+
+- The first draw of a run took 65 us against 8.4 us for an ordinary draw (whole `DrawIndex`,
+  CPU time equal to wall time, no submit inside it). At about 158 runs per frame that is about
+  9 ms of a 52 ms frame, before the batch's flush and submit (about 12 us per submit).
+- About 28 us of the extra is the missing front record (shader input analysis on the processor);
+  about 29 us follows the new command buffer (texture binding, render-pass and state emission,
+  materialization).
+- Register state at the start of each top-level run equalled the state at the end of the previous
+  one in all 896,147 boundaries compared (context, user config and shader registers), so a front
+  that continued into the next batch would replay from the right state.
+- Draws without a front record in mid-run are 1.6 % of draws, and cost about 28 us more than a
+  prepared draw.
+
+Bound: removing the whole boundary cost gives about 38 ms per frame (about 26 fps); with the
+66 % of batches already queued at a flush, about 23 fps. Not built yet.
 
