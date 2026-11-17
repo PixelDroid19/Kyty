@@ -227,7 +227,7 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 - **Pixel input analysis profile (gameplay route, 2026-11-17).** The tables of the register-keyed
   shadow above were per thread; a table shared with the front could at most add the front's 24 %
   repeat share, so that exclusion holds. Inline, the analysis costs the processor thread about
-  93 ms/s (about 1.6 us per draw). Its samples split into the dynamic scalar collector (17 %,
+  93 ms/s (about 1.6 us per draw). Its samples over all threads (mostly the front) split into the dynamic scalar collector (17 %,
   reads the snapshot words, so content-dependent), the sampler association (16 %), the
   redefined-buffer scan (12 %) and the descriptor-load `any_of` (19 %); the last three read only
   the code and the binding set. `ShaderAnalyzeImageCopyReads` drew no samples: its layout memo
@@ -254,8 +254,9 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   batches, and almost exactly those batches had returned before decode; the other 34 % have a
   submitter blocked on this batch's decode signal, so they cannot merge. The end-of-batch flush
   costs the processor thread 5.9 % of its samples (about 52 ms/s on the gameplay route), so a merge
-  could save at most about 34 ms/s, below the gate. The batch-start state setup follows the batch,
-  not the command buffer, so a merge does not remove it. Not measured: the guest-thread
+  could save at most about 34 ms/s from the submit alone. Unverified: whether the batch-start state
+  setup (about 28 us on the first draw of a batch) follows the batch or the command buffer; if it
+  follows the buffer, a merge would also save part of it and could pass the gate. Not measured: the guest-thread
   `WaitReleaseTicket` rate, which a merge would turn into mid-batch submits from guest threads.
 - **Check of `0469499d3` on this title:** heavy-scene run, `last-error` empty, events only
   informational, one capture scored healthy (it landed on the title menu, not the scene).
@@ -267,3 +268,4 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   about 2.1 us per draw. Single runs, not interleaved arms. Remaining texture-stage items on that
   profile: `GpuMemory::CreateObject` 12 % of the thread (statistics about 2.3 %), the VideoOut
   lookup for every sampled texture that is neither a render target nor a depth target 1.6 %.
+  Astro Bot dunes and the Minecraft world render as before on `01edd8484`.
