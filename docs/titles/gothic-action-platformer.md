@@ -147,9 +147,17 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   state setup +24 us, resource binding +10 us (texture descriptors +6 us), command emission +6 us.
   The state-setup part is the draw front, not the submit: the front starts at the first draw of a
   run and stops at every ordering packet, so the first draw of every batch takes the inline shader
-  input analysis (`ShaderGetInputInfoVS`/`PS`, about 28 us of state setup, about 4,500 per 2 s).
-  Other front misses add about 3,000 per 2 s at about 25 us, against about 1 us for a front hit:
-  the miss path totals about 106 ms/s, the largest single item left in state setup.
+  input analysis (about 28 us of state setup, about 4,500 per 2 s; a front start inside a batch
+  costs about 16 us, and the 12 us difference is unattributed, possibly the fresh command buffer).
+  Other front misses add about 3,000 per 2 s at about 25 us (binary with timers on every draw
+  metric; about 4,800 per 2 s with counters only), against about 1 us for a front hit: the miss
+  path totals about 106 ms/s, the largest single item left in state setup.
+  Every live-front miss is a draw the front has not prepared yet (no epoch, freshness or instance
+  misses), and almost all of them fall at the third or later draw after a front start, not at the
+  start (4,200-4,650 of about 4,800 per 2 s; the front was asleep at 99.6 % of starts). So the miss
+  is not wake latency: the front analyses a draw in about 25 us while the processor completes a
+  hit draw in about 14 us, and the front falls behind within a run. Excluded: polling the front
+  awake. Left open: a cheaper analysis, which helps both threads.
   A command-processor thread profile of the same scene (clean build, 6 s, about 3,200 samples)
   puts the inline pixel-shader input analysis at 11 % of samples and the vertex one at 2.3 %.
   Most of the pixel part is `ShaderParseUsage2` (8.8 %): dynamic scalar resources, sampled texture
