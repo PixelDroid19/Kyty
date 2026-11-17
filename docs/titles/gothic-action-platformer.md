@@ -605,6 +605,9 @@ frame, so its per-window totals are not compared). A/B against the parent build,
 one run each: 18.0 -> 18.7 fps (3,400 draws per frame in both), draw processor 13.09 -> 12.32 us
 per draw; one pair on a noisy host, so the gain is indicative. Astro dunes (three captures) and the
 Minecraft world render correctly; 414 packet and front unit tests and the four CTest gate tests pass.
+Repeated on a clean build of the branch head after the boundary records: Astro reached the dunes
+(different shot, 620 draws per frame, so fps not compared) with the same storage-frontier event as
+every earlier run of the route, and the Minecraft world held 48.5 fps (60 fps limit).
 
 Texture-stage reuse misses in the same window (fingerprint without the command buffer): 21 % of
 binds had the same inputs stored under another command buffer (an upper bound: the frame,
