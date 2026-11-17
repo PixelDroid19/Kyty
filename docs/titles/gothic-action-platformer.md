@@ -246,3 +246,16 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   `wait_reg_mem_current_producer` 1,662; queued-producer, producer-mismatch, not-found and
   suspended waits 0, against about 3,000 flushes. The guest-thread `WaitRetired` rate is not
   measured, so the batch merge is neither opened nor closed.
+- **Excluded: merging consecutive guest batches into one submission.** Per-call-site census of
+  `SubmitCurrentLocked` (heavy scene, temporary tag, 2026-11-17): 95 % of the submissions come from
+  the flush at the end of each guest graphics batch, about 2,700 batches per second in the heavy
+  scene; register waits, flips and the idle-submit path add under 5 %. Every batch carries a
+  completion callback and a decode signal. The next batch was already queued at the end of 66 % of
+  batches, and almost exactly those batches had returned before decode; the other 34 % have a
+  submitter blocked on this batch's decode signal, so they cannot merge. The end-of-batch flush
+  costs the processor thread 5.9 % of its samples (about 52 ms/s on the gameplay route), so a merge
+  could save at most about 34 ms/s, below the gate. The batch-start state setup follows the batch,
+  not the command buffer, so a merge does not remove it. Not measured: the guest-thread
+  `WaitReleaseTicket` rate, which a merge would turn into mid-batch submits from guest threads.
+- **Check of `0469499d3` on this title:** heavy-scene run, `last-error` empty, events only
+  informational, one capture scored healthy (it landed on the title menu, not the scene).
