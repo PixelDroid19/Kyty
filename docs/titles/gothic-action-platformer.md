@@ -109,8 +109,9 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   per-draw offsets), and indexing and trimming them cost more than creating them. A set is now
   cached only when its hash misses a second time; the first one is recycled after its submission.
   Same-binary A/B with the filter switched off, two clean pairs, Silent route: finalization 3.07 /
-  2.90 -> 1.96 / 1.83 us per draw and binding 9.02 / 8.79 -> 8.01 / 7.81 us, but state setup rose
-  3.70 / 3.97 -> 4.53 / 4.57 us and the total per draw was 15.90 / 17.73 -> 15.88 / 15.56 us (fps
+  2.90 -> 1.96 / 1.83 us per draw and binding 9.02 / 8.79 -> 8.01 / 7.81 us, state setup read
+  3.70 / 3.97 -> 4.53 / 4.57 us in a binary with counters in a scan both threads run (later runs read
+  2.98-3.87 us, so the state-setup arms are not comparable) and the total per draw was 15.90 / 17.73 -> 15.88 / 15.56 us (fps
   15.00 / 13.58 -> 14.83 / 15.08): a net per-draw gain is not established. Uncached sets are deferred
   inside `GetDescriptor`; their recycling runs from a submission completion callback, which may land
   in another stage. Sandbox world: hits stay at 98.9 % of requests. Robot platformer: hit ratio
@@ -125,8 +126,10 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   99.9 % of changed inputs change the output); robot platformer 0 of about 7,000, sandbox world has
   no eligible binds. But the binds with no side path (about 90,000 per 2 s) take 100 ms of the
   470 ms texture stage: about 1.1 us each, already `CachedReuse` hits with no other command-buffer
-  work. Skipping them saves at most about 50 ms/s. The cost is in depth-texture binds
-  (`depth-guest` about 67,000 and `depth-exact` about 41,000 per 2 s, about 7 us per bind).
+  work. Skipping whole stages without a depth texture saves at most about 50 ms/s (excluded as
+  scoped). Timed per texture, the stage cost is in ordinary sampled textures: `guest-upload` about
+  626,000 per 2 s taking about 290 ms (about six per draw, 0.46 us each), against `depth-guest`
+  67,000 (about 60 ms) and `depth-exact` 41,000 (about 10 ms).
 - **Depth refusal text built only on refusal.** The depth path formatted a refusal string on every
   depth bind (about 0.9 % of the command-processor thread); it is now formatted only when the
   depth materialization is refused, the one case that prints it.
