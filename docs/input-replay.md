@@ -37,6 +37,10 @@ replay follows wall-clock time, so loading-time differences
 between the recorded and the replayed run shift the guest state the inputs
 meet; record with the shader caches the replay will use.
 
+Save data persists between runs (`<build>/user/savedata`, or `KYTY_SAVEDATA_DIR`), and a title that
+finds its earlier progress can take another path through its menus. Give each scripted run the save state
+the route was recorded with, usually a fresh empty `KYTY_SAVEDATA_DIR` per run.
+
 The route is applied after the host/controller state and is OR-ed with the
 diagnostic agent overlay. Route buttons are OR-ed with held ones; on a stick
 axis the route holds, a live stick or key moved off rest wins, so the user can
