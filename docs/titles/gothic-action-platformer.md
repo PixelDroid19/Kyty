@@ -356,3 +356,18 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 - Pipeline index (`PipelineCache::Find`): the remaining cost is the full `ShaderId` compare of the
   match (`memcmp` about 2.3 %) and the multimap walk (about 1.1 %); the Minecraft record already
   measured about one entry per walk, so a finer index key was not built.
+
+### Excluded: skipping the memory-object request on a repeated texture bind (2026-11-17, code reading)
+
+- The texture-stage reuse record left open the side effects of skipping `CreateObject`. A shadow run
+  found no repeat where the locked path took anything but the cached reuse, but that reuse is not a
+  no-op for sampled textures: they arrive with `read_only` false, so every reuse adds one to
+  `write_uses` and sets `write_time`.
+- Both fields order later work. `write_time` picks the newest texel-bit source and rejects seeds
+  written after it when a new view is created (`GpuMemoryCreate.cpp:1030`, `:1049`), orders the
+  render-alias sources (`:2272`) and is compared with device writes on write-back
+  (`GpuMemoryWriteback.cpp:363`); `write_uses` is part of the device-address overlay identity
+  (`GuestDeviceAddress.cpp:1945`, `:2089`). Skipping the request would change those decisions, so
+  the reuse stays excluded while sampled textures count as writable uses.
+- Whether a sampled-only bind should count as a write at all is a question about the memory-object
+  model, not about this lever; it was not examined here.
