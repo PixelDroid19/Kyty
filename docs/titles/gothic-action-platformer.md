@@ -371,3 +371,14 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   the reuse stays excluded while sampled textures count as writable uses.
 - Whether a sampled-only bind should count as a write at all is a question about the memory-object
   model, not about this lever; it was not examined here.
+- Follow-up (2026-11-17): of the `write_time` readers above, only two can see a sampled `Texture`
+  bump: the seed rejection in `create_texel_bits_seed` (`GpuMemoryCreate.cpp:1049`) and the
+  superseded-parent test of storage-array growth (`:1836`). `create_raw_source_write_time` ignores
+  `write_time` for textures, write-back never runs on them (no write-back function), and the
+  write-back alias check reads the written-back object's own time. A temporary shadow `write_time`
+  that sampled-texture uses did not bump computed both decisions both ways: 0 calls at either site
+  in gameplay of this title, `PPSA21567 - Astro Bot` dunes, the `PPSA17221 - Minecraft` world and
+  90 s of `PPSA15552 - Dead Cells` menus (no input route); a call forced by hand printed its
+  difference, so the counter engaged. The bump therefore decided nothing in these runs; whether a
+  sampled-only bind should stop counting as a write remains a model change that needs the full
+  regression set.
