@@ -155,9 +155,17 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   Every live-front miss is a draw the front has not prepared yet (no epoch, freshness or instance
   misses), and almost all of them fall at the third or later draw after a front start, not at the
   start (4,200-4,650 of about 4,800 per 2 s; the front was asleep at 99.6 % of starts). So the miss
-  is not wake latency: the front analyses a draw in about 25 us while the processor completes a
-  hit draw in about 14 us, and the front falls behind within a run. Excluded: polling the front
-  awake. Left open: a cheaper analysis, which helps both threads.
+  is not wake latency. The front thread uses about 0.65 s of CPU per second, about 12 us per draw
+  all included, and the pixel input analysis costs about 11 us per call there against about 22 us
+  per call inline on the processor thread (cause not separated: colder caches on the processor
+  thread, or heavier draws at the miss points). The front's lead at a `Take` is usually 3 or more
+  draws and 0 at about 11 % of takes. Excluded: polling the front awake.
+- **Waiting for the front instead of analysing inline (excluded).** A processor that reached the
+  draw the front was analysing waited for it (interleaved A/B, 3 runs each): state setup fell from
+  3.2-3.8 to 2.4-2.5 us per draw, but the wait sits outside that timer. The processor locked step
+  with the front: about 22,000 waits per 2 s at about 9.3 us, about 100 ms/s, against about
+  53 ms/s of inline analysis removed; the per-draw processor time did not move beyond noise
+  (14.8 against 15.1 us). Reverted.
   A command-processor thread profile of the same scene (clean build, 6 s, about 3,200 samples)
   puts the inline pixel-shader input analysis at 11 % of samples and the vertex one at 2.3 %.
   Most of the pixel part is `ShaderParseUsage2` (8.8 %): dynamic scalar resources, sampled texture
