@@ -269,3 +269,14 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   profile: `GpuMemory::CreateObject` 12 % of the thread (statistics about 2.3 %), the VideoOut
   lookup for every sampled texture that is neither a render target nor a depth target 1.6 %.
   Astro Bot dunes and the Minecraft world render as before on `01edd8484`.
+- **Cost of one extra submission, inconclusive (2026-11-17).** A temporary override that submitted
+  every 10 operations mid-batch (heavy scene) raised submissions from about 180 to about 458 per
+  frame. Against baselines on the same binary the processor run time rose 3.35 ms per frame
+  (12 us per added submission) in one pair and 11.77 ms (43 us) in a quiet pair; a pair under
+  foreign load read 41 us. Quiet baselines alone spread from 48.9 to 55.9 ms per frame, as wide as
+  the effect, so the batch merge stays excluded until a within-run toggle measures the slope. The
+  draw stage timers did not move; the added time is in the submission itself. On the gameplay
+  profile the batch-end flush is 225 of the processor thread's 3,185 samples: `CommandBuffer::Begin`
+  112 (the per-buffer transient pool reset 55, which re-indexes every committed buffer in an
+  ordered map and clears the content hash; `vkResetQueryPool` 19; driver begin 20), fence
+  retirement 33, `vkQueueSubmit` path 23, publication 40. Each of these is 0.6-1.7 % of the thread.
