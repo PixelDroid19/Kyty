@@ -280,3 +280,15 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   112 (the per-buffer transient pool reset 55, which re-indexes every committed buffer in an
   ordered map and clears the content hash; `vkResetQueryPool` 19; driver begin 20), fence
   retirement 33, `vkQueueSubmit` path 23, publication 40. Each of these is 0.6-1.7 % of the thread.
+- **Second draw front (2026-11-17).** Two front threads now replay the same packets from each start,
+  each with its own shadow processor and record ring; the first to reach a draw claims it on a shared
+  packet cursor and analyses it, and the processor takes from whichever front holds it. Measured on
+  the gameplay route with a temporary within-run toggle (second front off every other 3 s window),
+  quiet host: draws taken without prepared inputs 7.0 % -> 5.6 % (the rest are the first draw of each
+  start), state setup 2.90 -> 2.65 us per draw, draw processor 14.23 -> 13.91 us per draw (10 and 12
+  one-second rows). A run under foreign compile load read 7.5 % -> 5.5 % and 2.91 -> 2.63. About 2 %
+  of the processor; no fps claim. A temporary check recomputed every taken draw's inputs inline and
+  compared both shader ids (they serialize every input): 0 mismatches over 1.23 million draws on
+  `PPSA21567 - Astro Bot` (dunes) and 6.0 million on `PPSA17221 - Minecraft` (world), and none
+  reported on this title's gameplay route; captures of both match earlier runs. The misses left are
+  the start draws, about 3,400 per second at about 28 us each.

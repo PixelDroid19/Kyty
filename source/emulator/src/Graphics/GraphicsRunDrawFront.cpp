@@ -63,9 +63,10 @@ DrawFrontPacket DrawFrontClassifyPacket(const uint32_t* packet, uint32_t availab
 	return register_tables || debug_marker || shader_register ? DrawFrontPacket::Registers : DrawFrontPacket::Other;
 }
 
-DrawFront::DrawFront(CommandProcessor* shadow): m_shadow(shadow), m_records(new Record[kRecords])
+DrawFront::DrawFront(CommandProcessor* shadow, std::atomic<const uint32_t*>* claimed)
+    : m_shadow(shadow), m_claimed(claimed), m_records(new Record[kRecords])
 {
-	EXIT_IF(shadow == nullptr);
+	EXIT_IF(shadow == nullptr || claimed == nullptr);
 	Core::Thread thread(ThreadRun, this);
 	thread.Detach();
 }
@@ -192,6 +193,15 @@ void DrawFront::Prepare(const HW::Context& ctx, const HW::UserConfig& ucfg, HW::
 		m_replay_parked = true;
 		return;
 	}
+	// The draw packets of a run only grow, so a claim past this draw means another front took it.
+	const uint32_t* claimed = m_claimed->load(std::memory_order_relaxed);
+	do
+	{
+		if (claimed >= m_replay_packet)
+		{
+			return;
+		}
+	} while (!m_claimed->compare_exchange_weak(claimed, m_replay_packet, std::memory_order_relaxed));
 	Record& record = m_records[prepared % kRecords];
 	// Fresh inputs, like the ones the recording analyses into.
 	record.inputs.~PreparedDrawInputs();

@@ -39,11 +39,12 @@ enum class DrawFrontPacket : uint8_t
 // indexed draw it meets, up to the first packet that is neither. The shadow starts from the registers
 // of the processor and runs the same handlers over the same packets, so it holds the processor's
 // registers at each draw. The processor takes the inputs of a draw only when no host write of guest
-// memory was announced since their analysis began.
+// memory was announced since their analysis began. Fronts that share `claimed` replay the same packets,
+// and each draw is analysed by the first of them to reach it.
 class DrawFront
 {
 public:
-	explicit DrawFront(CommandProcessor* shadow);
+	DrawFront(CommandProcessor* shadow, std::atomic<const uint32_t*>* claimed);
 	~DrawFront() = delete;
 
 	KYTY_CLASS_NO_COPY(DrawFront);
@@ -82,8 +83,9 @@ private:
 	void Sleep(const Condition& condition);
 	void Wake();
 
-	CommandProcessor* const   m_shadow;
-	std::unique_ptr<Record[]> m_records;
+	CommandProcessor* const             m_shadow;
+	std::atomic<const uint32_t*>* const m_claimed;
+	std::unique_ptr<Record[]>           m_records;
 
 	// Processor thread.
 	bool     m_live  = false;

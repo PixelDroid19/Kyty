@@ -446,6 +446,8 @@ private:
 	void                 ResolveNumInstancesLatch();
 	// The inputs prepared ahead for the indexed draw this processor is at, or null.
 	PreparedDrawInputs*  TakePreparedDrawInputs();
+	void                 StopDrawFronts();
+	void                 ReleaseDrawFronts();
 	static constexpr int VK_BUFFERS_NUM = static_cast<int>(CommandProcessorSubmissionSlots::SlotCount);
 	void                 CompleteSubmittedThroughLocked(SubmissionId target, SubmissionId* latest_completed);
 	void                 TryCompleteSubmittedLocked(SubmissionId* latest_completed);
@@ -525,7 +527,10 @@ private:
 	const uint32_t* m_active_run_end       = nullptr;
 	// The header of the packet this processor is at.
 	const uint32_t* m_packet               = nullptr;
-	// Prepares the inputs of the indexed draws that follow; its shadow processor only replays registers.
+	// Prepare the inputs of the indexed draws that follow; their shadow processors only replay registers.
+	std::array<DrawFront*, 2>    m_draw_fronts {};
+	std::atomic<const uint32_t*> m_draw_front_claimed {nullptr};
+	// A shadow processor's own front.
 	DrawFront*                      m_draw_front        = nullptr;
 	bool                            m_draw_front_shadow = false;
 	GpuSubmissionCoordinator* const m_submission_coordinator;

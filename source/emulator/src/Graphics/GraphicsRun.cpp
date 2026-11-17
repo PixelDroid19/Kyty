@@ -2488,9 +2488,9 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 		m_packet        = cmd;
 		ordering_packet = DrawFrontClassifyPacket(cmd, dw) == DrawFrontPacket::Other;
 		// The replay reads packets, registers and guest memory only between packets that change nothing else.
-		if (ordering_packet && m_draw_front != nullptr && m_draw_front->Live())
+		if (ordering_packet && m_draw_fronts[0] != nullptr && m_draw_fronts[0]->Live())
 		{
-			m_draw_front->Stop();
+			StopDrawFronts();
 		}
 
 		auto cmd_id = *cmd++;
@@ -2653,10 +2653,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 		dw -= s;
 	}
 
-	if (m_draw_front != nullptr)
-	{
-		m_draw_front->Stop();
-	}
+	StopDrawFronts();
 	m_active_run_begin = previous_run_begin;
 	m_active_run_end   = previous_run_end;
 }
@@ -2791,7 +2788,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
 		                        index_addr, draw_modifier, type, instance_count, 0, 0, pending, std::exchange(prepared, nullptr));
 	});
-	m_draw_front->Release();
+	ReleaseDrawFronts();
 	SubmitRecordedWorkIfGpuIdle();
 }
 
@@ -2837,7 +2834,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
 		                        index_addr, flags, 1, instance_count, 0, 0, pending, std::exchange(prepared, nullptr));
 	});
-	m_draw_front->Release();
+	ReleaseDrawFronts();
 	SubmitRecordedWorkIfGpuIdle();
 }
 
@@ -2877,29 +2874,66 @@ bool CommandProcessor::DrawIndexIndirectOnDevice(uint64_t args_address)
 
 PreparedDrawInputs* CommandProcessor::TakePreparedDrawInputs()
 {
-	if (m_draw_front == nullptr)
+	if (m_draw_fronts[0] == nullptr)
 	{
-		auto* shadow                = new CommandProcessor(m_submission_coordinator, m_queue);
-		m_draw_front                = new DrawFront(shadow);
-		shadow->m_draw_front        = m_draw_front;
-		shadow->m_draw_front_shadow = true;
+		for (auto& front: m_draw_fronts)
+		{
+			auto* shadow                = new CommandProcessor(m_submission_coordinator, m_queue);
+			front                       = new DrawFront(shadow, &m_draw_front_claimed);
+			shadow->m_draw_front        = front;
+			shadow->m_draw_front_shadow = true;
+		}
 	}
-	if (m_draw_front->Live())
+	if (m_draw_fronts[0]->Live())
 	{
-		return m_draw_front->Take(m_packet, m_num_instances);
+		// Every front learns where the processor is; at most one prepared this draw.
+		PreparedDrawInputs* prepared = nullptr;
+		for (auto* front: m_draw_fronts)
+		{
+			if (auto* inputs = front->Take(m_packet, m_num_instances); inputs != nullptr)
+			{
+				// Fronts claim draws exclusively.
+				EXIT_IF(prepared != nullptr);
+				prepared = inputs;
+			}
+		}
+		return prepared;
 	}
 	// The replay is idle. It continues from this draw with the registers this processor holds.
-	auto* shadow                  = m_draw_front->Shadow();
-	shadow->m_ctx                 = m_ctx;
-	shadow->m_ucfg                = m_ucfg;
-	shadow->m_sh_ctx              = m_sh_ctx;
-	shadow->m_user_data_marker    = m_user_data_marker;
-	shadow->m_index_type_and_size = m_index_type_and_size;
-	shadow->m_index_buffer_size   = m_index_buffer_size;
-	shadow->m_index_base_addr     = m_index_base_addr;
-	shadow->m_num_instances       = m_num_instances;
-	m_draw_front->Start(m_packet, m_active_run_end);
+	m_draw_front_claimed.store(m_packet);
+	for (auto* front: m_draw_fronts)
+	{
+		auto* shadow                  = front->Shadow();
+		shadow->m_ctx                 = m_ctx;
+		shadow->m_ucfg                = m_ucfg;
+		shadow->m_sh_ctx              = m_sh_ctx;
+		shadow->m_user_data_marker    = m_user_data_marker;
+		shadow->m_index_type_and_size = m_index_type_and_size;
+		shadow->m_index_buffer_size   = m_index_buffer_size;
+		shadow->m_index_base_addr     = m_index_base_addr;
+		shadow->m_num_instances       = m_num_instances;
+		front->Start(m_packet, m_active_run_end);
+	}
 	return nullptr;
+}
+
+void CommandProcessor::StopDrawFronts()
+{
+	for (auto* front: m_draw_fronts)
+	{
+		if (front != nullptr)
+		{
+			front->Stop();
+		}
+	}
+}
+
+void CommandProcessor::ReleaseDrawFronts()
+{
+	for (auto* front: m_draw_fronts)
+	{
+		front->Release();
+	}
 }
 
 // A direct draw after a device-side DRAW_INDEX_INDIRECT draws as many instances as that record
