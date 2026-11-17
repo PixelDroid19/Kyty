@@ -222,6 +222,8 @@ the command processor"): a second thread replays register packets on a shadow co
 prepares the shader input information of direct indexed draws, the per-draw class priced at 7.5 ms per
 frame above. Measured in the world with the paired in-run A/B: 10.54 -> 8.31 us per draw. The submit
 contract is unchanged; the replay restarts every 4.5-15 draws, at the next packet it does not admit.
+Since 2026-11-17 two such threads replay each run and the first to reach a draw prepares it
+(`docs/titles/gothic-action-platformer.md`, "Second draw front").
 
 ## Recomputed on `6a6a5818a` (2026-11-14)
 
