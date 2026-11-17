@@ -312,5 +312,7 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   access gate and the video output lock, 54 of 3,185 processor-thread samples (1.7 %). The video
   output now keeps every address a display buffer was registered at (64 entries, then every lookup
   searches) and returns at once for any other address. Gameplay profile (under foreign compile load):
-  4 of 3,104 samples. Captures of this title's level, `PPSA21567 - Astro Bot` dunes and
-  `PPSA17221 - Minecraft` render as before; no fps claim.
+  4 of 3,104 samples. On `d64a0b11b` the captures show this title's level and the
+  `PPSA21567 - Astro Bot` dunes; `PPSA17221 - Minecraft` missed the world once (the menu route
+  ended on another menu screen, drawn correctly) and entered it at 86.7 s on the rerun, ending on
+  the save's usual death screen. No fps claim.
