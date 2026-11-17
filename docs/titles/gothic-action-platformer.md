@@ -303,3 +303,7 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   previous run's end would lead the processor by about 7 us, less than one analysis on the front
   (about 11 us). The other misses (about 2 % of takes) are draws the front did not prepare in time or
   could not prepare. The capture at 172 s shows the level, and `last-error` is empty.
+- **Excluded: starting the front across the batch boundary (2026-11-17).** It can apply only where the
+  next batch is already queued at a run's end (66 % in the heavy scene) and opens with register
+  packets only (64 %), about 700 starts per second, about 15 ms per second at best; and a 7 us lead
+  against an 11 us analysis on the front still misses the first draw.
