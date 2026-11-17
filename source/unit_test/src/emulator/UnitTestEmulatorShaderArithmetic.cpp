@@ -1831,6 +1831,10 @@ void IsNan(uint32_t actual, const char* label)
 		Equal(Evaluate(minimum, kNegZero, 0u), kNegZero, "min of signed zeros is -0 (reversed)");
 		Equal(Evaluate(maximum, kNegZero, 0u), 0u, "max of signed zeros is +0");
 		Equal(Evaluate(maximum, 0u, kNegZero), 0u, "max of signed zeros is +0 (reversed)");
+		Equal(Evaluate(minimum, 0x00000001u, 0x00000002u), 0x00000001u, "min of subnormals selects an operand");
+		Equal(Evaluate(maximum, 0x00000001u, 0x00000002u), 0x00000002u, "max of subnormals selects an operand");
+		Equal(Evaluate(minimum, 0x80000001u, 0u), 0x80000001u, "min of a negative subnormal and +0");
+		Equal(Evaluate(maximum, kNegZero, 0x00000001u), 0x00000001u, "max of -0 and a positive subnormal");
 		Equal(Evaluate(minimum, kOne, kTwo), kOne, "ordered min");
 		Equal(Evaluate(maximum, kOne, kTwo), kTwo, "ordered max");
 
@@ -1843,6 +1847,7 @@ void IsNan(uint32_t actual, const char* label)
 		Equal(Evaluate(med3, kThree, kOne, kTwo), kTwo, "med3 maximum first");
 		Equal(Evaluate(med3, kOne, kThree, kTwo), kTwo, "med3 maximum second");
 		Equal(Evaluate(med3, 0u, 0u, kNegZero), 0u, "med3 of zeros");
+		Equal(Evaluate(med3, 0x00000001u, 0x00000003u, 0x00000002u), 0x00000002u, "med3 of subnormals");
 		Equal(Evaluate(min3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : kNegZero, "min3 with a signaling NaN");
 		Equal(Evaluate(max3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : 0u, "max3 with a signaling NaN");
 		Equal(Evaluate(med3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : kNegZero, "med3 with a NaN takes min3");

@@ -64,7 +64,9 @@ static bool Fp64Fp16OutputModifierActive(const Spirv* spirv, const ShaderInstruc
 // second operand, otherwise a NaN second operand returns the first (so two NaNs return
 // the second, as ShaderSelectRdna2MinMaxResultBits records); in IEEE mode a signaling NaN
 // is returned quieted, the first operand first; the minimum of signed zeros is -0 and the
-// maximum +0. Quiet NaNs are never modified. The result id is %<tag>.
+// maximum +0. Quiet NaNs are never modified. The zero rule is decided on bits: f32 denormal
+// handling is host-defined, and a flushed compare must not merge two distinct subnormals.
+// The result id is %<tag>.
 static String8 FloatMinMaxPair(const Spirv* spirv, const String8& tag, const String8& a, const String8& b, bool maximum)
 {
 	static const char* text = R"(
@@ -72,7 +74,9 @@ static String8 FloatMinMaxPair(const Spirv* spirv, const String8& tag, const Str
         %<t>_bb = OpBitcast %uint %<b>
         %<t>_an = OpIsNan %bool %<a>
         %<t>_num = OpExtInst %float %GLSL_std_450 <op> %<a> %<b>
-        %<t>_equal = OpFOrdEqual %bool %<a> %<b>
+        %<t>_or = OpBitwiseOr %uint %<t>_ab %<t>_bb
+        %<t>_mag = OpBitwiseAnd %uint %<t>_or %uint_0x7fffffff
+        %<t>_equal = OpIEqual %bool %<t>_mag %uint_0
         %<t>_merged = <zero_op> %uint %<t>_ab %<t>_bb
         %<t>_tied = OpBitcast %float %<t>_merged
         %<t>_ordered = OpSelect %float %<t>_equal %<t>_tied %<t>_num
