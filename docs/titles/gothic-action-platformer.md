@@ -576,6 +576,39 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   load, the title's own command-buffer assert recorded above when the route runs late; the rerun
   reached the dunes and exited cleanly.
 - `GpuMemoryCreateObject` statistics no longer count the cached reuses a bind reuse repeats.
+- `kyty_agent playable-regression` (PPSA06084 - Superliminal, strict, 60 fps limit) on the reuse
+  commit: 12 of 15 gates against 10 of 15 for the morning reference; the two extra passes are the
+  input gates (`input_delivered`, `input_sequence_complete`), which vary between runs. The gate
+  still exits 3 on the same three gates that fail in the reference (`visual_compare`,
+  `scene_checkpoint`, `action_response`).
 - Open: one Castlevania run with compute binds also reused stayed on a one-draw screen for its
   whole 185 s; unexplained, so compute binds stay on the full path. Pixel binds were not reused
   at first because every pixel bind passes a trace context; only an engaged trace now bypasses.
+
+### Draw fronts woken only from a full ring (2026-11-17, native, 60 fps limit)
+
+The command-processor thread was on the CPU 95 % of the gameplay window, 9 % of it in the kernel
+(per-thread `utime`/`stime`/`schedstat`, 23 s window); the lock waits that `sync-waits` would show
+are small (about 1 s blocked in 23 s). A temporary timer charged
+that kernel time:
+
+- `ReleaseDrawFronts`, after every draw, took 0.73 us per call and issued 1.2 wakes per call; each
+  front thread switched out about 28,000 times a second. `DrawFront::Release` woke a front whenever
+  it slept with free ring space, including a front sleeping for its next job, which has nothing to
+  read until `Start`; that front woke, found no job and slept again.
+- `vkQueueSubmit` took about 12 us per submit, about 2 ms per frame.
+
+Fix: the replay marks the full-ring wait (`m_parked`), and `Release` wakes only a parked front;
+`Start` still wakes a front waiting for a job. Same diagnostic, fix applied: `ReleaseDrawFronts`
+0.034 us per call and 0.095 wakes per call; front context switches 640 k -> 126 k per 23 s; kernel
+time of the command processor 2.16 -> 1.62 s per 23 s. A/B against the parent build, same route,
+one run each: 18.0 -> 18.7 fps (3,400 draws per frame in both), draw processor 13.09 -> 12.32 us
+per draw; one pair on a noisy host, so the gain is indicative. Astro dunes (three captures) and the
+Minecraft world render correctly; 414 packet and front unit tests and the three CTest gates pass.
+
+Texture-stage reuse misses in the same window (fingerprint without the command buffer): 21 % of
+binds had the same inputs stored under another command buffer, 0.15 % under another submission of
+the same buffer, 1.5 % never seen; 3.7 % matched but a recorded object had changed. Command-buffer
+turnover is the main source of misses; reusing across buffers needs the use records and image
+barriers proven for a new buffer, not built.
+
