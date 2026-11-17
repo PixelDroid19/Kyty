@@ -501,3 +501,32 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   device idles. Busy time scaled to the full clock (busy x actual / maximum, linear scaling
   assumed) is 17-23 ms per frame below 3,000 draws and 26-28 ms per frame at 3,400-3,500 draws,
   a GPU limit of about 36-38 fps on the gameplay scene if that scaling holds.
+
+### Texture-stage repeat shadow restricted to plain binds (2026-11-17, temporary diagnostic, native)
+
+- Each `PrepareTextures` call was keyed by its full texture and sampler resources, the seed-skip
+  mask, the stencil-attached depth image, the pass colour contents, the stage and the scaled-sampling
+  refusal; valid while the command buffer, submit, object-graph, guest-bytes and removal counters
+  were unchanged. A call was "plain" when it reached none of the thirteen sites that record on the
+  command buffer or stamp an image (stencil and depth plane seeds, depth slice arrays, scaled
+  demotion, CPU-write merges, inline D16 detile, block copies, storage prefix-layer copies, DCC
+  clear consumption, storage write stamps) and every `GpuMemoryCreateObject` inside was a cached
+  reuse. Only plain calls were stored; outputs compared were all image and view arrays, the SGPR
+  words written and the seed-skip mask, with one forced difference of each kind (all three seen).
+
+| Workload | Calls | Plain | Would reuse | Of which not plain | Output differences |
+|---|---|---|---|---|---|
+| PPSA35399 - Castlevania: Belmont's Curse, gameplay | 12.3 M | 86 % | 72 % | 9 (before the buffer and submit check) | 0 |
+| PPSA21567 - Astro Bot, dunes | 1.31 M | 38 % | 29 % | 0 | 0 |
+| PPSA17221 - Minecraft, world | 4.98 M | 75 % | 71 % | 0 | 0 |
+
+- The side-work sites fired on Astro (depth slices 118 k, CPU-write merges 678 k, prefix-layer
+  copies 116 k, DCC clears 151 k, storage stamps 130 k, non-cached creates 208 k) and Minecraft,
+  so the instrument engaged; none of them fired on a would-reuse call. Every reuse was inside one
+  submit, and the removal counter again explained nearly all stale repeats.
+- Hashing the 3,908-byte texture and 488-byte sampler resources cost about 0.9 us per call in
+  this diagnostic, so a memo must compare only the used entries.
+- Skipping `GpuMemoryCreateObject` on a reuse is not neutral: a sampled texture's cached hit bumps
+  its write time, which the texel-seed check and the superseded-parent check read, and records its
+  use for deferred deletion (a per-queue high water, so a repeat in the same submission is a
+  no-op). A reuse therefore has to repeat those cached-hit updates on the same objects.
