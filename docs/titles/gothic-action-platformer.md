@@ -613,3 +613,19 @@ the same buffer, 1.5 % never seen; 3.7 % matched but a recorded object had chang
 turnover is the main source of misses; reusing across buffers needs the use records and image
 barriers proven for a new buffer, not built.
 
+### Excluded: front misses at run starts, and texture-stage reuse across command buffers (2026-11-17)
+
+Temporary counters, same gameplay route, 16,384 runs in the window:
+
+- Draw fronts at run starts. The start draw of each run is prepared by the command processor
+  itself (4.7 % of draws, one run per batch). After it, the first front hit is the next draw in
+  98.5 % of runs; draws without a front record before the first hit are 0.5 % of all draws, and
+  after it 1.0 %. Front wake-up latency does not cost draws, so a spinning job wait would gain
+  nothing; the start draws themselves need a front started before the run, which the cross-batch
+  exclusion above already priced.
+- Texture-stage reuse across command buffers. Of the binds whose inputs were stored under another
+  command buffer (21 % of binds), 0.006 % had the frame, materialization removals, guest bytes and
+  object graph unchanged; materialization removals moved in 74 % and the frame in 26 %. Reuse across
+  buffers would need removals tracked per entry instead of one global counter; even then the frame
+  limit leaves at most about 1 ms per frame. Not built.
+
