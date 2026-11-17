@@ -162,10 +162,14 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   misses), and almost all of them fall at the third or later draw after a front start, not at the
   start (4,200-4,650 of about 4,800 per 2 s; the front was asleep at 99.6 % of starts). So the miss
   is not wake latency. The front thread uses about 0.65 s of CPU per second, about 12 us per draw
-  all included, and the pixel input analysis costs about 11 us per call there against about 22 us
-  per call inline on the processor thread (cause not separated: colder caches on the processor
-  thread, or heavier draws at the miss points). The front's lead at a `Take` is usually 3 or more
-  draws and 0 at about 11 % of takes. Excluded: polling the front awake.
+  all included. In a clean profile `ShaderParseUsage2` costs about 7 us per call on the front
+  against about 17 us inline on the processor thread (cause not separated: colder caches on the
+  processor thread, or heavier draws at the miss points). On a loaded host (about 9 fps, half the
+  usual draws) the front's lead at a `Take` was usually 3 or more draws and 0 at about 11 % of
+  takes; that histogram was not repeated on a quiet host. Excluded: polling the front awake.
+  The header comment of `GraphicsRunDrawFront.h` says the replay runs about 4 draws per processor
+  draw; in this scene it runs about 1.2 (about 12 against about 14 us per draw), so the comment
+  and the measurement disagree.
 - **Waiting for the front instead of analysing inline (excluded).** A processor that reached the
   draw the front was analysing waited for it (interleaved A/B, 3 runs each): state setup fell from
   3.2-3.8 to 2.4-2.5 us per draw, but the wait sits outside that timer. The processor locked step
@@ -184,3 +188,21 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   (serialized with draw recording, which also holds `m_mutex`), and every batch's interrupt and
   completion would move to a later submission. Not built; its
   precondition (whether a batch's waits name labels the previous batch writes) is unmeasured.
+- **Gameplay has the same profile (2026-11-17).** The route reached the first controllable level
+  (HUD and character in the captures, 160-182 s): about 3,470 draws per frame at about 14.0 us per
+  draw (binding 7.6, state setup 3.0, descriptor textures 3.7 us), 17 fps, about 3,000 submits
+  per second. The dialogue before it runs at 19-22 fps. The scene levers above apply unchanged.
+- **Per-texture guest-upload memo, priced (not built).** `GpuMemory::CreateObject` takes about
+  125 ms/s over about 511,000 calls per second in gameplay; textures are about 409,000 of them and
+  90 % end in `CachedReuse`, whose remembered-key path already skips the materialization cache.
+  The GPU-owned lookups before it are already skipped by `SampledLookupMissMemo`. A memo above
+  `CreateObject` would still have to take the registry lock for the hit's bookkeeping
+  (`RecordUse`, use counters, read-only merge), so it could remove only the key build, the
+  remembered-key scan, the statistics and the texture descriptor setup: about 50 ms/s at best,
+  under 1 us per draw, with lock-free invalidation as the risk. The create statistics cost about
+  4 % of the processor thread's samples.
+- **Excluded: the replay worker's spin hurting the processor thread.** `DeferredReplayWorker`
+  polls for 200 us before sleeping and spends about 27 % of the process's samples in that spin
+  (6-core SMT host). With the window set to 0 (interleaved, 2 runs each) the processor got slower,
+  15.72 / 15.60 against 15.27 / 15.04 us per draw (fps 14.9 / 14.8 against 15.5 / 15.8): the
+  spin saves hand-off wake-ups and does not cost the processor.
