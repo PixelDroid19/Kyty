@@ -341,8 +341,9 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 - Like-for-like gameplay runs (quiet host, `PrintfDirection = Silent`, profiler attached):
   `d64a0b11b` 17.62 fps, 13.69 us per draw (binding 7.54, pipeline setup 1.18) against the table
   and this change 18.5 fps, 12.85 us (binding 6.96, pipeline setup 1.02). Without the profiler,
-  `606a4ac78` ran 18.65 fps at 12.82 us. Single runs; earlier runs of the day at 14.2-14.4 us did
-  not set `Silent` and are not comparable.
+  `606a4ac78` ran 18.65 fps at 12.82 us. A run without the explicit setting gave the same
+  (12.81 us; the guest runner defaults to `Silent`). Single runs; earlier runs of the day at
+  14.2-14.4 us carried temporary diagnostics or ran beside other host load and are not compared.
 - The draw front builds both shader ids; on a pipeline cache hit the lookup key moved them out of
   the front record and freed them on the command-processor thread (`~ShaderId` about 1 % of it).
   A hit now moves them back into the record, so the front thread that built them frees them when it
