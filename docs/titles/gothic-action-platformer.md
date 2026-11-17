@@ -530,3 +530,45 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   its write time, which the texel-seed check and the superseded-parent check read, and records its
   use for deferred deletion (a per-queue high water, so a repeat in the same submission is a
   no-op). A reuse therefore has to repeat those cached-hit updates on the same objects.
+
+### Texture-stage reuse (2026-11-17, native, 60 fps limit)
+
+- A vertex or pixel bind whose texture and sampler resources, seed-skip mask, stencil-attached
+  depth, pass colour, scaled-sampling refusal and stage equal an earlier bind's in the same
+  command buffer and submission takes that bind's images, views and SGPR words instead of running
+  `PrepareTextures`. The earlier bind must have recorded no side work (any of the side-work sites,
+  or an image stamp comparison), and every object it resolved must have been a cached reuse, while
+  the object-graph, guest-bytes, materialization-removal counters and the frame stayed unchanged.
+  The reuse rechecks each object (free, scenario, logical generation, submit, in use, check hash)
+  and repeats the cached-hit updates on it, then repeats the bind's image reads. Compute binds,
+  engaged material or render-target traces and the opt-in texture dumps take the full path.
+- A first version did not recheck the object's check hash; another bind can change it in between,
+  and the full path then is not a cached reuse. The comparator below found it on Astro (27 calls)
+  before the recheck was added.
+- Comparator (temporary diagnostic): every reusable bind was also replayed into scratch outputs and
+  the full path then ran; images, views, SGPR words, the read list and the captured object uses were
+  compared, with one forced difference of each kind (all five seen). The Castlevania comparator run
+  predates the read and use comparison and the check-hash recheck, so it compared outputs only.
+
+| Workload | Reused | Output differences | Read or use differences | Reuse whose full path was not plain | Replay | Full path when reused |
+|---|---|---|---|---|---|---|
+| PPSA35399 - Castlevania: Belmont's Curse, gameplay | 71 % | 0 | not compared | not compared | 0.27-0.36 us | 1.3 us (earlier shadow) |
+| PPSA21567 - Astro Bot, dunes | 20 % | 0 | 0 (5 moved) | 0 | 0.37 us | 1.5 us |
+| PPSA17221 - Minecraft, world | 70 % | 0 | 0 (23 moved) | 0 | 0.16 us | 0.47 us |
+
+- "Moved": the registry counters changed during the full path itself (another thread), so its
+  capture was dropped; outputs matched. A missed reuse costs about 0.1 us of lookup plus 0.15-0.32
+  us to capture and store, so Astro is neutral (reuse saves 176 ms, misses cost 155 ms per 786 k
+  calls), Minecraft gains about 0.13 us per call and Castlevania about 0.5 us per call.
+- Castlevania A/B against the parent build, same route, alternating (draw processor and binding,
+  us per draw): reuse 12.51/6.39 and 13.64/6.95, parent 13.98/7.64 and 7.88 in an earlier run; one
+  parent run with every untouched timer 25-30 % higher was discarded. Binding falls by 0.7-1.2 us
+  per draw; the frame-rate gain is within the run-to-run noise and not established.
+- Captures of the reuse build: Castlevania gameplay level, Astro dunes (three shots) and the
+  Minecraft world render correctly. One Astro run ended with status 139 at the `hub_crashsite_tutorial`
+  load, the title's own command-buffer assert recorded above when the route runs late; the rerun
+  reached the dunes and exited cleanly.
+- `GpuMemoryCreateObject` statistics no longer count the cached reuses a bind reuse repeats.
+- Open: one Castlevania run with compute binds also reused stayed on a one-draw screen for its
+  whole 185 s; unexplained, so compute binds stay on the full path. Pixel binds were not reused
+  at first because every pixel bind passes a trace context; only an engaged trace now bypasses.

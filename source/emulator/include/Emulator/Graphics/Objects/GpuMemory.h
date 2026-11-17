@@ -1526,6 +1526,43 @@ Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64
 // Advances whenever an object enters or leaves GPU memory; a lookup that found
 // nothing stays a miss while it is unchanged.
 [[nodiscard]] uint64_t GpuMemoryObjectGraphGeneration();
+
+// The cached reuses GpuMemoryCreateObject makes on this thread while a capture is open, so the same
+// requests later in the same submission can repeat them without resolving their objects again.
+struct GpuMemoryCachedUseCapture
+{
+	static constexpr int USES_MAX = 32;
+
+	struct Use
+	{
+		int      heap_id            = -1;
+		int      object_id          = -1;
+		uint64_t logical_generation = 0;
+		uint64_t check_hash         = 0;
+		bool     read_only          = false;
+	};
+
+	Use uses[USES_MAX];
+	int uses_num    = 0;
+	int creates_num = 0;
+	// The registry state the reuses were resolved against (see GpuMemoryEndCachedUseCapture).
+	uint64_t graph_generation       = 0;
+	uint64_t guest_bytes_generation = 0;
+	uint64_t cache_removals         = 0;
+	uint64_t frame                  = 0;
+
+	// Every create while open was a cached reuse, and all of them fit.
+	[[nodiscard]] bool AllCached() const { return uses_num == creates_num; }
+};
+// Opens a capture on this thread and records the registry state it starts from.
+void GpuMemoryBeginCachedUseCapture(GpuMemoryCachedUseCapture* capture);
+// Closes the capture; it stays usable only when every create was a cached reuse and the registry
+// state did not change while it was open.
+void GpuMemoryEndCachedUseCapture();
+// Records the captured reuses again for `buffer` when no object entered or left a heap, no guest
+// byte range changed and the materialization cache dropped no entry since the capture, and every
+// object is still the live one of this submission. Otherwise records nothing and returns false.
+[[nodiscard]] bool GpuMemoryRepeatCachedUses(uint64_t submit_id, CommandBuffer* buffer, const GpuMemoryCachedUseCapture& capture);
 // Atomically finds matching objects and records the exact submission high-water
 // before exposing their raw Vulkan handles to the caller.
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,

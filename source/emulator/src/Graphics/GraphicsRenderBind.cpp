@@ -3756,6 +3756,26 @@ static bool HtileClearMatchesGuestDepth(uint64_t htile_addr, uint64_t depth_addr
 	return true;
 }
 
+// What PrepareTextures did besides filling its outputs: the images it read, in order, and whether it
+// recorded commands, stamped an image or compared image stamps on the way (any of which makes the
+// result depend on more than its inputs and the registry state).
+struct TextureStageEffects
+{
+	VulkanImage* reads[ShaderTextureResources::RES_MAX] {};
+	int          reads_num = 0;
+	bool         side_work = false;
+
+	void RecordRead(VulkanImage* image)
+	{
+		if (reads_num < ShaderTextureResources::RES_MAX)
+		{
+			reads[reads_num] = image;
+		}
+		// An overflow leaves reads_num past the bound, which makes the call ineligible for reuse.
+		reads_num++;
+	}
+};
+
 static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
                             const ShaderSamplerResources& samplers, VulkanImage** images_sampled, VulkanImage** images_storage,
                             int* images_sampled_view, VulkanImage** images_sampled_depth, int* images_sampled_depth_view,
@@ -3765,9 +3785,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
                             int* images_sampled_array_uint_view, VulkanImage** images_sampled_3d_uint,
                             int* images_sampled_3d_uint_view, int* images_storage_view, uint64_t storage_seed_skip_mask,
                             uint32_t** sgprs, DrawMaterialTraceSession* material_trace, const VulkanImage* stencil_attached_depth,
-                            bool scaled_sampling_refused, const RenderColorInfo* pass_color, bool compute_stage)
+                            bool scaled_sampling_refused, const RenderColorInfo* pass_color, bool compute_stage,
+                            TextureStageEffects* effects)
 {
 	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(effects == nullptr);
 
 	EXIT_IF(images_sampled == nullptr);
 	EXIT_IF(images_sampled_depth == nullptr);
@@ -4151,12 +4173,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				{
 					auto* depth_image = static_cast<DepthStencilVulkanImage*>(tex);
 					auto* plane       = DepthStencilBufferGetStencilStoragePlane(g_render_ctx->GetGraphicCtx(), depth_image);
+					effects->side_work = true;
 					if (!UtilCopyStencilBits(buffer, depth_image, plane, static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL)))
 					{
 						EXIT("stencil storage plane seed failed: extent=%ux%u format=%u layout=%u\n", depth_image->extent.width,
 						     depth_image->extent.height, static_cast<uint32_t>(depth_image->format),
 						     static_cast<uint32_t>(depth_image->layout));
 					}
+					effects->side_work = true;
 					buffer->DeferStencilPlaneStoreBack(depth_image);
 					tex         = plane;
 					materialize = "stencil-storage-plane";
@@ -4235,6 +4259,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					// The guest-memory depth sample contract: metadata (HTILE) or MSAA would change what the layer bytes mean.
 					const bool plain_guest_depth = tile == 24u && levels == 1u && !r.MsaaDepth() && r.MetaAddr() == 0u;
 					const auto array_extent = depth_exact ? owner->extent : VkExtent2D {width, height};
+					effects->side_work = true;
 					tex = GraphicsRenderDepthSliceArray(buffer, owner, addr, size.size, array_extent.width, array_extent.height, view_layers,
 					                                    fmt, pitch, plain_guest_depth);
 					materialize = "depth-slice-array";
@@ -4247,12 +4272,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				{
 					auto* depth_image = static_cast<DepthStencilVulkanImage*>(tex);
 					auto* plane       = DepthStencilBufferGetStoragePlane(g_render_ctx->GetGraphicCtx(), depth_image);
+					effects->side_work = true;
 					if (!UtilCopyTexelBits(buffer, depth_image, plane, static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL)))
 					{
 						EXIT("depth storage plane seed failed: extent=%ux%u format=%u layout=%u\n", depth_image->extent.width,
 						     depth_image->extent.height, static_cast<uint32_t>(depth_image->format),
 						     static_cast<uint32_t>(depth_image->layout));
 					}
+					effects->side_work = true;
 					buffer->DeferDepthPlaneStoreBack(depth_image);
 					tex         = plane;
 					materialize = "depth-storage-plane";
@@ -4396,6 +4423,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					const auto* chain = rt_exact ? nullptr : FindLatestStorageTexture(buffer, addr, size.size);
 					write_order_asked = chain != nullptr;
 					const bool chain_write = chain != nullptr && textures.desc[i].usage != ShaderTextureUsage::ReadOnly && chain->mip_levels > tex->mip_levels;
+					effects->side_work |= chain != nullptr;
 					if (chain_write || (chain != nullptr && chain->storage_write_stamp > std::max(tex->storage_write_stamp, tex->content_stamp)))
 					{
 						tex                = nullptr;
@@ -4406,6 +4434,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					// Storage views and refused sampling address guest texels.
 					if (tex != nullptr && tex->IsResolutionScaled() && (textures.desc[i].textures2d_without_sampler || scaled_sampling_refused))
 					{
+						effects->side_work = true;
 						tex = DemoteScaledRenderTexture(submit_id, buffer, rtex.At(static_cast<int>(alias_index)), addr, size.size,
 						                                pass_color);
 						materialize = "rt-demoted";
@@ -4505,6 +4534,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 							alias_index = static_cast<size_t>(filtered[alias_index]);
 						}
 						tex = stex.At(static_cast<int>(alias_index));
+						effects->side_work = true;
 						StorageTextureMergeCpuWrites(buffer, stex.At(static_cast<int>(alias_index)));
 					}
 					// Guest memory is untyped: an image a dispatch wrote as R8_UINT
@@ -4524,6 +4554,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 							storage_texture    = true;
 							reinterpret_format = sample_format;
 							materialize        = "st-reinterpret";
+							effects->side_work = true;
 							StorageTextureMergeCpuWrites(buffer, candidate);
 							break;
 						}
@@ -4734,6 +4765,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					materialize   = depth_source == GpuMemoryDepthD16Source::StorageBuffer ? "depth-storage" : "depth-guest";
 					if (depth_texture && depth_storage != nullptr)
 					{
+						effects->side_work = true;
 						const auto detile_status = TileGpuDetileDepthD16Inline(
 						    g_render_ctx->GetGraphicCtx(), buffer, depth_storage, depth_storage_offset, depth_storage->guest_size, tex,
 						    width, height, pitch);
@@ -4811,6 +4843,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					const auto source_shape = source != nullptr ? source->GetGuestExtent() : VkExtent2D {};
 					uint32_t   copy_width   = 0;
 					uint32_t   copy_height  = 0;
+					effects->side_work |= source != nullptr;
 					if (source != nullptr && source->storage_write_stamp > tex->content_stamp &&
 					    Gen5BlockCompressedStorageCopyExtent(fmt, width, height, source->format, source_shape.width, source_shape.height,
 					                                         &copy_width, &copy_height))
@@ -4820,15 +4853,18 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						regions[0].src_image = source;
 						regions[0].width     = copy_width;
 						regions[0].height    = copy_height;
+						effects->side_work = true;
 						UtilImageToImage(buffer, regions, tex, static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
 						tex->content_stamp = VulkanImageNextStamp();
 						materialize        = "st-block-copy";
 					}
 				}
+				effects->side_work |= gen5 && arrayed_2d && base_array == 0u;
 				if (gen5 && arrayed_2d && base_array == 0u &&
 				    CopyNewerStoragePrefixLayers(buffer, tex, addr, fmt, width, height, pitch, levels, tile, depth))
 				{
 					materialize = "st-prefix-copy";
+					effects->side_work = true;
 				}
 			}
 		}
@@ -4844,6 +4880,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			image.bytes_per_element = ShaderGen5TextureBytesPerElement(fmt);
 			image.alpha_on_msb      = r.DccAlphaPos();
 			image.single_surface    = levels == 1u && !arrayed_2d && !three_dimensional;
+			effects->side_work = true;
 			ConsumeImageColorDccClear(buffer, image);
 		}
 		if (tex == nullptr)
@@ -4856,6 +4893,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		} else
 		{
 			buffer->ReadImage(tex);
+			effects->RecordRead(tex);
 		}
 		if (!textures.desc[i].textures2d_without_sampler &&
 		    textures.desc[i].sample_operation != State::ImageSampleOperation::Regular)
@@ -4986,6 +5024,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			images_storage[index_storage] = tex;
 			if (tex != nullptr && textures.desc[i].usage != ShaderTextureUsage::ReadOnly)
 			{
+				effects->side_work = true;
 				tex->storage_write_stamp = VulkanImageNextStamp();
 			}
 			const bool storage_array = arrayed_2d && tex != nullptr && tex->type == VulkanImageType::StorageTexture;
@@ -5536,6 +5575,205 @@ static void RequireScaledImageReads(ScaledImageReadAccess access, const ShaderSa
 	}
 }
 
+// Texture-stage reuse. A bind whose texture and sampler words, seed-skip mask, attached
+// depth, pass colour and sampling refusal equal an earlier bind's in the same command buffer and
+// submission gets that bind's images, views and SGPR words, when the earlier bind recorded no side
+// work, every object it resolved was a cached reuse, and since then no object entered or left a
+// heap, no guest byte range changed and the materialization cache dropped nothing.
+// The reuse repeats the cached-object uses and the image reads of the earlier bind.
+class TextureStageReuse
+{
+public:
+	static constexpr int IMAGE_ARRAYS = 8;
+
+	struct Bind
+	{
+		const ShaderTextureResources* textures               = nullptr;
+		const ShaderSamplerResources* samplers               = nullptr;
+		uint64_t                      seed_skip_mask         = 0;
+		const VulkanImage*            stencil_attached_depth = nullptr;
+		const RenderColorInfo*        pass_color             = nullptr;
+		bool                          scaled_sampling_refused = false;
+		DescriptorCache::Stage        stage                  = DescriptorCache::Stage::Vertex;
+		VulkanImage**                 images[IMAGE_ARRAYS]   = {};
+		int*                          views[IMAGE_ARRAYS]    = {};
+	};
+
+	[[nodiscard]] bool Replay(uint64_t submit_id, CommandBuffer* buffer, const Bind& bind, uint32_t** sgprs);
+	void Store(uint64_t submit_id, CommandBuffer* buffer, const Bind& bind, const uint32_t* sgprs_begin, const uint32_t* sgprs_end,
+	           const TextureStageEffects& effects, const GpuMemoryCachedUseCapture& capture);
+
+private:
+	static constexpr int ENTRIES       = 64;
+	static constexpr int BINDINGS_MAX  = ShaderTextureResources::RES_MAX;
+	static constexpr int SGPRS_MAX     = ShaderTextureResources::RES_MAX * 8;
+
+	struct Binding
+	{
+		int          array = 0;
+		int          slot  = 0;
+		VulkanImage* image = nullptr;
+		int          view  = 0;
+	};
+
+	struct Entry
+	{
+		bool                      valid = false;
+		uint64_t                  fingerprint = 0;
+		ShaderTextureResources    textures;
+		ShaderSamplerResources    samplers;
+		uint64_t                  seed_skip_mask = 0;
+		const VulkanImage*        stencil_attached_depth = nullptr;
+		RenderColorInfo           pass_color {};
+		bool                      has_pass_color = false;
+		bool                      scaled_sampling_refused = false;
+		DescriptorCache::Stage    stage = DescriptorCache::Stage::Vertex;
+		const CommandBuffer*      buffer = nullptr;
+		uint64_t                  submit_id = 0;
+		SubmissionId              submission {};
+		Binding                   bindings[BINDINGS_MAX];
+		int                       bindings_num = 0;
+		uint32_t                  sgprs[SGPRS_MAX] {};
+		int                       sgprs_num = 0;
+		VulkanImage*              reads[ShaderTextureResources::RES_MAX] {};
+		int                       reads_num = 0;
+		GpuMemoryCachedUseCapture capture;
+	};
+
+	static uint64_t Fingerprint(const CommandBuffer* buffer, const Bind& bind);
+	static bool     SameInputs(const Entry& e, const Bind& bind);
+
+	std::unique_ptr<Entry[]> m_entries;
+};
+
+uint64_t TextureStageReuse::Fingerprint(const CommandBuffer* buffer, const Bind& bind)
+{
+	const auto& t = *bind.textures;
+	const int   n = std::clamp(t.textures_num, 0, 2);
+	uint64_t    h = (static_cast<uint64_t>(t.textures_num) << 32u) ^ (static_cast<uint64_t>(bind.samplers->samplers_num) << 8u) ^
+	             static_cast<uint64_t>(bind.stage) ^ reinterpret_cast<uintptr_t>(buffer);
+	const auto* bytes = reinterpret_cast<const uint8_t*>(t.desc);
+	for (size_t i = 0; i + 8 <= sizeof(t.desc[0]) * static_cast<size_t>(n); i += 8)
+	{
+		uint64_t w = 0;
+		std::memcpy(&w, bytes + i, 8);
+		h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+		h ^= h >> 29u;
+	}
+	return h;
+}
+
+bool TextureStageReuse::SameInputs(const Entry& e, const Bind& bind)
+{
+	static_assert(std::is_trivially_copyable_v<ShaderTextureResources> && std::is_trivially_copyable_v<ShaderSamplerResources> &&
+	              std::is_trivially_copyable_v<RenderColorInfo>);
+	return e.stage == bind.stage && e.seed_skip_mask == bind.seed_skip_mask && e.stencil_attached_depth == bind.stencil_attached_depth &&
+	       e.scaled_sampling_refused == bind.scaled_sampling_refused && e.has_pass_color == (bind.pass_color != nullptr) &&
+	       (bind.pass_color == nullptr || std::memcmp(&e.pass_color, bind.pass_color, sizeof(e.pass_color)) == 0) &&
+	       std::memcmp(&e.textures, bind.textures, sizeof(e.textures)) == 0 &&
+	       std::memcmp(&e.samplers, bind.samplers, sizeof(e.samplers)) == 0;
+}
+
+bool TextureStageReuse::Replay(uint64_t submit_id, CommandBuffer* buffer, const Bind& bind, uint32_t** sgprs)
+{
+	if (m_entries == nullptr)
+	{
+		return false;
+	}
+	const uint64_t fingerprint = Fingerprint(buffer, bind);
+	auto&          e           = m_entries[fingerprint % ENTRIES];
+	SubmissionId   submission {};
+	if (!e.valid || e.fingerprint != fingerprint || e.buffer != buffer || e.submit_id != submit_id ||
+	    !buffer->GetSubmissionId(&submission) || !(submission == e.submission) || !SameInputs(e, bind))
+	{
+		return false;
+	}
+	if (!GpuMemoryRepeatCachedUses(submit_id, buffer, e.capture))
+	{
+		e.valid = false;
+		return false;
+	}
+	for (int i = 0; i < e.bindings_num; i++)
+	{
+		const auto& b              = e.bindings[i];
+		bind.images[b.array][b.slot] = b.image;
+		bind.views[b.array][b.slot]  = b.view;
+	}
+	std::memcpy(*sgprs, e.sgprs, sizeof(uint32_t) * static_cast<size_t>(e.sgprs_num));
+	*sgprs += e.sgprs_num;
+	for (int i = 0; i < e.reads_num; i++)
+	{
+		buffer->ReadImage(e.reads[i]);
+	}
+	return true;
+}
+
+void TextureStageReuse::Store(uint64_t submit_id, CommandBuffer* buffer, const Bind& bind, const uint32_t* sgprs_begin,
+                              const uint32_t* sgprs_end, const TextureStageEffects& effects, const GpuMemoryCachedUseCapture& capture)
+{
+	const auto sgprs_num = sgprs_end - sgprs_begin;
+	SubmissionId submission {};
+	if (effects.side_work || effects.reads_num > ShaderTextureResources::RES_MAX || !capture.AllCached() || sgprs_num < 0 ||
+	    sgprs_num > SGPRS_MAX || !buffer->GetSubmissionId(&submission))
+	{
+		return;
+	}
+	if (m_entries == nullptr)
+	{
+		m_entries = std::make_unique<Entry[]>(ENTRIES);
+	}
+	const uint64_t fingerprint = Fingerprint(buffer, bind);
+	auto&          e           = m_entries[fingerprint % ENTRIES];
+	e.valid                    = false;
+	e.bindings_num             = 0;
+	for (int a = 0; a < IMAGE_ARRAYS; a++)
+	{
+		for (int slot = 0; slot < ShaderTextureResources::RES_MAX; slot++)
+		{
+			if (bind.images[a][slot] == nullptr)
+			{
+				continue;
+			}
+			if (e.bindings_num == BINDINGS_MAX)
+			{
+				return;
+			}
+			e.bindings[e.bindings_num++] = {a, slot, bind.images[a][slot], bind.views[a][slot]};
+		}
+	}
+	e.fingerprint             = fingerprint;
+	std::memcpy(&e.textures, bind.textures, sizeof(e.textures));
+	std::memcpy(&e.samplers, bind.samplers, sizeof(e.samplers));
+	e.seed_skip_mask          = bind.seed_skip_mask;
+	e.stencil_attached_depth  = bind.stencil_attached_depth;
+	e.has_pass_color          = bind.pass_color != nullptr;
+	if (e.has_pass_color)
+	{
+		std::memcpy(&e.pass_color, bind.pass_color, sizeof(e.pass_color));
+	}
+	e.scaled_sampling_refused = bind.scaled_sampling_refused;
+	e.stage                   = bind.stage;
+	e.buffer                  = buffer;
+	e.submit_id               = submit_id;
+	e.submission              = submission;
+	std::memcpy(e.sgprs, sgprs_begin, sizeof(uint32_t) * static_cast<size_t>(sgprs_num));
+	e.sgprs_num = static_cast<int>(sgprs_num);
+	std::copy(effects.reads, effects.reads + effects.reads_num, e.reads);
+	e.reads_num = effects.reads_num;
+	e.capture   = capture;
+	e.valid     = true;
+}
+
+
+// Opt-in texture diagnostics inside PrepareTextures log or dump per call, so they disable reuse.
+static bool TextureStageDiagnosticsRequested()
+{
+	static const bool requested = std::getenv("KYTY_SAMPLE_BIND_METADATA_LOG") != nullptr ||
+	                              std::getenv("KYTY_SAMPLE_BIND_CATALOG") != nullptr || std::getenv("KYTY_DUMP_TEXTURE_BIND") != nullptr ||
+	                              std::getenv("KYTY_DUMP_BOUND_SAMPLE") != nullptr || std::getenv("KYTY_DUMP_VIDEO_BIND") != nullptr;
+	return requested;
+}
+
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint64_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
@@ -5609,14 +5847,42 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			const auto stage_start = BindingStageClock::now();
 			storage_seed_skip_mask = ValidateUploadedStorageSeedCoverage(buffer, bind, storage_buffers,
 			                                                             storage_seed_skip_mask, storage_seed_coverage);
-			PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage,
-			                textures2d_sampled_view, textures2d_sampled_depth, textures2d_sampled_depth_view,
-			                textures2d_array_sampled, textures2d_array_sampled_view, textures3d_sampled,
-			                textures3d_sampled_view, textures2d_sampled_uint, textures2d_sampled_uint_view,
-			                textures2d_array_sampled_uint, textures2d_array_sampled_uint_view, textures3d_sampled_uint,
-			                textures3d_sampled_uint_view, textures2d_storage_view, storage_seed_skip_mask, &sgprs_ptr, &trace_session,
-			                stencil_attached_depth, ScaledSamplingRefused(scaled_image_reads, bind.samplers), pass_color,
-			                stage == DescriptorCache::Stage::Compute);
+			const bool              scaled_sampling_refused = ScaledSamplingRefused(scaled_image_reads, bind.samplers);
+			TextureStageReuse::Bind reuse_bind {&bind.textures2D, &bind.samplers, storage_seed_skip_mask, stencil_attached_depth,
+			                                    pass_color, scaled_sampling_refused, stage,
+			                                    {textures2d_sampled, textures2d_sampled_depth, textures2d_array_sampled, textures3d_sampled,
+			                                     textures2d_sampled_uint, textures2d_array_sampled_uint, textures3d_sampled_uint,
+			                                     textures2d_storage},
+			                                    {textures2d_sampled_view, textures2d_sampled_depth_view, textures2d_array_sampled_view,
+			                                     textures3d_sampled_view, textures2d_sampled_uint_view, textures2d_array_sampled_uint_view,
+			                                     textures3d_sampled_uint_view, textures2d_storage_view}};
+			thread_local TextureStageReuse texture_stage_reuse;
+			// An engaged material or render-target trace records per call inside PrepareTextures.
+			const bool reusable = stage != DescriptorCache::Stage::Compute && trace_session.draw == nullptr &&
+			                      !trace_session.trace_rt_lifetime && !TextureStageDiagnosticsRequested();
+			if (!reusable || !texture_stage_reuse.Replay(submit_id, buffer, reuse_bind, &sgprs_ptr))
+			{
+				TextureStageEffects       effects;
+				GpuMemoryCachedUseCapture capture;
+				uint32_t* const           sgprs_begin  = sgprs_ptr;
+				if (reusable)
+				{
+					GpuMemoryBeginCachedUseCapture(&capture);
+				}
+				PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage,
+				                textures2d_sampled_view, textures2d_sampled_depth, textures2d_sampled_depth_view,
+				                textures2d_array_sampled, textures2d_array_sampled_view, textures3d_sampled,
+				                textures3d_sampled_view, textures2d_sampled_uint, textures2d_sampled_uint_view,
+				                textures2d_array_sampled_uint, textures2d_array_sampled_uint_view, textures3d_sampled_uint,
+				                textures3d_sampled_uint_view, textures2d_storage_view, storage_seed_skip_mask, &sgprs_ptr,
+				                &trace_session, stencil_attached_depth, scaled_sampling_refused, pass_color,
+				                stage == DescriptorCache::Stage::Compute, &effects);
+				if (reusable)
+				{
+					GpuMemoryEndCachedUseCapture();
+					texture_stage_reuse.Store(submit_id, buffer, reuse_bind, sgprs_begin, sgprs_ptr, effects, capture);
+				}
+			}
 			if (Config::GetRenderResolutionScope() == Config::RenderResolutionScope::RenderTargets)
 			{
 				RequireScaledImageReads(scaled_image_reads, bind.samplers, stage,

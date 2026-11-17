@@ -847,6 +847,13 @@ Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64
 	return g_gpu_memory->FindObjects(vaddr, size, vaddr_num, type, exact, only_first);
 }
 
+bool GpuMemoryRepeatCachedUses(uint64_t submit_id, CommandBuffer* buffer, const GpuMemoryCachedUseCapture& capture)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+
+	return g_gpu_memory->RepeatCachedUses(submit_id, buffer, capture);
+}
+
 uint64_t GpuMemoryObjectGraphGeneration()
 {
 	EXIT_IF(g_gpu_memory == nullptr);

@@ -311,6 +311,8 @@ public:
 	void  FrameDone(GraphicContext* ctx);
 
 	[[nodiscard]] uint64_t ObjectGraphGeneration() const { return m_object_graph_generation.load(std::memory_order_acquire); }
+	void                   StampCachedUseCapture(GpuMemoryCachedUseCapture* capture, bool end);
+	[[nodiscard]] bool     RepeatCachedUses(uint64_t submit_id, CommandBuffer* buffer, const GpuMemoryCachedUseCapture& capture);
 
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first, const SubmissionId* submission = nullptr);
@@ -493,6 +495,7 @@ private:
 	void PublishStorageSnapshotLocked(const GpuMemoryStorageSnapshot& snapshot);
 	void RecordUse(ObjectInfo* object, SubmissionId submission);
 	void RecordUse(ObjectInfo* object, CommandBuffer* buffer);
+	void RecordCachedReuse(int heap_id, int object_id, bool read_only, uint64_t check_hash, CommandBuffer* buffer);
 	void ScheduleDestructors(GraphicContext* ctx, Vector<Destructor>* destructors);
 	void ScheduleDestructorsOutsideMutationLocks(GraphicContext* ctx, Vector<Destructor>* destructors);
 	void VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vector<Destructor>* destructors,

@@ -1211,6 +1211,117 @@ void GpuMemory::CompleteSubmission(SubmissionId submission)
 	                                            { return m_deferred_deletions.AreDependenciesComplete({recording}); });
 }
 
+namespace {
+thread_local GpuMemoryCachedUseCapture* t_cached_use_capture = nullptr;
+} // namespace
+
+void GpuMemoryBeginCachedUseCapture(GpuMemoryCachedUseCapture* capture)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	EXIT_IF(capture == nullptr);
+
+	capture->uses_num    = 0;
+	capture->creates_num = 0;
+	g_gpu_memory->StampCachedUseCapture(capture, false);
+	t_cached_use_capture = capture;
+}
+
+void GpuMemoryEndCachedUseCapture()
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+
+	GpuMemoryCachedUseCapture* capture = t_cached_use_capture;
+	t_cached_use_capture               = nullptr;
+	if (capture != nullptr && capture->AllCached())
+	{
+		g_gpu_memory->StampCachedUseCapture(capture, true);
+	}
+}
+
+// The use a cached materialization hit records; CreateObject and repeated captures share it.
+void GpuMemory::RecordCachedReuse(int heap_id, int object_id, bool read_only, uint64_t check_hash, CommandBuffer* buffer)
+{
+	auto&      h                  = m_heaps[heap_id].objects[object_id];
+	auto&      o                  = h.info;
+	o.use_num++;
+	o.use_last_frame              = m_current_frame;
+	const bool previous_read_only = o.read_only;
+	o.read_only                   = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, read_only);
+	o.write_uses += read_only ? 0u : 1u;
+	o.write_time = read_only ? o.write_time : GpuMemoryGetCurrentTime();
+	if (o.read_only != previous_read_only)
+	{
+		for (int vi = 0; vi < h.block.vaddr_num; ++vi)
+		{
+			m_overlap_snapshot_cache.InvalidateRange(h.block.vaddr[vi], h.block.size[vi]);
+		}
+	}
+	o.in_use     = true;
+	o.check_hash = check_hash;
+	RecordUse(&o, buffer);
+	// The indexes follow free, in_use, read_only and the callbacks; a hit keeps all but read_only.
+	// Storage objects record a scan change on every writable use, so they always sync.
+	if (o.read_only != previous_read_only || o.object.type == GpuMemoryObjectType::StorageBuffer)
+	{
+		SyncWriteBackIndexes(heap_id, object_id);
+	}
+}
+
+// At the start of a capture records the registry state; at its end keeps the capture only while that
+// state held for the whole capture, so its reuses were all resolved against one state.
+void GpuMemory::StampCachedUseCapture(GpuMemoryCachedUseCapture* capture, bool end)
+{
+	EXIT_IF(capture == nullptr);
+	Core::LockGuard lock(m_mutex);
+	const uint64_t graph_generation       = m_object_graph_generation.load(std::memory_order_acquire);
+	const uint64_t guest_bytes_generation = m_guest_bytes_generation.load(std::memory_order_acquire);
+	const uint64_t cache_removals         = m_materialization_cache.Removals();
+	if (end && (capture->graph_generation != graph_generation || capture->guest_bytes_generation != guest_bytes_generation ||
+	            capture->cache_removals != cache_removals || capture->frame != m_current_frame))
+	{
+		capture->uses_num = -1;
+		return;
+	}
+	capture->graph_generation       = graph_generation;
+	capture->guest_bytes_generation = guest_bytes_generation;
+	capture->cache_removals         = cache_removals;
+	capture->frame                  = m_current_frame;
+}
+
+bool GpuMemory::RepeatCachedUses(uint64_t submit_id, CommandBuffer* buffer, const GpuMemoryCachedUseCapture& capture)
+{
+	EXIT_IF(buffer == nullptr);
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	if (!capture.AllCached() || capture.graph_generation != m_object_graph_generation.load(std::memory_order_acquire) ||
+	    capture.guest_bytes_generation != m_guest_bytes_generation.load(std::memory_order_acquire) ||
+	    capture.cache_removals != m_materialization_cache.Removals() || capture.frame != m_current_frame)
+	{
+		return false;
+	}
+	for (int i = 0; i < capture.uses_num; i++)
+	{
+		const auto& use = capture.uses[i];
+		if (use.heap_id < 0 || static_cast<uint32_t>(use.heap_id) >= m_heaps.Size() || use.object_id < 0 ||
+		    static_cast<uint32_t>(use.object_id) >= m_heaps[use.heap_id].objects.Size())
+		{
+			return false;
+		}
+		const auto& h = m_heaps[use.heap_id].objects[use.object_id];
+		if (h.free || h.scenario != GpuMemoryScenario::Common || h.info.logical_generation != use.logical_generation ||
+		    h.info.submit_id != submit_id || !h.info.in_use || h.info.check_hash != use.check_hash)
+		{
+			return false;
+		}
+	}
+	for (int i = 0; i < capture.uses_num; i++)
+	{
+		const auto& use = capture.uses[i];
+		RecordCachedReuse(use.heap_id, use.object_id, use.read_only, use.check_hash, buffer);
+	}
+	return true;
+}
+
 // A remembered hit is what the materialization cache would answer while no object block entered
 // or left a heap, the heap index is unchanged and the cache has dropped no entry.
 const GpuMemory::RecentMaterialization* GpuMemory::FindRecentMaterialization(const GpuMemoryMaterializationKey& key) const
@@ -1248,6 +1359,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	KYTY_PROFILER_BLOCK("GpuMemory::CreateObject", profiler::colors::Green300);
 
 	EXIT_IF(info.type == GpuMemoryObjectType::Invalid);
+	if (t_cached_use_capture != nullptr)
+	{
+		t_cached_use_capture->creates_num++;
+	}
 	EXIT_IF(vaddr == nullptr || size == nullptr || vaddr_num > VADDR_BLOCKS_MAX || vaddr_num <= 0);
 
 	uint64_t requested_bytes = 0;
@@ -1354,24 +1469,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			    o.object.type == info.type && o.submit_id == submit_id && o.in_use && o.check_hash == info.check_hash &&
 			    info.Equal(o.params) && same_callbacks)
 			{
-				o.use_num++;
-				o.use_last_frame              = m_current_frame;
-				const bool previous_read_only = o.read_only;
-				o.read_only                   = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
-				o.write_uses += info.read_only ? 0u : 1u;
-				o.write_time = info.read_only ? o.write_time : GpuMemoryGetCurrentTime();
-				if (o.read_only != previous_read_only)
+				RecordCachedReuse(heap_id, cached.object_id, info.read_only, info.check_hash, buffer);
+				if (t_cached_use_capture != nullptr && t_cached_use_capture->uses_num < GpuMemoryCachedUseCapture::USES_MAX)
 				{
-					invalidate_overlap_snapshots(h.block);
-				}
-				o.in_use     = true;
-				o.check_hash = info.check_hash;
-				RecordUse(&o, buffer);
-				// The indexes follow free, in_use, read_only and the callbacks; a hit keeps all but read_only.
-				// Storage objects record a scan change on every writable use, so they always sync.
-				if (o.read_only != previous_read_only || o.object.type == GpuMemoryObjectType::StorageBuffer)
-				{
-					SyncWriteBackIndexes(heap_id, cached.object_id);
+					t_cached_use_capture->uses[t_cached_use_capture->uses_num++] = {heap_id, cached.object_id, o.logical_generation,
+					                                                                info.check_hash, info.read_only};
 				}
 				if (recent == nullptr)
 				{
