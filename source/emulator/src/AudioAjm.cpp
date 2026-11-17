@@ -2663,10 +2663,10 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 					if (format.channels == 0 || bytes_per_frame == 0 || format.block_align == 0 ||
 					    job.input_size > AJM_MAX_DIRECT_JOB_INPUT_SIZE ||
 					    job.output_size > Core::VirtualMemory::GuestMappingSnapshot::kMaxBytes ||
-					    job.input_size % format.block_align != 0 || job.output_size % bytes_per_frame != 0)
+					    job.output_size % bytes_per_frame != 0)
 					{
 						lock.unlock();
-						RejectMalformedAjmData("ATRAC9 job extent is not a whole number of samples or superframes");
+						RejectMalformedAjmData("ATRAC9 job output is not a whole number of sample frames");
 					}
 					if (job.input_size > AJM_MAX_DIRECT_BATCH_INPUT_SIZE - atrac9_input_admitted)
 					{

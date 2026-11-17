@@ -6702,6 +6702,64 @@ TEST(EmulatorAudio, AjmAtrac9BatchOfManyShortDecodesStarts)
 	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
 }
 
+// A streaming guest hands a buffer that ends inside a superframe; the whole superframes decode and the result reports
+// only their bytes consumed, so the guest resubmits the tail with the next data.
+TEST(EmulatorAudio, AjmAtrac9DecodeLeavesATrailingPartialSuperframeUnconsumed)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "ATRAC9 backend is unavailable";
+	}
+
+	constexpr size_t tail_bytes   = 37;
+	constexpr size_t input_bytes  = kSyntheticAtrac9Superframe + tail_bytes;
+	constexpr size_t output_bytes = 2 * 1024 * sizeof(int16_t);
+	uint32_t         context      = 0;
+	uint32_t         instance     = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
+
+	GuestReadableBlock             config_storage(8);
+	GuestReadableBlock             input_storage(input_bytes);
+	GuestReadableBlock             output_storage(output_bytes);
+	GuestReadableBlock             init_result_storage(32);
+	GuestReadableBlock             result_storage(32);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	ASSERT_TRUE(config_storage.IsValid() && input_storage.IsValid() && output_storage.IsValid() && init_result_storage.IsValid() &&
+	            result_storage.IsValid() && error_storage.IsValid() && batch_id_storage.IsValid());
+
+	auto* const config = static_cast<uint8_t*>(config_storage.Data());
+	std::memcpy(config, kSyntheticAtrac9Config, sizeof(kSyntheticAtrac9Config));
+	std::memset(config + sizeof(kSyntheticAtrac9Config), 0, 4);
+	const auto superframe = BuildAtrac9Superframe(0x1ffu);
+	ASSERT_EQ(superframe.size(), kSyntheticAtrac9Superframe);
+	auto* const input = static_cast<uint8_t*>(input_storage.Data());
+	std::memcpy(input, superframe.data(), superframe.size());
+	std::memcpy(input + superframe.size(), superframe.data(), tail_bytes);
+	std::memset(result_storage.Data(), 0xa5, 32);
+	*error_storage.Data()    = {};
+	*batch_id_storage.Data() = 0;
+
+	alignas(uint64_t) uint8_t batch[64] {};
+	ASSERT_EQ(Ajm::AjmBatchJobInitialize(batch, instance, config, 8, init_result_storage.Data()), 0);
+	ASSERT_EQ(Ajm::AjmBatchJobDecode(batch, instance, input, input_bytes, output_storage.Data(), output_bytes, result_storage.Data()), 0);
+	ASSERT_EQ(Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()), 0);
+	EXPECT_EQ(error_storage.Data()->error_code, 0);
+	int32_t input_consumed = 0;
+	std::memcpy(&input_consumed, static_cast<const uint8_t*>(result_storage.Data()) + 8, sizeof(input_consumed));
+	EXPECT_EQ(input_consumed, static_cast<int32_t>(kSyntheticAtrac9Superframe));
+	ASSERT_EQ(Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()), 0);
+	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
 TEST(EmulatorAudio, AjmAtrac9ResampleEnabledInstanceDecodesDirectAndSplitJobsThroughTheNeutralProfile)
 {
 	if (!Config::IsInitialized())
