@@ -483,13 +483,21 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 - Price: on the command-processor profile `PrepareTextures` is 22 % of samples (about 3.8 us of
   12.85 us per draw with the sampler stage); a hit still owes the cache lock, the dirty-page check
   in `Update` and the use records, about 4 of those 22 points. At 68 % valid that saves about
-  2 us per draw, the same as the parked bound above (1.9 us), so the image memo stays parked.
-  Deleting the texture and sampler stages outright leaves about 9.1 us per draw, which with about
-  10 ms per frame outside draws is 25-27 fps; removing the emulator's descriptor set cache as well
-  (up to about 2 us per draw, measured but not built; `docs/bringup/cp-draw-plan.md`, "Dynamic
-  offsets and descriptor buffers on Intel Arc") does not reach 30 fps either. Storage words change
-  on most draws, so a whole-set memo cannot hit without them leaving the set.
-- GPU clock (sysfs actual frequency averaged per second, read in the first diagnostic run only):
-  1,030-2,270 MHz of a 2,400 MHz maximum. The seconds at 12-13 fps were the ones where it fell
-  from 1,840 to 1,030 MHz, so engine time per frame measured at a low clock is an upper bound for
-  the work; whether the clock drop causes or follows the slow seconds is not established.
+  2 us per draw (2.7 us if evictions stopped invalidating), the same order as the parked bound
+  above (1.9 us).
+- Bounds at 3,000-3,300 draws per frame and about 10 ms per frame outside draws:
+  - deleting the texture and sampler stages outright leaves about 9.1 us per draw: 25-27 fps;
+  - also removing the emulator's descriptor set cache leaves about 7.5 us: 29-31 fps. That cache's
+    share is at most 1.6 us here (finalize is 2.0 us per draw, about 0.4 us of it driver binding);
+    the 2 us figure in `docs/bringup/cp-draw-plan.md`, "Dynamic offsets and descriptor buffers on
+    Intel Arc", was measured on the DREDGE dock with 2.71 us of finalize;
+  - expected with an image memo at 68-87 % valid binds plus that cache removed: 25-28 fps.
+  - Storage words change on most draws, so a whole-set memo cannot hit without them leaving the
+    set. The rest of the way to 30 fps has to come from state setup (3.3 us per draw), pipeline
+    setup (1.2 us) or the time outside draws.
+- GPU clock (sysfs actual frequency averaged per second; first diagnostic run, 2,560-3,700 draws
+  per frame): 1,030-2,270 MHz of a 2,400 MHz maximum. The rate held at 11-13 fps both at
+  1,030 MHz and at 1,945-2,240 MHz, so it did not follow the clock; the clock falls while the
+  device idles. Busy time scaled to the full clock (busy x actual / maximum, linear scaling
+  assumed) is 17-23 ms per frame below 3,000 draws and 26-28 ms per frame at 3,400-3,500 draws,
+  a GPU limit of about 36-38 fps on the gameplay scene if that scaling holds.
