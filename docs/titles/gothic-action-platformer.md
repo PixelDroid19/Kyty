@@ -696,3 +696,17 @@ to a first record. Not built. Reopen
 only with a freshness rule narrower than the global epoch, which would also serve the mid-run
 records rejected as stale.
 
+### Where the remaining processor time goes (2026-11-17, existing counters)
+
+- The draw tail (pipeline, binds, push constants, draw) already records on the per-pool replay
+  thread on render-pass continuations, about 3,200 of 3,400 draws per frame here; command emission
+  on the processor is 0.22 us per prepared draw. Moving the rest of recording to that thread
+  leaves only the command-buffer end and queue submit, about 2 ms per frame.
+- Memory objects in the gameplay window, per frame: no object was created, reclaimed or freed
+  (new and reclaim counters 0.1 or less for every type); about 13,900 lookups were served from
+  the caches (texture 7,900, depth 3,370, render target 2,520, storage 120), about four per draw
+  at about 0.4 us each (5 ms per frame in object lookup alone).
+- The processor cost is therefore the volume of ordered per-draw resolution against an unchanged
+  object set, not object churn. With every local lever counted (batch merge, submit hand-off,
+  sampler ids), the estimate ends near 21-22 fps; 30 fps needs resolution that is skipped when a
+  draw's resources did not change, which is a change to the memory-object model.

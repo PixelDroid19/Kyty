@@ -1,6 +1,8 @@
 # Parallel draw recording (design, 2026-11-10)
 
-Status: design, not built. The measured ceiling is at or below the build gate (see "Decision").
+Status: parallel workers and secondaries not built. A single in-order replay thread per command
+pool that records the draw tail on render-pass continuations is built (see
+`performance-architecture-plan.md`); the "Not built" decision below predates it.
 
 ## Why
 
