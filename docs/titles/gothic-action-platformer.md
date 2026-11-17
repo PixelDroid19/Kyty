@@ -475,13 +475,21 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   shader about 100 %. With the counters unchanged the image key held 68 % of binds; the misses
   were the removal counter 3.96 M, guest bytes 1.45 M and the object graph 41 k. Among 8.9 M
   valid image hits the arrays differed once, the case forced by hand.
-- So sampled images repeat and storage does not. A memo of the image part is bounded by the
-  texture and sampler stages (about 3.7 us per draw) times its hit rate, and on a hit it still owes
-  the use records, the per-submit dirty-page check of each guest texture and the layout barriers.
-  The first measured raises the hit rate are the removal counter (bumped by cache evictions as well
-  as invalidations) and the global guest-bytes generation. Storage words change on most draws, so
-  they would have to leave the set (by-address or dynamic offsets; see
-  `docs/bringup/cp-draw-plan.md`, "Dynamic offsets and descriptor buffers on Intel Arc").
-- In the same runs the GPU clock (sysfs actual frequency, averaged per second) moved between
-  1,030 and 2,270 MHz of a 2,400 MHz maximum while the device sat idle half the time, so the
-  measured engine time per frame is an upper bound for the work.
+- The stale counters overlap: the removal counter moved in every invalid repeat (3.96 M of
+  3.96 M) and guest bytes in a subset, so a removal counter that ignored evictions would lift the
+  valid share to at most about 87 %. The zero output differences cover only binds with the
+  counters unchanged, and only the image pointers, the samplers and the 2D sampled view indices,
+  not the other view arrays; outputs in the removal-stale binds were not compared.
+- Price: on the command-processor profile `PrepareTextures` is 22 % of samples (about 3.8 us of
+  12.85 us per draw with the sampler stage); a hit still owes the cache lock, the dirty-page check
+  in `Update` and the use records, about 4 of those 22 points. At 68 % valid that saves about
+  2 us per draw, the same as the parked bound above (1.9 us), so the image memo stays parked.
+  Deleting the texture and sampler stages outright leaves about 9.1 us per draw, which with about
+  10 ms per frame outside draws is 25-27 fps; removing the emulator's descriptor set cache as well
+  (up to about 2 us per draw, measured but not built; `docs/bringup/cp-draw-plan.md`, "Dynamic
+  offsets and descriptor buffers on Intel Arc") does not reach 30 fps either. Storage words change
+  on most draws, so a whole-set memo cannot hit without them leaving the set.
+- GPU clock (sysfs actual frequency averaged per second, read in the first diagnostic run only):
+  1,030-2,270 MHz of a 2,400 MHz maximum. The seconds at 12-13 fps were the ones where it fell
+  from 1,840 to 1,030 MHz, so engine time per frame measured at a low clock is an upper bound for
+  the work; whether the clock drop causes or follows the slow seconds is not established.
