@@ -330,24 +330,27 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   the field recheck under the lock are unchanged.
 - Verification: a temporary diagnostic run compared every table hit against the materialization cache: 46.8 M hits
   of 67.1 M requests (70 %), 0 object mismatches besides one forced by hand. Command-processor
-  profile (gameplay, about 3,100 samples each): `CreateObject` under `PrepareTextures` 14.6 % ->
-  11.6 %, `PrepareTextures` 23.2 % -> 20.8 %. Captures of `PPSA21567 - Astro Bot` dunes and the
+  profile (gameplay, about 3,100 samples each, both with `PrintfDirection = Silent`; the second
+  also has the shader-id change below): `CreateObject` under `PrepareTextures` 14.6 % -> 12.1 %. Captures of `PPSA21567 - Astro Bot` dunes and the
   `PPSA17221 - Minecraft` world render as before. No fps claim (perf-recorded run).
 - Open: most stale table probes come from cache-slot evictions bumping the removal counter; split
   that counter before changing the validity test.
 
 ### Prepared shader ids returned to the front on a pipeline hit (2026-11-17)
 
-- A clean gameplay run on `606a4ac78` (quiet host, no profiler): 18.65 fps, 12.82 us per draw
-  (binding 6.91 us), against 14.24 us and binding 7.84 us in a run of the previous table build.
-  Single runs; no fps claim.
+- Like-for-like gameplay runs (quiet host, `PrintfDirection = Silent`, profiler attached):
+  `d64a0b11b` 17.62 fps, 13.69 us per draw (binding 7.54, pipeline setup 1.18) against the table
+  and this change 18.5 fps, 12.85 us (binding 6.96, pipeline setup 1.02). Without the profiler,
+  `606a4ac78` ran 18.65 fps at 12.82 us. Single runs; earlier runs of the day at 14.2-14.4 us did
+  not set `Silent` and are not comparable.
 - The draw front builds both shader ids; on a pipeline cache hit the lookup key moved them out of
   the front record and freed them on the command-processor thread (`~ShaderId` about 1 % of it).
   A hit now moves them back into the record, so the front thread that built them frees them when it
   reuses the record. A miss still stores its own copy.
-- Profile in gameplay (about 3,100 samples each): `~ShaderId` 1.05 % -> 0 of the command-processor
-  thread, now on the two front threads; `CreatePipeline` 7.2 % -> 4.9 %; pipeline setup
-  1.11 -> 1.02 us per draw. Captures of this title's level, `PPSA21567 - Astro Bot` dunes and the
+- Profile in gameplay (about 3,100 samples each, `Silent`): `~ShaderId` 1.05 % -> 0 of the
+  command-processor thread, now on the two front threads; `CreatePipeline` 5.35 % -> 4.87 %; pixel
+  input analysis on the command-processor thread (front misses) 7.3 % -> 6.9 %, so the fronts do
+  not fall behind more often. Captures of this title's level, `PPSA21567 - Astro Bot` dunes and the
   `PPSA17221 - Minecraft` world render as before.
 - Pipeline index (`PipelineCache::Find`): the remaining cost is the full `ShaderId` compare of the
   match (`memcmp` about 2.3 %) and the multimap walk (about 1.1 %); the Minecraft record already
