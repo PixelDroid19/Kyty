@@ -89,6 +89,17 @@ same playback interval. Compare their presentation numbers and scene motion in
 order. This distinguishes a real stale-buffer or timestamp regression from an
 intentional bright frame in the source artwork.
 
+## Audio-first demux contract
+
+A guest may wait for its first audio frame before it takes any video frame.
+One demux thread feeds both queues, so it must not block on a full video
+queue while the audio queue has room: since 2026-11-16 (`fabb94594`) the
+decoder holds demuxed video packets (bounded at 32 MiB of compressed data),
+keeps reading audio, sends the held packets in order as video slots free, and
+drops them on seek or close. Before, the player's prepare step timed out and
+the video never started. `PPSA34971 - Hollow Knight: Voidheart Edition` plays
+its intro video and reaches gameplay with this change.
+
 ## Jump and loop contract
 
 `sceAvPlayerJumpToTime` repositions the decoder at the requested time, then

@@ -6,6 +6,44 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: the studio intro video was black, a UNORM target sampled as sRGB (2026-11-16, fixed)
+
+Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs of 14-18 s from boot.
+
+- **Observed.** After the publisher card the title plays its 8.5 s studio video (3840x2160 H.264); Kyty
+  presented black or the background instead. A video in another title plays, so the decoder was a lead only.
+- **Localized, stage by stage, with temporary prints.** The player calls, events and `GetVideoDataEx` frames
+  are correct (NV12, luma means 17-61). The guest copies each frame with `DMA_DATA` into two ping-pong
+  buffers; the copy matches its source. The copy is sampled as a linear R8 texture that is updated every
+  frame, and the YUV-to-RGB pixel program (image samples with non-sequential addresses) reads it correctly
+  into a 3840x2160 `R8G8B8A8_UNORM` render target. The next pass samples that target's address as
+  `8_8_8_8_SRGB` (tile 27, same extent): `Gen5PickSampleSurfaceAliases` rejected the target because its
+  format differs only in gamma, and the sample got a separate texture that skips its guest upload
+  (`guest-skip-live-cover`), so it read transparent black.
+- **Causal check.** Binding the rejected target for that sample (wrong gamma, behind a temporary variable)
+  showed the video, too bright; without it the frames were black.
+- **Fix (`13fafeac5`).** Render targets whose format has an 8-bit gamma twin (`R8G8B8A8`/`B8G8R8A8`
+  UNORM and sRGB) are created mutable with a two-format list (that pair only, so the driver keeps colour
+  compression). A sampled descriptor rejected only by gamma reads a mutable target whose twin is the sample
+  format, at the exact extent with every viewed level and layer, through a sampled view in the twin format
+  (`Gen5PickGammaTwinSurfaceAlias`); red/blue-exchanged targets compose their selectors as before. Storage
+  descriptors keep the old path.
+- **Verified.** Captures at 12-14 s match frames extracted from the source video in content and tone.
+  On the late dunes route a temporary counter on the new branch fired only for the video target and only
+  in the first 10 s. `PPSA17221 - Minecraft` world route 80-108 s: 30.35 fps against 30.31 before, 0 errors.
+  Unit suite 2703 tests pass and the three repository gates pass. A validation-layer intro run (layer
+  confirmed loaded) reported no image, view or format-list error; it reported two existing dispatch errors,
+  recorded below.
+- **Not verified.** There is no same-scene frame-rate comparison for this title: the 150 s route reaches
+  different scenes from run to run (tunnel, space, dunes). AMD/RADV is untested; window creation failed on
+  that driver before graphics initialization, so this is a host problem.
+- **Open, found on the way.** One of four 150 s route runs captured an all-black frame (RGB 0) at frame 3211,
+  with the title steady at 18.6 fps in the dunes. Three other runs, with captures every 4-10 s, showed none.
+  The new alias branch was not active then, so the cause is unexplained (a fade on a diverged route is
+  possible). The validation layer reports, during the intro, a storage image view `R16G16B16A16_SFLOAT` used
+  by an atomic (`VUID-vkCmdDispatch-None-02691`) and an `R8_UNORM` view bound to a descriptor that requires
+  UINT (`VUID-vkCmdDispatch-format-07753`), 20 times each. Neither was investigated.
+
 ## Robot platformer: unpatched frame rate by scene, the transient command-bound dip, and a replay-worker poll A/B (2026-11-15, measured)
 
 Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, silent console, late dunes route from the
