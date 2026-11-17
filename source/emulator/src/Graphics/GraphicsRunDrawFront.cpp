@@ -170,9 +170,9 @@ PreparedDrawInputs* DrawFront::Take(const uint32_t* draw_packet, uint32_t instan
 
 void DrawFront::Release()
 {
-	// Ordered before the flag is read, as the sleeper sets the flag before it reads the count.
+	// Ordered before the flags are read, as the sleeper sets them before it reads the count.
 	m_released.store(m_taken);
-	if (m_sleeping.load() && m_prepared.load(std::memory_order_relaxed) - m_taken <= kRecords / 2u)
+	if (m_parked.load() && m_sleeping.load() && m_prepared.load(std::memory_order_relaxed) - m_taken <= kRecords / 2u)
 	{
 		Wake();
 	}
@@ -270,10 +270,12 @@ void DrawFront::ThreadRun(void* data)
 			}
 			// Parked on a full ring: nothing is read until the processor frees records or stops.
 			front->m_reading.store(false);
+			front->m_parked.store(true);
 			front->Sleep([&] {
 				return front->m_generation.load() != job ||
 				       front->m_prepared.load(std::memory_order_relaxed) - front->m_released.load() <= kRecords / 2u;
 			});
+			front->m_parked.store(false);
 			front->m_reading.store(true);
 		}
 		done = job;

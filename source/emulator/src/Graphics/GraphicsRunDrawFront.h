@@ -110,6 +110,8 @@ private:
 	std::mutex              m_mutex;
 	std::condition_variable m_wake;
 	std::atomic<bool>       m_sleeping {false};
+	// Set while the replay waits on a full ring; a replay waiting for its next job has nothing to gain from a release.
+	std::atomic<bool> m_parked {false};
 
 	// Replay thread.
 	const uint32_t* m_replay_packet = nullptr;
