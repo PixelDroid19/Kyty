@@ -1222,21 +1222,18 @@ const GpuMemory::RecentMaterialization* GpuMemory::FindRecentMaterialization(con
 	const uint64_t graph_generation = m_object_graph_generation.load(std::memory_order_acquire);
 	const uint64_t heap_generation  = m_guest_bytes_generation.load(std::memory_order_acquire);
 	const uint64_t cache_removals   = m_materialization_cache.Removals();
-	for (const auto& recent: m_recent_materializations)
+	const auto&    recent           = m_recent_materializations[RecentMaterializationSlot(key)];
+	if (recent.graph_generation == graph_generation && recent.heap_generation == heap_generation &&
+	    recent.cache_removals == cache_removals && recent.key == key)
 	{
-		if (recent.graph_generation == graph_generation && recent.heap_generation == heap_generation &&
-		    recent.cache_removals == cache_removals && recent.key == key)
-		{
-			return &recent;
-		}
+		return &recent;
 	}
 	return nullptr;
 }
 
 void GpuMemory::RememberRecentMaterialization(const GpuMemoryMaterializationKey& key, const Materialization& value)
 {
-	auto& recent                  = m_recent_materializations[m_recent_materialization_next];
-	m_recent_materialization_next = (m_recent_materialization_next + 1u) % RECENT_MATERIALIZATIONS;
+	auto& recent                  = m_recent_materializations[RecentMaterializationSlot(key)];
 	recent.key                    = key;
 	recent.value                  = value;
 	recent.graph_generation       = m_object_graph_generation.load(std::memory_order_acquire);

@@ -316,3 +316,22 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   `PPSA21567 - Astro Bot` dunes; `PPSA17221 - Minecraft` missed the world once (the menu route
   ended on another menu screen, drawn correctly) and entered it at 86.7 s on the rerun, ending on
   the save's usual death screen. No fps claim.
+
+### Recent materializations in a direct-mapped table (2026-11-17)
+
+- Shadow run in gameplay (73.4 M texture and buffer object requests): the 8-entry recent ring
+  answered 10 % of them; a 256-slot table keyed by the full materialization key would answer 71 %
+  under the same validity test (object-graph, guest-bytes and cache-removal generations). A
+  lock-free variant was not built: sampled textures arrive with `read_only` false, so every reuse
+  writes `write_uses` and `write_time`, and `ResetHash`/`ResetPlaneHash` bump only the cache
+  removal counter, which is read under the registry lock.
+- Change: the ring became a 256-slot direct-mapped table indexed by a cheap hash of the first range,
+  its size, the first parameter and the object type; the full key compare, the generation test and
+  the field recheck under the lock are unchanged.
+- Verification: a DIAG run compared every table hit against the materialization cache: 46.8 M hits
+  of 67.1 M requests (70 %), 0 object mismatches besides one forced by hand. Command-processor
+  profile (gameplay, about 3,100 samples each): `CreateObject` under `PrepareTextures` 14.6 % ->
+  11.6 %, `PrepareTextures` 23.2 % -> 20.8 %. Captures of `PPSA21567 - Astro Bot` dunes and the
+  `PPSA17221 - Minecraft` world render as before. No fps claim (perf-recorded run).
+- Open: most stale table probes come from cache-slot evictions bumping the removal counter; split
+  that counter before changing the validity test.

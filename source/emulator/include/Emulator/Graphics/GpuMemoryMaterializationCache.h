@@ -156,6 +156,9 @@ public:
 		return hash;
 	}
 
+	// A few fields only: enough to spread the keys of one submission over a small table.
+	[[nodiscard]] uint64_t QuickHash() const { return Mix(m_address[0] ^ (m_size[0] << 20u) ^ m_params[0] ^ m_object_type); }
+
 	[[nodiscard]] bool operator==(const GpuMemoryMaterializationKey& other) const
 	{
 		return m_valid == other.m_valid && m_guest_submit == other.m_guest_submit && m_host_sequence == other.m_host_sequence &&

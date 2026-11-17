@@ -626,11 +626,15 @@ private:
 		uint64_t                    heap_generation  = 0;
 		uint64_t                    cache_removals   = 0;
 	};
-	static constexpr size_t                                    RECENT_MATERIALIZATIONS = 8;
+	// Direct-mapped: a draw samples several textures, so a short ring evicts them before the next draw.
+	static constexpr size_t                                    RECENT_MATERIALIZATIONS = 256;
 	std::array<RecentMaterialization, RECENT_MATERIALIZATIONS> m_recent_materializations {};
-	size_t                                                     m_recent_materialization_next = 0;
 	[[nodiscard]] const RecentMaterialization*                 FindRecentMaterialization(const GpuMemoryMaterializationKey& key) const;
 	void RememberRecentMaterialization(const GpuMemoryMaterializationKey& key, const Materialization& value);
+	static size_t RecentMaterializationSlot(const GpuMemoryMaterializationKey& key)
+	{
+		return static_cast<size_t>(key.QuickHash()) & (RECENT_MATERIALIZATIONS - 1u);
+	}
 
 	// The last few targets ResetHash found by exact range: a draw invalidates the same
 	// colour and depth objects again and again while the object graph is unchanged.
