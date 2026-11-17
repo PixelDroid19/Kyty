@@ -95,7 +95,8 @@ bool ShaderInstructionWritesVccHigh(const ShaderInstruction& inst)
 	};
 	// Native wave32 carry output occupies one scalar word, including the
 	// implicit VCC_LO destination of a VOP2 instruction.
-	const bool single_carry = inst.type == ShaderInstructionType::VAddCoCiU32 || inst.type == ShaderInstructionType::VSubrevCoCiU32;
+	const bool single_carry = inst.type == ShaderInstructionType::VAddCoCiU32 || inst.type == ShaderInstructionType::VSubrevCoCiU32 ||
+	                          inst.type == ShaderInstructionType::VSubCoCiU32;
 	return overlaps_high(inst.dst) || inst.dst2.type == ShaderOperandType::VccHi || (!single_carry && overlaps_high(inst.dst2));
 }
 
@@ -135,7 +136,8 @@ bool ShaderReverseBorrowMaskHasProvenance(const ShaderCode& code, uint32_t instr
 	}
 
 	const auto& consumer = instructions.At(instruction_index);
-	if (consumer.type != ShaderInstructionType::VSubrevCoCiU32 || consumer.src_num < 3)
+	if ((consumer.type != ShaderInstructionType::VSubrevCoCiU32 && consumer.type != ShaderInstructionType::VSubCoCiU32) ||
+	    consumer.src_num < 3)
 	{
 		return false;
 	}

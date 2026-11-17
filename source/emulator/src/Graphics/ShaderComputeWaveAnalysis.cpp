@@ -702,7 +702,8 @@ ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const Shad
 	}
 	const auto mask_pair = [](const ShaderOperand& operand)
 	{ return operand.size == 2 && (operand.type == ShaderOperandType::VccLo || operand.type == ShaderOperandType::Sgpr) && !operand.dpp; };
-	if ((instruction.type == ShaderInstructionType::VAddCoCiU32 || instruction.type == ShaderInstructionType::VSubrevCoCiU32) &&
+	if ((instruction.type == ShaderInstructionType::VAddCoCiU32 || instruction.type == ShaderInstructionType::VSubrevCoCiU32 ||
+	     instruction.type == ShaderInstructionType::VSubCoCiU32) &&
 	    instruction.dst.type == ShaderOperandType::Vgpr && instruction.dst.size == 1 && mask_pair(instruction.dst2) &&
 	    instruction.src_num == 3 && mask_pair(instruction.src[2]) && !instruction.vop_sdwa)
 	{

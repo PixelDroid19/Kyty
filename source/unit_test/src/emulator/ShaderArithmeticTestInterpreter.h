@@ -268,6 +268,10 @@ public:
 			{
 				if (t.size() > 8u) { Fail("composite wider than four words"); }
 				for (size_t i = 4; i < t.size(); ++i) { result.words.at(i - 4u) = arg(i); }
+			} else if (op == "OpISubBorrow")
+			{
+				result.words[0] = arg(4) - arg(5);
+				result.words[1] = arg(4) < arg(5) ? 1u : 0u;
 			} else if (op == "OpCompositeExtract") { r = value(t.at(4)).words.at(std::strtoul(t.at(5).c_str(), nullptr, 0)); }
 			else if (op == "OpExtInst")
 			{

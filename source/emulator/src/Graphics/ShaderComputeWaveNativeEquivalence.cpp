@@ -152,7 +152,7 @@ bool IsBranchType(ShaderInstructionType type)
 bool IsVectorMaskConsumer(ShaderInstructionType type)
 {
 	return type == ShaderInstructionType::VCndmaskB32 || type == ShaderInstructionType::VAddCoCiU32 ||
-	       type == ShaderInstructionType::VSubrevCoCiU32;
+	       type == ShaderInstructionType::VSubrevCoCiU32 || type == ShaderInstructionType::VSubCoCiU32;
 }
 
 // Instructions that read M0 without naming it (RDNA2 ISA 6.4, 10.4, 12.x): the

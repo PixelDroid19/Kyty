@@ -708,6 +708,8 @@ enum class ShaderInstructionType : uint32_t
 	VCmpxClassF16,
 	VCmpxClassF32,
 	VCmpxClassF64,
+	// Gen5 VOP2/VOP3B V_SUB_CO_CI_U32: src0 - src1 - borrow-in.
+	VSubCoCiU32,
 
 	ZMax
 };

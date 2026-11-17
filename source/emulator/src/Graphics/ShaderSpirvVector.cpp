@@ -5757,7 +5757,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 {
 	const auto& inst = code.GetInstructions().At(index);
 	const bool native_wave32 = spirv->NativeWave32();
-	if (inst.type == ShaderInstructionType::VSubrevCoCiU32 && !ShaderReverseBorrowMaskHasProvenance(code, index, native_wave32))
+	const bool borrow = inst.type == ShaderInstructionType::VSubrevCoCiU32 || inst.type == ShaderInstructionType::VSubCoCiU32;
+	if (borrow && !ShaderReverseBorrowMaskHasProvenance(code, index, native_wave32))
 	{
 		return false;
 	}
@@ -5768,11 +5769,11 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 	{
 		return false;
 	}
-	if (inst.type == ShaderInstructionType::VSubrevCoCiU32 &&
+	if (borrow &&
 	    (inst.dst.clamp || inst.dst.multiplier != 1.0f || inst.src[0].negate || inst.src[0].absolute || inst.src[1].negate ||
 	     inst.src[1].absolute || inst.src[2].negate || inst.src[2].absolute))
 	{
-		// V_SUBREV_CO_CI_U32 is integer arithmetic. Its VOP3B clamp and
+		// V_SUB(REV)_CO_CI_U32 is integer arithmetic. Its VOP3B clamp and
 		// source/output modifiers have distinct ISA semantics, so do not
 		// silently inherit the shared emitter's warning-only behavior.
 		return false;
@@ -5830,14 +5831,15 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
                OpStore %<dst2_0> %t213_<index>
                <clear_high>
 )";
-	// The mask accessor supplies the selected guest lane's borrow-in bit.
-	static const char* subrev_text = R"(
+	// The mask accessor supplies the selected guest lane's borrow-in bit. The
+	// borrow-out is minuend < subtrahend + borrow-in without wrapping (ISA 12.7).
+	static const char* borrow_text = R"(
               <load0>
               <load1>
               <load2>
         %subrev_carry_nonzero_<index> = OpINotEqual %bool %t2_<index> %uint_0
         %subrev_carry_<index> = OpSelect %uint %subrev_carry_nonzero_<index> %uint_1 %uint_0
-        %subrev_base_<index> = OpISubBorrow %ResTypeU %t1_<index> %t0_<index>
+        %subrev_base_<index> = OpISubBorrow %ResTypeU <minuend> <subtrahend>
         %subrev_value_<index> = OpCompositeExtract %uint %subrev_base_<index> 0
         %subrev_base_borrow_<index> = OpCompositeExtract %uint %subrev_base_<index> 1
         %subrev_adjusted_<index> = OpISubBorrow %ResTypeU %subrev_value_<index> %subrev_carry_<index>
@@ -5862,9 +5864,11 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 	switch (inst.type)
 	{
 		case ShaderInstructionType::VAddCoCiU32: text = add_text; break;
-		case ShaderInstructionType::VSubrevCoCiU32: text = subrev_text; break;
+		case ShaderInstructionType::VSubrevCoCiU32:
+		case ShaderInstructionType::VSubCoCiU32: text = borrow_text; break;
 		default: return false;
 	}
+	const bool reverse = inst.type == ShaderInstructionType::VSubrevCoCiU32;
 	// A wave32 carry writes one word. The adjacent scalar word can hold
 	// another live mask, including a comparison explicitly stored in VCC_HI.
 	const auto clear_high = native_wave32 ? String8 {} : String8("OpStore %<dst2_1> %uint_0").ReplaceStr("<dst2_1>", dst2_value1.value);
@@ -5875,6 +5879,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<load2>", load2)
+	                   .ReplaceStr("<minuend>", reverse ? "%t1_<index>" : "%t0_<index>")
+	                   .ReplaceStr("<subtrahend>", reverse ? "%t0_<index>" : "%t1_<index>")
 	                   .ReplaceStr("<index>", index_str);
 
 	return true;

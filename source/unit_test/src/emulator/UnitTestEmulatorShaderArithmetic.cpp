@@ -1858,6 +1858,38 @@ void IsNan(uint32_t actual, const char* label)
 	std::_Exit(0);
 }
 
+// V_SUB_CO_CI_U32: D = S0 - S1 - borrow-in; the borrow-out is S1 + borrow-in > S0 without
+// wrapping. VOP2 reads and writes VCC; VOP3B writes the borrow to an explicit SGPR pair.
+[[noreturn]] void RunSubtractWithBorrowContracts()
+{
+	Initialize();
+	constexpr uint32_t kVccLo = 106u;
+	const std::vector<uint32_t> vop2 = {(0x29u << 25u) | (2u << 17u) | (1u << 9u) | 256u, kEnd};
+	const std::vector<uint32_t> vop3 = {(0x35u << 26u) | (0x129u << 16u) | (8u << 8u) | 2u, 256u | (257u << 9u) | (kVccLo << 18u), kEnd};
+	for (const bool e64: {false, true})
+	{
+		const Program program(Emit(Parse(e64 ? vop3 : vop2), 0xc0u, false, false, true).c_str());
+		const char* borrow_out = e64 ? "%s8" : "%vcc_lo";
+		const auto run = [&](uint32_t s0, uint32_t s1, uint32_t borrow_in, const char* destination) {
+			return program.Run({{"%v0", s0}, {"%v1", s1}, {"%v2", 0xa5a51234u}, {"%vcc_lo", borrow_in}, {"%vcc_hi", 0u},
+			                    {"%s8", 0xdeadbeefu}, {"%s9", 0xdeadbeefu}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", 1u},
+			                    {"%exec_hi", 0u}, {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+			                   destination);
+		};
+		const auto check = [&](uint32_t s0, uint32_t s1, uint32_t borrow_in, uint32_t expected, uint32_t expected_borrow,
+		                       const char* label) {
+			Equal(run(s0, s1, borrow_in, "%v2"), expected, label);
+			Equal(run(s0, s1, borrow_in, borrow_out) & 1u, expected_borrow, label);
+		};
+		check(5u, 3u, 0u, 2u, 0u, "V_SUB_CO_CI_U32 no borrow");
+		check(5u, 4u, 1u, 0u, 0u, "V_SUB_CO_CI_U32 borrow-in reaches zero");
+		check(3u, 5u, 0u, 0xfffffffeu, 1u, "V_SUB_CO_CI_U32 source borrow");
+		check(5u, 5u, 1u, UINT32_MAX, 1u, "V_SUB_CO_CI_U32 equal sources with borrow-in");
+		check(UINT32_MAX, UINT32_MAX, 1u, UINT32_MAX, 1u, "V_SUB_CO_CI_U32 S1 plus borrow-in does not wrap");
+	}
+	std::_Exit(0);
+}
+
 // V_SIN_F32 / V_COS_F32 take turns: the ISA functional examples, quarter turns that must
 // land exactly, and a large phase whose fraction a 2*pi product would lose.
 [[noreturn]] void RunTrigTurnContracts()
@@ -1949,6 +1981,7 @@ TEST(EmulatorShaderArithmetic, ComputeFloatModeClampOutputModifierAndMinMaxContr
 {
 	ASSERT_EXIT(RunFloatModeContracts(ShaderType::Compute), ::testing::ExitedWithCode(0), "");
 }
+TEST(EmulatorShaderArithmetic, SubtractWithBorrowWritesResultAndLaneBorrow) { ASSERT_EXIT(RunSubtractWithBorrowContracts(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, SineAndCosineReduceTheirPhaseInTurns) { ASSERT_EXIT(RunTrigTurnContracts(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, FloatToIntegerConversionsSaturateWithoutUndefinedSpirvConversions)
 {

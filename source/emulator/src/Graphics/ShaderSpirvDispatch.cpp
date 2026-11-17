@@ -692,6 +692,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1,  ShaderInstructionType::VSubrevI32, ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1,  {"%t_<index> = OpISubBorrow %ResTypeU %t1_<index> %t0_<index>"}},
     {Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2, ShaderInstructionType::VAddCoCiU32, ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2, {""}},
     {Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2, ShaderInstructionType::VSubrevCoCiU32, ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2, {""}},
+    {Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2, ShaderInstructionType::VSubCoCiU32, ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2, {""}},
     {Recompile_VMadU64U32_Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair, ShaderInstructionType::VMadU64U32, ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair, {""}},
 
     {Recompile_VCmp_XXX_F32_SmaskVsrc0Vsrc1,  ShaderInstructionType::VCmpEqF32,    ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFOrdEqual"}},
