@@ -338,9 +338,10 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 
 ### Prepared shader ids returned to the front on a pipeline hit (2026-11-17)
 
-- Like-for-like gameplay runs (quiet host, `PrintfDirection = Silent`, profiler attached):
-  `d64a0b11b` 17.62 fps, 13.69 us per draw (binding 7.54, pipeline setup 1.18) against the table
-  and this change 18.5 fps, 12.85 us (binding 6.96, pipeline setup 1.02). Without the profiler,
+- Gameplay runs (quiet host, profiler attached): `d64a0b11b` 17.62 fps, 13.69 us per draw against
+  the table and this change 18.5 fps, 12.85 us. Same-code runs today differed by up to 1.6 us per
+  draw, so this pair is within run spread; the attributable part is the profile (about 3.5 % of
+  the command-processor thread). Without the profiler,
   `606a4ac78` ran 18.65 fps at 12.82 us. A run without the explicit setting gave the same
   (12.81 us; the guest runner defaults to `Silent`). Single runs; earlier runs of the day at
   14.2-14.4 us carried temporary diagnostics or ran beside other host load and are not compared.
@@ -376,9 +377,12 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   superseded-parent test of storage-array growth (`:1836`). `create_raw_source_write_time` ignores
   `write_time` for textures, write-back never runs on them (no write-back function), and the
   write-back alias check reads the written-back object's own time. A temporary shadow `write_time`
-  that sampled-texture uses did not bump computed both decisions both ways: 0 calls at either site
-  in gameplay of this title, `PPSA21567 - Astro Bot` dunes, the `PPSA17221 - Minecraft` world and
-  90 s of `PPSA15552 - Dead Cells` menus (no input route); a call forced by hand printed its
-  difference, so the counter engaged. The bump therefore decided nothing in these runs; whether a
-  sampled-only bind should stop counting as a write remains a model change that needs the full
-  regression set.
+  that sampled-texture uses did not bump computed both decisions both ways. It printed only on a
+  difference or every 4,096 calls per site: nothing printed in gameplay of this title,
+  `PPSA21567 - Astro Bot` dunes, the `PPSA17221 - Minecraft` world or 90 s of
+  `PPSA15552 - Dead Cells` menus (no input route), and a difference forced at the 50th seed call
+  never printed in this title or Minecraft, so the seed site ran fewer than 50 times there and each
+  site fewer than 4,096 times everywhere. A call forced by hand printed, so the counter engaged.
+  These runs barely reach the two sites; they do not show the bump is unused where the sites were
+  written for. Whether a sampled-only bind should stop counting as a write remains a model change
+  that needs those titles and the full regression set.
