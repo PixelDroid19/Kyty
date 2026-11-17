@@ -423,12 +423,14 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 ### Budget for 30 fps (2026-11-17, existing gameplay samples and profile)
 
 - GPU: render-engine busy 0.64-0.80 of each second at 18-19 flips per second (`samples.jsonl`
-  of two gameplay runs), about 37 ms of engine time per frame. 30 fps needs 33 ms, so on this
-  host the GPU alone caps the scene near 26 fps unless the per-frame GPU work shrinks too.
-- Command processor: about 53.6 ms per frame and 3,400 draws, 15.8 us of thread time per draw.
-  `BindDescriptors` holds 47 % (about 7.4 us per draw: textures 22 %, descriptor cache 10.8 %,
-  storage 7.3 %, samplers 2.2 %); the driver 8.3 % (about 1.3 us); buffer flush and submit about
-  11 %; front-miss pixel-shader analysis 6.9 %. 30 fps allows about 9.8 us per draw, so with the
-  rest unchanged binding must fall to about 1.5 us per draw on this thread: about 80 % of it must
-  leave the thread or disappear, against the 10-15 % that is free of order today
-  (`docs/bringup/parallel-recording-design.md`, "Descriptor binding split by order").
+  of two gameplay runs), about 37 ms of engine time per frame. A GPU-bound scene of
+  `PPSA21567 - Astro Bot` read 84-88 % on the same counter, so the GPU cap here is extrapolated at
+  23-26 fps, not tested.
+- Command processor (timers): 12.85 us per draw in the draw processor, of which binding 6.9 us,
+  plus about 10 ms per frame outside draws, at about 3,400 draws per frame. 30 fps leaves about
+  1 us per draw for binding with the rest unchanged, so nearly all of it must leave the thread or
+  disappear, against the 10-15 % that is free of order today
+  (`docs/bringup/parallel-recording-design.md`, "Descriptor binding split by order"). Profile
+  shares (stacks truncated, so lower bounds): `BindDescriptors` 47 % (textures 22 %, descriptor
+  cache 10.8 %, storage 7.3 %, samplers 2.2 %), driver 8.3 %, buffer flush and submit about
+  11 %, shader input analysis about 11 % (pixel 6.9 %, vertex 2.4 %, redefined buffers 1.6 %).
