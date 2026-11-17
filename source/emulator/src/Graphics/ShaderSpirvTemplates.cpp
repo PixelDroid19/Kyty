@@ -1683,8 +1683,9 @@ const char SCC_CARRY_1[] = R"(
 
 // V_SIN_F32 / V_COS_F32 take their phase in turns (ISA 12.8). The phase is reduced in
 // turns before scaling by 2*pi, so integers (any large finite input) land on exact zero
-// phase and quarter turns on exact quadrants; zero results are +0 except sin(-0) = -0,
-// and infinities return the ISA's NaN.
+// phase and quarter turns on exact quadrants, whose 0 and 1 are selected rather than
+// left to the host Sin/Cos; zero results are +0 except sin(-0) = -0, and infinities
+// return the ISA's NaN.
 #define KYTY_TRIG_F32_TURNS_REDUCE R"(
         %tw_<index> = OpExtInst %float %GLSL_std_450 RoundEven %t0_<index>
         %tr_<index> = OpFSub %float %t0_<index> %tw_<index>
@@ -1694,8 +1695,13 @@ const char SCC_CARRY_1[] = R"(
         %tfh_<index> = OpFMul %float %tf4_<index> %float_0_500000
         %tfq_<index> = OpFMul %float %tfh_<index> %float_0_500000
         %tth_<index> = OpFMul %float %tfq_<index> %float_2pi
-        %tsin_<index> = OpExtInst %float %GLSL_std_450 Sin %tth_<index>
-        %tcos_<index> = OpExtInst %float %GLSL_std_450 Cos %tth_<index>
+        %tsinv_<index> = OpExtInst %float %GLSL_std_450 Sin %tth_<index>
+        %tcosv_<index> = OpExtInst %float %GLSL_std_450 Cos %tth_<index>
+        %tf4b_<index> = OpBitcast %uint %tf4_<index>
+        %tf4m_<index> = OpBitwiseAnd %uint %tf4b_<index> %uint_0x7fffffff
+        %tquad_<index> = OpIEqual %bool %tf4m_<index> %uint_0
+        %tsin_<index> = OpSelect %float %tquad_<index> %float_0_000000 %tsinv_<index>
+        %tcos_<index> = OpSelect %float %tquad_<index> %float_1_000000 %tcosv_<index>
         %tqn_<index> = OpIsNan %bool %tqr_<index>
         %tqs_<index> = OpSelect %float %tqn_<index> %float_0_000000 %tqr_<index>
         %tqi_<index> = OpConvertFToS %int %tqs_<index>
