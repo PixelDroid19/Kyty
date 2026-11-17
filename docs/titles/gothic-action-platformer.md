@@ -646,11 +646,19 @@ in 64), in microseconds per draw:
   CPU time equal to wall time, no submit inside it). At about 158 runs per frame that is about
   9 ms of a 52 ms frame, before the batch's flush and submit (about 12 us per submit).
 - About 28 us of the extra is the missing front record (shader input analysis on the processor);
-  about 29 us coincides with the new command buffer (texture binding, render-pass and state emission,
-  materialization).
+  about 29 us coincides with the new command buffer. A forced new command buffer every 64th draw
+  (prepared draws, same batch) measured that part alone: +13 us (binding +6.2, of it textures +3.9;
+  emission +3.8; state +1.7; materialization +1.0), with 58 more command buffers per frame and
+  unchanged processor draw time per frame (43.0 against 43.2 ms). About 15 us of a batch start
+  is explained by neither.
+- Fronts woke within 8 us of a start in 98 % of starts and had their first record ready 16-32 us
+  after it in about half (77 % within 32 us, 98 % within 64 us).
+- No constant-stream run carried packets in the route (the stream is empty on this title), so a
+  batch boundary has no state change between two draw-stream runs.
 - Register state at the start of each top-level run equalled the state at the end of the previous
-  one in all 896,147 boundaries compared (context, user config and shader registers), so a front
-  that continued into the next batch would replay from the right state.
+  one in all 896,147 boundaries compared (context, user config and shader registers). The
+  comparison is between consecutive top-level runs, so a change made inside a constant-stream run
+  between two draw-stream runs is not excluded by it.
 - Draws without a front record in mid-run are 1.6 % of draws, and cost about 28 us more than a
   prepared draw.
 
@@ -661,13 +669,24 @@ in 64), in microseconds per draw:
   front started on the queued batch would have to prepare that draw (about 22 us of analysis plus
   a thread wake). Without a queued batch the gap was 72 us, mostly waiting for the batch.
 - Mid-run draws without a front record: 58 % had a record prepared before a host write moved the
-  epoch (rejected as stale), 42 % were not prepared yet; none were skipped by the fronts and none
-  differed in epoch or instance count at the record.
+  epoch (rejected as stale), 42 % had no record at or past the draw (not prepared yet, or declined
+  by the front); none differed in epoch or instance count at the record.
 - Command buffers per frame 173, render-pass begins 196: nearly every batch begins its own render
   pass, so the emission and materialization part of the boundary may follow the target change and
   not the buffer; merging batches would recover it only where consecutive batches share targets.
 
 Bound: removing the whole boundary cost gives about 38 ms per frame (about 26 fps); with the
 70 % of batches already queued, about 23 fps. A front continuing into the queued batch recovers at
-most the analysis part, about 24 us x 0.7 x 158, 2.7 ms per frame (about +5 %). Not built yet.
+most the analysis part, about 24 us x 0.7 x 158, 2.7 ms per frame (about +5 %).
+
+### Excluded: starting the fronts on the queued batch (2026-11-17)
+
+Counted at each batch end with a queued next batch (258,048 boundaries in the route): the next
+draw stream reached its first indexed draw without an ordering packet in 90 % of them, but the
+host-write epoch advanced before that draw in 83 % of those (end-of-pipe label copies and
+write-backs of the finishing work). `Take` rejects every record analysed before an advance, so a
+front started at the batch end would serve the first draw in about 15 % of queued boundaries:
+about 0.4 ms per frame. No queued boundary took a submission wait or a flip. Not built. Reopen
+only with a freshness rule narrower than the global epoch, which would also serve the mid-run
+records rejected as stale.
 
