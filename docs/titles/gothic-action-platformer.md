@@ -119,3 +119,16 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 - **Excluded: a register prefilter for the dynamic scalar-load scan.** `ShaderIsDynamicScalarStorageConsumer`
   scans about 30 records per call, but 89 % of calls find a matching storage record, so filtering
   by destination register would skip almost nothing.
+- **Texture-stage reuse, priced (excluded as the lever).** Shadow check on the Silent route
+  (2026-11-17): of about 170,000 texture-stage binds per 2 s, 84 % repeat the previous bind's
+  inputs in the same submission and object generation, with 0 output mismatches (positive control:
+  99.9 % of changed inputs change the output); robot platformer 0 of about 7,000, sandbox world has
+  no eligible binds. But the binds with no side path (about 90,000 per 2 s) take 100 ms of the
+  470 ms texture stage: about 1.1 us each, already `CachedReuse` hits with no other command-buffer
+  work. Skipping them saves at most about 50 ms/s. The cost is in depth-texture binds
+  (`depth-guest` about 67,000 and `depth-exact` about 41,000 per 2 s, about 7 us per bind).
+- **Depth refusal text built only on refusal.** The depth path formatted a refusal string on every
+  depth bind (about 0.9 % of the command-processor thread); it is now formatted only when the
+  depth materialization is refused, the one case that prints it.
+- Dialogue scene after the new game (robust route, Silent): about 20 fps, no visual errors in a
+  burst of captures.
