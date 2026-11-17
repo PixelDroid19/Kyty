@@ -425,7 +425,14 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 - GPU: render-engine busy 0.64-0.80 of each second at 18-19 flips per second (`samples.jsonl`
   of two gameplay runs), about 37 ms of engine time per frame. A GPU-bound scene of
   `PPSA21567 - Astro Bot` read 84-88 % on the same counter, so the GPU cap here is extrapolated at
-  23-26 fps, not tested.
+  23-26 fps.
+- Render scale test (one gameplay run, `Fixed` / `RenderTargets` 960x540, same scene: 3,369 draws
+  per frame): 15.8 fps (native runs 18-18.6), draw processor 15.3 us per draw, render-engine busy
+  0.36-0.51, about 28 ms of engine time per frame against about 37 ms at native. The scene is
+  command-processor bound (quarter the pixels did not raise fps), and only about a quarter of the
+  GPU frame time follows resolution: the rest is per-draw or per-pass work. 30 fps therefore needs
+  the GPU frame cut as well as the command-processor one; lower resolution does not remove that
+  cost. The slower draw processor in this run is one sample and is not explained.
 - Command processor (timers): 12.85 us per draw in the draw processor, of which binding 6.9 us,
   plus about 10 ms per frame outside draws, at about 3,400 draws per frame. 30 fps leaves about
   1 us per draw for binding with the rest unchanged, so nearly all of it must leave the thread or
