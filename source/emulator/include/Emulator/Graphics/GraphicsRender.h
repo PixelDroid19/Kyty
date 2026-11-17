@@ -39,6 +39,7 @@ struct ShaderProgramSnapshot;
 struct VulkanImage;
 struct VideoOutVulkanImage;
 struct DepthStencilVulkanImage;
+struct DepthSliceArray;
 struct TextureVulkanImage;
 struct StorageTextureVulkanImage;
 struct RenderTextureVulkanImage;
@@ -786,6 +787,9 @@ public:
 	void DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth);
 	void DeferStencilPlaneStoreBack(DepthStencilVulkanImage* depth);
 	void StoreBackDepthPlanes();
+	// A layered depth pass renders into the slice array of its first slice; the array's layers return to the slice
+	// images when the pass ends.
+	void DeferLayeredDepthStore(DepthSliceArray* array, std::vector<DepthStencilVulkanImage*> slices);
 	// A submission of another queue this recording waits for on the device before it executes, through that
 	// queue's timeline value; later submissions of a queue complete after earlier ones.
 	void AwaitSubmissionOnDevice(SubmissionId submission, VkSemaphore timeline, uint64_t value);
@@ -836,6 +840,11 @@ private:
 		uint64_t        end     = 0;
 		VkCommandBuffer segment = nullptr;
 		uint64_t        hazards = 0;
+	};
+	struct LayeredDepthStore
+	{
+		DepthSliceArray*                      array = nullptr;
+		std::vector<DepthStencilVulkanImage*> slices;
 	};
 
 	[[nodiscard]] bool AttachPipelineLease(VulkanPipeline* pipeline, bool* added);
@@ -898,6 +907,7 @@ private:
 	uint64_t                     m_geometry_offset  = 0;
 	// Images the render passes begun since the open segment opened write.
 	std::vector<const VulkanImage*> m_segment_attachments;
+	std::vector<LayeredDepthStore>        m_layered_depth_stores;
 	std::vector<DepthStencilVulkanImage*> m_depth_plane_store_backs;
 	std::vector<DepthStencilVulkanImage*> m_stencil_plane_store_backs;
 	std::vector<SubmissionId>             m_device_awaited;

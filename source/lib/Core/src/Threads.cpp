@@ -24,10 +24,11 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#include <algorithm>
 #include <windows.h> // IWYU pragma: keep
 #endif
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS && KYTY_COMPILER == KYTY_COMPILER_CLANG
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #define KYTY_WIN_CS
 #endif
 
@@ -635,10 +636,44 @@ void Thread::Sleep(uint32_t millis)
 #endif
 }
 
+#if !defined(KYTY_SDL_THREADS) && KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+// winpthreads' nanosleep, behind std::this_thread::sleep_for, rounds a sleep
+// shorter than a millisecond down to none. A high-resolution waitable timer
+// sleeps for the requested time. The wait also carries a timeout, far past the
+// timer, so a thread that inspects the sleeper sees a bounded wait.
+static void SleepPrecise(uint64_t nanos)
+{
+	struct SleepTimer
+	{
+		SleepTimer(): handle(CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_MODIFY_STATE | SYNCHRONIZE)) {}
+		~SleepTimer()
+		{
+			if (handle != nullptr)
+			{
+				CloseHandle(handle);
+			}
+		}
+		KYTY_CLASS_NO_COPY(SleepTimer);
+		HANDLE handle;
+	};
+	thread_local SleepTimer timer;
+	EXIT_IF(timer.handle == nullptr);
+
+	// A negative due time is relative, in 100 ns units.
+	LARGE_INTEGER due {};
+	due.QuadPart = -static_cast<LONGLONG>((nanos + 99u) / 100u);
+	EXIT_IF(SetWaitableTimer(timer.handle, &due, 0, nullptr, nullptr, FALSE) == 0);
+	const uint64_t bound_millis = nanos / 1000000u + 1000u;
+	EXIT_IF(WaitForSingleObject(timer.handle, static_cast<DWORD>(std::min<uint64_t>(bound_millis, INFINITE - 1u))) != WAIT_OBJECT_0);
+}
+#endif
+
 void Thread::SleepMicro(uint32_t micros)
 {
 #ifdef KYTY_SDL_THREADS
 	SDL_DelayNS(static_cast<Uint64>(micros) * 1000u);
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	SleepPrecise(static_cast<uint64_t>(micros) * 1000u);
 #else
 	std::this_thread::sleep_for(std::chrono::microseconds(micros));
 #endif
@@ -648,6 +683,8 @@ void Thread::SleepNano(uint64_t nanos)
 {
 #ifdef KYTY_SDL_THREADS
 	SDL_DelayNS(nanos);
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	SleepPrecise(nanos);
 #else
 	std::this_thread::sleep_for(std::chrono::nanoseconds(nanos));
 #endif
@@ -974,5 +1011,70 @@ uint64_t Thread::GetHostThreadId()
 	return static_cast<uint64_t>(std::hash<std::thread::id> {}(std::this_thread::get_id()));
 #endif
 }
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+// NT_TIB keeps StackBase as the exclusive top and StackLimit as the lowest committed byte.
+Thread::StackRange Thread::GetStackRange()
+{
+	const auto* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+	return {reinterpret_cast<uint64_t>(tib->StackLimit), reinterpret_cast<uint64_t>(tib->StackBase)};
+}
+
+void Thread::SetStackRange(const StackRange& range)
+{
+	EXIT_IF(range.low >= range.high);
+	auto* tib       = reinterpret_cast<NT_TIB*>(NtCurrentTeb());
+	tib->StackLimit = reinterpret_cast<void*>(range.low);
+	tib->StackBase  = reinterpret_cast<void*>(range.high);
+}
+
+// Lowest address of the committed run that ends at end, scanning one allocation from its base.
+static uint64_t CommittedRunStart(uint64_t allocation_base, uint64_t end)
+{
+	uint64_t run_start = allocation_base;
+	for (uint64_t cursor = allocation_base; cursor < end;)
+	{
+		MEMORY_BASIC_INFORMATION region {};
+		EXIT_IF(VirtualQuery(reinterpret_cast<const void*>(cursor), &region, sizeof(region)) == 0);
+		const uint64_t region_end = reinterpret_cast<uint64_t>(region.BaseAddress) + region.RegionSize;
+		if (region.State != MEM_COMMIT) { run_start = region_end; }
+		cursor = region_end;
+	}
+	return run_start;
+}
+
+// VirtualQuery reports like pages only from the queried page upward, so the run below top is found by
+// scanning each allocation from its base. The record must reach the stack's lowest committed byte:
+// MSVC's __chkstk writes a zero into every page between StackLimit and the new RSP, and inside a
+// guest stack those pages hold live guest frames.
+Thread::StackRange Thread::CommittedStackBelow(uint64_t top)
+{
+	MEMORY_BASIC_INFORMATION region {};
+	EXIT_IF(top == 0 || VirtualQuery(reinterpret_cast<const void*>(top - 1), &region, sizeof(region)) == 0 || region.State != MEM_COMMIT);
+	uint64_t low = top;
+	for (;;)
+	{
+		const auto allocation_base = reinterpret_cast<uint64_t>(region.AllocationBase);
+		low                        = CommittedRunStart(allocation_base, low);
+		if (low != allocation_base || allocation_base == 0 ||
+		    VirtualQuery(reinterpret_cast<const void*>(allocation_base - 1), &region, sizeof(region)) == 0 || region.State != MEM_COMMIT)
+		{
+			return {low, top};
+		}
+	}
+}
+#else
+Thread::StackRange Thread::GetStackRange()
+{
+	return {};
+}
+
+void Thread::SetStackRange(const StackRange& /*range*/) {}
+
+Thread::StackRange Thread::CommittedStackBelow(uint64_t /*top*/)
+{
+	return {};
+}
+#endif
 
 } // namespace Kyty::Core

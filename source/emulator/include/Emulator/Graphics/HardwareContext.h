@@ -33,6 +33,11 @@ struct ColorView
 	uint32_t current_mip_level      = 0;
 };
 
+// COMP_SWAP ALT on a two-channel color format stores exports X and W in channels
+// 0 and 1. No host format orders channels that way, so the pixel export and the
+// write mask move W into the second channel under this export order value.
+constexpr uint8_t kColorExportOrderTwoChannelAlt = 4u;
+
 struct ColorInfo
 {
 	bool fmask_compression_enable = false;
@@ -748,7 +753,9 @@ public:
 	void SetColorInfo(uint32_t slot, const ColorInfo& info)
 	{
 		m_render_targets[slot].info          = info;
-		m_sh_regs.target_output_order[slot] = static_cast<uint8_t>(info.channel_order);
+		const bool two_channel               = info.format == 0x3u || info.format == 0x5u || info.format == 0xbu;
+		m_sh_regs.target_output_order[slot] =
+		    two_channel && info.channel_order == 1u ? kColorExportOrderTwoChannelAlt : static_cast<uint8_t>(info.channel_order);
 		m_sh_regs.target_output_number[slot] = static_cast<uint8_t>(info.channel_type);
 	}
 	void SetColorAttrib(uint32_t slot, const ColorAttrib& attrib) { m_render_targets[slot].attrib = attrib; }

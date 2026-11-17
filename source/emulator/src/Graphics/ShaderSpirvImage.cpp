@@ -1009,7 +1009,12 @@ String8 GuardImageDestinationStores(const String8& source, const ShaderInstructi
 	}
 
 	uint32_t destination_count = inst.dst.size > 0 ? static_cast<uint32_t>(inst.dst.size) : 1u;
-	if (inst.mimg_dmask != 0)
+	// Gather4 returns four texels of the one channel its DMASK selects.
+	const bool gather = inst.type == ShaderInstructionType::ImageGather4 || inst.type == ShaderInstructionType::ImageGather4C;
+	if (gather)
+	{
+		destination_count = 4u;
+	} else if (inst.mimg_dmask != 0)
 	{
 		destination_count = 0;
 		for (uint32_t mask = inst.mimg_dmask; mask != 0; mask >>= 1u)
@@ -3436,6 +3441,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleL_VdataVaddrStSsMimgDmask)
 	{
 		shape       = SampledImageShape::Array2d;
 		sampled_num = bind->textures2D.textures2d_array_sampled_num;
+	} else if (inst.mimg_dimension == 5u && descriptor_shape == ShaderGen5SampledTextureShape::TwoDimensional)
+	{
+		// A single-layer 2D-array view bound as 2D: its only slice is sampled as (x, y).
+		sampled_num = bind->textures2D.textures2d_sampled_num;
 	}
 	if (sampled_num <= 0)
 	{
@@ -3446,7 +3455,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleL_VdataVaddrStSsMimgDmask)
 
 	const auto texture = operand_variable_to_str(inst.src[1], 0);
 	const auto sampler = operand_variable_to_str(inst.src[2], 0);
-	const auto lod     = mimg_address_to_str(inst, coordinate_num);
+	// The LOD follows every DIM coordinate, the slice included (RDNA2 ISA table 43).
+	const auto lod     = mimg_address_to_str(inst, inst.mimg_dimension == 1u ? 2 : 3);
 	if (texture.type != SpirvType::Uint || sampler.type != SpirvType::Uint || lod.type != SpirvType::Float)
 	{
 		return false;

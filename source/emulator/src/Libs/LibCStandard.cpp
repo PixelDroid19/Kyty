@@ -313,12 +313,12 @@ KYTY_SYSV_ABI double c_wcstod(const uint16_t* s, uint16_t** end)
 
 KYTY_SYSV_ABI int64_t c_wcstol(const uint16_t* s, uint16_t** end, int base)
 {
-	return ConvertWide<int64_t>(s, end, [base](const char* t, char** e) { return std::strtol(t, e, base); });
+	return ConvertWide<int64_t>(s, end, [base](const char* t, char** e) { return std::strtoll(t, e, base); });
 }
 
 KYTY_SYSV_ABI uint64_t c_wcstoul(const uint16_t* s, uint16_t** end, int base)
 {
-	return ConvertWide<uint64_t>(s, end, [base](const char* t, char** e) { return std::strtoul(t, e, base); });
+	return ConvertWide<uint64_t>(s, end, [base](const char* t, char** e) { return std::strtoull(t, e, base); });
 }
 
 KYTY_SYSV_ABI int64_t c_wcstoll(const uint16_t* s, uint16_t** end, int base)

@@ -12,7 +12,7 @@ namespace Kyty::Libs::Graphics {
 // allocation and the linear staging footprint. Keep that contract in one place so
 // sampled and storage textures cannot drift apart.
 //
-// Supported swizzle modes (T# SW mode, single mip only):
+// Supported swizzle modes (T# SW mode; one mip level except in SW mode 27):
 //  - 5, Standard 4KB, and 9, Standard 64KB: 1, 2, 4, 8 or 16-byte elements through the RDNA2 SW_4KB_S /
 //    SW_64KB_S volume patterns; the descriptor pitch is ignored and rows are the width rounded up to the block
 //    width;
@@ -24,7 +24,8 @@ namespace Kyty::Libs::Graphics {
 //    blocks for the Z and standard swizzles only (titles carry its 64 KiB 3D block
 //    table), so a render-target volume is thin: every depth slice is a complete 2D
 //    render-target slice, laid out like the layers of a 2D array, with the slice
-//    index permuting the within-block pipe bits.
+//    index permuting the within-block pipe bits. Each layer holds the whole mip chain, so
+//    slice z of level L is layer z of that chain; level L has max(1, depth >> L) slices.
 struct Gen5TextureVolumeLayout
 {
 	TileSizeAlign tiled {};

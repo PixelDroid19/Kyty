@@ -72,11 +72,13 @@ bool LinearLayout(uint32_t format, uint32_t height, uint32_t depth, uint32_t pit
 	return true;
 }
 
-bool ThinRenderTargetLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch,
+// A thin volume stores depth slice z of every level in array layer z; each layer holds the
+// whole mip chain, as a 2D-array layer does.
+bool ThinRenderTargetLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch, uint32_t levels,
                             Gen5TextureVolumeLayout* layout)
 {
 	Gen5TextureArrayLayout slices {};
-	if (!Gen5GetTextureArrayLayout(format, width, height, pitch, 1u, kSwModeRender64K, depth, &slices) ||
+	if (!Gen5GetTextureArrayLayout(format, width, height, pitch, levels, kSwModeRender64K, depth, &slices) ||
 	    slices.tiled_size > UINT32_MAX)
 	{
 		return false;
@@ -104,12 +106,16 @@ bool Gen5GetVolumeTextureLayout(uint32_t format, uint32_t width, uint32_t height
 {
 	if (layout == nullptr) { return false; }
 	*layout = {};
-	if (width == 0u || height == 0u || depth == 0u || pitch < width || levels != 1u) { return false; }
+	if (width == 0u || height == 0u || depth == 0u || pitch < width || levels == 0u ||
+	    (levels != 1u && tile != kSwModeRender64K))
+	{
+		return false;
+	}
 	Gen5TextureVolumeLayout result {};
 	bool                    supported = false;
 	if (tile == kSwModeStandard4K) { supported = StandardLayout(format, width, height, depth, 4096u, &result); }
 	if (tile == kSwModeStandard64K) { supported = StandardLayout(format, width, height, depth, 65536u, &result); }
-	if (tile == kSwModeRender64K) { supported = ThinRenderTargetLayout(format, width, height, depth, pitch, &result); }
+	if (tile == kSwModeRender64K) { supported = ThinRenderTargetLayout(format, width, height, depth, pitch, levels, &result); }
 	if (tile == kSwModeLinear)
 	{
 		supported    = LinearLayout(format, height, depth, pitch, &result);
@@ -159,6 +165,8 @@ bool Gen5DetileTextureVolume(void* destination, uint64_t destination_size, const
 	}
 	if (layout.thin)
 	{
+		// A mip chain has one linear range per level (see the sampled volume upload).
+		if (layout.slices.levels != 1u) { return false; }
 		return Gen5DetileTextureArray(destination, destination_size, source, source_size, layout.slices);
 	}
 	TileConvertStandardVolumeToLinear(destination, source, layout.width, layout.height, layout.depth, layout.pitch,

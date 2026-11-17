@@ -374,13 +374,10 @@ void* mem_alloc_check_alignment(void* ptr)
 
 void* mem_alloc(size_t size)
 {
+	// operator new routes here, and C++ requires a zero-size new to return a unique valid pointer.
 	if (size == 0)
 	{
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 		size = 1;
-#else
-		EXIT("size == 0\n");
-#endif
 	}
 
 	if ((g_mem_max_size != 0u) && size > g_mem_max_size)

@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <shared_mutex>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -100,6 +101,11 @@ enum class PipelineCacheStoreSaveResult
 // whole file.
 void               PipelineCacheStoreRecordCreation(VkResult result, const VkPipelineCreationFeedback& feedback);
 [[nodiscard]] bool PipelineCacheStoreTakeAddedEntries();
+// Vulkan lets vkGetPipelineCacheData run while other threads create pipelines with
+// the same cache, but the Intel Windows driver then faults inside the read. Every
+// pipeline creation that passes the shared cache holds this lock shared, and a
+// checkpoint read holds it exclusive.
+[[nodiscard]] std::shared_mutex& PipelineCacheAccess();
 
 [[nodiscard]] std::vector<uint8_t>         PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& properties);
 [[nodiscard]] PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineCache cache,

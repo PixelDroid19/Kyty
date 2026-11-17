@@ -522,7 +522,7 @@ int CaptureRunMain(const std::vector<std::string>& args)
 		return 2;
 	}
 	const std::string seed   = manifest_path;
-	const std::string socket = "/tmp/kyty_cap_" + Sha256Hex(seed.data(), seed.size()).substr(0, 12) + ".sock";
+	const std::string socket = LocalAgentEndpoint("kyty_cap_" + Sha256Hex(seed.data(), seed.size()).substr(0, 12));
 	std::vector<std::string> termination_notes;
 	RemoveStaleUnixSocket(socket, &termination_notes);
 

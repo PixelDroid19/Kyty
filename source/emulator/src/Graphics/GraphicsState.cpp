@@ -322,6 +322,23 @@ uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32
 	return static_cast<uint8_t>(((target_mask >> shift) & (shader_mask >> shift)) & 0xFu);
 }
 
+uint32_t ResolvePixelExportTarget(uint32_t shader_mask, uint32_t export_index)
+{
+	for (uint32_t target = 0; target < ColorTargetLayout::kMaxTargets; target++)
+	{
+		if (((shader_mask >> (target * 4u)) & 0xFu) == 0u)
+		{
+			continue;
+		}
+		if (export_index == 0u)
+		{
+			return target;
+		}
+		export_index--;
+	}
+	return ColorTargetLayout::kMaxTargets;
+}
+
 uint8_t ResolveColorWriteAgainstExport(uint8_t channel_mask, uint8_t export_enable, bool summary_available)
 {
 	return summary_available && export_enable == 0u ? 0u : channel_mask;

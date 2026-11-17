@@ -148,6 +148,7 @@ char*              KYTY_SYSV_ABI c_strrchr(const char* value, int character);
 char*              KYTY_SYSV_ABI c_strstr(const char* value, const char* needle);
 char*              KYTY_SYSV_ABI c_strnstr(const char* value, const char* needle, size_t count);
 char*              KYTY_SYSV_ABI c_getenv(const char* name);
+int                KYTY_SYSV_ABI c_setenv(const char* name, const char* value, int overwrite);
 char*              KYTY_SYSV_ABI c_setlocale(int category, const char* locale);
 unsigned __int128  KYTY_SYSV_ABI c_udivti3(unsigned __int128 numerator, unsigned __int128 denominator);
 uint16_t*          KYTY_SYSV_ABI c_wcsstr(const uint16_t* value, const uint16_t* needle);

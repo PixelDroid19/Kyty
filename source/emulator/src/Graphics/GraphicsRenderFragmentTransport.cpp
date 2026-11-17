@@ -283,6 +283,7 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 		pipeline_info.stage        = stage;
 		pipeline_info.layout       = *layout;
 		pipeline_info.basePipelineIndex = -1;
+		std::shared_lock cache_access(PipelineCacheAccess());
 		result                     = vkCreateComputePipelines(device, pipeline_cache, 1, &pipeline_info, nullptr, pipeline);
 		PipelineCacheStoreRecordCreation(result, feedback);
 		step                       = "vkCreateComputePipelines";

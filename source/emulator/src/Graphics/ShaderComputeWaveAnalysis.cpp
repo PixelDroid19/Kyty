@@ -510,7 +510,10 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 	{
 		if (!operand_valid(instruction.mimg_address[address])) { return false; }
 	}
-	if (ShaderInstructionIsVectorBufferAccess(instruction.type) && (instruction.buffer_flags & ~0x0au) != 0u)
+	// buffer_load_dword with LDS=1 is decoded with a null VDATA and lowered onto workgroup LDS.
+	const bool lds_load = instruction.type == ShaderInstructionType::BufferLoadDword &&
+	                      (instruction.buffer_flags & ~0x0au) == 1u && instruction.dst.type == ShaderOperandType::Null;
+	if (ShaderInstructionIsVectorBufferAccess(instruction.type) && (instruction.buffer_flags & ~0x0au) != 0u && !lds_load)
 	{
 		// SLC/DLC are cache hints (ISA tables 96/98). LDS changes the destination, TFE adds a
 		// status result, and unknown/reserved bits cannot mean an ordinary access.

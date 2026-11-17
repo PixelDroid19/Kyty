@@ -141,6 +141,10 @@ struct PthreadPrivate
 	std::atomic_uint64_t    interruptible_begin {0};
 	std::atomic_uint64_t    interruptible_end {0};
 	PthreadContextDelivery* context_delivery = nullptr;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// Set by PthreadCancel; PthreadTestcancel acts on it (see PthreadCancel).
+	std::atomic_bool cancel_requested {false};
+#endif
 };
 
 struct PthreadRwlockPrivate

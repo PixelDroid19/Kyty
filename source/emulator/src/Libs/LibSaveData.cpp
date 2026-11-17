@@ -100,7 +100,7 @@ static bool ResolveSaveDataSlot(const char* title_id, const char* directory_name
 	{
 		return false;
 	}
-	const auto path = (root / std::filesystem::u8path(directory_name)).lexically_normal().u8string();
+	const auto path = (root / std::filesystem::u8path(directory_name)).lexically_normal().generic_u8string();
 	*out            = String::FromUtf8(path.c_str());
 	return !out->IsEmpty();
 }

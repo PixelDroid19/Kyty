@@ -397,7 +397,8 @@ void AddcontInventoryLoad(const std::string& app0_root, const std::string& packa
 	std::string error = LoadManifest(app0_root, title_id, &inventory.records);
 	if (error.empty() && !packages_root.empty())
 	{
-		error = LoadPackages(std::filesystem::path(packages_root) / title_id, title_id, &inventory.records);
+		error = title_id.empty() ? "packages need the title id, which the title does not declare"
+		                         : LoadPackages(std::filesystem::path(packages_root) / title_id, title_id, &inventory.records);
 	}
 	if (error.empty())
 	{

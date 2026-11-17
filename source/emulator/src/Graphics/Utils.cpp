@@ -285,6 +285,8 @@ static VkImageAspectFlags TexelBitsLayoutAspect(const VulkanImage* image)
 	return IsTexelBitsDepthFormat(image->format) ? DepthFormatAspectMask(image->format) : VK_IMAGE_ASPECT_COLOR_BIT;
 }
 
+constexpr uint64_t kTexelBitsBandBytes = 16u * 1024u * 1024u;
+
 // Moves one plane of each image through a tightly packed buffer, which is the only copy Vulkan
 // guarantees between a depth or stencil aspect and a colour image.
 static bool CopyPlaneBits(CommandBuffer* buffer, VulkanImage* src_image, VkImageAspectFlags src_aspect, VulkanImage* dst_image,
@@ -297,42 +299,51 @@ static bool CopyPlaneBits(CommandBuffer* buffer, VulkanImage* src_image, VkImage
 	{
 		return false;
 	}
-	const uint64_t bytes   = static_cast<uint64_t>(src_image->extent.width) * src_image->extent.height * texel_bytes;
-	auto*          scratch = buffer->AllocateTransientCopyBuffer(bytes);
+	// The plane moves in bands of rows through one scratch of at most kTexelBitsBandBytes: a whole
+	// 10240x2048 16-bit plane (40 MiB) did not fit the transient pool's per-command-buffer budget.
+	const uint32_t width     = src_image->extent.width;
+	const uint32_t height    = src_image->extent.height;
+	const uint64_t row_bytes = static_cast<uint64_t>(width) * texel_bytes;
+	const auto     band_rows = static_cast<uint32_t>(std::clamp<uint64_t>(kTexelBitsBandBytes / row_bytes, 1u, height));
+	auto*          scratch   = buffer->AllocateTransientCopyBuffer(row_bytes * band_rows);
 	if (scratch == nullptr || scratch->buffer == nullptr)
 	{
 		return false;
 	}
 
-	auto* vk_buffer = buffer->RecordOutsideRenderPass();
-	// The command buffer reuses one bounded scratch allocation: finish earlier uses before this copy writes it.
-	VkMemoryBarrier scratch_barrier {};
-	scratch_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-	scratch_barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-	scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u,
-	                     nullptr, 0u, nullptr);
-
+	auto*               vk_buffer  = buffer->RecordOutsideRenderPass();
 	const VkImageLayout src_layout = src_image->layout;
-	VkBufferImageCopy   region {};
-	region.imageSubresource.aspectMask = src_aspect;
-	region.imageSubresource.layerCount = 1u;
-	region.imageExtent                 = {src_image->extent.width, src_image->extent.height, 1u};
 	set_image_layout(buffer, vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), src_layout,
 	                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, scratch->buffer, 1u, &region);
-	set_image_layout(buffer, vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-	                 src_layout);
-
-	scratch_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u, nullptr,
-	                     0u, nullptr);
-
-	region.imageSubresource.aspectMask = dst_aspect;
 	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	vkCmdCopyBufferToImage(vk_buffer, scratch->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
+
+	VkMemoryBarrier scratch_barrier {};
+	scratch_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	VkBufferImageCopy region {};
+	region.imageSubresource.layerCount = 1u;
+	for (uint32_t y = 0; y < height; y += band_rows)
+	{
+		// The command buffer reuses one bounded scratch allocation: finish earlier uses before this band writes it.
+		scratch_barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+		scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u,
+		                     nullptr, 0u, nullptr);
+		region.imageSubresource.aspectMask = src_aspect;
+		region.imageOffset                 = {0, static_cast<int32_t>(y), 0};
+		region.imageExtent                 = {width, std::min(band_rows, height - y), 1u};
+		vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, scratch->buffer, 1u, &region);
+
+		scratch_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u,
+		                     nullptr, 0u, nullptr);
+		region.imageSubresource.aspectMask = dst_aspect;
+		vkCmdCopyBufferToImage(vk_buffer, scratch->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
+	}
+
+	set_image_layout(buffer, vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	                 src_layout);
 	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 	                 static_cast<VkImageLayout>(dst_layout));
 	return true;

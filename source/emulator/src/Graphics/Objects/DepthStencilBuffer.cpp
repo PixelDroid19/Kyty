@@ -280,8 +280,10 @@ DepthSliceArray* DepthStencilBufferGetSliceArray(GraphicContext* ctx, DepthStenc
 	image_descriptor.extent       = {width, height, 1u};
 	image_descriptor.array_layers = layers;
 	image_descriptor.format       = array->format;
-	// Sampled in DEPTH_STENCIL_READ_ONLY_OPTIMAL, a layout valid only for depth-stencil attachment images.
-	image_descriptor.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+	// Sampled in DEPTH_STENCIL_READ_ONLY_OPTIMAL, a layout valid only for depth-stencil attachment images; a layered
+	// pass also renders into it and copies its layers back to the slices.
+	image_descriptor.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+	                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
 	if (!VulkanCreateDeviceImage(ctx, VulkanBuildImageCreateInfo(image_descriptor), array, &slice_array->memory))
 	{
 		EXIT("depth slice array image creation failed: extent=%ux%u layers=%u\n", width, height, layers);
@@ -295,6 +297,9 @@ DepthSliceArray* DepthStencilBufferGetSliceArray(GraphicContext* ctx, DepthStenc
 	view_descriptor.view_type   = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
 	view_descriptor.layer_count = layers;
 	EXIT_IF(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &array->image_view[VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY]));
+	view_descriptor.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+	                              VK_COMPONENT_SWIZZLE_IDENTITY};
+	EXIT_IF(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &array->image_view[VulkanImage::VIEW_DEFAULT]));
 
 	slice_array->image = array;
 	slice_array->layers.assign(layers, {});
@@ -307,6 +312,7 @@ static void DeleteSliceArrays(GraphicContext* ctx, DepthStencilVulkanImage* dept
 	for (auto& slice_array: depth->slice_arrays)
 	{
 		auto* array = slice_array->image;
+		DeleteFramebuffer(array);
 		for (auto& view: array->image_view)
 		{
 			if (view != nullptr)

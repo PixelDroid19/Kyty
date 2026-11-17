@@ -1574,6 +1574,29 @@ static void InvalidateDrawnColorTargets(const RenderColorInfo& color, const Shad
 	}
 }
 
+// A transported draw begins its framebuffer's pass once per capture and once per resolve, so a pass
+// that clears on begin would clear over the bands already resolved. An empty pass applies the clear
+// once; the transport passes then load the cleared targets.
+static VulkanFramebuffer* FragmentTransportLoadingFramebuffer(CommandBuffer* buffer, VulkanFramebuffer* framebuffer,
+                                                              RenderColorInfo* color_info, RenderDepthInfo* depth_info,
+                                                              DepthStencilAttachmentAccess depth_access, VkExtent2D attachmentless_extent,
+                                                              const VulkanSampleLocationState& sample_locations)
+{
+	if (framebuffer->compatibility.begins_without_clear)
+	{
+		return framebuffer;
+	}
+	buffer->BeginRenderPass(framebuffer, color_info, depth_info, &sample_locations);
+	buffer->RecordOutsideRenderPass();
+	auto* loading = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(color_info, depth_info, depth_access, attachmentless_extent);
+	if (!loading->compatibility.begins_without_clear)
+	{
+		// The depth clear-enable state clears on every begin.
+		EXIT("fragment transport cannot begin a depth-clearing pass yet: extent=%ux%u\n", loading->extent.width, loading->extent.height);
+	}
+	return loading;
+}
+
 void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Shader* sh_ctx, VulkanFramebuffer* framebuffer,
                                          RenderColorInfo* color_info, RenderDepthInfo* depth_info,
                                          const VulkanSampleLocationState& sample_locations, const ShaderVertexInputInfo& vs_input_info,
@@ -2277,6 +2300,8 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 		}
 		geometry.index_type  = index_type;
 		geometry.base_vertex = vertex_offset;
+		framebuffer = FragmentTransportLoadingFramebuffer(buffer, framebuffer, &color_info, &depth_info, depth_access, attachmentless_extent,
+		                                                  sample_locations);
 		GraphicsRenderFragmentTransportDraw(submit_id, buffer, sh_ctx, framebuffer, &color_info, &depth_info, sample_locations, vs_input_info,
 		                                    ps_input_info, vertex_requirement.first, vertex_records, device_address_table,
 		                                    stencil_attached_depth, pipeline, primitive_plan, instance_count, first_instance, geometry);
@@ -3768,6 +3793,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		FragmentTransportGeometry geometry {};
 		geometry.first_vertex        = first_vertex;
 		geometry.indices_snapshotted = true;
+		framebuffer = FragmentTransportLoadingFramebuffer(buffer, framebuffer, &color_info, &depth_info, depth_access, attachmentless_extent,
+		                                                  sample_locations);
 		GraphicsRenderFragmentTransportDraw(submit_id, buffer, sh_ctx, framebuffer, &color_info, &depth_info, sample_locations, vs_input_info,
 		                                    ps_input_info, vertex_requirement.first, vertex_records, device_address_table,
 		                                    stencil_attached_depth, pipeline, primitive_plan, instance_count, first_instance, geometry);

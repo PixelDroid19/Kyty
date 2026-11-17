@@ -84,6 +84,7 @@ UT_LINK(EmulatorAudioNgs2Reverb);
 UT_LINK(EmulatorAudioDecoderAdmission);
 UT_LINK(EmulatorMediaLifetimes);
 UT_LINK(EmulatorPipelineLifetime);
+UT_LINK(EmulatorStencilLogicOps);
 UT_LINK(EmulatorPad);
 UT_LINK(EmulatorIme);
 UT_LINK(EmulatorRtc);

@@ -147,6 +147,12 @@ bool PipelineCacheStoreTakeAddedEntries()
 	return g_added_entries.exchange(false, std::memory_order_relaxed);
 }
 
+std::shared_mutex& PipelineCacheAccess()
+{
+	static std::shared_mutex access;
+	return access;
+}
+
 std::vector<uint8_t> PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& properties)
 {
 	if (!Config::ShaderCacheEnabled())

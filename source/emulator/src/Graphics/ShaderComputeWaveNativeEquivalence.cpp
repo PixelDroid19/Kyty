@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bitset>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -686,6 +687,49 @@ std::vector<UniformityState> SolveUniformity(const Vector<ShaderInstruction>& in
 	}
 	return in;
 }
+
+// ds_swizzle and ds_bpermute exchange registers without touching LDS; ADD_TID
+// accesses were proven to stay in lane-private planes.
+bool AccessesSharedLds(ShaderInstructionType type)
+{
+	return NameStartsWith(magic_enum::enum_name(type), "Ds") && type != ShaderInstructionType::DsSwizzleB32 &&
+	       type != ShaderInstructionType::DsBpermuteB32 && type != ShaderInstructionType::DsWriteAddtidB32 &&
+	       type != ShaderInstructionType::DsReadAddtidB32;
+}
+
+// The LDS accesses of one guest wave complete in program order for all its lanes. One
+// invocation per lane keeps that order only across S_BARRIER, so an LDS read reachable
+// from an LDS write without a barrier between them may miss another lane's write.
+std::optional<uint32_t> FindLdsReadAfterUnorderedWrite(const Vector<ShaderInstruction>&          instructions,
+                                                       const std::vector<std::vector<uint32_t>>& successors)
+{
+	const auto        count = static_cast<uint32_t>(instructions.Size());
+	std::vector<bool> pending(count, false);
+	std::vector<bool> reached(count, false);
+	std::vector<uint32_t> work {0u};
+	reached[0] = true;
+	while (!work.empty())
+	{
+		const uint32_t index = work.back();
+		work.pop_back();
+		const auto type = instructions.At(index).type;
+		const bool lds  = AccessesSharedLds(type);
+		const auto name = magic_enum::enum_name(type);
+		if (lds && pending[index] && !NameStartsWith(name, "DsWrite"))
+		{
+			return instructions.At(index).pc;
+		}
+		const bool out = type != ShaderInstructionType::SBarrier && (pending[index] || (lds && !NameStartsWith(name, "DsRead")));
+		for (auto successor: successors[index])
+		{
+			if (reached[successor] && (pending[successor] || !out)) { continue; }
+			reached[successor] = true;
+			pending[successor] = pending[successor] || out;
+			work.push_back(successor);
+		}
+	}
+	return std::nullopt;
+}
 } // namespace
 
 ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const ShaderCode& code)
@@ -973,6 +1017,10 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 		{
 			return Failure(instruction.pc, "a scalar value written inside a lane-conditional region is live at its join");
 		}
+	}
+	if (const auto read = FindLdsReadAfterUnorderedWrite(instructions, successors))
+	{
+		return Failure(*read, "LDS read may miss another lane's write with no S_BARRIER between them");
 	}
 	ShaderComputeWaveAnalysisResult result {true, 0, {}};
 	result.reads_quad_lanes = std::any_of(decoded.begin(), decoded.end(), [](const auto& entry) { return entry.reads_quad; });

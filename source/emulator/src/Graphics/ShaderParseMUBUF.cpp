@@ -131,6 +131,11 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.format =
 			    (offen == 1 ? ShaderInstructionFormat::Vdata1Vaddr2SvSoffsOffenIdxen : ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen);
 			inst.src[1].size = 4;
+			// With LDS=1 the dword goes to LDS and VDATA is not written.
+			if (next_gen && lds == 1u)
+			{
+				inst.dst = operand_parse(125);
+			}
 			break;
 		case 0x0D:
 			inst.type        = ShaderInstructionType::BufferLoadDwordx2;

@@ -919,6 +919,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	EXIT_IF(pipeline->pipeline != nullptr);
 
 	const auto     vk_create_start = DebugStatsClock::now();
+	std::shared_lock cache_access(PipelineCacheAccess());
 	const VkResult create_result =
 	    vkCreateGraphicsPipelines(gctx->device, gctx->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline->pipeline);
 	PipelineCacheStoreRecordCreation(create_result, feedback);
@@ -1110,6 +1111,7 @@ static VkResult CreateComputePipelineFromRecipe(GraphicContext* gctx, const Comp
 		info.stage             = comp_shader_stage_info;
 		info.layout            = *layout;
 		info.basePipelineIndex = -1;
+		std::shared_lock cache_access(PipelineCacheAccess());
 		result                 = vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, pipeline);
 		PipelineCacheStoreRecordCreation(result, feedback);
 	}
@@ -1458,6 +1460,13 @@ void PipelineCache::SaveDriverCacheIfDue()
 		return;
 	}
 
+	// A background compile may hold the cache for seconds; the checkpoint waits for a later lookup instead.
+	std::unique_lock cache_access(PipelineCacheAccess(), std::try_to_lock);
+	if (!cache_access.owns_lock())
+	{
+		return;
+	}
+
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
 
@@ -1564,10 +1573,6 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	if (static_params.rasterization_samples != VK_SAMPLE_COUNT_1_BIT)
 	{
 		EXIT("fragment transport needs single-sample rasterization: %s\n", requirement_facts.c_str());
-	}
-	if (!framebuffer->compatibility.begins_without_clear)
-	{
-		EXIT("fragment transport cannot begin a clearing pass yet: %s\n", requirement_facts.c_str());
 	}
 	if (!TransportColorTargetsWritable(color))
 	{
@@ -1873,6 +1878,12 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			p.static_params->color_mask[rt] = uint16_mrt_output
 			                                      ? State::ResolveColorWriteAgainstUint16Export(export_admitted_mask, export_enable)
 			                                      : export_admitted_mask;
+			if (ps_input_info->target_output_order[rt] == HW::kColorExportOrderTwoChannelAlt)
+			{
+				// The guest mask names export components; the attachment's second channel holds W.
+				const uint8_t mask              = p.static_params->color_mask[rt];
+				p.static_params->color_mask[rt] = static_cast<uint8_t>((mask & 1u) | ((mask >> 2u) & 2u));
+			}
 			p.static_params->color_srcblend[rt]       = blend.color_srcblend;
 			p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
 			p.static_params->color_destblend[rt]      = blend.color_destblend;

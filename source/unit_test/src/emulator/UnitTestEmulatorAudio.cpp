@@ -7503,6 +7503,7 @@ void DecodeAjmOpusFixtureSource(uint32_t total_frames, uint16_t priming, std::ve
 	source->assign(decoded.begin() + priming * channels, decoded.begin() + (priming + total_frames) * channels);
 }
 
+#if defined(__linux__)
 // Independent model of the resampled stream: each output frame interpolates linearly at the source position, then the
 // position advances by the ratio, which moves by the change per sample from the last setter. A is the furthest source
 // frame read, C the frames at or after the position, and the result ratio the current one.
@@ -7559,6 +7560,7 @@ void BuildAjmResampleOracle(const std::vector<float>& source, uint32_t total_fra
 		expected_results->push_back(result);
 	}
 }
+#endif
 
 } // namespace
 

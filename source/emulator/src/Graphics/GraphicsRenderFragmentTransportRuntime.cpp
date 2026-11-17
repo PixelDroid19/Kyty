@@ -114,7 +114,11 @@ VkPipeline CreateKernelPipeline(VkDevice device, VkPipelineCache cache, VkPipeli
 	feedback_info.pPipelineCreationFeedback = &feedback;
 	info.pNext                              = &feedback_info;
 	VkPipeline pipeline = VK_NULL_HANDLE;
-	const auto result   = vkCreateComputePipelines(device, cache, 1, &info, nullptr, &pipeline);
+	VkResult   result   = VK_SUCCESS;
+	{
+		std::shared_lock cache_access(PipelineCacheAccess());
+		result = vkCreateComputePipelines(device, cache, 1, &info, nullptr, &pipeline);
+	}
 	PipelineCacheStoreRecordCreation(result, feedback);
 	vkDestroyShaderModule(device, module, nullptr);
 	return result == VK_SUCCESS ? pipeline : VK_NULL_HANDLE;

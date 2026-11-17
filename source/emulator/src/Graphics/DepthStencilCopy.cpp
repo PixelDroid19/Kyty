@@ -638,7 +638,11 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	pipeline_info.pNext                     = &feedback_info;
 
 	VkPipeline pipeline = nullptr;
-	const auto result = vkCreateGraphicsPipelines(m_device, context->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline);
+	VkResult   result   = VK_SUCCESS;
+	{
+		std::shared_lock cache_access(PipelineCacheAccess());
+		result = vkCreateGraphicsPipelines(m_device, context->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline);
+	}
 	PipelineCacheStoreRecordCreation(result, feedback);
 	if (fragment_module != nullptr)
 	{
