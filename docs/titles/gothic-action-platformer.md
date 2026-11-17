@@ -307,3 +307,10 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   next batch is already queued at a run's end (66 % in the heavy scene) and opens with register
   packets only (64 %), about 700 starts per second, about 15 ms per second at best; and a 7 us lead
   against an 11 us analysis on the front still misses the first draw.
+- **Display-buffer lookup filtered (2026-11-17).** Every sampled texture the texture memo did not
+  resolve asked the video output for a registered display image at its address, taking the host
+  access gate and the video output lock, 54 of 3,185 processor-thread samples (1.7 %). The video
+  output now keeps every address a display buffer was registered at (64 entries, then every lookup
+  searches) and returns at once for any other address. Gameplay profile (under foreign compile load):
+  4 of 3,104 samples. Captures of this title's level, `PPSA21567 - Astro Bot` dunes and
+  `PPSA17221 - Minecraft` render as before; no fps claim.
