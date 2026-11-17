@@ -443,14 +443,17 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   as busy is not known.
 - Device timestamps (temporary diagnostic run, native resolution, same scene, about 3,400 draws per
   frame): a timestamp at the first and last command of every primary command buffer, read in
-  windows of 2,048 buffers (about one second). The union of in-buffer intervals covered 300-430 ms
-  of each 850-1,140 ms window (32-43 %), about 20 ms per frame; the rest is the device waiting for
-  the next submit. The render-engine counter read 0.41-0.51 in the same run (the two agree within
-  the context-switch margin), against 0.64-0.80 in the two earlier native runs at the same frame
-  rate: the counter varies between runs by more than the fps does, so the 23-26 fps GPU cap above
-  and the per-pass fit are withdrawn. On this run the GPU has about twice the work time it uses,
-  and the scene is bound by the command processor. The diagnostic itself lowered the frame rate
-  (13.5 fps over the heavy seconds, 16-19 before the late scene change).
+  windows of 2,048 buffers (about 14 frames at 147 submits per frame). In the 18-19 fps seconds
+  the union of in-buffer intervals covered 0.41-0.44 of each window, about 23-24 ms per frame; the
+  rest is the device waiting for the next submit. The render-engine counter read 0.45-0.48 there,
+  against 0.64-0.80 in the two earlier native runs at the same frame rate, and the half-resolution
+  run cost about 28 ms per frame of engine time, so busy time per frame is not a fixed amount of
+  work across runs (device frequency is a lead: the sysfs actual-frequency file reads 0 when idle,
+  not logged per second yet). The 23-26 fps GPU cap and the per-pass fit above are withdrawn; on
+  this run the GPU work fits about 40 fps, and the scene is bound by the command processor (timer
+  prediction, half-resolution run and idle device time agree). Later in the run the frame rate fell
+  to 9-11 fps at the same 3,300-3,800 draws per frame while engine time rose to about 30 ms per
+  frame; the cause is unexplained and those seconds are excluded.
 - Command processor (timers): 12.85 us per draw in the draw processor, of which binding 6.9 us,
   plus about 10 ms per frame outside draws, at about 3,400 draws per frame. 30 fps leaves about
   1 us per draw for binding with the rest unchanged, so nearly all of it must leave the thread or
