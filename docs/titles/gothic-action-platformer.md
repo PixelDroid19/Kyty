@@ -135,3 +135,16 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   depth materialization is refused, the one case that prints it.
 - Dialogue scene after the new game (robust route, Silent): about 20 fps, no visual errors in a
   burst of captures.
+- **One host submit per guest batch, priced (2026-11-17, Silent route, scene after the new game).**
+  The guest submits about 2,700 command batches per second (about 190 per frame); each ends in
+  `BufferFlush`, and every one carries a queued graphics interrupt and a decode completion, so no
+  batch is free of a completion. The next batch is already queued at 67 % of batch ends, and batch
+  streams did not suspend on a wait in the measured windows. Inner timers: about 27 us per submit
+  (`vkQueueSubmit` 12, `Begin` 7, fence retirement 6), about 70 ms/s, plus about 10 ms/s publishing.
+  The first draw after a batch-end submit takes about 58 us against about 12 us for the others:
+  state setup +24 us (draw-front misses at the start of a guest batch, which a merged submit does
+  not remove), resource binding +10 us (texture descriptors +6 us), command emission +6 us.
+  Merging submits of batches whose successor is queued is worth roughly 50-75 ms/s, and it is not
+  a local change: a merged batch's `m_batch_ends` entry would name a recording submission, and
+  `GraphicsRing::WaitRetired` on a guest thread would then submit it through `WaitSubmission`, which
+  takes `m_mutex` while the command processor records under `m_run_mutex`. Not built.
