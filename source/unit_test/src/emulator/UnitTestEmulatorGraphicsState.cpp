@@ -5991,6 +5991,30 @@ TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesPrefersExactExtent)
 // A render target or storage image is one level. A descriptor that views a mip chain
 // (BASE_LEVEL..LAST_LEVEL) over it would read levels the image does not have, so the surface
 // is not an alias: the sample is built as a texture from its parents instead.
+TEST(EmulatorGraphicsState, Gen5PickGammaTwinSurfaceAliasReadsTheOtherGammaOfAMutableSurface)
+{
+	using namespace Kyty::Libs::Graphics;
+	// An sRGB RGBA8 sample (ufmt 130) of targets rendered UNORM.
+	const VkFormat formats[]   = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT,
+	                              VK_FORMAT_B8G8R8A8_UNORM};
+	const bool     mutables[]  = {false, true, true, true};
+	const uint32_t extents_w[] = {3840u, 1920u, 3840u, 3840u};
+	const uint32_t extents_h[] = {2160u, 1080u, 2160u, 2160u};
+	const uint32_t levels[]    = {1u, 1u, 1u, 1u};
+	const uint32_t layers[]    = {1u, 1u, 1u, 1u};
+	VkFormat       view        = VK_FORMAT_UNDEFINED;
+
+	// Not mutable, wrong extent and wrong texel size are skipped; the red/blue
+	// exchanged target is read through its own sRGB twin.
+	EXPECT_EQ(Gen5PickGammaTwinSurfaceAlias(130u, true, 3840u, 2160u, 1u, 1u, 4, formats, mutables, extents_w, extents_h, levels, layers, &view), 3);
+	EXPECT_EQ(view, VK_FORMAT_B8G8R8A8_SRGB);
+
+	// Without a mutable candidate of the right extent there is no alias.
+	EXPECT_EQ(Gen5PickGammaTwinSurfaceAlias(130u, true, 3840u, 2160u, 1u, 1u, 3, formats, mutables, extents_w, extents_h, levels, layers, &view), -1);
+	// A sample viewing more levels than the target has is not served by it.
+	EXPECT_EQ(Gen5PickGammaTwinSurfaceAlias(130u, true, 3840u, 2160u, 2u, 1u, 4, formats, mutables, extents_w, extents_h, levels, layers, &view), -1);
+}
+
 TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesNeedsEveryViewedMipLevel)
 {
 	using namespace Kyty::Libs::Graphics;

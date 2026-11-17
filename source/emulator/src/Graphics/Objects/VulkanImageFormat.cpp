@@ -301,6 +301,18 @@ bool VulkanColorFormatsShareTexels(VkFormat a, VkFormat b)
 	return bytes != 0u && bytes == VulkanColorTexelBytes(b);
 }
 
+VkFormat VulkanColorGammaTwin(VkFormat format)
+{
+	switch (format)
+	{
+		case VK_FORMAT_R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_SRGB;
+		case VK_FORMAT_R8G8B8A8_SRGB: return VK_FORMAT_R8G8B8A8_UNORM;
+		case VK_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_SRGB;
+		case VK_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_B8G8R8A8_UNORM;
+		default: return VK_FORMAT_UNDEFINED;
+	}
+}
+
 uint32_t VulkanColorTexelFormatList(VkFormat format, VkFormat* out, uint32_t capacity)
 {
 	if (out == nullptr || capacity == 0u || VulkanColorTexelBytes(format) == 0u)

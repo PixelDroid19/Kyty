@@ -4207,9 +4207,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				uint32_t     cand_h[16]   = {};
 				uint32_t     cand_mips[16] = {};
 				uint32_t     cand_layers[16] = {};
+				bool         cand_mutable[16] = {};
 				for (size_t i = 0; i < cand_n; i++)
 				{
 					cand_fmt[i]             = rtex.At(static_cast<int>(i))->format;
+					cand_mutable[i]         = rtex.At(static_cast<int>(i))->mutable_format;
 					const auto guest_extent = rtex.At(static_cast<int>(i))->GetGuestExtent();
 					cand_w[i]               = guest_extent.width;
 					cand_h[i]               = guest_extent.height;
@@ -4221,6 +4223,19 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				bool   reject_alias = false;
 				EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, use_srgb, width, height, view_last_level + 1u, view_layers, cand_n, cand_fmt, cand_w,
 				                                      cand_h, cand_mips, cand_layers, filtered, &filtered_n, &reject_alias));
+				// Guest memory is untyped: a target rendered UNORM may be sampled sRGB
+				// (or the reverse); read the live target through a sampled view in that gamma.
+				const bool gamma_view_allowed = reject_alias && !textures.desc[i].textures2d_without_sampler;
+				const int  gamma_alias        = gamma_view_allowed ? Gen5PickGammaTwinSurfaceAlias(fmt, use_srgb, width, height, view_last_level + 1u, view_layers,
+				                                                                           cand_n, cand_fmt, cand_mutable, cand_w, cand_h,
+				                                                                           cand_mips, cand_layers, &reinterpret_format)
+				                                                   : -1;
+				if (gamma_alias >= 0)
+				{
+					reject_alias = false;
+					filtered[0]  = gamma_alias;
+					filtered_n   = 1;
+				}
 				if (reject_alias)
 				{
 					render_texture = false;
@@ -4277,9 +4292,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					const bool chain_write = chain != nullptr && textures.desc[i].usage != ShaderTextureUsage::ReadOnly && chain->mip_levels > tex->mip_levels;
 					if (chain_write || (chain != nullptr && chain->storage_write_stamp > std::max(tex->storage_write_stamp, tex->content_stamp)))
 					{
-						tex            = nullptr;
-						render_texture = false;
-						materialize    = "rt-yields-to-chain";
+						tex                = nullptr;
+						render_texture     = false;
+						reinterpret_format = VK_FORMAT_UNDEFINED;
+						materialize        = "rt-yields-to-chain";
 					}
 					// Storage views and refused sampling address guest texels.
 					if (tex != nullptr && tex->IsResolutionScaled() && (textures.desc[i].textures2d_without_sampler || scaled_sampling_refused))
@@ -4978,12 +4994,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// Keep attachment/storage views intact and cache the complete sampled
 				// view identity so two simultaneous aliases can use different DST_SEL.
 				const uint32_t last_level = view_last_level;
-				// A reinterpreting view reads in the sample's format; otherwise the
-				// surface may store the sample's bytes with red and blue exchanged.
+				// The surface, or the reinterpreting view of it, may store the
+				// sample's bytes with red and blue exchanged.
 				const uint32_t alias_swizzle =
-				    gen5 && reinterpret_format == VK_FORMAT_UNDEFINED
-				        ? VulkanGen5SampleSurfaceSelectors(static_cast<uint16_t>(fmt), use_srgb, tex->format, view_swizzle)
-				        : view_swizzle;
+				    gen5 ? VulkanGen5SampleSurfaceSelectors(static_cast<uint16_t>(fmt), use_srgb,
+				                                            reinterpret_format != VK_FORMAT_UNDEFINED ? reinterpret_format : tex->format,
+				                                            view_swizzle)
+				         : view_swizzle;
 				VulkanImageViewDescriptor sampled_descriptor {};
 				if (last_level < base_level ||
 				    !VulkanPlanSampledImageView(*tex, three_dimensional ? VK_IMAGE_VIEW_TYPE_3D :

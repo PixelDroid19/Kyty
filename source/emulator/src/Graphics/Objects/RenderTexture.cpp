@@ -572,7 +572,23 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	image_descriptor.format = vk_obj->format;
 	image_descriptor.samples = vk_obj->samples;
 	image_descriptor.usage  = vk_usage;
-	const auto image_info   = VulkanBuildImageCreateInfo(image_descriptor);
+	auto image_info         = VulkanBuildImageCreateInfo(image_descriptor);
+	// Guest memory is untyped: a target rendered in one gamma may be sampled
+	// in the other. Only the gamma pair is listed, so the driver keeps its
+	// color compression on the target.
+	const VkFormat              view_formats[2] = {vk_format, VulkanColorGammaTwin(vk_format)};
+	VkImageFormatListCreateInfo format_list {};
+	format_list.sType           = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO;
+	format_list.viewFormatCount = 2u;
+	format_list.pViewFormats    = view_formats;
+	auto mutable_info           = image_info;
+	mutable_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+	mutable_info.pNext = &format_list;
+	if (view_formats[1] != VK_FORMAT_UNDEFINED && VulkanImageFormatSupported(ctx, mutable_info))
+	{
+		image_info             = mutable_info;
+		vk_obj->mutable_format = true;
+	}
 	if (!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem))
 	{
 		EXIT("failed to create render-texture image\n");
