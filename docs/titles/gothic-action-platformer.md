@@ -139,12 +139,19 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   The guest submits about 2,700 command batches per second (about 190 per frame); each ends in
   `BufferFlush`, and every one carries a queued graphics interrupt and a decode completion, so no
   batch is free of a completion. The next batch is already queued at 67 % of batch ends, and batch
-  streams did not suspend on a wait in the measured windows. Inner timers: about 27 us per submit
+  streams suspended at most rarely in three runs (the counter never reported); that does not show
+  the batches are independent, since the mostly idle GPU may write a label before the next wait
+  decodes. Inner timers: about 27 us per submit
   (`vkQueueSubmit` 12, `Begin` 7, fence retirement 6), about 70 ms/s, plus about 10 ms/s publishing.
   The first draw after a batch-end submit takes about 58 us against about 12 us for the others:
-  state setup +24 us (draw-front misses at the start of a guest batch, which a merged submit does
-  not remove), resource binding +10 us (texture descriptors +6 us), command emission +6 us.
+  state setup +24 us, resource binding +10 us (texture descriptors +6 us), command emission +6 us.
+  The state-setup part is the draw front, not the submit: the front starts at the first draw of a
+  run and stops at every ordering packet, so the first draw of every batch takes the inline shader
+  input analysis (`ShaderGetInputInfoVS`/`PS`, about 28 us of state setup, about 4,500 per 2 s).
+  Other front misses add about 3,000 per 2 s at about 25 us, against about 1 us for a front hit:
+  the miss path totals about 106 ms/s, the largest single item left in state setup.
   Merging submits of batches whose successor is queued is worth roughly 50-75 ms/s, and it is not
   a local change: a merged batch's `m_batch_ends` entry would name a recording submission, and
   `GraphicsRing::WaitRetired` on a guest thread would then submit it through `WaitSubmission`, which
-  takes `m_mutex` while the command processor records under `m_run_mutex`. Not built.
+  takes `m_mutex` while the command processor records under `m_run_mutex`. Not built; its
+  precondition (whether a batch's waits name labels the previous batch writes) is unmeasured.
