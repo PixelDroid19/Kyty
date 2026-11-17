@@ -206,15 +206,18 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   4 % of the processor thread's samples.
 - **Excluded: a register-keyed memo of the pixel input analysis.** Shadow on the gameplay route
   (2026-11-17), key = the pixel stage registers, user SGPRs, the shader registers the analysis reads,
-  the colour mask and the vertex fields it reads; 512-entry table per thread; a hash of the whole
-  output compared on every repeat, with an injected mismatch every 4,096 repeats (162 of 162
-  caught). The front analysed about 50,000 draws per second and repeated a key on 24.5 % of them;
-  the processor's inline misses (about 8,400 per second) repeated on 4.1 %. Of the repeats, 6 %
-  on the front and 41 % inline produced a different output under the same host-write epoch: the
-  descriptor words the analysis reads changed while the registers did not. The user SGPRs point at
-  per-draw guest memory, so the inputs rarely repeat; a cache would have to split the
-  program-dependent layout work from the descriptor-dependent part inside `ShaderParseUsage2`, which
-  is a redesign of that function, not a memo.
+  the colour mask and the vertex fields it reads; a 65,536-entry table per thread; hashes of the
+  output before `bind` and of `bind` compared on every repeat, with an injected mismatch every
+  4,096 repeats (242 of 242 caught). The front analysed about 52,000 draws per second and repeated
+  a key on 32.4 % of them; the processor's inline misses (about 8,400 per second) repeated on
+  22 %. 68-78 % of insertions replaced a different key. On 76 % of the front's calls and 96 % of
+  the inline ones the program and registers had been seen before and only the user SGPRs
+  differed. No repeat changed the output before `bind`; 26 % (front) and 66 % (inline) of repeats
+  changed `bind`, mostly across a host-write epoch change. Useful inline hits are about 7.6 % of
+  the misses, roughly 13 ms/s. A cache that pays would have to split the program-dependent layout
+  work from the SGPR- and descriptor-dependent part inside `ShaderParseUsage2`, a redesign of that
+  function rather than a memo. (A first shadow with a 512-entry table read 24.5 % and 4.1 %; it
+  could not see repeats across frames.)
 - **Excluded: the replay worker sleeping instead of spinning.** `DeferredReplayWorker` polls for
   200 us before sleeping and spends about 27 % of the process's samples in that spin (6-core SMT
   host). With the window set to 0 (interleaved, 2 runs per arm) the processor got slower,
