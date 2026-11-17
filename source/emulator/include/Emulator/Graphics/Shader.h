@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/RenderResolutionShaderScale.h"
 #include "Emulator/Graphics/VertexClipProbe.h"
 
+#include <cstring>
 #include <bitset>
 #include <limits>
 #include <memory>
@@ -1342,7 +1343,12 @@ struct ShaderId
 	uint32_t         crc32 = 0;
 	Vector<uint32_t> ids;
 
-	bool operator==(const ShaderId& other) const { return hash0 == other.hash0 && crc32 == other.crc32 && ids == other.ids; }
+	bool operator==(const ShaderId& other) const
+	{
+		// Pipeline lookups compare long id vectors on every draw; memcmp vectorizes, the element loop does not.
+		return hash0 == other.hash0 && crc32 == other.crc32 && ids.Size() == other.ids.Size() &&
+		       (ids.Size() == 0 || std::memcmp(ids.GetDataConst(), other.ids.GetDataConst(), ids.Size() * sizeof(uint32_t)) == 0);
+	}
 	bool operator!=(const ShaderId& other) const { return !(*this == other); }
 };
 
