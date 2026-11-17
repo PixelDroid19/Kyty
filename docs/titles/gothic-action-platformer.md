@@ -150,6 +150,12 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   input analysis (`ShaderGetInputInfoVS`/`PS`, about 28 us of state setup, about 4,500 per 2 s).
   Other front misses add about 3,000 per 2 s at about 25 us, against about 1 us for a front hit:
   the miss path totals about 106 ms/s, the largest single item left in state setup.
+  A command-processor thread profile of the same scene (clean build, 6 s, about 3,200 samples)
+  puts the inline pixel-shader input analysis at 11 % of samples and the vertex one at 2.3 %.
+  Most of the pixel part is `ShaderParseUsage2` (8.8 %): dynamic scalar resources, sampled texture
+  to sampler association and redefined buffer descriptors. Their code-only scans already go
+  through `ShaderCodeResourceMemo`; what remains depends on the bound descriptors, so a cache must
+  key on the descriptors the analysis reads from guest memory.
   Merging submits of batches whose successor is queued is worth roughly 50-75 ms/s, and it is not
   a local change: a merged batch's `m_batch_ends` entry would name a recording submission, which
   `GraphicsRing::WaitRetired` on a guest thread then submits mid-batch through `WaitSubmission`
