@@ -1918,6 +1918,15 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		*found->dynamic_params = lookup_dynamic;
 		AttachPipelineLease(recording_buffer, *found);
 		SaveDriverCacheIfDue();
+		// Prepared ids go back to their record, so the front thread that built them also frees them.
+		if (prepared_vs_id != nullptr)
+		{
+			*prepared_vs_id = std::move(p.vs_shader_id);
+		}
+		if (prepared_ps_id != nullptr)
+		{
+			*prepared_ps_id = std::move(p.ps_shader_id);
+		}
 		return found->pipeline;
 	}
 	// A stored pipeline owns its parameters; only a miss needs heap copies.
