@@ -646,7 +646,7 @@ in 64), in microseconds per draw:
   CPU time equal to wall time, no submit inside it). At about 158 runs per frame that is about
   9 ms of a 52 ms frame, before the batch's flush and submit (about 12 us per submit).
 - About 28 us of the extra is the missing front record (shader input analysis on the processor);
-  about 29 us follows the new command buffer (texture binding, render-pass and state emission,
+  about 29 us coincides with the new command buffer (texture binding, render-pass and state emission,
   materialization).
 - Register state at the start of each top-level run equalled the state at the end of the previous
   one in all 896,147 boundaries compared (context, user config and shader registers), so a front
@@ -654,6 +654,20 @@ in 64), in microseconds per draw:
 - Draws without a front record in mid-run are 1.6 % of draws, and cost about 28 us more than a
   prepared draw.
 
+- The index type, size and base, the instance count and the user-data marker that a front start
+  copies were also equal at every boundary.
+- At the end of a batch's streams (before its flush) the next batch was already queued in 70 % of
+  batches; from there to the next run's first draw took a mean 50 us (most 32-64 us), the time a
+  front started on the queued batch would have to prepare that draw (about 22 us of analysis plus
+  a thread wake). Without a queued batch the gap was 72 us, mostly waiting for the batch.
+- Mid-run draws without a front record: 58 % had a record prepared before a host write moved the
+  epoch (rejected as stale), 42 % were not prepared yet; none were skipped by the fronts and none
+  differed in epoch or instance count at the record.
+- Command buffers per frame 173, render-pass begins 196: nearly every batch begins its own render
+  pass, so the emission and materialization part of the boundary may follow the target change and
+  not the buffer; merging batches would recover it only where consecutive batches share targets.
+
 Bound: removing the whole boundary cost gives about 38 ms per frame (about 26 fps); with the
-66 % of batches already queued at a flush, about 23 fps. Not built yet.
+70 % of batches already queued, about 23 fps. A front continuing into the queued batch recovers at
+most the analysis part, about 24 us x 0.7 x 158, 2.7 ms per frame (about +5 %). Not built yet.
 
