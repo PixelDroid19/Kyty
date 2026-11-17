@@ -3098,8 +3098,8 @@ static uint64_t MaxStorageBufferRange()
 }
 
 // Read-only storage slots bound to imported guest pages. Each view keeps one
-// unique id per buffer, offset and size, so the descriptor sets built with it are
-// found again; the views go when an import does, or when they outgrow the bound.
+// unique id per buffer, offset and size, so the descriptor sets built with it can
+// be found again; the views go when an import does, or when they outgrow the bound.
 class GuestPagesViews
 {
 public:
@@ -3125,11 +3125,7 @@ public:
 			view->descriptor_range = size;
 			view->guest_offset     = offset;
 			VulkanAssignMemoryUniqueId(&view->memory);
-			// Like a fresh snapshot: a set is cached once its view is bound again.
-			view->uncached_descriptor_sets = true;
-			return view.get();
 		}
-		view->uncached_descriptor_sets = false;
 		return view.get();
 	}
 

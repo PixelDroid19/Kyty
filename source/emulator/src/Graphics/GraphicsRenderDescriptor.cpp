@@ -477,6 +477,23 @@ bool DescriptorCache::SameBindings(const Set& a, const Set& b)
 	       (!a.vsharp_uniform_buffer || a.vsharp_uniform_buffer_key == b.vsharp_uniform_buffer_key);
 }
 
+// Called under m_mutex. True when a set with this hash was asked for before: one
+// slot per hash bucket remembers the last hash that missed there.
+bool DescriptorCache::AdmitSet(uint64_t hash)
+{
+	if (m_seen_set_hashes.empty())
+	{
+		m_seen_set_hashes.resize(SEEN_SET_HASHES);
+	}
+	auto& seen = m_seen_set_hashes[(hash * 0x9E3779B97F4A7C15ull) >> (64u - SEEN_SET_HASHES_BITS)];
+	if (seen == hash)
+	{
+		return true;
+	}
+	seen = hash;
+	return false;
+}
+
 int DescriptorCache::FindSet(const Set& s)
 {
 	const int* head = m_sets_by_hash.Find(s.hash);
@@ -685,12 +702,13 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	}
 
 	// A set binding a buffer the snapshot pool just recaptured for another guest range
-	// is never looked up again: indexing it and trimming it later costs more than its
-	// creation. It returns to the recycled sets once its submission completes.
+	// is never looked up again, and a set seen for the first time often is not either:
+	// indexing it and trimming it later costs more than its creation. It returns to the
+	// recycled sets once its submission completes; a set asked for again is cached.
 	SubmissionId uncached_submission {};
-	const bool   uncached = std::any_of(storage_buffers, storage_buffers + storage_buffers_num,
-	                                    [](const VulkanBuffer* storage) { return storage != nullptr && storage->uncached_descriptor_sets; }) &&
-	                      buffer != nullptr && buffer->GetSubmissionId(&uncached_submission);
+	const bool   recaptured = std::any_of(storage_buffers, storage_buffers + storage_buffers_num, [](const VulkanBuffer* storage)
+	                                      { return storage != nullptr && storage->uncached_descriptor_sets; });
+	const bool   uncached   = (recaptured || !AdmitSet(nset.hash)) && buffer != nullptr && buffer->GetSubmissionId(&uncached_submission);
 
 	KYTY_PROFILER_END_BLOCK;
 

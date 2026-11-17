@@ -482,6 +482,8 @@ private:
 	// each live set holds driver pool memory that pools never return.
 	static constexpr uint32_t LIVE_SETS_MAX = 16384;
 	static constexpr uint32_t TRIM_SETS     = 2048;
+	static constexpr uint32_t SEEN_SET_HASHES_BITS = 16;
+	static constexpr uint32_t SEEN_SET_HASHES      = 1u << SEEN_SET_HASHES_BITS;
 	// Released sets wait for reuse by the next set of their layout, up to this
 	// many in all; past it the oldest returns to its pool. Pools never give memory
 	// back to the system, so a held set only reserves pool space, while a driver
@@ -491,6 +493,7 @@ private:
 	static constexpr uint32_t RECYCLED_SETS_MAX = TRIM_SETS * 32;
 
 	int                  FindSet(const Set& s);
+	bool                 AdmitSet(uint64_t hash);
 	void                 IndexSet(int index);
 	VulkanDescriptorSet* UnindexSet(int index);
 	void                 ReleaseSet(int index);
@@ -653,6 +656,8 @@ private:
 	// that recorded them; recycled once all of those complete.
 	std::vector<VulkanDescriptorSet*> m_uncached_sets;
 	std::vector<SubmissionId>         m_uncached_submissions;
+	// Hashes of sets that missed once, for AdmitSet.
+	std::vector<uint64_t> m_seen_set_hashes;
 };
 
 class SamplerCache
