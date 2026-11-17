@@ -47,5 +47,36 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   Rendering at 960x540 instead of the guest's 3840x2160 targets left the scene at 11 fps and the loop in
   place, so the scene is bound by command processing, not pixel work. Working hypothesis, not yet
   proven causally: at a 90 ms tick the guest's resync window loses the race in most runs. The causal test
-  is raising that scene's frame rate, which needs command-processor throughput (the per-draw binding
-  cost recorded for other titles).
+  is raising that scene's frame rate, which needs command-processor throughput. The binding cost is
+  higher here than on the titles tuned so far: the scene binds about 7 textures and 5 storage buffers per
+  draw.
+
+## Frame rate in the new-game video scene (2026-11-17, open)
+
+- **Baseline.** Strict run, `KYTY_PRESENT_FPS_LIMIT=60`, agent `perf-snapshot` over 6 s while the video
+  plays: 9.3 fps, 3,336 draws per frame, 27.2 us per draw in the draw processor. Binding 14.0 us
+  (textures 5.8, storage 4.1, descriptor finalization 2.7), state setup 7.5, pipeline setup 3.1. Earlier
+  windows of the same scene read 11-14 fps and 21 us per draw; the scene's load varies with the video
+  state. After the skip, gameplay runs at 13-14 fps.
+- **Why the draw is expensive.** Each draw binds about 7.4 textures and 5.6 storage buffers, at roughly
+  0.7-0.8 us each. On the sandbox title, at 6.3 us per draw, binding is under 2 us. Rendering at 960x540
+  does not change the frame rate, so the scene is bound by command processing.
+- **Profile of the command-processor thread** (stack samples at about 45 Hz over 14 s): descriptor
+  binding 49 % (textures 18 %, storage buffers 16 %, set lookup 9 %), snapshot capture of storage buffers
+  13 % (write tracking re-armed and released with `mprotect` per snapshot), submission 9 %, pixel-shader
+  input analysis 7 %, pipeline lookup 5 %.
+- **Storage buffers.** 66 % of them are captured into transient snapshots and 34 % are read by address.
+  Every captured one fails the by-address route at `dword_loads_only`, and 84 % of them are V#s the
+  shader loads from a descriptor table (`ShaderStorageBindingSource::DynamicScalarLoad`), which the
+  by-address route leaves on the descriptor path by design (`48cfd70c8`). Descriptor-set misses are
+  1.7 % real misses and 34 % uncached sets that bind a fresh snapshot by design.
+- **Excluded: reusing the previous texture-stage result.** 87.5 % of stage binds repeat the previous
+  bind's T# and S# words, and a shadow check found no output mismatch on 83 % of binds with the same
+  inputs, submission and object-graph generation; a positive control (different inputs) changed the
+  outputs in 99.9 %. Skipping is still not equivalent: a sampled texture's `GpuMemory` object is created
+  with `read_only = false`, so every bind advances its `write_time` on a per-call clock, and another
+  object is materialized between every two such binds (0 of about 74,000 eligible binds had none).
+  Skipping would change which overlapping object is newest. 37 % of the eligible binds also sample a
+  depth target (`depth-guest`, `depth-exact`).
+- **Draw front.** 92-97 % of draws take the inputs the front thread prepared; the rest repeat the
+  pixel-shader analysis on the command-processor thread at about 35 us each.
