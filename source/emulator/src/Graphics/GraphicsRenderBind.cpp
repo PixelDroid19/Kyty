@@ -4682,8 +4682,9 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				        addr, width,
 				        height, pitch, size.size, textures.desc[i].sample_operation);
 				materialize_depth = physical_ok && source_ok && shape_ok;
-				// The overlapping objects decide whether guest bytes can be trusted; keep them for the refusal below.
-				int written = std::snprintf(depth_refusal, sizeof(depth_refusal), " physical=%d mapped_kind=%u source=%u shape=%d overlaps=%u:",
+				// The overlapping objects decide whether guest bytes can be trusted; keep them for the refusal below,
+				// which is the only reader of the text.
+				int written = materialize_depth ? 0 : std::snprintf(depth_refusal, sizeof(depth_refusal), " physical=%d mapped_kind=%u source=%u shape=%d overlaps=%u:",
 				                            physical_ok ? 1 : 0, static_cast<uint32_t>(mapped.kind), static_cast<uint32_t>(depth_source),
 				                            shape_ok ? 1 : 0, overlaps_ok ? overlaps.total_count : 0u);
 				for (uint32_t entry = 0; overlaps_ok && entry < overlaps.entry_count && written > 0 &&
