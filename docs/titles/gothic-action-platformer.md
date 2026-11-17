@@ -292,3 +292,14 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   `PPSA21567 - Astro Bot` (dunes) and 6.0 million on `PPSA17221 - Minecraft` (world), and none
   reported on this title's gameplay route; captures of both match earlier runs. The misses left are
   the start draws, about 3,400 per second at about 28 us each.
+- **Front starts counted (2026-11-17, `cc3f74e58`, gameplay route, temporary counters).** Per second:
+  about 1,950 guest batches, each one top-level run with no nested indirect buffer, about 30 draws each;
+  about 1,700 front starts, 99.4 % of them the first draw of a run (mid-run restarts after an ordering
+  packet are about 10 per second). From the end of a run to the next run's first draw: 7.2-8.0 us on
+  average, and the host-write epoch moved in none of 13,421 such gaps. 64 % of runs reach their first
+  draw through register packets only; the other 36 % meet a non-register packet first, almost all
+  `CLEAR_STATE`. So the start draws total about 1,700 x 22-28 us, about 40-48 ms per second (half the
+  earlier estimate, which inferred the start count from the miss rate), and a front started at the
+  previous run's end would lead the processor by about 7 us, less than one analysis on the front
+  (about 11 us). The other misses (about 2 % of takes) are draws the front did not prepare in time or
+  could not prepare. The capture at 172 s shows the level, and `last-error` is empty.
