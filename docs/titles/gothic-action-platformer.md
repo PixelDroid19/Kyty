@@ -424,8 +424,8 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 
 - GPU: render-engine busy 0.64-0.80 of each second at 18-19 flips per second (`samples.jsonl`
   of two gameplay runs), about 37 ms of engine time per frame. A GPU-bound scene of
-  `PPSA21567 - Astro Bot` read 84-88 % on the same counter, so the GPU cap here is extrapolated at
-  23-26 fps.
+  `PPSA21567 - Astro Bot` read 84-88 % on the same counter, so the GPU cap here was extrapolated
+  at 23-26 fps (withdrawn below: device timestamps).
 - Render scale test (one gameplay run, `Fixed` / `RenderTargets` 960x540, same scene: 3,369 draws
   per frame): 15.8 fps (native runs 18-18.6), draw processor 15.3 us per draw, render-engine busy
   0.36-0.51, about 28 ms of engine time per frame against about 37 ms at native. The scene is
@@ -440,7 +440,17 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   0.97 correlated, so the fit cannot separate them; draws alone fit slightly worse). In the heavy
   scene (about 197 pass begins and 174 submits per frame) that term is about 15-16 ms of the
   37 ms. Whether it is engine work (flushes between batches) or idle time between submits charged
-  as busy is not known; the 23-26 fps cap stands on this counter only.
+  as busy is not known.
+- Device timestamps (temporary diagnostic run, native resolution, same scene, about 3,400 draws per
+  frame): a timestamp at the first and last command of every primary command buffer, read in
+  windows of 2,048 buffers (about one second). The union of in-buffer intervals covered 300-430 ms
+  of each 850-1,140 ms window (32-43 %), about 20 ms per frame; the rest is the device waiting for
+  the next submit. The render-engine counter read 0.41-0.51 in the same run (the two agree within
+  the context-switch margin), against 0.64-0.80 in the two earlier native runs at the same frame
+  rate: the counter varies between runs by more than the fps does, so the 23-26 fps GPU cap above
+  and the per-pass fit are withdrawn. On this run the GPU has about twice the work time it uses,
+  and the scene is bound by the command processor. The diagnostic itself lowered the frame rate
+  (13.5 fps over the heavy seconds, 16-19 before the late scene change).
 - Command processor (timers): 12.85 us per draw in the draw processor, of which binding 6.9 us,
   plus about 10 ms per frame outside draws, at about 3,400 draws per frame. 30 fps leaves about
   1 us per draw for binding with the rest unchanged, so nearly all of it must leave the thread or
