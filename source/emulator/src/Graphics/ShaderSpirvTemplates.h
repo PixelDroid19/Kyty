@@ -53,6 +53,8 @@ extern const char SCC_OVERFLOW_ADD_1[];
 extern const char SCC_OVERFLOW_SUB_1[];
 extern const char SCC_CARRY_1[];
 extern const char CLAMP_DX10[];
+extern const char V_SIN_F32_TURNS[];
+extern const char V_COS_F32_TURNS[];
 extern const char CLAMP_PASSTHROUGH[];
 extern const char OUTPUT_MODIFIER_SCALE[];
 extern const char OUTPUT_MODIFIER_HALVE[];

@@ -1858,6 +1858,35 @@ void IsNan(uint32_t actual, const char* label)
 	std::_Exit(0);
 }
 
+// V_SIN_F32 / V_COS_F32 take turns: the ISA functional examples, quarter turns that must
+// land exactly, and a large phase whose fraction a 2*pi product would lose.
+[[noreturn]] void RunTrigTurnContracts()
+{
+	Initialize();
+	constexpr uint32_t kIsaNan = 0xffc00000u;
+	for (const bool e64: {false, true})
+	{
+		const Program sine(Emit(Parse(Unary(0x35u, e64)), 0xc0u, false, false, true).c_str());
+		const Program cosine(Emit(Parse(Unary(0x36u, e64)), 0xc0u, false, false, true).c_str());
+		Equal(Evaluate(sine, 0xff800000u), kIsaNan, "sin(-inf)");
+		Equal(Evaluate(sine, 0x7f800000u), kIsaNan, "sin(+inf)");
+		Equal(Evaluate(sine, 0xff7fffffu), 0u, "sin(-max float)");
+		Equal(Evaluate(sine, 0x80000000u), 0x80000000u, "sin(-0)");
+		Equal(Evaluate(sine, 0u), 0u, "sin(+0)");
+		Equal(Evaluate(sine, Bits(0.25f)), Bits(1.0f), "sin(0.25 turn)");
+		Equal(Evaluate(sine, Bits(-0.25f)), Bits(-1.0f), "sin(-0.25 turn)");
+		Equal(Evaluate(sine, Bits(1000.25f)), Bits(1.0f), "sin of a large phase keeps its fraction");
+		Equal(Evaluate(cosine, 0xff800000u), kIsaNan, "cos(-inf)");
+		Equal(Evaluate(cosine, 0x7f800000u), kIsaNan, "cos(+inf)");
+		Equal(Evaluate(cosine, 0xff7fffffu), Bits(1.0f), "cos(-max float)");
+		Equal(Evaluate(cosine, 0x80000000u), Bits(1.0f), "cos(-0)");
+		Equal(Evaluate(cosine, Bits(0.25f)), 0u, "cos(0.25 turn)");
+		Equal(Evaluate(cosine, Bits(0.5f)), Bits(-1.0f), "cos(0.5 turn)");
+		Equal(Evaluate(cosine, Bits(1000.5f)), Bits(-1.0f), "cos of a large phase keeps its fraction");
+	}
+	std::_Exit(0);
+}
+
 [[noreturn]] void RunFloatToIntegerConversionContracts(ShaderType stage = ShaderType::Pixel)
 {
 	Initialize();
@@ -1920,6 +1949,7 @@ TEST(EmulatorShaderArithmetic, ComputeFloatModeClampOutputModifierAndMinMaxContr
 {
 	ASSERT_EXIT(RunFloatModeContracts(ShaderType::Compute), ::testing::ExitedWithCode(0), "");
 }
+TEST(EmulatorShaderArithmetic, SineAndCosineReduceTheirPhaseInTurns) { ASSERT_EXIT(RunTrigTurnContracts(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, FloatToIntegerConversionsSaturateWithoutUndefinedSpirvConversions)
 {
 	ASSERT_EXIT(RunFloatToIntegerConversionContracts(), ::testing::ExitedWithCode(0), "");

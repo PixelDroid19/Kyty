@@ -1681,6 +1681,65 @@ const char SCC_CARRY_1[] = R"(
         OpStore %scc %carry_<index>
 )";
 
+// V_SIN_F32 / V_COS_F32 take their phase in turns (ISA 12.8). The phase is reduced in
+// turns before scaling by 2*pi, so integers (any large finite input) land on exact zero
+// phase and quarter turns on exact quadrants; zero results are +0 except sin(-0) = -0,
+// and infinities return the ISA's NaN.
+#define KYTY_TRIG_F32_TURNS_REDUCE R"(
+        %tw_<index> = OpExtInst %float %GLSL_std_450 RoundEven %t0_<index>
+        %tr_<index> = OpFSub %float %t0_<index> %tw_<index>
+        %tq4_<index> = OpFMul %float %tr_<index> %float_4_000000
+        %tqr_<index> = OpExtInst %float %GLSL_std_450 RoundEven %tq4_<index>
+        %tf4_<index> = OpFSub %float %tq4_<index> %tqr_<index>
+        %tfh_<index> = OpFMul %float %tf4_<index> %float_0_500000
+        %tfq_<index> = OpFMul %float %tfh_<index> %float_0_500000
+        %tth_<index> = OpFMul %float %tfq_<index> %float_2pi
+        %tsin_<index> = OpExtInst %float %GLSL_std_450 Sin %tth_<index>
+        %tcos_<index> = OpExtInst %float %GLSL_std_450 Cos %tth_<index>
+        %tqn_<index> = OpIsNan %bool %tqr_<index>
+        %tqs_<index> = OpSelect %float %tqn_<index> %float_0_000000 %tqr_<index>
+        %tqi_<index> = OpConvertFToS %int %tqs_<index>
+)"
+#define KYTY_TRIG_F32_TURNS_SELECT R"(
+        %tm_<index> = OpBitwiseAnd %int %tqo_<index> %int_3
+        %todd_<index> = OpBitwiseAnd %int %tm_<index> %int_1
+        %tneg_<index> = OpBitwiseAnd %int %tm_<index> %int_2
+        %toddb_<index> = OpINotEqual %bool %todd_<index> %int_0
+        %tnegb_<index> = OpINotEqual %bool %tneg_<index> %int_0
+        %tsel_<index> = OpSelect %float %toddb_<index> %tcos_<index> %tsin_<index>
+        %tsn_<index> = OpFNegate %float %tsel_<index>
+        %tval_<index> = OpSelect %float %tnegb_<index> %tsn_<index> %tsel_<index>
+        %tvb_<index> = OpBitcast %uint %tval_<index>
+        %tvm_<index> = OpBitwiseAnd %uint %tvb_<index> %uint_0x7fffffff
+        %tvz_<index> = OpIEqual %bool %tvm_<index> %uint_0
+        %tvc_<index> = OpSelect %uint %tvz_<index> %uint_0 %tvb_<index>
+        %tib_<index> = OpBitcast %uint %t0_<index>
+        %tim_<index> = OpBitwiseAnd %uint %tib_<index> %uint_0x7fffffff
+        %tiz_<index> = OpIEqual %bool %tim_<index> %uint_0
+        %tinf_<index> = OpIsInf %bool %t0_<index>
+        %tnan_<index> = OpBitwiseOr %uint %uint_0x7fc00000 %uint_0x80000000
+)"
+#define KYTY_TRIG_F32_TURNS_RESULT R"(
+        %tir_<index> = OpSelect %uint %tinf_<index> %tnan_<index> %tzr_<index>
+        %t_<index> = OpBitcast %float %tir_<index>
+)"
+
+const char V_SIN_F32_TURNS[] = KYTY_TRIG_F32_TURNS_REDUCE R"(
+        %tqo_<index> = OpCopyObject %int %tqi_<index>
+)" KYTY_TRIG_F32_TURNS_SELECT R"(
+        %tzr_<index> = OpSelect %uint %tiz_<index> %tib_<index> %tvc_<index>
+)" KYTY_TRIG_F32_TURNS_RESULT;
+
+const char V_COS_F32_TURNS[] = KYTY_TRIG_F32_TURNS_REDUCE R"(
+        %tqo_<index> = OpIAdd %int %tqi_<index> %int_1
+)" KYTY_TRIG_F32_TURNS_SELECT R"(
+        %tzr_<index> = OpCopyObject %uint %tvc_<index>
+)" KYTY_TRIG_F32_TURNS_RESULT;
+
+#undef KYTY_TRIG_F32_TURNS_REDUCE
+#undef KYTY_TRIG_F32_TURNS_SELECT
+#undef KYTY_TRIG_F32_TURNS_RESULT
+
 const char CLAMP_DX10[] = R"(
 		%c197_<index> = OpLoad %float %<dst>
 		%dx10_clamp_nan_<index> = OpIsNan %bool %c197_<index>
