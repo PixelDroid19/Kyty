@@ -1077,7 +1077,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x189: KYTY_NI("v_mov_fed_b32"); break;
 		case 0x18A: inst.type = ShaderInstructionType::VCvtF16F32; break;
 		case 0x18B: inst.type = ShaderInstructionType::VCvtF32F16; break;
-		case 0x18C: KYTY_NI("v_cvt_rpi_i32_f32"); break;
+		case 0x18C: inst.type = ShaderInstructionType::VCvtRpiI32F32; break;
 		case 0x18D: inst.type = ShaderInstructionType::VCvtFlrI32F32; break;
 		case 0x18E: inst.type = ShaderInstructionType::VCvtOffF32I4; break;
 		case 0x18F: KYTY_NI("v_cvt_f32_f64"); break;

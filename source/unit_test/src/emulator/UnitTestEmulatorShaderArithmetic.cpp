@@ -1886,10 +1886,13 @@ void IsNan(uint32_t actual, const char* label)
 	Equal(Evaluate(to_signed, 0x7f800000u, 0u, 0u, 0xdeadbeefu, 0u), 0xdeadbeefu, "inactive signed conversion retains the destination");
 
 	// V_CVT_RPI_I32_F32 is floor(x + 0.5): ties round up, not to even.
-	const Program to_nearest(Emit(Parse(Unary(0x0cu, false), stage), 0xc0u, false, false, true).c_str());
-	Equal(Evaluate(to_nearest, Bits(2.5f)), 3u, "round-to-nearest conversion rounds a positive tie up");
-	Equal(Evaluate(to_nearest, Bits(-1.5f)), 0xffffffffu, "round-to-nearest conversion rounds a negative tie up");
-	Equal(Evaluate(to_nearest, Bits(1.4f)), 1u, "round-to-nearest conversion rounds below a tie down");
+	for (const bool e64: {false, true})
+	{
+		const Program to_nearest(Emit(Parse(Unary(0x0cu, e64), stage), 0xc0u, false, false, true).c_str());
+		Equal(Evaluate(to_nearest, Bits(2.5f)), 3u, "round-to-nearest conversion rounds a positive tie up");
+		Equal(Evaluate(to_nearest, Bits(-1.5f)), 0xffffffffu, "round-to-nearest conversion rounds a negative tie up");
+		Equal(Evaluate(to_nearest, Bits(1.4f)), 1u, "round-to-nearest conversion rounds below a tie down");
+	}
 	std::_Exit(0);
 }
 
