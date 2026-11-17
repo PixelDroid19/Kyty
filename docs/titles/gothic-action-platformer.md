@@ -151,7 +151,8 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   Other front misses add about 3,000 per 2 s at about 25 us, against about 1 us for a front hit:
   the miss path totals about 106 ms/s, the largest single item left in state setup.
   Merging submits of batches whose successor is queued is worth roughly 50-75 ms/s, and it is not
-  a local change: a merged batch's `m_batch_ends` entry would name a recording submission, and
-  `GraphicsRing::WaitRetired` on a guest thread would then submit it through `WaitSubmission`, which
-  takes `m_mutex` while the command processor records under `m_run_mutex`. Not built; its
+  a local change: a merged batch's `m_batch_ends` entry would name a recording submission, which
+  `GraphicsRing::WaitRetired` on a guest thread then submits mid-batch through `WaitSubmission`
+  (serialized with draw recording, which also holds `m_mutex`), and every batch's interrupt and
+  completion would move to a later submission. Not built; its
   precondition (whether a batch's waits name labels the previous batch writes) is unmeasured.
