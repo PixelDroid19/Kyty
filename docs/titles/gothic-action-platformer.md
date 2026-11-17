@@ -224,3 +224,25 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   15.72 / 15.60 against 15.27 / 15.04 us per draw (fps 14.9 / 14.8 against 15.5 / 15.8). Sleeping
   adds a wake-up per hand-off, so this shows sleeping is not a gain; it does not show what the
   spin itself costs the processor thread.
+- **Pixel input analysis profile (gameplay route, 2026-11-17).** The tables of the register-keyed
+  shadow above were per thread; a table shared with the front could at most add the front's 24 %
+  repeat share, so that exclusion holds. Inline, the analysis costs the processor thread about
+  93 ms/s (about 1.6 us per draw). Its samples split into the dynamic scalar collector (17 %,
+  reads the snapshot words, so content-dependent), the sampler association (16 %), the
+  redefined-buffer scan (12 %) and the descriptor-load `any_of` (19 %); the last three read only
+  the code and the binding set. `ShaderAnalyzeImageCopyReads` drew no samples: its layout memo
+  always hits, so binding layouts repeat. `0469499d3` marks static EUD words in one pass and hashes
+  the image-copy layouts; results unchanged, unit tests pass, Astro Bot dunes and the Minecraft
+  world render as before. Its sample saving (about 7 %) was read from a profile dumped with
+  different inline flags under foreign load, so it is unconfirmed; no frame-rate claim.
+- **Not built: a binding-layout memo of the code-and-binding work.** It could remove at most about
+  43 ms/s directly (about 46 % of the inline samples, before the key cost), below the gate that
+  excluded the texture memo. More would need a faster front to turn inline analyses into front
+  hits; the split of the 8,400 inline analyses per second into structural ones (batch start, epoch
+  change) and front-behind ones is not measured. Even removing the whole inline analysis and the
+  miss path (about 106 ms/s) leaves about 12.2 us per draw, about 19.5 fps: 30 fps needs the
+  processor redesign, not local levers.
+- **Merge precondition counters (gameplay).** Per second: `wait_reg_mem_satisfied` 2,651,
+  `wait_reg_mem_current_producer` 1,662; queued-producer, producer-mismatch, not-found and
+  suspended waits 0, against about 3,000 flushes. The guest-thread `WaitRetired` rate is not
+  measured, so the batch merge is neither opened nor closed.
