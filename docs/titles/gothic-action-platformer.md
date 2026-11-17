@@ -429,10 +429,18 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 - Render scale test (one gameplay run, `Fixed` / `RenderTargets` 960x540, same scene: 3,369 draws
   per frame): 15.8 fps (native runs 18-18.6), draw processor 15.3 us per draw, render-engine busy
   0.36-0.51, about 28 ms of engine time per frame against about 37 ms at native. The scene is
-  command-processor bound (quarter the pixels did not raise fps), and only about a quarter of the
-  GPU frame time follows resolution: the rest is per-draw or per-pass work. 30 fps therefore needs
-  the GPU frame cut as well as the command-processor one; lower resolution does not remove that
-  cost. The slower draw processor in this run is one sample and is not explained.
+  command-processor bound: 15.3 us x 3,369 draws plus about 10 ms outside draws predicts about
+  16 fps. At least a quarter of the GPU frame time follows resolution (scaled cohorts may demote
+  to native and add resample copies; the run reports neither count). The slower draw processor in
+  this run is one sample and is not explained.
+- Fit of render-engine busy per second (100 seconds of two native gameplay runs, this run and an
+  earlier half-resolution run that landed in a lighter scene, 1,200 draws per frame at 41 fps,
+  about 18 ms of engine time per frame), R^2 0.93: about 11 ms per flip at either resolution,
+  10 ms more per flip at native, and 83 us per render-pass begin or 88 us per submit (the two are
+  0.97 correlated, so the fit cannot separate them; draws alone fit slightly worse). In the heavy
+  scene (about 197 pass begins and 174 submits per frame) that term is about 15-16 ms of the
+  37 ms. Whether it is engine work (flushes between batches) or idle time between submits charged
+  as busy is not known; the 23-26 fps cap stands on this counter only.
 - Command processor (timers): 12.85 us per draw in the draw processor, of which binding 6.9 us,
   plus about 10 ms per frame outside draws, at about 3,400 draws per frame. 30 fps leaves about
   1 us per draw for binding with the rest unchanged, so nearly all of it must leave the thread or
