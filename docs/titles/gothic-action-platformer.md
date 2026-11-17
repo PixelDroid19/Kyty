@@ -55,9 +55,10 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 
 - **Baseline.** Strict run, `KYTY_PRESENT_FPS_LIMIT=60`, agent `perf-snapshot` over 6 s while the video
   plays: 9.3 fps, 3,336 draws per frame, 27.2 us per draw in the draw processor. Binding 14.0 us
-  (textures 5.8, storage 4.1, descriptor finalization 2.7), state setup 7.5, pipeline setup 3.1. Earlier
-  windows of the same scene read 11-14 fps and 21 us per draw; the scene's load varies with the video
-  state. After the skip, gameplay runs at 13-14 fps.
+  (textures 5.8, storage 4.1, descriptor finalization 2.7), state setup 7.5, pipeline setup 3.1. Other
+  windows of the same scene read 11-14 fps and 21 us per draw. The swing follows draw-front coverage:
+  a draw the front did not prepare repeats the pixel-shader analysis inside state setup (see Draw
+  front). After the skip, gameplay runs at 13-14 fps.
 - **Why the draw is expensive.** Each draw binds about 7.4 textures and 5.6 storage buffers, at roughly
   0.7-0.8 us each. On the sandbox title, at 6.3 us per draw, binding is under 2 us. Rendering at 960x540
   does not change the frame rate, so the scene is bound by command processing.
@@ -70,13 +71,27 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   shader loads from a descriptor table (`ShaderStorageBindingSource::DynamicScalarLoad`), which the
   by-address route leaves on the descriptor path by design (`48cfd70c8`). Descriptor-set misses are
   1.7 % real misses and 34 % uncached sets that bind a fresh snapshot by design.
-- **Excluded: reusing the previous texture-stage result.** 87.5 % of stage binds repeat the previous
+- **Parked: reusing the previous texture-stage result.** 87.5 % of stage binds repeat the previous
   bind's T# and S# words, and a shadow check found no output mismatch on 83 % of binds with the same
   inputs, submission and object-graph generation; a positive control (different inputs) changed the
   outputs in 99.9 %. Skipping is still not equivalent: a sampled texture's `GpuMemory` object is created
-  with `read_only = false`, so every bind advances its `write_time` on a per-call clock, and another
-  object is materialized between every two such binds (0 of about 74,000 eligible binds had none).
-  Skipping would change which overlapping object is newest. 37 % of the eligible binds also sample a
+  with `read_only = false`, so every bind advances its `write_time` on a per-call clock. Skipping
+  could change which overlapping object is newest; that ordering would need its own proof first. 37 % of the eligible binds also sample a
   depth target (`depth-guest`, `depth-exact`).
 - **Draw front.** 92-97 % of draws take the inputs the front thread prepared; the rest repeat the
-  pixel-shader analysis on the command-processor thread at about 35 us each.
+  pixel-shader analysis on the command-processor thread at about 35 us each. With storage binding
+  cheaper (below), the command processor outruns the front more often: empty-queue misses went from
+  about 1,400 to 7,000 per window. The front is the next limit.
+- **Fixed: read-only storage bound in place** (`7473c5bfd`). 99.9 % of the snapshot captures were
+  read-only ranges inside an imported guest-memory buffer at a bindable offset (4-byte storage
+  alignment on the Intel driver), about 15 KB each. They now bind that buffer directly, as by-address
+  rows already did. Same scene, same binary, A/B: storage stage 4.1 -> 1.4 us per draw, draw
+  processor 21.8 -> 20.4 us, capture calls about 515k -> 20k per 2 s, 13.35 -> 13.67 fps; a second
+  A/B under a foreign host build read 32.3 -> 28.4 us and 7.0 -> 7.9 fps. Intro cinematic captures
+  unchanged. Minecraft (`PPSA17221`) storage stage 0.39 -> 0.28 us, captures correct; Astro Bot
+  dunes route reached and rendered normally. Slots that a storage-image seed proof reads keep their
+  snapshot. Premise, shared with the by-address path: no CPU write to those pages between recording
+  and GPU execution.
+- **Run note.** With `PrintfDirection = Silent` the scripted route reaches the title menu at a
+  different time and stays there, so the scene never loads; use console logging for this route
+  until it waits on a scene condition.
