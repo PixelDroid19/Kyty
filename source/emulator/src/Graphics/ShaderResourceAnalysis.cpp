@@ -79,8 +79,8 @@ bool ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format)
 
 bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 {
-	// GFX10+ unified formats 20 and 22 represent scalar 32-bit resource views.
-	return format == 20 || format == 22;
+	// GFX10+ unified formats 20-22 (32_UINT, 32_SINT, 32_FLOAT) represent scalar 32-bit resource views.
+	return format >= 20 && format <= 22;
 }
 
 static bool ShaderRawStorageSixteenBitFormat(uint32_t format)
