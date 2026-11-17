@@ -607,7 +607,9 @@ per draw; one pair on a noisy host, so the gain is indicative. Astro dunes (thre
 Minecraft world render correctly; 414 packet and front unit tests and the four CTest gate tests pass.
 Repeated on a clean build of the branch head after the boundary records: Astro reached the dunes
 (different shot, 620 draws per frame, so fps not compared) with the same storage-frontier event as
-every earlier run of the route, and the Minecraft world held 48.5 fps (60 fps limit).
+every earlier run of the route (capture checked), and the Minecraft world held 48.5 fps (60 fps
+limit). `kyty_agent playable-regression` (PPSA06084 - Superliminal, strict) on that head: 12 of 15
+gates, the same three failures as the reference (visual compare, scene checkpoint, action response).
 
 Texture-stage reuse misses in the same window (fingerprint without the command buffer): 21 % of
 binds had the same inputs stored under another command buffer (an upper bound: the frame,
@@ -704,9 +706,12 @@ records rejected as stale.
   leaves only the command-buffer end and queue submit, about 2 ms per frame.
 - Memory objects in the gameplay window, per frame: no object was created, reclaimed or freed
   (new and reclaim counters 0.1 or less for every type); about 13,900 lookups were served from
-  the caches (texture 7,900, depth 3,370, render target 2,520, storage 120), about four per draw
-  at about 0.4 us each (5 ms per frame in object lookup alone).
-- The processor cost is therefore the volume of ordered per-draw resolution against an unchanged
-  object set, not object churn. With every local lever counted (batch merge, submit hand-off,
-  sampler ids), the estimate ends near 21-22 fps; 30 fps needs resolution that is skipped when a
-  draw's resources did not change, which is a change to the memory-object model.
+  the caches (texture 7,900, depth 3,370, render target 2,520, storage 120), about four per draw;
+  at most about 5 ms per frame, estimated from one sample row's create time per call (cached reuses
+  are not shown to pass that timer). Storage resolution and descriptor finalize (about 9 ms per
+  frame) are not object lookup: storage lookups are 120 per frame.
+- The processor cost is the volume of ordered per-draw resolution, not object creation (an earlier
+  record found the removal counter moving in 74 % of cross-buffer binds, so the object set is not
+  shown unchanged). With every local lever counted (batch merge, submit hand-off, sampler ids), the
+  estimate ends near 21-22 fps; no priced lever reaches 30 fps (texture-stage reuse already skips
+  resolution for 71 % of texture binds, and a whole-set memo cannot hit).
