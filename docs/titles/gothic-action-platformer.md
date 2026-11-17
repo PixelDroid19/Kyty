@@ -492,6 +492,9 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
     the 2 us figure in `docs/bringup/cp-draw-plan.md`, "Dynamic offsets and descriptor buffers on
     Intel Arc", was measured on the DREDGE dock with 2.71 us of finalize;
   - expected with an image memo at 68-87 % valid binds plus that cache removed: 25-28 fps.
+  - Measured later ("Texture-stage reuse" below): the shipped reuse saves 0.7-1.2 us per draw of
+    binding, not 2-2.7 us, because a full path that can be reused costs about 1.3 us, not the
+    3.8 us average, and a miss adds about 0.4 us; the 25-28 fps expectation does not hold.
   - Storage words change on most draws, so a whole-set memo cannot hit without them leaving the
     set. The rest of the way to 30 fps has to come from state setup (3.3 us per draw), pipeline
     setup (1.2 us) or the time outside draws.
@@ -525,7 +528,8 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   so the instrument engaged; none of them fired on a would-reuse call. Every reuse was inside one
   submit, and the removal counter again explained nearly all stale repeats.
 - Hashing the 3,908-byte texture and 488-byte sampler resources cost about 0.9 us per call in
-  this diagnostic, so a memo must compare only the used entries.
+  this diagnostic. The shipped reuse compares the whole resources with `memcmp` instead (0.16-0.37
+  us per reuse including the object recheck), which is cheap enough without a hash.
 - Skipping `GpuMemoryCreateObject` on a reuse is not neutral: a sampled texture's cached hit bumps
   its write time, which the texel-seed check and the superseded-parent check read, and records its
   use for deferred deletion (a per-queue high water, so a repeat in the same submission is a
@@ -547,17 +551,20 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   before the recheck was added.
 - Comparator (temporary diagnostic): every reusable bind was also replayed into scratch outputs and
   the full path then ran; images, views, SGPR words, the read list and the captured object uses were
-  compared, with one forced difference of each kind (all five seen). The Castlevania comparator run
-  predates the read and use comparison and the check-hash recheck, so it compared outputs only.
+  compared, with one forced difference of each kind (all five seen). Castlevania and the second
+  Minecraft run used the final logic and also classified every full path that was not plain.
 
 | Workload | Reused | Output differences | Read or use differences | Reuse whose full path was not plain | Replay | Full path when reused |
 |---|---|---|---|---|---|---|
-| PPSA35399 - Castlevania: Belmont's Curse, gameplay | 71 % | 0 | not compared | not compared | 0.27-0.36 us | 1.3 us (earlier shadow) |
+| PPSA35399 - Castlevania: Belmont's Curse, gameplay | 71 % | 0 | 0 (245 moved) | 0 | 0.29 us | 1.3 us |
 | PPSA21567 - Astro Bot, dunes | 20 % | 0 | 0 (5 moved) | 0 | 0.37 us | 1.5 us |
-| PPSA17221 - Minecraft, world | 70 % | 0 | 0 (23 moved) | 0 | 0.16 us | 0.47 us |
+| PPSA17221 - Minecraft, world | 61-70 % | 0 | 0 (23 and 52 moved) | 0 | 0.16-0.18 us | 0.47-0.52 us |
 
-- "Moved": the registry counters changed during the full path itself (another thread), so its
-  capture was dropped; outputs matched. A missed reuse costs about 0.1 us of lookup plus 0.15-0.32
+- "Moved": a registry counter changed while the full path itself ran, so its capture was dropped;
+  outputs matched. Classified on Castlevania and Minecraft: none had side work and none had a
+  non-cached object; the guest-bytes or frame counter moved in all of them, and in the 3 where the
+  graph or removal counter also moved the frame moved too (one of them resolved no object at all),
+  which points to a change from outside the call. A missed reuse costs about 0.1 us of lookup plus 0.15-0.32
   us to capture and store, so Astro is neutral (reuse saves 176 ms, misses cost 155 ms per 786 k
   calls), Minecraft gains about 0.13 us per call and Castlevania about 0.5 us per call.
 - Castlevania A/B against the parent build, same route, alternating (draw processor and binding,
