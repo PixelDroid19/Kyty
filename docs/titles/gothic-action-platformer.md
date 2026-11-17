@@ -53,8 +53,8 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 
 ## Frame rate in the new-game video scene (2026-11-17, open)
 
-- **Baseline.** Strict run, `KYTY_PRESENT_FPS_LIMIT=60`, agent `perf-snapshot` over 6 s while the video
-  plays: 9.3 fps, 3,336 draws per frame, 27.2 us per draw in the draw processor. Binding 14.0 us
+- **Baseline (console logging on).** Strict run, `KYTY_PRESENT_FPS_LIMIT=60`, agent `perf-snapshot` over 6 s
+  while the video plays: 9.3 fps, 3,336 draws per frame, 27.2 us per draw in the draw processor. Binding 14.0 us
   (textures 5.8, storage 4.1, descriptor finalization 2.7), state setup 7.5, pipeline setup 3.1. Other
   windows of the same scene read 11-14 fps and 21 us per draw. The swing follows draw-front coverage:
   a draw the front did not prepare repeats the pixel-shader analysis inside state setup (see Draw
@@ -85,13 +85,34 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
 - **Fixed: read-only storage bound in place** (`7473c5bfd`). 99.9 % of the snapshot captures were
   read-only ranges inside an imported guest-memory buffer at a bindable offset (4-byte storage
   alignment on the Intel driver), about 15 KB each. They now bind that buffer directly, as by-address
-  rows already did. Same scene, same binary, A/B: storage stage 4.1 -> 1.4 us per draw, draw
-  processor 21.8 -> 20.4 us, capture calls about 515k -> 20k per 2 s, 13.35 -> 13.67 fps; a second
-  A/B under a foreign host build read 32.3 -> 28.4 us and 7.0 -> 7.9 fps. Intro cinematic captures
-  unchanged. Minecraft (`PPSA17221`) storage stage 0.39 -> 0.28 us, captures correct; Astro Bot
-  dunes route reached and rendered normally. Slots that a storage-image seed proof reads keep their
+  rows already did. Same scene, same binary, A/B with console logging on: storage stage 4.1 -> 1.4 us
+  per draw, draw processor 21.8 -> 20.4 us, capture calls about 515k -> 20k per 2 s (single fps
+  pairs in this scene vary by more than the change and are not quoted). Intro cinematic captures
+  unchanged. Minecraft (`PPSA17221`) storage stage 0.39 -> 0.28 us, captures correct. Astro Bot
+  (`PPSA21567`) on the dunes script reached the world map, not the dunes, and rendered normally. Slots that a storage-image seed proof reads keep their
   snapshot. Premise, shared with the by-address path: no CPU write to those pages between recording
   and GPU execution.
-- **Run note.** With `PrintfDirection = Silent` the scripted route reaches the title menu at a
-  different time and stays there, so the scene never loads; use console logging for this route
-  until it waits on a scene condition.
+- **Run note.** With `PrintfDirection = Silent` the title menu answers about 6 s later than with
+  console logging, so the logging-timed route misses it; the Silent route presses cross at 26, 31
+  and 36 s, and the scene runs from about 41 s.
+- **Silent baseline** (after `7473c5bfd`): 13.9 fps, 3,550 draws per frame, 16.96 us per draw
+  (textures 4.28, state setup 4.01, finalization 2.92, pipeline 1.72, storage 1.15). The command
+  processor is inside `Run` about 89 % of the time and the render engine is busy 55-60 %, so the
+  scene is bound by command processing. Four runs of the same binary read 13.0-14.6 fps.
+- **Draw front, measured.** Per 2 s: about 4,700 front restarts, one per guest submission (about 77 %)
+  or after a `RELEASE_MEM` (about 23 %), each missing its first draw, plus about 3,200 misses later
+  in the segment. A miss repeats the vertex (3.9 us) and pixel (20 us) input analysis on the
+  command processor, about 1.8 us per draw on average. Most of the pixel cost is
+  `ShaderParseUsage2` resource resolution, not code analysis (already cached per program).
+- **Descriptor sets cached on a second request** (`caaecf9b0`). About 25-30 % of the per-draw
+  descriptor set requests created a cached set that was never found again (storage views carry
+  per-draw offsets), and indexing and trimming them cost more than creating them. A set is now
+  cached only when its hash misses a second time; the first one is recycled after its submission.
+  Same-binary A/B with the filter switched off, two clean pairs, Silent route: finalization 3.07 /
+  2.90 -> 1.96 / 1.83 us per draw, binding 9.02 / 8.79 -> 8.01 / 7.81 us, fps 15.00 / 13.58 ->
+  14.83 / 15.08 (within run noise). Sandbox world: hits stay at 98.9 % of requests. Robot
+  platformer: hits per 2 s unchanged within scene variation. A burst of six captures in the dialogue
+  scene showed no stale or missing sprites.
+- **Excluded: a register prefilter for the dynamic scalar-load scan.** `ShaderIsDynamicScalarStorageConsumer`
+  scans about 30 records per call, but 89 % of calls find a matching storage record, so filtering
+  by destination register would skip almost nothing.

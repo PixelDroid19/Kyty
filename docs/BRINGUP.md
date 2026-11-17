@@ -198,7 +198,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Gothic action platformer](titles/gothic-action-platformer.md)
   - Gothic action platformer: the new-game video presents black (2026-11-16, open)
-  - Gothic action platformer: read-only storage bound in place, storage 4.1 -> 1.4 us per draw; draw front next (2026-11-17, open)
+  - Gothic action platformer: read-only storage bound in place, storage 4.1 -> 1.4 us per draw; descriptor sets cached on second request, finalization -1 us per draw; draw front next (2026-11-17, open)
 - [Twin-stick shooter](titles/twin-stick-shooter.md)
   - Twin-stick shooter: first strict runs reach the menu, play is not reached (2026-11-17, open)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
