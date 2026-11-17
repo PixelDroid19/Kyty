@@ -116,7 +116,13 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   inside `GetDescriptor`; their recycling runs from a submission completion callback, which may land
   in another stage. Sandbox world: hits stay at 98.9 % of requests. Robot platformer: hit ratio
   35-39 % in both arms on a loaded host in the warp tunnel, no timing, not gameplay. A burst of six
-  captures in the dialogue scene showed no stale or missing sprites.
+  captures in the dialogue scene showed no stale or missing sprites. On `3901c34bd` (2026-11-17)
+  the robot platformer's dunes route reached gameplay with three normal captures at 160-210 s and a
+  clean exit; an earlier run on a loaded host ended at status 139 on the title's recorded hub-start
+  command-buffer assert (`rip 0x9004a0c3e`), which the route meets when it runs late.
+  `kyty_agent playable-regression` on `PPSA06084 - Superliminal`: 10 of 15 gates pass, gate for
+  gate the same as the earlier reference (the five failures are the missing baseline, checkpoint
+  and input gates).
 - **Excluded: a register prefilter for the dynamic scalar-load scan.** `ShaderIsDynamicScalarStorageConsumer`
   scans about 30 records per call, but 89 % of calls find a matching storage record, so filtering
   by destination register would skip almost nothing.
