@@ -397,3 +397,38 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   `GraphicsRenderAttachments.cpp:121`) read only storage objects, and only the two sampled-image
   binds in `GraphicsRenderBind.cpp` request a `Texture`. The seed site is still untested with a
   `Texture` overlap.
+- Correction and open items (2026-11-17, code reading): the raw-render composite order
+  (`GpuMemoryCreate.cpp:2272`) reads `create_raw_source_write_time`, which takes `write_time` only
+  from storage images, so it cannot see the bump. Not yet confirmed: the type gates of the
+  write-back readers at `GpuMemoryWriteback.cpp:611` and `:768` (both cast to a buffer). Not yet
+  read: whether the depth-materialized sampled bind (`GraphicsRenderBind.cpp:4727`) and the
+  mip-generation texture (`Texture.cpp:1394`) receive GPU copies recorded only by `write_time`; a
+  rule limited to textures uploaded from guest bytes would avoid that question.
+
+### Parked: lock-free reuse of sampled-texture requests (2026-11-17)
+
+- A per-thread memo in front of `GpuMemory::CreateObject` would skip only cached hits. The cached
+  hit path never calls `Update`, the fast search or the cache store, and the cache lookup runs only
+  when the recent table misses, so a memo hit saves the two locks, the recent probe, the recheck
+  and the use record while paying its own key build and probe. Profile of the command-processor
+  thread (table and returned shader ids, `Silent`): `CreateObject` 15.5 % of the thread for every
+  object type (12.1 % under `PrepareTextures`); `Update` 2.6 % (dirty-page tracker map lookups),
+  debug-stat timing 3 %, locks 1 %. At the measured 71 % would-hit rate the memo is worth about
+  0.7 us per draw, under 1 fps, and it needs the same model change (sampled textures stop counting
+  as writes) and full regression set as texture-stage reuse. Not built.
+- The whole texture route is bounded by about 0.71 x 2.7 = 1.9 us per draw, roughly 21 fps. The
+  `Update` lever (skip the tracker lookups while its evidence version holds) is open and unpriced,
+  at most 2.6 % of the thread.
+
+### Budget for 30 fps (2026-11-17, existing gameplay samples and profile)
+
+- GPU: render-engine busy 0.64-0.80 of each second at 18-19 flips per second (`samples.jsonl`
+  of two gameplay runs), about 37 ms of engine time per frame. 30 fps needs 33 ms, so on this
+  host the GPU alone caps the scene near 26 fps unless the per-frame GPU work shrinks too.
+- Command processor: about 53.6 ms per frame and 3,400 draws, 15.8 us of thread time per draw.
+  `BindDescriptors` holds 47 % (about 7.4 us per draw: textures 22 %, descriptor cache 10.8 %,
+  storage 7.3 %, samplers 2.2 %); the driver 8.3 % (about 1.3 us); buffer flush and submit about
+  11 %; front-miss pixel-shader analysis 6.9 %. 30 fps allows about 9.8 us per draw, so with the
+  rest unchanged binding must fall to about 1.5 us per draw on this thread: about 80 % of it must
+  leave the thread or disappear, against the 10-15 % that is free of order today
+  (`docs/bringup/parallel-recording-design.md`, "Descriptor binding split by order").
