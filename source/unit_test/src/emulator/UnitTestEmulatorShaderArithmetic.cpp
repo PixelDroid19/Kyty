@@ -1959,6 +1959,36 @@ void IsNan(uint32_t actual, const char* label)
 		Equal(Evaluate(to_nearest, Bits(-1.5f)), 0xffffffffu, "round-to-nearest conversion rounds a negative tie up");
 		Equal(Evaluate(to_nearest, Bits(1.4f)), 1u, "round-to-nearest conversion rounds below a tie down");
 	}
+
+	// V_CVT_I32_F64 / V_CVT_U32_F64 truncate, saturate out-of-range values and map NaN to zero like FP32.
+	const auto f64 = [](uint64_t bits) { return std::array<uint32_t, 2> {static_cast<uint32_t>(bits), static_cast<uint32_t>(bits >> 32u)}; };
+	const auto from_double = [&](double value) {
+		uint64_t bits = 0;
+		std::memcpy(&bits, &value, sizeof(bits));
+		return f64(bits);
+	};
+	{
+		// The VOP3 forms of these conversions are not decoded yet.
+		const Program to_i32(Emit(Parse(Unary(0x03u, false), stage), 0xc0u, false, false, true).c_str());
+		const Program to_u32(Emit(Parse(Unary(0x15u, false), stage), 0xc0u, false, false, true).c_str());
+		const auto i32 = [&](std::array<uint32_t, 2> words) { return Evaluate(to_i32, words[0], words[1]); };
+		const auto u32 = [&](std::array<uint32_t, 2> words) { return Evaluate(to_u32, words[0], words[1]); };
+		Equal(i32(from_double(-1.9)), 0xffffffffu, "f64 signed conversion truncates");
+		Equal(i32(from_double(2147483647.9)), 0x7fffffffu, "f64 signed conversion keeps the largest in-range value");
+		Equal(i32(from_double(2147483648.0)), 0x7fffffffu, "f64 signed conversion saturates at 2^31");
+		Equal(i32(from_double(-2147483648.9)), 0x80000000u, "f64 signed conversion keeps -2^31");
+		Equal(i32(from_double(-1e300)), 0x80000000u, "f64 signed conversion saturates below -2^31");
+		Equal(i32(f64(0x7ff0000000000000ull)), 0x7fffffffu, "f64 signed conversion saturates positive infinity");
+		Equal(i32(f64(0xfff0000000000000ull)), 0x80000000u, "f64 signed conversion saturates negative infinity");
+		Equal(i32(f64(0x7ff8000000000000ull)), 0u, "f64 signed conversion maps NaN to zero");
+		Equal(u32(from_double(4294967295.9)), 0xffffffffu, "f64 unsigned conversion keeps the largest in-range value");
+		Equal(u32(from_double(4294967296.0)), 0xffffffffu, "f64 unsigned conversion saturates at 2^32");
+		Equal(u32(from_double(-0.5)), 0u, "f64 unsigned conversion truncates toward zero");
+		Equal(u32(from_double(-1.0)), 0u, "f64 unsigned conversion saturates negative values");
+		Equal(u32(f64(0x7ff0000000000000ull)), 0xffffffffu, "f64 unsigned conversion saturates positive infinity");
+		Equal(u32(f64(0xfff0000000000000ull)), 0u, "f64 unsigned conversion saturates negative infinity");
+		Equal(u32(f64(0xfff8000000000000ull)), 0u, "f64 unsigned conversion maps NaN to zero");
+	}
 	std::_Exit(0);
 }
 

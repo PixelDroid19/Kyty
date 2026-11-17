@@ -247,11 +247,19 @@ public:
 			}
 			else if (op == "OpIsNan") { r = std::isnan(compared(4)); }
 			else if (op == "OpIsInf") { r = std::isinf(compared(4)); }
+			else if ((op == "OpConvertUToF" || op == "OpConvertSToF") && t.at(3) == "%double")
+			{
+				const double   d    = op == "OpConvertUToF" ? static_cast<double>(arg(4)) : static_cast<double>(static_cast<int32_t>(arg(4)));
+				uint64_t       bits = 0;
+				std::memcpy(&bits, &d, sizeof(bits));
+				result.words[0] = static_cast<uint32_t>(bits);
+				result.words[1] = static_cast<uint32_t>(bits >> 32u);
+			}
 			else if (op == "OpConvertUToF") { r = Bits(static_cast<float>(arg(4))); }
 			else if (op == "OpConvertSToF") { r = Bits(static_cast<float>(static_cast<int32_t>(arg(4)))); }
 			else if (op == "OpConvertFToU")
 			{
-				const double input = fp(4);
+				const double input = compared(4);
 				if (!std::isfinite(input) || input < 0.0 || input >= 4294967296.0)
 				{
 					Fail("undefined conversion");
@@ -259,8 +267,8 @@ public:
 				r = static_cast<uint32_t>(input);
 			} else if (op == "OpConvertFToS")
 			{
-				if (!std::isfinite(fp(4)) || fp(4) < -2147483648.0 || fp(4) >= 2147483648.0) { Fail("undefined conversion"); }
-				r = static_cast<uint32_t>(static_cast<int32_t>(fp(4)));
+				if (!std::isfinite(compared(4)) || compared(4) < -2147483648.0 || compared(4) >= 2147483648.0) { Fail("undefined conversion"); }
+				r = static_cast<uint32_t>(static_cast<int32_t>(compared(4)));
 			}
 			// The fixture runs one lane, invocation 0, so a ballot holds only that lane's predicate.
 			else if (op == "OpGroupNonUniformBallot") { r = arg(5) != 0u ? 1u : 0u; }

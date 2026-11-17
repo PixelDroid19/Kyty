@@ -1908,7 +1908,21 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtI32F64_SVdstSVsrc0)
         %d0v_<index> = OpCompositeConstruct %v2uint %t0_lo_<index> %t0_hi_<index>
         %d0u_<index> = OpBitcast %ulong %d0v_<index>
         %d0_<index> = OpBitcast %double %d0u_<index>
-        %i_<index> = OpConvertFToS %int %d0_<index>
+        ; Out-of-range values saturate and NaN converts to 0 (ISA 12.8); only in-range values reach the conversion.
+        %imin_<index> = OpBitcast %int %uint_0x80000000
+        %imax_<index> = OpBitcast %int %uint_0x7fffffff
+        %dmin_<index> = OpConvertSToF %double %imin_<index>
+        %dmax_<index> = OpConvertSToF %double %imax_<index>
+        %dzero_<index> = OpConvertSToF %double %int_0
+        %dnan_<index> = OpIsNan %bool %d0_<index>
+        %dlow_<index> = OpFOrdLessThan %bool %d0_<index> %dmin_<index>
+        %dhigh_<index> = OpFOrdGreaterThan %bool %d0_<index> %dmax_<index>
+        %dout_<index> = OpLogicalOr %bool %dlow_<index> %dhigh_<index>
+        %dbad_<index> = OpLogicalOr %bool %dout_<index> %dnan_<index>
+        %dsafe_<index> = OpSelect %double %dbad_<index> %dzero_<index> %d0_<index>
+        %iconv_<index> = OpConvertFToS %int %dsafe_<index>
+        %ilow_<index> = OpSelect %int %dlow_<index> %imin_<index> %iconv_<index>
+        %i_<index> = OpSelect %int %dhigh_<index> %imax_<index> %ilow_<index>
         %t_<index> = OpBitcast %float %i_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
@@ -2308,7 +2322,17 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtU32F64_SVdstSVsrc0)
         %d0v_<index> = OpCompositeConstruct %v2uint %t0_lo_<index> %t0_hi_<index>
         %d0u_<index> = OpBitcast %ulong %d0v_<index>
         %d0_<index> = OpBitcast %double %d0u_<index>
-        %i_<index> = OpConvertFToU %uint %d0_<index>
+        ; Out-of-range values saturate and NaN converts to 0 (ISA 12.8); only in-range values reach the conversion.
+        %dmax_<index> = OpConvertUToF %double %uint_0xffffffff
+        %dzero_<index> = OpConvertUToF %double %uint_0
+        %dnan_<index> = OpIsNan %bool %d0_<index>
+        %dlow_<index> = OpFOrdLessThan %bool %d0_<index> %dzero_<index>
+        %dhigh_<index> = OpFOrdGreaterThan %bool %d0_<index> %dmax_<index>
+        %dout_<index> = OpLogicalOr %bool %dlow_<index> %dhigh_<index>
+        %dbad_<index> = OpLogicalOr %bool %dout_<index> %dnan_<index>
+        %dsafe_<index> = OpSelect %double %dbad_<index> %dzero_<index> %d0_<index>
+        %uconv_<index> = OpConvertFToU %uint %dsafe_<index>
+        %i_<index> = OpSelect %uint %dhigh_<index> %uint_0xffffffff %uconv_<index>
         %t_<index> = OpBitcast %float %i_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
