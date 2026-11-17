@@ -600,14 +600,15 @@ that kernel time:
 
 Fix: the replay marks the full-ring wait (`m_parked`), and `Release` wakes only a parked front;
 `Start` still wakes a front waiting for a job. Same diagnostic, fix applied: `ReleaseDrawFronts`
-0.034 us per call and 0.095 wakes per call; front context switches 640 k -> 126 k per 23 s; kernel
-time of the command processor 2.16 -> 1.62 s per 23 s. A/B against the parent build, same route,
+0.034 us per call and 0.095 wakes per call (that run reached a lighter scene, about 2,000 draws per
+frame, so its per-window totals are not compared). A/B against the parent build, same route,
 one run each: 18.0 -> 18.7 fps (3,400 draws per frame in both), draw processor 13.09 -> 12.32 us
 per draw; one pair on a noisy host, so the gain is indicative. Astro dunes (three captures) and the
-Minecraft world render correctly; 414 packet and front unit tests and the three CTest gates pass.
+Minecraft world render correctly; 414 packet and front unit tests and the four CTest gate tests pass.
 
 Texture-stage reuse misses in the same window (fingerprint without the command buffer): 21 % of
-binds had the same inputs stored under another command buffer, 0.15 % under another submission of
+binds had the same inputs stored under another command buffer (an upper bound: the frame,
+removal and guest-bytes counters were not checked for this class), 0.15 % under another submission of
 the same buffer, 1.5 % never seen; 3.7 % matched but a recorded object had changed. Command-buffer
 turnover is the main source of misses; reusing across buffers needs the use records and image
 barriers proven for a new buffer, not built.
