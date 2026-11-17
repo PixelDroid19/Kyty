@@ -109,10 +109,13 @@ Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs.
   per-draw offsets), and indexing and trimming them cost more than creating them. A set is now
   cached only when its hash misses a second time; the first one is recycled after its submission.
   Same-binary A/B with the filter switched off, two clean pairs, Silent route: finalization 3.07 /
-  2.90 -> 1.96 / 1.83 us per draw, binding 9.02 / 8.79 -> 8.01 / 7.81 us, fps 15.00 / 13.58 ->
-  14.83 / 15.08 (within run noise). Sandbox world: hits stay at 98.9 % of requests. Robot
-  platformer: hits per 2 s unchanged within scene variation. A burst of six captures in the dialogue
-  scene showed no stale or missing sprites.
+  2.90 -> 1.96 / 1.83 us per draw and binding 9.02 / 8.79 -> 8.01 / 7.81 us, but state setup rose
+  3.70 / 3.97 -> 4.53 / 4.57 us and the total per draw was 15.90 / 17.73 -> 15.88 / 15.56 us (fps
+  15.00 / 13.58 -> 14.83 / 15.08): a net per-draw gain is not established. Uncached sets are deferred
+  inside `GetDescriptor`; their recycling runs from a submission completion callback, which may land
+  in another stage. Sandbox world: hits stay at 98.9 % of requests. Robot platformer: hit ratio
+  35-39 % in both arms on a loaded host in the warp tunnel, no timing, not gameplay. A burst of six
+  captures in the dialogue scene showed no stale or missing sprites.
 - **Excluded: a register prefilter for the dynamic scalar-load scan.** `ShaderIsDynamicScalarStorageConsumer`
   scans about 30 records per call, but 89 % of calls find a matching storage record, so filtering
   by destination register would skip almost nothing.
