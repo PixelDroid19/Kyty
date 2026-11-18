@@ -305,6 +305,62 @@ bool Spirv::EmitGuestLoad(const String8& lo, const String8& hi, int dwords, cons
 	return true;
 }
 
+bool Spirv::EmitGuestLoad64Aligned(const String8& lo, const String8& hi, int dwords, const String8& prefix, String8* output) const
+{
+	if (!UsesGuestDeviceAddress() || output == nullptr || dwords <= 0 || dwords > 32 || (dwords % 4) != 0)
+	{
+		return false;
+	}
+	const auto* p = prefix.c_str();
+	*output += String8::FromPrintf("%%%s_lo64 = OpUConvert %%ulong %%%s\n"
+	                               "%%%s_hi64 = OpUConvert %%ulong %%%s\n"
+	                               "%%%s_hi_shift = OpShiftLeftLogical %%ulong %%%s_hi64 %%uint_32\n"
+	                               "%%%s_guest = OpBitwiseOr %%ulong %%%s_hi_shift %%%s_lo64\n"
+	                               "%%%s_device = OpFunctionCall %%ulong %%guest_device_address %%%s_guest %%gda_u64_4\n",
+	                               p, lo.c_str(), p, hi.c_str(), p, p, p, p, p, p, p);
+
+	// Caller guarantees 64-byte guest alignment: words 0..15 cannot cross a 4 KiB
+	// page, and words 16..dwords-1 cross at most once as a contiguous tail.
+	if (dwords > 16)
+	{
+		*output += String8::FromPrintf(
+		    "%%%s_page_offset = OpBitwiseAnd %%ulong %%%s_guest %%gda_u64_page_mask\n"
+		    "%%%s_tail_start_off = OpIAdd %%ulong %%%s_page_offset %%gda_u64_64\n"
+		    "%%%s_crosses = OpUGreaterThanEqual %%bool %%%s_tail_start_off %%gda_u64_page\n"
+		    "%%%s_next_guest = OpIAdd %%ulong %%%s_guest %%gda_u64_64\n"
+		    "OpSelectionMerge %%%s_split_end None\n"
+		    "OpBranchConditional %%%s_crosses %%%s_split_load %%%s_split_skip\n"
+		    "%%%s_split_load = OpLabel\n"
+		    "%%%s_next_device_raw = OpFunctionCall %%ulong %%guest_device_address %%%s_next_guest %%gda_u64_4\n"
+		    "OpBranch %%%s_split_end\n"
+		    "%%%s_split_skip = OpLabel\n"
+		    "%%%s_tail_normal = OpIAdd %%ulong %%%s_device %%gda_u64_64\n"
+		    "OpBranch %%%s_split_end\n"
+		    "%%%s_split_end = OpLabel\n"
+		    "%%%s_tail_device = OpPhi %%ulong %%%s_next_device_raw %%%s_split_load %%%s_tail_normal %%%s_split_skip\n",
+		    p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p);
+	}
+
+	// Emit vec4 loads directly with 4-byte alignment so no scalar fallback branch
+	// or per-word OpPhi array is kept live across adjacent BVH paths.
+	const int vectors = dwords / 4;
+	for (int v = 0; v < vectors; v++)
+	{
+		const char* base     = (v < 4) ? "device" : "tail_device";
+		const int   byte_off = (v % 4) * 16;
+		*output += String8::FromPrintf("%%%s_v%d_a = OpIAdd %%ulong %%%s_%s %%gda_u64_%d\n"
+		                               "%%%s_v%d_p = OpConvertUToPtr %%_ptr_PhysicalStorageBuffer_v4uint %%%s_v%d_a\n"
+		                               "%%%s_v%d = OpLoad %%v4uint %%%s_v%d_p Aligned 4\n",
+		                               p, v, p, base, byte_off, p, v, p, v, p, v, p, v);
+		for (int c = 0; c < 4; c++)
+		{
+			const int word = v * 4 + c;
+			*output += String8::FromPrintf("%%%s_d%d = OpCompositeExtract %%uint %%%s_v%d %d\n", p, word, p, v, c);
+		}
+	}
+	return true;
+}
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

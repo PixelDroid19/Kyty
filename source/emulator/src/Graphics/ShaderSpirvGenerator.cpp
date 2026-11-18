@@ -9,6 +9,7 @@
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvTemplates.h"
 #include "ShaderNativeWaveInternal.h"
+#include "ShaderSpirvSelectionCut.h"
 #include "ShaderSpirvStorageWriteMask.h"
 #include "ShaderStorageAnalysis.h"
 
@@ -506,12 +507,25 @@ void Spirv::GenerateSource()
 	const uint32_t annotations_end = m_source.Size();
 	WriteTypes();
 	WriteConstants();
+	const uint32_t constants_end = m_source.Size();
 	WriteGlobalVariables();
-	const uint32_t main_begin = m_source.Size();
+	uint32_t main_begin = m_source.Size();
 	WriteMainProlog();
 	WriteLocalVariables();
 	WriteInstructions();
 	WriteMainEpilog();
+	if (m_bind != nullptr && m_bind->device_address_used && m_bind->push_constant_size > 0)
+	{
+		String8                       lrc_constants;
+		String8                       lrc_body;
+		const SpirvSelectionCutConfig lrc_cfg {m_bind->device_address_offset_dw / 4u, m_bind->vsharp_uniform_buffer};
+		if (SpirvCutSelectionLiveRanges(m_source.Mid(main_begin), lrc_cfg, &lrc_constants, &lrc_body))
+		{
+			m_source   = m_source.Left(constants_end) + lrc_constants +
+			             m_source.Mid(constants_end, main_begin - constants_end) + lrc_body;
+			main_begin += lrc_constants.Size();
+		}
+	}
 	if (UsesSplitComputeWave())
 	{
 		CheckSplitWaveCollectives(m_source.Mid(main_begin));

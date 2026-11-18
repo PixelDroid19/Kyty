@@ -147,6 +147,7 @@ UT_LINK(EmulatorShaderResourceBounds);
 UT_LINK(EmulatorShaderDescriptorLimits);
 UT_LINK(EmulatorShaderDescriptorLayoutPlan);
 UT_LINK(EmulatorShaderSpirvStorageWriteMask);
+UT_LINK(EmulatorShaderSpirvSelectionCut);
 UT_LINK(EmulatorShaderMetadataResourceIndex);
 UT_LINK(EmulatorShaderDynamicMappings);
 UT_LINK(EmulatorShaderGetpc);

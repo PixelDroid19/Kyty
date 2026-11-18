@@ -28,18 +28,30 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 	{
 		return false;
 	}
-	const auto i = String8::FromPrintf("bvh_%u", index);
-	String8    s;
-	auto       line = [&](const char* fmt, auto... args) { s += String8::FromPrintf(fmt, args...); };
-	const auto* p   = i.c_str();
+	const auto  i    = String8::FromPrintf("bvh_%u", index);
+	String8     s;
+	auto        line = [&](const char* fmt, auto... args) { s += String8::FromPrintf(fmt, args...); };
+	const auto* p    = i.c_str();
+	const auto  invalid  = spirv->GetConstantUint(0xffffffffu);
+	const auto  inf_bits = spirv->GetConstantUint(0x7f800000u);
+	const auto  ninf_bits = spirv->GetConstantUint(0xff800000u);
 
-	// Ray operands (float) and node pointer.
-	for (int k = 0; k < 11; k++)
+	// Skip operand loads and address math for inactive lanes.
+	s += String8(R"(
+%<p>_exec = OpLoad %uint %exec_lo
+%<p>_active = OpINotEqual %bool %<p>_exec %uint_0
+OpSelectionMerge %<p>_merge None
+OpBranchConditional %<p>_active %<p>_work %<p>_merge
+%<p>_work = OpLabel
+)").ReplaceStr("<p>", i);
+
+	auto load_ray = [&](int reg)
 	{
-		line("%%%s_a%d = OpLoad %%float %%%s\n", p, k, operand_variable_to_str(inst.mimg_address[k]).value.c_str());
-	}
+		line("%%%s_a%d = OpLoad %%float %%%s\n", p, reg, operand_variable_to_str(inst.mimg_address[reg]).value.c_str());
+	};
+	// Node pointer and T# descriptor words for address, bounds check, and switch dispatch.
+	load_ray(0);
 	line("%%%s_ptr = OpBitcast %%uint %%%s_a0\n", p, p);
-	// T# words.
 	for (int w = 0; w < 4; w++)
 	{
 		line("%%%s_t%d = OpLoad %%uint %%%s\n", p, w, operand_variable_to_str(inst.src[1], w).value.c_str());
@@ -50,13 +62,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 %<p>_t1_lo8 = OpBitwiseAnd %uint %<p>_t1 %uint_255
 %<p>_t1_sh = OpShiftLeftLogical %uint %<p>_t1_lo8 %uint_8
 %<p>_base_hi = OpBitwiseOr %uint %<p>_base_top %<p>_t1_sh
-%<p>_grow_raw = OpShiftRightLogical %uint %<p>_t1 %uint_23
-%<p>_grow = OpBitwiseAnd %uint %<p>_grow_raw %uint_255
 %<p>_sort_bit = OpShiftRightLogical %uint %<p>_t1 %uint_31
 %<p>_sort = OpINotEqual %bool %<p>_sort_bit %uint_0
-%<p>_mode_raw = OpShiftRightLogical %uint %<p>_t3 %uint_24
-%<p>_mode_bit = OpBitwiseAnd %uint %<p>_mode_raw %uint_1
-%<p>_mode1 = OpINotEqual %bool %<p>_mode_bit %uint_0
 %<p>_type = OpBitwiseAnd %uint %<p>_ptr %uint_7
 %<p>_ptr_hi = OpShiftRightLogical %uint %<p>_ptr %uint_29
 %<p>_ptr_clear = OpBitwiseAnd %uint %<p>_ptr %<not7>
@@ -66,119 +73,130 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 %<p>_carry = OpSelect %uint %<p>_carry_b %uint_1 %uint_0
 %<p>_hi_sum = OpIAdd %uint %<p>_base_hi %<p>_ptr_hi
 %<p>_addr_hi = OpIAdd %uint %<p>_hi_sum %<p>_carry
-%<p>_is16 = OpIEqual %bool %<p>_type %uint_4
 %<p>_index = OpShiftRightLogical %uint %<p>_ptr %<three>
 %<p>_size_hi = OpBitwiseAnd %uint %<p>_t3 %<size_hi_mask>
 %<p>_size_big = OpINotEqual %bool %<p>_size_hi %uint_0
 %<p>_index_fits = OpULessThanEqual %bool %<p>_index %<p>_t2
 %<p>_in_bounds = OpLogicalOr %bool %<p>_size_big %<p>_index_fits
-%<p>_eps = OpConvertUToF %float %<p>_grow
-%<p>_ulp = OpBitcast %float %<ulp_bits>
-%<p>_grow_f = OpFMul %float %<p>_eps %<p>_ulp
-%<p>_grow_scale = OpFAdd %float %float_1_000000 %<p>_grow_f
-%<p>_inf = OpBitcast %float %<inf_bits>
-%<p>_ninf = OpBitcast %float %<ninf_bits>
-%<p>_exec = OpLoad %uint %exec_lo
-%<p>_active = OpINotEqual %bool %<p>_exec %uint_0
 %<p>_type_oob = OpBitwiseOr %uint %<p>_type %uint_8
 %<p>_kind = OpSelect %uint %<p>_in_bounds %<p>_type %<p>_type_oob
-OpSelectionMerge %<p>_merge None
-OpBranchConditional %<p>_active %<p>_work %<p>_merge
-%<p>_work = OpLabel
+%<p>_inf = OpBitcast %float %<inf_bits>
+%<p>_ninf = OpBitcast %float %<ninf_bits>
 OpSelectionMerge %<p>_kind_end None
-OpSwitch %<p>_kind %<p>_user 0 %<p>_tri 1 %<p>_tri 4 %<p>_box 5 %<p>_box 8 %<p>_tri_oob 9 %<p>_tri_oob
-%<p>_box = OpLabel
+OpSwitch %<p>_kind %<p>_user 0 %<p>_tri 1 %<p>_tri 4 %<p>_box16 5 %<p>_box32 8 %<p>_tri_oob 9 %<p>_tri_oob
 )").ReplaceStr("<p>", i)
 	                                                        .ReplaceStr("<not7>", spirv->GetConstantUint(0xfffffff8u))
 	                                                        .ReplaceStr("<size_hi_mask>", spirv->GetConstantUint(0x3ffu))
 	                                                        .ReplaceStr("<three>", spirv->GetConstantUint(3u))
-	                                                        .ReplaceStr("<inf_bits>", spirv->GetConstantUint(0x7f800000u))
-	                                                        .ReplaceStr("<ninf_bits>", spirv->GetConstantUint(0xff800000u))
-	                                                        .ReplaceStr("<ulp_bits>", spirv->GetConstantUint(0x33800000u));
-	// Box node: four child pointers, then 24 fp32 bounds or 12 words of fp16 pairs.
-	if (!spirv->EmitGuestLoad(i + "_addr_lo", i + "_addr_hi", 28, i + "_n", &s))
-	{
-		return false;
-	}
-	auto f = [&](int w) { return String8::FromPrintf("%s_f%d", p, w); };
-	for (int w = 4; w < 28; w++)
-	{
-		line("%%%s_f%d = OpBitcast %%float %%%s_n_d%d\n", p, w, p, w);
-	}
+	                                                        .ReplaceStr("<inf_bits>", inf_bits)
+	                                                        .ReplaceStr("<ninf_bits>", ninf_bits);
 
-	// Box children bounds: fp32 layout, and fp16 layout unpacked to fp32.
-	for (int c = 0; c < 4; c++)
+	// Split fp16 (box16: 16 dwords) and fp32 (box32: 28 dwords) box nodes so
+	// neither loads unused bounds or keeps unused ray operands alive.
+	const int pairs[5][2] = {{0, 2}, {1, 3}, {0, 1}, {2, 3}, {1, 2}};
+	auto      emit_box    = [&](bool fp16, const char* tag, int final_versions[4]) -> bool
 	{
-		for (int k = 0; k < 6; k++)
+		const auto bx   = String8::FromPrintf("%s_%s", p, tag);
+		const auto nd_p = bx + "_n";
+		const int  dws  = fp16 ? 16 : 28;
+		line("%%%s = OpLabel\n", bx.c_str());
+		if (!spirv->EmitGuestLoad64Aligned(i + "_addr_lo", i + "_addr_hi", dws, nd_p, &s))
 		{
-			line("%%%s_b32_%d_%d = OpCopyObject %%float %%%s\n", p, c, k, f(4 + 6 * c + k).c_str());
-		}
-		for (int k = 0; k < 3; k++)
-		{
-			line("%%%s_h_%d_%d = OpExtInst %%v2float %%GLSL_std_450 UnpackHalf2x16 %%%s_n_d%d\n", p, c, k, p, 4 + 3 * c + k);
-		}
-		const char* comps[6][2] = {{"0", "0"}, {"0", "1"}, {"1", "0"}, {"1", "1"}, {"2", "0"}, {"2", "1"}};
-		for (int k = 0; k < 6; k++)
-		{
-			line("%%%s_b16_%d_%d = OpCompositeExtract %%float %%%s_h_%d_%s %s\n", p, c, k, p, c, comps[k][0], comps[k][1]);
-			line("%%%s_bb_%d_%d = OpSelect %%float %%%s_is16 %%%s_b16_%d_%d %%%s_b32_%d_%d\n", p, c, k, p, p, c, k, p, c, k);
-		}
-	}
-	// Slab tests: grown exit distance, entry distance used as sort key.
-	const char* axis[3] = {"2", "3", "4"};
-	const char* inv[3]  = {"8", "9", "10"};
-	for (int c = 0; c < 4; c++)
-	{
-		for (int a = 0; a < 3; a++)
-		{
-			line("%%%s_c%d_lo%d = OpFSub %%float %%%s_bb_%d_%d %%%s_a%s\n"
-			     "%%%s_c%d_hi%d = OpFSub %%float %%%s_bb_%d_%d %%%s_a%s\n"
-			     "%%%s_c%d_tlo%d = OpFMul %%float %%%s_c%d_lo%d %%%s_a%s\n"
-			     "%%%s_c%d_thi%d = OpFMul %%float %%%s_c%d_hi%d %%%s_a%s\n"
-			     "%%%s_c%d_pos%d = OpFOrdGreaterThanEqual %%bool %%%s_a%s %%float_0_000000\n"
-			     "%%%s_c%d_in%d = OpSelect %%float %%%s_c%d_pos%d %%%s_c%d_tlo%d %%%s_c%d_thi%d\n"
-			     "%%%s_c%d_out%d = OpSelect %%float %%%s_c%d_pos%d %%%s_c%d_thi%d %%%s_c%d_tlo%d\n",
-			     p, c, a, p, c, a, p, axis[a], p, c, a, p, c, a + 3, p, axis[a], p, c, a, p, c, a, p, inv[a], p, c, a, p, c, a, p,
-			     inv[a], p, c, a, p, inv[a], p, c, a, p, c, a, p, c, a, p, c, a, p, c, a, p, c, a, p, c, a, p, c, a);
+			return false;
 		}
 		s += String8(R"(
-%<p>_c<c>_in01 = OpExtInst %float %GLSL_std_450 NMax %<p>_c<c>_in0 %<p>_c<c>_in1
-%<p>_c<c>_enter = OpExtInst %float %GLSL_std_450 NMax %<p>_c<c>_in01 %<p>_c<c>_in2
-%<p>_c<c>_out01 = OpExtInst %float %GLSL_std_450 NMin %<p>_c<c>_out0 %<p>_c<c>_out1
-%<p>_c<c>_exit = OpExtInst %float %GLSL_std_450 NMin %<p>_c<c>_out01 %<p>_c<c>_out2
-%<p>_c<c>_tmin0 = OpExtInst %float %GLSL_std_450 NMax %<p>_c<c>_enter %float_0_000000
-%<p>_c<c>_tmax0 = OpExtInst %float %GLSL_std_450 NMin %<p>_c<c>_exit %<p>_a1
-%<p>_c<c>_nan_in = OpIsNan %bool %<p>_c<c>_enter
-%<p>_c<c>_nan_out = OpIsNan %bool %<p>_c<c>_exit
-%<p>_c<c>_nan = OpLogicalOr %bool %<p>_c<c>_nan_in %<p>_c<c>_nan_out
-%<p>_c<c>_tmin = OpSelect %float %<p>_c<c>_nan %<inf> %<p>_c<c>_tmin0
-%<p>_c<c>_tmax = OpSelect %float %<p>_c<c>_nan %<ninf> %<p>_c<c>_tmax0
-%<p>_c<c>_grown = OpFMul %float %<p>_c<c>_tmax %<p>_grow_scale
-%<p>_c<c>_hit = OpFOrdLessThanEqual %bool %<p>_c<c>_tmin %<p>_c<c>_grown
-%<p>_c<c>_node = OpSelect %uint %<p>_c<c>_hit %<p>_n_d<c> %<invalid>
-%<p>_k<c>_0 = OpCopyObject %float %<p>_c<c>_tmin
-%<p>_v<c>_0 = OpCopyObject %uint %<p>_c<c>_node
-)").ReplaceStr("<p>", i)
-		         .ReplaceStr("<c>", String8::FromPrintf("%d", c))
-		         .ReplaceStr("<inf>", i + "_inf")
-		         .ReplaceStr("<ninf>", i + "_ninf")
-		         .ReplaceStr("<invalid>", spirv->GetConstantUint(0xffffffffu));
-	}
-	// Sorting network (0,2)(1,3)(0,1)(2,3)(1,2): swap when B is valid and
-	// nearer, or A is invalid, and only when T# box sorting is enabled.
-	int        version[4]  = {0, 0, 0, 0};
-	const int  pairs[5][2] = {{0, 2}, {1, 3}, {0, 1}, {2, 3}, {1, 2}};
-	for (int n = 0; n < 5; n++)
-	{
-		const int  a  = pairs[n][0];
-		const int  b  = pairs[n][1];
-		const auto va = String8::FromPrintf("%s_v%d_%d", p, a, version[a]);
-		const auto vb = String8::FromPrintf("%s_v%d_%d", p, b, version[b]);
-		const auto ka = String8::FromPrintf("%s_k%d_%d", p, a, version[a]);
-		const auto kb = String8::FromPrintf("%s_k%d_%d", p, b, version[b]);
-		version[a]++;
-		version[b]++;
-		s += String8(R"(
+%<bx>_grow_raw = OpShiftRightLogical %uint %<p>_t1 %uint_23
+%<bx>_grow = OpBitwiseAnd %uint %<bx>_grow_raw %uint_255
+%<bx>_eps = OpConvertUToF %float %<bx>_grow
+%<bx>_ulp = OpBitcast %float %<ulp_bits>
+%<bx>_grow_f = OpFMul %float %<bx>_eps %<bx>_ulp
+%<bx>_grow_scale = OpFAdd %float %float_1_000000 %<bx>_grow_f
+)").ReplaceStr("<bx>", bx)
+		         .ReplaceStr("<p>", i)
+		         .ReplaceStr("<ulp_bits>", spirv->GetConstantUint(0x33800000u));
+
+		for (int k: {1, 2, 3, 4, 8, 9, 10})
+		{
+			line("%%%s_a%d = OpLoad %%float %%%s\n", bx.c_str(), k, operand_variable_to_str(inst.mimg_address[k]).value.c_str());
+		}
+
+		const char* axis[3] = {"2", "3", "4"};
+		const char* inv[3]  = {"8", "9", "10"};
+		for (int c = 0; c < 4; c++)
+		{
+			if (fp16)
+			{
+				const char* comps[6][2] = {{"0", "0"}, {"0", "1"}, {"1", "0"}, {"1", "1"}, {"2", "0"}, {"2", "1"}};
+				for (int k = 0; k < 3; k++)
+				{
+					line("%%%s_h_%d_%d = OpExtInst %%v2float %%GLSL_std_450 UnpackHalf2x16 %%%s_d%d\n", bx.c_str(), c, k, nd_p.c_str(),
+					     4 + 3 * c + k);
+				}
+				for (int k = 0; k < 6; k++)
+				{
+					line("%%%s_bb_%d_%d = OpCompositeExtract %%float %%%s_h_%d_%s %s\n", bx.c_str(), c, k, bx.c_str(), c, comps[k][0],
+					     comps[k][1]);
+				}
+			} else
+			{
+				for (int k = 0; k < 6; k++)
+				{
+					line("%%%s_bb_%d_%d = OpBitcast %%float %%%s_d%d\n", bx.c_str(), c, k, nd_p.c_str(), 4 + 6 * c + k);
+				}
+			}
+			for (int a = 0; a < 3; a++)
+			{
+				line("%%%s_c%d_lo%d = OpFSub %%float %%%s_bb_%d_%d %%%s_a%s\n"
+				     "%%%s_c%d_hi%d = OpFSub %%float %%%s_bb_%d_%d %%%s_a%s\n"
+				     "%%%s_c%d_tlo%d = OpFMul %%float %%%s_c%d_lo%d %%%s_a%s\n"
+				     "%%%s_c%d_thi%d = OpFMul %%float %%%s_c%d_hi%d %%%s_a%s\n"
+				     "%%%s_c%d_pos%d = OpFOrdGreaterThanEqual %%bool %%%s_a%s %%float_0_000000\n"
+				     "%%%s_c%d_in%d = OpSelect %%float %%%s_c%d_pos%d %%%s_c%d_tlo%d %%%s_c%d_thi%d\n"
+				     "%%%s_c%d_out%d = OpSelect %%float %%%s_c%d_pos%d %%%s_c%d_thi%d %%%s_c%d_tlo%d\n",
+				     bx.c_str(), c, a, bx.c_str(), c, a, bx.c_str(), axis[a], bx.c_str(), c, a, bx.c_str(), c, a + 3, bx.c_str(),
+				     axis[a], bx.c_str(), c, a, bx.c_str(), c, a, bx.c_str(), inv[a], bx.c_str(), c, a, bx.c_str(), c, a, bx.c_str(),
+				     inv[a], bx.c_str(), c, a, bx.c_str(), inv[a], bx.c_str(), c, a, bx.c_str(), c, a, bx.c_str(), c, a, bx.c_str(), c,
+				     a, bx.c_str(), c, a, bx.c_str(), c, a, bx.c_str(), c, a, bx.c_str(), c, a);
+			}
+			s += String8(R"(
+%<bx>_c<c>_in01 = OpExtInst %float %GLSL_std_450 NMax %<bx>_c<c>_in0 %<bx>_c<c>_in1
+%<bx>_c<c>_enter = OpExtInst %float %GLSL_std_450 NMax %<bx>_c<c>_in01 %<bx>_c<c>_in2
+%<bx>_c<c>_out01 = OpExtInst %float %GLSL_std_450 NMin %<bx>_c<c>_out0 %<bx>_c<c>_out1
+%<bx>_c<c>_exit = OpExtInst %float %GLSL_std_450 NMin %<bx>_c<c>_out01 %<bx>_c<c>_out2
+%<bx>_c<c>_tmin0 = OpExtInst %float %GLSL_std_450 NMax %<bx>_c<c>_enter %float_0_000000
+%<bx>_c<c>_tmax0 = OpExtInst %float %GLSL_std_450 NMin %<bx>_c<c>_exit %<bx>_a1
+%<bx>_c<c>_nan_in = OpIsNan %bool %<bx>_c<c>_enter
+%<bx>_c<c>_nan_out = OpIsNan %bool %<bx>_c<c>_exit
+%<bx>_c<c>_nan = OpLogicalOr %bool %<bx>_c<c>_nan_in %<bx>_c<c>_nan_out
+%<bx>_c<c>_tmin = OpSelect %float %<bx>_c<c>_nan %<inf> %<bx>_c<c>_tmin0
+%<bx>_c<c>_tmax = OpSelect %float %<bx>_c<c>_nan %<ninf> %<bx>_c<c>_tmax0
+%<bx>_c<c>_grown = OpFMul %float %<bx>_c<c>_tmax %<bx>_grow_scale
+%<bx>_c<c>_hit = OpFOrdLessThanEqual %bool %<bx>_c<c>_tmin %<bx>_c<c>_grown
+%<bx>_c<c>_node = OpSelect %uint %<bx>_c<c>_hit %<nd>_d<c> %<invalid>
+%<bx>_k<c>_0 = OpCopyObject %float %<bx>_c<c>_tmin
+%<bx>_v<c>_0 = OpCopyObject %uint %<bx>_c<c>_node
+)").ReplaceStr("<bx>", bx)
+			         .ReplaceStr("<nd>", nd_p)
+			         .ReplaceStr("<c>", String8::FromPrintf("%d", c))
+			         .ReplaceStr("<inf>", i + "_inf")
+			         .ReplaceStr("<ninf>", i + "_ninf")
+			         .ReplaceStr("<invalid>", invalid);
+		}
+		for (int c = 0; c < 4; c++)
+		{
+			final_versions[c] = 0;
+		}
+		for (int n = 0; n < 5; n++)
+		{
+			const int  a  = pairs[n][0];
+			const int  b  = pairs[n][1];
+			const auto va = String8::FromPrintf("%s_v%d_%d", bx.c_str(), a, final_versions[a]);
+			const auto vb = String8::FromPrintf("%s_v%d_%d", bx.c_str(), b, final_versions[b]);
+			const auto ka = String8::FromPrintf("%s_k%d_%d", bx.c_str(), a, final_versions[a]);
+			const auto kb = String8::FromPrintf("%s_k%d_%d", bx.c_str(), b, final_versions[b]);
+			final_versions[a]++;
+			final_versions[b]++;
+			s += String8(R"(
 %<sw>_bvalid = OpINotEqual %bool %<vb> %<invalid>
 %<sw>_near = OpFOrdLessThan %bool %<kb> %<ka>
 %<sw>_both = OpLogicalAnd %bool %<sw>_bvalid %<sw>_near
@@ -189,27 +207,45 @@ OpSwitch %<p>_kind %<p>_user 0 %<p>_tri 1 %<p>_tri 4 %<p>_box 5 %<p>_box 8 %<p>_
 %<vb2> = OpSelect %uint %<sw> %<va> %<vb>
 %<ka2> = OpSelect %float %<sw> %<kb> %<ka>
 %<kb2> = OpSelect %float %<sw> %<ka> %<kb>
-)").ReplaceStr("<sw>", String8::FromPrintf("%s_sw%d", p, n))
-		         .ReplaceStr("<va2>", String8::FromPrintf("%s_v%d_%d", p, a, version[a]))
-		         .ReplaceStr("<vb2>", String8::FromPrintf("%s_v%d_%d", p, b, version[b]))
-		         .ReplaceStr("<ka2>", String8::FromPrintf("%s_k%d_%d", p, a, version[a]))
-		         .ReplaceStr("<kb2>", String8::FromPrintf("%s_k%d_%d", p, b, version[b]))
-		         .ReplaceStr("<va>", va)
-		         .ReplaceStr("<vb>", vb)
-		         .ReplaceStr("<ka>", ka)
-		         .ReplaceStr("<kb>", kb)
-		         .ReplaceStr("<p>", i)
-		         .ReplaceStr("<invalid>", spirv->GetConstantUint(0xffffffffu));
-	}
+)").ReplaceStr("<sw>", String8::FromPrintf("%s_sw%d", bx.c_str(), n))
+			         .ReplaceStr("<va2>", String8::FromPrintf("%s_v%d_%d", bx.c_str(), a, final_versions[a]))
+			         .ReplaceStr("<vb2>", String8::FromPrintf("%s_v%d_%d", bx.c_str(), b, final_versions[b]))
+			         .ReplaceStr("<ka2>", String8::FromPrintf("%s_k%d_%d", bx.c_str(), a, final_versions[a]))
+			         .ReplaceStr("<kb2>", String8::FromPrintf("%s_k%d_%d", bx.c_str(), b, final_versions[b]))
+			         .ReplaceStr("<va>", va)
+			         .ReplaceStr("<vb>", vb)
+			         .ReplaceStr("<ka>", ka)
+			         .ReplaceStr("<kb>", kb)
+			         .ReplaceStr("<p>", i)
+			         .ReplaceStr("<invalid>", invalid);
+		}
+		line("OpBranch %%%s_end\n%%%s_end = OpLabel\nOpBranch %%%s_kind_end\n", bx.c_str(), bx.c_str(), p);
+		return true;
+	};
 
-	line("OpBranch %%%s_box_end\n%%%s_box_end = OpLabel\nOpBranch %%%s_kind_end\n%%%s_tri = OpLabel\n", p, p, p, p);
-
-	// Triangle node: vertices in words 0-11, triangle id in word 15. Pick
-	// vertices by type (0: V0,V1,V2; 1: V1,V3,V2).
-	if (!spirv->EmitGuestLoad(i + "_addr_lo", i + "_addr_hi", 16, i + "_tn", &s))
+	int ver16[4] = {};
+	int ver32[4] = {};
+	if (!emit_box(true, "box16", ver16) || !emit_box(false, "box32", ver32))
 	{
 		return false;
 	}
+
+	line("%%%s_tri = OpLabel\n", p);
+	// Triangle node: vertices in words 0-11, triangle id in word 15. Pick
+	// vertices by type (0: V0,V1,V2; 1: V1,V3,V2).
+	if (!spirv->EmitGuestLoad64Aligned(i + "_addr_lo", i + "_addr_hi", 16, i + "_tn", &s))
+	{
+		return false;
+	}
+	for (int k: {2, 3, 4, 5, 6, 7})
+	{
+		line("%%%s_tri_a%d = OpLoad %%float %%%s\n", p, k, operand_variable_to_str(inst.mimg_address[k]).value.c_str());
+	}
+	s += String8(R"(
+%<p>_mode_raw = OpShiftRightLogical %uint %<p>_t3 %uint_24
+%<p>_mode_bit = OpBitwiseAnd %uint %<p>_mode_raw %uint_1
+%<p>_mode1 = OpINotEqual %bool %<p>_mode_bit %uint_0
+)").ReplaceStr("<p>", i);
 	auto g = [&](int w) { return String8::FromPrintf("%s_g%d", p, w); };
 	for (int w = 0; w < 12; w++)
 	{
@@ -227,8 +263,8 @@ OpSwitch %<p>_kind %<p>_user 0 %<p>_tri 1 %<p>_tri 4 %<p>_box 5 %<p>_box 8 %<p>_
 		line("%%%s_vec%d = OpCompositeConstruct %%v3float %%%s_v%d0 %%%s_v%d1 %%%s_v%d2\n", p, v, p, v, p, v, p, v);
 	}
 	s += String8(R"(
-%<p>_orig = OpCompositeConstruct %v3float %<p>_a2 %<p>_a3 %<p>_a4
-%<p>_dir = OpCompositeConstruct %v3float %<p>_a5 %<p>_a6 %<p>_a7
+%<p>_orig = OpCompositeConstruct %v3float %<p>_tri_a2 %<p>_tri_a3 %<p>_tri_a4
+%<p>_dir = OpCompositeConstruct %v3float %<p>_tri_a5 %<p>_tri_a6 %<p>_tri_a7
 %<p>_e1 = OpFSub %v3float %<p>_vec1 %<p>_vec0
 %<p>_e2 = OpFSub %v3float %<p>_vec2 %<p>_vec0
 %<p>_e3 = OpFSub %v3float %<p>_orig %<p>_vec0
@@ -288,13 +324,13 @@ OpBranch %<p>_kind_end
 )").ReplaceStr("<p>", i).ReplaceStr("<inf>", i + "_inf");
 	// Out-of-range triangles miss; boxes out of range and user nodes return
 	// four invalid pointers.
-	const auto    invalid          = spirv->GetConstantUint(0xffffffffu);
-	const String8 triangle_miss[4] = {spirv->GetConstantUint(0x7f800000u), spirv->GetConstantUint(0x3f800000u), spirv->GetConstantUint(0u),
+	const String8 triangle_miss[4] = {inf_bits, spirv->GetConstantUint(0x3f800000u), spirv->GetConstantUint(0u),
 	                                  spirv->GetConstantUint(0u)};
 	for (int r = 0; r < 4; r++)
 	{
-		line("%%%s_r%d = OpPhi %%uint %%%s_tri_r%d %%%s_tri_end %%%s_v%d_%d %%%s_box_end %%%s %%%s_tri_oob %%%s %%%s_user\n", p, r, p, r, p,
-		     p, r, version[r], p, triangle_miss[r].c_str(), p, invalid.c_str(), p);
+		line("%%%s_r%d = OpPhi %%uint %%%s_tri_r%d %%%s_tri_end %%%s_box16_v%d_%d %%%s_box16_end %%%s_box32_v%d_%d %%%s_box32_end %%%s "
+		     "%%%s_tri_oob %%%s %%%s_user\n",
+		     p, r, p, r, p, p, r, ver16[r], p, p, r, ver32[r], p, triangle_miss[r].c_str(), p, invalid.c_str(), p);
 	}
 	for (int r = 0; r < 4; r++)
 	{

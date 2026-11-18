@@ -242,6 +242,7 @@ public:
 	[[nodiscard]] String8 GuestDeviceAddressTypes(bool ulong_declared) const;
 	[[nodiscard]] String8 GuestDeviceAddressFunction() const;
 	[[nodiscard]] bool    EmitGuestLoad(const String8& lo, const String8& hi, int dwords, const String8& prefix, String8* output) const;
+	[[nodiscard]] bool    EmitGuestLoad64Aligned(const String8& lo, const String8& hi, int dwords, const String8& prefix, String8* output) const;
 	[[nodiscard]] String8 WrapVertexScalarBufferProbe(const ShaderInstruction& inst, uint32_t index,
 	                                                 uint32_t site, const String8& original);
 	[[nodiscard]] String8 EmitNativeThreadLimitExec() const;

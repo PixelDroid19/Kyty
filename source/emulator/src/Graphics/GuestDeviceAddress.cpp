@@ -1384,6 +1384,7 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 	std::memset(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes + entry_bytes + directory_bytes, 0, sizeof(TableEntry));
 	vkUnmapMemory(ctx->device, table.memory);
 	table.device  = BufferDeviceAddress(ctx->device, table.buffer);
+	EXIT_IF((table.device & 15ull) != 0ull);
 	table.entries = static_cast<uint32_t>(entries.size());
 	if (registry->table.buffer != nullptr)
 	{
