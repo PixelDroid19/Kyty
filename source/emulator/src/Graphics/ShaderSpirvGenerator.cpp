@@ -514,7 +514,7 @@ void Spirv::GenerateSource()
 	WriteLocalVariables();
 	WriteInstructions();
 	WriteMainEpilog();
-	if (m_bind != nullptr && m_bind->device_address_used && m_bind->push_constant_size > 0)
+	if (m_code.GetType() == ShaderType::Compute && m_bind != nullptr && m_bind->device_address_used && m_bind->push_constant_size > 0)
 	{
 		String8                       lrc_constants;
 		String8                       lrc_body;
@@ -2575,7 +2575,9 @@ void Spirv::WriteLocalVariables()
 	                                 m_cs_input_info->wave_layout.guest_wave_size ==
 	                             0u;
 	const bool all_lanes_live = whole_waves || HasFusedVertexLanes() ||
-	                            (m_code.GetType() == ShaderType::Pixel && !UsesFragmentCompute() &&
+	                            ((m_code.GetType() == ShaderType::Pixel ||
+	                              (m_code.GetType() == ShaderType::Compute && !UsesNativeComputeWave())) &&
+	                             !UsesFragmentCompute() && !UsesGeometryCompute() &&
 	                             !(m_bind != nullptr && m_bind->thread_limits_used));
 	m_source += all_lanes_live ? NativeExecAllLanes() : NativeExecRefresh("initial");
 	if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog && !UsesGeometryCompute())
@@ -3343,11 +3345,6 @@ void Spirv::WriteFunctions()
 		m_source += FUNC_ABS_DIFF;
 	}
 
-	if (m_code.HasAnyOf({ShaderInstructionType::SWqmB32, ShaderInstructionType::SWqmB64}))
-	{
-		m_source += FUNC_WQM;
-	}
-
 	if (m_code.HasAnyOf({ShaderInstructionType::SAddcU32, ShaderInstructionType::VAddCoCiU32}))
 	{
 		m_source += FUNC_ADDC;
@@ -3582,8 +3579,8 @@ void Spirv::FindConstants()
 	}
 	if (m_bind != nullptr && m_bind->storage_address_used)
 	{
-		// Loads by device address: address mask and shift, dword alignment and access sizes.
-		for (uint32_t value: {0xffffu, 0xfffffffcu, 32u})
+		// Loads by device address: address mask and shift, dword alignment, partial-OOB loop and access sizes.
+		for (uint32_t value: {0u, 1u, 2u, 0xffffu, 0xfffffffcu, 32u})
 		{
 			AddConstantUint(value);
 		}
@@ -3662,7 +3659,7 @@ void Spirv::FindConstants()
 	}
 	if (m_code.HasAnyOf({ShaderInstructionType::SWqmB32, ShaderInstructionType::SWqmB64}))
 	{
-		for (uint32_t shift = 0; shift < 32u; shift += 4u) { AddConstantUint(15u << shift); }
+		for (uint32_t value: {1u, 2u, 0x55555555u, 0xaaaaaaaau, 0x33333333u, 0xccccccccu}) { AddConstantUint(value); }
 	}
 	// A runtime-M0 relative move lowers to select chains whose comparisons
 	// name every register-file offset the chain covers.

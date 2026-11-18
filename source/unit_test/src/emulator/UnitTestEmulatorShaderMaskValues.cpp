@@ -115,7 +115,7 @@ public:
 		spirv.AddConstantUint(0x108u);
 		spirv.AddConstantUint(0xffffffffu);
 		spirv.AddConstantUint(0xfffffffcu);
-		for (uint32_t shift = 0; shift < 32; shift += 4) { spirv.AddConstantUint(15u << shift); }
+		for (uint32_t value: {0x55555555u, 0xaaaaaaaau, 0x33333333u, 0xccccccccu}) { spirv.AddConstantUint(value); }
 		for (uint32_t r = 0; r < 32; ++r)
 		{
 			Set("%s" + std::to_string(r), 0);
@@ -209,9 +209,7 @@ public:
 			if (op == "OpFunctionParameter") { values[t[0]] = parameters.at(parameter++); continue; }
 			if (op == "OpFunctionCall")
 			{
-				if (t.at(4) != "%wqm") { Fail("unsupported emitted helper"); }
-				values[t[0]] = Run(FUNC_WQM, {Read(t.at(5)), Read(t.at(6)), Read(t.at(7))});
-				continue;
+				Fail("unsupported emitted helper");
 			}
 			Values result(lanes);
 			for (uint32_t lane = 0; lane < lanes; ++lane)

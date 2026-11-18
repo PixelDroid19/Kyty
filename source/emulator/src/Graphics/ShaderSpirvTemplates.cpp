@@ -117,24 +117,6 @@ const char FUNC_ABS_DIFF[] = R"(
                OpFunctionEnd
 )";
 
-const char FUNC_WQM[] = R"(
-                    ; uint w(uint u, uint s, uint m)
-                    ; {
-                    ; 	return ((u >> s) & 0xF) != 0 ? m : 0;
-                    ; }
-         %wqm = OpFunction %uint None %function_u_u_u
-         %wqm_155 = OpFunctionParameter %uint
-         %wqm_156 = OpFunctionParameter %uint
-         %wqm_161 = OpFunctionParameter %uint
-         %wqm_50 = OpLabel
-        %wqm_157 = OpShiftRightLogical %uint %wqm_155 %wqm_156
-        %wqm_159 = OpBitwiseAnd %uint %wqm_157 %uint_15
-        %wqm_160 = OpINotEqual %bool %wqm_159 %uint_0
-        %wqm_162 = OpSelect %uint %wqm_160 %wqm_161 %uint_0
-               OpReturnValue %wqm_162
-               OpFunctionEnd
-)";
-
 const char FUNC_ADDC[] = R"(
                   ; uvec2 addc(uint a, uint b, uint c)
                   ; {

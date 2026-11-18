@@ -464,13 +464,27 @@ static bool emit_address_words(Spirv* spirv, const ShaderInstruction& inst, cons
 {
 	const auto all  = spirv->GetConstantUint(dwords * 4u);
 	const auto zero = type == SpirvType::Float ? spirv->GetConstantFloat(0.0f) : spirv->GetConstantUint(0u);
+	const auto u0   = spirv->GetConstantUint(0u);
+	const auto u1   = spirv->GetConstantUint(1u);
+	const auto u2   = spirv->GetConstantUint(2u);
+	const auto u4   = spirv->GetConstantUint(4u);
 	if (dwords == 0u || dwords > 16u || all == "unknown_uint_constant" || zero == "unknown_float_constant" ||
-	    zero == "unknown_uint_constant")
+	    zero == "unknown_uint_constant" || u0 == "unknown_uint_constant" || u1 == "unknown_uint_constant" ||
+	    u2 == "unknown_uint_constant" || u4 == "unknown_uint_constant")
 	{
 		return false;
 	}
 	const char* value_type = type == SpirvType::Float ? "float" : "uint";
 	const auto  t          = tag.c_str();
+	SpirvValue  dsts[16];
+	for (uint32_t word = 0; word < dwords; word++)
+	{
+		dsts[word] = operand_variable_to_str(inst.dst, static_cast<int>(word));
+		if (dsts[word].type != type)
+		{
+			return false;
+		}
+	}
 	*body += String8(R"(
 %<t>_off64 = OpUConvert %ulong <off>
 %<t>_addr = OpIAdd %ulong <base> %<t>_off64
@@ -487,54 +501,103 @@ OpBranchConditional %<t>_in %<t>_whole %<t>_part
 	             .ReplaceStr("<off>", off)
 	             .ReplaceStr("<bytes>", bytes)
 	             .ReplaceStr("<all>", all);
+	for (uint32_t word = 0; word < dwords; word++)
+	{
+		*body += String8(R"(%<t>_a<w> = OpIAdd %ulong %<t>_addr %gda_u64_<bytes>
+%<t>_p<w> = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %<t>_a<w>
+%<t>_w<w> = OpLoad %uint %<t>_p<w> Aligned 4
+%<t>_v<w> = OpBitcast %<type> %<t>_w<w>
+OpStore %<dst> %<t>_v<w>
+)")
+		             .ReplaceStr("<t>", tag)
+		             .ReplaceStr("<w>", String8::FromPrintf("%u", word))
+		             .ReplaceStr("<bytes>", String8::FromPrintf("%u", word * 4u))
+		             .ReplaceStr("<type>", value_type)
+		             .ReplaceStr("<dst>", dsts[word].value);
+	}
 	String8 part;
 	for (uint32_t word = 0; word < dwords; word++)
 	{
-		const auto dst  = operand_variable_to_str(inst.dst, static_cast<int>(word));
-		const auto need = spirv->GetConstantUint(word * 4u + 4u);
-		if (dst.type != type || need == "unknown_uint_constant")
-		{
-			return false;
-		}
-		const auto load = [&](const char* name)
-		{
-			return String8(R"(%<t>_<n>a<w> = OpIAdd %ulong %<t>_addr %gda_u64_<bytes>
-%<t>_<n>p<w> = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %<t>_<n>a<w>
-%<t>_<n>w<w> = OpLoad %uint %<t>_<n>p<w> Aligned 4
-%<t>_<n>v<w> = OpBitcast %<type> %<t>_<n>w<w>
-OpStore %<dst> %<t>_<n>v<w>
-)")
-			    .ReplaceStr("<t>", tag)
-			    .ReplaceStr("<n>", name)
-			    .ReplaceStr("<w>", String8::FromPrintf("%u", word))
-			    .ReplaceStr("<bytes>", String8::FromPrintf("%u", word * 4u))
-			    .ReplaceStr("<type>", value_type)
-			    .ReplaceStr("<dst>", dst.value);
-		};
-		*body += load("");
-		if (dwords == 1u)
-		{
-			part += String8::FromPrintf("OpStore %%%s %%%s\n", dst.value.c_str(), zero.c_str());
-			continue;
-		}
-		// A partly backed access: the backed leading words load one at a time.
-		part += String8(R"(%<t>_room<w> = OpUGreaterThanEqual %bool <bytes> %<need>
-%<t>_last<w> = OpISub %uint <bytes> %<need>
-%<t>_fits<w> = OpULessThanEqual %bool <off> %<t>_last<w>
-%<t>_in<w> = OpLogicalAnd %bool %<t>_room<w> %<t>_fits<w>
-OpSelectionMerge %<t>_pmerge<w> None
-OpBranchConditional %<t>_in<w> %<t>_pload<w> %<t>_pzero<w>
-%<t>_pload<w> = OpLabel
+		part += String8::FromPrintf("OpStore %%%s %%%s\n", dsts[word].value.c_str(), zero.c_str());
+	}
+	if (dwords == 2u)
+	{
+		// In the partial branch word 1 is guaranteed out of bounds; only word 0 can be backed.
+		part += String8(R"(%<t>_room0 = OpUGreaterThanEqual %bool <bytes> %<u4>
+%<t>_last0 = OpISub %uint <bytes> %<u4>
+%<t>_fits0 = OpULessThanEqual %bool <off> %<t>_last0
+%<t>_in0 = OpLogicalAnd %bool %<t>_room0 %<t>_fits0
+OpSelectionMerge %<t>_pmerge0 None
+OpBranchConditional %<t>_in0 %<t>_pload0 %<t>_pmerge0
+%<t>_pload0 = OpLabel
+%<t>_pp0 = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %<t>_addr
+%<t>_pw0 = OpLoad %uint %<t>_pp0 Aligned 4
+%<t>_pv0 = OpBitcast %<type> %<t>_pw0
+OpStore %<dst0> %<t>_pv0
+OpBranch %<t>_pmerge0
+%<t>_pmerge0 = OpLabel
 )")
 		            .ReplaceStr("<t>", tag)
-		            .ReplaceStr("<w>", String8::FromPrintf("%u", word))
 		            .ReplaceStr("<bytes>", bytes)
 		            .ReplaceStr("<off>", off)
-		            .ReplaceStr("<need>", need);
-		part += load("p");
-		part += String8::FromPrintf("OpBranch %%%s_pmerge%u\n%%%s_pzero%u = OpLabel\nOpStore %%%s %%%s\nOpBranch %%%s_pmerge%u\n"
-		                            "%%%s_pmerge%u = OpLabel\n",
-		                            t, word, t, word, dst.value.c_str(), zero.c_str(), t, word, t, word);
+		            .ReplaceStr("<u4>", u4)
+		            .ReplaceStr("<type>", value_type)
+		            .ReplaceStr("<dst0>", dsts[0].value);
+	} else if (dwords >= 3u)
+	{
+		// Keep partial-OOB handling in a non-unrolled loop (one load instead of dwords unrolled branches).
+		// Because the whole-range check failed, backed leading words satisfy 1 <= ((bytes - off) >> 2) < dwords.
+		String8 sw_cases;
+		String8 sw_blocks;
+		for (uint32_t word = 0; word + 1u < dwords; word++)
+		{
+			sw_cases += String8::FromPrintf(" %u %%%s_sw%u", word, t, word);
+			sw_blocks += String8::FromPrintf("%%%s_sw%u = OpLabel\nOpStore %%%s %%%s_pv\nOpBranch %%%s_psend\n", t, word,
+			                                 dsts[word].value.c_str(), t, t);
+		}
+		part += String8(R"(%<t>_proom = OpUGreaterThanEqual %bool <bytes> %<u4>
+%<t>_plast = OpISub %uint <bytes> %<u4>
+%<t>_pfits = OpULessThanEqual %bool <off> %<t>_plast
+%<t>_pany = OpLogicalAnd %bool %<t>_proom %<t>_pfits
+OpSelectionMerge %<t>_pfin None
+OpBranchConditional %<t>_pany %<t>_plpre %<t>_pfin
+%<t>_plpre = OpLabel
+%<t>_prem = OpISub %uint <bytes> <off>
+%<t>_pnw = OpShiftRightLogical %uint %<t>_prem %<u2>
+OpBranch %<t>_ploop
+%<t>_ploop = OpLabel
+%<t>_pw = OpPhi %uint %<u0> %<t>_plpre %<t>_pwnext %<t>_pcont
+OpLoopMerge %<t>_pexit %<t>_pcont DontUnroll
+OpBranch %<t>_pbody
+%<t>_pbody = OpLabel
+%<t>_pwsh = OpShiftLeftLogical %uint %<t>_pw %<u2>
+%<t>_pw64 = OpUConvert %ulong %<t>_pwsh
+%<t>_pwa = OpIAdd %ulong %<t>_addr %<t>_pw64
+%<t>_pwp = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %<t>_pwa
+%<t>_pwv = OpLoad %uint %<t>_pwp Aligned 4
+%<t>_pv = OpBitcast %<type> %<t>_pwv
+OpSelectionMerge %<t>_psend None
+OpSwitch %<t>_pw %<t>_psend<sw_cases>
+<sw_blocks>%<t>_psend = OpLabel
+OpBranch %<t>_pcont
+%<t>_pcont = OpLabel
+%<t>_pwnext = OpIAdd %uint %<t>_pw %<u1>
+%<t>_pmore = OpULessThan %bool %<t>_pwnext %<t>_pnw
+OpBranchConditional %<t>_pmore %<t>_ploop %<t>_pexit
+%<t>_pexit = OpLabel
+OpBranch %<t>_pfin
+%<t>_pfin = OpLabel
+)")
+		            .ReplaceStr("<t>", tag)
+		            .ReplaceStr("<bytes>", bytes)
+		            .ReplaceStr("<off>", off)
+		            .ReplaceStr("<u0>", u0)
+		            .ReplaceStr("<u1>", u1)
+		            .ReplaceStr("<u2>", u2)
+		            .ReplaceStr("<u4>", u4)
+		            .ReplaceStr("<type>", value_type)
+		            .ReplaceStr("<sw_cases>", sw_cases)
+		            .ReplaceStr("<sw_blocks>", sw_blocks);
 	}
 	*body += String8::FromPrintf("OpBranch %%%s_merge\n%%%s_part = OpLabel\n%sOpBranch %%%s_merge\n%%%s_merge = OpLabel\n", t, t,
 	                             part.c_str(), t, t);

@@ -229,13 +229,20 @@ bool Spirv::SkipDestinationExecGuard(uint32_t index) const
 				m_vertex_exec_full       = ShaderAnalyzeVertexExecFull(m_code, NativeWave32());
 			}
 			exec_full = m_vertex_exec_full;
-		} else if (HasWholeComputeWavesAtEntry())
+		} else if (HasWholeComputeWavesAtEntry() ||
+		           (m_code.GetType() == ShaderType::Compute && !UsesNativeComputeWave() && !UsesGeometryCompute() &&
+		            !(m_bind != nullptr && m_bind->thread_limits_used)))
 		{
 			entry_exec_full = true;
-		} else if (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr &&
-		           m_ps_input_info->native_wave.refusal_reason == nullptr && FragmentMaskFlow().lane_local)
+		} else if (m_code.GetType() == ShaderType::Pixel && !UsesFragmentCompute() &&
+		           !(m_bind != nullptr && m_bind->thread_limits_used))
 		{
-			exec_full = FragmentMaskFlow().exec_full;
+			entry_exec_full = true;
+			if (m_ps_input_info != nullptr && m_ps_input_info->native_wave.refusal_reason == nullptr &&
+			    FragmentMaskFlow().lane_local)
+			{
+				exec_full = FragmentMaskFlow().exec_full;
+			}
 		}
 		m_dead_vgpr_guards = ShaderAnalyzeDeadVgprDstGuards(m_code, exec_full, entry_exec_full);
 	}

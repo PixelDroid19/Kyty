@@ -1332,6 +1332,46 @@ KYTY_RECOMPILER_FUNC(Recompile_SSwappcB64_Sdst2Ssrc02)
 }
 
 // WQM is a numeric operation on a packed architectural word, independent of
+static bool emit_wqm_word(const Spirv* spirv, const String8& src_id, const String8& dst_id, const String8& tag, String8* out)
+{
+	const auto c1   = spirv->GetConstantUint(1u);
+	const auto c2   = spirv->GetConstantUint(2u);
+	const auto m_aa = spirv->GetConstantUint(0xaaaaaaaau);
+	const auto m_55 = spirv->GetConstantUint(0x55555555u);
+	const auto m_cc = spirv->GetConstantUint(0xccccccccu);
+	const auto m_33 = spirv->GetConstantUint(0x33333333u);
+	if (c1 == "unknown_uint_constant" || c2 == "unknown_uint_constant" || m_aa == "unknown_uint_constant" ||
+	    m_55 == "unknown_uint_constant" || m_cc == "unknown_uint_constant" || m_33 == "unknown_uint_constant")
+	{
+		return false;
+	}
+	// Bit-parallel quad smear: expand every non-zero 4-bit nibble to 0xF.
+	*out += String8(R"(
+        %<t>_a1 = OpBitwiseAnd %uint <src> %<maa>
+        %<t>_a2 = OpShiftRightLogical %uint %<t>_a1 %<c1>
+        %<t>_a3 = OpBitwiseAnd %uint <src> %<m55>
+        %<t>_a4 = OpShiftLeftLogical %uint %<t>_a3 %<c1>
+        %<t>_a5 = OpBitwiseOr %uint <src> %<t>_a2
+        %<t>_p  = OpBitwiseOr %uint %<t>_a5 %<t>_a4
+        %<t>_b1 = OpBitwiseAnd %uint %<t>_p %<mcc>
+        %<t>_b2 = OpShiftRightLogical %uint %<t>_b1 %<c2>
+        %<t>_b3 = OpBitwiseAnd %uint %<t>_p %<m33>
+        %<t>_b4 = OpShiftLeftLogical %uint %<t>_b3 %<c2>
+        %<t>_b5 = OpBitwiseOr %uint %<t>_p %<t>_b2
+        <dst> = OpBitwiseOr %uint %<t>_b5 %<t>_b4
+)")
+	            .ReplaceStr("<t>", tag)
+	            .ReplaceStr("<src>", src_id)
+	            .ReplaceStr("<dst>", dst_id)
+	            .ReplaceStr("<c1>", c1)
+	            .ReplaceStr("<c2>", c2)
+	            .ReplaceStr("<maa>", m_aa)
+	            .ReplaceStr("<m55>", m_55)
+	            .ReplaceStr("<mcc>", m_cc)
+	            .ReplaceStr("<m33>", m_33);
+	return true;
+}
+
 // the register that holds it. The native adapter refreshes the EXEC lane view
 // after a mask destination write, just as it does for any other scalar ALU.
 KYTY_RECOMPILER_FUNC(Recompile_SWqmB32_SVdstSVsrc0)
@@ -1351,32 +1391,18 @@ KYTY_RECOMPILER_FUNC(Recompile_SWqmB32_SVdstSVsrc0)
 		return false;
 	}
 
-	static const char* text = R"(
-        <load0>
-        %wqm_q0_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_0 %uint_15
-        %wqm_r0_<index> = OpBitwiseOr %uint %uint_0 %wqm_q0_<index>
-        %wqm_q1_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_4 %uint_240
-        %wqm_r1_<index> = OpBitwiseOr %uint %wqm_r0_<index> %wqm_q1_<index>
-        %wqm_q2_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_8 %uint_0x00000f00
-        %wqm_r2_<index> = OpBitwiseOr %uint %wqm_r1_<index> %wqm_q2_<index>
-        %wqm_q3_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_12 %uint_0x0000f000
-        %wqm_r3_<index> = OpBitwiseOr %uint %wqm_r2_<index> %wqm_q3_<index>
-        %wqm_q4_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_16 %uint_0x000f0000
-        %wqm_r4_<index> = OpBitwiseOr %uint %wqm_r3_<index> %wqm_q4_<index>
-        %wqm_q5_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_20 %uint_0x00f00000
-        %wqm_r5_<index> = OpBitwiseOr %uint %wqm_r4_<index> %wqm_q5_<index>
-        %wqm_q6_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_24 %uint_0x0f000000
-        %wqm_r6_<index> = OpBitwiseOr %uint %wqm_r5_<index> %wqm_q6_<index>
-        %wqm_q7_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_28 %uint_0xf0000000
-        %wqm_r7_<index> = OpBitwiseOr %uint %wqm_r6_<index> %wqm_q7_<index>
-)";
+	String8 wqm_body;
+	if (!emit_wqm_word(spirv, "%t0_" + index_str, "%wqm_r7_" + index_str, "wqm32_" + index_str, &wqm_body))
+	{
+		return false;
+	}
 
-	*dst_source += String8(text).ReplaceStr("<load0>", load0).ReplaceStr("<index>", index_str);
-
+	*dst_source += load0.ReplaceStr("<index>", index_str) + wqm_body;
 	*dst_source += String8("OpStore %<dst> %wqm_r7_<index>\n<scc>\n<execz>\n")
 	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 1))
 	                   .ReplaceStr("<execz>", operand_is_exec(inst.dst) ? EXECZ : "")
-	                   .ReplaceStr("<dst>", dst_value.value).ReplaceStr("<index>", index_str);
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
 
@@ -1393,8 +1419,6 @@ KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02)
 
 	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
-	// EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
-
 	String8 load0;
 	String8 load1;
 
@@ -1407,50 +1431,20 @@ KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02)
 		return false;
 	}
 
-	static const char* text = R"(
-        <load0>
-        <load1>
-        %t170_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_0 %uint_15
-        %t172_<index> = OpBitwiseOr %uint %uint_0 %t170_<index>
-        %t179_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_4 %uint_240
-        %t181_<index> = OpBitwiseOr %uint %t172_<index> %t179_<index>
-        %t188_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_8 %uint_0x00000f00
-        %t190_<index> = OpBitwiseOr %uint %t181_<index> %t188_<index>
-        %t197_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_12 %uint_0x0000f000
-        %t199_<index> = OpBitwiseOr %uint %t190_<index> %t197_<index>
-        %t206_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_16 %uint_0x000f0000
-        %t208_<index> = OpBitwiseOr %uint %t199_<index> %t206_<index>
-        %t215_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_20 %uint_0x00f00000
-        %t217_<index> = OpBitwiseOr %uint %t208_<index> %t215_<index>
-        %t224_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_24 %uint_0x0f000000
-        %t226_<index> = OpBitwiseOr %uint %t217_<index> %t224_<index>
-        %t233_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_28 %uint_0xf0000000
-        %t235_<index> = OpBitwiseOr %uint %t226_<index> %t233_<index>
-        %t1701_<index> = OpFunctionCall %uint %wqm %t1_<index> %uint_0 %uint_15
-        %t1721_<index> = OpBitwiseOr %uint %uint_0 %t1701_<index>
-        %t1791_<index> = OpFunctionCall %uint %wqm %t1_<index> %uint_4 %uint_240
-        %t1811_<index> = OpBitwiseOr %uint %t1721_<index> %t1791_<index>
-        %t1881_<index> = OpFunctionCall %uint %wqm %t1_<index> %uint_8 %uint_0x00000f00
-        %t1901_<index> = OpBitwiseOr %uint %t1811_<index> %t1881_<index>
-        %t1971_<index> = OpFunctionCall %uint %wqm %t1_<index> %uint_12 %uint_0x0000f000
-        %t1991_<index> = OpBitwiseOr %uint %t1901_<index> %t1971_<index>
-        %t2061_<index> = OpFunctionCall %uint %wqm %t1_<index> %uint_16 %uint_0x000f0000
-        %t2081_<index> = OpBitwiseOr %uint %t1991_<index> %t2061_<index>
-        %t2151_<index> = OpFunctionCall %uint %wqm %t1_<index> %uint_20 %uint_0x00f00000
-        %t2171_<index> = OpBitwiseOr %uint %t2081_<index> %t2151_<index>
-        %t2241_<index> = OpFunctionCall %uint %wqm %t1_<index> %uint_24 %uint_0x0f000000
-        %t2261_<index> = OpBitwiseOr %uint %t2171_<index> %t2241_<index>
-        %t2331_<index> = OpFunctionCall %uint %wqm %t1_<index> %uint_28 %uint_0xf0000000
-        %t2351_<index> = OpBitwiseOr %uint %t2261_<index> %t2331_<index>
+	String8 wqm_body;
+	if (!emit_wqm_word(spirv, "%t0_" + index_str, "%t235_" + index_str, "wqm64l_" + index_str, &wqm_body) ||
+	    !emit_wqm_word(spirv, "%t1_" + index_str, "%t2351_" + index_str, "wqm64h_" + index_str, &wqm_body))
+	{
+		return false;
+	}
+
+	*dst_source += load0.ReplaceStr("<index>", index_str) + "\n" + load1.ReplaceStr("<index>", index_str) + wqm_body;
+	*dst_source += String8(R"(
                OpStore %<dst0> %t235_<index>
                OpStore %<dst1> %t2351_<index>
         <execz>
         <scc>
-)";
-
-	*dst_source += String8(text)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<load1>", load1)
+)")
 	                   .ReplaceStr("<execz>", (operand_is_exec(inst.dst) ? EXECZ : ""))
 	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 2))
 	                   .ReplaceStr("<dst0>", dst_value0.value)

@@ -70,6 +70,32 @@ ExecRel JoinExecRel(ExecRel a, ExecRel b)
 	return ExecRel::SubsetOfEntry;
 }
 
+ExecRel UnionExecRel(ExecRel a, ExecRel b)
+{
+	if (a == ExecRel::Unknown || b == ExecRel::Unknown) { return ExecRel::Unknown; }
+	if (a == ExecRel::WidenedWqm || b == ExecRel::WidenedWqm) { return ExecRel::WidenedWqm; }
+	if (IsWqmRel(a) || IsWqmRel(b)) { return ExecRel::WidenedWqmSubset; }
+	if (a == ExecRel::AtEntry || b == ExecRel::AtEntry) { return ExecRel::AtEntry; }
+	return ExecRel::SubsetOfEntry;
+}
+
+ExecRel XorExecRel(ExecRel a, ExecRel b)
+{
+	if (a == ExecRel::Unknown || b == ExecRel::Unknown) { return ExecRel::Unknown; }
+	if (IsWqmRel(a) || IsWqmRel(b)) { return ExecRel::WidenedWqmSubset; }
+	return ExecRel::SubsetOfEntry;
+}
+
+ExecRel IntersectExecRel(ExecRel a, ExecRel b)
+{
+	if (a == ExecRel::AtEntry || a == ExecRel::SubsetOfEntry || b == ExecRel::AtEntry || b == ExecRel::SubsetOfEntry)
+	{
+		return ExecRel::SubsetOfEntry;
+	}
+	if (IsWqmRel(a) || IsWqmRel(b)) { return ExecRel::WidenedWqmSubset; }
+	return ExecRel::Unknown;
+}
+
 struct ExecState
 {
 	bool                                      reachable   = false;
@@ -519,11 +545,43 @@ bool TrackExecStep(const ShaderInstruction& inst, ExecState* state, uint32_t wqm
 	{
 		ExecRel  copied_rel = ExecRel::Unknown;
 		unsigned expected   = 0;
-		if (inst.src_num == 1 && inst.dst2.type == Operand::Unknown &&
-		    (inst.type == Type::SMovB64 || inst.type == Type::SMovB32))
+		if (inst.dst2.type == Operand::Unknown)
 		{
-			expected   = (inst.type == Type::SMovB64) ? 2u : 1u;
-			copied_rel = OperandExecRel(*state, inst.src[0], expected);
+			if (inst.src_num == 1 && (inst.type == Type::SMovB64 || inst.type == Type::SMovB32))
+			{
+				expected   = (inst.type == Type::SMovB64) ? 2u : 1u;
+				copied_rel = OperandExecRel(*state, inst.src[0], expected);
+			} else if (inst.src_num >= 2 && (inst.type == Type::SOrB64 || inst.type == Type::SOrB32))
+			{
+				expected   = (inst.type == Type::SOrB64) ? 2u : 1u;
+				copied_rel = UnionExecRel(OperandExecRel(*state, inst.src[0], expected),
+				                          OperandExecRel(*state, inst.src[1], expected));
+			} else if (inst.src_num >= 2 && (inst.type == Type::SXorB64 || inst.type == Type::SXorB32))
+			{
+				expected   = (inst.type == Type::SXorB64) ? 2u : 1u;
+				copied_rel = XorExecRel(OperandExecRel(*state, inst.src[0], expected),
+				                        OperandExecRel(*state, inst.src[1], expected));
+			} else if (inst.src_num >= 2 && (inst.type == Type::SAndB64 || inst.type == Type::SAndB32))
+			{
+				expected   = (inst.type == Type::SAndB64) ? 2u : 1u;
+				copied_rel = IntersectExecRel(OperandExecRel(*state, inst.src[0], expected),
+				                              OperandExecRel(*state, inst.src[1], expected));
+			} else if (inst.src_num >= 1 && (inst.type == Type::SAndn2B64 || inst.type == Type::SAndn2B32))
+			{
+				expected = (inst.type == Type::SAndn2B64) ? 2u : 1u;
+				const ExecRel src0_rel = OperandExecRel(*state, inst.src[0], expected);
+				if (src0_rel == ExecRel::AtEntry || src0_rel == ExecRel::SubsetOfEntry) { copied_rel = ExecRel::SubsetOfEntry; }
+				else if (IsWqmRel(src0_rel)) { copied_rel = ExecRel::WidenedWqmSubset; }
+			} else if (inst.src_num >= 1 && (inst.type == Type::SWqmB64 || inst.type == Type::SWqmB32))
+			{
+				expected = (inst.type == Type::SWqmB64) ? 2u : 1u;
+				const ExecRel src0_rel = OperandExecRel(*state, inst.src[0], expected);
+				if (src0_rel == ExecRel::AtEntry || src0_rel == ExecRel::WidenedWqm) { copied_rel = ExecRel::WidenedWqm; }
+				else if (src0_rel == ExecRel::SubsetOfEntry || src0_rel == ExecRel::WidenedWqmSubset)
+				{
+					copied_rel = ExecRel::WidenedWqmSubset;
+				}
+			}
 		}
 		ClearInstructionScalarDsts(inst, state);
 		unsigned dfirst = 0;
@@ -561,18 +619,28 @@ bool TrackExecStep(const ShaderInstruction& inst, ExecState* state, uint32_t wqm
 		{
 			next_exec = ExecRel::WidenedWqmSubset;
 		}
+	} else if (inst.type == Type::SOrSaveexecB64 || inst.type == Type::SOrSaveexecB32)
+	{
+		const ExecRel src0_rel = inst.src_num >= 1 ? OperandExecRel(*state, inst.src[0], expected) : ExecRel::Unknown;
+		saves_dst              = true;
+		next_exec              = UnionExecRel(src0_rel, saved_rel);
+	} else if (inst.type == Type::SXorSaveexecB64 || inst.type == Type::SXorSaveexecB32)
+	{
+		const ExecRel src0_rel = inst.src_num >= 1 ? OperandExecRel(*state, inst.src[0], expected) : ExecRel::Unknown;
+		saves_dst              = true;
+		next_exec              = XorExecRel(src0_rel, saved_rel);
 	} else if ((inst.type == Type::SAndB64 || inst.type == Type::SAndB32) && inst.src_num >= 2)
 	{
-		const ExecRel src0_rel = OperandExecRel(*state, inst.src[0], expected);
-		const ExecRel src1_rel = OperandExecRel(*state, inst.src[1], expected);
-		if (src0_rel == ExecRel::AtEntry || src0_rel == ExecRel::SubsetOfEntry || src1_rel == ExecRel::AtEntry ||
-		    src1_rel == ExecRel::SubsetOfEntry)
-		{
-			next_exec = ExecRel::SubsetOfEntry;
-		} else if (IsWqmRel(src0_rel) || IsWqmRel(src1_rel))
-		{
-			next_exec = ExecRel::WidenedWqmSubset;
-		}
+		next_exec = IntersectExecRel(OperandExecRel(*state, inst.src[0], expected),
+		                             OperandExecRel(*state, inst.src[1], expected));
+	} else if ((inst.type == Type::SOrB64 || inst.type == Type::SOrB32) && inst.src_num >= 2)
+	{
+		next_exec = UnionExecRel(OperandExecRel(*state, inst.src[0], expected),
+		                         OperandExecRel(*state, inst.src[1], expected));
+	} else if ((inst.type == Type::SXorB64 || inst.type == Type::SXorB32) && inst.src_num >= 2)
+	{
+		next_exec = XorExecRel(OperandExecRel(*state, inst.src[0], expected),
+		                       OperandExecRel(*state, inst.src[1], expected));
 	} else if ((inst.type == Type::SAndn2B64 || inst.type == Type::SAndn2B32) && inst.src_num >= 1)
 	{
 		const ExecRel src0_rel = OperandExecRel(*state, inst.src[0], expected);
