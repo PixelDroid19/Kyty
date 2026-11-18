@@ -337,7 +337,7 @@ public:
 	void WriteBack();
 	// Copies guest bytes the processor reads at record time once no GPU writer owns newer content.
 	[[nodiscard]] bool ReadCurrentGuestBytes(uint64_t vaddr, void* dst, uint64_t size);
-	void MemoryBarrier();
+	void MemoryBarrier(uint8_t producers = CommandBuffer::BarrierProducerAll);
 	void RenderTextureBarrier(uint64_t vaddr, uint64_t size);
 	void DepthStencilBarrier(uint64_t vaddr, uint64_t size);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);

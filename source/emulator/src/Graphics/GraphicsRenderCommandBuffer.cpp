@@ -2470,9 +2470,11 @@ void CommandBuffer::Begin()
 	m_device_wait_semaphores.clear();
 	m_device_wait_values.clear();
 	// A barrier at the start of a recording still orders it after earlier submissions.
-	m_latest_full_barrier   = false;
-	m_full_barrier_recorded = false;
-	m_recording_begin_time  = GpuMemoryGetCurrentTime();
+	const uint8_t initial_producers =
+	    SupportsGraphics() ? BarrierProducerAll : static_cast<uint8_t>(BarrierProducerCompute | BarrierProducerTransfer);
+	m_dirty_barrier_producers = initial_producers;
+	m_full_barrier_recorded   = false;
+	m_recording_begin_time    = GpuMemoryGetCurrentTime();
 	// Chunks of an executed recording that was not reset are reset again when they begin.
 	m_chunks.clear();
 	m_geometry_segment = {};
@@ -2740,7 +2742,7 @@ void CommandBuffer::OpenGeometrySegment(VulkanBuffer* output, uint64_t offset)
 {
 	FlushDeferredState();
 	CloseRenderPass();
-	m_latest_full_barrier = false;
+	m_dirty_barrier_producers |= BarrierProducerGraphics | BarrierProducerCompute;
 
 	auto& segment       = m_geometry_segment;
 	segment.predecessor = m_main;
@@ -2866,7 +2868,6 @@ void CommandBuffer::WriteSeparatingTimestamp()
 void CommandBuffer::WriteTimestamp(const TimestampQuery& query)
 {
 	EXIT_IF(IsInvalid() || query.pool == VK_NULL_HANDLE);
-	m_latest_full_barrier = false;
 	DeferredState(m_main)->WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query.pool, query.query);
 }
 
@@ -2981,7 +2982,7 @@ void CommandBuffer::End()
 {
 	EXIT_IF(IsInvalid());
 
-	auto* buffer = RecordOutsideRenderPass();
+	auto* buffer = RecordOutsideRenderPassSync();
 	CloseGeometrySegment();
 
 	const auto result = vkEndCommandBuffer(buffer);
@@ -3450,7 +3451,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		PresentationFsr3NoteRenderPass(*color, *depth);
 	}
 	CloseRenderPass();
-	m_latest_full_barrier = false;
+	m_dirty_barrier_producers |= BarrierProducerGraphics;
 
 	auto* buffer = m_main;
 
@@ -3679,7 +3680,6 @@ void CommandBuffer::CloseRenderPass()
 		return;
 	}
 	m_open_render_pass.reset();
-	m_latest_full_barrier = false;
 	FlushDeferredState();
 
 	auto* buffer = m_main;
@@ -3706,12 +3706,23 @@ void CommandBuffer::CloseRenderPass()
 
 VkCommandBuffer CommandBuffer::RecordOutsideRenderPass()
 {
+	auto* buffer = RecordOutsideRenderPassSync();
+	m_dirty_barrier_producers |= BarrierProducerCompute | BarrierProducerTransfer;
+	return buffer;
+}
+
+VkCommandBuffer CommandBuffer::RecordOutsideRenderPassSync()
+{
 	EXIT_IF(IsInvalid());
 	FlushDeferredState();
 	CloseRenderPass();
-	m_latest_full_barrier = false;
 	m_geometry_hazards++;
 	return m_main;
+}
+
+void CommandBuffer::MarkBarrierProducers(uint8_t producers) const
+{
+	m_dirty_barrier_producers |= producers;
 }
 
 VkCommandBuffer CommandBuffer::RecordState()
@@ -3723,12 +3734,12 @@ VkCommandBuffer CommandBuffer::RecordState()
 VkCommandBuffer CommandBuffer::StateTarget()
 {
 	EXIT_IF(IsInvalid());
-	m_latest_full_barrier = false;
 	if (m_geometry_pass.pending)
 	{
 		auto* segment = PlaceGeometryPass();
 		if (segment != nullptr)
 		{
+			m_dirty_barrier_producers |= BarrierProducerGraphics | BarrierProducerCompute;
 			return segment;
 		}
 	}
@@ -3739,7 +3750,7 @@ VkCommandBuffer CommandBuffer::RecordInsideRenderPass() const
 {
 	EXIT_IF(IsInvalid());
 	EXIT_IF(!m_open_render_pass.has_value());
-	m_latest_full_barrier = false;
+	m_dirty_barrier_producers |= BarrierProducerGraphics;
 	FlushDeferredState();
 	return m_main;
 }
@@ -3776,7 +3787,6 @@ DeferredStateCommands* CommandBuffer::DeferredDraw()
 {
 	EXIT_IF(IsInvalid());
 	EXIT_IF(!m_open_render_pass.has_value());
-	m_latest_full_barrier = false;
 	return DeferredState(m_main);
 }
 
@@ -3792,22 +3802,64 @@ void CommandBuffer::FlushDeferredState() const
 	}
 }
 
-void CommandBuffer::FullMemoryBarrier()
+void CommandBuffer::MemoryBarrier(uint8_t producers)
 {
 	EXIT_IF(IsInvalid());
-	if (m_latest_full_barrier)
+	const uint8_t supported =
+	    SupportsGraphics() ? BarrierProducerAll : static_cast<uint8_t>(BarrierProducerCompute | BarrierProducerTransfer);
+	const uint8_t dirty = m_dirty_barrier_producers & producers & supported;
+	if (dirty == BarrierProducerNone)
 	{
 		return;
 	}
+
+	VkPipelineStageFlags src_stage  = 0;
+	VkAccessFlags        src_access = 0;
+	if ((dirty & BarrierProducerGraphics) != 0u)
+	{
+		src_stage |= VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+		src_access |= VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	}
+	if ((dirty & BarrierProducerCompute) != 0u)
+	{
+		src_stage |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+		src_access |= VK_ACCESS_SHADER_WRITE_BIT;
+	}
+	if ((dirty & BarrierProducerTransfer) != 0u)
+	{
+		src_stage |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+		src_access |= VK_ACCESS_TRANSFER_WRITE_BIT;
+	}
+
+	VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+	VkAccessFlags        dst_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
+	                                  VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	if (SupportsGraphics())
+	{
+		dst_stage |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+		dst_access |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
+		              VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+		              VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	}
+
 	VkMemoryBarrier mem_barrier {};
 	mem_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	mem_barrier.pNext         = nullptr;
-	mem_barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-	mem_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-	vkCmdPipelineBarrier(RecordOutsideRenderPass(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1,
-	                     &mem_barrier, 0, nullptr, 0, nullptr);
-	m_latest_full_barrier   = true;
-	m_full_barrier_recorded = true;
+	mem_barrier.srcAccessMask = src_access;
+	mem_barrier.dstAccessMask = dst_access;
+	auto*          vk_buffer  = RecordOutsideRenderPassSync();
+	vkCmdPipelineBarrier(vk_buffer, src_stage, dst_stage, 0, 1, &mem_barrier, 0, nullptr, 0, nullptr);
+
+	m_dirty_barrier_producers &= static_cast<uint8_t>(~dirty);
+	if ((m_dirty_barrier_producers & supported) == 0u)
+	{
+		m_full_barrier_recorded = true;
+	}
+}
+
+void CommandBuffer::FullMemoryBarrier()
+{
+	MemoryBarrier(BarrierProducerAll);
 }
 
 bool CommandBuffer::OrderEarlierDeviceWrite(uint64_t device_write_time, VkCommandBuffer target)

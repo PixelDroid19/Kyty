@@ -173,7 +173,8 @@ void               GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const G
 // the guest's physical memory qualify: a snapshot chunk could be refreshed
 // from stale guest bytes before the CPU write-back.
 [[nodiscard]] bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source,
-                                                       uint64_t vaddr, uint64_t size);
+                                                       uint64_t vaddr, uint64_t size, bool supports_graphics = true,
+                                                       bool already_ordered = false);
 
 // For a result GuestDeviceAddressRecordPublication refuses (a device write over part
 // of a cache line), records into `cmd` a copy of the storage object into a

@@ -46,8 +46,8 @@
 #include <array>
 #include <cinttypes>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -481,7 +481,7 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	return true;
 }
 
-bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill, bool already_ordered)
 {
 	// The fill rewrites every byte of the bound range, so the whole storage
 	// object is the guest result; a wider object could hold older pending writes.
@@ -504,7 +504,8 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 		DiscardInPlaceFills(fill.address, fill.size);
 	}
 	if (!(fill_copy && GuestDeviceAddressRecordFill(ctx, cmd, words[0], fill.address, fill.size)) &&
-	    !GuestDeviceAddressRecordPublication(ctx, cmd, *identity.buffer, fill.address, fill.size))
+	    !GuestDeviceAddressRecordPublication(ctx, cmd, *identity.buffer, fill.address, fill.size, buffer->SupportsGraphics(),
+	                                         already_ordered))
 	{
 		return false;
 	}
@@ -525,12 +526,18 @@ bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUnifor
 	{
 		return false;
 	}
-	auto*           cmd = buffer->RecordOutsideRenderPass();
+	auto*                      cmd    = buffer->RecordOutsideRenderPass();
+	const bool                 gfx    = buffer->SupportsGraphics();
+	const VkPipelineStageFlags rw_shader_stages =
+	    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
+	    (gfx ? (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT) : 0u);
+	const VkPipelineStageFlags consumer_stages =
+	    rw_shader_stages | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | (gfx ? VK_PIPELINE_STAGE_VERTEX_INPUT_BIT : 0u);
 	VkMemoryBarrier barrier {};
 	barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+	vkCmdPipelineBarrier(cmd, rw_shader_stages, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 	if (!(identity.buffer->guest_in_place && RepeatsInPlaceFill(buffer->GetQueueIndex(), identity, fill.address, fill.size, words[0])))
 	{
 		vkCmdFillBuffer(cmd, identity.buffer->buffer, identity.buffer->guest_offset, fill.size, words[0]);
@@ -538,9 +545,10 @@ bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUnifor
 	// Flag every page as the dispatch's stores would, for the write-back.
 	vkCmdFillBuffer(cmd, identity.buffer->write_mask->buffer, 0, VK_WHOLE_SIZE, 1u);
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
-	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
-	                     &barrier, 0, nullptr, 0, nullptr);
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
+	                        VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
+	                        (gfx ? (VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT) : 0u);
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, consumer_stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 	return true;
 }
 
@@ -563,8 +571,9 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 			// The publication copies the result over guest memory.
 			DiscardInPlaceFills(publication.vaddr, publication.size);
 		}
-		const bool recorded = GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
-		                                                          *publication.identity.buffer, publication.vaddr, publication.size);
+		const bool recorded = GuestDeviceAddressRecordPublication(
+		    g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(), *publication.identity.buffer, publication.vaddr,
+		    publication.size, buffer->SupportsGraphics(), false);
 		if (recorded && publication.identity.buffer->guest_in_place)
 		{
 			GpuMemoryMarkInPlaceStorageOrdered(publication.identity, consumer);
@@ -576,10 +585,12 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 		}
 		// The device may not write the result over guest memory: readers on this queue
 		// observe it through an overlay until its write-back.
-		if (!recorded && GuestDeviceAddressRecordOverlay(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(), recording,
-		                                                 publication))
+		if (!recorded)
 		{
-			continue;
+			if (GuestDeviceAddressRecordOverlay(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(), recording, publication))
+			{
+				continue;
+			}
 		}
 		*dependency = publication.dependency;
 		return true;
@@ -1513,14 +1524,14 @@ static bool ConsumeDepthMetaClear(uint64_t submit_id, const RenderDepthInfo& dep
 	return event != nullptr;
 }
 
-void GraphicsRenderMemoryBarrier(CommandBuffer* buffer)
+void GraphicsRenderMemoryBarrier(CommandBuffer* buffer, uint8_t producers)
 {
 	EXIT_IF(buffer == nullptr);
 	EXIT_IF(buffer->IsInvalid());
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	buffer->FullMemoryBarrier();
+	buffer->MemoryBarrier(producers);
 }
 
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* image)
@@ -1557,7 +1568,8 @@ void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* imag
 		const VkPipelineStageFlags dst_stage = VulkanQueueBarrierScope(
 		    buffer, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		    &image_memory_barrier.dstAccessMask);
-		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+		auto*          vk_cmd = buffer->RecordOutsideRenderPassSync();
+		vkCmdPipelineBarrier(vk_cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 
 		image->layout = image_memory_barrier.newLayout;
 	}
@@ -1599,7 +1611,7 @@ void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, VulkanImage* image
 		constexpr VkPipelineStageFlags stages    = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 		const VkPipelineStageFlags     src_stage = VulkanQueueBarrierScope(buffer, stages, &image_memory_barrier.srcAccessMask);
 		const VkPipelineStageFlags     dst_stage = VulkanQueueBarrierScope(buffer, stages, &image_memory_barrier.dstAccessMask);
-		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPassSync(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 
 		image->layout = image_memory_barrier.newLayout;
 	}
@@ -1664,7 +1676,7 @@ void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image
 
 	const VkPipelineStageFlags dst_stage =
 	    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-	vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), VulkanQueueBarrierScope(buffer, src_stage, &image_memory_barrier.srcAccessMask),
+	vkCmdPipelineBarrier(buffer->RecordOutsideRenderPassSync(), VulkanQueueBarrierScope(buffer, src_stage, &image_memory_barrier.srcAccessMask),
 	                     VulkanQueueBarrierScope(buffer, dst_stage, &image_memory_barrier.dstAccessMask), 0, 0, nullptr, 0, nullptr, 1,
 	                     &image_memory_barrier);
 	image->layout = image_memory_barrier.newLayout;

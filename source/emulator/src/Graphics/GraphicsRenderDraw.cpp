@@ -4378,12 +4378,18 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		}
 	}
 
-	auto* vk_buffer = buffer->RecordOutsideRenderPass();
+	auto* vk_buffer = buffer->RecordOutsideRenderPassSync();
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(buffer, &input_info, &sh_ctx->GetCs(), &ctx->GetShaderRegisters());
 
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 
+	constexpr uint32_t kDispatchComputeShaderEnable = 0x01u;
+	constexpr uint32_t kDispatchPartialThreadGroups = 0x02u;
+	ComputeUniformBufferFill fill;
+	ComputeBlockHeadFill     block_heads;
+	const bool proven_fill = !indirect && (mode & kDispatchComputeShaderEnable) != 0u && (mode & kDispatchPartialThreadGroups) == 0u &&
+	                         ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill, &block_heads);
 	const uint64_t storage_seed_skip_mask =
 	    indirect ? 0u : ShaderComputeStorageSeedSkipMask(input_info, Config::IsNextGen(), thread_group_x, thread_group_y, thread_group_z);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
@@ -4407,14 +4413,13 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	// transfer fill, which an in-place range already holding that fill skips. A proven full uniform fill
 	// additionally updates its exact color-image aliases and depth and stencil planes in this recording;
 	// partial thread groups would leave the range uncovered.
-	constexpr uint32_t kDispatchComputeShaderEnable = 0x01u;
-	constexpr uint32_t kDispatchPartialThreadGroups = 0x02u;
-	ComputeUniformBufferFill fill;
-	ComputeBlockHeadFill     block_heads;
-	const bool proven_fill = !indirect && (mode & kDispatchComputeShaderEnable) != 0u && (mode & kDispatchPartialThreadGroups) == 0u &&
-	                         ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill, &block_heads);
-	if (!(proven_fill && RecordComputeUniformFillTransfer(buffer, fill)))
+	bool transfer_recorded = false;
+	if (proven_fill && RecordComputeUniformFillTransfer(buffer, fill))
 	{
+		transfer_recorded = true;
+	} else
+	{
+		buffer->MarkBarrierProducers(CommandBuffer::BarrierProducerCompute);
 		if (indirect)
 		{
 			vkCmdDispatchIndirect(vk_buffer, indirect_args->buffer, 0);
@@ -4431,7 +4436,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		(void)PropagateComputeUniformDepthFill(buffer, fill);
 		(void)PublishComputeColorMetaClear(buffer, fill);
 		(void)PublishUniformDepthMetaFill(submit_id, fill);
-		(void)PublishComputeUniformFillToGuestAddress(buffer, fill);
+		(void)PublishComputeUniformFillToGuestAddress(buffer, fill, transfer_recorded);
 	}
 	if (block_heads.size != 0u)
 	{

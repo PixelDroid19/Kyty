@@ -39,8 +39,6 @@
 #include <chrono>
 #include <cinttypes>
 #include <condition_variable>
-#include <cstdio>
-#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -3675,13 +3673,13 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	}
 }
 
-void CommandProcessor::MemoryBarrier()
+void CommandProcessor::MemoryBarrier(uint8_t producers)
 {
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
-	GraphicsRenderMemoryBarrier(m_buffer[m_current_buffer]);
+	GraphicsRenderMemoryBarrier(m_buffer[m_current_buffer], producers);
 }
 
 void CommandProcessor::RenderTextureBarrier(uint64_t vaddr, uint64_t size)
@@ -3724,24 +3722,24 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index, u
 	} else if (event_type == 0x0000002a && event_index == 0x00000000)
 	{
 		// DB_CACHE_FLUSH_AND_INV
-		MemoryBarrier();
+		MemoryBarrier(CommandBuffer::BarrierProducerGraphics);
 	} else if (event_type == 0x0000002c && (event_index == 0x00000000 || event_index == 0x00000007))
 	{
 		// FLUSH_AND_INV_DB_META — index 7 was already accepted; post-Play also
 		// emits index 0 on EVENT_WRITE.
-		MemoryBarrier();
+		MemoryBarrier(CommandBuffer::BarrierProducerGraphics);
 	} else if (event_type == 0x0000002e && (event_index == 0x00000000 || event_index == 0x00000007))
 	{
 		// FLUSH_AND_INV_CB_META — observed post-Play EVENT_WRITE (index 0).
 		// Ensure color-target metadata/data are coherent for later samples.
-		MemoryBarrier();
+		MemoryBarrier(CommandBuffer::BarrierProducerGraphics);
 	} else if ((event_type == 0x00000010) && event_index == 0x00000000)
 	{
 		// PsPartialFlush
 	} else if (event_type == 0x00000007 && event_index == 0x00000000)
 	{
-		// CS_PARTIAL_FLUSH — wait for outstanding compute work. Treat as a barrier.
-		MemoryBarrier();
+		// CS_PARTIAL_FLUSH — wait for outstanding compute work.
+		MemoryBarrier(CommandBuffer::BarrierProducerCompute);
 	} else if (event_type == 0x00000039 && event_index == 0x00000001)
 	{
 		// Until host occlusion queries are implemented, publish an always-visible

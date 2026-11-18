@@ -1998,7 +1998,8 @@ bool PublishComputeColorBlockHeads(CommandBuffer* buffer, const ComputeBlockHead
 [[nodiscard]] bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
 // Copies the filled storage object into the guest device-address view in queue
 // order, so later device-address consumers on this queue need no CPU write-back.
-[[nodiscard]] bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+[[nodiscard]] bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill,
+                                                                 bool already_ordered = false);
 // Before a device-address read on `buffer`'s queue: copies every pending storage
 // result written only on that queue into the guest device-address view in queue
 // order. Returns true with a dependency to wait for when a pending result does not
