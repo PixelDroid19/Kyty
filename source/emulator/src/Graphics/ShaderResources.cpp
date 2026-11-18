@@ -533,7 +533,7 @@ ShaderDynamicSLoadSpan ShaderCodeResourceMemo::DynamicSLoadScalarSpan(const Shad
 {
 	const auto key = std::make_tuple(mapping.instruction_pc, mapping.last_consumer_pc, mapping.destination_register, mapping.dword_count);
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		if (const auto it = m_dynamic_sload_spans.find(key); it != m_dynamic_sload_spans.end())
 		{
 			return it->second;
@@ -541,7 +541,7 @@ ShaderDynamicSLoadSpan ShaderCodeResourceMemo::DynamicSLoadScalarSpan(const Shad
 	}
 	ShaderDynamicSLoadSpan span {};
 	span.exact = ShaderDynamicSLoadScalarSpan(code, mapping, &span.required_bytes);
-	std::lock_guard<std::mutex> lock(m_mutex);
+	std::unique_lock<std::shared_mutex> lock(m_mutex);
 	m_dynamic_sload_spans.emplace(key, span);
 	return span;
 }
@@ -1301,29 +1301,20 @@ static int ShaderDescriptorSLoadDwords(const ShaderInstruction& sload)
 
 const std::vector<ShaderDynamicSLoadUse>& ShaderCodeResourceMemo::DescriptorSLoadUses(const ShaderCode& code) const
 {
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		if (m_descriptor_sload_uses_ready)
-		{
-			return m_descriptor_sload_uses;
-		}
-	}
-	const uint32_t                     instruction_count = code.GetInstructions().Size();
-	std::vector<ShaderDynamicSLoadUse> uses(instruction_count);
-	for (uint32_t index = 0; index < instruction_count; ++index)
-	{
-		const auto& sload = code.GetInstructions().At(index);
-		if (ShaderDescriptorSLoadDwords(sload) != 0)
-		{
-			uses[index] = ShaderFindDynamicSLoadUse(code, index, sload);
-		}
-	}
-	std::lock_guard<std::mutex> lock(m_mutex);
-	if (!m_descriptor_sload_uses_ready)
-	{
-		m_descriptor_sload_uses       = std::move(uses);
-		m_descriptor_sload_uses_ready = true;
-	}
+	std::call_once(m_descriptor_sload_uses_once,
+	               [&]
+	               {
+		               const uint32_t instruction_count = code.GetInstructions().Size();
+		               m_descriptor_sload_uses.resize(instruction_count);
+		               for (uint32_t index = 0; index < instruction_count; ++index)
+		               {
+			               const auto& sload = code.GetInstructions().At(index);
+			               if (ShaderDescriptorSLoadDwords(sload) != 0)
+			               {
+				               m_descriptor_sload_uses[index] = ShaderFindDynamicSLoadUse(code, index, sload);
+			               }
+		               }
+	               });
 	return m_descriptor_sload_uses;
 }
 
@@ -1667,65 +1658,27 @@ ShaderInstructionIndices ShaderIndexInstructions(const ShaderCode& code)
 		{
 			indices.gds_and_m0_writes.push_back(index);
 		}
-		indices.gds_memory = indices.gds_memory || inst.format == ShaderInstructionFormat::VaddrVdataOffsetGds;
+		indices.gds_memory      = indices.gds_memory || inst.format == ShaderInstructionFormat::VaddrVdataOffsetGds;
+		indices.has_image_reads = indices.has_image_reads || ShaderInstructionReadsImageResource(inst.type);
 	}
 	return indices;
 }
 
 const ShaderInstructionIndices& ShaderCodeResourceMemo::InstructionIndices(const ShaderCode& code) const
 {
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		if (m_instruction_indices_ready)
-		{
-			return m_instruction_indices;
-		}
-	}
-	auto                        indices = ShaderIndexInstructions(code);
-	std::lock_guard<std::mutex> lock(m_mutex);
-	if (!m_instruction_indices_ready)
-	{
-		m_instruction_indices       = std::move(indices);
-		m_instruction_indices_ready = true;
-	}
+	std::call_once(m_instruction_indices_once, [&] { m_instruction_indices = ShaderIndexInstructions(code); });
 	return m_instruction_indices;
 }
 
 const ShaderEudDescriptorLoads& ShaderCodeResourceMemo::EudDescriptorLoads(const ShaderCode& code) const
 {
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		if (m_eud_descriptor_loads_ready)
-		{
-			return m_eud_descriptor_loads;
-		}
-	}
-	auto                        loads = ShaderFindEudDescriptorLoads(code);
-	std::lock_guard<std::mutex> lock(m_mutex);
-	if (!m_eud_descriptor_loads_ready)
-	{
-		m_eud_descriptor_loads       = std::move(loads);
-		m_eud_descriptor_loads_ready = true;
-	}
+	std::call_once(m_eud_descriptor_loads_once, [&] { m_eud_descriptor_loads = ShaderFindEudDescriptorLoads(code); });
 	return m_eud_descriptor_loads;
 }
 
 const std::vector<ShaderNestedTableLoad>& ShaderCodeResourceMemo::NestedTableLoads(const ShaderCode& code) const
 {
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		if (m_nested_table_loads_ready)
-		{
-			return m_nested_table_loads;
-		}
-	}
-	auto                        loads = ShaderFindNestedTableLoads(code);
-	std::lock_guard<std::mutex> lock(m_mutex);
-	if (!m_nested_table_loads_ready)
-	{
-		m_nested_table_loads       = std::move(loads);
-		m_nested_table_loads_ready = true;
-	}
+	std::call_once(m_nested_table_loads_once, [&] { m_nested_table_loads = ShaderFindNestedTableLoads(code); });
 	return m_nested_table_loads;
 }
 
@@ -1963,8 +1916,8 @@ const std::vector<ShaderDescriptorBlock>& ShaderCodeResourceMemo::TableLoadBlock
 {
 	std::shared_ptr<const ShaderControlFlowGraph> cfg;
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		const auto                  found = m_table_load_blocks.find(index);
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
+		const auto                          found = m_table_load_blocks.find(index);
 		if (found != m_table_load_blocks.end())
 		{
 			return found->second;
@@ -1975,13 +1928,66 @@ const std::vector<ShaderDescriptorBlock>& ShaderCodeResourceMemo::TableLoadBlock
 	{
 		cfg = std::make_shared<const ShaderControlFlowGraph>(ShaderBuildControlFlowGraph(code));
 	}
-	auto                        blocks = ShaderPartitionTableLoad(code, *cfg, index);
-	std::lock_guard<std::mutex> lock(m_mutex);
+	auto                                blocks = ShaderPartitionTableLoad(code, *cfg, index);
+	std::unique_lock<std::shared_mutex> lock(m_mutex);
 	if (m_cfg == nullptr)
 	{
 		m_cfg = cfg;
 	}
 	return m_table_load_blocks.emplace(index, std::move(blocks)).first->second;
+}
+
+const std::vector<ShaderPointerTableLoadEntry>& ShaderCodeResourceMemo::PointerTableLoads(const ShaderCode& code) const
+{
+	std::call_once(
+	    m_pointer_table_loads_once,
+	    [&]
+	    {
+		    std::shared_ptr<const ShaderControlFlowGraph> cfg;
+		    const auto&                                   instructions = code.GetInstructions();
+		    for (uint32_t index = 0; index < instructions.Size(); ++index)
+		    {
+			    const auto& sload       = instructions.At(index);
+			    const int   dword_count = ShaderTableSLoadDwords(sload);
+			    int         offset_dw   = 0;
+			    if (dword_count == 0 || !ShaderGetSmemConstantDwordOffset(sload, &offset_dw) || offset_dw < 0 ||
+			        static_cast<uint32_t>(dword_count) > kMaxSrtPointerTableDwords ||
+			        static_cast<uint32_t>(offset_dw) > kMaxSrtPointerTableDwords - static_cast<uint32_t>(dword_count))
+			    {
+				    continue;
+			    }
+			    if (cfg == nullptr)
+			    {
+				    {
+					    std::shared_lock<std::shared_mutex> lock(m_mutex);
+					    cfg = m_cfg;
+				    }
+				    if (cfg == nullptr)
+				    {
+					    cfg = std::make_shared<const ShaderControlFlowGraph>(ShaderBuildControlFlowGraph(code));
+					    std::unique_lock<std::shared_mutex> lock(m_mutex);
+					    if (m_cfg == nullptr) { m_cfg = cfg; }
+				    }
+			    }
+			    auto blocks = ShaderPartitionTableLoad(code, *cfg, index);
+			    if (blocks.empty())
+			    {
+				    continue;
+			    }
+			    ShaderPointerTableLoadEntry entry;
+			    entry.index     = index;
+			    entry.dwords    = dword_count;
+			    entry.offset_dw = offset_dw;
+			    for (const auto& block: blocks)
+			    {
+				    entry.has_non_sampler = entry.has_non_sampler || ShaderDescriptorLoadInPass(block.use, ShaderDescriptorLoadPass::NonSampler);
+				    entry.has_sampler     = entry.has_sampler || ShaderDescriptorLoadInPass(block.use, ShaderDescriptorLoadPass::Sampler);
+			    }
+			    entry.blocks = std::move(blocks);
+			    m_pointer_table_loads.push_back(std::move(entry));
+		    }
+	    });
+	return m_pointer_table_loads;
 }
 
 // The dwords of a nested table that its loads and copied T#s read, or with
@@ -2159,6 +2165,76 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 	const auto&    nested            = memo != nullptr ? memo->NestedTableLoads(code) : direct_nested;
 	const auto     nested_tables =
 	    ShaderSnapshotNestedTables(code, nested, user_sgpr, srt_size_dw, user_data_register_base, scalar_flow, *bind, false);
+
+	if (memo != nullptr)
+	{
+		const auto& entries = memo->PointerTableLoads(code);
+		// Snapshot each active SRT pointer-table load once for both passes instead
+		// of scanning the full instruction stream and re-snapshotting per pass.
+		struct ActiveEntry
+		{
+			const ShaderPointerTableLoadEntry* entry = nullptr;
+			std::vector<uint32_t>              table;
+		};
+		std::vector<ActiveEntry> active;
+		if (!entries.empty())
+		{
+			active.reserve(entries.size());
+			for (const auto& entry: entries)
+			{
+				if (entry.index >= entry_values.size())
+				{
+					continue;
+				}
+				const auto& sload = code.GetInstructions().At(entry.index);
+				if (!ShaderLoadsThroughSrtPointer(sload, entry_values[entry.index], srt_size_dw, user_data_register_base, *bind))
+				{
+					continue;
+				}
+				const int      pointer = sload.src[0].register_id - user_data_register_base;
+				const uint64_t address = ((static_cast<uint64_t>(user_sgpr.value[pointer + 1]) & 0xffffu) << 32u) | user_sgpr.value[pointer];
+				const uint32_t table_dwords = static_cast<uint32_t>(entry.offset_dw) + static_cast<uint32_t>(entry.dwords);
+				ActiveEntry item {&entry, std::vector<uint32_t>(table_dwords)};
+				if (!ShaderSnapshotGuestDescriptorTable(address, table_dwords, item.table.data()))
+				{
+					EXIT("unreadable descriptor table behind an SRT pointer: pc=0x%08" PRIx32 " sgpr=%d address=0x%016" PRIx64
+					     " dwords=%d\n",
+					     sload.pc, pointer, address, entry.offset_dw + entry.dwords);
+				}
+				active.push_back(std::move(item));
+			}
+		}
+		for (const auto pass: {ShaderDescriptorLoadPass::NonSampler, ShaderDescriptorLoadPass::Sampler})
+		{
+			ShaderBindNestedTableDescriptors(code, nested, nested_tables, user_sgpr, pass, bind, info, memo);
+			for (const auto& item: active)
+			{
+				const auto& entry = *item.entry;
+				if (!(pass == ShaderDescriptorLoadPass::NonSampler ? entry.has_non_sampler : entry.has_sampler))
+				{
+					continue;
+				}
+				const auto& sload = code.GetInstructions().At(entry.index);
+				for (const auto& block: entry.blocks)
+				{
+					if (!ShaderDescriptorLoadInPass(block.use, pass))
+					{
+						continue;
+					}
+					if (!ShaderAddDynamicScalarResource(code, bind, info, block.load, entry.offset_dw + block.first_dword, block.use,
+					                                    user_sgpr, item.table.data(), instruction_count, memo))
+					{
+						EXIT("unable to materialize SRT pointer descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u textures=%d "
+						     "samplers=%d\n",
+						     sload.pc, entry.offset_dw + block.first_dword, block.load.dst.size, static_cast<unsigned>(block.use.kind),
+						     bind->textures2D.textures_num, bind->samplers.samplers_num);
+					}
+				}
+			}
+		}
+		return;
+	}
+
 	for (const auto pass: {ShaderDescriptorLoadPass::NonSampler, ShaderDescriptorLoadPass::Sampler})
 	{
 	ShaderBindNestedTableDescriptors(code, nested, nested_tables, user_sgpr, pass, bind, info, memo);
@@ -2174,9 +2250,7 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 		{
 			continue;
 		}
-		const auto direct_blocks =
-		    memo == nullptr ? ShaderPartitionTableLoad(code, ShaderBuildControlFlowGraph(code), index) : std::vector<ShaderDescriptorBlock> {};
-		const auto& blocks = memo != nullptr ? memo->TableLoadBlocks(code, index) : direct_blocks;
+		const auto blocks = ShaderPartitionTableLoad(code, ShaderBuildControlFlowGraph(code), index);
 		if (blocks.empty())
 		{
 			continue;
@@ -2403,20 +2477,7 @@ std::vector<ShaderConstantSamplerRead> ShaderFindConstantSamplerReads(const Shad
 
 const std::vector<ShaderConstantSamplerRead>& ShaderCodeResourceMemo::ConstantSamplerReads(const ShaderCode& code) const
 {
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		if (m_constant_sampler_reads_ready)
-		{
-			return m_constant_sampler_reads;
-		}
-	}
-	auto                        reads = ShaderFindConstantSamplerReads(code);
-	std::lock_guard<std::mutex> lock(m_mutex);
-	if (!m_constant_sampler_reads_ready)
-	{
-		m_constant_sampler_reads       = std::move(reads);
-		m_constant_sampler_reads_ready = true;
-	}
+	std::call_once(m_constant_sampler_reads_once, [&] { m_constant_sampler_reads = ShaderFindConstantSamplerReads(code); });
 	return m_constant_sampler_reads;
 }
 
@@ -2837,8 +2898,8 @@ bool ShaderCodeResourceMemo::SgprWrittenOnEveryPath(const ShaderCode& code, uint
 {
 	std::shared_ptr<const ShaderControlFlowGraph> cfg;
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		const auto                  found = m_written_on_every_path.find({index, reg});
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
+		const auto                          found = m_written_on_every_path.find({index, reg});
 		if (found != m_written_on_every_path.end())
 		{
 			return found->second;
@@ -2849,8 +2910,8 @@ bool ShaderCodeResourceMemo::SgprWrittenOnEveryPath(const ShaderCode& code, uint
 	{
 		cfg = std::make_shared<const ShaderControlFlowGraph>(ShaderBuildControlFlowGraph(code));
 	}
-	const bool                  written = ShaderUniqueReachingSgprWrite(code, *cfg, index, reg) != UINT32_MAX;
-	std::lock_guard<std::mutex> lock(m_mutex);
+	const bool                          written = ShaderUniqueReachingSgprWrite(code, *cfg, index, reg) != UINT32_MAX;
+	std::unique_lock<std::shared_mutex> lock(m_mutex);
 	if (m_cfg == nullptr)
 	{
 		m_cfg = cfg;

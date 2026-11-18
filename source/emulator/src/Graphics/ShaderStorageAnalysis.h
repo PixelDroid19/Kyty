@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -43,6 +44,8 @@ struct ShaderImageCopyRead
 };
 
 [[nodiscard]] std::vector<int32_t>             ShaderImageCopyLayout(const ShaderBindResources& bind, int user_data_register_base);
+void                                           ShaderImageCopyLayoutInto(const ShaderBindResources& bind, int user_data_register_base,
+                                                                         std::vector<int32_t>* layout);
 [[nodiscard]] std::vector<ShaderImageCopyRead> ShaderAnalyzeImageCopyReads(const ShaderCode& code, const ShaderBindResources& bind,
                                                                            int user_data_register_base);
 
@@ -110,12 +113,13 @@ struct ShaderEudDescriptorLoads
 // instructions their own checks can accept.
 struct ShaderInstructionIndices
 {
-	std::vector<uint32_t> buffer_accesses;    // scalar buffer loads and vector buffer accesses
-	std::vector<uint32_t> image_samplers;     // instructions that read an S#
-	std::vector<uint32_t> image_reads;        // image reads that return dmask components
-	std::vector<uint32_t> descriptor_loads;   // S_LOAD_DWORDX4 and S_LOAD_DWORDX8
-	std::vector<uint32_t> gds_and_m0_writes;  // GDS data-share instructions and M0 writes
-	bool                  gds_memory = false; // a GDS memory instruction exists
+	std::vector<uint32_t> buffer_accesses;       // scalar buffer loads and vector buffer accesses
+	std::vector<uint32_t> image_samplers;        // instructions that read an S#
+	std::vector<uint32_t> image_reads;           // image reads that return dmask components
+	std::vector<uint32_t> descriptor_loads;      // S_LOAD_DWORDX4 and S_LOAD_DWORDX8
+	std::vector<uint32_t> gds_and_m0_writes;     // GDS data-share instructions and M0 writes
+	bool                  gds_memory      = false; // a GDS memory instruction exists
+	bool                  has_image_reads = false; // any ShaderInstructionReadsImageResource exists
 };
 
 [[nodiscard]] ShaderInstructionIndices ShaderIndexInstructions(const ShaderCode& code);
@@ -191,12 +195,53 @@ struct ShaderDescriptorBlock
 	ShaderDynamicSLoadUse use;
 };
 
+// Pre-partitioned SRT pointer-table load with at least one bound descriptor block.
+struct ShaderPointerTableLoadEntry
+{
+	uint32_t                           index           = 0;
+	int                                dwords          = 0;
+	int                                offset_dw       = 0;
+	std::vector<ShaderDescriptorBlock> blocks;
+	bool                               has_non_sampler = false;
+	bool                               has_sampler     = false;
+};
+
+// Code-only eligibility hints for storage-image tile-coverage proofs, computed once per compute program.
+struct ShaderComputeTileCoverageHints
+{
+	bool ends_with_endpgm           = false;
+	bool may_be_metadata_origin_grid = false;
+	bool may_be_bounded_grid        = false;
+	bool may_be_grid_coverage       = false;
+	bool may_be_paired_split        = false;
+	bool may_be_paired_linear       = false;
+	bool may_be_linear_1d           = false;
+};
+
+// Code-only empty-gate candidate (SGPR base of the scalar load and byte offset).
+struct ShaderComputeEmptyGateCandidate
+{
+	int      src_register = -1;
+	uint32_t byte_offset  = 0;
+};
+
+[[nodiscard]] ShaderComputeTileCoverageHints AnalyzeShaderComputeTileCoverageHints(const ShaderCode& code);
+[[nodiscard]] ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverageWithContext(
+    const ShaderCode& code, const ShaderBindResources& bind, int texture_index, int workgroup_register,
+    const uint32_t threads[3], bool native_xy_thread_ids, bool group_xy_enabled, bool paired_xy_thread_ids,
+    const ShaderScalarFlow* cached_flow, const ShaderComputeTileCoverageHints* hints);
+[[nodiscard]] std::vector<ShaderComputeEmptyGateCandidate> AnalyzeShaderComputeEmptyGateCandidates(const ShaderCode& code);
+[[nodiscard]] ShaderComputeEmptyGate ResolveShaderComputeEmptyGate(
+    const std::vector<ShaderComputeEmptyGateCandidate>& candidates, const ShaderBindResources& bind);
+[[nodiscard]] ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFillCode(const ShaderCode& code);
+
 struct ShaderControlFlowGraph;
 
 class ShaderCodeResourceMemo
 {
 public:
 	[[nodiscard]] ShaderStorageUseEvidence       StorageUse(const ShaderCode& code, int start_register) const;
+	[[nodiscard]] ShaderStorageUsage             DirectStorageUsage(const ShaderCode& code, int start_register) const;
 	[[nodiscard]] ShaderDirectImageUse           DirectImageUse(const ShaderCode& code, int start_register,
 	                                                            const std::vector<std::bitset<106>>* entry_values) const;
 	[[nodiscard]] ShaderSamplerOperationEvidence SamplerOperation(const ShaderCode& code, int start_register) const;
@@ -207,6 +252,7 @@ public:
 	[[nodiscard]] const ShaderInstructionIndices&           InstructionIndices(const ShaderCode& code) const;
 	[[nodiscard]] const std::vector<ShaderNestedTableLoad>& NestedTableLoads(const ShaderCode& code) const;
 	[[nodiscard]] const std::vector<ShaderConstantSamplerRead>& ConstantSamplerReads(const ShaderCode& code) const;
+	[[nodiscard]] const std::vector<ShaderPointerTableLoadEntry>& PointerTableLoads(const ShaderCode& code) const;
 	// Descriptor blocks of the pointer-table load at index; empty when a part
 	// of it has no consumer it alone defines.
 	[[nodiscard]] const std::vector<ShaderDescriptorBlock>& TableLoadBlocks(const ShaderCode& code, uint32_t index) const;
@@ -214,25 +260,29 @@ public:
 	[[nodiscard]] bool SgprWrittenOnEveryPath(const ShaderCode& code, uint32_t index, int reg) const;
 	[[nodiscard]] ShaderDynamicSLoadSpan DynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping) const;
 	// Copy-flow reads for the binding layout of `bind` (ShaderImageCopyLayout).
-	[[nodiscard]] std::vector<ShaderImageCopyRead> ImageCopyReads(const ShaderCode& code, const ShaderBindResources& bind,
-	                                                              int user_data_register_base) const;
+	[[nodiscard]] std::shared_ptr<const std::vector<ShaderImageCopyRead>> ImageCopyReads(const ShaderCode& code,
+	                                                                                     const ShaderBindResources& bind,
+	                                                                                     int user_data_register_base) const;
 
 private:
-	mutable std::mutex                                              m_mutex;
+	mutable std::shared_mutex                                       m_mutex;
 	mutable std::unordered_map<int, ShaderStorageUseEvidence>       m_storage_use;
+	mutable std::unordered_map<int, ShaderStorageUsage>             m_direct_storage_usage;
 	mutable std::unordered_map<int, ShaderDirectImageUse>           m_direct_image_use;
 	mutable std::unordered_map<int, ShaderDirectImageUse>           m_entry_image_use;
 	mutable std::unordered_map<int, ShaderSamplerOperationEvidence> m_sampler_operation;
+	mutable std::once_flag                                          m_descriptor_sload_uses_once;
 	mutable std::vector<ShaderDynamicSLoadUse>                      m_descriptor_sload_uses;
-	mutable bool                                                    m_descriptor_sload_uses_ready = false;
+	mutable std::once_flag                                          m_eud_descriptor_loads_once;
 	mutable ShaderEudDescriptorLoads                                m_eud_descriptor_loads;
-	mutable bool                                                    m_eud_descriptor_loads_ready = false;
+	mutable std::once_flag                                          m_instruction_indices_once;
 	mutable ShaderInstructionIndices                                m_instruction_indices;
-	mutable bool                                                    m_instruction_indices_ready = false;
+	mutable std::once_flag                                          m_nested_table_loads_once;
 	mutable std::vector<ShaderNestedTableLoad>                      m_nested_table_loads;
-	mutable bool                                                    m_nested_table_loads_ready = false;
+	mutable std::once_flag                                          m_constant_sampler_reads_once;
 	mutable std::vector<ShaderConstantSamplerRead>                  m_constant_sampler_reads;
-	mutable bool                                                    m_constant_sampler_reads_ready = false;
+	mutable std::once_flag                                          m_pointer_table_loads_once;
+	mutable std::vector<ShaderPointerTableLoadEntry>                m_pointer_table_loads;
 	mutable std::shared_ptr<const ShaderControlFlowGraph>           m_cfg;
 	mutable std::map<uint32_t, std::vector<ShaderDescriptorBlock>>  m_table_load_blocks;
 	mutable std::map<std::pair<uint32_t, int>, bool>                m_written_on_every_path;
@@ -250,7 +300,8 @@ private:
 			return static_cast<size_t>(hash);
 		}
 	};
-	mutable std::unordered_map<std::vector<int32_t>, std::vector<ShaderImageCopyRead>, LayoutHash> m_image_copy_reads;
+	mutable std::unordered_map<std::vector<int32_t>, std::shared_ptr<const std::vector<ShaderImageCopyRead>>, LayoutHash>
+	    m_image_copy_reads;
 };
 
 [[nodiscard]] ShaderStorageUseEvidence       AnalyzeShaderStorageUse(const ShaderCode& code, int start_register,
@@ -351,6 +402,7 @@ private:
 };
 
 // Copies a descriptor table from guest memory, retrying until two reads agree.
+bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords, uint32_t* snapshot);
 bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords, std::vector<uint32_t>* snapshot);
 bool ShaderIsDynamicScalarStorageConsumer(const ShaderBindResources& bind, const ShaderInstruction& inst);
 bool ShaderStorageResourceHasDynamicSLoad(const ShaderBindResources& bind, int storage_index);
