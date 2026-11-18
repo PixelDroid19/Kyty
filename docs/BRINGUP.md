@@ -246,7 +246,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
     - First stage built: indexed-draw shader inputs prepared ahead, 10.54 -> 8.31 us per draw (2026-11-12)
     - Admitting more packets to the replay excluded: 86.5 % of draws already taken, at most ~2 ms per frame (2026-11-12)
   - [Binding over a versioned snapshot](bringup/binding-snapshot-design.md): epochs, by-address storage, texture heap priced on paper at 3.0-5.2 us/draw saved, leaving 6.5-8.5 us; 3 us needs recording off the command-processor thread (2026-11-12, design)
-  - [Shader ALU contracts](bringup/shader-alu-contracts.md): scalar min/max SCC, RPI VOP3, f32 min/max zero rule, sin/cos in turns, V_SUB_CO_CI_U32, f64-to-integer saturation fixed; RPI/FLR out-of-range and FP_DENORM min/max open (2026-11-17)
+  - [Shader ALU contracts](bringup/shader-alu-contracts.md): scalar min/max SCC, RPI VOP3, f32 min/max zero rule, sin/cos in turns, V_SUB_CO_CI_U32, f64-to-integer saturation fixed; RPI/FLR saturation and rounding, FP32 input denormals and F64 e64 follow-up (2026-11-17)
   - [Temporal upscalers decision](bringup/temporal-upscalers-decision.md): no DLSS/XeSS now; temporal inputs first, FSR 2 before proprietary SDKs (2026-10-29, decided)
   - Street scene of GTA San Andreas DE: recycled-memory links, reloaded V#s, gather4 lanes, wave64 LDS order (dot grid); capture layout race, HUD and Arc device loss open (2026-11-05, fixed; open items)
   - Layered depth-only passes, transport LDS, sample_cd over discard copies, textures around depth slices; compile stalls and street corruption (2026-11-05, fixed; open items)
