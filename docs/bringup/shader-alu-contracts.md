@@ -31,11 +31,12 @@ the contract, not the failure.
   `KytyArchiveDagIntegration.Repository` and `KytyHostShaders.CheckedInIncludes`
   passed.
 - Strict 60 fps-limited runs on Intel Xe (Mesa ANV), private SPIR-V cache:
-  - `PPSA17221 - Minecraft` (9ae052f04, cold cache): in the world at 140 s,
+  - `PPSA17221 - Minecraft` (9ae052f04, before the quadrant select; cold cache): in the world at 140 s,
     50 fps, clean capture.
-  - `PPSA21567 - Astro Bot` (9ae052f04 cold, then the quadrant select warm):
-    intro warp at 120 s in both runs, clean captures. The route does not reach
-    gameplay within 120 s, so Astro gameplay is unverified.
+  - `PPSA21567 - Astro Bot`: 9ae052f04 with a cold cache, intro warp at
+    120 s, clean capture; eabde50fa with a warm cache, intro warp at 110 s,
+    33.5 fps, clean captures at 100 and 110 s. The route stays in the intro
+    warp through 120 s, so Astro gameplay is unverified.
 - `kyty_agent playable-regression` was not run.
 - Not measured: whether these titles execute the changed instructions. The
   visual effect of the fixes on any title is unknown.
