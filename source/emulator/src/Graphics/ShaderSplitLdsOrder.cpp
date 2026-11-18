@@ -18,7 +18,7 @@ using Type = ShaderInstructionType;
 // The 24-bit multiplies and the 32-bit adds of an address stay exact below it.
 constexpr int64_t kExactLimit = 1 << 24;
 // Past this many accesses every one keeps its own order: the pairing is quadratic.
-constexpr size_t kMaxAccesses = 64;
+constexpr size_t kMaxAccesses = 512;
 // A guest wave whose lanes all exist: no host lane runs outside the thread group.
 constexpr uint32_t kWaveLanes = 64;
 

@@ -201,6 +201,8 @@ public:
 	[[nodiscard]] const ShaderFragmentMaskFlow& FragmentMaskFlow() const;
 	// A pixel program's EXEC write at index leaves every host invocation live: the proof says EXEC is full before the next instruction.
 	[[nodiscard]] bool ExecFullAfter(uint32_t index) const;
+	// True when all guest lanes in each dispatched compute wave start live without masking.
+	[[nodiscard]] bool HasWholeComputeWavesAtEntry() const;
 	// True when instruction `index` writes only VGPRs whose inactive lanes can never be observed.
 	[[nodiscard]] bool SkipDestinationExecGuard(uint32_t index) const;
 	// A fused vertex program run by the graphics pipeline: every lane of a host subgroup is a live vertex.

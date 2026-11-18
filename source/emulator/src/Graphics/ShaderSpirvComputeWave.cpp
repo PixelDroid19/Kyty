@@ -203,13 +203,24 @@ bool Spirv::ExecFullAfter(uint32_t index) const
 	return flow.lane_local && index + 1u < flow.exec_full.size() && flow.exec_full[index + 1u];
 }
 
+bool Spirv::HasWholeComputeWavesAtEntry() const
+{
+	return UsesNativeComputeWave() && !UsesGeometryCompute() && m_cs_input_info != nullptr &&
+	       !(m_bind != nullptr && m_bind->thread_limits_used) &&
+	       (m_cs_input_info->wave_layout.guest_local[0] * m_cs_input_info->wave_layout.guest_local[1] *
+	        m_cs_input_info->wave_layout.guest_local[2]) %
+	               m_cs_input_info->wave_layout.guest_wave_size ==
+	           0u;
+}
+
 bool Spirv::SkipDestinationExecGuard(uint32_t index) const
 {
-	if (UsesFragmentCompute() || UsesGeometryCompute()) { return false; }
+	if (UsesFragmentCompute()) { return false; }
 	if (!m_dead_vgpr_guards_ready)
 	{
 		m_dead_vgpr_guards_ready = true;
 		std::vector<bool> exec_full;
+		bool              entry_exec_full = false;
 		if (HasFusedVertexLanes())
 		{
 			if (!m_vertex_exec_full_ready)
@@ -218,12 +229,15 @@ bool Spirv::SkipDestinationExecGuard(uint32_t index) const
 				m_vertex_exec_full       = ShaderAnalyzeVertexExecFull(m_code, NativeWave32());
 			}
 			exec_full = m_vertex_exec_full;
+		} else if (HasWholeComputeWavesAtEntry())
+		{
+			entry_exec_full = true;
 		} else if (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr &&
 		           m_ps_input_info->native_wave.refusal_reason == nullptr && FragmentMaskFlow().lane_local)
 		{
 			exec_full = FragmentMaskFlow().exec_full;
 		}
-		m_dead_vgpr_guards = ShaderAnalyzeDeadVgprDstGuards(m_code, exec_full);
+		m_dead_vgpr_guards = ShaderAnalyzeDeadVgprDstGuards(m_code, exec_full, entry_exec_full);
 	}
 	return index < m_dead_vgpr_guards.size() && m_dead_vgpr_guards[index];
 }

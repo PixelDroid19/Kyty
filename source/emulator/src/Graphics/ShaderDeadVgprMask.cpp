@@ -697,7 +697,7 @@ bool AnalyzeRegionEntryMaskAndCrossLane(const ShaderCode& code, const std::vecto
 void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlock>& blocks,
                               const std::vector<VectorSet>& cross_reads, const std::vector<VectorSet>& writes,
                               const std::vector<bool>& eligible, const std::vector<bool>& overwrites,
-                              std::vector<bool>* unguarded)
+                              bool entry_exec_full, std::vector<bool>* unguarded)
 {
 	const auto&    instructions = code.GetInstructions();
 	const uint32_t n            = instructions.Size();
@@ -757,6 +757,18 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 		}
 		block_out_valid[b] = cur.valid;
 		block_out_epoch[b] = cur.valid ? cur.wqm_epoch : 0u;
+	}
+
+	if (entry_exec_full)
+	{
+		for (uint32_t k = 0; k < n; ++k)
+		{
+			if (eligible[k] && overwrites[k] &&
+			    (pre_exec[k] == ExecRel::AtEntry || (pre_epoch[k] == 0u && pre_exec[k] == ExecRel::WidenedWqm)))
+			{
+				(*unguarded)[k] = true;
+			}
+		}
 	}
 
 	std::vector<VectorSet> cross_in(nb);
@@ -867,7 +879,7 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 
 } // namespace
 
-std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const std::vector<bool>& exec_full)
+std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const std::vector<bool>& exec_full, bool entry_exec_full)
 {
 	const auto& instructions = code.GetInstructions();
 	const auto  n            = instructions.Size();
@@ -911,7 +923,7 @@ std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const s
 	{
 		if (!exec_full.empty() && exec_full[i] && overwrites[i]) { unguarded[i] = true; }
 	}
-	ApplyMonotonicTailGuards(code, blocks, cross_reads, writes, eligible, overwrites, &unguarded);
+	ApplyMonotonicTailGuards(code, blocks, cross_reads, writes, eligible, overwrites, entry_exec_full, &unguarded);
 
 	const auto regions = FindSelectionRegions(code, blocks);
 	struct AnalyzedRegion

@@ -390,8 +390,13 @@ const ShaderSplitLdsOrder& Spirv::SplitLdsOrder() const
 String8 Spirv::SplitWaveDsOrder(uint32_t index, const String8& body) const
 {
 	// The subgroup barrier makes every lane's LDS access available before the elected lane publishes.
-	const auto rendezvous = [index](const char* side)
+	const bool single_wave = m_cs_input_info != nullptr && m_cs_input_info->wave_layout.waves == 1u;
+	const auto rendezvous  = [index, single_wave](const char* side)
 	{
+		if (single_wave)
+		{
+			return String8("OpControlBarrier %split_scope_workgroup %split_scope_workgroup %split_acq_rel\n");
+		}
 		return String8::FromPrintf("OpControlBarrier %%split_scope_subgroup %%split_scope_workgroup %%split_acq_rel\n"
 		                           "%%split_ds_%s%u = OpFunctionCall %%uint %%split_sync\n",
 		                           side, index);
@@ -466,8 +471,38 @@ static String8 SplitWavePartWords(uint32_t parts, const char* tag)
 // part published its word of the same exchange and returns that exchange's
 // number. The number, not the spin's last reads, is returned: callers need only
 // its parity, and a result taken from the reads keeps all of them live.
-static String8 SplitWavePublishFunction(uint32_t parts)
+static String8 SplitWavePublishFunction(uint32_t parts, bool single_wave)
 {
+	if (single_wave)
+	{
+		// One guest wave occupies the whole Vulkan workgroup, so a hardware workgroup
+		// barrier orders every part's slot write without atomic polling or spin loops.
+		return R"(
+%split_publish = OpFunction %uint None %function_gen5_buffer_format_bytes
+%split_publish_value = OpFunctionParameter %uint
+%split_publish_entry = OpLabel
+%split_publish_subgroup = OpLoad %uint %gl_SubgroupID
+%split_publish_part = OpBitwiseAnd %uint %split_publish_subgroup %split_parts_mask
+%split_publish_previous = OpLoad %uint %split_count
+%split_publish_n = OpIAdd %uint %split_publish_previous %split_c1
+OpStore %split_count %split_publish_n
+%split_publish_parity = OpBitwiseAnd %uint %split_publish_n %split_c1
+%split_publish_own2 = OpShiftLeftLogical %uint %split_publish_part %split_c1
+%split_publish_own_slot = OpIAdd %uint %split_publish_own2 %split_publish_parity
+%split_publish_own_index = OpIAdd %uint %split_parts %split_publish_own_slot
+%split_publish_own_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_publish_own_index
+%split_publish_elected = OpGroupNonUniformElect %bool %split_scope_subgroup
+OpSelectionMerge %split_publish_published None
+OpBranchConditional %split_publish_elected %split_publish_publish %split_publish_published
+%split_publish_publish = OpLabel
+OpStore %split_publish_own_ptr %split_publish_value
+OpBranch %split_publish_published
+%split_publish_published = OpLabel
+OpControlBarrier %split_scope_workgroup %split_scope_workgroup %split_acq_rel
+OpReturnValue %split_publish_n
+OpFunctionEnd
+)";
+	}
 	String8 text = R"(
 %split_publish = OpFunction %uint None %function_gen5_buffer_format_bytes
 %split_publish_value = OpFunctionParameter %uint
@@ -642,9 +677,9 @@ OpFunctionEnd
 // Reads one guest lane per invocation through a dword per lane in the exchange
 // area; the rendezvous publishes the stores, and the bank of this exchange's
 // parity stays intact until every part has finished reading it.
-static String8 SplitWaveLaneReadFunction()
+static String8 SplitWaveLaneReadFunction(bool single_wave)
 {
-	return R"(
+	return String8(R"(
 %split_lane_read = OpFunction %uint None %function_u_u
 %split_lane_read_value = OpFunctionParameter %uint
 %split_lane_read_lane = OpFunctionParameter %uint
@@ -662,22 +697,22 @@ static String8 SplitWaveLaneReadFunction()
 %split_lane_read_own_index = OpIAdd %uint %split_lane_read_area %split_lane_read_guest
 %split_lane_read_own_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_lane_read_own_index
 OpStore %split_lane_read_own_ptr %split_lane_read_value
-OpControlBarrier %split_scope_subgroup %split_scope_workgroup %split_acq_rel
-%split_lane_read_stored = OpFunctionCall %uint %split_sync
+<sub_barrier>%split_lane_read_stored = OpFunctionCall %uint %split_sync
 %split_lane_read_source = OpBitwiseAnd %uint %split_lane_read_lane %split_c63
 %split_lane_read_index = OpIAdd %uint %split_lane_read_area %split_lane_read_source
 %split_lane_read_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_lane_read_index
 %split_lane_read_result = OpLoad %uint %split_lane_read_ptr
 OpReturnValue %split_lane_read_result
 OpFunctionEnd
-)";
+)")
+	    .ReplaceStr("<sub_barrier>", single_wave ? "" : "OpControlBarrier %split_scope_subgroup %split_scope_workgroup %split_acq_rel\n");
 }
 
 // Reads up to four values at one guest lane in one exchange (Spirv::SplitReadGroup): host lane k of each part
 // stores that part's word k into its lanes of the bank, so the source part's first four dwords hold the words.
-static String8 SplitWaveReadGroupFunction()
+static String8 SplitWaveReadGroupFunction(bool single_wave)
 {
-	return R"(
+	return String8(R"(
 %split_read_group = OpFunction %v4uint None %function_split_read_group
 %split_read_group_value0 = OpFunctionParameter %uint
 %split_read_group_value1 = OpFunctionParameter %uint
@@ -710,8 +745,7 @@ static String8 SplitWaveReadGroupFunction()
 %split_read_group_own_index = OpIAdd %uint %split_read_group_area %split_read_group_guest
 %split_read_group_own_ptr = OpAccessChain %_ptr_Workgroup_split_uint %split_exchange %split_read_group_own_index
 OpStore %split_read_group_own_ptr %split_read_group_word
-OpControlBarrier %split_scope_subgroup %split_scope_workgroup %split_acq_rel
-%split_read_group_stored = OpFunctionCall %uint %split_sync
+<sub_barrier>%split_read_group_stored = OpFunctionCall %uint %split_sync
 %split_read_group_source_lanes = OpShiftRightLogical %uint %split_read_group_lane %split_lanes_shift
 %split_read_group_source = OpBitwiseAnd %uint %split_read_group_source_lanes %split_parts_mask
 %split_read_group_source_first = OpShiftLeftLogical %uint %split_read_group_source %split_lanes_shift
@@ -730,7 +764,8 @@ OpControlBarrier %split_scope_subgroup %split_scope_workgroup %split_acq_rel
 %split_read_group_result = OpCompositeConstruct %v4uint %split_read_group_result0 %split_read_group_result1 %split_read_group_result2 %split_read_group_result3
 OpReturnValue %split_read_group_result
 OpFunctionEnd
-)";
+)")
+	    .ReplaceStr("<sub_barrier>", single_wave ? "" : "OpControlBarrier %split_scope_subgroup %split_scope_workgroup %split_acq_rel\n");
 }
 
 String8 Spirv::SplitWaveFunctions() const
@@ -739,11 +774,12 @@ String8 Spirv::SplitWaveFunctions() const
 	{
 		return {};
 	}
-	const uint32_t lanes = SplitWavePartLanes();
-	const uint32_t parts = m_cs_input_info->wave_layout.guest_wave_size / lanes;
+	const uint32_t lanes       = SplitWavePartLanes();
+	const uint32_t parts       = m_cs_input_info->wave_layout.guest_wave_size / lanes;
+	const bool     single_wave = m_cs_input_info->wave_layout.waves == 1u;
 	// %function_u_u is (uint, uint) -> uint and %function_gen5_buffer_format_bytes
 	// is (uint) -> uint; SPIR-V forbids declaring a function type twice.
-	String8 text = SplitWavePublishFunction(parts);
+	String8 text = SplitWavePublishFunction(parts, single_wave);
 	text += SplitWaveBallotFunction(parts, lanes);
 	text += SplitWaveBallotGroupFunctions(parts, lanes);
 	// This part's bits of the wave mask, the other parts' bits zero: enough
@@ -794,7 +830,7 @@ OpFunctionEnd
 
 %split_sync = OpFunction %uint None %function_split_u
 %split_sync_entry = OpLabel
-%split_sync_result = OpFunctionCall %uint %split_publish %split_c0
+<sync>
 OpReturnValue %split_sync_result
 OpFunctionEnd
 
@@ -827,8 +863,14 @@ OpFunctionEnd
 OpReturnValue %split_first_result
 OpFunctionEnd
 )";
-	text += SplitWaveLaneReadFunction();
-	text += SplitWaveReadGroupFunction();
+	text = text.ReplaceStr("<sync>",
+	                       single_wave ? "%split_sync_previous = OpLoad %uint %split_count\n"
+	                                     "%split_sync_result = OpIAdd %uint %split_sync_previous %split_c1\n"
+	                                     "OpStore %split_count %split_sync_result\n"
+	                                     "OpControlBarrier %split_scope_workgroup %split_scope_workgroup %split_acq_rel"
+	                                   : "%split_sync_result = OpFunctionCall %uint %split_publish %split_c0");
+	text += SplitWaveLaneReadFunction(single_wave);
+	text += SplitWaveReadGroupFunction(single_wave);
 	return text;
 }
 
