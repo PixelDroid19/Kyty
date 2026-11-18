@@ -47,6 +47,10 @@ follow-up below).
 Translator version 229 invalidates modules from earlier translations.
 The focused suites passed 40 arithmetic tests and 14 translation-cache tests.
 The new arithmetic cases validate complete pixel and compute SPIR-V modules.
+Full `kyty_unit_test` at `253d981a9`: 2722 passed, 11 skipped, 0 failed; the three CTest gates passed. Strict
+60 fps-limited runs on Intel Arc A770 (binary stamp `1d35b0a31` plus the null export fix, warm private caches):
+`PPSA17221 - Minecraft` in the world at 140 s, 54-60 fps, clean capture; `PPSA21567 - Astro Bot` reached the late
+dunes with correct captures at 160, 185 and 210 s.
 
 - RPI and FLR now classify out-of-range operands by bits before conversion.
   The AMD gfx1036 probe returned signed saturation for tested NaNs, infinities

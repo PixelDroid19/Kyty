@@ -7469,3 +7469,34 @@ with `compress=zstd:3,ssd,discard=async`.
   with neither counter high; none was texture creation, and 8 of its 25 large textures still made two allocations.
   The free list is not released when the graphics context is replaced, which only the test fixture does today;
   in-flight fills had the same limit before.
+
+## Dunes baseline re-measured against 2026-11-14 (2026-11-18, measured)
+
+One warm-cache run per arm of the late dunes route on Intel Arc A770 (`8086:56a0`, Mesa ANV from git, 26.3.0),
+60 fps limit, private SPIR-V and pipeline caches per arm: `fe853a27b` (the build behind the 2026-11-14 causal test)
+against `253d981a9`, the null pixel export fix on top of the shader ALU follow-up (the HEAD binary carries the
+stamp `1d35b0a31`: it was built from that fix as an uncommitted change, and the rebase changed only a comment and a
+test). Medians of the per-second samples from 165 to 215 s, grouped by draws a frame because the two runs did not
+reach the same place: the base run walked another part of the dunes and HEAD stood near the ship. Neither reached
+the 752-draw tutorial-prompt scene of the 2026-11-14 test, so its 52.6 ms and 46.6 ms are not re-checked here.
+Command runs are thread time summed over the second, divided by flips.
+
+| Draws a frame | Arm | Seconds | Draws | Frame | Engine work | Command runs | Fence waits | Command us a draw |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 400-560 | `fe853a27b` | 26 | 436 | 43.9 ms | 38.6 ms | 29.9 ms | 7.5 ms | 67.7 |
+| 400-560 | `253d981a9` | 9 | 539 | 46.0 ms | 44.5 ms | 31.2 ms | 13.3 ms | 58.5 |
+| 560-760 | `253d981a9` | 34 | 661 | 48.2 ms | 46.1 ms | 34.0 ms | - | 51.6 |
+
+- Both builds are GPU-bound in these scenes: engine work is 88-97 % of the frame and the command path has slack.
+- In the shared 400-560 band, command time per draw is 13 % lower on HEAD (24 % when HEAD's 560-760 band is set
+  against the base's 400-560 band). With different draw counts and one run per arm, the difference is not attributed
+  to any commit.
+- Engine work per frame is higher on HEAD in the same band, with about 100 more draws a frame; whether HEAD costs
+  more GPU time for the same work is not established. In an earlier HEAD run that left the route, one window of
+  1,150-1,230 draws took 67-73 ms of engine work against 38-40 ms on the base at a similar time; the scenes were not
+  compared, so this is a lead only.
+- The 39.3 ms command path with the lighting program left out needs the 2026-11-14 probe and was not re-measured.
+- Route outcomes: both base runs (warm-up and measured) reached the dunes. Of the HEAD runs, the cold warm-up
+  reached only the world map, one left the route for the ship crowd cinematic, one stopped at 140 s and one reached
+  the dunes. The stop was a pixel program on the per-lane fragment path refused at its null export; fixed in
+  `253d981a9`, where a null export emits nothing after the valid-mask bit has set which lanes stay alive.

@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: dunes baseline re-measured against 2026-11-14, both builds GPU-bound (2026-11-18, measured)
   - Robot platformer: progress writes to save-data memory were dropped (2026-11-16, fixed)
   - Robot platformer: the studio intro video was black, a UNORM target sampled as sRGB (2026-11-16, fixed)
   - Robot platformer: freezes from the pipeline cache and array uploads, the SPIR-V working set, file status calls excluded, and texture-creation drops (2026-11-15, fixed in part)
