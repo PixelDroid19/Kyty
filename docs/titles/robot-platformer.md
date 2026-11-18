@@ -7472,31 +7472,52 @@ with `compress=zstd:3,ssd,discard=async`.
 
 ## Dunes baseline re-measured against 2026-11-14 (2026-11-18, measured)
 
-One warm-cache run per arm of the late dunes route on Intel Arc A770 (`8086:56a0`, Mesa ANV from git, 26.3.0),
-60 fps limit, private SPIR-V and pipeline caches per arm: `fe853a27b` (the build behind the 2026-11-14 causal test)
-against `253d981a9`, the null pixel export fix on top of the shader ALU follow-up (the HEAD binary carries the
-stamp `1d35b0a31`: it was built from that fix as an uncommitted change, and the rebase changed only a comment and a
-test). Medians of the per-second samples from 165 to 215 s, grouped by draws a frame because the two runs did not
-reach the same place: the base run walked another part of the dunes and HEAD stood near the ship. Neither reached
-the 752-draw tutorial-prompt scene of the 2026-11-14 test, so its 52.6 ms and 46.6 ms are not re-checked here.
-Command runs are thread time summed over the second, divided by flips.
+Intel Arc A770 (`8086:56a0`, Mesa ANV from git, 26.3.0), strict, 60 fps present limit, warm private SPIR-V and
+pipeline caches per build. `fe853a27b` (the build behind the 2026-11-14 causal test) against `575cb70f8`.
 
-| Draws a frame | Arm | Seconds | Draws | Frame | Engine work | Command runs | Fence waits | Command us a draw |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 400-560 | `fe853a27b` | 26 | 436 | 43.9 ms | 38.6 ms | 29.9 ms | 7.5 ms | 67.7 |
-| 400-560 | `253d981a9` | 9 | 539 | 46.0 ms | 44.5 ms | 31.2 ms | 13.3 ms | 58.5 |
-| 560-760 | `253d981a9` | 34 | 661 | 48.2 ms | 46.1 ms | 34.0 ms | - | 51.6 |
+**Causal runs.** One run per build with the 2026-11-14 probe (temporary, not committed; ported by hand to the
+dispatch call on HEAD) and the same 340 s route and settings: 3 s blocks rotating the dispatch of `0x3666fa39`
+issued or left out, crossed with a 10 us busy-wait after every draw. On both builds the probe left out every call
+in its arms. Blocks are matched to the per-second samples by the midpoint of each sample interval; this method
+gives back the 2026-11-14 table from its own run within 1.6 ms (frames exact).
 
-- Both builds are GPU-bound in these scenes: engine work is 88-97 % of the frame and the command path has slack.
-- In the shared 400-560 band, command time per draw is 13 % lower on HEAD (24 % when HEAD's 560-760 band is set
-  against the base's 400-560 band). With different draw counts and one run per arm, the difference is not attributed
-  to any commit.
-- Engine work per frame is higher on HEAD in the same band, with about 100 more draws a frame; whether HEAD costs
-  more GPU time for the same work is not established. In an earlier HEAD run that left the route, one window of
-  1,150-1,230 draws took 67-73 ms of engine work against 38-40 ms on the base at a similar time; the scenes were not
-  compared, so this is a lead only.
-- The 39.3 ms command path with the lighting program left out needs the 2026-11-14 probe and was not re-measured.
-- Route outcomes: both base runs (warm-up and measured) reached the dunes. Of the HEAD runs, the cold warm-up
-  reached only the world map, one left the route for the ship crowd cinematic, one stopped at 140 s and one reached
-  the dunes. The stop was a pixel program on the per-lane fragment path refused at its null export; fixed in
-  `253d981a9`, where a null export emits nothing after the valid-mask bit has set which lanes stay alive.
+Neither run reached the 2026-11-14 scene (the controller in the sand, about 752 draws a frame): both walked on to
+the rock with the objective marker. From block 16 to the end (seven or eight blocks per arm) HEAD stood next to
+the rock looking up the dune and the base stood back facing the rock:
+
+| Build | Arm | Draws | Frame | Engine busy | Engine work a frame | Command runs a frame | Fence waits a frame |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `575cb70f8` | Program runs | 348 | 41.7 ms | 94 % | 36.8 ms | 30.9 ms | 13.0 ms |
+| `575cb70f8` | Program left out | 347 | 25.9 ms | 92 % | 24.8 ms | 20.2 ms | 1.9 ms |
+| `fe853a27b` | Program runs | 608 | 47.6 ms | 94 % | 44.1 ms | 31.2 ms | 8.2 ms |
+| `fe853a27b` | Program left out | 615 | 36.1 ms | 85 % | 30.9 ms | 30.1 ms | 0.6 ms |
+
+Command runs are thread time summed over the block, divided by flips.
+
+- **With the program the GPU sets the frame on both builds.** The added 3.5 ms (HEAD) and 6.2 ms (base) of
+  command work change the frame by less than 0.4 ms (k about 0).
+- **Without it HEAD is no longer purely command-bound.** The base still pays 0.82 ms of frame per ms added to the
+  command thread (36.1 -> 41.1 ms for 6.1 ms), close to the 2026-11-14 k = 1.02. On HEAD the frame moves 1.8 ms
+  for 3.5 ms (k about 0.5) with the engine busy 92 % of the frame. The views differ, so this is not attributed to
+  a commit.
+- **Same view, both builds.** The base passed through HEAD's view in its first four blocks (341-358 draws, one
+  block per arm, right after the first dispatch): 40 ms frame and 38 ms engine work with the program, 27 ms and
+  23 ms without. HEAD in that view: 41.7 and 36.8 ms, 25.9 and 24.8 ms. No GPU regression shows at matched work;
+  the base sample is one block per arm.
+- **Near the 2026-11-14 draw count.** While walking, the base crossed 766-780 draws a frame (blocks 6-8): 56-58 ms
+  frames with 47-48 ms engine work when the program ran, against 52.6 and 46.6 ms on 2026-11-14 at 752 draws.
+  HEAD was not measured at that count.
+- **Budget for 30 fps in HEAD's view.** Frame 41.7 ms, engine work 36.8 ms: the GPU is 3.5 ms over 33.3 ms with the
+  lighting program and 8.5 ms under it without. The command path (25.9 ms frames without the program) is not the
+  limit there.
+
+**Unprobed runs.** One warm run per build of the 225 s route earlier the same day, medians of 165-215 s grouped by
+draws a frame (the scenes differed): in the shared 400-560 band the base ran 43.9 ms frames with 38.6 ms engine
+work and 67.7 us of command time a draw (436 draws), HEAD 46.0 ms, 44.5 ms and 58.5 us (539 draws). In an earlier
+HEAD run that left the route, one window of 1,150-1,230 draws took 67-73 ms of engine work against 38-40 ms on the
+base at a similar time; that scene was not compared and stays an open lead.
+
+Route outcomes on the 225 s route: both base runs reached the dunes; of the HEAD runs, the cold warm-up reached
+only the world map, one left the route for the ship crowd cinematic, one stopped at 140 s and one reached the
+dunes. The stop was a pixel program on the per-lane fragment path refused at its null export; fixed in
+`253d981a9`, where a null export emits nothing after the valid-mask bit has set which lanes stay alive.
