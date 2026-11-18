@@ -326,7 +326,8 @@ bool Spirv::EmitFragmentExport(const ShaderInstruction& instruction, uint32_t in
 		*output += String8::FromPrintf("%%%s_alive = OpSelect %%uint %%%s_write %%uint_1 %%uint_0\nOpStore %%fragment_alive %%%s_alive\n",
 		                               tag.c_str(), tag.c_str(), tag.c_str());
 	}
-	if (ShaderIsNullMrtDoneFormat(instruction.format))
+	// A null export carries no payload: VM above already decided which lanes stay alive.
+	if (ShaderIsNullMrtDoneFormat(instruction.format) || instruction.format == ShaderInstructionFormat::NullVmDone)
 	{
 		return true;
 	}
