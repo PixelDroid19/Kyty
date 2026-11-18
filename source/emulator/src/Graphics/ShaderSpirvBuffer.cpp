@@ -512,6 +512,11 @@ OpStore %<dst> %<t>_<n>v<w>
 			    .ReplaceStr("<dst>", dst.value);
 		};
 		*body += load("");
+		if (dwords == 1u)
+		{
+			part += String8::FromPrintf("OpStore %%%s %%%s\n", dst.value.c_str(), zero.c_str());
+			continue;
+		}
 		// A partly backed access: the backed leading words load one at a time.
 		part += String8(R"(%<t>_room<w> = OpUGreaterThanEqual %bool <bytes> %<need>
 %<t>_last<w> = OpISub %uint <bytes> %<need>

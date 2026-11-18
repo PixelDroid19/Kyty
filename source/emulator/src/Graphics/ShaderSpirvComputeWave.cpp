@@ -1,4 +1,5 @@
 #include "ShaderSpirvInternal.h"
+#include "ShaderDeadVgprMask.h"
 #include "Emulator/Graphics/ShaderVertexExecFlow.h"
 
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
@@ -200,6 +201,31 @@ bool Spirv::ExecFullAfter(uint32_t index) const
 	}
 	const auto& flow = FragmentMaskFlow();
 	return flow.lane_local && index + 1u < flow.exec_full.size() && flow.exec_full[index + 1u];
+}
+
+bool Spirv::SkipDestinationExecGuard(uint32_t index) const
+{
+	if (UsesFragmentCompute() || UsesGeometryCompute()) { return false; }
+	if (!m_dead_vgpr_guards_ready)
+	{
+		m_dead_vgpr_guards_ready = true;
+		std::vector<bool> exec_full;
+		if (HasFusedVertexLanes())
+		{
+			if (!m_vertex_exec_full_ready)
+			{
+				m_vertex_exec_full_ready = true;
+				m_vertex_exec_full       = ShaderAnalyzeVertexExecFull(m_code, NativeWave32());
+			}
+			exec_full = m_vertex_exec_full;
+		} else if (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr &&
+		           m_ps_input_info->native_wave.refusal_reason == nullptr && FragmentMaskFlow().lane_local)
+		{
+			exec_full = FragmentMaskFlow().exec_full;
+		}
+		m_dead_vgpr_guards = ShaderAnalyzeDeadVgprDstGuards(m_code, exec_full);
+	}
+	return index < m_dead_vgpr_guards.size() && m_dead_vgpr_guards[index];
 }
 
 const ShaderLaneReductions& Spirv::LaneReductions() const

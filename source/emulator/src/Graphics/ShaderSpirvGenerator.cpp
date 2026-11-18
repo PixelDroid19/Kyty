@@ -2567,13 +2567,17 @@ void Spirv::WriteLocalVariables()
 	m_source += "%native_initial_lo = OpCompositeExtract %uint %native_initial_ballot 0\n"
 	            "%native_initial_hi = OpCompositeExtract %uint %native_initial_ballot 1\n"
 	            "OpStore %exec_lo %native_initial_lo\nOpStore %exec_hi %native_initial_hi\n";
-	// A dispatch of whole waves starts every lane live: the membership test above is always true.
+	// Non-compute waves start with every lane live (`OpStore %exec_lane_lo %uint_1` above),
+	// and whole-wave compute dispatches have every membership bit set.
 	const bool whole_waves = UsesNativeComputeWave() && !(m_bind != nullptr && m_bind->thread_limits_used) &&
 	                         (m_cs_input_info->wave_layout.guest_local[0] * m_cs_input_info->wave_layout.guest_local[1] *
 	                          m_cs_input_info->wave_layout.guest_local[2]) %
 	                                 m_cs_input_info->wave_layout.guest_wave_size ==
 	                             0u;
-	m_source += whole_waves || HasFusedVertexLanes() ? NativeExecAllLanes() : NativeExecRefresh("initial");
+	const bool all_lanes_live = whole_waves || HasFusedVertexLanes() ||
+	                            (m_code.GetType() == ShaderType::Pixel && !UsesFragmentCompute() &&
+	                             !(m_bind != nullptr && m_bind->thread_limits_used));
+	m_source += all_lanes_live ? NativeExecAllLanes() : NativeExecRefresh("initial");
 	if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog && !UsesGeometryCompute())
 	{
 		// One host subgroup is one guest wave (see ShaderNggFront.h): s3 counts every lane
@@ -3216,7 +3220,7 @@ void Spirv::WriteInstructions()
 			     sampled_2d, sampled_array, sampled_3d, inst_text, static_cast<unsigned>(inst.sopp_opcode), inst.raw_word,
 			     m_code.GetCrc32(), (ImageBindingSummary(inst) + ExportBindingSummary(inst)).c_str());
 		}
-		if (IsImageInstruction(inst))
+		if (IsImageInstruction(inst) && (fragment_emitted || !SkipDestinationExecGuard(static_cast<uint32_t>(index))))
 		{
 			dst = GuardImageDestinationStores(dst, inst, static_cast<uint32_t>(index));
 		}

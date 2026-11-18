@@ -304,8 +304,11 @@ String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index
 	{
 		// Only implicit EXEC loads have these names. Numeric loads and EXECZ
 		// use packed_exec_* until this adapter finishes.
-		result = ReplaceMaskToken(result, "OpLoad %uint %exec_lo", "OpLoad %uint %exec_lane_lo");
-		result = ReplaceMaskToken(result, "OpLoad %uint %exec_hi", "OpLoad %uint %exec_lane_hi");
+		const bool skip_exec_guard = SkipDestinationExecGuard(index);
+		result = ReplaceMaskToken(result, "OpLoad %uint %exec_lo",
+		                          skip_exec_guard ? "OpCopyObject %uint %uint_1" : "OpLoad %uint %exec_lane_lo");
+		result = ReplaceMaskToken(result, "OpLoad %uint %exec_hi",
+		                          skip_exec_guard ? "OpCopyObject %uint %uint_0" : "OpLoad %uint %exec_lane_hi");
 	}
 	if (inst.type == ShaderInstructionType::VCndmaskB32)
 	{
