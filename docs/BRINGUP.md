@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: BVH fetch merge and loop-enclosing selection cut drop 0x3666fa39 from 16.4 to 6.0 ms and lift the dunes cliff to 31.9-33.6 fps (2026-11-18, fixed)
   - Robot platformer: dunes baseline re-measured with the 2026-11-14 probe, GPU-bound with the lighting program on both builds, no GPU regression seen at about 350 draws (one base block per arm) (2026-11-18, measured)
   - Robot platformer: progress writes to save-data memory were dropped (2026-11-16, fixed)
   - Robot platformer: the studio intro video was black, a UNORM target sampled as sRGB (2026-11-16, fixed)

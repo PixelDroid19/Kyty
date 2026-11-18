@@ -6,6 +6,69 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: BVH fetch merge and loop-enclosing selection cut drop 0x3666fa39 from 16.4 to 6.0 ms and lift the dunes cliff to 31.9-33.6 fps (2026-11-18, fixed)
+
+Intel Arc A770, Mesa 26.3.0 (`git-34ad0a45aa`) on Linux 7.3.4, `60 fps`
+present limit, `KYTY_PRINTF_DIRECTION=Silent`, `origin/main` `87bbe5570` +
+translator changes (`kShaderTranslatorVersion = 231`).
+
+- **Baseline (`87bbe5570`, `csprof-base`, warm cache, temporary Vulkan compute
+  timestamps).** In the dunes rock-cliff scene (`19.72 fps`
+  mean across `145-216 s`), compute work spanned `43.6-48.3 ms` per frame.
+  Dispatch `0x3666fa39` (`8160x1x1`, 1 call/frame) alone took `16.23-17.77 ms`
+  (`16.36 ms` mean in the in-run A/B baseline arm).
+- **Changes (general translator path, no title branches).**
+  1. `Spirv::EmitGuestLoad64Aligned` (`ShaderSpirvGuestAddress.cpp`) + BVH node
+     load rewrite (`ShaderSpirvBvh.cpp`): loads 64B-aligned BVH node words as
+     `OpLoad %v4uint ... Aligned 4` (16 dwords direct without page-cross
+     checks; 28 dwords with a single `tail_device` check at
+     `(guest & 4095) + 64 >= 4096`), branches on `exec != 0` before loading
+     arguments, splits `box16` / `box32` handling with per-child unpacks, and
+     sinks loop-invariant operands into the case arms. Backed by
+     `EXIT_IF((table.device & 15ull) != 0ull)` on GDA table allocation
+     (`GuestDeviceAddress.cpp`).
+  2. `SpirvCutSelectionLiveRanges` (`ShaderSpirvSelectionCut.cpp`): cuts live
+     ranges of loop-invariant scalar `Function` variables (must-initialized across
+     reachable predecessors via `OpStore` or `OpFunctionCall`) before and after
+     the highest-scoring loop-enclosing one-armed selection merge when
+     `device_address_used && push_constant_size > 0`, `total_fn_vars >= 60`,
+     `body_blocks >= 100` enclosing at least one `OpLoopMerge`, and at least 32
+     parked scalars exist, using a runtime zero derived from
+     `(%vsharp[0][device_address_block][0] & 15u)`.
+- **Offline cross-recipe verification and exclusions.** Global unrestricted live-range
+  cuts regress other workloads (`30/91`), and reading `NumWorkgroups.y >> 16` for the
+  runtime zero was excluded in favour of `(%vsharp[0][gda_blk][0] & 15u)`. Across
+  all 16 `PPSA21567` BVH compute shaders, `16/16` dropped peak live registers
+  (`-35` to `-71`) and `-111` `SEND`s and `14/16` dropped spills+fills (`0x3666fa39`:
+  `392:1663 -> 282:1049`, scratch `8192 -> 4096 B`, peak live `245`). Across 431
+  compute recipes from 26 titles, only one non-BVH shader (`PPSA17221`, without
+  GDA) matched the structural thresholds and is skipped by `device_address_used`.
+- **Verified.**
+  - Live Vulkan timestamps (`t231-prof`, temporary profiler removed afterwards):
+    `0x3666fa39` (`8160x1x1`) dropped from `16.23-17.77 ms` to `5.76-6.19 ms`
+    per frame; A/B arm `arm=3` pixel diff vs baseline in the same cliff frame was
+    `mean_abs <= 0.35`, `p99 = 1.00`, preserving direct and bounce lighting.
+  - Strict warm-cache run without diagnostics (`strict-t231`, `214 s`, exit `0`):
+    sustained `32.6-34.6 fps` (`33.63 fps` steady across `t=164-209 s` outside
+    synchronous manual capture frames; `31.88 fps` mean over `170-215 s`), with
+    `3/3` healthy captures (`entropy 4.70-4.72`, `stripey: false`).
+  - Gates & cross-title checks on the final source: CTest `5/5` passed
+    (`KytyUnitTest`, `KytyHostShaders.CheckedInIncludes`,
+    `KytyArchitectureBoundaryIntegration.Repository`,
+    `KytyArchiveDagIntegration.Repository`, `KytyIntegration._build`);
+    `kyty_unit_test`: `2724` passed, `11` skipped (`CoreVirtualMemory` x3,
+    `EmulatorAudio` x6, `EmulatorAudioDecoderAdmission` x1,
+    `EmulatorKernelLifetimes` x1), `0` failed, including 2 new tests in
+    `EmulatorShaderSpirvSelectionCut`. `kyty_agent capture-run` exited `0` on
+    both `PPSA21567 - ASTRO BOT` and `PPSA17221 - Minecraft`; `kyty_agent
+    playable-regression` passed `11/14` non-external gates on both (`exit=3` due
+    to absent external baseline/checkpoint JSON), and `PPSA17221` scored
+    `material_healthy: true`.
+- **Remaining gap / open items.** At ~33 fps (~30 ms/frame), closing the gap to
+  `60 fps` (`16.67 ms`) requires non-BVH GPU pass work and command-processor cost
+  reduction; in close-up dune views compute shader `0x874bd13f` (`120x68x1`)
+  reaches `10.4-12.5 ms`. Untested on AMD RADV and Windows.
+
 ## Robot platformer: progress writes to save-data memory were dropped (2026-11-16, fixed)
 
 - **Observed (live trace, late dunes route).** Every `sceSaveDataSetSaveDataMemory2` call passed a valid
