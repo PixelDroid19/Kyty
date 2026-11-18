@@ -45,6 +45,10 @@ public:
 // write-back.
 [[nodiscard]] bool StorageBufferWriteBackPublishedDevice(GraphicContext* ctx, void* obj, uint64_t vaddr, uint64_t size,
                                                          GpuWritebackResult* result);
+// Write-back from `data`, a device copy of the object taken earlier, instead of the
+// object's memory, which later submissions may still write. False when the object
+// observes depth metadata or does not cover exactly that range.
+[[nodiscard]] bool StorageBufferWriteBackSnapshot(void* obj, uint64_t vaddr, uint64_t size, const void* data, GpuWritebackResult* result);
 
 // Uploads only `runs` of a storage object whose other bytes already match guest
 // memory. False when the object observes depth metadata, whose HTILE tracking

@@ -76,6 +76,7 @@ struct PresentationViewStage;
 struct PresentationFsrStage;
 struct PresentationFsr3Stage;
 struct TransientSnapshotPool;
+class DeferredReplayWorker;
 struct VulkanBuffer;
 
 struct VulkanSwapchain
@@ -103,9 +104,15 @@ struct VulkanSwapchain
 
 struct VulkanCommandPool
 {
+	// Extra primaries of each slot for the geometry segments of its recording, two per segment; allocated with
+	// the pool, since other threads may record into its buffers at any later time.
+	static constexpr uint32_t CHUNKS_PER_SLOT = 8;
+
 	Core::Mutex      mutex;
 	VkCommandPool    pool          = nullptr;
 	VkCommandBuffer* buffers       = nullptr;
+	// CHUNKS_PER_SLOT per slot, in slot order.
+	VkCommandBuffer* chunks        = nullptr;
 	VkFence*         fences        = nullptr;
 	VkSemaphore*     semaphores    = nullptr;
 	bool*            busy          = nullptr;
@@ -114,6 +121,9 @@ struct VulkanCommandPool
 	TransientSnapshotPool* snapshots = nullptr;
 	// Fragment-transport storage shared by the command buffers of this pool; owned by the command buffer code.
 	VulkanBuffer* transport_storage = nullptr;
+	// Records draw-tail commands of this pool's command buffers off the command processor; created on
+	// first use and owned by the command buffer code.
+	DeferredReplayWorker* replay = nullptr;
 	// Geometry-pass output shared by the command buffers of this pool, and the smaller ones it replaced, which
 	// recordings in flight may still read; owned by the command buffer code.
 	VulkanBuffer*              geometry_output = nullptr;
@@ -126,6 +136,8 @@ struct VulkanQueueInfo
 	uint32_t     family   = static_cast<uint32_t>(-1);
 	uint32_t     index    = static_cast<uint32_t>(-1);
 	VkQueue      vk_queue = nullptr;
+	// Meaningful bits of the family's timestamps; zero when the family cannot write them.
+	uint32_t timestamp_valid_bits = 0;
 	// Signaled by every command-processor submission with a value that rises in
 	// submission order (guarded by mutex), so rings wait for completion.
 	VkSemaphore timeline       = nullptr;
@@ -197,6 +209,8 @@ struct GraphicContext
 	// before a graphics pipeline can request sample shading.
 	bool sample_rate_shading_supported = false;
 	bool geometry_shader_supported = false;
+	// A nonzero firstInstance in indirect draw arguments requires drawIndirectFirstInstance.
+	bool draw_indirect_first_instance_supported = false;
 	bool compute_derivative_group_linear_supported = false;
 	bool compute_derivative_group_linear_enabled = false;
 	// VK_KHR_shader_maximal_reconvergence lets a fragment shader keep every
@@ -207,6 +221,19 @@ struct GraphicContext
 	// VK_EXT_image_view_min_lod clamps sampled LOD per view; it carries the
 	// guest T# MIN_LOD, which streaming titles raise above non-resident mips.
 	bool image_view_min_lod_supported = false;
+	// VK_EXT_device_fault describes a device loss (faulting addresses, vendor fault codes).
+	bool device_fault_supported = false;
+	// Intel parts lose the device (engine reset, fixed-function units busy, shader units idle) in depth passes that
+	// mix consecutive pixel-killing draws with depth writes, unless a pipelined timestamp separates those draws.
+	bool separate_depth_kill_draws = false;
+	// Intel's Mesa driver emits its pixel-shader stall sync only when "depth or stencil writes enabled" changes, so a
+	// stencil-only draw followed by a depth-writing one gets no stall, which can lose the device.
+	bool stencil_only_write_resync = false;
+	// VK_KHR/EXT_calibrated_timestamps in the host performance counter's domain: end-of-pipe clock marks then carry
+	// the device time of their position in the stream. Null when the device cannot relate the two clocks.
+	PFN_vkGetCalibratedTimestampsKHR get_calibrated_timestamps = nullptr;
+	VkTimeDomainKHR                  host_time_domain          = VK_TIME_DOMAIN_DEVICE_KHR;
+	float                            timestamp_period_ns       = 0.0f;
 
 	// Vulkan subgroup limits used to validate shaders that require an exact guest
 	// wave width. A zero maximum means the physical-device query was unavailable.
@@ -227,6 +254,9 @@ struct GraphicContext
 	bool guest_host_pointer_import_supported = false;
 	// Device-addressable buffers can import dma-buf descriptors.
 	bool guest_dma_buf_import_supported = false;
+	// Every import type the device uses also imports as a vertex buffer, so a
+	// draw can fetch its streams from the imported guest pages.
+	bool guest_draw_input_import_supported = false;
 	ShaderComputeWaveVulkanState compute_wave_vulkan_state {};
 
 	// VK_EXT_sample_locations is optional at device discovery time. A draw that
@@ -234,6 +264,21 @@ struct GraphicContext
 	// represent the exact state.
 	VulkanSampleLocationCapabilities sample_location_capabilities;
 };
+
+// vkDeviceWaitIdle needs every queue externally synchronized, but submitters
+// only hold their own queue's mutex: wait for each queue under that mutex.
+inline void VulkanWaitQueuesIdle(GraphicContext* ctx)
+{
+	for (const auto& queue: ctx->queues)
+	{
+		if (queue.vk_queue == nullptr || queue.mutex == nullptr)
+		{
+			continue;
+		}
+		Core::LockGuard lock(*queue.mutex);
+		vkQueueWaitIdle(queue.vk_queue);
+	}
+}
 
 inline void VulkanApplyResourceSharing(const GraphicContext& ctx, VkSharingMode* mode, uint32_t* family_count, const uint32_t** families)
 {
@@ -413,6 +458,8 @@ struct DepthSliceArray
 	DepthStencilVulkanImage*          image = nullptr;
 	VulkanMemory                      memory;
 	std::vector<DepthSliceArrayLayer> layers;
+	// A layered pass renders into the array and has not yet copied its layers back to the slice images.
+	bool store_pending = false;
 };
 
 struct DepthStencilVulkanImage: public VulkanImage
@@ -453,6 +500,18 @@ struct StorageTextureVulkanImage: public VulkanImage
 {
 	StorageTextureVulkanImage(): VulkanImage(VulkanImageType::StorageTexture) {}
 	uint64_t guest_vaddr = 0;
+	// A single-level 2D Standard64KB image seeded from guest memory keeps the detiled guest bytes of its last seed or
+	// merge (rows of guest_seed_pitch texels), the range it registered with the dirty-page tracker and the generation
+	// of that read. Storage images are not written back, so a later CPU write reaches the image only by merging the
+	// texels it changed (StorageTextureMergeCpuWrites).
+	std::vector<uint8_t> guest_seed;
+	uint64_t             guest_seed_addr       = 0;
+	uint64_t             guest_seed_size       = 0;
+	uint64_t             guest_seed_generation = 0;
+	uint32_t             guest_seed_width      = 0;
+	uint32_t             guest_seed_height     = 0;
+	uint32_t             guest_seed_pitch      = 0;
+	uint32_t             guest_seed_bpe        = 0;
 	// Normalized identity mapping of every storage view of this image.
 	VkComponentMapping storage_components = {};
 };
@@ -503,6 +562,9 @@ struct VulkanBuffer
 	bool guest_in_place = false;
 	// Where the guest object starts inside `buffer`: memory binds are coarser than guest addresses.
 	uint64_t guest_offset = 0;
+	// The transient snapshot pool recaptured this buffer for another guest range: no
+	// lookup finds a descriptor set built with it again, so such sets skip the cache.
+	bool uncached_descriptor_sets = false;
 
 	[[nodiscard]] VulkanBufferDescriptorKey DescriptorKey() const { return {memory.unique_id, descriptor_range}; }
 };

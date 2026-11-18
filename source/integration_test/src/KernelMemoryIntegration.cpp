@@ -522,6 +522,13 @@ int GpuMappingLifecycleContract()
 	callbacks.release_range    = GpuMappingPortProbe::ReleaseRange;
 	Expect(!port.Install(callbacks), "lifecycle port must refuse a bundle without the protection callback");
 	callbacks.protect_range = GpuMappingPortProbe::ProtectRange;
+	callbacks.invalidate_ranges_deferred = [](void* c, const Kernel::Memory::KernelGpuMappingRange* r, size_t n, uint64_t* t)
+	{
+		*t = 0;
+		return GpuMappingPortProbe::InvalidateRanges(c, r, n);
+	};
+	callbacks.ticket_retired = [](void*, uint64_t) { return true; };
+	callbacks.wait_ticket    = [](void*, uint64_t) {};
 	Expect(port.Install(callbacks), "complete GPU mapping lifecycle port must install");
 
 	void* mapping = nullptr;

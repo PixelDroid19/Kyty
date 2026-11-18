@@ -1822,7 +1822,9 @@ red->green test; 1,859 unit tests pass in one process; boundary, table, playable
   frame (`WindowDrawBlank`) instead of being rejected or re-flipping the current buffer. A flip the command
   processor decoded counts as pending (`gcQueueNum`, included in `flipPendingNum`) until the flip queue owns it
   (`VideoOutFlipPending`); a guest that waits for `IsFlipPending() == 0`, flips blank and unregisters its buffers no
-  longer races a flip still in its command stream.
+  longer races a flip still in its command stream. Since 2026-11-16 (`7fb19247a`) a submit that returns before the
+  command processor decodes it (every wait self-produced) reserves each top-level flip of the batch as pending
+  at submit time; counting only at decode left a window where the count read zero.
 - **Quiesce before the first submission.** A guest munmap of GPU-mapped memory quiesces the GPU; a command
   processor that never recorded has nothing to complete and no longer creates command buffers before the render
   context exists.

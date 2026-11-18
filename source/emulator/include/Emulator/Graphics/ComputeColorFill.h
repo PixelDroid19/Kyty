@@ -44,9 +44,21 @@ public:
 	}
 	void DiscardOverlaps(uint64_t address, uint64_t size)
 	{
+		// Every draw discards for each of its targets, and the table is usually empty: stop once each pending
+		// event was seen.
+		uint32_t unseen = m_count;
 		for (auto& event: m_events)
 		{
-			if (event.sequence != 0 && Overlaps(event.identity, address, size))
+			if (unseen == 0)
+			{
+				break;
+			}
+			if (event.sequence == 0)
+			{
+				continue;
+			}
+			--unseen;
+			if (Overlaps(event.identity, address, size))
 			{
 				event = {};
 				--m_count;

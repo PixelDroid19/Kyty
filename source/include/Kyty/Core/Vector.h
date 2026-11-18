@@ -20,13 +20,21 @@ public:
 
 	static constexpr uint32_t INVALID_INDEX = static_cast<uint32_t>(-1);
 
-	VectorBase(): m_data(new DataType) {}
+	// An empty vector owns no storage: draw paths build and drop many empty vectors, and the
+	// allocation per construction showed up in their profiles. Storage comes with the first write.
+	VectorBase() = default;
 
-	VectorBase(const VectorType& src) { src.m_data->CopyPtr(&m_data, src.m_data); }
+	VectorBase(const VectorType& src)
+	{
+		if (src.m_data != nullptr)
+		{
+			src.m_data->CopyPtr(&m_data, src.m_data);
+		}
+	}
 
 	VectorBase(VectorType&& src) noexcept: m_data(src.m_data) { src.m_data = nullptr; }
 
-	explicit VectorBase(uint32_t size, bool ctor = true): m_data(size != 0u ? new DataType(size, ctor) : new DataType) {}
+	explicit VectorBase(uint32_t size, bool ctor = true): m_data(size != 0u ? new DataType(size, ctor) : nullptr) {}
 
 	VectorBase(std::initializer_list<T> list): m_data(new DataType(list)) {}
 
@@ -38,18 +46,26 @@ public:
 		}
 	}
 
-	[[nodiscard]] uint32_t Size() const { return m_data->Size(); }
+	[[nodiscard]] uint32_t Size() const { return data()->Size(); }
 
-	[[nodiscard]] uint32_t Capacity() const { return m_data->Capacity(); }
+	[[nodiscard]] uint32_t Capacity() const { return data()->Capacity(); }
 
 	void Clear()
 	{
+		if (m_data == nullptr)
+		{
+			return;
+		}
 		copy_on_write();
 		m_data->Clear();
 	}
 
 	void Free()
 	{
+		if (m_data == nullptr)
+		{
+			return;
+		}
 		copy_on_write();
 		m_data->Free();
 	}
@@ -64,7 +80,11 @@ public:
 				m_data->Release();
 			}
 
-			src.m_data->CopyPtr(&m_data, src.m_data);
+			m_data = nullptr;
+			if (src.m_data != nullptr)
+			{
+				src.m_data->CopyPtr(&m_data, src.m_data);
+			}
 		}
 		return *this;
 	}
@@ -84,9 +104,9 @@ public:
 		return *this;
 	}
 
-	bool operator==(const VectorType& s) const { return *m_data == *s.m_data; }
+	bool operator==(const VectorType& s) const { return *data() == *s.data(); }
 
-	bool operator!=(const VectorType& s) const { return !(*m_data == *s.m_data); }
+	bool operator!=(const VectorType& s) const { return !(*data() == *s.data()); }
 
 	void Expand(uint32_t num)
 	{
@@ -138,30 +158,30 @@ public:
 		m_data->InsertAt(index, std::forward<T>(val));
 	}
 
-	[[nodiscard]] uint32_t Find(const T& t) const { return m_data->Find(t); }
+	[[nodiscard]] uint32_t Find(const T& t) const { return data()->Find(t); }
 
 	template <typename OP>
 	uint32_t Find(const T& t, OP&& op_eq) const
 	{
-		return m_data->Find(t, op_eq);
+		return data()->Find(t, op_eq);
 	}
 
 	template <typename T2, typename OP>
 	uint32_t Find(const T2& t, OP&& op_eq) const
 	{
-		return m_data->Find(t, op_eq);
+		return data()->Find(t, op_eq);
 	}
 
 	template <typename T2, typename OP, typename V>
 	void FindAll(const T2& t, OP&& op_eq, V* out) const
 	{
-		m_data->FindAll(t, op_eq, out);
+		data()->FindAll(t, op_eq, out);
 	}
 
 	template <typename T2, typename T3, typename OP>
 	uint32_t Find(const T2& t2, const T3& t3, OP&& op_eq) const
 	{
-		return m_data->Find(t2, t3, op_eq);
+		return data()->Find(t2, t3, op_eq);
 	}
 
 	[[nodiscard]] bool Contains(const T& t) const { return Find(t) != INVALID_INDEX; }
@@ -184,7 +204,7 @@ public:
 		return m_data->RemoveAt(index, count);
 	}
 
-	[[nodiscard]] bool IndexValid(uint32_t index) const { return m_data->IndexValid(index); }
+	[[nodiscard]] bool IndexValid(uint32_t index) const { return data()->IndexValid(index); }
 
 	T& operator[](uint32_t index)
 	{
@@ -192,9 +212,9 @@ public:
 		return m_data->operator[](index);
 	}
 
-	const T& operator[](uint32_t index) const { return m_data->At(index); }
+	const T& operator[](uint32_t index) const { return data()->At(index); }
 
-	[[nodiscard]] const T& At(uint32_t index) const { return m_data->At(index); }
+	[[nodiscard]] const T& At(uint32_t index) const { return data()->At(index); }
 
 	T* GetData()
 	{
@@ -202,9 +222,9 @@ public:
 		return m_data->GetData();
 	}
 
-	[[nodiscard]] const T* GetData() const { return m_data->GetDataConst(); }
+	[[nodiscard]] const T* GetData() const { return data()->GetDataConst(); }
 
-	[[nodiscard]] const T* GetDataConst() const { return m_data->GetDataConst(); }
+	[[nodiscard]] const T* GetDataConst() const { return data()->GetDataConst(); }
 
 	void Memset(int c)
 	{
@@ -244,25 +264,48 @@ public:
 
 	iterator begin() // NOLINT(readability-identifier-naming)
 	{
+		if (m_data == nullptr)
+		{
+			return nullptr;
+		}
 		copy_on_write();
 		return m_data->begin();
 	}
 
 	iterator end() // NOLINT(readability-identifier-naming)
 	{
+		if (m_data == nullptr)
+		{
+			return nullptr;
+		}
 		copy_on_write();
 		return m_data->end();
 	}
 
-	[[nodiscard]] const_iterator begin() const { return m_data->cbegin(); }  // NOLINT(readability-identifier-naming)
-	[[nodiscard]] const_iterator end() const { return m_data->cend(); }      // NOLINT(readability-identifier-naming)
-	[[nodiscard]] const_iterator cbegin() const { return m_data->cbegin(); } // NOLINT(readability-identifier-naming)
-	[[nodiscard]] const_iterator cend() const { return m_data->cend(); }     // NOLINT(readability-identifier-naming)
+	[[nodiscard]] const_iterator begin() const { return data()->cbegin(); }  // NOLINT(readability-identifier-naming)
+	[[nodiscard]] const_iterator end() const { return data()->cend(); }      // NOLINT(readability-identifier-naming)
+	[[nodiscard]] const_iterator cbegin() const { return data()->cbegin(); } // NOLINT(readability-identifier-naming)
+	[[nodiscard]] const_iterator cend() const { return data()->cend(); }     // NOLINT(readability-identifier-naming)
 
 private:
-	void copy_on_write() { m_data->CopyOnWrite(&m_data); }
+	void copy_on_write()
+	{
+		if (m_data == nullptr)
+		{
+			m_data = new DataType;
+			return;
+		}
+		m_data->CopyOnWrite(&m_data);
+	}
 
-	DataType* m_data;
+	// Reads of a vector without storage see this shared, never-written empty array.
+	[[nodiscard]] const DataType* data() const
+	{
+		static const DataType empty;
+		return m_data != nullptr ? m_data : &empty;
+	}
+
+	DataType* m_data = nullptr;
 };
 
 } // namespace Kyty::Core

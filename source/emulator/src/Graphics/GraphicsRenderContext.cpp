@@ -10,6 +10,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
+#include "Emulator/Graphics/ComputePipelinePrecompile.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/Tile.h"
@@ -18,6 +19,7 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/PipelineCacheStore.h"
+#include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Graphics/Window.h"
@@ -133,6 +135,13 @@ void GraphicsRenderCreateContext()
 
 	if (ctx != nullptr && ctx->device != nullptr && ctx->pipeline_cache == nullptr)
 	{
+		// The per-title directory follows the translator version, so its working set never names stale modules.
+		if (const auto directory = Config::ShaderCacheEnabled() ? ComputePipelinePrecompileDirectory() : std::filesystem::path();
+		    !directory.empty())
+		{
+			SpirvBinaryCacheDefaultStore().StartWorkingSet(directory / "spirv-working-set");
+		}
+
 		VkPhysicalDeviceProperties properties {};
 		vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
 		auto initial_data = PipelineCacheStoreLoad(properties);
@@ -621,6 +630,13 @@ void CommandPool::Create(int id)
 		EXIT("Can't allocate command buffers");
 	}
 
+	alloc_info.commandBufferCount = m_pool[id]->buffers_count * VulkanCommandPool::CHUNKS_PER_SLOT;
+	m_pool[id]->chunks            = new VkCommandBuffer[alloc_info.commandBufferCount];
+	if (vkAllocateCommandBuffers(ctx->device, &alloc_info, m_pool[id]->chunks) != VK_SUCCESS)
+	{
+		EXIT("Can't allocate command buffers");
+	}
+
 	for (uint32_t i = 0; i < m_pool[id]->buffers_count; i++)
 	{
 		m_pool[id]->busy[i] = false;
@@ -668,7 +684,10 @@ void CommandPool::DeleteAll()
 				vkDestroyFence(ctx->device, pool->fences[i], nullptr);
 			}
 
+			delete pool->replay;
+			pool->replay = nullptr;
 			vkFreeCommandBuffers(ctx->device, pool->pool, pool->buffers_count, pool->buffers);
+			vkFreeCommandBuffers(ctx->device, pool->pool, pool->buffers_count * VulkanCommandPool::CHUNKS_PER_SLOT, pool->chunks);
 
 			vkDestroyCommandPool(ctx->device, pool->pool, nullptr);
 
@@ -691,6 +710,7 @@ void CommandPool::DeleteAll()
 			delete[] pool->semaphores;
 			delete[] pool->fences;
 			delete[] pool->buffers;
+			delete[] pool->chunks;
 			delete[] pool->busy;
 
 			delete pool;

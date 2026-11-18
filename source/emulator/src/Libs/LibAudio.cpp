@@ -66,6 +66,7 @@ LIB_DEFINE(InitAudio_1_AudioIn)
 	LIB_FUNC("5NE8Sjc7VC8", AudioIn::AudioInOpen);
 	LIB_FUNC("LozEOU8+anM", AudioIn::AudioInInput);
 	LIB_FUNC("Jh6WbHhnI68", AudioIn::AudioInClose);
+	LIB_FUNC("BohEAQ7DlUE", AudioIn::AudioInGetSilentState);
 }
 
 } // namespace LibAudioIn
@@ -124,6 +125,8 @@ LIB_DEFINE(InitAudio_1_Ajm)
 	LIB_FUNC("7jdAXK+2fMo", Ajm::AjmBatchJobRunSplitBufferRa);
 	LIB_FUNC("fFFkk0xfGWs", Ajm::AjmBatchStartBuffer);
 	LIB_FUNC("-qLsfDAywIY", Ajm::AjmBatchWait);
+	LIB_FUNC("WfAiBW8Wcek", Ajm::AjmBatchErrorDump);
+	LIB_FUNC("1t3ixYNXyuc", Ajm::AjmDecAt9ParseConfigData);
 	LIB_FUNC("NVDXiUesSbA", Ajm::AjmBatchCancel);
 	LIB_FUNC("AxhcqVv5AYU", Ajm::AjmStrError);
 	LIB_FUNC("ezM2OhNxzck", Ajm::AjmBatchJobInitialize);

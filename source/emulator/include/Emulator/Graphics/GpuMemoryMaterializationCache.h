@@ -156,6 +156,9 @@ public:
 		return hash;
 	}
 
+	// A few fields only: enough to spread the keys of one submission over a small table.
+	[[nodiscard]] uint64_t QuickHash() const { return Mix(m_address[0] ^ (m_size[0] << 20u) ^ m_params[0] ^ m_object_type); }
+
 	[[nodiscard]] bool operator==(const GpuMemoryMaterializationKey& other) const
 	{
 		return m_valid == other.m_valid && m_guest_submit == other.m_guest_submit && m_host_sequence == other.m_host_sequence &&
@@ -239,6 +242,10 @@ public:
 			return;
 		}
 		const size_t slot = static_cast<size_t>(key.Hash()) & (Capacity - 1u);
+		if (m_entries[slot].has_value() && m_entries[slot]->epoch == m_epoch)
+		{
+			++m_removals;
+		}
 		m_entries[slot]   = Entry {m_epoch, key, value};
 		m_spans[slot]     = key.Span();
 		m_store_log[static_cast<size_t>(m_store_seq % StoreLogSize)] = slot;
@@ -247,6 +254,7 @@ public:
 
 	void Invalidate()
 	{
+		++m_removals;
 		m_spans.fill({0u, 0u});
 		++m_epoch;
 		if (m_epoch == 0u)
@@ -258,6 +266,10 @@ public:
 			m_epoch = 1u;
 		}
 	}
+
+	// Advances whenever a live entry is dropped or replaced, so an answer
+	// remembered outside the cache stays the cache's answer while it is unchanged.
+	[[nodiscard]] uint64_t Removals() const { return m_removals; }
 
 	// Removes every entry overlapping the range except the writer's own.
 	void InvalidateRange(uint64_t address, uint64_t size, const GpuMemoryMaterializationWriter& writer = {})
@@ -327,6 +339,7 @@ private:
 		{
 			entry.reset();
 			m_spans[slot] = {0u, 0u};
+			++m_removals;
 		}
 	}
 
@@ -337,6 +350,7 @@ private:
 	uint64_t                                            m_store_seq  = 0;
 	size_t                                              m_clean_next = 0;
 	uint64_t                                            m_epoch      = 1u;
+	uint64_t                                            m_removals   = 0;
 };
 
 } // namespace Kyty::Libs::Graphics

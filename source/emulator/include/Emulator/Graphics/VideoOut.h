@@ -98,6 +98,8 @@ VideoOutRegisteredHostExtentStatus VideoOutSelectRegisteredHostExtent(Graphics::
                                                                       uint32_t guest_height, uint32_t host_width,
                                                                       uint32_t host_height);
 void                               VideoOutWaitFlipDone(int handle, int index);
+// True when a registered display buffer overlaps the range, and also before VideoOut exists (unknown means busy).
+bool                               VideoOutBuffersOverlap(uint64_t vaddr, uint64_t size);
 bool                               VideoOutRunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action,
                                                                     void* data);
 bool                               VideoOutRunBufferUnmapTransaction(const VideoOutBufferRange* ranges, size_t range_count,

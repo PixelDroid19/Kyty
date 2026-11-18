@@ -6,6 +6,33 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## First-person puzzle title: GPU hang in the shadow pass on Intel Arc (2026-11-07, open)
+
+- **Observation.** PPSA06084 - Superliminal loses the device on Intel Arc A770 (ANV, Xe KMD) about once per minute of
+  play. The GuC resets the render engine with no page fault.
+  - In every decoded batch the hang is in a shadow pass: D16 at 2048x2048, depth write, depth bias. It mixes
+    draws without a pixel shader with draws of a pixel shader that kills pixels (an LOD dither).
+  - INSTDONE shows the windower, HiZ, depth front end and SBE busy. The samplers are idle and every subslice is
+    in the same state.
+- **Excluded.** HiZ and depth or colour compression (`INTEL_DEBUG=nohiz,noccs`), SIMD32 dispatch, Vulkan validation
+  (clean), page faults and the recent commits; the hang is older.
+- **Pixel shader.** Its translation has no loop, no maximal reconvergence and a single kill, taken only when the whole
+  quad is dead. Mesa turns that kill into a demote, and the native code ends in the usual predicated render-target
+  write. Nothing points at the translation, so this is treated as a driver or hardware hazard whose cause is not
+  known yet.
+- **Mitigation (Intel only).** `CommandBuffer::SeparateDepthKillDraw` writes a bottom-of-pipe timestamp before every
+  draw that kills pixels with depth writes on, and before the draw after it. Each recording has its own query pools,
+  reset from the host when it begins (`hostQueryReset`).
+  - It lowers the hang rate but does not remove it. Without it, 13 of 14 runs hung within 150 s. With it, one hang
+    in about 800 s of play over five runs. One event bounds the gain only loosely.
+  - The hung batch had the marks around every kill draw, so the hazard is not just the overlap of consecutive draws.
+  - Cost on this title: 57.5 -> 54.1 fps; GPU 10.1 -> 13.7 ms per frame.
+  - PPSA09076 - DREDGE, which is CPU-bound, is unchanged: 37.7 fps, GPU 12.9 ms per frame.
+  - A run with Vulkan validation on is clean.
+- **Translation gap found on the way (not the hang).** At the final `exp ... done vm`, exec only kills when the whole
+  quad's exec is zero. Dead lanes of a partly live quad still write depth, so the dither works per 2x2 quad rather than
+  per pixel.
+
 ## First-person puzzle title: empty vertex descriptors and empty indexed draws (2026-10-31)
 
 Implements the direction of the record below, and closes a second stop found on the same title.

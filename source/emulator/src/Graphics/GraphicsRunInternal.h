@@ -16,13 +16,16 @@
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Kernel/Pthread.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -107,6 +110,7 @@ inline void trace_aa_register_write(const char* path, const char* name, uint32_t
 }
 
 class Gpu;
+class DrawFront;
 
 extern Gpu* g_gpu;
 
@@ -261,7 +265,7 @@ public:
 
 	CommandProcessor(GpuSubmissionCoordinator* submission_coordinator, int queue)
 	    : m_submission_slots(submission_coordinator, GpuQueueId(static_cast<uint32_t>(queue))),
-	      m_publication_gate(GpuQueueId(static_cast<uint32_t>(queue))), m_queue(queue)
+	      m_publication_gate(GpuQueueId(static_cast<uint32_t>(queue))), m_queue(queue), m_submission_coordinator(submission_coordinator)
 	{
 		EXIT_IF(submission_coordinator == nullptr);
 		EXIT_IF(queue < 0 || queue >= GraphicContext::QUEUES_NUM);
@@ -283,6 +287,8 @@ public:
 	[[nodiscard]] bool OldestSubmittedTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value);
 	void               SubmitAndWait();
 	void               WaitSubmission(SubmissionId submission);
+	// Non-blocking: true once the submission completed (or was retired from the slots).
+	[[nodiscard]] bool IsSubmissionComplete(SubmissionId submission);
 	// Submits the submission if it is still being recorded and returns the timeline value its
 	// completion signals; false once it completed.
 	[[nodiscard]] bool SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value);
@@ -323,7 +329,8 @@ public:
 	void WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_write_dest, uint32_t eop_event_type, uint32_t cache_action,
 	                        uint32_t event_index, uint32_t event_write_source, void* dst_gpu_addr, uint64_t value,
 	                        uint32_t interrupt_selector, uint32_t interrupt_context_id);
-	void Flip();
+	// queued_at_submit: the submit already counted this flip as pending.
+	void Flip(bool queued_at_submit);
 	void Flip(void* dst_gpu_addr, uint32_t value);
 	void FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr, uint32_t value);
 	void QueueQueuedGraphicsInterrupt();
@@ -398,6 +405,20 @@ public:
 	[[nodiscard]] const uint32_t* GetActiveRunEnd() const { return m_active_run_end; }
 
 	[[nodiscard]] const FlipInfo& GetFlip() const { return m_flip; }
+	void                          SetFlipsQueuedAtSubmit(uint32_t count)
+	{
+		EXIT_IF(m_flips_queued_at_submit != 0u);
+		m_flips_queued_at_submit = count;
+	}
+	[[nodiscard]] bool TakeFlipQueuedAtSubmit()
+	{
+		if (m_flips_queued_at_submit == 0u)
+		{
+			return false;
+		}
+		m_flips_queued_at_submit--;
+		return true;
+	}
 	void                          SetFlip(const FlipInfo& flip)
 	{
 		m_flip                        = flip;
@@ -421,6 +442,12 @@ public:
 
 private:
 	void DispatchIndirectAtAddress(uint64_t address, uint32_t mode);
+	bool                 DrawIndexIndirectOnDevice(uint64_t args_address);
+	void                 ResolveNumInstancesLatch();
+	// The inputs prepared ahead for the indexed draw this processor is at, or null.
+	PreparedDrawInputs*  TakePreparedDrawInputs();
+	void                 StopDrawFronts();
+	void                 ReleaseDrawFronts();
 	static constexpr int VK_BUFFERS_NUM = static_cast<int>(CommandProcessorSubmissionSlots::SlotCount);
 	void                 CompleteSubmittedThroughLocked(SubmissionId target, SubmissionId* latest_completed);
 	void                 TryCompleteSubmittedLocked(SubmissionId* latest_completed);
@@ -450,6 +477,10 @@ private:
 	uint64_t         m_draw_indirect_args_base_addr     = 0;
 	uint64_t         m_dispatch_indirect_args_base_addr = 0;
 	uint32_t         m_num_instances       = 1;
+	// A device-side DRAW_INDEX_INDIRECT of this submission latched NUM_INSTANCES; m_num_instances
+	// holds it only once the host reads the latch after that submission completes.
+	bool         m_num_instances_latched = false;
+	SubmissionId m_num_instances_latch;
 
 	Core::Mutex m_mutex;
 	Core::Mutex m_run_mutex;
@@ -467,6 +498,7 @@ private:
 
 	FlipInfo m_flip;
 	bool     m_flip_issued                 = false;
+	uint32_t m_flips_queued_at_submit      = 0;
 	// Submission that recorded the latest GPU flip to each display buffer
 	// index. Its flip request reaches the flip queue only on completion.
 	struct RecordedFlip
@@ -493,6 +525,15 @@ private:
 	uint32_t m_last_pm4_dw                 = 0;
 	const uint32_t* m_active_run_begin     = nullptr;
 	const uint32_t* m_active_run_end       = nullptr;
+	// The header of the packet this processor is at.
+	const uint32_t* m_packet               = nullptr;
+	// Prepare the inputs of the indexed draws that follow; their shadow processors only replay registers.
+	std::array<DrawFront*, 2>    m_draw_fronts {};
+	std::atomic<const uint32_t*> m_draw_front_claimed {nullptr};
+	// A shadow processor's own front.
+	DrawFront*                      m_draw_front        = nullptr;
+	bool                            m_draw_front_shadow = false;
+	GpuSubmissionCoordinator* const m_submission_coordinator;
 	bool            m_suspend_run_requested = false;
 	bool            m_suspended_run_valid   = false;
 	SuspendedRun    m_suspended_run;
@@ -541,6 +582,47 @@ private:
 	bool           m_started       = false;
 };
 
+// The submission each finished batch ended with. A release ticket retires once the batches it covers finished and
+// their submissions completed on the device, the state Gpu::WaitLocked guarantees.
+class BatchEndLog
+{
+public:
+	void Note(uint64_t count, SubmissionId submission)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_ends.push_back({count, submission});
+		if (m_ends.size() > kCapacity)
+		{
+			m_ends.pop_front();
+		}
+	}
+
+	// Submission of the batch that finished at `count`. An aged-out count answers with the oldest kept one,
+	// which is later and therefore only delays retirement; a count past the newest answers with the newest.
+	[[nodiscard]] bool Find(uint64_t count, SubmissionId* submission) const
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_ends.empty())
+		{
+			return false;
+		}
+		const auto it = std::find_if(m_ends.begin(), m_ends.end(), [count](const End& end) { return end.count >= count; });
+		*submission   = (it != m_ends.end() ? *it : m_ends.back()).submission;
+		return true;
+	}
+
+private:
+	struct End
+	{
+		uint64_t     count;
+		SubmissionId submission;
+	};
+	static constexpr size_t kCapacity = 256;
+
+	mutable std::mutex m_mutex;
+	std::deque<End>    m_ends;
+};
+
 class GraphicsRing
 {
 public:
@@ -554,6 +636,14 @@ public:
 	void Done();
 	void WaitForIdle();
 	bool IsIdle();
+	void HoldParkedDecode(bool hold);
+
+	// Monotonic counters for release tickets: a ticket holds EnqueuedBatches() and is retired once
+	// FinishedBatches() reaches it. Finished means the batch ran to its end, the point WaitForIdle waits for.
+	[[nodiscard]] uint64_t EnqueuedBatches() const { return m_enqueued_batches.load(); }
+	// Retired: the first `count` batches ran to their end and their submissions completed on the device.
+	[[nodiscard]] bool     IsRetired(uint64_t count) const;
+	void                   WaitRetired(uint64_t count);
 
 	void SetCp(CommandProcessor* cp)
 	{
@@ -618,6 +708,13 @@ private:
 		bool                           with_api_flip = false;
 		GraphicsSubmissionCompletion completion   = GraphicsSubmissionCompletion::None;
 		std::shared_ptr<DecodeCompletion> decode_completion;
+		// Signalled when this batch's decode ends or is suspended; the next submitter that returns early waits on it.
+		std::shared_ptr<DecodeCompletion> follow_completion;
+		// Its submitter already returned (or may return) before this batch decodes: its memory waits must all be
+		// produced inside it, so it can never need the guest to release its decode.
+		bool                              returns_before_decode = false;
+		// Top-level R_FLIP packets the submit already counted as pending.
+		uint32_t                          flips_queued_at_submit = 0;
 	};
 
 	static void ThreadBatchRun(void* data);
@@ -629,10 +726,18 @@ private:
 	Core::Mutex          m_mutex;
 	// Set while decode waits on a value no submitted GPU work produces.
 	bool                 m_decode_released = false;
+	// Follow completion of the latest submitted batch.
+	std::shared_ptr<CmdBatch::DecodeCompletion> m_previous_follow_completion;
+	// Set by a quiesce: decode parked on such a value counts as drained and does not resume until the hold ends.
+	bool                 m_parked_decode_hold = false;
 	// Only the ring thread touches it: a deferred completion it still pumps while idle.
 	bool                 m_async_completion_pending = false;
 	Core::CondVar        m_cond_var;
 	Core::CondVar        m_idle_cond_var;
+	Core::CondVar        m_finished_cond_var;
+	std::atomic_uint64_t m_enqueued_batches {0};
+	std::atomic_uint64_t m_finished_batches {0};
+	BatchEndLog          m_batch_ends;
 	SubmissionTimelineWaiter m_timeline_waiter {&m_mutex, &m_cond_var};
 	Core::List<CmdBatch> m_cmd_batches;
 	bool                 m_done = true;
@@ -654,6 +759,11 @@ public:
 	void Done();
 	void WaitForIdle();
 	bool IsIdle();
+
+	// Same ticket counters as GraphicsRing; a doorbell is the unit, and the run that consumes it finishes it.
+	[[nodiscard]] uint64_t EnqueuedBatches() const { return m_enqueued_doorbells.load(); }
+	[[nodiscard]] bool     IsRetired(uint64_t count) const;
+	void                   WaitRetired(uint64_t count);
 
 	void SetCp(CommandProcessor* cp)
 	{
@@ -679,6 +789,10 @@ private:
 	Core::Mutex   m_mutex;
 	Core::CondVar m_cond_var;
 	Core::CondVar m_idle_cond_var;
+	Core::CondVar m_finished_cond_var;
+	std::atomic_uint64_t m_enqueued_doorbells {0};
+	std::atomic_uint64_t m_finished_doorbells {0};
+	BatchEndLog          m_batch_ends;
 	SubmissionTimelineWaiter m_timeline_waiter {&m_mutex, &m_cond_var};
 	bool          m_done = true;
 	bool          m_idle = true;
@@ -723,12 +837,18 @@ public:
 	void     WaitSubmission(SubmissionId submission);
 	bool     SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value);
 	bool     RunQuiesced(GraphicsRunQuiescedAction action, void* data);
+	// A ticket stands for the work every ring had in flight when it was taken (0 when none). It never
+	// quiesces: later submissions are not part of it, so guest memory it protects must not be reachable by them.
+	uint64_t TakeReleaseTicket();
+	bool     IsReleaseTicketRetired(uint64_t ticket);
+	void     WaitReleaseTicket(uint64_t ticket);
 	int      GetFrameNum();
 	bool     AreSubmitsAllowed();
 
 private:
 	void Init();
 	void WaitLocked();
+	void HoldParkedDecode(bool hold);
 
 	ComputeRing* GetRing(uint32_t ring_id);
 
@@ -745,6 +865,21 @@ private:
 	GraphicsRing*              m_agc_async_ring[GraphicsAgcAsyncQueueSlots::Capacity] = {};
 
 	std::atomic_int m_done_num = 0;
+
+	struct ReleaseTicket
+	{
+		uint64_t                                         id = 0;
+		std::vector<std::pair<GraphicsRing*, uint64_t>> graphics;
+		std::vector<std::pair<ComputeRing*, uint64_t>>  compute;
+	};
+	[[nodiscard]] static bool IsReleaseTicketFinished(const ReleaseTicket& ticket);
+	// Retirement is monotonic in id, so only the front can be the next to retire.
+	void PruneRetiredTicketsLocked();
+
+	std::mutex               m_ticket_mutex;
+	std::deque<ReleaseTicket> m_release_tickets;
+	uint64_t                 m_last_ticket_id    = 0;
+	uint64_t                 m_retired_ticket_id = 0;
 };
 
 } // namespace Kyty::Libs::Graphics

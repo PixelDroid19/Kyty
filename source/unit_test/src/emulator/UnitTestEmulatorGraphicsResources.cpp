@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Shader.h"
@@ -271,6 +272,32 @@ ImageModuleFixture MakeSampledShapesImageModule(uint32_t shapes, ShaderInstructi
 
 } // namespace
 
+TEST(EmulatorGraphicsResources, StorageTextureChangedTexelRunsSplitRowsAndIgnorePitchPadding)
+{
+	// 4x2 texels of 2 bytes in rows of 5 texels: the fifth texel of each row is padding.
+	uint8_t before[2 * 5 * 2] = {};
+	uint8_t after[2 * 5 * 2]  = {};
+	after[(0 * 5 + 1) * 2]     = 7; // (1,0)
+	after[(0 * 5 + 2) * 2 + 1] = 7; // (2,0), second byte only
+	after[(1 * 5 + 0) * 2 + 1] = 9; // (0,1)
+	after[(1 * 5 + 3) * 2]     = 9; // (3,1)
+	after[(1 * 5 + 4) * 2]     = 1; // padding
+
+	const auto runs = StorageTextureChangedTexelRuns(before, after, 4, 2, 5, 2);
+
+	ASSERT_EQ(runs.Size(), 3u);
+	EXPECT_EQ(runs[0].x, 1u);
+	EXPECT_EQ(runs[0].y, 0u);
+	EXPECT_EQ(runs[0].length, 2u);
+	EXPECT_EQ(runs[1].x, 0u);
+	EXPECT_EQ(runs[1].y, 1u);
+	EXPECT_EQ(runs[1].length, 1u);
+	EXPECT_EQ(runs[2].x, 3u);
+	EXPECT_EQ(runs[2].y, 1u);
+	EXPECT_EQ(runs[2].length, 1u);
+	EXPECT_TRUE(StorageTextureChangedTexelRuns(before, before, 4, 2, 5, 2).IsEmpty());
+}
+
 TEST(EmulatorGraphicsResources, FindObjectsWithoutRegisteredHeapReturnsEmpty)
 {
 	ASSERT_EXIT(
@@ -368,10 +395,14 @@ TEST(EmulatorGraphicsResources, EmitsAndValidatesExactHomogeneousUintStorageForm
 	ASSERT_EXIT(
 	    {
 		    InitializeImageModuleTest();
-		    for (uint16_t format: {5u, 20u, 62u, 75u})
+		    for (uint16_t format: {5u, 20u, 62u, 69u, 75u})
 		    {
 			    const auto source = EmitValidatedImageModule(MakeImageModule(71u, format));
-			    const char* token = format == 5u ? "R8ui" : format == 20u ? "R32ui" : format == 62u ? "Rg32ui" : "Rgba32ui";
+			    const char* token = format == 5u    ? "R8ui"
+			                        : format == 20u ? "R32ui"
+			                        : format == 62u ? "Rg32ui"
+			                        : format == 69u ? "Rgba16ui"
+			                                        : "Rgba32ui";
 			    const auto declaration = Core::String8::FromPrintf("%%ImageL = OpTypeImage %%uint 2D 0 0 0 2 %s", token);
 			    RequireImageModule(source.ContainsStr(declaration), "exact typed storage format");
 			    RequireImageModule(source.ContainsStr("OpCapability StorageImageExtendedFormats") == (format == 5u || format == 62u),
@@ -590,6 +621,11 @@ TEST(EmulatorGraphicsResources, WritableNumericAdmissionIgnoresSampledDescriptor
 		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
 		    RequireImageModule(plan.supported && plan.descriptor_view[1] != plan.descriptor_view[2] && plan.extended_formats,
 		                       "R8ui and R32ui use separate exact views");
+		    textures.desc[1].texture.fields[1] = 69u << 20u;
+		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
+		    RequireImageModule(plan.supported && !plan.extended_formats &&
+		                           std::strcmp(ShaderStorageImageViewOf(plan, plan.descriptor_view[1]).image_format, "Rgba16ui") == 0,
+		                       "16_16_16_16_UINT uses the core Rgba16ui view");
 		    textures.desc[1].texture.fields[1] = 70u << 20u;
 		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
 		    RequireImageModule(!plan.supported && std::strstr(plan.reason, "signed writable") != nullptr, "signed bank is unsupported");
@@ -1031,11 +1067,11 @@ TEST(EmulatorGraphicsResources, VolumeAdmissionNeverTurnsRejectedTilingIntoLinea
 					const bool admitted = Gen5GetVolumeTextureLayout(format, 8u, 16u, depth, 8u, levels, tile, &layout);
 					// SW mode 0 (linear) is a byte-for-byte layout and SW modes 5 and 9 the SW_4KB_S and
 					// SW_64KB_S volume patterns of every element size. SW mode 27 is a thin volume whose
-					// slices are 2D-array layers. Any other tile mode, or a mip chain, must stay rejected
-					// instead of being read as linear.
+					// slices are 2D-array layers, mip chain included. Any other tile mode, or a mip chain
+					// in another mode, must stay rejected instead of being read as linear.
 					Gen5TextureArrayLayout slices {};
-					const bool thin = tile == 27u && Gen5GetTextureArrayLayout(format, 8u, 16u, 8u, 1u, 27u, depth, &slices);
-					EXPECT_EQ(admitted, levels == 1u && (tile == 0u || tile == 5u || tile == 9u || thin));
+					const bool thin = tile == 27u && Gen5GetTextureArrayLayout(format, 8u, 16u, 8u, levels, 27u, depth, &slices);
+					EXPECT_EQ(admitted, thin || (levels == 1u && (tile == 0u || tile == 5u || tile == 9u)));
 					if (!admitted)
 					{
 						EXPECT_EQ(layout.tiled.size, 0u);

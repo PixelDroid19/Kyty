@@ -92,6 +92,9 @@ struct Decoder::State
 	bool stop_requested = false;
 	std::deque<VideoFrame> video_queue;
 	std::deque<AudioFrame> audio_queue;
+	// Demuxed video packets held while the video queue is full; only the decode worker touches them.
+	std::deque<AVPacket*> held_video;
+	size_t                held_video_bytes = 0;
 #endif
 };
 
@@ -118,6 +121,8 @@ constexpr uint32_t kOutputSampleRate = 48000;
 constexpr uint32_t kOutputChannels   = 2;
 constexpr size_t   kVideoQueueCapacity = 6;
 constexpr size_t   kAudioQueueCapacity = 32;
+// Compressed video the demuxer may hold past a full video queue so that audio keeps flowing.
+constexpr size_t kHeldVideoBytesCapacity = 32u * 1024u * 1024u;
 
 bool SoftwareDecodeAllowed()
 {
@@ -200,6 +205,16 @@ static void SetFfmpegError(Decoder::State* state, Status status, int error, cons
 	SetError(state, status, message.c_str());
 }
 
+static void ReleaseHeldVideo(Decoder::State* state)
+{
+	for (AVPacket* packet: state->held_video)
+	{
+		av_packet_free(&packet);
+	}
+	state->held_video.clear();
+	state->held_video_bytes = 0;
+}
+
 static void FreeState(Decoder::State* state)
 {
 	if (state == nullptr)
@@ -217,6 +232,7 @@ static void FreeState(Decoder::State* state)
 		Kernel::PthreadInterruptibleScope any_syscall;
 		state->worker.join();
 	}
+	ReleaseHeldVideo(state);
 	if (state->resampler != nullptr)
 	{
 		swr_free(&state->resampler);
@@ -660,11 +676,91 @@ static bool FlushCodecs(Decoder::State* state)
 	return DrainVideo(state) && DrainAudio(state);
 }
 
+enum class DecodeRoom
+{
+	Stop,
+	Video,
+	ReadAhead,
+};
+
+// Waits until the worker can progress: a free video slot, or room to read ahead while audio has space.
+static DecodeRoom WaitForDecodeRoom(Decoder::State* state)
+{
+	const bool can_read_ahead = state->audio != nullptr && !state->demux_eof;
+	std::unique_lock<std::mutex> lock(state->mutex);
+	const auto video_room = [state] { return state->video == nullptr || state->video_queue.size() < kVideoQueueCapacity; };
+	state->condition.wait(lock, [&] {
+		return state->stop_requested || video_room() ||
+		       (can_read_ahead && state->audio_queue.size() < kAudioQueueCapacity && state->held_video_bytes < kHeldVideoBytesCapacity);
+	});
+	if (state->stop_requested)
+	{
+		return DecodeRoom::Stop;
+	}
+	return video_room() ? DecodeRoom::Video : DecodeRoom::ReadAhead;
+}
+
+static bool SendVideoPacket(Decoder::State* state, const AVPacket* packet)
+{
+	const int send_result = avcodec_send_packet(state->video, packet);
+	if (send_result < 0 && send_result != AVERROR(EAGAIN))
+	{
+		SetFfmpegError(state, Status::DecodeFailed, send_result, "send video packet");
+		return false;
+	}
+	return true;
+}
+
+static bool SendHeldVideo(Decoder::State* state)
+{
+	AVPacket* packet = state->held_video.front();
+	state->held_video.pop_front();
+	state->held_video_bytes -= static_cast<size_t>(packet->size);
+	const bool sent = SendVideoPacket(state, packet);
+	av_packet_free(&packet);
+	return sent && DrainVideo(state);
+}
+
+static bool HoldVideo(Decoder::State* state)
+{
+	AVPacket* held = av_packet_alloc();
+	if (held == nullptr)
+	{
+		av_packet_unref(state->packet);
+		SetError(state, Status::DecodeFailed, "allocate held video packet");
+		return false;
+	}
+	av_packet_move_ref(held, state->packet);
+	state->held_video_bytes += static_cast<size_t>(held->size);
+	state->held_video.push_back(held);
+	return true;
+}
+
+// The end of input sends every held video packet, waiting for free video slots, before flushing the codecs.
+static bool FinishInput(Decoder::State* state)
+{
+	while (!state->held_video.empty())
+	{
+		if (WaitForDecodeRoom(state) == DecodeRoom::Stop || !SendHeldVideo(state))
+		{
+			return false;
+		}
+	}
+	return FlushCodecs(state);
+}
+
+// A guest may wait for a first audio frame before it takes any video frame, so demuxing continues past a full
+// video queue while audio has room, holding the compressed video until a slot frees.
 static bool Pump(Decoder::State* state)
 {
-	if (state == nullptr || state->demux_eof)
+	const DecodeRoom room = WaitForDecodeRoom(state);
+	if (room == DecodeRoom::Stop)
 	{
-		return FlushCodecs(state);
+		return false;
+	}
+	if (room == DecodeRoom::Video && !state->held_video.empty())
+	{
+		return SendHeldVideo(state);
 	}
 	const int result = av_read_frame(state->format, state->packet);
 	if (result < 0)
@@ -675,14 +771,16 @@ static bool Pump(Decoder::State* state)
 			return false;
 		}
 		state->demux_eof = true;
-		return FlushCodecs(state);
+		return FinishInput(state);
 	}
 	if (state->packet->stream_index == state->video_stream && state->video != nullptr)
 	{
-		const int send_result = avcodec_send_packet(state->video, state->packet);
-		if (send_result < 0 && send_result != AVERROR(EAGAIN))
+		if (room == DecodeRoom::ReadAhead)
 		{
-			SetFfmpegError(state, Status::DecodeFailed, send_result, "send video packet");
+			return HoldVideo(state);
+		}
+		if (!SendVideoPacket(state, state->packet))
+		{
 			av_packet_unref(state->packet);
 			return false;
 		}
@@ -698,7 +796,8 @@ static bool Pump(Decoder::State* state)
 		}
 	}
 	av_packet_unref(state->packet);
-	return DrainVideo(state) && DrainAudio(state);
+	// A full video queue takes no new frame; the decoder keeps it until a slot frees.
+	return (room == DecodeRoom::ReadAhead || DrainVideo(state)) && DrainAudio(state);
 }
 
 static void DecodeLoop(Decoder::State* state)
@@ -756,6 +855,7 @@ static bool RepositionInput(Decoder::State* state, uint64_t time_ms)
 		SetError(state, Status::DecodeFailed, "reset audio resampler");
 		return false;
 	}
+	ReleaseHeldVideo(state);
 	state->demux_eof            = false;
 	state->video_eof            = state->video == nullptr;
 	state->audio_eof            = state->audio == nullptr;
@@ -1912,6 +2012,16 @@ uint32_t ElementaryAudioDecoder::SampleRate() const
 uint32_t ElementaryAudioDecoder::BlockAlign() const
 {
 	return state_->block_align;
+}
+
+uint32_t ElementaryAudioDecoder::Atrac9FrameSamples() const
+{
+	return state_->atrac9_frame_samples;
+}
+
+uint32_t ElementaryAudioDecoder::Atrac9FramesPerSuperframe() const
+{
+	return state_->atrac9_frames;
 }
 
 } // namespace Kyty::Emulator::AudioVideoBackend

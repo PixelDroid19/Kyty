@@ -6,6 +6,140 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Fishing title: a write-back requested with an incomplete use stopped the run (2026-11-11, fixed)
+
+`PPSA09076 - DREDGE`, first-gameplay route, Intel Arc A770, ANV Mesa 26.2.6, strict, 60 fps limit.
+
+- **Observation.** Five of seven bounded runs stopped between 33 s and 90 s with "GpuMemory write-back requested
+  before exact resource dependencies completed", always `type=StorageBuffer`, pending on queue 8. The stop also
+  happened on the build before the in-place vertex streams, so it is not caused by them.
+- **Localized (temporary backtrace and object dump, two stops).** The request comes from an indexed draw:
+  the device-address read preparation writes back the storage ranges that the pending scan did not publish. One
+  thread did the pending mark, the pending scan and the write-back, so it is not a race between command
+  processors. The object is a 0x100-byte storage buffer, one block, no aliases, with one incomplete use on the
+  consumer's own queue. The pending scan, 51 us earlier, had ruled it publishable, and the publication step had
+  recorded an overlay for it 11 us before the write-back scan.
+- **Cause.** An overlay holds for one flip after guest memory last held its bytes. The flip counter advances on
+  the presenting thread. An overlay that the pending scan and the publication saw holding can therefore stop
+  holding before the write-back scan of the same preparation asks again; the scan then asked for a write-back
+  of an object whose use had not completed. The 2026-11-07 fix in `docs/titles/robot-platformer.md` ("Pending-
+  storage scans missed overlays that aged out") invalidated memoized scans at a flip; this is the window that
+  remained inside one preparation.
+- **Fix.** The write-back scan reports the first incomplete use as a dependency in place of requesting the
+  write-back. The preparation returns it as a pending write-back and the existing draw retry waits for that
+  submission (on the device when it can, else on the host) and prepares again.
+- **Verification.** One 110 s run with the fix and a temporary counter: exit 0, the new path taken 4 times, each
+  with an overlay two flips old and 20-386 us after the pending scan. Captures at 60 s and 100 s show the town
+  with intact geometry, HUD and text (material score healthy, 250-263 quantized colors, as in the run without
+  in-place streams). Two runs without the counter, the second on the final build, ran 104 s and 103 s to the
+  end with exit 0. The wait applies to the case that used to stop and no other: the scan collects only objects
+  in use, and the condition is the one that guarded the stop (an incomplete use on an object still in use).
+- **Limit.** The stop was intermittent (two of seven runs did not show it before the fix), so one passing run
+  with the path engaged is the evidence; the wait costs one submission wait on the rare draw that takes it.
+
+## Fishing title: per-draw command-processor costs at the dock (2026-11-07, partly fixed)
+
+`PPSA09076 - DREDGE`, first-gameplay route, Intel Arc A770, ANV Mesa 26.2.5, 60 fps limit. The dock is CP-bound:
+about 1,170 draws and 27 ms of command-processor time per frame (about 23 us per draw), 34 fps, the GPU 45 % busy.
+A `cpu-clock:u` profile with call graphs is flat; no single item passes 6 %. Every A/B below alternates the change
+on and off every 10 s inside one run. It compares CP us per draw per window with matched draws per frame. The four
+commits below cut about 11 % of CP time per draw, each measured on its own.
+
+- **Probe selectors read on every draw (c0a31996e).** The vertex clip, pixel input and fragment tap probe
+  resolvers read their environment selectors on every draw: `getenv` plus its `strncmp` cost 2.2 % of the CP thread.
+  The draw paths now check once whether any selector is set and skip the resolvers otherwise; with no selector they
+  returned their disabled configs anyway. The resolvers are unchanged and their tests call them directly. A/B
+  together with the pipeline index key below: 23.41 ± 0.06 to 22.77 ± 0.06 us per draw (-2.7 %), 33.3 to 34.1 fps,
+  10 windows per arm. The lookup statistics of the same run attribute about 0.2 % of that to the index key, so the
+  selector check is worth about 2.5 %.
+- **Per-draw allocations of input infos and pipeline parameters (321f64f2f).** A Kyty `Vector` allocates even when
+  empty, so every vertex input info and every heap copy of the pipeline parameters allocates and clears memory on
+  each draw. The draw paths now build the geometry-pass input info only for a geometry pass. Pipeline creation keeps
+  the lookup parameters on the stack and copies them to the heap only on a miss. A/B: 23.59 ± 0.14 to
+  22.92 ± 0.13 us per draw (-2.8 %), 33.0 to 33.9 fps. That is more than the profile share of the removed calls.
+- **Pixel input info reset (7fa9b12d2).** `ShaderGetInputInfoPS` began with `*ps_info = {}`, which builds, copies and
+  frees a whole temporary input info. Both draw paths now value-initialize a fresh one and the reset is gone. The
+  first A/B ran with load on the host: six of its 20 windows were 1 to 6 us slower, in both arms, and the means
+  showed no difference. In its clean windows the change was about 0.3 us faster. A repeat on a quiet host:
+  23.85 ± 0.17 to 23.41 ± 0.15 us per draw (-1.8 %), median -0.40 us, 8 of 10 adjacent window pairs faster.
+- **Pipeline index key over pass and static parameters (measured, not committed).** The pipeline index hashes only
+  the shader pair, so `Find` compares every pipeline of that pair. Adding the render pass and the static parameter
+  bytes to the key cut graphics lookups from 412 to 360 ns but raised compute lookups from 298 to 371 ns (hashing
+  the parameters). What remains is hashing and pointer chasing, not the candidate walk; about 0.2 % of the CP thread.
+- **Pixel usage memo (measured, not committed).** About half of the pixel `ShaderParseUsage2` calls repeat within a
+  frame with the same program, user SGPRs and descriptor words. A memo keyed on those inputs, revalidated by
+  re-reading every descriptor word the parse read, matched production output on 536,933 hits, but saved only
+  about 1.3 % (under two standard errors): copying the 7.2 KB bind resources and the reads log costs half of what
+  the parse saves.
+- **Snapshot retention (19a56a245).** About 25,000 descriptor set misses per second against 37,000 hits; 97 % of
+  the misses combine storage buffer ids that were all seen before. Most snapshot keys return 256 to 512 recordings
+  after their last capture (about 76 recordings per frame), and 37 % of those returning captures hold the same
+  bytes. Entries were recycled after 64 recordings, so no key found its snapshot or its stale entry again: each
+  recapture took another key's oldest buffer and the combinations seldom recurred. That is also why taking the
+  key's own stale entry first changed nothing. Snapshots now stay for 1024 recordings. A/B, steady windows:
+  25.08 ± 0.21 to 23.92 ± 0.20 us per draw (-4.6 %), 14 of 17 adjacent window pairs faster, 34.7 to 35.6 fps,
+  descriptor set misses 50 % to 40 %, snapshot pool peak 118 to 215 MB. The gain is specific to this title:
+  `PPSA28311 - Absolum` keeps 31 % misses with a pool under 1 MB, and `PPSA21567 - Astro Bot` keeps 70 % misses
+  with about 27,000 pool entries instead of 6,000 at the same 265 MB peak.
+- **Retention side effects (967d9ce88).** With chains surviving across frames, covering captures grew into another
+  frame's windows: `PPSA21567 - Astro Bot` copied 35 KB per draw instead of 11 KB and spent 141 instead of 129 us
+  of CP per draw on its scripted route (12.2 instead of 13.7 fps). Unions now take only a snapshot leased in the
+  last 64 recordings: 130 us per draw, 13.7 fps. Past 256 MB (half the pool budget) an aged take ignores the
+  retention, so a title streaming hundreds of MB per second does not fill the pool. This title afterwards: 21.6 us
+  per draw at 35.2 fps on the dock (1,130 to 1,220 draws per frame).
+- **Remaining per-draw costs (same profile, before the change).** Pixel input info 14.7 % (its parse 10.1 %),
+  pipeline lookup 4.7 % (`Find` 1.8 %, shader ids 1.9 %), guest device address preparation 3.9 %, transient
+  read-only uploads 3.4 %, descriptor binding 3.2 %, allocation 4.9 % (empty Kyty vectors allocate) and zeroing
+  2.9 % (each input info clears about 7 KB of bind resources). The two commits above remove part of the last two.
+- **Measured and excluded (2026-11-07).** A run on the build above, on the same day as the runs below, gave 21.99 us
+  per draw and 34.5 fps. Single runs vary by about 2 %. Each change got one run:
+  - An exact memo of the pixel usage parse: 23.2 us per draw.
+  - Kyty vectors that start on one shared empty array and allocate on first write: 22.33 us. Every stage rose
+    evenly. The allocations it removes are under 1 % of CP, and every vector operation gains a static-init check.
+  - 65,536 live descriptor sets instead of 16,384: 22.90 us. Descriptor finalization fell 0.3 to 0.7 us per draw,
+    but index binding (+20 %), vertex binding (+10 %), storage descriptors (+8 %) and transient uploads (+14 %)
+    rose, in both runs at that limit.
+  - 4,096 retained recordings instead of 1,024: 22.47 us. Transient uploads -23 %, finalization +6 %.
+- **Where descriptor misses come from (diagnostic build, 16,384 live sets).**
+  - Lookups: 70,000 per second, 31.7 % of them misses.
+  - Misses: 32 % are sets trimmed at the live limit (trims run at 22,000 sets per second); 62 % are combinations
+    never built before, made only of buffer and image ids that earlier sets used; 6 % carry a new buffer id.
+  - Snapshot entries for captures that need one: 64 % are the key's own stale entry, 28 % are another key's aged
+    entry, 7 % are new; 2,400 keys per second were never captured before.
+  - Sets are keyed by buffer identity, so rotating snapshot entries keep producing new combinations. Pool
+    retention cannot remove them; buffer binding that does not depend on the buffer's identity can.
+  - The command-processor thread spends 6.5-6.8 % of its time in the kernel, so submissions are not the cost.
+- **Where the command-processor thread spends its time (diagnostic build, 40-120 s).**
+  - Timers at the batch loop's call sites: command processing 26.0 ms per frame (88 %), waiting for the next guest
+    batch 2.0 ms (6.7 %), the batch-end flush 1.3 ms (4.5 %). Suspended-run and submission-completion waits are
+    zero. Blocking outside command processing is not a lever.
+  - Inclusive profile shares on the build above: snapshot capture 13.4 %, pixel input info 13.6 % (its usage
+    parse 10.6 %), descriptor lookup 11.7 %, pipeline lookup 6.7 %, GPU object lookup 7.5 %. Allocator and memset
+    leaves total 12 %, spread over many callers; the empty-vector change above removed the default-constructed
+    ones without a gain.
+  - With the GPU 45 % busy and a 60 fps cap, the title can gain up to about 74 %, which needs about half the
+    command-processor time per draw. No single subtree holds that: it takes the three largest ones together, or
+    recording draws off the single command-processor thread.
+- **Excluded: push descriptors for the vertex-stage set.**
+  - Sizing (diagnostic build): vertex lookups 1141 per frame, 31.5 % misses, 478 ns per hit and 2537 ns per miss,
+    1.28 ms per frame; pixel lookups 1.38 ms per frame. No set holds more than 23 descriptors, within the 32 that
+    Vulkan 1.4 guarantees for a push set.
+  - Pushing the vertex set instead of looking it up (one run, 40-120 s): 32.30 us per draw and 24.4 fps against
+    21.99 and 34.5. Descriptor finalization rose from 2.71 to 11.68 us per draw.
+  - A call-graph profile puts 34 % of the command-processor thread in a `memmove` inside the Intel Vulkan driver
+    (Mesa 26.2.5), called from `vkCmdPushDescriptorSet`. The cost is in the driver, so push descriptors do not pay
+    on this driver.
+- **Own-chain relink of a recaptured stale snapshot (5e80abc9e).** A capture that recycles its key's own stale
+  entry erased the key's chain from the snapshot map when the chain emptied, then inserted it again. The entry is now
+  unlinked and relinked in the chain it already holds, and a single-snapshot chain keeps its write-tracking backoff.
+  One run against the 21.99 us run above: 22.04 us per draw (within run noise), transient uploads -12 %, storage
+  descriptors -4 %. Its 33.5 fps include one 1.9 s swapchain acquire stall; without that second, 33.7 fps.
+- **Per-function work on this title is done.** The profile above stays flat after these changes: no subtree holds
+  more than about 14 % of the command-processor thread, and the last single-function changes moved it by less than
+  run noise. The remaining gain (up to about 74 % at 45 % GPU load) needs about half the CP time per draw, which only
+  descriptor binding that does not depend on buffer identity or recording draws off the single command-processor
+  thread can reach (`docs/bringup/cp-draw-plan.md`).
+
 ## Fishing title: gray rectangles behind the first dialogue portrait (2026-10-23, checked)
 
 - **Observation.** In the first character dialogue, a tan panel behind the

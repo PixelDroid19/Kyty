@@ -799,37 +799,28 @@ static void AgentPadApplyToButtonsAndAxes(bool advance_tap, uint32_t* buttons, u
 	{
 		*buttons |= g_agent_pad.buttons | tap_bits;
 	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::LeftX)] && left_x != nullptr)
+	// A live axis off rest wins, as over a route: an agent that released a stick by writing its rest value
+	// must not pin the user's stick there for the rest of the session.
+	const auto apply_axis = [](Axis axis, uint8_t rest, uint8_t* value)
 	{
-		*left_x = g_agent_pad.axes[static_cast<int>(Axis::LeftX)];
-	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::LeftY)] && left_y != nullptr)
-	{
-		*left_y = g_agent_pad.axes[static_cast<int>(Axis::LeftY)];
-	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::RightX)] && right_x != nullptr)
-	{
-		*right_x = g_agent_pad.axes[static_cast<int>(Axis::RightX)];
-	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::RightY)] && right_y != nullptr)
-	{
-		*right_y = g_agent_pad.axes[static_cast<int>(Axis::RightY)];
-	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::TriggerLeft)] && l2 != nullptr)
-	{
-		*l2 = g_agent_pad.axes[static_cast<int>(Axis::TriggerLeft)];
-		if (*l2 > 0 && buttons != nullptr)
+		if (g_agent_pad.axis_set[static_cast<int>(axis)] && value != nullptr && *value == rest)
 		{
-			*buttons |= PAD_BUTTON_L2;
+			*value = g_agent_pad.axes[static_cast<int>(axis)];
 		}
-	}
-	if (g_agent_pad.axis_set[static_cast<int>(Axis::TriggerRight)] && r2 != nullptr)
+	};
+	apply_axis(Axis::LeftX, 128, left_x);
+	apply_axis(Axis::LeftY, 128, left_y);
+	apply_axis(Axis::RightX, 128, right_x);
+	apply_axis(Axis::RightY, 128, right_y);
+	apply_axis(Axis::TriggerLeft, 0, l2);
+	apply_axis(Axis::TriggerRight, 0, r2);
+	if (l2 != nullptr && *l2 > 0 && buttons != nullptr)
 	{
-		*r2 = g_agent_pad.axes[static_cast<int>(Axis::TriggerRight)];
-		if (*r2 > 0 && buttons != nullptr)
-		{
-			*buttons |= PAD_BUTTON_R2;
-		}
+		*buttons |= PAD_BUTTON_L2;
+	}
+	if (r2 != nullptr && *r2 > 0 && buttons != nullptr)
+	{
+		*buttons |= PAD_BUTTON_R2;
 	}
 }
 
@@ -1732,6 +1723,23 @@ int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable)
 	return OK;
 }
 
+// The one pad is the host's local controller, never a remote-play client.
+int KYTY_SYSV_ABI PadIsRemoteController(int handle, bool* is_remote)
+{
+	PRINT_NAME();
+
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	if (is_remote == nullptr)
+	{
+		return PAD_ERROR_INVALID_ARG;
+	}
+	*is_remote = false;
+	return OK;
+}
+
 int KYTY_SYSV_ABI PadSetTiltCorrectionState(int handle, bool enable)
 {
 	PRINT_NAME();
@@ -1983,7 +1991,15 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 
 	PadScriptState scripted {};
 	(void)g_pad_script.Sample(&scripted);
-	const auto script_axis = [](int8_t value) -> uint8_t { return value < 0 ? 0u : (value > 0 ? 255u : 128u); };
+	// A live stick off rest wins over the route, so the user can still steer while a route holds that axis.
+	const auto script_axis = [&scripted](Axis axis, int8_t value, uint8_t live) -> uint8_t
+	{
+		if ((scripted.axis_mask & (1u << static_cast<uint8_t>(axis))) == 0 || live != 128u)
+		{
+			return live;
+		}
+		return value < 0 ? 0u : (value > 0 ? 255u : 128u);
+	};
 	// A pressed trigger button always carries its analog value; scripted L2/R2 and keyboard L2/R2,
 	// which have no analog travel, are fully pressed.
 	const auto script_trigger = [&scripted](uint32_t button, uint8_t value, uint32_t held) -> uint8_t
@@ -1992,18 +2008,10 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	const uint64_t now_ts = Kernel::KernelGetProcessTime();
 
 	data->buttons                = state.buttons | auto_buttons | scripted.buttons;
-	data->left_stick_x           = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftX))) != 0
-	                                    ? script_axis(scripted.left_x)
-	                                    : state.axes[static_cast<int>(Axis::LeftX)];
-	data->left_stick_y           = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftY))) != 0
-	                                    ? script_axis(scripted.left_y)
-	                                    : state.axes[static_cast<int>(Axis::LeftY)];
-	data->right_stick_x          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightX))) != 0
-	                                    ? script_axis(scripted.right_x)
-	                                    : state.axes[static_cast<int>(Axis::RightX)];
-	data->right_stick_y          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightY))) != 0
-	                                    ? script_axis(scripted.right_y)
-	                                    : state.axes[static_cast<int>(Axis::RightY)];
+	data->left_stick_x           = script_axis(Axis::LeftX, scripted.left_x, state.axes[static_cast<int>(Axis::LeftX)]);
+	data->left_stick_y           = script_axis(Axis::LeftY, scripted.left_y, state.axes[static_cast<int>(Axis::LeftY)]);
+	data->right_stick_x          = script_axis(Axis::RightX, scripted.right_x, state.axes[static_cast<int>(Axis::RightX)]);
+	data->right_stick_y          = script_axis(Axis::RightY, scripted.right_y, state.axes[static_cast<int>(Axis::RightY)]);
 	data->analog_buttons_l2      = script_trigger(PAD_BUTTON_L2, state.axes[static_cast<int>(Axis::TriggerLeft)], state.buttons);
 	data->analog_buttons_r2      = script_trigger(PAD_BUTTON_R2, state.axes[static_cast<int>(Axis::TriggerRight)], state.buttons);
 	AgentPadApplyToButtonsAndAxes(true, &data->buttons, &data->left_stick_x, &data->left_stick_y, &data->right_stick_x,
@@ -2043,7 +2051,15 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 	}
 	PadScriptState scripted {};
 	const bool script_active = g_pad_script.Sample(&scripted);
-	const auto script_axis = [](int8_t value) -> uint8_t { return value < 0 ? 0u : (value > 0 ? 255u : 128u); };
+	// A live stick off rest wins over the route, so the user can still steer while a route holds that axis.
+	const auto script_axis = [&scripted](Axis axis, int8_t value, uint8_t live) -> uint8_t
+	{
+		if ((scripted.axis_mask & (1u << static_cast<uint8_t>(axis))) == 0 || live != 128u)
+		{
+			return live;
+		}
+		return value < 0 ? 0u : (value > 0 ? 255u : 128u);
+	};
 	// A pressed trigger button always carries its analog value; scripted L2/R2 and keyboard L2/R2,
 	// which have no analog travel, are fully pressed.
 	const auto script_trigger = [&scripted](uint32_t button, uint8_t value, uint32_t held) -> uint8_t
@@ -2053,18 +2069,10 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 	{
 		std::memset(&data[i], 0, sizeof(data[i]));
 		data[i].buttons                = states[i].buttons | scripted.buttons;
-		data[i].left_stick_x           = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftX))) != 0
-		                                    ? script_axis(scripted.left_x)
-		                                    : states[i].axes[static_cast<int>(Axis::LeftX)];
-		data[i].left_stick_y           = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftY))) != 0
-		                                    ? script_axis(scripted.left_y)
-		                                    : states[i].axes[static_cast<int>(Axis::LeftY)];
-		data[i].right_stick_x          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightX))) != 0
-		                                    ? script_axis(scripted.right_x)
-		                                    : states[i].axes[static_cast<int>(Axis::RightX)];
-		data[i].right_stick_y          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightY))) != 0
-		                                    ? script_axis(scripted.right_y)
-		                                    : states[i].axes[static_cast<int>(Axis::RightY)];
+		data[i].left_stick_x           = script_axis(Axis::LeftX, scripted.left_x, states[i].axes[static_cast<int>(Axis::LeftX)]);
+		data[i].left_stick_y           = script_axis(Axis::LeftY, scripted.left_y, states[i].axes[static_cast<int>(Axis::LeftY)]);
+		data[i].right_stick_x          = script_axis(Axis::RightX, scripted.right_x, states[i].axes[static_cast<int>(Axis::RightX)]);
+		data[i].right_stick_y          = script_axis(Axis::RightY, scripted.right_y, states[i].axes[static_cast<int>(Axis::RightY)]);
 		data[i].analog_buttons_l2 = script_trigger(PAD_BUTTON_L2, states[i].axes[static_cast<int>(Axis::TriggerLeft)], states[i].buttons);
 		data[i].analog_buttons_r2 = script_trigger(PAD_BUTTON_R2, states[i].axes[static_cast<int>(Axis::TriggerRight)], states[i].buttons);
 		// Advance the tap FSM at most once per PadRead call (first sample only) so a

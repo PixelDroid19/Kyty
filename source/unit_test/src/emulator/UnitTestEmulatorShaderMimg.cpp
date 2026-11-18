@@ -2532,4 +2532,113 @@ TEST(EmulatorShaderMimg, ResolvesSampledDescriptorsThroughShiftedScalarWindows)
 	EXPECT_EQ(ShaderFindImageSamplerDescriptor(partial_sample, bind, 0), 0);
 }
 
+TEST(EmulatorShaderMimg, ResolvesSamplerRestoredFromVgprLanes)
+{
+	enum class Break
+	{
+		None,
+		VgprRewritten,
+		DynamicLane
+	};
+	const auto make = [](Break broken)
+	{
+		ShaderCode code;
+		code.SetType(ShaderType::Compute);
+		auto add = [&code](ShaderInstructionType type, ShaderOperand dst, std::initializer_list<ShaderOperand> sources)
+		{
+			ShaderInstruction inst {};
+			inst.pc      = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+			inst.type    = type;
+			inst.dst     = dst;
+			inst.src_num = static_cast<int>(sources.size());
+			int source_index = 0;
+			for (const auto source: sources)
+			{
+				inst.src[source_index++] = source;
+			}
+			code.GetInstructions().Add(inst);
+		};
+		// The S# in s[10:13] is parked in lanes 0-3 of v1, s[10:13] is reused, and the
+		// words come back into s[20:23] for the sample.
+		for (int word = 0; word < 4; ++word)
+		{
+			add(ShaderInstructionType::VWritelaneB32, TileVgpr(1), {TileSgpr(10 + word), TileConstant(static_cast<uint32_t>(word))});
+		}
+		for (int word = 0; word < 4; ++word)
+		{
+			add(ShaderInstructionType::SMovB32, TileSgpr(10 + word), {TileSgpr(40 + word)});
+		}
+		if (broken == Break::VgprRewritten)
+		{
+			add(ShaderInstructionType::VMovB32, TileVgpr(1), {TileVgpr(0)});
+		}
+		for (int word = 0; word < 4; ++word)
+		{
+			const auto lane = broken == Break::DynamicLane && word == 2 ? TileSgpr(30) : TileConstant(static_cast<uint32_t>(word));
+			add(ShaderInstructionType::VReadlaneB32, TileSgpr(20 + word), {TileVgpr(1), lane});
+		}
+		add(ShaderInstructionType::ImageSampleLz, TileVgpr(4), {TileVgpr(0), TileSgpr(2, 8), TileSgpr(20, 4)});
+		add(ShaderInstructionType::SEndpgm, {}, {});
+		return code;
+	};
+	ShaderBindResources bind {};
+	bind.textures2D.textures_num           = 1;
+	bind.textures2D.desc[0].usage          = ShaderTextureUsage::ReadOnly;
+	bind.textures2D.desc[0].start_register = 2;
+	bind.samplers.samplers_num             = 1;
+	bind.samplers.start_register[0]        = 10;
+	const auto sampler_of = [&](Break broken)
+	{
+		const auto code = make(broken);
+		ShaderAssociateSampledTextureSamplers(code, &bind, 0);
+		return ShaderFindImageSamplerDescriptor(code.GetInstructions().At(code.GetInstructions().Size() - 2u), bind, 0);
+	};
+
+	EXPECT_EQ(sampler_of(Break::None), 0);
+	EXPECT_EQ(bind.textures2D.desc[0].sampler_indices_mask, 0x1u);
+	EXPECT_EQ(sampler_of(Break::VgprRewritten), -1);
+	EXPECT_EQ(bind.textures2D.desc[0].sampler_indices_mask, 0x0u);
+	EXPECT_EQ(sampler_of(Break::DynamicLane), -1);
+}
+
+TEST(EmulatorShaderMimg, ResolvesExtendedSamplerBehindShiftedUserData)
+{
+	constexpr int kBase = 8;
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	ShaderInstruction load {};
+	load.type    = ShaderInstructionType::SLoadDwordx4;
+	load.dst     = TileSgpr(40, 4);
+	load.src_num = 2;
+	load.src[0]  = TileSgpr(24 + kBase, 2);
+	load.src[1]  = TileConstant(144);
+	code.GetInstructions().Add(load);
+	ShaderInstruction sample {};
+	sample.pc      = 8;
+	sample.type    = ShaderInstructionType::ImageSampleLz;
+	sample.dst     = TileVgpr(4);
+	sample.src_num = 3;
+	sample.src[0]  = TileVgpr(0);
+	sample.src[1]  = TileSgpr(kBase, 8);
+	sample.src[2]  = TileSgpr(40, 4);
+	code.GetInstructions().Add(sample);
+	ShaderInstruction end {};
+	end.pc   = 16;
+	end.type = ShaderInstructionType::SEndpgm;
+	code.GetInstructions().Add(end);
+
+	ShaderBindResources bind {};
+	bind.textures2D.textures_num           = 1;
+	bind.textures2D.desc[0].usage          = ShaderTextureUsage::ReadOnly;
+	bind.textures2D.desc[0].start_register = 0;
+	bind.samplers.samplers_num             = 1;
+	bind.samplers.extended[0]              = true;
+	bind.samplers.start_register[0]        = 52; // EUD dwords 36-39, byte 144
+	bind.extended.used                     = true;
+	bind.extended.start_register           = 24;
+	ShaderAssociateSampledTextureSamplers(code, &bind, kBase);
+	EXPECT_EQ(ShaderFindImageSamplerDescriptor(sample, bind, kBase), 0);
+	EXPECT_EQ(bind.textures2D.desc[0].sampler_indices_mask, 0x1u);
+}
+
 UT_END();

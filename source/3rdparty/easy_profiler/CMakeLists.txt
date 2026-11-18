@@ -38,6 +38,10 @@ endif()
 
 add_library(easy_profiler_obj OBJECT ${easy_profiler_src})
 add_library(easy_profiler STATIC $<TARGET_OBJECTS:easy_profiler_obj>)
+if(WIN32)
+	# The profiler's network listener uses Winsock.
+	target_link_libraries(easy_profiler PUBLIC ws2_32)
+endif()
 
 target_include_directories(easy_profiler PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 

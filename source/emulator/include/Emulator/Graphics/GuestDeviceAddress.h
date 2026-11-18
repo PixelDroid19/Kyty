@@ -5,8 +5,10 @@
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
+struct VkBuffer_T;
 struct VkCommandBuffer_T;
 
 #ifdef KYTY_EMU_ENABLED
@@ -17,6 +19,8 @@ struct GraphicContext;
 struct VulkanBuffer;
 struct GuestInPlaceWindow;
 struct GpuMemoryStoragePublication;
+struct GpuMemoryStorageWriteIdentity;
+struct GpuMemoryStorageSnapshot;
 
 // Guest GPU-visible mappings imported as host-pointer device memory, so a
 // shader can dereference a computed guest address. Guest and host virtual
@@ -51,6 +55,22 @@ struct GuestDeviceAddressDirectory
 
 [[nodiscard]] GuestDeviceAddressDirectory GuestDeviceAddressBuildDirectory(const uint64_t* sorted_bases, uint32_t count);
 
+// One table entry as the device reads it.
+struct GuestDeviceAddressEntry
+{
+	uint64_t guest  = 0;
+	uint64_t size   = 0;
+	uint64_t device = 0;
+	uint64_t span   = 0;
+};
+
+// `entries` with the bytes of each of `overlays` cut out and translated by the
+// overlay instead. Inputs and result are sorted by guest base and disjoint; an
+// entry's remaining pieces keep translating from its own device range. A load
+// that starts before an overlay and runs into it still reads the entry.
+[[nodiscard]] std::vector<GuestDeviceAddressEntry> GuestDeviceAddressOverlayEntries(const std::vector<GuestDeviceAddressEntry>& entries,
+                                                                                   const std::vector<GuestDeviceAddressEntry>& overlays);
+
 struct GuestDeviceAddressTable
 {
 	uint64_t address     = 0;
@@ -82,6 +102,14 @@ enum class GuestDeviceAddressPrepareResult: uint8_t
 // preparation. Untouched pages read as zero, like the table's null target.
 void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physical_backing);
 
+// Marks a point after which guest memory may hold pages the GPU must see: a
+// command-processor run begins or ends, or a packet other than a register write
+// or an indexed draw completed, or the emulator wrote guest memory back. The
+// physical population is queried again only after such a point or an announced
+// host write (GpuDirtyPageTracker::HostWriteEpoch), so a page first touched by
+// the guest is imported by the first preparation after the guest orders it.
+void GuestDeviceAddressNoteOrderingPoint() noexcept;
+
 // Must run with GPU submissions quiesced: drops the imports overlapping the
 // range (its protection or contents may have changed); they are imported
 // again on the next use. The range stays registered.
@@ -91,17 +119,34 @@ void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vad
 // every table still retained in the retirement list.
 void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 
+// True when a registered range overlaps [vaddr, vaddr + size).
+bool GuestDeviceAddressOverlapsRegisteredRange(uint64_t vaddr, uint64_t size);
+
 // Writes back GPU results held in Kyty storage-buffer objects over every
 // registered range, so a shader dereferencing guest pointers reads the
 // current guest memory. Call before recording such a dispatch on `consumer`.
 // Results already published to the imported view on that queue are skipped.
-void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
+// True: the reader must first wait for `dependency` (GpuMemoryWriteBackStorageRanges).
+[[nodiscard]] bool GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer,
+                                               SubmissionId* dependency);
 
 // True when a registered range still waits for GPU results held outside storage
 // buffers (GpuMemoryPendingWriteBackOutsideStorage). Storage results reach
 // device-address readers through GuestDeviceAddressPendingWriteBack; these need
 // the processor write-back before the reader is recorded.
 [[nodiscard]] bool GuestDeviceAddressPendingWriteBackOutsideStorage();
+
+// The imported buffer over the guest pages of [vaddr, vaddr + size) and the range's
+// offset in it, so a draw fetches the guest's bytes without a copy. False: the range
+// is not inside one imported run of direct memory. The buffer lives until its range
+// is released or invalidated, which runs with submissions quiesced. `device`, when
+// given, receives the device address of vaddr.
+[[nodiscard]] bool GuestDeviceAddressResolveDrawInput(const GraphicContext* ctx, uint64_t vaddr,
+                                                      uint64_t size, VkBuffer_T** buffer,
+                                                      uint64_t* offset, uint64_t* device = nullptr);
+// Moves whenever an imported buffer leaves the registry: a buffer
+// GuestDeviceAddressResolveDrawInput returned stays valid while this is unchanged.
+[[nodiscard]] uint64_t GuestDeviceAddressChunkRemovals();
 
 // Creates `out` directly over the guest pages of [vaddr, vaddr + size), so device
 // writes reach guest memory without a copy and CPU stores reach the device. False:
@@ -129,6 +174,52 @@ void               GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const G
 // from stale guest bytes before the CPU write-back.
 [[nodiscard]] bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source,
                                                        uint64_t vaddr, uint64_t size);
+
+// For a result GuestDeviceAddressRecordPublication refuses (a device write over part
+// of a cache line), records into `cmd` a copy of the storage object into a
+// device-local slot that the table maps over the object's guest range. Device-address
+// reads recorded later on the queue of `recording` observe the result in GPU order;
+// guest memory still receives it from the object's write-back. The slot stays mapped
+// until the guest range changes (that write-back included), a device write lands
+// over it, or a reader of another queue prepares (GuestDeviceAddressValidateOverlays).
+// Completion defers the write-back of an object rewritten every frame, so the copy
+// also goes to host-readable staging that write-back completion publishes
+// (GuestDeviceAddressTakeSnapshots). Refuses when staging is full, and once two flips
+// passed since guest memory last matched the object; the caller's host wait then
+// writes it back.
+[[nodiscard]] bool GuestDeviceAddressRecordOverlay(GraphicContext* ctx, VkCommandBuffer_T* cmd, SubmissionId recording,
+                                                   const GpuMemoryStoragePublication& publication);
+
+// Whether readers on `consumer` observe this exact write of the object at
+// [vaddr, vaddr + size) through an overlay, within the flip it may be held for.
+// GPU memory asks this under its lock.
+[[nodiscard]] bool GuestDeviceAddressOverlayHolds(const GpuMemoryStorageWriteIdentity& identity, uint64_t vaddr, uint64_t size,
+                                                  GpuQueueId consumer);
+
+// The object's write-back left guest [vaddr, vaddr + size) holding this write; when
+// `rebaselined`, the range matches the tracker at `guest_generation`. An overlay of the
+// same object keeps its slot instead of being dropped as changed, and may be held for
+// another two flips. Called under the GPU-memory lock.
+void GuestDeviceAddressOverlayWrittenBack(const GpuMemoryStorageWriteIdentity& identity, uint64_t vaddr, uint64_t size,
+                                          bool rebaselined, uint64_t guest_generation);
+
+// A frame was flipped: overlays held since two flips ago stop deferring write-back.
+void GuestDeviceAddressFrameDone();
+
+// Moves out, oldest first, the overlay snapshots whose recording `complete` reports
+// done. Their bytes stay readable until GuestDeviceAddressReleaseSnapshots. Called
+// under the GPU-memory lock.
+[[nodiscard]] std::vector<GpuMemoryStorageSnapshot> GuestDeviceAddressTakeSnapshots(const std::function<bool(SubmissionId)>& complete);
+void GuestDeviceAddressReleaseSnapshots(const std::vector<GpuMemoryStorageSnapshot>& snapshots);
+
+// Frees the staging of snapshots that a write-back of their object superseded, once `complete`
+// reports their recording done: publication skips them and their copy has finished.
+void GuestDeviceAddressReleaseCancelledSnapshots(const std::function<bool(SubmissionId)>& complete);
+
+// Unmaps the overlays a reader on `consumer` must not observe: those of other
+// queues and those whose guest range changed. Call before collecting the
+// consumer's pending storage results.
+void GuestDeviceAddressValidateOverlays(GpuQueueId consumer);
 
 // Records, with the same ordering and range rules as GuestDeviceAddressRecordPublication,
 // `word` repeated over the imported view of `size` bytes at guest address `vaddr`.

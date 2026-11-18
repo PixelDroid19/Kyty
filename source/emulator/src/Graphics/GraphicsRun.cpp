@@ -12,6 +12,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GpuSubmissionPublicationGate.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/GuestDeviceAddress.h"
@@ -46,6 +47,7 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+#include "GraphicsRunDrawFront.h"
 #include "GraphicsRunInternal.h"
 
 namespace Kyty::Libs::Graphics {
@@ -343,6 +345,97 @@ void Gpu::WaitLocked()
 	}
 }
 
+uint64_t Gpu::TakeReleaseTicket()
+{
+	ReleaseTicket ticket;
+	const auto    note_graphics = [&](GraphicsRing* ring)
+	{
+		const uint64_t enqueued = ring->EnqueuedBatches();
+		if (!ring->IsRetired(enqueued))
+		{
+			ticket.graphics.emplace_back(ring, enqueued);
+		}
+	};
+	note_graphics(m_gfx_ring);
+	for (auto* ring: m_agc_async_ring)
+	{
+		if (ring != nullptr)
+		{
+			note_graphics(ring);
+		}
+	}
+	for (auto* ring: m_compute_ring)
+	{
+		if (ring == nullptr)
+		{
+			continue;
+		}
+		const uint64_t enqueued = ring->EnqueuedBatches();
+		if (!ring->IsRetired(enqueued))
+		{
+			ticket.compute.emplace_back(ring, enqueued);
+		}
+	}
+	if (ticket.graphics.empty() && ticket.compute.empty())
+	{
+		return 0;
+	}
+
+	std::lock_guard<std::mutex> lock(m_ticket_mutex);
+	PruneRetiredTicketsLocked();
+	ticket.id = ++m_last_ticket_id;
+	m_release_tickets.push_back(std::move(ticket));
+	return m_last_ticket_id;
+}
+
+bool Gpu::IsReleaseTicketFinished(const ReleaseTicket& ticket)
+{
+	return std::all_of(ticket.graphics.begin(), ticket.graphics.end(),
+	                   [](const auto& entry) { return entry.first->IsRetired(entry.second); }) &&
+	       std::all_of(ticket.compute.begin(), ticket.compute.end(),
+	                   [](const auto& entry) { return entry.first->IsRetired(entry.second); });
+}
+
+void Gpu::PruneRetiredTicketsLocked()
+{
+	while (!m_release_tickets.empty() && IsReleaseTicketFinished(m_release_tickets.front()))
+	{
+		m_retired_ticket_id = m_release_tickets.front().id;
+		m_release_tickets.pop_front();
+	}
+}
+
+bool Gpu::IsReleaseTicketRetired(uint64_t ticket)
+{
+	std::lock_guard<std::mutex> lock(m_ticket_mutex);
+	PruneRetiredTicketsLocked();
+	return ticket <= m_retired_ticket_id;
+}
+
+void Gpu::WaitReleaseTicket(uint64_t ticket)
+{
+	// Rings are never destroyed, so the entry can be waited on without holding the ticket mutex.
+	ReleaseTicket pending;
+	{
+		std::lock_guard<std::mutex> lock(m_ticket_mutex);
+		const auto                  it = std::find_if(m_release_tickets.begin(), m_release_tickets.end(),
+		                                              [ticket](const ReleaseTicket& entry) { return entry.id == ticket; });
+		if (it == m_release_tickets.end())
+		{
+			return;
+		}
+		pending = *it;
+	}
+	for (const auto& [ring, count]: pending.graphics)
+	{
+		ring->WaitRetired(count);
+	}
+	for (const auto& [ring, count]: pending.compute)
+	{
+		ring->WaitRetired(count);
+	}
+}
+
 bool Gpu::SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value)
 {
 	CommandProcessor* owner = nullptr;
@@ -400,7 +493,32 @@ void Gpu::WaitSubmission(SubmissionId submission)
 bool Gpu::RunQuiesced(GraphicsRunQuiescedAction action, void* data)
 {
 	EXIT_IF(action == nullptr);
-	return m_submission_admission_gate.RunQuiesced([&] { WaitLocked(); }, [&] { return action(data); });
+	// The gate holds back the submission or host store a parked wait may need, so
+	// draining such a ring to idle would deadlock against its own producer.
+	return m_submission_admission_gate.RunQuiesced(
+	    [&]
+	    {
+		    HoldParkedDecode(true);
+		    WaitLocked();
+	    },
+	    [&]
+	    {
+		    const bool done = action(data);
+		    HoldParkedDecode(false);
+		    return done;
+	    });
+}
+
+void Gpu::HoldParkedDecode(bool hold)
+{
+	m_gfx_ring->HoldParkedDecode(hold);
+	for (auto* ring: m_agc_async_ring)
+	{
+		if (ring != nullptr)
+		{
+			ring->HoldParkedDecode(hold);
+		}
+	}
 }
 
 void Gpu::Init()
@@ -442,8 +560,8 @@ ComputeRing* Gpu::GetRing(uint32_t ring_id)
 
 void CommandProcessor::Reset()
 {
-	BufferWait();
-
+	// No drain: the index buffers deleted below reach the delete list only after GpuMemory saw every
+	// submission that used them complete, and the rest is processor state no recording reads.
 	Core::LockGuard lock(m_mutex);
 
 	GraphicsRenderDeleteIndexBuffers();
@@ -552,7 +670,7 @@ void CommandProcessor::SubmitRecordedWorkIfGpuIdle()
 	// the interval below are extended; that bounds the cost to a few percent
 	// of the CP thread while the GPU waits at most that long.
 	constexpr uint32_t operations_per_submission = 8;
-	constexpr auto     min_submission_interval   = std::chrono::microseconds(500);
+	constexpr auto     min_submission_interval   = std::chrono::microseconds(1500);
 	if (m_queue != GraphicContext::QUEUE_GFX)
 	{
 		return;
@@ -721,6 +839,8 @@ void CommandProcessor::WaitUntilPublishedUnlessReentrant(SubmissionId submission
 	require_publication_success(m_publication_gate.WaitUntilPublished(submission), "WaitUntilPublished", m_queue, submission);
 	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - started).count();
 	TraceWait("publication_end", m_queue, 0, 0, 0, 0, submission.sequence, static_cast<uint64_t>(elapsed));
+	// Guest bytes read before this wait returned may precede what the submission published.
+	GpuDirtyPageTracker::NoteHostWrite();
 }
 
 void CommandProcessor::WaitSubmission(SubmissionId submission)
@@ -762,6 +882,21 @@ void CommandProcessor::WaitSubmission(SubmissionId submission)
 	PublishCompletedSubmissions();
 	WaitUntilPublishedUnlessReentrant(submission);
 	(void)GuestDeviceAddressAcknowledgeReader(submission);
+}
+
+bool CommandProcessor::IsSubmissionComplete(SubmissionId submission)
+{
+	EXIT_IF(!OwnsSubmissionQueue(submission));
+	Core::LockGuard lock(m_mutex);
+
+	uint32_t slot = 0;
+	if (m_submission_slots.FindSlot(submission, &slot) != GpuSubmissionResult::Success)
+	{
+		return true;
+	}
+	GpuSubmissionState state = GpuSubmissionState::Completed;
+	require_submission_success(m_submission_slots.GetState(submission, &state), "GetState", m_queue, slot);
+	return state == GpuSubmissionState::Completed;
 }
 
 bool CommandProcessor::SubmitForDeviceWait(SubmissionId submission, VkSemaphore* timeline, uint64_t* value)
@@ -949,6 +1084,7 @@ void SubmissionTimelineWaiter::ThreadRun(void* data)
 		const VkResult result    = vkWaitSemaphores(device, &wait_info, kWaitSliceNs);
 		if (result != VK_SUCCESS && result != VK_TIMEOUT)
 		{
+			VulkanReportDeviceFault(result);
 			EXIT("vkWaitSemaphores (queue timeline) failed: result=%d\n", static_cast<int>(result));
 		}
 
@@ -1116,9 +1252,12 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	const auto effects                = static_cast<uint8_t>(dependency.effects);
 	const bool producer_on_this_queue = producer == GpuSubmissionResult::Success && OwnsSubmissionQueue(dependency.producer);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(
-	        producer_on_this_queue, effects, producer_on_this_queue && (effects & 2u) != 0u && GpuMemoryPendingStorageHasAliases()))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_on_this_queue, effects))
 	{
+		if ((effects & 2u) != 0u)
+		{
+			GpuMemoryDeferPendingStorageAliases();
+		}
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
 		m_consolidated_producer   = dependency.producer;
@@ -1201,9 +1340,12 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	const auto effects                = static_cast<uint8_t>(dependency.effects);
 	const bool producer_on_this_queue = producer == GpuSubmissionResult::Success && OwnsSubmissionQueue(dependency.producer);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(
-	        producer_on_this_queue, effects, producer_on_this_queue && (effects & 2u) != 0u && GpuMemoryPendingStorageHasAliases()))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_on_this_queue, effects))
 	{
+		if ((effects & 2u) != 0u)
+		{
+			GpuMemoryDeferPendingStorageAliases();
+		}
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
 		m_consolidated_producer   = dependency.producer;
@@ -1450,6 +1592,8 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 	const auto decode_completion = completion == GraphicsSubmissionCompletion::QueuedGraphicsInterrupt
 	                                   ? std::make_shared<CmdBatch::DecodeCompletion>()
 	                                   : nullptr;
+	std::shared_ptr<CmdBatch::DecodeCompletion> previous_follow_completion;
+	bool                                        returns_before_own_decode = false;
 	{
 		Core::LockGuard lock(m_mutex);
 
@@ -1483,18 +1627,54 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 		{
 			decode_completion->Signal();
 		}
+		if (decode_completion != nullptr)
+		{
+			buf.follow_completion = std::make_shared<CmdBatch::DecodeCompletion>();
+			if (m_decode_released)
+			{
+				buf.follow_completion->Signal();
+			}
+			previous_follow_completion   = m_decode_released ? nullptr : m_previous_follow_completion;
+			m_previous_follow_completion = buf.follow_completion;
+			// Only a batch whose memory waits are all produced inside itself can leave its decode running: any
+			// other wait may depend on a CPU store the guest makes after this call returns.
+			const auto draw_scan      = ScanBatchMemoryWaits(buf.draw_buffer.data, buf.draw_buffer.num_dw);
+			returns_before_own_decode = BatchProducesItsOwnWaits(draw_scan, ScanBatchMemoryWaits(buf.const_buffer.data, buf.const_buffer.num_dw));
+			buf.returns_before_decode = returns_before_own_decode;
+			if (returns_before_own_decode)
+			{
+				// The guest may poll IsFlipPending as soon as this submit returns, before the batch decodes, and
+				// unregister the buffers a flip still in it shows: its flips are pending from the submit.
+				for (const uint32_t handle: draw_scan.flip_handles)
+				{
+					VideoOut::VideoOutQueueGpuFlip(static_cast<int>(handle));
+				}
+				buf.flips_queued_at_submit = static_cast<uint32_t>(draw_scan.flip_handles.size());
+			}
+		}
 
 		m_cmd_batches.Add(buf);
+		m_enqueued_batches++;
 		// A drain must see queued work before the worker wakes to dequeue it.
 		m_idle = false;
 
 		m_cond_var.Signal();
 	}
 
-	if (decode_completion != nullptr)
+	if (decode_completion == nullptr)
 	{
-		decode_completion->Wait();
+		return;
 	}
+	// Depth 1: the submitter proceeds once the previous batch has decoded, so one batch stays in flight.
+	if (returns_before_own_decode)
+	{
+		if (previous_follow_completion != nullptr)
+		{
+			previous_follow_completion->Wait();
+		}
+		return;
+	}
+	decode_completion->Wait();
 }
 
 // The command processor reads through the GPU's contiguous virtual space, so the range may cross from one
@@ -1623,10 +1803,42 @@ void GraphicsRing::Done()
 void GraphicsRing::WaitForIdle()
 {
 	Core::LockGuard lock(m_mutex);
-	while (!m_idle)
+	while (!m_idle && !(m_parked_decode_hold && m_decode_released))
 	{
 		Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
 	}
+}
+
+bool GraphicsRing::IsRetired(uint64_t count) const
+{
+	SubmissionId submission;
+	return m_finished_batches.load() >= count && (!m_batch_ends.Find(count, &submission) || !m_cp->OwnsSubmissionQueue(submission) ||
+	                                              m_cp->IsSubmissionComplete(submission));
+}
+
+// Waits like WaitForIdle does for the same batches: interruptible at safe points, and for as long as a batch
+// suspended on a guest store keeps running. Nothing here releases such a batch early.
+void GraphicsRing::WaitRetired(uint64_t count)
+{
+	{
+		Core::LockGuard lock(m_mutex);
+		while (m_finished_batches.load() < count)
+		{
+			Kernel::PthreadInterruptibleWait(&m_finished_cond_var, &m_mutex);
+		}
+	}
+	SubmissionId submission;
+	if (m_batch_ends.Find(count, &submission) && m_cp->OwnsSubmissionQueue(submission))
+	{
+		m_cp->WaitSubmission(submission);
+	}
+}
+
+void GraphicsRing::HoldParkedDecode(bool hold)
+{
+	Core::LockGuard lock(m_mutex);
+	m_parked_decode_hold = hold;
+	m_idle_cond_var.SignalAll();
 }
 
 bool GraphicsRing::IsIdle()
@@ -1748,10 +1960,22 @@ void GraphicsRing::SetDecodeReleased(const CmdBatch* current, bool released)
 	EXIT_IF(current == nullptr);
 
 	Core::LockGuard lock(m_mutex);
-	m_decode_released = released;
 	if (!released)
 	{
+		// Decode resumes only after a quiesce that counted it as drained completes its action.
+		while (m_parked_decode_hold)
+		{
+			Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
+		}
+		m_decode_released = false;
 		return;
+	}
+	m_decode_released = true;
+	m_idle_cond_var.SignalAll();
+	// The suspended batch's follower is released too, or the next early-returning submitter would wait on it.
+	if (current->follow_completion != nullptr)
+	{
+		current->follow_completion->Signal();
 	}
 	// The suspended batch keeps waiting: its completion interrupt follows the
 	// packets after the wait, so the CP can only consume them once the value
@@ -1764,6 +1988,7 @@ void GraphicsRing::SetDecodeReleased(const CmdBatch* current, bool released)
 		const auto& queued = m_cmd_batches.At(index);
 		if (queued.decode_completion != nullptr)
 		{
+			queued.follow_completion->Signal();
 			queued.decode_completion->Signal();
 		}
 	}
@@ -1835,6 +2060,7 @@ void GraphicsRing::ThreadBatchRun(void* data)
 	for (;;)
 	{
 		CmdBatch buf = ring->GetCmdBatch();
+		SubmissionId batch_submission;
 
 		const ::Kyty::Emulator::Ports::ScopedProgress progress(::Kyty::Emulator::Ports::ProgressLane::GraphicsCommands);
 		cp->RunLock();
@@ -1844,6 +2070,7 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			// The previous batch retired its consolidated wait before it ended.
 			EXIT_IF(cp->TakeConsolidatedPlainWait());
 			cp->SetFlip(buf.flip);
+			cp->SetFlipsQueuedAtSubmit(buf.flips_queued_at_submit);
 			cp->SetSumbitId(++seq);
 
 			struct ScheduledStream
@@ -1909,6 +2136,13 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				const bool host_producer = !SuspendedRunsHaveGpuProducer(cp, constant_wait, draw_wait);
 				if (host_producer)
 				{
+					const auto* wait = constant_wait != nullptr ? constant_wait : draw_wait;
+					if (buf.returns_before_decode)
+					{
+						EXIT("Batch that returned before its decode suspended on a wait no submitted work produces: address=0x%016" PRIx64
+						     " size=%" PRIu32 "\n",
+						     reinterpret_cast<uint64_t>(wait->address), static_cast<uint32_t>(wait->size));
+					}
 					ring->SetDecodeReleased(&buf, true);
 				}
 				WaitForSuspendedRuns(cp, constant_wait, draw_wait);
@@ -1931,15 +2165,17 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			// (empty Flip queue → guest ThreadFlag bit 0x1 soft-lock).
 			if (GraphicsBatchNeedsApiFlip(buf.with_api_flip, cp->FlipIssued()))
 			{
-				cp->Flip();
+				cp->Flip(false);
 				flip_submission = cp->BufferFlush();
 			}
+			batch_submission = flip_submission;
 			// A consolidated wait's label is published with the submission, like
 			// any other completion payload of this batch.
 			const bool consolidated_wait = cp->TakeConsolidatedPlainWait();
 			if (buf.decode_completion != nullptr)
 			{
 				buf.decode_completion->Signal();
+				buf.follow_completion->Signal();
 			}
 			if (!consolidated_wait && !GraphicsBatchCanDeferSubmissionCompletion(cp->CompletionCallbackSources()) &&
 			    GraphicsBatchNeedsSubmissionCompletion(cp->CompletionCallbackIssued()))
@@ -1952,6 +2188,13 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			ring->m_async_completion_pending = true;
 		}
 		cp->RunUnlock();
+
+		{
+			Core::LockGuard lock(ring->m_mutex);
+			ring->m_batch_ends.Note(ring->m_finished_batches.load() + 1u, batch_submission);
+			ring->m_finished_batches++;
+			ring->m_finished_cond_var.SignalAll();
+		}
 	}
 }
 
@@ -2001,12 +2244,16 @@ void ComputeRing::ThreadRun(void* data)
 				continue;
 			}
 			ring->m_idle = true;
+			// An idle ring has consumed every doorbell, or dropped them because it was deactivated.
+			ring->m_finished_doorbells.store(ring->m_enqueued_doorbells.load());
+			ring->m_finished_cond_var.SignalAll();
 			ring->m_idle_cond_var.Signal();
 			ring->m_cond_var.Wait(&ring->m_mutex);
 		}
 
 		ring->m_idle = false;
 
+		const uint64_t consumed_doorbells = ring->m_enqueued_doorbells.load();
 		auto  pos       = *ring->m_read_ptr_addr;
 		auto  num_dw    = ring->m_run_offset_dw;
 		auto  next_pos  = pos + num_dw;
@@ -2026,6 +2273,7 @@ void ComputeRing::ThreadRun(void* data)
 		}
 
 		ring->m_mutex.Unlock();
+		SubmissionId run_submission;
 
 		const ::Kyty::Emulator::Ports::ScopedProgress progress(::Kyty::Emulator::Ports::ProgressLane::ComputeCommands);
 		cp->RunLock();
@@ -2056,15 +2304,18 @@ void ComputeRing::ThreadRun(void* data)
 				run_source_data = nullptr;
 			}
 
-			cp->BufferFlush();
+			run_submission = cp->BufferFlush();
 		}
 		cp->RunUnlock();
 
+		ring->m_batch_ends.Note(consumed_doorbells, run_submission);
 		ring->m_mutex.Lock();
 
 		ring->m_completion_pending = true;
 		ring->m_run_offset_dw -= num_dw;
 		*ring->m_read_ptr_addr = next_pos % ring_size;
+		ring->m_finished_doorbells.store(consumed_doorbells);
+		ring->m_finished_cond_var.SignalAll();
 	}
 }
 
@@ -2117,6 +2368,7 @@ void ComputeRing::DingDong(uint32_t offset_dw)
 	uint32_t advance = (offset_dw + (offset_dw < m_last_dingdong_offset_dw ? m_ring_size_dw : 0)) - m_last_dingdong_offset_dw;
 
 	m_run_offset_dw += advance;
+	m_enqueued_doorbells++;
 
 	m_last_dingdong_offset_dw = offset_dw;
 
@@ -2134,6 +2386,29 @@ void ComputeRing::Done()
 		}
 	}
 	m_done = true;
+}
+
+bool ComputeRing::IsRetired(uint64_t count) const
+{
+	SubmissionId submission;
+	return m_finished_doorbells.load() >= count && (!m_batch_ends.Find(count, &submission) || !m_cp->OwnsSubmissionQueue(submission) ||
+	                                                m_cp->IsSubmissionComplete(submission));
+}
+
+void ComputeRing::WaitRetired(uint64_t count)
+{
+	{
+		Core::LockGuard lock(m_mutex);
+		while (m_finished_doorbells.load() < count)
+		{
+			Kernel::PthreadInterruptibleWait(&m_finished_cond_var, &m_mutex);
+		}
+	}
+	SubmissionId submission;
+	if (m_batch_ends.Find(count, &submission) && m_cp->OwnsSubmissionQueue(submission))
+	{
+		m_cp->WaitSubmission(submission);
+	}
 }
 
 void ComputeRing::WaitForIdle()
@@ -2167,14 +2442,57 @@ bool ComputeRing::IsActive()
 	return m_active;
 }
 
+// Register state, draws and buffer chaining; any other packet may order guest
+// memory between the commands before it and the geometry passes after it.
+static bool Pm4KeepsGeometrySegment(uint32_t op)
+{
+	switch (op)
+	{
+		case Pm4::IT_DRAW_INDEX_2:
+		case Pm4::IT_DRAW_INDEX_AUTO:
+		case Pm4::IT_DRAW_INDEX_INDIRECT:
+		case Pm4::IT_DRAW_INDEX_OFFSET_2:
+		case Pm4::IT_DRAW_INDIRECT:
+		case Pm4::IT_SET_CONTEXT_REG:
+		case Pm4::IT_SET_SH_REG:
+		case Pm4::IT_SET_UCONFIG_REG:
+		case Pm4::IT_SET_UCONFIG_REG_INDEX:
+		case Pm4::IT_NOP:
+		case Pm4::IT_INDEX_BASE:
+		case Pm4::IT_INDEX_BUFFER_SIZE:
+		case Pm4::IT_INDEX_TYPE:
+		case Pm4::IT_NUM_INSTANCES:
+		case Pm4::IT_SET_BASE:
+		case Pm4::IT_INDIRECT_BUFFER:
+		case Pm4::IT_INDIRECT_BUFFER_END:
+		case Pm4::IT_CLEAR_STATE:
+		case Pm4::IT_ONE_REG_WRITE: return true;
+		default: return false;
+	}
+}
+
 void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data)
 {
 	KYTY_PROFILER_BLOCK("CommandProcessor::Run");
-	const ScopedDebugStatsTimer run_timer(DebugStatsRecordCommandProcessorRun);
 	const uint32_t* const previous_run_begin = m_active_run_begin;
 	const uint32_t* const previous_run_end   = m_active_run_end;
+	// Indirect buffers run nested inside the enclosing run, which already counts their time.
+	std::optional<ScopedDebugStatsTimer> run_timer;
+	if (previous_run_begin == nullptr)
+	{
+		run_timer.emplace(DebugStatsRecordCommandProcessorRun);
+	}
 	m_active_run_begin                       = data;
 	m_active_run_end                         = data != nullptr ? data + num_dw : nullptr;
+	// Work submitted or resumed may read guest writes ordered before it; every exit
+	// ends the stretch of packets that change no guest memory.
+	struct OrderingPointScope
+	{
+		OrderingPointScope() { GuestDeviceAddressNoteOrderingPoint(); }
+		~OrderingPointScope() { GuestDeviceAddressNoteOrderingPoint(); }
+		OrderingPointScope(const OrderingPointScope&)            = delete;
+		OrderingPointScope& operator=(const OrderingPointScope&) = delete;
+	} const ordering_point_scope;
 	const bool submit_fault_trace            = VulkanSubmitFaultTraceEnabled();
 	// Recent-draw records name the packet that emitted them; every exit restores
 	// the enclosing run's packet.
@@ -2189,16 +2507,30 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 		GraphicsRenderMemoryFree(reinterpret_cast<uint64_t>(source_data), static_cast<size_t>(num_dw) * 4);
 	}
 
-	auto* cmd = data;
-	auto  dw  = num_dw;
+	auto* cmd             = data;
+	auto  dw              = num_dw;
+	bool  ordering_packet = false;
 	for (;;)
 	{
+		// Noted once the packet completed, so a wait's producer wrote before the point.
+		if (ordering_packet)
+		{
+			GuestDeviceAddressNoteOrderingPoint();
+		}
 		if (dw == 0)
 		{
 			break;
 		}
 
 		if (dw > num_dw) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw > num_dw condition ignored (continuing)\n"); }
+
+		m_packet        = cmd;
+		ordering_packet = DrawFrontClassifyPacket(cmd, dw) == DrawFrontPacket::Other;
+		// The replay reads packets, registers and guest memory only between packets that change nothing else.
+		if (ordering_packet && m_draw_fronts[0] != nullptr && m_draw_fronts[0]->Live())
+		{
+			StopDrawFronts();
+		}
 
 		auto cmd_id = *cmd++;
 		dw -= 1;
@@ -2287,6 +2619,12 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			m_last_pm4_dw = num_dw - dw - 1u;
 			(void)VulkanRecentDrawSetPacket({true, op, m_last_pm4_dw});
 		}
+		if (!Pm4KeepsGeometrySegment(op))
+		{
+			Core::LockGuard lock(m_mutex);
+			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+			m_buffer[m_current_buffer]->BreakGeometrySegment();
+		}
 
 		auto pfunc = g_cp_op_func[op];
 
@@ -2354,6 +2692,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 		dw -= s;
 	}
 
+	StopDrawFronts();
 	m_active_run_begin = previous_run_begin;
 	m_active_run_end   = previous_run_end;
 }
@@ -2418,7 +2757,8 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances)
 		num_instances = 1;
 	}
 
-	m_num_instances = num_instances;
+	m_num_instances         = num_instances;
+	m_num_instances_latched = false;
 }
 
 // A dependency on another queue is ordered on the device first; one the draw still reports
@@ -2447,8 +2787,15 @@ static void RetryGuestDeviceAddressDraw(CommandProcessor* cp, const Callback& ca
 
 void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type)
 {
+	if (m_draw_front_shadow)
+	{
+		m_draw_front->Prepare(m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
+		return;
+	}
 	SubmitRecordedDispatchesBeforeDraw();
+	ResolveNumInstancesLatch();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
+	PreparedDrawInputs*         prepared = TakePreparedDrawInputs();
 	uint64_t submit_id = 0;
 	uint32_t index_type_and_size = 0;
 	uint32_t instance_count = 1;
@@ -2476,16 +2823,25 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 	{
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		// A retry records against registers a wait may have changed, so it analyses them again.
 		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
-		                        index_addr, draw_modifier, type, instance_count, 0, 0, pending);
+		                        index_addr, draw_modifier, type, instance_count, 0, 0, pending, std::exchange(prepared, nullptr));
 	});
+	ReleaseDrawFronts();
 	SubmitRecordedWorkIfGpuIdle();
 }
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags)
 {
+	if (m_draw_front_shadow)
+	{
+		m_draw_front->Prepare(m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
+		return;
+	}
 	SubmitRecordedDispatchesBeforeDraw();
+	ResolveNumInstancesLatch();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
+	PreparedDrawInputs*         prepared = TakePreparedDrawInputs();
 	uint64_t submit_id = 0;
 	uint32_t index_type_and_size = 0;
 	uint32_t instance_count = 1;
@@ -2515,9 +2871,130 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
-		                        index_addr, flags, 1, instance_count, 0, 0, pending);
+		                        index_addr, flags, 1, instance_count, 0, 0, pending, std::exchange(prepared, nullptr));
 	});
+	ReleaseDrawFronts();
 	SubmitRecordedWorkIfGpuIdle();
+}
+
+// The device reads the record in queue order when the storage buffer an earlier command of this
+// queue writes holds it, so the host neither waits for nor reads it.
+bool CommandProcessor::DrawIndexIndirectOnDevice(uint64_t args_address)
+{
+	uint64_t submit_id = 0;
+	{
+		Core::LockGuard lock(m_mutex);
+		// The device draw binds the whole index window, so its size must be known.
+		if (m_index_base_addr == 0 || m_index_buffer_size == 0 || m_index_type_and_size > 1u)
+		{
+			return false;
+		}
+		submit_id = m_sumbit_id;
+	}
+	bool recorded = false;
+	RetryGuestDeviceAddressDraw(this,
+	                            [&](SubmissionId* pending)
+	                            {
+		                            Core::LockGuard lock(m_mutex);
+		                            EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM || m_queue < 0);
+		                            auto* buffer = m_buffer[m_current_buffer];
+		                            recorded     = GraphicsRenderDrawIndexIndirect(
+		                                submit_id, buffer, &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, m_index_buffer_size,
+		                                reinterpret_cast<const void*>(m_index_base_addr), args_address, static_cast<uint32_t>(m_queue),
+		                                m_num_instances_latched ? 0u : m_num_instances, pending);
+		                            if (recorded)
+		                            {
+			                            m_num_instances_latched = true;
+			                            EXIT_IF(!buffer->GetSubmissionId(&m_num_instances_latch));
+		                            }
+	                            });
+	return recorded;
+}
+
+PreparedDrawInputs* CommandProcessor::TakePreparedDrawInputs()
+{
+	if (m_draw_fronts[0] == nullptr)
+	{
+		for (auto& front: m_draw_fronts)
+		{
+			auto* shadow                = new CommandProcessor(m_submission_coordinator, m_queue);
+			front                       = new DrawFront(shadow, &m_draw_front_claimed);
+			shadow->m_draw_front        = front;
+			shadow->m_draw_front_shadow = true;
+		}
+	}
+	if (m_draw_fronts[0]->Live())
+	{
+		// Every front learns where the processor is; at most one prepared this draw.
+		PreparedDrawInputs* prepared = nullptr;
+		for (auto* front: m_draw_fronts)
+		{
+			if (auto* inputs = front->Take(m_packet, m_num_instances); inputs != nullptr)
+			{
+				// Fronts claim draws exclusively.
+				EXIT_IF(prepared != nullptr);
+				prepared = inputs;
+			}
+		}
+		return prepared;
+	}
+	// The replay is idle. It continues from this draw with the registers this processor holds.
+	m_draw_front_claimed.store(m_packet);
+	for (auto* front: m_draw_fronts)
+	{
+		auto* shadow                  = front->Shadow();
+		shadow->m_ctx                 = m_ctx;
+		shadow->m_ucfg                = m_ucfg;
+		shadow->m_sh_ctx              = m_sh_ctx;
+		shadow->m_user_data_marker    = m_user_data_marker;
+		shadow->m_index_type_and_size = m_index_type_and_size;
+		shadow->m_index_buffer_size   = m_index_buffer_size;
+		shadow->m_index_base_addr     = m_index_base_addr;
+		shadow->m_num_instances       = m_num_instances;
+		front->Start(m_packet, m_active_run_end);
+	}
+	return nullptr;
+}
+
+void CommandProcessor::StopDrawFronts()
+{
+	for (auto* front: m_draw_fronts)
+	{
+		if (front != nullptr)
+		{
+			front->Stop();
+		}
+	}
+}
+
+void CommandProcessor::ReleaseDrawFronts()
+{
+	for (auto* front: m_draw_fronts)
+	{
+		front->Release();
+	}
+}
+
+// A direct draw after a device-side DRAW_INDEX_INDIRECT draws as many instances as that record
+// latched; the host reads the latch once the recording that holds the record completes.
+void CommandProcessor::ResolveNumInstancesLatch()
+{
+	SubmissionId latch;
+	{
+		Core::LockGuard lock(m_mutex);
+		if (!m_num_instances_latched)
+		{
+			return;
+		}
+		latch = m_num_instances_latch;
+	}
+	WaitSubmission(latch);
+	const uint32_t  instances = GraphicsRenderReadDrawIndexedIndirectInstances(static_cast<uint32_t>(m_queue));
+	Core::LockGuard lock(m_mutex);
+	// Every latch chain starts from a nonzero host value or record count.
+	EXIT_IF(instances == 0u);
+	m_num_instances         = instances;
+	m_num_instances_latched = false;
 }
 
 void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiator)
@@ -2550,6 +3027,11 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 			EXIT("DRAW_INDEX_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
 			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
 		}
+	}
+	if (DrawIndexIndirectOnDevice(args_address))
+	{
+		SubmitRecordedWorkIfGpuIdle();
+		return;
 	}
 	// The arguments can be written by an earlier dispatch of this recording.
 	if (!ReadCurrentGuestBytes(args_address, &args, sizeof(args)))
@@ -2625,7 +3107,8 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 			}
 		}
 
-		m_num_instances = args.instance_count;
+		m_num_instances         = args.instance_count;
+		m_num_instances_latched = false;
 		submit_id = m_sumbit_id;
 		index_type_and_size = m_index_type_and_size;
 		instance_count = args.instance_count;
@@ -2688,7 +3171,8 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
 			     args.start_vertex_location);
 		}
 
-		m_num_instances = args.instance_count;
+		m_num_instances         = args.instance_count;
+		m_num_instances_latched = false;
 		submit_id       = m_sumbit_id;
 	}
 	RetryGuestDeviceAddressDraw(this, [&](SubmissionId* pending)
@@ -2833,6 +3317,7 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier)
 {
 	SubmitRecordedDispatchesBeforeDraw();
+	ResolveNumInstancesLatch();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	uint64_t submit_id = 0;
 	uint32_t instance_count = 1;
@@ -3288,7 +3773,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index, u
 	}
 }
 
-void CommandProcessor::Flip()
+void CommandProcessor::Flip(bool queued_at_submit)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -3299,7 +3784,10 @@ void CommandProcessor::Flip()
 		KYTY_LOG_DEBUG("CommandProcessor::Flip()\n");
 	}
 
-	VideoOut::VideoOutQueueGpuFlip(m_flip.handle);
+	if (!queued_at_submit)
+	{
+		VideoOut::VideoOutQueueGpuFlip(m_flip.handle);
+	}
 	RecordFlipSubmissionLocked();
 	GraphicsRenderWriteAtEndOfPipeOnlyFlip(m_sumbit_id, m_buffer[m_current_buffer], m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                       m_flip.flip_arg);
@@ -3494,6 +3982,27 @@ bool GraphicsRunAreSubmitsAllowed()
 	EXIT_IF(g_gpu == nullptr);
 
 	return g_gpu->AreSubmitsAllowed();
+}
+
+uint64_t GraphicsRunTakeReleaseTicket()
+{
+	EXIT_IF(g_gpu == nullptr);
+
+	return g_gpu->TakeReleaseTicket();
+}
+
+bool GraphicsRunIsReleaseTicketRetired(uint64_t ticket)
+{
+	EXIT_IF(g_gpu == nullptr);
+
+	return g_gpu->IsReleaseTicketRetired(ticket);
+}
+
+void GraphicsRunWaitReleaseTicket(uint64_t ticket)
+{
+	EXIT_IF(g_gpu == nullptr);
+
+	g_gpu->WaitReleaseTicket(ticket);
 }
 
 bool GraphicsRunWithQuiescedSubmissions(GraphicsRunQuiescedAction action, void* data)

@@ -288,7 +288,7 @@ int KYTY_SYSV_ABI GraphicsUpdatePrimState(volatile uint32_t* cx_regs, volatile u
 uint32_t* KYTY_SYSV_ABI GraphicsDcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t block_dwords);
 uint32_t* KYTY_SYSV_ABI GraphicsAcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t block_dwords);
 // PS5 Pro / Trinity GPU mode query (NID BfBDZGbti7A). Base Prospero reports 0.
-uint64_t KYTY_SYSV_ABI GraphicsGetIsTrinityMode();
+int KYTY_SYSV_ABI GraphicsGetIsTrinityMode(bool* is_trinity_mode);
 // Debug exception raise used by titles as a soft breakpoint; returns OK.
 int KYTY_SYSV_ABI GraphicsDebugRaiseException(uint32_t exception_id);
 // sceAgcDriverRegisterWorkloadStream (NID 3AyTaWcF-H8): register a Gen5 workload stream descriptor.

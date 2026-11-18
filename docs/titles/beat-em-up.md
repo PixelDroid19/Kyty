@@ -6,6 +6,98 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Beat 'em up: the vertex container search walked every block of each stream (2026-11-10, fixed)
+
+- **Observed** (Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14, first area,
+  `scripts/input/reach_first_gameplay.pad`, 60 fps limit, 60-115 s window;
+  fps is flips per one-second sample, averaged over the window):
+  - `40d8c109f` with `59e3640cf`, Release without link-time optimisation:
+    39.4 fps; the command processor ran 23.9 ms per frame, 8.2 ms of it
+    binding vertex buffers.
+  - Both ends of the range with link-time optimisation, same host and driver:
+    `26be1584d` 48.6 fps with 0.56 ms of vertex buffer binding per frame,
+    `657613887` 36.4 fps with 9.43 ms. The command processor grew by 7.2 ms
+    per frame.
+- **Localized** with a 5 s `perf` sample of on-CPU time at about 75 s:
+  `GpuMemory::FindVertexContaining` held 29.6 % of all samples, 22.4 % in its
+  own body, and `GpuMemory::FindBlocks` 8.5 %. The cost is the walk, not
+  lock waits.
+- **Cause** (`51e107dbf`, `00558ea73`): before creating a draw's vertex
+  object, `BindVertexBuffers` asks for the live vertex object that holds the
+  declared stream. The search walks every block the stream overlaps and reads
+  each object, to check that one vertex object covers the range. This title
+  binds each pool from a fixed V# base, so the object of its exact stream
+  already exists (the reuse path of "Vertex objects cover the declared
+  stream", `docs/bringup/cross-title.md`), and the walk only confirmed it.
+- **Fix** (`799fb76fd`, `GpuMemory::FindVertexContaining` in
+  `GpuMemoryWriteback.cpp`): the exact object is looked up by start address
+  first; the block walk runs only when it is missing, so a stream inside an
+  older object still binds into that object.
+- **Result** (Release without link-time optimisation, one run, same window):
+  39.4 to 60.1 fps, the present limit; command processor 23.9 to 13.2 ms per
+  frame; vertex buffer binding 8.18 to 0.45 ms. Upload and hash bytes per
+  frame change by less than 4 %. With link-time optimisation, `799fb76fd`
+  ran 58.7 fps against 36.4 for `657613887` (command processor 26.0 to 14.4
+  ms per frame). Captures at 60 and 115 s are correct. The
+  scene at 115 s varies between runs of this route: earlier runs stopped at
+  the camp, in a cave or on a bridge.
+- **Shared path** (`PPSA21567 - Astro Bot`, user-recorded dunes route,
+  Release without link-time optimisation): vertex buffer binding stays at
+  0.11-0.12 ms per frame over 60-80 s, where both runs show the same content:
+  22.85 fps against 22.4. Of two runs with the change, one left the route at
+  about 84 s and reached content whose compute pipelines took 3.8-4.4 s each
+  to create. The other reached the dunes with correct captures. The replay
+  follows wall clock, so the first run is recorded as a route desync, not
+  attributed to the change.
+- **Verified:** the `KytyUnitTest` suite passes; no unit test reaches this
+  lookup.
+- **Other titles** (earlier runs of `59e3640cf`, same window): vertex buffer
+  binding is 0.92 ms per frame in `PPSA09076 - DREDGE`, 0.11 ms in
+  `PPSA09809 - OCTOPATH TRAVELER II` and 0.22 ms in `PPSA21402 - Balatro`, so
+  the remaining walk is not a bound there. The change was not run on them.
+- **Open:**
+  - The advancing-V# pool that `51e107dbf` targets still walks the blocks.
+    No record names its title or its gain.
+  - `26be1584d` ran 58.6 fps on 2026-11-07 (Mesa 26.2.5) and 48.6 fps here.
+    The 58.6 and 58.7 fps runs stayed at the camp and the 48.6 fps run
+    reached a cave, so the gap looks like scene, not driver; not measured.
+
+## Beat 'em up: every in-place uniform fill was written twice to guest memory (2026-11-07, fixed)
+
+- **Observed** (Intel Arc A770, Mesa 26.2.5 on Xe, first area, generic pad route,
+  60 fps limit, 80-120 s): 39.6 fps, GPU busy 94-95 %, about 10.7 ms of fence
+  wait per frame. Only about 5 ms per frame was guest draws and dispatches.
+- **Measured** with a DIAG that timestamps each pool command buffer at begin, around
+  every guest draw, dispatch and detile kernel, after every transfer, clear,
+  barrier and render pass end, and at end. These marks serialize the GPU, so
+  read the shares, not the absolute times. Of 26.2 ms of busy GPU time per frame:
+  - 7.8 ms went to the fill transfer of proven uniform fills
+    (`RecordComputeUniformFillTransfer`) plus the barrier after it;
+  - 7.8 ms went to the second fill of the same range in
+    `GuestDeviceAddressRecordFill` plus its after-barrier;
+  - 4.7 ms went to about 1650 guest memory barriers (`GraphicsRenderMemoryBarrier`),
+    an amount the marks inflate;
+  - 4.0 ms went to indexed draws, and 1.1 ms to dispatches.
+- **Cause**: about 480 fills per second, 7.3 GB/s, up to 33,423,360 bytes each.
+  Every fill targets an object bound in place: memory flags 0xe (host-visible,
+  coherent, cached, not device-local). The first fill already writes the guest
+  pages. The publication then filled the same pages again through the
+  publication pieces, which are a second import of the same physical memory.
+  That is about 180 MB per frame over PCIe, twice.
+- **Fix**: an in-place object skips the second fill and publishes through the in-place
+  branch of `GuestDeviceAddressRecordPublication`, which drops overlays and
+  records the barriers. The guest-published marking is unchanged.
+- **Result**: one product run each.
+  - PPSA28311 - Absolum: 39.6 to 58.4 fps (+47 %); p95 frame time 27.2 to
+    20.2 ms; fence wait 10.7 to 2.2 ms per frame; same 335 draws per frame.
+    Captures at 60, 90 and 115 s match the earlier ones.
+  - PPSA09076 - DREDGE: 22.04 to 21.76 us/draw, 33.5 to 34.8 fps (within noise).
+  - All 108 tests pass.
+- **Open**:
+  - The first fill still writes about 180 MB per frame to host memory.
+  - The guest memory barriers (ALL_COMMANDS to ALL_COMMANDS, about three per guest
+    event) are not sized yet without the DIAG.
+
 ## Beat 'em up: every draw scanned and copied a whole shared vertex pool (2026-10-31, fixed)
 
 - **Observed** (Intel Arc A770, Mesa 26.2.5, first area, generic pad route, 60 fps

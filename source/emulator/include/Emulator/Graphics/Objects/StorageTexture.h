@@ -101,6 +101,23 @@ public:
 [[nodiscard]] uint32_t StorageTextureMipBackingLevels(const uint64_t* params, bool gen5);
 [[nodiscard]] VkImageUsageFlags StorageTextureGetImageUsage();
 
+// A run of `length` texels starting at (x, y).
+struct StorageTextureTexelRun
+{
+	uint32_t x      = 0;
+	uint32_t y      = 0;
+	uint32_t length = 0;
+};
+
+// The runs of texels, row by row, whose bytes differ between two linear copies of an image (rows of pitch_elems
+// texels of bytes_per_element bytes).
+[[nodiscard]] Vector<StorageTextureTexelRun> StorageTextureChangedTexelRuns(const uint8_t* before, const uint8_t* after, uint32_t width,
+                                                                            uint32_t height, uint32_t pitch_elems,
+                                                                            uint32_t bytes_per_element);
+// Records into `buffer` the copy of every texel a CPU write changed in the guest memory of a guest-seeded image since
+// its last seed or merge. Texels the device wrote and the CPU did not keep their device contents.
+void StorageTextureMergeCpuWrites(CommandBuffer* buffer, StorageTextureVulkanImage* image);
+
 struct StorageTextureRenderAliasCopy
 {
 	uint32_t source_x      = 0;

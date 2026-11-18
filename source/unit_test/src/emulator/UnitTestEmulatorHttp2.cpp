@@ -32,9 +32,9 @@ T Resolve(Loader::SymbolDatabase* symbols, const char16_t* nid)
 	return record == nullptr ? nullptr : reinterpret_cast<T>(record->vaddr);
 }
 
-using InitFn            = int (*)(int, int, size_t, int);
-using CreateTemplateFn  = int (*)(int, const char*, int, int);
-using SetAuthEnabledFn  = int (*)(int, int);
+using InitFn            = int(KYTY_SYSV_ABI*)(int, int, size_t, int);
+using CreateTemplateFn  = int(KYTY_SYSV_ABI*)(int, const char*, int, int);
+using SetAuthEnabledFn  = int(KYTY_SYSV_ABI*)(int, int);
 
 } // namespace
 

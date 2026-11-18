@@ -6,6 +6,2375 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: progress writes to save-data memory were dropped (2026-11-16, fixed)
+
+- **Observed (live trace, late dunes route).** Every `sceSaveDataSetSaveDataMemory2` call passed a valid
+  data pointer with an entry count of zero, and plausible ranges (13397 bytes at 0, about 3.3 KB at 393216,
+  148267 bytes at 0, and others). Kyty took the count literally and wrote nothing, so the 2 MiB slot stayed
+  zero and progress could not survive a restart.
+- **Fix (`36b94dd3f`).** A zero count with a data pointer writes that one entry; the getter already reads a
+  single entry without a count. The save-data unit test writes through a zero count and reads it back.
+- **Verified.** After the same route the slot file holds 30095 non-zero bytes. Not checked: that the title
+  restores the progress on the next boot.
+
+## Robot platformer: the studio intro video was black, a UNORM target sampled as sRGB (2026-11-16, fixed)
+
+Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, strict runs of 14-18 s from boot.
+
+- **Observed.** After the publisher card the title plays its 8.5 s studio video (3840x2160 H.264); Kyty
+  presented black or the background instead. A video in another title plays, so the decoder was a lead only.
+- **Localized, stage by stage, with temporary prints.** The player calls, events and `GetVideoDataEx` frames
+  are correct (NV12, luma means 17-61). The guest copies each frame with `DMA_DATA` into two ping-pong
+  buffers; the copy matches its source. The copy is sampled as a linear R8 texture that is updated every
+  frame, and the YUV-to-RGB pixel program (image samples with non-sequential addresses) reads it correctly
+  into a 3840x2160 `R8G8B8A8_UNORM` render target. The next pass samples that target's address as
+  `8_8_8_8_SRGB` (tile 27, same extent): `Gen5PickSampleSurfaceAliases` rejected the target because its
+  format differs only in gamma, and the sample got a separate texture that skips its guest upload
+  (`guest-skip-live-cover`), so it read transparent black.
+- **Causal check.** Binding the rejected target for that sample (wrong gamma, behind a temporary variable)
+  showed the video, too bright; without it the frames were black.
+- **Fix (`13fafeac5`).** Render targets whose format has an 8-bit gamma twin (`R8G8B8A8`/`B8G8R8A8`
+  UNORM and sRGB) are created mutable with a two-format list (that pair only, so the driver keeps colour
+  compression). A sampled descriptor rejected only by gamma reads a mutable target whose twin is the sample
+  format, at the exact extent with every viewed level and layer, through a sampled view in the twin format
+  (`Gen5PickGammaTwinSurfaceAlias`); red/blue-exchanged targets compose their selectors as before. Storage
+  descriptors keep the old path.
+- **Verified.** Captures at 12-14 s match frames extracted from the source video in content and tone.
+  On the late dunes route a temporary counter on the new branch fired only for the video target and only
+  in the first 10 s. `PPSA17221 - Minecraft` world route 80-108 s: 30.35 fps against 30.31 before, 0 errors.
+  Unit suite 2703 tests pass and the three repository gates pass. A validation-layer intro run (layer
+  confirmed loaded) reported no image, view or format-list error; it reported two existing dispatch errors,
+  recorded below.
+- **Not verified.** There is no same-scene frame-rate comparison for this title: the 150 s route reaches
+  different scenes from run to run (tunnel, space, dunes). AMD/RADV is untested; window creation failed on
+  that driver before graphics initialization, so this is a host problem.
+- **Open, found on the way.** One of four 150 s route runs captured an all-black frame (RGB 0) at frame 3211,
+  with the title steady at 18.6 fps in the dunes. Three other runs, with captures every 4-10 s, showed none.
+  The new alias branch was not active then, so the cause is unexplained (a fade on a diverged route is
+  possible). The validation layer reports, during the intro, a storage image view `R16G16B16A16_SFLOAT` used
+  by an atomic (`VUID-vkCmdDispatch-None-02691`) and an `R8_UNORM` view bound to a descriptor that requires
+  UINT (`VUID-vkCmdDispatch-format-07753`), 20 times each. Neither was investigated.
+
+## Robot platformer: unpatched frame rate by scene, the transient command-bound dip, and a replay-worker poll A/B (2026-11-15, measured)
+
+Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, silent console, late dunes route from the
+world-map slot, `1f28471be` source (later commits are documentation), no game patch unless stated.
+The wall-clock route reaches different scenes from run to run; each figure names its run and
+window.
+
+- **Unpatched frame rate depends on the scene.** a390 170-210 s: 25.5 fps at 349 draws per frame,
+  engine 94 % busy. a391 and a392 150-215 s: 20-22 fps at 510-610 draws, engine 90-96 % busy.
+  The 19-20 fps quoted in earlier records belongs to their scenes (525-772 draws). No unpatched
+  window reached 30 fps.
+- **A transient dip set by command processing.** a390 150-158 s (1080p) and a385 150-159 s
+  (960x540 patch) drop to 13-17 fps with the engine 56-69 % busy. Draws per second stay at about
+  13,000-14,500 while the cost per draw rises from about 29 us to 54-63 us; it falls back over
+  5-6 s as the scene settles. Every stage of a draw grows (a390, per draw, dip against 170-210 s:
+  state setup 20.2 against 9.2 us, resource binding 18.8 against 12.1, pipeline setup 5.6 against
+  2.1, emission 4.6 against 2.4). Two counters move with it: guest-address preparations that
+  re-query physical population (64-71 % of draws against 16-20 %; they run when an ordering point
+  or a host write intervened since the previous preparation), and compute-pipeline lookups (706
+  per frame against 105, with 104 dispatches in both), which points at draws that carry a compute
+  geometry front. Neither is shown to be the cause: no profile of the dip exists, because a391
+  and a392 never reached it (no window above 800 draws per frame). Its ceiling at about 29 us per
+  draw would be about 24 fps, not 30.
+- **Stops to zero frames per second.** a389 (960x540 patch) 208-210 s: 0.5-0.7 s of pipeline
+  creation and 0.24-0.29 s of SPIR-V work in each second, at an area change. a388 (probe build,
+  960x540 patch) 176, 181 and 183 s: command runs of 0.73, 1.96 and 0.85 s with under 0.5 ms of
+  pipeline creation; what they waited on is not established.
+- **Replay-worker poll, in-run A/B** (a390, temporary probe `diag-poll-20261115.patch`: the
+  worker's 200 us poll window off in odd 4 s wall-clock blocks, on in even ones; a snapshot counts
+  only inside one block). Steady scene 165-212 s: 25.46 against 25.42 fps, 28.6 against 28.9 us
+  per draw, engine 94 % in both, worker 33.7 % against 3.8 % of a core. In the dip (150-164 s,
+  five snapshots per arm, 866 against 900 draws per frame) poll off read 56.8 against 51.5 us per
+  draw and 15.1 against 16.8 fps. The dip result rests on too few, unequal snapshots: a cost of
+  the poll's removal is not established and neither is its absence. Not shipped.
+  **Excluded (2026-11-15, m472):** the same probe on the PPSA17221 - Minecraft world route (about
+  5,450 draws per frame, 20 and 21 one-second samples inside single 4 s blocks) read 30.5 fps with
+  the poll and 23.5 fps without it (5.8 against 7.3 us of command processing per draw). The poll's
+  half core buys about 7 fps on a dense draw stream; removing it is not a resource fix.
+- **960x540 patch, fourth run** (a389, 166-215 s): 25.4 fps; 20-28 fps over 150-192 s at 330-480
+  draws, 41-53 fps at 195-201 s with 82-254 draws per frame before a load. The 37-41 fps of the
+  older record (469 draws, `6a6a5818a`) was not reproduced; its cause is not established.
+- **Host render-target scaling, unpatched** (a394, `Fixed`, `RenderTargets`, 1280x720, `Fsr`):
+  23.0 fps over 60-215 s, the same by scene as unscaled runs (21 fps at 550-700 draws, 25 at about
+  370, a dip to 16 at 836-885), engine 83-95 % busy. The status reports the display cohort scaled
+  at 1/3 of the 3840x2160 display; no counter shows any offscreen target scaled. This repeats the
+  2026-11-02 exclusion below: the scope plans only targets of the display extent, and the main
+  passes and the lighting kernel's grid keep the guest's 1920x1080. A presentation filter cannot
+  change guest work, so neither `Fsr` nor `Fsr3` is a frame-rate lever here. The bound for any cut
+  of internal resolution is the guest patch, which misses 30 fps in the dunes (27.8) and the
+  close-up (23.4) at 960x540.
+- **Tools** (evidence directory, outside the repository): `pollab.py`, `perf_on_draws.py`
+  (enables the profiler on draws per frame instead of the clock).
+
+## Robot platformer: at 960x540 the draw ring's cycle is the frame; the scheduler holds 0.2 ms of it (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, silent console, late dunes route from the
+world-map slot, the user-supplied game patch that sets a 1920x1080 output and a 960x540 internal
+resolution (same terms as the record below: not a strict run, no compatibility claim, picture not
+compared). The wall-clock route lands in a different scene from run to run, so each row names its
+scene from the run's captures. Three runs, one instrument each:
+
+- Run a385, `1f28471be` built clean: once a second, `/proc/<pid>/task/<tid>/schedstat` of every
+  task (on-CPU time, run-queue wait, timeslices) and 18 `kyty_agent threads` snapshots 2 s apart.
+- Run a386, same build started inside the user-space sampling profiler, which samples only in
+  190-194 s (199 Hz, stacks): it names the host threads by thread id, because every task reports
+  the same name. Every a386 figure below comes from that wrapped run, read outside those seconds.
+- Run a388, the same source with a temporary per-second bill of each graphics ring thread (wait for
+  the next batch, submit-to-dequeue latency, run-lock wait, batch body in wall and thread CPU time,
+  suspended-run waits, submission waits). The host was not quiet after 174 s of that run (all tasks
+  waited 48 ms per frame for a core against 17 ms in a386, and a draw cost 48 us against 28), so
+  only 153-171 s is quoted as figures. The scheduler samples start at 168 s: the host is known
+  quiet for 168-171 s only (18.6 ms per frame over all tasks); before that the claim rests on a
+  flat frame rate. A run before it stopped at 161 s on the title's own abort at hub load and gave
+  no window.
+
+| Run, seconds | Scene (draws per frame) | fps | Frame ms | GPU work ms/frame | Engine busy | Command runs ms/frame, all rings |
+| --- | --- | --- | --- | --- | --- | --- |
+| a385, 176-206 | free play beside a rock (357) | 33.9 | 29.5 | 23.0 | 78.2 % | 28.6, 4.6 in fence waits |
+| a386 (profiler-wrapped), 196-214 | dunes with the tutorial prompt (758) | 27.8 | 35.9 | 29.9 | 83.3 % | 34.1, 1.5 in fence waits |
+| a386 (profiler-wrapped), 151-177 | close-up landing (392) | 23.4 | 42.7 | 37.2 | 87.0 % | 36.7, 12.2 in fence waits |
+| a388 (probe build), 153-171 | close-up landing (386) | 23.6 | 42.3 | 37.4 | 88.4 % | 34.7, 15.8 in fence waits |
+
+- **The 960x540 internal resolution does not hold 30 fps on this route.** The dunes scene gains
+  about 1 fps over 1280x720 (27.8 against 26.2-27.2 in the record below) and the close-up landing
+  scene still spends 37.2-37.4 ms of GPU work per frame in two runs (40.3 at 1280x720, 50.8
+  unpatched). The 37-41 fps recorded for this patch earlier on 2026-11-14 is another scene (walking
+  the dunes, 469 draws per frame) on an older commit (`6a6a5818a`) and was not reproduced: the
+  first row has fewer draws and a lower frame rate, and that gap is unexplained.
+- **Host threads in the dunes scene** (a386, the profiler-wrapped run, 197-211 s, 28.0 fps, frame
+  35.7 ms; names from the profile stacks):
+
+  | Thread | CPU ms/frame | Run-queue wait ms/frame | Share of a core | Timeslices per frame |
+  | --- | --- | --- | --- | --- |
+  | Graphics ring thread that carries the draws | 28.19 | 0.17 | 79.0 % | 122 |
+  | Deferred replay worker | 17.89 | 0.09 | 50.1 % | 18 |
+  | Draw-front thread | 10.47 | 0.13 | 29.3 % | 224 |
+  | Guest thread that yields in a loop | 4.27 | 0.17 | 12.0 % | 7 |
+  | Graphics ring thread that carries the dispatches | 3.93 | 0.35 | 11.0 % | 339 |
+  | Guest job workers, each of 11 | 1.54 | 0.71-0.83 | 4.3 % | 49 |
+  | Guest thread that submits command buffers | 1.52 | 0.15 | 4.3 % | 12 |
+
+  The draw ring thread waits 0.17 ms per frame for a core: the scheduler is not what it waits on.
+  It is off the CPU 7.3 ms of each 35.7 ms frame; the wait counters hold 3.2 ms of that (fence
+  1.50, render lock 0.83, WAIT_REG_MEM 0.48, flip done 0.37; the counters do not say which ring).
+- **The draw ring's cycle** (a388, 153-171 s, frame 42.3 ms; four graphics ring threads exist, the
+  one with the draws takes 5 batches per frame):
+
+  | Per frame | ms |
+  | --- | --- |
+  | No batch queued, waiting for the next submit (0.45 ms of it on the CPU, publishing completions) | 2.71 |
+  | Waiting for the run lock | 0.00 |
+  | Batch bodies, wall | 39.45 |
+  | - on the CPU | 18.97 |
+  | - blocked | 20.48 |
+  | - - of which waits of a suspended run for a value not yet written | 7.72 |
+  | Cycle | 42.16 |
+
+  A batch waits 4.1 ms on average between its submit and its dequeue, so the guest submits ahead of
+  the ring. In the disturbed window of the same run (196-212 s, 708 draws, 20.2 fps) the shape is
+  the same with the CPU share larger: no batch queued 3.47 ms, bodies 45.89 ms of which 35.88 on
+  the CPU and 1.42 in suspended-run waits, cycle 49.37 of 49.62 ms.
+- **What this prices.** In these runs the draw ring has no batch queued for 2.7-3.5 ms per frame;
+  the rest of its cycle is batch bodies, where the thread either works (dunes: 28.2 of 35.7 ms) or
+  is blocked (close-up landing: 20.5 of 42.3 ms). Inference, not measured on the same run: the
+  6.6 ms that the earlier accounting left "outside the runs" (subsection "The command thread"
+  below; unpatched resolution, lighting program left out, another scene) is this wait for the next
+  batch plus waits between the runs of one batch. That accounting cannot be exact either way: its
+  run counter adds the runs of every ring thread.
+- **Guest side** (a385, 18 snapshots): the main thread was in a mutex wait in 10 and asleep in 7;
+  the 11 job workers were idle on their semaphore in 16 or 17; three guest threads were never in a
+  wait. `sync-waits` reported its tracking disabled and gave nothing.
+- **Deferred replay worker.** 359 of its 374 profile samples are its poll loop (clock reads and the
+  loop itself): half a core that replays almost nothing in this scene
+  (`DeferredReplayWorker::Run`, `kPollWindow`, `GraphicsRenderCommandBuffer.cpp`). It is a resource
+  cost, not a measured frame cost. A shorter window moves the cost to a wake-up on the draw ring
+  thread for every hand-off; handing work off in larger pieces would let the worker sleep. Neither
+  is built.
+- **Not established.** What the guest does in the 2.7-3.5 ms before its next submit. Which ring
+  holds each counted wait. The split of the 20.5 ms blocked in the close-up scene beyond its
+  suspended-run waits. Each scene has one window of one run; a388 is a probe build.
+- **Tools** (evidence directory, outside the repository): `schedsample.py`, `schedperf.py`,
+  `ringbill.py`, `diag-ring-20261114.patch`.
+
+## Robot platformer: a 1920x1080 output with a 1280x720 internal resolution removes under a third of the GPU work and still misses 30 fps (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, 60 fps present limit, silent console, `1f28471be` built clean (no
+probe), late dunes route from the world-map slot, one run per patch, per-second performance
+snapshots and the render engine's busy counters over the stated seconds. The guest resolution is
+changed with a user-supplied game patch file that rewrites the title's own resolution table
+(`docs/game-patches.md`). A run with a game patch is not a strict run and supports no compatibility
+claim; the patch is not shipped and its picture was not compared against the unpatched one.
+
+| Guest output / internal | Scene (draws per frame) | fps | Frame ms | GPU work ms/frame | Engine busy | Command runs ms/frame | us per draw |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 3840x2160 / 1920x1080 (unpatched), 196-213 s | dunes (772) | 19.1 | 52.3 | 48.0 | 91.7 % | 42.7, 6.4 in fence waits | 35.9 |
+| 1920x1080 / 1280x720, 183-213 s | dunes (765) | 26.2 | 38.1 | 34.3 | 90.0 % | 33.4, 3.1 in fence waits | 27.8 |
+| 3840x2160 / 1920x1080 (unpatched), 153-180 s | before the dunes (386) | 18.9 | 52.9 | 50.8 | 96.0 % | | |
+| 1920x1080 / 1280x720, 150-174 s | before the dunes (390) | 22.7 | 44.1 | 40.3 | 91.3 % | | |
+| 1920x1080 / 1920x1080, 150-215 s | another scene (550) | 18.6 | 53.7 | 46.2 | 86.0 % | 48.9, 17.0 in fence waits | |
+
+- **Most of the GPU frame does not follow the internal resolution.** The patched rows change two
+  things at once: the output from 3840x2160 to 1920x1080 and the internal resolution to 0.44 times
+  the pixels. Together they take 13.7 ms off 48.0 ms in the dunes and 10.5 ms off 50.8 ms in the
+  scene before them. A line through each pair leaves 22 ms and 32 ms of GPU work per frame at zero
+  internal pixels (two points per scene, not a fit). Inference, not measured: 13.7 ms is what two
+  lighting programs of about 25 ms would lose if they scaled with the pixel count while draws and
+  the other dispatches stayed; only `0x3666fa39` was measured in a dunes scene (13.65 ms, record
+  below), `0x874bd13f` was not.
+- **The output resolution alone is not the cost.** With the output at 1920x1080 and the internal
+  resolution unchanged the frame stays at 53.7 ms. The route landed in a different scene in that
+  run, so the row excludes a large gain and prices nothing.
+- **At 1280x720 both limits sit together.** The engine is still 90 % busy at 38.1 ms and the
+  command thread runs 33.4 ms of the frame, so 30 fps is not held at that resolution either. An
+  earlier run at 960x540 on `6a6a5818a` held 37-41 fps with the engine 78 % busy (record below); later
+  runs at 960x540 held 33.9, 27.8 and 23.4-23.6 fps in three other scenes (record above).
+- **Command work per draw is not constant.** The same draw count costs 35.9 us per draw at
+  1920x1080 and 27.8 us at 1280x720, with every stage lower by a similar share (state setup 10.5
+  against 8.2, binding 14.8 against 12.2). The cause is not established; the thread sleeps in fence
+  waits for 6.4 ms against 3.1 ms per frame. Later check (2026-11-15, dunes route at 1920x1080): it is not
+  the host slowing an idle thread. The busiest emulator thread ran at 4.5-5.1 GHz in every second, with no relation
+  between its clock and the cost per draw (r = 0.23), nor with a busy SMT sibling or core migrations (|r| < 0.1).
+  Within one draw band the cost per draw falls as the engine gets busier (r = -0.91 to -0.95 in four runs): the
+  costly seconds are the ones where the command thread limits the GPU. In them every stage rises, most of all
+  texture and storage descriptors and state setup, which points to the draws themselves. The check sampled only the
+  emulator's three busiest threads; other host load was not measured.
+- **Two further command-thread costs (2026-11-15, same run, agent counters).** Guest-address residency rises from
+  about 0.9 ms to 37-65 ms per second in five slow seconds at an unchanged call count. Each such second has a
+  longest single preparation of 13-19 ms against under 5 us in quiet seconds, so the time is a few long calls,
+  not a repeated per-preparation cost; the timed span is the import of physical pages the title populates while it
+  streams (page query, window export and import), and which part of a long call dominates was not measured. Memory-object
+  lookups run about 10 calls per draw at a measured 0.6-1.4 us each, timing overhead included, in steady seconds
+  (8-12 us per draw, 10-19 % of command-processor run time; the paying thread was not established). In steady
+  seconds 90-93 % are cached reuses and the rest fast reuses; the slow ones are texture
+  loads, whose staging cost db6d7c132 already reduced. Neither names a cause with a small fix; moving residency off
+  the command thread or folding the per-draw lookups are larger changes, not started. The residency
+  imports are timed in `cross-title.md` ("Physical windows are whole 64 MiB chunks", 2026-11-15 entry).
+- **Colour compression is not the GPU cost (2026-11-15, weak exclusion).** One run with the driver's
+  colour compression disabled (`INTEL_DEBUG=noccs`, passed through the inherited environment; the
+  child's environment was not read) against one without, same binary, save and route, compared by
+  draws per flip: 650 draws per flip 20.4 → 17.3 fps, 600 23.3 → 19.3, 250 32.7 → 29.0 (2-25
+  seconds per band). Compression is a net gain on this scene, so its resolves are not where the GPU time
+  goes. One run per arm.
+- **Storage buffers rehashed on edge-only changes (2026-11-15, excluded as a fix).** Storage buffers of
+  8 MiB and more at page-unaligned addresses were hashed in full 30-60 times a second because a
+  neighbour wrote their shared first or last page; their interior pages were unchanged. A change that
+  let the existing storage-edge hashes declare such a buffer clean cut storage hashing from 1,680 to
+  355 ms over the run (48.8 to 9.4 GiB) with unchanged fps in light bands, but in the 525-700 draws
+  per flip band command-buffer fence waits rose from about 1.7 to 6.3 per frame (50-150 to 250-335
+  ms per second) while the GPU's busy share fell from 82-96 % to 67-82 %, and fps fell (650 draws per
+  flip 20.4 → 14.3). A check run that hashed every edge-clean buffer in full anyway found 22,765
+  mismatches in 28,000 decisions (decisions, not buffers: a skipped buffer mismatches again on every
+  later visit), all on buffers whose content came from a device write-back and none on CPU uploads:
+  their recorded hash predates the write-back, so the full hash was re-uploading the written-back
+  bytes. That check run, slowed by its own hashing, reached only 750-800 draws per flip, where it
+  again waited on fences 6-8 times per frame, but with the GPU 92-94 % busy. Why skipping those
+  re-uploads adds fence waits is not established. The change was reverted. Direction: a narrower rule
+  needs its own measurement of the write-back path.
+- **Short dips on the dunes route (2026-11-15, cause open).** Two classes:
+  - Scene-linked: two runs fall to 9-15 fps with the GPU 40-56 % busy at 78-80 s, just before draws
+    per flip fall to about 45; the 31-68 ms window exports recorded near 77-80 s
+    ([cross-title](../bringup/cross-title.md)) are the lead. A third run reached that point about 9 s
+    later and ended before it.
+  - Unattributed: that third run fell to 9-17 fps at 56-67 s (GPU 39-75 % busy, few fence waits), where
+    each per-draw phase took about twice as long and command emission about seven times as long (4 to
+    29 us per draw). No scheduler samples cover it. Samples that did cover 72-86 s showed the
+    emulator's threads waiting 2,400 ms a second to run at 74 s (300 normally), but fps was 28.7 then,
+    and agent snapshots were being taken in that second.
+  - Passive samples (five runs, per-second scheduler, pressure, disk and process IO; one run with a
+    user-space CPU profile). In the one clean run the 78 s dip (12 fps) coincides with a burst of
+    first-use texture creation on the command thread: 111 creates, `upload_ns` 215 ms (27 ms for one upload),
+    `guest_address_residency_ns` 86 ms, `detile_ns` 54 ms, `draw_descriptor_texture_ns` 353 ms,
+    `command_processor_run_max_ns` 291 ms, fence waits 19 ms, and GPU busy cycles fall to about a
+    fifth. The command thread's user-space samples stay at about 540 a second in steady and dip
+    windows; in the dip they move to detile, memcpy, XXH3 hashing and block creation. Whether the
+    rest of `upload_ns` is kernel time (first-touch faults on new staging) or a wait for in-flight
+    fills is not measured, and the three counters above are not shown to be disjoint.
+  - A later clean run repeats the dip at 78 s (10 fps) and its slow-frame records give the split per
+    frame: the 484 ms frame carries 97 ms of GPU memory creation and 50 ms of upload, the next
+    (208 ms) frame 10 ms of creation; the command thread's longest run is 243 ms. Creation is under
+    half of the lost time, so the dip stays open. The slow-create records (tagged
+    `temporal_not_causal`) show 22 MB textures taking 6-16 ms each: upload 1.5-11 ms, Vulkan
+    allocation 0.2-8 ms, hashing about 0.8 ms. The host sampler's seconds and the snapshot seconds
+    differ by one or two, so per-thread fault spikes are not paired with the dip second.
+  - Excluded for these dips: swap activity, cgroup memory events (all zero) and process block reads
+    in the dip second (0 MB at 78 s; reads of 0.4-0.9 GB/s come one to three seconds later).
+  - Guest file IO runs synchronously on the calling thread: `SubmitCommandBuffer`
+    (`Libs/LibAmpr.cpp:786`) executes its reads inline (`ExecuteActions`, line 812; `ExecuteRead`,
+    line 671, 4 MiB chunks), the kernel AIO submit (`Kernel/Aio.cpp:66`) runs each request inline and
+    reports it completed, and `KernelPread` (`Kernel/FileSystem.cpp:1587`) holds the file mutex. A
+    temporary probe measured up to 300-700 ms a second of such blocking per streaming thread at about
+    0.9 GB/s. The blocking did not line up with the dips (a 698 ms block at 77 s came with no dip), so
+    it is not shown to cause them. The install volume is a FUSE NTFS mount: 1.16 GB/s cold serial,
+    0.70 GB/s cold with eight readers, 10.6 GB/s from page cache; no claim that it causes the dips.
+  - Open: a 0 fps freeze at 104-108 s in two runs with a foreign build loading the host (IO
+    pressure 270-525), not repeated in three later runs.
+  - Package stats: from about 30 s to 90 s the guest calls `KernelStat` on `/app0` files 700-1,000
+    times a second, and the FUSE daemon serving the install uses 525-570 ms of CPU a second in the
+    runs measured with and without the change below. Early on, 65-90 % of the paths repeat; later
+    the calls are about 700 distinct absent paths a second. `KernelStat` now takes the package fast
+    path that APR resolution already used (an exactly spelled regular file below `/app0` with no
+    patch directory: a status, a size and a time lookup, plus an existence check for `.odx` paths),
+    which answered 20-50 % of the early calls. No effect on stat rate, CPU or fps was measured: the
+    stat rate varies between runs of each arm more than between arms. Open:
+    an absent path still runs the full resolve (patch, extension alias, data segment, companion and
+    font candidates, each a host lookup); answering it fast needs a cached, bounded index of the
+    read-only package that proves every candidate absent.
+  A dip on a shared host needs passive scheduler and pressure samples over the whole run before it is
+  attributed.
+- **Standing against the 30 fps target at the unpatched resolution.** The frame needs about 17 ms
+  less GPU work, and the command thread, which runs 33.4 ms for the same draw count once the GPU
+  stops limiting it (second row), has no margin left under 33.3 ms. The measured GPU levers are the
+  range split of the lighting program (5.9 ms, probe only, fails its sweep) and nothing else above 1
+  ms; no general rule recorded so far closes the gap on this GPU.
+- **Runs.** The first attempt with the 1280x720 patch exited with status 139 at 144 s in the hub
+  load, a fault in guest code; whether it is the hub-start assert recorded on 2026-10-30 was not
+  checked. The repeat ran clean.
+
+## Robot platformer: the loop-boundary range split fails the cross-recipe sweep and stays a probe result (2026-11-14, offline)
+
+Intel Arc A770, Mesa ANV on Xe (Mesa 26.3 development build), SIMD8, driver shader cache disabled. No
+title runs: every stored compute recipe whose entry function holds a loop was compiled as translated
+and again after the rewrite of the record below, applied as a rule: at every outermost loop of the
+entry function, in the block that enters the loop (when it has a single one that only falls into the
+header) and at the start of the loop's merge block, every scalar function variable is stored back as
+itself plus a run-time zero. The gate was that no recipe gets worse. It fails, so the rule is not
+written into the translator.
+
+| Store | Recipes with a loop | Fewer spills + fills | Same | More |
+| --- | --- | --- | --- | --- |
+| PPSA21567 - ASTRO BOT | 60 | 36 | 9 | 15 |
+| PPSA03969 - F.I.S.T.: Forged In Shadow Torch | 9 | 0 | 3 | 6 |
+| PPSA07393 - Gori: Cuddly Carnage | 9 | 1 | 3 | 5 |
+| PPSA01341 - Demon's Souls | 5 | 0 | 4 | 1 |
+| PPSA17221 - Minecraft | 4 | 0 | 3 | 1 |
+| PPSA09809 - OCTOPATH TRAVELER II | 3 | 0 | 1 | 2 |
+| PPSA04220 - JoJo's Bizarre Adventure: All-Star Battle R | 1 | 0 | 1 | 0 |
+| All | 91 | 37 | 24 | 30 |
+
+- **The gains sit in this title.** 13 of the 36 gains in this title's store are compilations of
+  the lighting program itself (the same module shape, including the arms the probe runs stored);
+  the 60 rows hold 46 distinct module shapes. Outside this title the rule gains once and loses 15
+  times.
+- **Losses are not marginal.** Spills:fills go 104:321 -> 597:1184 on a Minecraft program,
+  53:161 -> 93:1224 on a Demon's Souls program, 622:1593 -> 1380:2236 and 2901:9982 -> 4848:14221
+  on two other programs of this title, and 0:0 -> 41:107 on a Gori: Cuddly Carnage program that
+  did not spill at all.
+- **No narrower form passes.** Over nine losing and five gaining recipes, three narrower forms were
+  compiled: the exit only, only the registers the loop never references, only the registers the loop
+  never writes. They make 6, 5 and 7 of the 14 worse; four recipes get worse under every form.
+- **No structural property separates the two groups.** The share of the entry function before,
+  inside and after its outermost loops, the number of outermost loops and the number of registers
+  written inside them overlap between gains and losses (a program with 23 % / 51 % / 24 % loses, one
+  with 32 % / 52 % / 14 % gains).
+- **The driver's cycle estimate cannot choose.** For the lighting program it reads 1.536e9 as
+  translated, 1.574e9 with the split that measured 5.9 ms faster, and 0.808e9 for the parked form
+  that the statistics of the record below exclude.
+- **What stays open.** Choosing per pipeline from the spill and fill counts the driver reports for
+  both compilations would never pick a worse count, at the price of compiling such programs twice.
+  It is not built: the only evidence that the static count tracks GPU time is three compilations of
+  this one program (1634, 938 and 214 fills against 13.65, 7.75 and 3.3 ms per frame).
+- **Tools** (evidence directory, never in the repository): `splitloops.py` (the rule and its
+  narrower forms on a SPIR-V listing), `sweep_split.py` (the before/after table over recipe stores),
+  `loopshape.py` (where the entry function's code sits relative to its loops).
+
+### The command thread: wait counters hold 1.2 ms, 6.6 ms outside its runs is unpriced
+
+A later record the same day ("at 960x540 the draw ring's cycle is the frame", above) measures the
+draw ring's cycle directly, in 960x540 runs of other scenes; that it accounts for this 6.6 ms is
+an inference.
+
+The per-second performance snapshots of run a379 (record below) were mapped to the arm that was
+live, keeping only snapshots that lie inside one 2 s block (`armperf.py`; block edges from the
+probe's lines, shifted by the sub-second offset that best matches flips to presents, mean error
+1.6 fps). In the second scene of that run (blocks 56-67, three snapshots per arm, about 630 draws
+and 105 dispatches per frame):
+
+| Per frame, lighting program left out | ms |
+| --- | --- |
+| Frame | 38.3 |
+| Command processor runs | 31.7 |
+| Draw processing (632 calls, 33 us each) | 21.1 |
+| - resource binding (texture descriptors 4.7, storage 1.5, finalize 1.5) | 8.4 |
+| - draw state setup | 6.8 |
+| - pipeline setup, emission, materialization | 3.9 |
+| Dispatch processing (105 calls, 57 us each) | 6.0 |
+| Fence waits | 0.84 |
+| WAIT_REG_MEM | 0.35 |
+| Flip-done waits | 0.04 |
+
+The wait counters hold 1.2 ms of the frame, and fence waits are timed inside the runs. That leaves
+6.6 ms per frame outside the runs and outside every wait counter (38.3 - 31.7), which matches the
+75-80 % of a core the thread used in the causal test of 2026-11-14. That time is not priced: it may
+be the gap between a guest submit and the run that serves it (about 20 runs per frame), run-queue
+delay, or the guest's own pace. With the program as translated the same counters read 33.2 ms of
+runs and 4.9 ms of fence waits in a 43.9 ms frame. Three snapshots per arm on a probe build; the
+figures size the parts, they are not a benchmark.
+
+## Robot platformer: splitting register ranges at the light loop recovers 5.9 ms of GPU time (2026-11-14, probe only)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
+`d25d2e373` plus the temporary probe of the record below (not committed), four arms in 2 s blocks in
+one run. The fourth arm runs the translated module of `0x3666fa39` after an offline rewrite of its
+SPIR-V: in the block that enters the light loop and in the loop's merge block, every scalar function
+variable (a guest register) is stored back as itself plus a run-time zero. The rewrite changes no
+result of the program. No translator change is committed; this record prices the rule.
+
+| Arm (blocks 4-48, 11-12 per arm) | Engine ms/frame | Frame ms | Against full |
+| --- | --- | --- | --- |
+| Program as translated | 50.69 | 53.98 | |
+| Program left out | 37.04 | 41.70 | -13.65 |
+| Trace region folded out | 40.36 | 43.19 | -10.33 |
+| Ranges split at the light loop | 44.79 | 46.71 | -5.90 |
+
+The split arm is -4.66 in blocks 4-27 and -6.23 in blocks 28-48, and -5.45 (3 blocks per arm) in the
+scene the route reaches in blocks 56-67. Blocks 49-55 and 68 onwards hold a scene change and are
+left out.
+
+Driver statistics of the same module variants, compiled offline from the stored recipe (method of
+the record below, SIMD8); fills are counted before, inside and after the light loop in the
+generated code:
+
+| Variant | Instructions | Spills:Fills | Max live | Fills before / inside / after |
+| --- | --- | --- | --- | --- |
+| As translated | 34,087 | 390:1634 | 283 | 413 / 666 / 555 |
+| Trace region folded out | 12,149 | 86:214 | 168 | 142 / 6 / 66 |
+| Split at the loop exit | 31,034 | 280:1139 | 270 | 348 / 646 / 145 |
+| Split at the loop entry | 32,651 | 340:1305 | 264 | not counted |
+| Split at entry and exit (the arm above) | 30,423 | 253:938 | 262 | 222 / 577 / 139 |
+| Same, every variable without a liveness test | 30,423 | 253:938 | 262 | same module statistics |
+| Parked in scratch, one index base (19 variables) | 32,704 | 357:1393 | 275 | 399 / 457 / 537 |
+| Parked in scratch, separate reload base | 33,345 | 354:1491 | 259 | 342 / 611 / 538 |
+| Parked with constant indices (control) | 34,087 | 390:1634 | 283 | as translated |
+| Split at every loop | 43,837 | 1322:2687 | 671 | 399 / 2105 / 183 |
+| Split at every loop and selection holding a loop | 61,708 | 2793:4708 | 1361 | 940 / 3528 / 240 |
+| Entry and exit, plus copies of read-only registers after the trace region (9) | 30,306 | 254:921 | 262 | 221 / 563 / 137 |
+| Same, plus copies at the top of the loop body (27) | 31,345 | 285:1108 | 263 | 223 / 572 / 313 |
+
+- **What the rewrite does.** `V = V + z`, with `z` a value the driver cannot fold (the probe uses
+  `NumWorkgroups.y >> 16`, which is zero for any dispatch below 65,536 groups in y), in bit form for
+  float registers. The value after the boundary is a new value for the driver. The record below
+  measured that the driver counts one register range per value (283 against an exact 243), so a
+  register written before the loop and read after it holds one range across the loop; the split
+  ends that range at the boundary.
+- **Engaged.** The run log reports the fourth arm's module loaded from the offline file (200,194
+  words against 196,783) and the arm differs from full in every window.
+- **Where it acts.** Fills after the loop fall from 555 to 139 and before it from 413 to 222; inside
+  the loop they stay (666 to 577). The 5.9 ms is close to the about 7 ms the record below assigns to
+  the code before and after the light loop; the about 4.5 ms it assigns to the loop itself remain.
+- **No liveness needed.** Rewriting all 267 scalar variables at both boundaries gives the same
+  module statistics as rewriting only the 98 and 88 live ones: the driver drops the dead ones.
+- **Excluded without a run: parking in per-thread scratch.** Only 19 variables are untouched by the
+  loop and live after it (the driver's 44 loop-through values include its own subexpressions). With
+  one index base the driver keeps 17 slot addresses in registers across the loop; with a separate
+  reload base the maximum falls to 259 but fills stay at 1491 and the fills after the loop do not
+  move (538). With constant indices the driver folds the array back into values (identical
+  statistics), so a run-time index is what makes a scratch array stick.
+- **Excluded without a run: splitting inside the loop.** A split at every loop, or at every loop and
+  every selection holding a loop, multiplies registers and fills (maximum 671 and 1361). A value
+  rewritten inside a loop becomes one more range across that loop.
+- **Excluded without a run: copies of read-only registers.** Only 9 registers that the loop only
+  reads have two or more reads after the trace region; copying them there changes nothing, and
+  copies at the top of the loop body bring fills back after the loop.
+- **Not verified.** Picture equality of the split arm against full (the rewrite is a no-op by
+  construction; no capture was compared). The rule in the translator, other programs of this title,
+  other titles and other drivers.
+- **Tools** (evidence directory, not in the repository): the SPIR-V rewriter, the fill counter by
+  loop position and the loop-through lister.
+
+## Robot platformer: the trace region costs GPU time by being compiled in, not by running (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
+`c5cf3199e` plus the temporary probe of the record below (not committed), six arms in 2 s blocks in
+the same scene. Two more kinds of arm: every `image_bvh_intersect_ray` reports a miss without
+loading a node, and a guest branch taken under a condition the compiler cannot fold (the count word
+of the guest address table in the program's uniform block is not zero: true on every dispatch).
+
+Run 1, medians of blocks 18 to 92, 12-13 per arm:
+
+| Arm (instruction index) | Frame | Engine work a frame | Removed |
+| --- | --- | --- | --- |
+| As translated | 52.8 ms | 48.1 ms (47.2-49.3) | |
+| Dispatch left out | 37.0 ms | 32.6 ms (32.1-33.6) | 15.4 ms |
+| Trace region skipped, branch folded at compile time (1437) | 40.9 ms | 36.5 ms (36.2-39.6) | 11.6 ms |
+| Every intersect reports a miss (1550, 1582, 1767) | 52.6 ms | 47.9 ms (46.5-48.6) | 0.2 ms |
+| Bottom-level walk skipped, branch folded (1485) | 46.6 ms | 42.1 ms (41.2-42.9) | 6.0 ms |
+| Trace region skipped under the run-time condition (1437) | 52.7 ms | 48.0 ms (47.0-49.5) | 0.0 ms |
+
+Run 2, the control, medians of blocks 18 to 79, 10-11 per arm. The first half of the window is
+about 4 ms a frame heavier in every arm; the differences hold within 1.7 ms in each half:
+
+| Arm (instruction index) | Frame | Engine work a frame | Removed |
+| --- | --- | --- | --- |
+| As translated | 61.3 ms | 50.7 ms (45.7-54.1) | |
+| Dispatch left out | 45.2 ms | 35.5 ms (30.1-37.3) | 15.2 ms |
+| Trace region skipped, branch folded (1437) | 49.0 ms | 39.1 ms (33.6-41.4) | 11.6 ms |
+| Trace region skipped under the run-time condition (1437) | 57.2 ms | 50.1 ms (45.0-53.6) | 0.5 ms |
+| Leaves after the light cull under the run-time condition (250) | 44.5 ms | 35.8 ms (29.9-37.8) | 14.9 ms |
+| Light loop never entered under the run-time condition (1361) | 51.8 ms | 45.6 ms (41.5-48.7) | 5.1 ms |
+
+- **The run-time condition engages.** Leaving after the light cull under it recovers 14.9 of the
+  15.2 ms of leaving the dispatch out, so the arms that use it do skip their region on every thread.
+- **Running the region costs nothing measurable here.** Skipped at run time it returns 0.0 and
+  0.5 ms; with every intersect a miss, 0.2 ms. The method resolves about 2 ms.
+- **Having it in the compiled program costs 11.6 ms a frame**, in both runs: the same skip folded at
+  compile time removes the region from the program and with it three quarters of the program's cost.
+  Half the region (the bottom-level walk) removes half of that.
+- **The cost lands on the rest of the program.** With the light loop never entered at run time
+  5.1 ms come back, against 12.6 ms when the loop is folded out (record below). About 7 ms of the
+  region's presence is paid in the code before and after the light loop, about 4.5 ms in the light
+  loop outside the region.
+- **Driver statistics of the same variants** (their stored compute recipes compiled offline,
+  `VK_KHR_pipeline_executable_properties`, shader cache disabled, SIMD8):
+
+  | Variant | Instructions | Loops | Spills:fills | Scratch a thread | Maximum live registers | Removed |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | As translated | 34,087 | 137 | 390:1634 | 8,192 B | 283 | |
+  | Trace region skipped at run time | 34,086 | 137 | 390:1634 | 8,192 B | 283 | 0.0-0.5 ms |
+  | Every intersect a miss | 28,602 | 125 | 412:1390 | 8,192 B | 228 | 0.2 ms |
+  | Bottom-level walk folded out | 23,255 | 88 | 271:1042 | 4,096 B | 242 | 6.0 ms |
+  | Trace region folded out | 12,149 | 39 | 86:214 | 2,048 B | 168 | 11.6 ms |
+
+  The region is 65 % of the compiled program for 22 % of the guest instructions. The GPU time follows
+  the scratch traffic, not the instructions that run. By position in the assembly of the translated
+  program, the first 12,000 instructions hold 487 scratch loads, the next 18,000 (the light loop)
+  369 and the last 10,300 (the shading after the loop) 778; the variant without the region holds 214
+  in all.
+- **Why the rest of the program pays** (final NIR from `INTEL_DEBUG=cs`, exact CFG liveness, one
+  register per value at SIMD8 against 128 registers):
+
+  | Point | Live values |
+  | --- | --- |
+  | Before the light loop | 150 (31 uniform, 119 per-lane) |
+  | Trace region entry | 164 |
+  | Peak, inside the region | 243 (83 uniform, 160 per-lane) |
+  | Trace region exit | 160 |
+  | After the light loop | 112 |
+  | Peak without the region | 158 (47 uniform, 111 per-lane) |
+
+  At the peak 95 values live only inside the region, 95 pass through it untouched (18 uniform, 77
+  per-lane; 44 of them are not touched by the whole light loop) and 51 are used on both sides. The
+  pass-through values have 162 definitions and 1,900 uses outside the region, 268 of them inside
+  the light loop. One continuous range per value peaks at 282, the driver reports 283: ranges with
+  holes add about 40 to the exact figure, not the gap the 2026-11-12 record below claimed. Which
+  values the allocator sends to scratch was not traced; 1,634 fills against 1,900 uses of values
+  that only pass through is consistent with those values being loaded from scratch at every use.
+- **Tool defect, earlier figures withdrawn.** The liveness script behind the 2026-11-12 table read
+  successors only from the line that closes a block; an empty block prints them on its header line,
+  so liveness never crossed an empty else arm (471 of 1,431 blocks). Fixed, it matches a hand count
+  on a 60-instruction test program (10 values: 3 uniform, 7 per-lane). "Exact 126", "51 under
+  exact" and "exact 102" in that record are wrong; see the correction there. The guest-listing pass
+  of that record (122 registers) uses another script and was not re-checked.
+- **Scratch is reachable from a translation.** A function-local array indexed by a run-time value
+  compiles on this driver to scratch stores and loads (test program: a 96-element array becomes
+  `store_scratch_intel` / `load_scratch_intel`, 384 bytes of scratch a thread). Not tried: keeping
+  the pass-through values there across the region.
+- **What it bounds.** 11.6 ms a frame is the ceiling of any translation change that stops the
+  region from pushing other values out of registers. At that ceiling the frame is about 40 ms
+  (25 fps) and the graphics command thread sets it (causal test below).
+- **Not measured.** How often a thread enters the region in this scene; the same split for
+  `0x874bd13f`; any other GPU or driver. The arms change the picture; no image was scored.
+- **Discarded run.** One run left the dunes route for the opening cinematic; the program was not
+  dispatched after block 40.
+
+## Robot platformer: removing the trace region removes most of the lighting program's GPU time (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
+`451e7d292` plus a temporary probe (not committed). Starting 35 s after the first dispatch of
+`0x3666fa39` it rotates seven arms in 2 s blocks: the program as translated, its dispatch call left
+out, and five translations of the same program, compiled outside the translation cache under their
+own pipeline keys, in which one guest conditional branch is always taken. At every block change the
+probe reads the present count and the process's render-engine cycles from its DRM client records,
+which gives engine work per frame. 117 blocks ran; the figures are medians of blocks 14 to 96 (12 per
+arm, the scene where the robot lies on the dune under the tutorial prompt), with the block range in
+brackets. The last three cycles agree within 0.5 ms.
+
+| Arm (instruction index of the forced branch) | Frame | Engine busy | Engine work a frame | Removed |
+| --- | --- | --- | --- | --- |
+| As translated | 51.4 ms | 89 % | 46.1 ms (45.2-47.3) | |
+| Dispatch left out | 37.3 ms | 82 % | 30.5 ms (29.6-31.0) | 15.6 ms |
+| Leaves after the tile's light cull (250) | 37.3 ms | 83 % | 30.9 ms (30.7-31.9) | 15.2 ms |
+| Light loop never entered (1361) | 38.5 ms | 88 % | 33.5 ms (32.6-35.0) | 12.6 ms |
+| Trace region skipped (1437) | 39.6 ms | 88 % | 34.7 ms (28.2-35.3) | 11.4 ms |
+| Shading block skipped (2229) | 51.5 ms | 89 % | 45.8 ms (41.2-47.0) | 0.4 ms |
+| Part of the shading block skipped (2236) | 50.1 ms | 89 % | 43.8 ms (41.3-44.8) | 2.3 ms |
+
+- **Where the time goes away.** The light cull costs about 0.4 ms and, with the light loop folded
+  out, everything outside it about 3 ms. Folding the light loop out removes 12.6 ms, and 11.4 ms of
+  that goes with the span the guest itself skips when no lane of the wave traces: 665 of the
+  program's 3,066 instructions, from the branch at index 1437 to its join. The record above shows
+  that this is the cost of having the span in the compiled program, not of running it. The span holds the three `image_bvh_intersect_ray` instructions, the header loads that
+  build the two BVH descriptors, the two-level walk (instances, then triangle lists) with its shared
+  stack in lane reads and writes, and the use of the hit. The two shading-block arms disagree with
+  each other (a part cannot cost more than the whole), so 2 ms is the resolution of this method: each
+  arm is its own compilation, and the record of the doubled lookups (2026-11-14) saw register
+  allocation alone move this program by 15 %.
+- **Corrects the earlier price.** The forced-miss build of 2026-11-09 (23.6 against 24.7 ms a call)
+  priced the node visits after the first one, not the trace: the header loads, the first visit and
+  the lane exchanges ran in both arms. "A host-written traversal is worth about 1 ms" in the record
+  below is withdrawn; removing the trace region from the compiled program removes 11.4 of the
+  program's 15.6 ms in this scene.
+- **What it bounds.** With the region left out the frame is 39.6 ms (25 fps), where the causal test
+  below shows the graphics command thread setting the frame. 30 fps still needs both: engine work at
+  or under about 30 ms a frame and 6 ms less command processing.
+- **Not measured.** How many light iterations trace per tile and how many nodes a trace visits in
+  this scene (the 2026-10-30 counts are from another window). The forced-miss arm and the split
+  between running the span and compiling it in are in the record above. The arms change the
+  picture (lighting on and off every cycle); no image was scored.
+- **Discarded run.** The first attempt started the arms at a fixed 201 s. Boot was slow, the hub
+  loaded during the first cycle, each first use of a variant stalled the command thread for 1-3 s
+  while it compiled, and the run ended at 231 s on the known intermittent guest jump to address 0
+  (`rip 0x9004a0c3e`). The probe was then anchored to the program's first dispatch.
+
+## Robot platformer: the GPU limits the frame with the lighting program, command processing without it (2026-11-14, causal test)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
+`fe853a27b` plus a temporary probe (not committed). From 201 s it rotates four arms in 3 s blocks:
+the dispatch call of `0x3666fa39` issued or left out, crossed with a busy-wait of 10 us after every
+draw on the graphics command thread (the probe counts the waits: 7.5-7.7 ms a frame). Figures are
+block medians of blocks 16 to 31, four per arm, in the scene where the robot lies on the dune under
+the tutorial prompt (about 752 draws a frame). The first 16 blocks include two at 10-15 fps whatever
+the arm and are left out.
+
+| Arm | Frame | Engine busy | Engine work a frame | Fence waits a frame |
+| --- | --- | --- | --- | --- |
+| Program runs | 52.6 ms | 88 % | 46.6 ms | 10.0 ms |
+| Program runs, +7.6 ms on the command thread | 52.7 ms | 87 % | 46.4 ms | 5.9 ms |
+| Program left out | 39.3 ms | 76 % | 30.1 ms | 1.5 ms |
+| Program left out, +7.5 ms on the command thread | 46.9 ms | 65 % | 31.0 ms | 1.0 ms |
+
+- **With the program the GPU sets the frame.** 7.6 ms more command processing changes nothing
+  (k = 0.01 ms of frame per ms added): the command thread has at least that much slack and the engine
+  is busy 46.6 ms of every 52.6 ms frame.
+- **Without it the graphics command thread sets the frame.** Every millisecond added to it is a
+  millisecond of frame (k = 1.02), although the thread uses only 75-80 % of one core.
+- **Budget for 30 fps in this scene.** Both limits are above 33.3 ms: engine work has to fall from
+  46.6 ms to about 30 ms (the program accounts for 16.5 ms of it), and the command path from 39.3 ms
+  by 6 ms. Either alone leaves the frame above 33.3 ms.
+- **Where the command path spends its time** (user-space CPU profile, 199 Hz for 20 s, program left
+  out for the whole window, 42 ms frames; 1 % of the samples is about 1 ms a frame):
+  - Graphics command thread, 31.6 %: indexed draws 18.8 % (descriptor binding 12.5 %, of which
+    texture preparation 6.2 %, guest memory object lookup 4.6 %, storage buffers 3.4 %), handlers
+    reached through nop packets 7.3 %, auto-index draws 5.8 %, dispatches 4.1 %, completed-submission
+    publication 2.2 %. Shader input analysis repeated on every call is 3.2 % for pixel programs and
+    1.6 % for compute programs. No single function is above 1.6 % by itself.
+  - Draw-front thread, 13.8 %: 10.3 % is the same pixel-program input analysis (usage parsing 7.4 %).
+  - Deferred replay worker, 19 %: 14.7 % is clock reads inside its 200 us poll window
+    (`DeferredReplayWorker::Run`, `GraphicsRenderCommandBuffer.cpp`). Draws arrive tens of
+    microseconds apart here, so the worker polls through the whole frame: 45 % of one core that does
+    no work.
+  - Guest threads: none above 2 % of the samples. In 20 `threads` snapshots the guest main thread
+    was in a mutex wait in 13 and asleep in 5. One guest thread yields in a loop; its CPU share
+    follows the fence waits (36 % of a core with the program, 8-9 % without).
+- **Discarded runs.** A first four-arm run with 5 s blocks and 3.9 ms a frame placed nothing: live
+  input moved the scene (567 draws a frame, another cinematic at the end). One run stopped at 160 s
+  on the title's own buffer-full abort recorded below, before the probe window.
+- **Open.** The region of `0x3666fa39` that holds its GPU time is priced in the record above; what
+  inside that region costs it is not. The per-call shader input analysis and
+  the replay worker's poll are host costs that a memo and a shorter poll would remove; neither is
+  measured as a frame-rate gain while the GPU sets the frame.
+
+## Robot platformer: without the heavy lighting program the close-up scene holds 25 fps (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot,
+`3faa704ed` plus a temporary probe (not committed) that leaves out only the dispatch call of chosen
+compute programs and keeps their bindings and all other command processing. From 201 s it rotates
+three arms in 5 s blocks for 95 s; the figures are medians of the 1 s agent samples inside blocks 6
+to 18 (two of the first six blocks ran at 8-12 fps whatever the arm). The capture before the window
+shows the robot lying on the dune after landing (the close-up scene); both programs were dispatched
+once a frame in every block.
+
+| Arm | Frame rate | Command processor run a frame | Fence waits a frame | Render engine busy |
+| --- | --- | --- | --- | --- |
+| Everything runs | 19.0 fps | 38.7 ms | 8.7 ms | 86 % |
+| `0x3666fa39` not dispatched | 25.0 fps | 35.8 ms | 1.4 ms | 74 % |
+| `0x3666fa39` and `0x874bd13f` not dispatched | 24.0 fps | 37.8 ms | 1.0 ms | 71 % |
+
+- **`0x3666fa39` is 15.7 ms of engine time a frame here** (86 % of 52.6 ms against 74 % of 40.0 ms).
+  Without it the frame no longer waits on the GPU (fence waits about 1 ms) and holds 25 fps; the
+  causal test above shows the graphics command thread then sets the frame.
+- **`0x874bd13f` frees no engine time.** Leaving it out as well leaves the engine's busy time a frame
+  at 29.6 ms in both arms and the frame rate unchanged. The about 14 ms that dispatch stamps gave it
+  (bill record below) is elapsed time that overlaps other queued work, not exclusive engine time.
+- **What this bounds.** 30 fps in this scene needs both sides at once: the GPU frame under 33 ms,
+  which is the other work (about 30 ms) plus at most about 3 ms for `0x3666fa39`, and command
+  processing under 33 ms. No change to these two programs alone reaches it. The 2026-11-12 record
+  below (26.0 fps and 36.1 ms with every intersection program left out) measured the same ceiling.
+- **What `0x3666fa39` is.** A decode of its guest listing (3,066 instructions; notes kept outside the
+  repository) shows the title's tiled deferred lighting pass, not a traversal kernel: one 16x16 pixel
+  tile per 256-thread group from a compacted tile list, a per-tile light list built in LDS by the
+  group's threads between two barriers, G-buffer reads, a loop over the tile's lights, probe and
+  reflection lookups and two storage-image stores. Its three intersection instructions sit inside
+  the light loop, share one wave-wide stack through lane reads and writes, and only bend a probe
+  lookup direction for glossy pixels; every lane's result depends on its own ray alone. The record of
+  2026-11-09 below priced the node visits after the first at about 1 ms of 24 a call (forced misses);
+  the region-pricing records above show that removing the whole trace region from the compiled
+  program removes 11.4 of the program's 15.6 ms, while running it costs nothing measurable.
+  Earlier records call the program "the BVH kernel"; the trace is 665 of its 3,066 instructions. A host-written copy of the whole program would be a transcription of the
+  guest program, which the data boundary keeps out of the repository.
+- **Measured since.** The region that holds the time: region-pricing record above. The command path
+  without the program is profiled in the causal-test record above.
+
+## Robot platformer: where the GPU frame goes in dunes gameplay (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV on Xe, strict, 60 fps present limit, dunes route from the world-map slot.
+Baseline: `23c501b05` without diagnostics, 1 s agent samples over 150-210 s. Bill: the same commit plus
+two temporary diagnostics (not committed) that bracket every guest dispatch and every indexed or
+pull draw with bottom-of-pipe timestamps, engaged only from 150 s so the route keeps its timing;
+5 s dumps. The bill run's captures at 160, 185 and 210 s show the robot walking in the dunes; the
+baseline's show it standing still against a rock in the dunes (the timed input route ends at 140.5 s,
+so where the robot stands depends on how long the loads took).
+
+- **Baseline.** 18.8 fps in the steady windows, the render engine 89-91 % busy (about 48 ms of GPU
+  per frame), 530 draws per frame. The command processor spends about 27 ms per frame outside
+  fence and register waits (summed thread time) and waits 19-21 ms per frame on fences, so the
+  GPU is the limit. About a third of the windows dip to 15.8-16.8 fps with the engine 77-83 % busy;
+  there the command processor's own work rises to 38-45 ms per frame at the same draw count.
+  Two of the three dip windows start at the capture times (160, 185 s); the one at 177-181 s does not.
+- **Bill, 155-210 s** (19-20 fps with the probes, engine 73-83 % busy, about 40 ms per frame):
+
+  | Per frame | Time |
+  | --- | --- |
+  | Guest dispatches | 18.5-24.5 ms |
+  | of which `0xbf8ee9fc` (13,072 groups, the 2432x1368 grid) | 4.1-5.3 ms |
+  | of which BVH traversal `0x3666fa39` (480-7,700 groups, 2.2 us per group) | 2.8-19.6 ms |
+  | of which `0x61f4e366` | 3.2-3.8 ms when present |
+  | of which `0x874bd13f` (8,160 groups) | 2.2-2.7 ms |
+  | of which `0x8f3da857` | 0.8-2.0 ms |
+  | Indexed and pull draws | 7.4-10.0 ms |
+  | of which on the 1920x1080 targets | 7.6 ms (105 draws) |
+  | Not bracketed (other draws, clears, copies, barriers, gaps) | about 10 ms |
+
+- **Reading.** The BVH kernel's cost follows its group count, which the guest varies with the
+  view: 7,700 groups and 19.6 ms on entry, 1,100-2,700 groups and 2-6 ms on the walk. No program
+  takes more than about 6 ms per frame on the walk; 30 fps needs about 17 ms off a 48 ms frame,
+  so no single program is that lever.
+- **The composite runs on the larger grid.** In every dump of the bill run where it appears (9),
+  `0xbf8ee9fc` dispatched 13,072 groups per call (152x86, the 2432x1368 grid), while the indexed
+  draws render at 1920x1080. Whether the guest picks that grid from its dynamic resolution, and so from the
+  end-of-pipe clock marks (`cross-title.md`, open defect), is not traced.
+- **Close-up scene, every draw path stamped (second run, same route).** With the non-indexed draw path
+  bracketed too, the stamps cover 366-384 of 381 draws per frame. That run's captures show the robot close
+  up in the dunes, at 15.2 fps. Per frame: compute 43-46 ms, draws 11.4-12.0 ms (non-indexed ones 2.1-2.4
+  ms). `0x3666fa39` and `0x874bd13f` each dispatched 8,160 groups per call, one call per frame, at 2.5 and
+  1.7 us per group: about 20 and 14 ms. 8,160 is the 120x68 grid; the program's
+  workgroup is 256 threads, one 16x16 pixel tile, so 8,160 groups are 1920x1088: the full-resolution
+  tile list, all of it when the robot fills the view (corrected 2026-11-14; this bullet first read
+  the grid as 8x8 tiles of a 960x540 image). Both programs spill on
+  this host (records of 2026-11-06 and 2026-11-12 below); no translator change was tried in this run.
+- **The BVH grids follow the guest's resolution (2026-11-15, one run with the 960x540 measurement
+  patch).** With the same per-program GPU stamps on the dunes route, `0x874bd13f` dispatched 2,040 groups
+  per call (60x34 tiles, exactly a quarter of the native 8,160) at 1.2 ms a call. `0x3666fa39` walks a
+  variable tile list bounded by that grid (480-7,700 groups at native) and dispatched 920-1,000 groups
+  at 1.4-1.5 ms; scenes were not matched. The guest sizes the grid from its render resolution, so
+  emulator-side scaling cannot shrink it; at native resolution only the cost per group is open. That
+  cost was lower at 540p (about 1.5 against 2.2-2.5 us for `0x3666fa39`, 0.4-0.6 against 0.8-1.7 for
+  `0x874bd13f`) with the same programs, which is a lead, not a result. Per frame in the patched run
+  the two kernels took about 2.4 ms and all stamped compute about 8.5 ms while the engine was busy about
+  30 ms; draws were not stamped, so where 540p's GPU time goes is open. A compiler from an unrelated
+  process ran from 96 s of that run.
+- **Placement of `0x3666fa39`'s storage buffers gave no gain above about 1.2-1.3x (2026-11-15, small
+  group counts only).** The kernel binds five storage buffers, all small read-only per-submit copies
+  (16 B to 17.9 KB, descriptor-bound) in host-cached system memory; none is imported guest memory. Its
+  image inputs and their placement were not examined. A temporary probe copied the five into
+  device-local memory before each dispatch and bound the copies; the log showed every binding swapped,
+  not that the kernel read the right bytes. The device-local arm stamped the kernel in one 5 s window:
+  93 calls at about 650 groups per call, 1.56 us per group. The nearest system-memory figure at a small
+  group count is 1.85 us (45,002 groups in 54 calls, an older native build), and the control run gave
+  2.0-2.1 us at about 7,300 groups per call; no device-local sample reached the large calls that set
+  the close-up frame. `0x874bd13f` was not covered: the probe never saw it bind a storage buffer. Its
+  equal time in both arms (6.4-6.9 against 6.5 ms per call at 8,160 groups) only shows that the GPU
+  clock was comparable. One run per arm; an unrelated compiler ran during parts of both.
+- **Storage placement census and one device-local A/B (2026-11-15, native, dunes route).** Placement
+  is closed on this route as a fps lever: the exposed time is under 9 ms a frame, and the one program
+  tested ran no faster in device-local memory where the two arms could be compared.
+  - Census (one run, 310 frames in the last 15 s). A temporary count of the storage range every
+    program binds, by placement, was joined to per-program GPU stamps. Draws are keyed by vertex
+    program. Bound range is not bytes read, and every stamp is an upper bound.
+    - Compute programs binding 1 MiB or more of system memory per stamped call took 3.65 ms a frame:
+      `0x61f4e366` 1.26, `0x90c95e2d` 0.87, `0x108c4737` 0.79 and `0x51b2a70f` 0.46. All four read
+      and write in-place guest imports of 11-29 MiB per call.
+    - Draws whose vertex program binds 1 MiB or more took 4.77 ms a frame. That is whole-draw time
+      (raster and pixel work included), so it is only a ceiling on vertex fetch from system memory.
+    - No program bound a storage object, the class the 2026-10-29 probe moved; every byte was an
+      in-place import or a small per-submit copy.
+    - `0x874bd13f` (2 storage slots), `0xbf8ee9fc` (1) and `0xe1b1315d` (1) took 7.1 ms of compute a
+      frame. In the counted classes they bound under 0.05 MiB per 5 s, the print resolution; what
+      their slots are and where they live is not established. `0xff2adfc8` binds no storage.
+    - An unrelated compiler ran during part of that run.
+  - A/B on `0x61f4e366`, the largest exposed program. A temporary probe copied four of its five
+    storage slots, the descriptor-bound ones, into device-local memory before each dispatch and bound
+    the copies: 32 B, 4.5 MiB read-only, and 1.5 MiB and 16 MiB written. Its by-address range stayed
+    in system memory. The written slots were copied back after the dispatch, outside the stamps. The
+    log showed the four slots moved from host-cached to device-local memory for the first ten calls;
+    later calls were not logged. The route diverged between the arms: the control reached a cutscene
+    and the probe stayed in gameplay.
+    - At the matched moment, the first 5 s window in which `0x3666fa39` runs, the kernel took
+      1.24 ms per call in the control and 1.25 in the probe.
+    - In the probe's gameplay windows it took 0.10-0.17 ms per call. An earlier no-shadow run in the
+      same gameplay held it below the 8th-ranked program, under about 0.2-0.3 ms per call, so those
+      windows agree with system memory.
+    - Ceiling: the saving is at most exposure x (1 - 1/k). With about 8.4 ms exposed, saving 5 ms a
+      frame needs k of about 3 or more, and neither comparison shows that.
+    - One run per arm. The probe's output was not verified (its capture shows a different scene), and
+      a kernel reading stale data would also run faster.
+- **Register spills across the title's compute programs (offline, 2026-11-14).** The 105 compute
+  pipeline recipes recorded for the title (translator store t215) compiled on ANV: 60 spill. Width 16:
+  60 recipes, 15 of them with 870-1,309 spills and 3,589-5,927 fills; width 8: 39, the BVH kernel's
+  recipe at 622:2,426 and 358 maximum live registers; width 32: 6, one at 2,901:9,982 (the native
+  wave32 program recorded below as `0x874bd13f`). Recipes carry no program hash, so only the BVH
+  kernel and that wave32 program are matched to their GPU time; how much frame time the other spilling
+  programs take is not established.
+- **Split-wave rendezvous result trimmed (2026-11-14, translator t216).** The split-wave publish
+  function returned the minimum of the sequence words its spin loop read; callers use only the parity
+  of the exchange number, which equals that minimum whenever the spin succeeds. Returning the number
+  itself frees the loop's loads after it. Offline, the BVH kernel went from 358 to 285 maximum live
+  registers and 622:2,426 to 474:2,133 spills:fills, and four other width-8 recipes compiled at
+  283-287; the 41 recipes shared with the t215 census are unchanged. One run on the dunes route
+  (capture checked, close-up dune scene) measured 17.7-18.1 fps against 16.4-16.9 fps the run before
+  without the change: within run-to-run noise, so no frame-rate gain is claimed.
+- **Split-wave rendezvous cost priced: small (2026-11-14, t216).** A temporary translator probe added two
+  sequence-only rendezvous rounds (no value slot written, parity kept) to every exchange of the two BVH
+  kernels only, compiled outside the translation cache so every other program kept its t216 SPIR-V; a
+  stderr line confirmed the first BVH kernel took it (the second, 874bd13f, has no split-wave exchange:
+  its SPIR-V is identical with and without the probe). GPU timestamps around each dispatch, on the walking-dunes
+  view of the dunes route (capture checked, about 8,000 thread groups a call, the second BVH kernel
+  absent in both runs): 1.913-1.919 us per group and 15.4 ms per call without the probe, 2.092-2.095 us
+  and 16.7 ms with it. Two extra rounds per exchange cost 1.3 ms, so the fixed mechanics of one
+  rendezvous are a floor of about 0.65 ms of the 15.4 ms (about 4 %). The added rounds start right after
+  a completed rendezvous, when both halves arrive together, so the time one half waits for the other at
+  the real exchanges is not priced, nor is the data they move. Both runs used the stamped probe build.
+- **Frame budget on the dunes route (2026-11-14, t216, stamped probe builds).** Close-up dune scene:
+  compute about 46 ms a frame, 34 ms of it the two BVH kernels, and draws about 12 ms (7 ms at
+  1920x1080, 2.9 ms in the 2048x2048 shadow pass). Walking view: the BVH kernel 15.4 ms and other
+  compute about 6 ms a frame, with the render engine about 19 % idle. Offline, removing the whole
+  address-table lookup from the BVH kernel (not a valid translation, a ceiling only) takes it from
+  475:2,022 to 378:1,488 spills:fills and 285 to 271 live registers with 14 % fewer instructions: a
+  static estimate of at most about 2 ms of the 15.4 ms; the dynamic share was measured later and the
+  live A/B below shows the driver's register allocation, not the lookup work, moves the time. 30 fps at native resolution needs more than that ceiling in the
+  walking view and about half of the close-up GPU time, so no single translator lever measured so far
+  reaches it; the kernel compiles at SIMD8 with spills because the guest program alone sits at the
+  register limit (see the BVH pressure record above). Earlier probe runs that doubled the exchanges of every split-wave program from boot left the
+  route (ship cinematic, world map, the title's command-buffer assert), so the probe was narrowed. The
+  walking view differs from the close-up scene of the earlier per-group figures (2.5 us), so the two are
+  not compared.
+- **BVH kernel time follows driver spill placement, not lookup cost (2026-11-14, t216).** A temporary
+  probe compiled the first BVH kernel (3666fa39) in a second variant outside the translation cache and
+  alternated the two every four dispatches in one run, so both arms see the same view; the second BVH
+  kernel, compiled twice with identical SPIR-V, timed equal in both arms (1.593 us a group), so the
+  alternation has no bias. Variants: a fresh plain translation timed equal to the cached one; wrapping
+  the address-table lookup so each call runs it twice, the second dependent on the first, was about
+  15 % faster (1.67 against 1.97 us a group, every 5 s window of two runs, about 8,100 groups a call);
+  the same wrapper returning the first result (second call dead) was 4-9 % faster. Driver statistics of
+  the dumped live SPIR-V: plain 390:1,634 spills:fills, single wrapper 385:1,577, doubled 363:1,509,
+  all 283 live registers; the doubled variant moves spills out of the deepest loops (fills at loop depth
+  5: 84 to 57, spills 18 to 4). More lookup work being faster means the kernel's time is set by where the
+  Intel register allocator places spills, not by the lookup. Not shipped: it is an artifact of one
+  driver's heuristic, with no general translation that reproduces it. Hand-edited offline variants did
+  not match the live translator output (plain 40,923 against 34,087 instructions live), so offline
+  figures in this record that came from hand edits are not comparable with live ones.
+  The loop-depth split came from a parser that resolved 36 to 66 of the driver's 137 loops, and the
+  doubled variant's statistics came from the dumped single-wrapper binary with its return operand
+  switched to the second call, not from a separate live dump.
+- **Inlining the address-table helper is not a lever (2026-11-14, t216, offline on the live SPIR-V).**
+  The translator emits the guest-address lookup as one function marked `DontInline`, called 379 times
+  in the first BVH kernel. Recompiling the dumped live SPIR-V with that control changed to `Inline`
+  gives the same driver statistics as the original (34,087 instructions, 390:1,634 spills:fills, 283
+  live registers): ANV inlines the call either way, so the control does not shape register allocation.
+  Replacing every `OpSelect` with its first arm (not a valid translation) collapses the program to
+  3,866 instructions, so it bounds nothing about the guard selects alone: what a sound subset of them
+  is worth stays not measured. `0x874bd13f` has no intersection instruction (217 texture samples); it
+  is a shading kernel, not a second BVH kernel, and earlier bullets that call it one are wrong on that
+  point. With the doubled-lookup gain above unshippable and inlining excluded, no measured translator
+  lever on `0x3666fa39` approaches the about 17 ms a frame that 30 fps at native resolution needs in
+  the close-up scene.
+- **Close-up dunes GPU time is command work, not submit gaps or guest flush barriers (2026-11-14, t216,
+  probe builds; captures show the close-up dune scene, not the walking view).** Per-command-buffer GPU stamps (start of pipe at begin, end of pipe at end): about 600
+  buffers a second, their union covers 94-96 % of wall time, the gaps between buffers 4-5 %; the render
+  engine is 86-91 % busy, so the GPU is not waiting for the command processor in this scene. Draw and
+  dispatch stamps in the same view account for about 39 of 47 busy ms a frame (BVH kernel 16 ms, other
+  compute 8, 1920x1080 draws 11.8, shadow pass 2.4); the rest was not attributed further, and per-draw
+  stamps add their own drains. A Vulkan call counter showed about 937 pipeline barriers a frame, 615
+  with all-commands stages, about 320 of them from guest cache-flush packets (`ACQUIRE_MEM` /
+  `RELEASE_MEM` mapped to one full memory barrier). Skipping that barrier in alternate 5 s blocks of one
+  run (a pricing probe, not a valid translation) moved GPU time from 51.3 to 50.8 ms a frame and fps
+  from 17.3 to 17.7; a repeat with the call counter confirmed the skip engaged (all-commands barriers
+  372 to 20 a frame, render passes unchanged at about 52) and gave 50.8 to 49.9 ms, 17.2 to 17.7 fps:
+  guest flush barriers cost about 0.5-1 ms a frame here and are not the lever. The other all-commands
+  barriers, which bracket buffer fills, copies and guest-address publishes, drain around the transfers
+  they bracket; stamp pairs around the transfers themselves (same scene, a separate run) gave fills
+  0.34-0.37 ms a frame (64 calls), buffer copies 0.11-0.12 ms (21) and render-pass begins with their
+  load and clear 0.06 ms (52): together about 0.5 ms, not the lever either. About 6 ms of busy time a
+  frame stays unattributed (18 image clears, image copies and blits were not stamped). The BVH kernel
+  arrives on the guest graphics ring (Kyty queue 8); the guest compute queues also run on the render
+  engine on this host because the compute-only family gate stays closed (Arc compute engine record
+  below), so all of it executes on one engine. A Mesa
+  per-event timing run (`INTEL_MEASURE`) crashed inside the driver and gave no data.
+- **Excluded: remembering each invocation's last address-table entry (2026-11-14).** A translator
+  variant tried the entry of the invocation's previous guest-address translation before the directory
+  and the binary search (entries are disjoint, so a containing entry is the search's answer). Unit tests
+  with real device loads passed; one run on the dunes route (capture checked, close-up dune scene)
+  measured 17.6-18.4 fps against 17.7-18.1 fps without it. The memo's hit rate and the kernels' time per
+  group were not measured, so this shows no frame-rate change, not that the address search costs
+  nothing; the variant was not kept.
+- **Status 139 off the route is the title's own command-buffer assert (2026-11-14).** It ended two
+  diagnostic runs and one run of a build without probes (ship cinematic, then `hub_crashsite_tutorial`
+  loading). The crash context's "execute fault at address 0" is how the host reports the guest's
+  `int 0x42` abort: the faulting instruction is that trap in the title's "buffer full" handler of its
+  command-buffer writer, reached when a reservation does not fit ("There are too many objects/batches in
+  this scene."). This is the hub-start assert recorded in this file (bone matrices embedded per draw when
+  the builder reads a skeleton between the palette clear and its publish), not a null call and not caused
+  by the probes. The dunes route avoids it only when it stays on time.
+- **Excluded as a measurement: doubled exchanges off-route.** The run with doubled exchanges
+  slowed boot so much that the timed route ended in the ship cinematic; its per-group figures
+  come from another scene and price nothing.
+
+## Robot platformer: a guest 960x540 render resolution re-measured on the dunes (2026-11-14, measured)
+
+Intel Arc A770, Mesa ANV, Ryzen 5 7600, `6a6a5818a`, 60 fps present limit, dunes route from the
+world-map slot, 1 s agent samples over 155-215 s. The patched run applies one game patch: a mod
+that fixes the guest's render resolution at 960x540 (13 writes to the 01.018.000 executable). A
+run with a game patch is not a strict run and supports no compatibility claim.
+
+| Run | Mean fps | Steady fps | GPU busy (rcs) | Draws per frame |
+| --- | --- | --- | --- | --- |
+| No patch | 18.9 | 20-21 | 91 % | 525 |
+| 960x540 patch | 31.9 | 37-41 after 166 s; 14-16 before | 78 % | 469 |
+
+Later the same day the same patch held 33.9, 27.8 and 23.4-23.6 fps in three other scenes of this
+route (record "at 960x540 the draw ring's cycle is the frame" at the top); the 37-41 fps was not
+reproduced.
+
+- **Scenes differ.** The input route is timed, and the faster run walks the dunes and the cliff
+  path. The unpatched run stands next to a rock in the dunes during the window. Both include one
+  load pause (0-2 fps). The captures at 160, 185 and 210 s show correct dunes, the robot and the
+  cliffs in both runs; no scored compare was made.
+- **Against the 2026-11-02 figure.** The same lever measured 16.6-18.1 fps then. The
+  command-processor work cut since then lets the smaller GPU frame show: the GPU is no longer busy
+  all the time (78 % against 91 %).
+- **Repeated.** A second patched run held 37-39 fps from 170 s to the end of the window, after the
+  same slow start (13-20 fps), without a load pause.
+- **Not done.** The same scene was not reached in both runs, and the slow start of the patched
+  window was not traced to a scene.
+
+## Robot platformer: transport shade layout destroyed while in use (2026-11-14, fixed)
+
+Intel Arc A770, Mesa ANV, strict run, 60 fps present limit, pause-menu route, 300 s, with the Vulkan
+validation layer's thread-safety, unique-handle and object-lifetime checks.
+
+- **Cause.** `FragmentTransportCreateShadePipeline` built the shade pipeline layout from an empty
+  descriptor set layout and destroyed that layout right after pipeline creation. Without
+  `maintenance4` the set layouts of a pipeline layout must stay alive while it is used, so every
+  bind of such a pipeline was invalid (`VUID-vkCmdBindPipeline-pipeline-parameter`).
+- **Fix.** The shade pipelines use the device-lifetime empty layout that the graphics pipelines
+  already share.
+- **Verified.** The same route reports nothing under those checks; a temporary entry report
+  confirmed fragment transport was recorded in both runs, and the three captures have the same
+  health metrics as before the fix.
+
+## Robot platformer: draw tail recorded on a replay thread (2026-11-14, measured)
+
+`docs/bringup/performance-architecture-plan.md`, entry "Built: C stages 1 and 2". Intel Arc A770, strict
+run, 60 fps present limit, dunes gameplay: 20.3 fps against 19.1 fps with the draw tail recorded inline
+(one run each; the scene is GPU-bound, so this is not a speed claim). The Vulkan validation layer with
+only its thread-safety checks is clean.
+
+## Robot platformer: a depth array layer partly outside its depth image (2026-11-13, fixed)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, branch `perf/guest-memory-binding` at `05f53da47` plus the
+fix, strict runs, `KYTY_PRESENT_FPS_LIMIT=60`, native resolution, the user playing with a real pad.
+
+- **Cause.** Leaving the dunes, a 64 KiB tiled depth view reads layer 4 (D32, 1024x1024, 4 MiB at
+  0x529c30000). One depth image (1536x1536, plane 0x529530000-0x529e30000) holds the layer's first 2 MiB;
+  the rest lies in no image's plane. The layer planner exited on the first such block (the record of
+  2026-11-12 below).
+- **Fix.** The planner keeps the blocks outside every image as merged address ranges. When a layer has such
+  ranges, each range must classify as guest-owned (the same classification the plain guest layer uses); the
+  layer's guest bytes are uploaded, then the images' blocks are copied over them. The layer is rebuilt on
+  each use, since its digest does not cover guest bytes. A range that is not guest-owned still exits, naming
+  the range and the classification.
+- **First attempt rejected.** Classifying the whole layer returned unsupported, because the depth image that
+  holds the first half overlaps it; that build exited at 270 s on the same layer (e77).
+- **Checked.** A user-played run on the fixed build held 321 s with no exit (e78), where the previous build
+  exited at 270 s (e77); `kyty_unit_test` 2652 passed; the three CTest gates passed. Not confirmed: that the
+  mixed-layer branch ran in e78 (no counter was compiled in, and an earlier 893 s run also had no exit),
+  the image of the layer's consumer, a recorded route to that scene, and other titles. The mixed layer
+  re-uploads 4 MiB of guest bytes on every use; that cost was not measured.
+
+## Robot platformer: Arc compute engine not usable for the compute queues (2026-11-13, excluded)
+
+Same host and build with temporary counters (removed), dune route 105-145 s.
+
+- On this host the compute-only family is selected only when every renderable depth format declares
+  `DEPTH_COPY_ON_COMPUTE_QUEUE` (`VK_KHR_maintenance10`). ANV declares it for neither D16 (124) nor D32
+  (126), so every queue runs on the render engine: rcs 93-94 %, ccs 0 %.
+- Counted depth copies: D16 copies were recorded only on the graphics queue (7,966-8,794 per run), none on
+  Kyty compute queues 0-7. The compute queues recorded 4,212-4,276 D32 copies per run, all from the texel-bit
+  reinterpretation copy (`vkCmdCopyImageToBuffer` then `vkCmdCopyBufferToImage` through a scratch
+  buffer); the source-side and destination-side counters were equal, so whether one or both sides were
+  depth is not settled. Either way a buffer copy with a depth aspect needs the format's copy-on-compute
+  bit on a queue without graphics. Of the image-to-image sites only the depth array layer copy was
+  counted (none on the compute queues).
+- Skipping only the D16 check (e75) left the gate closed on D32: 19.63 fps, rcs 93 %, ccs 0 %, against
+  20.04 fps on the base (e71).
+- The BVH kernel `0x3666fa39` is recorded on the graphics queue (Kyty queue 8) and would stay on the render
+  engine in any case; the compute queues held about 6 ms of the frame in the record of 2026-10-30 (gw137,
+  older build, not re-measured). Using the compute engine would need those copies moved to the graphics
+  queue with cross-queue synchronization, for at most about 2-3 fps.
+
+## Robot platformer: one batch in flight stops the boot (2026-11-12, probe, own-producer rule passes)
+
+- **Observed.** A temporary change made a graphics submit wait for the previous batch's decode
+  instead of its own. The title stopped at frame 1 with no present, with or without the release-drain
+  skip. On the graphics ring, 5 batches were dequeued and 4 signalled.
+- **Contract.** It is the signature of the 2026-10-26 stop ("A suspended submitter must not pass
+  the command processor", below). Keeping serial every batch with a top-level memory wait boots the
+  title, but also releasing the suspended batch's own submitter at the host-producer release stops it
+  again. Over a whole boot-to-dunes run, 17 % of 18,512 batches were released for a host-produced
+  value, so those batches cannot return early. In the dunes window (90-145 s), 1.6 % of 148,478 waits
+  found no producer and 91.8 % had it in the command processor's current host submission (inferred
+  to be the same batch, not shown). The mechanism is inferred from the record;
+  thread states were not taken.
+- **Own-producer rule.** Returning early only the batches whose every memory wait is written by an
+  earlier packet of the same batch: 16,153 batches early, 4,038 serial, and every host-produced
+  release falls in a serial batch. The title boots and plays the dunes route; 17.98 fps at 105-145 s
+  against 19.44 serial (no gain, as estimated).
+- **Record.** `docs/bringup/performance-architecture-plan.md`, section 6.
+
+## Robot platformer: not running the programs that contain intersection instructions (2026-11-12, rejected)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, `bbc559839` plus a temporary diagnostic (not committed) that returned
+from a compute dispatch without running it when its program contains `ImageBvhIntersectRay`. Dunes route,
+105-148 s, one pair of runs, 60 fps present limit.
+
+| | Guest | Programs not run |
+| --- | --- | --- |
+| Frame rate | 20.0 fps | 26.0 fps |
+| Command processing per frame | 54.1 ms | 36.1 ms |
+| Of which fence waits, register waits | 15.6 ms, 11.6 ms | 1.2 ms, 1.3 ms |
+| GPU busy | 94 % | 82 % |
+
+- **Rejected on the image.** 18,024 dispatches were not run. The scored capture pair and a user-played
+  session (26-30 fps on the window) show dark terrain, a translucent player model and washed-out objects.
+  The outputs of the skipped programs stay unwritten; which later pass reads which output was not traced.
+- **What it bounds.** With that GPU cost gone entirely the scene runs at 26 fps with 36 ms of command
+  processing a frame, so no GPU-side change alone passes about 26-28 fps here.
+- **What stays possible.** Every intersection reporting a miss keeps all outputs written; the record of
+  2026-11-09 below ("paired kernel measurement") priced it at about 1 ms of 24 per call of the heavy
+  program. That is the price of the node visits after the first, not of the trace: the trace region as
+  a whole is 11.4 of the program's 15.6 ms (region-pricing record, 2026-11-14). The title's own renderer selection through a game
+  patch is the other route and is the guest's configuration; its image was not verified ("Game patch
+  trial and geometry cost", 2026-11-01, below).
+
+## Robot platformer: the reported output size does not move the title's render targets (2026-11-12, excluded)
+
+Question of the performance plan (E2): does the title size its targets from the output size the guest is
+told? Census of the first colour target's extent per indexed draw over the dunes route, with a temporary
+diagnostic (not committed) that also printed the screen size it read.
+
+| Reported output size | 1920x1080 | 2432x1368 | 3840x2160 | 960x540 | Frame rate | GPU busy |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1280x720 | 451,615 | 2,117 | 7,179 | 73,443 | 19.5 fps | 92 % |
+| 960x540 | 466,605 | 3,340 | 7,566 | 75,545 | 20.4 fps | 95 % |
+
+The display buffer is 3840x2160 in both runs. The title does not follow the reported size, so an
+output-size option separate from the window size is not built for it.
+
+## Robot platformer: GPU clock marks and the title's dynamic resolution (2026-11-12, open, frame-rate effect not established)
+
+The title starts with main targets of 2432x1368 and steps to 1920x1080 by itself (2,117 draws at the larger
+size over the dunes route). Its end-of-pipe clock marks all carry nearly the same value inside one host
+submission (`cross-title.md`, open defect). One run with a temporary diagnostic (not committed) that wrote
+every mark at least 0.1 ms after the previous one drew 6 draws at 2432x1368 and no main target below
+1920x1080 in 143 s.
+
+- **Not comparable past the first frames.** Its captures at 108, 125 and 145 s show a black frame and the
+  intro cinematic where the run without the spacing is in gameplay; it measured 17.4 fps, 369 draws a
+  frame and 31 ms a frame in each of fence and register waits, against 19.5 fps, 592 draws, 12 and 8 ms.
+  Whether the spacing delayed the route or the host did was not separated.
+- **Excluded in the dunes (2026-11-14, one run each, scene checked by capture).** With every mark at least
+  0.15 ms after the previous one from 150 s (after the input route, so the route kept its timing), about
+  66 ms of reported GPU time a frame, the close-up dune scene drew 113,027 draws at 1920x1080 against
+  106,479 without the spacing, the same handful at 2432x1368, nothing new below 1080p, and 15.8 against
+  15.2 fps. The title's resolution does not drop in the dunes when the marks report over-budget frames,
+  so correct marks are a correctness fix there, not a frame-rate lever.
+- **Marks fixed (2026-11-14).** Device timestamps now back every mark (`cross-title.md`); one run in the
+  close-up dune scene measured 16.4-16.9 fps with main targets unchanged.
+
+## Robot platformer: render-target scaling to 960x540 under user play, and a depth-array exit (2026-11-12, exit fixed 2026-11-13)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, branch `perf/guest-memory-binding` at `0fe51e855`,
+strict run, `KYTY_PRESENT_FPS_LIMIT=60`, `RenderResolutionMode = Fixed`, `RenderResolutionScope =
+RenderTargets`, 960x540, the user playing with a real pad (no input route), per-second agent samples.
+The binary also held a temporary binding diagnostic, compiled in and switched off.
+
+- **Frame rate.** It never reached 60 fps. Menus and the first scene: 30.5 fps, GPU busy 79 %, command
+  processor 34.5 ms/f, of which 13.8 ms were waits. Gameplay at 370-630 draws per frame: 19.6-20.7 fps, GPU
+  busy 83-90 %, command processor 51 ms/f, of which 15-23 ms were waits. Short peaks of 58-60 fps appeared
+  only in scenes with about 170-260 draws.
+- **Why the scaling does not help.** This scope scales only render targets of the display extent; the main
+  passes and the BVH kernel's guest grid keep their size (see the 640x360 test below). The internal-resolution
+  lever is the game patch that lowers the guest grid, and it measured 16.6-18.1 fps in the dunes, not 60.
+- **Defect, not fixed.** After 223 s the run exited at `GraphicsRenderAttachments.cpp:824`: "depth array layer
+  4 ... lies partly outside depth images" (block 0x529e30000 of the layer at 0x529c30000). No depth image
+  covers that 64 KiB block. It is not known whether native resolution reaches the same state, since the route
+  was the user's and was not recorded. Suggested direction: record a pad route to that scene, repeat at native
+  resolution, and log the depth images near that address when the layer is assembled.
+
+## Robot platformer: BVH kernel register pressure, guest against host (2026-11-12, open)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.15, translator 215, offline.
+The question: the 2026-11-10 record below closes the BVH traversal kernel
+`0x3666fa39` on "the guest program's live ranges at 128 registers". How much
+of the driver's 358 live registers does the guest itself need?
+
+- **Module.** The stored compute recipe of the dunes route whose descriptor
+  layout matches `0x3666fa39` (10+10 2D, 5+5 2D-array, 1+1 3D textures, 7
+  samplers, 2 storage images, workgroup 256) compiles at SIMD8 to 41,398
+  instructions, 1352 sends, 145 loops, spills:fills 622:2426 and 358 maximum
+  live registers (`VK_KHR_pipeline_executable_properties`, shader cache
+  disabled). That is heavier than the translator 210 baseline below (37,309,
+  1219, 137, 556:2138, 354); the cause was not traced.
+- **The guest alone sits at the limit.** The program names v0-v73 and
+  s0-s54. A backward CFG liveness pass over the guest listing (3,066
+  instructions; `exec` and `scc` left out, every write counted as a full
+  definition, so a lower bound) peaks at 53 scalar and 69 vector registers,
+  122 in all, against 128 registers per thread at SIMD8.
+- **Host pressure by model** (final NIR from `INTEL_DEBUG=cs`):
+
+  | Model | Peak, 32-bit words |
+  | --- | --- |
+  | Exact CFG liveness | 126 (49 uniform, 77 per-lane) |
+  | One continuous range per value, the hull of where it is live | 267 |
+  | Driver, maximum live registers | 358 |
+
+  The hull is how the back end's allocator sees a value. It agrees with the
+  2026-10-29 estimate below (about 265 against 362). At the hull peak 104
+  per-lane NIR registers span the point, against 51 under exact liveness:
+  register webs whose live ranges have holes. The last 90 registers come from
+  the back end's own lowering; not traced.
+
+  **Correction (2026-11-14).** The "exact" row and the two exact figures after
+  it are wrong. The script read a block's successors only from the line that
+  closes it; an empty block prints them on its header line, so liveness never
+  crossed an empty else arm and the exact figure came out far too low. Fixed
+  and re-run on the translator 216 module (34,087 instructions, 390:1634, 283
+  maximum live): exact 243 (83 uniform, 160 per-lane), one continuous range
+  per value 282, driver 283. Holes in register webs add about 40, not 140: the
+  program's values are live, and 95 of them only pass through the trace region
+  (record of 2026-11-14 above). "51 under exact" and the holes conclusion are
+  withdrawn. The exact figure of the guard ablation below (102) has the same
+  defect and was not re-run; its compiled statistics stand.
+- **Guards explain little of the holes.** The same module with every select
+  on the guest EXEC replaced by its new value (unsound, offline ceiling)
+  compiles to 33,141 instructions, 462:1464, 331 maximum live; hull 247,
+  exact 102. The 2026-11-02 exclusion of removing EXEC guards by register
+  liveness stands: even all of them leave the hull near 250.
+- **Driver back end.** `INTEL_JAY=cs` leaves the same brw output on this GPU;
+  the alternative back end does not engage.
+- **Cross-lane operations.** The guest uses only `v_readlane` (44),
+  `v_writelane` (36), `v_readfirstlane` (9) and `s_ff1` on 64-bit masks (30):
+  no DPP, `v_permlane16`, `v_permlanex16`, `ds_swizzle` or `ds_bpermute`. The
+  ISA confines those to 16-lane rows or 32-lane halves, so that confinement
+  cannot keep any of this kernel's exchanges inside a part.
+- **Excluded: a workgroup barrier as the exchange between parts.** The lane
+  reads already use `OpControlBarrier` with subgroup execution scope, which
+  orders one part's memory and does not wait for the others
+  (`ShaderSpirvSplitWave.cpp`, lane-read helpers); the only workgroup-scope
+  barrier is in the prologue. A workgroup barrier at each exchange needs the
+  four guest waves of the workgroup to make the same exchanges between
+  barriers, and the traversal loop of each wave exits on its own wave-uniform
+  stack state.
+- **Excluded: one guest wave64 as one 32-lane host subgroup with two guest
+  lanes per invocation.** It removes the exchange between parts, but on 128
+  registers per thread a SIMD32 value takes 4 registers, and the kernel keeps
+  about 69 vector values live per lane, twice per invocation. The records
+  below measured the nearer variants: 16-lane parts compiled to 1574:9325, and
+  32-lane parts gave wrong output at 101 ms per call.
+- **Open.** The largest static gain on record is still the rendezvous
+  ablation (362 to 258 live, 2225 to 1353 fills, 2026-10-30), which has no
+  valid design. Even the guest's own registers fill the thread, so no
+  translation reaches zero spills; a gain here is a few ms per call at most,
+  and only per-call GPU timestamps on a matched scene with an image compare
+  can show it.
+
+## Robot platformer: banded frame in the intro cinematic (2026-11-10, open)
+
+- Observed (Intel Arc A770, ANV Mesa 26.2.6, strict, `6dab9a32e` plus the uncommitted
+  min/max change of the cross-title float min/max record, translator 211): on the full
+  dunes route, from a save that continues on the world map, a capture at 150 s (frame
+  3881) showed the ship over dark horizontal bands, 38 s and about 800 frames after
+  that run's space-map capture. The row-mean luminance has a 42-43 px period (spectral
+  peak 61 times the median). The shot was not identified. The space scene record of
+  2026-10-31 had the same symptom; its clean captures are of earlier shots.
+- No clean `6dab9a32e` run is a replay of that run. One clean run of the same route
+  was on the dunes by 140 s; another exited at 117 s (below). Two clean runs whose
+  input stops after Continue showed, one, the space map at 125-130 s, a slate frame at
+  135 s and the ship falling to the dunes from 140 s, and the other the warp effect
+  from 128 to 142 s. The slate frame has no row pattern (row-to-row steps below 0.05
+  of 255). None of the 21 clean captures shows bands. The run with the change and
+  that input stayed on the title's press-any-button screen: its presses came before
+  the title accepted input.
+- So whether the bands come from the change, are intermittent, or are a regression
+  since 2026-10-31 is not known. The change was not committed.
+- One clean run of the dunes route exited by itself with code 0 at 117 s, with no
+  error event and no crash report, resident memory 9.7 GB against the run's 16 GB
+  limit, after the route's Options, Down and Cross presses during the cinematic.
+  Whether those presses chose an exit item was not checked; one occurrence.
+- Direction: same route and save as the banded run, clean HEAD first, captures every
+  3 s from 100 to 175 s, each file moved out of the capture directory as it lands
+  (native captures keep the newest eight), each scored by the row profile; run the
+  change the same way only if those captures are clean.
+
+## Robot platformer: the guest does not pace the still dune view (2026-11-10)
+
+Intel Arc A770 at 2400 MHz without throttling, Mesa 26.2.6 on Xe, Linux
+7.2.14; other processes used 0.7-1.6 % of the render engine. Idle dunes route,
+strict runs with the 60 fps cap. Two runs on `0b02f53a1` (32 slots) carry a
+temporary probe, not shipped: timers on each graphics ring thread around its
+wait for the next guest batch, the run lock, suspended label waits and the
+time it holds a batch, plus the per-site fence probe of the records below. The
+third run compared is the ring record's "after" run below, with the per-site
+fence probe only.
+
+- **Excluded: the guest paces the frame.** In the probed runs the main
+  graphics ring thread waited for a guest batch 2.9 ms per frame in the
+  alias-wait regime below (100-110 s, 556 draws per frame) and 3.8 ms per
+  frame without it (100-110 s, a window that also holds a 5 s hitch before the
+  still view). It held its batch 95-97 % of the frame, and its suspended label
+  waits took 0.3 and 1.1 ms per frame. An asynchronous graphics ring thread
+  spent 49-63 ms per frame suspended on a host-produced label. The fence
+  counter also holds the window thread's present wait (about 2.8 ms per frame
+  in the ring record's "after" run), so frame time minus the CP thread's CPU
+  time, fence wait and render lock does not bound the batch wait; the direct
+  timer above does.
+- **The second wait regime recurs with 32 slots.** It is the `publish-host`
+  wait of `docs/bringup/cp-gpu-sync-chain.md` ("Attribution moves"): a draw
+  reads a storage buffer whose pending GPU write has a Texture alias, so
+  `StorageIsWholeGuestContent` fails and the draw waits on the host. One of
+  three probed 32-slot runs took it; a fourth 32-slot run of the view, under
+  a profiler, cannot show the site. It first fired at 80-90 s, 179 waits of
+  about 0.15 ms each; in the still view (100-110 s) it waited 4.9 times per
+  frame, about 4.5 ms each, 21.9 ms per frame. The wait's length follows how
+  far the GPU is behind, which fits the untested reading in the sync-chain
+  record that the first wait of a frame absorbs the GPU catch-up.
+
+  | Per frame | Ring record "after" run, 103-110 s | Probed, without the alias wait, 106-116 s | Probed, with it, 103-110 s |
+  | --- | --- | --- | --- |
+  | Frame time, ms | 52.0 | 60.4 | 62.8 |
+  | Graphics CP thread CPU, ms | 36.9 | 40.9 | 32.9 |
+  | Fence wait, ms | 8.7 | 10.8 | 24.1 |
+  | `WAIT_REG_MEM` wait, ms | 6.9 | 7.9 | 2.0 |
+  | Submits | 45.9 | 44.4 | 60.8 |
+  | Render engine busy, ms | 42.1 | 48.2 | 44.3 |
+
+  The submit rate tracks the regime: about 15 more per frame with the alias
+  wait, three per alias wait; the mechanism is not separated. A fourth run
+  (2026-11-10, no alias wait, 107-116 s) gave 44.4 per frame again; other
+  DRM clients used 1.7 % of the render engine's cycles over 90-116 s, with
+  no 3D renderer running on the host, so a busy one was not measured. By the
+  code, one wait submits at most two graphics recordings, both conditional:
+  the open recording at the same-queue wait (`WaitSubmission`) if the
+  awaited one is still recording, and the idle-GPU submit after the retried
+  draw (`SubmitRecordedWorkIfGpuIdle`, every 8 operations and 500 us); the
+  wait itself blocks on the fences through the awaited submission
+  (`CompleteSubmittedThroughLocked`). The third submit is not on the wait's
+  path. The per-site counter of the GPU bill run below put its 56.5 submits
+  per flip mostly on the idle-GPU rule (29.3, against about 9 in the earlier
+  runs of about 36), so the extra submits are that rule's. Whether that run
+  took alias waits was not probed, so the link from the alias wait to the
+  idle-GPU flushes is inferred, not measured. The alias itself is not identified: the run that took this wait
+  predates the probe that names it, and the probed run did not take it.
+
+  The middle column ran a different workload through 116 s: 55-58 render
+  pass begins and about 1470 uploads per frame against 69-91 and 1720-1830 in
+  the other two, and no object creation. The two probed runs therefore do not
+  isolate the alias wait, and its frame cost is not established. Draws,
+  dispatches, uploads, hashed bytes and object creation per frame match
+  within 2 % between the first and third columns. Captures at 126 s (first
+  column) and 110 s (third) show the same view rendered correctly. The guest
+  thread that spins in a sleep loop (about 18 ms of CPU per frame) runs in the
+  first two columns only.
+- **Ceiling.** The render engine is busy 42-45 ms per frame in the runs with
+  the usual workload (the first seconds of the view are not more expensive)
+  and 49 ms in the run with the different one, so work on synchronization
+  alone ends near 21-24 fps here, and 30 fps needs the GPU's work under 33 ms
+  per frame.
+- **Open.** Which texture aliases the buffer is not identified: a capped probe
+  line in the failing branch (storage and alias ranges, alias parameters,
+  dependency queue) did not fire in the repeat run, which stayed in the
+  regime without the wait.
+
+## Robot platformer: the still dune view waited on a full submission ring (2026-11-10, fixed)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14. Idle dunes route, window
+96-126 s (the still view, 559-561 draws per frame), one strict run per arm on
+`1c707186c` with the temporary per-site wait probe of the record below; the
+second arm adds the ring change.
+
+- **Before.** 14.9 fps, 16.0 ms of fence wait per frame, render engine 66 %
+  busy (about 44.0 ms per frame). In a 20 s stretch the full submission ring
+  held 4333 of the 4739 ms of fence wait. A slot is reused only after its
+  submission completes, and in the GPU-bill run below the graphics queue
+  submitted 56.5 times per flip (99-109 s), so 8 slots fill while one long
+  submission runs.
+- **Change (`b7af968cb`).** `CommandProcessorSubmissionSlots::SlotCount` 8
+  to 32, with the transient snapshot pool at one recording per slot to match.
+  Retention stays at 256 MiB (`kRetainedBytes`, before half of the 8-slot
+  pool budget); pool entries are created on demand, so the larger budget is a
+  cap, not a reservation. The slot-count contract test now expects 32.
+- **After.** 18.6 fps, 7.7 ms of fence wait per frame, render engine 79 %
+  busy (about 42.6 ms per frame); full-ring waits 0. The largest remaining
+  waits are the `WAIT_REG_MEM` producer wait (1735 ms per 20 s) and the
+  window thread's present wait (1047 ms per 20 s). Resident memory peaked at
+  10.16 GB against 10.01 GB. With the render engine near 80 % busy at about
+  43 ms per frame, this view's GPU bound is about 23 fps.
+- **Earlier result reconciled.** The probe-arm table in
+  `docs/bringup/cp-gpu-sync-chain.md` found that 32 slots alone changed
+  nothing while the host read of the geometry record blocked; that read is
+  gone since the device-side geometry draw (`fdd43102c`), so the ring became
+  the wait.
+- **Other titles.** These runs are on `b7af968cb`, so they cover both
+  `b6b1acb58` (the fill split below) and the ring; the previous runs were on
+  `fdd43102c`. The binary was built from that tree before the commit, so
+  its embedded revision reads `1c707186c`. One strict 125 s run each of `PPSA28311 - Absolum`,
+  `PPSA09076 - DREDGE`, `PPSA03969 - F.I.S.T.: Forged In Shadow Torch`,
+  `PPSA09809 - OCTOPATH TRAVELER II` and `PPSA21402 - Balatro` on the
+  generic route: all exit 0 at the interactive frontier with both captures
+  healthy.
+
+  | Title | Frames in 60-116 s, before | After | Peak resident memory, before / after |
+  | --- | --- | --- | --- |
+  | Absolum | 2839 | 2854; repeat 3274 | 7.94 / 7.66 and 8.30 GB |
+  | DREDGE | 1723 | 1611 | 2.75 / 2.77 GB |
+  | F.I.S.T. | 312 | 412 | 4.71 / 4.87 GB |
+  | OCTOPATH TRAVELER II | 3182 | 3247 | 4.01 / 4.08 GB |
+  | Balatro | 3306 | 3230 | 0.75 / 0.79 GB |
+
+  - The first Absolum run reported 50.2 and 48.8 fps at the two captures
+    against 60.0 and 60.1. That status figure is a 0.25 s window at the
+    query instant; over the window the frame count was the same, and the
+    per-sample median frame time was 18.0 ms against 19.2 ms. The repeat
+    held 59.7 fps over the window.
+  - DREDGE has 6.5 % fewer frames in the window (29.9 against 38.9 fps at
+    the 60 s capture, 31.7 against 30.4 at 115 s), one run each; it was not
+    repeated.
+- **Playable regression.** `kyty_agent playable-regression` on
+  `PPSA06084 - Superliminal` exited 3. Its failed gates were
+  `visual_compare` (no baseline is recorded on this host, so there is no
+  visual comparison), `scene_checkpoint` and `action_response`; the input
+  gates passed. The previous reference run failed those three and two input
+  gates.
+- **Tests.** `ctest --no-tests=error`: 108 tests, 100 % passed
+  (`PairedWave64` skipped), exit 0.
+
+## Robot platformer: geometry output fills ran a driver divisor search (2026-11-10, fixed)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14. Strict runs of the idle
+dunes route on `1323c0915`; the dune approach and crash-site cinematic
+(700-826 draws per frame, 6-10 fps) came before the still view in every run
+by 115 s, so these figures describe that stretch, not the still view.
+
+- **Before the fix, fence waits were not the lever there.** A temporary
+  per-site wait probe measured 1-12 ms of fence wait per frame against
+  106-157 ms of summed command-processor time, with the render engine
+  41-56 % busy. Per 10 s the largest sites were the full submission ring
+  (214-389 ms) and the `WAIT_REG_MEM` producer wait (116-333 ms); untagged
+  waits added 120-180 ms. After the fix the same stretch shows 16-24 ms of
+  fence wait per frame with the render engine 63-74 % busy: the wait moved
+  once the command processor got faster, and its sites are not yet split on
+  the fixed binary.
+- **Profile.** `perf` (user time, 199 Hz, 6 s from the first sample at
+  >= 500 draws per frame) on the graphics command-processor thread:
+  `CommandBuffer::CloseGeometrySegment` 16.2 % of its samples, all in the
+  driver below `vkCmdFillBuffer`, 130 of 131 samples in one two-instruction
+  loop of `isl_surf_from_mem` that increments a candidate and divides until
+  it divides the element count. The driver records the fill as a 2D surface
+  and searches for a width of at most 16384 elements; an element count with a
+  large prime factor costs one division per candidate.
+- **Fix (`b6b1acb58`).** `VulkanCmdFillBuffer` records explicit-size fills as a body in
+  whole 64 KiB (about one division per 64 KiB, about 16k at the 1 GiB
+  geometry output cap) plus a tail below 16384 words that fits one row; the
+  filled bytes are unchanged. Only the geometry segment call site was shown
+  exercised; the device-address, detile and fragment-transport sites use the
+  same helper without a measurement. Same route and profile window: `CloseGeometrySegment` 0 of 731
+  samples, `isl_surf_from_mem` 0 samples (130 before). Rendering at 116 s is
+  the same cinematic, scored healthy.
+- **Frame rate: indicative only.** At 737-799 draws per frame the summed
+  command-processor time fell from 90-138 to 75-106 ms per frame and the
+  frame rate rose from 7.5-11.7 to 10.0-14.3 fps, but the heavy stretch began
+  at 101 s in one run and 109 s in the other, so the windows are not the same
+  part of the cinematic.
+- **Remaining on that thread.** Transient snapshot capture (copy and compare
+  of read-only buffers) 15-17 %, `ShaderParseUsage2` under
+  `ShaderGetInputInfoPS` 10-12 %, `GpuMemory::CreateObject` 11 %.
+- **Not changed.** The GDS fill is at most `kGraphicsGdsDwords` (12288)
+  words and fits one row. The guest fill in `GraphicsRenderAttachments.cpp`
+  (`vkCmdFillBuffer(cmd, identity.buffer->buffer, ..., fill.size, ...)`) has
+  a guest-controlled size, so the driver search is still reachable there; it
+  was left because that file carries unrelated uncommitted work on the shared
+  branch. Direction: route it through `VulkanCmdFillBuffer` once that work
+  lands.
+
+## Robot platformer: BVH kernel spills are the guest's live ranges, no translation lever (2026-11-10)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14, translator 210, offline.
+The question: can a different translation of the BVH traversal kernel
+`0x3666fa39`, 19.7 of the 44.4 ms dunes GPU bill (record below), cut its
+scratch spills enough to save 3 ms per frame?
+
+**Later (2026-11-14).** The record at the top of this file prices the scratch
+traffic of this program at 11.6 ms a frame and counts 95 values that only pass
+through its trace region. "No translation lever" covers the variants tried
+here, not a translation that keeps those values out of the allocator's way.
+
+- **Module.** A strict 211 s run of the dunes route on `aa282cbf4` with
+  temporary probes and a private copy of the shader store logged the
+  kernel's SPIR-V assembly through the shader probe. Assembled without
+  optimization (`spirv-as`, Vulkan 1.4) it is byte-identical to the module
+  the store holds for that program, so the pipeline compiles that text.
+- **Method.** Each variant is the logged text rewritten offline and
+  compiled by ANV at SIMD8, shader cache disabled, with the kernel's
+  descriptor layout; statistics and GEN assembly come from
+  `VK_KHR_pipeline_executable_properties`. Outer-loop fills are counted in
+  the assembly. Variants that break the exchange's semantics only bound
+  what a translation change could reach; none is a candidate fix.
+
+  | Variant | Instructions | Sends | Spills:fills | Outer-loop fills |
+  | --- | --- | --- | --- | --- |
+  | Baseline | 37,309 | 1219 | 556:2138 | 1072 |
+  | 19 cold scalars packed | 36,248 | 1223 | 520:1955 | 1012 |
+  | 26 cold scalars packed | 35,992 | 1226 | 488:1878 | 923 |
+  | 36 cold scalars packed | 38,132 | 1249 | 516:2123 | 1013 |
+  | 19 cold scalars in shared memory | 38,433 | 1294 | 547:2401 | 1299 |
+  | Relaxed exchange ordering (invalid) | 35,487 | 907 | 555:2171 | 1076 |
+
+- **Cold scalar registers.** The translation gives each guest scalar
+  register its own function variable, and ANV holds each in a whole register
+  at SIMD8. The packed variants keep the least-accessed scalar registers in
+  the lanes of a few per-lane variables: a read becomes a constant-lane
+  broadcast, a write a lane select. That assumes the packed values are
+  uniform in the subgroup, which was not checked. Packing all 172 declared
+  scalar registers gave no gain. The best set (26 registers) removes 149 of
+  the 1072 outer-loop fills. 89 of them sit in the loop at nesting depth 2
+  that holds 264 of the outer loop's 318 global loads, by its loads the node
+  traversal: 28% of that loop's own fills. The frame effect was not
+  measured. The saving is not monotonic in the set (36 registers gives
+  almost all of it back), so it yields no general selection rule; a
+  hand-picked set per program would not be a general translation, and
+  packing is only valid for values proven uniform, which the translator does
+  not establish. One workgroup-memory slot per subgroup instead of a lane is
+  worse.
+- **Rendezvous and ordering.** Removing the split-wave spin loops entirely
+  (invalid, a ceiling) still leaves 1740 fills, and the fills outside loops
+  do not move. Relaxed ordering on the exchange atomics without the acquire
+  barrier (invalid: acquire and release make the exchange defined) cuts
+  sends by 312 and SLM fences by 303 (318 to 15 in the assembly), but no
+  fills: ordering does not drive the spills. Plain loads in the spin loops,
+  and the acquire barrier moved after the loop, compiled to one identical
+  program; these and the relaxed variant have 128 loops instead of 137, for
+  a reason not established. Fence cost is bounded by the halving of the
+  rendezvous (record of 2026-10-29 below: 2399 to 1486 sends, at most about
+  10% in dune windows).
+- **Allocator noise.** The relaxed variant moved fills by 33 with no
+  register change, so differences of a few dozen fills are noise.
+- **Excluded: marking scalar registers uniform (2026-11-10).** A general
+  variant passes every value stored to a guest scalar register (and to
+  `exec`, `vcc`, `scc`) through `OpGroupNonUniformBroadcastFirst`, and a
+  second one also every load: 561:2170 and 560:2188 spills:fills against
+  556:2138, 353 maximum live registers against 354. In the final NIR of the
+  stores variant one of the 1663 inserted broadcasts remains: the compiler
+  removed the rest because their sources were already convergent, and the
+  phis stay at 274 convergent and 1118 divergent as in the baseline. The
+  stored values were therefore already uniform where they are defined. That
+  the backend then gives each such value a whole SIMD8 register is a reading
+  of a few assembly lines (`<0>` source regions, no-mask SIMD8 writes), not
+  established for the scalar registers.
+- **Conclusion.** The spills follow from the guest program's live ranges at
+  128 registers per thread. No variant tried gives a general translation
+  rule that cuts them, so reworking the BVH translation is closed; the
+  frame effect of the best packed set was not measured.
+
+## Robot platformer: the command processor is worth at most 3 fps in the dunes (2026-11-10)
+
+Intel Arc A770, Mesa 26.2.6 on Xe, Linux 7.2.14, the user-recorded dunes
+route, 60 fps limit. The binary is `799fb76fd` (Release, without link-time
+optimisation) plus temporary diagnostics, not committed: a 40 us busy-wait
+after each draw in alternate wall-clock windows, and fence time per wait
+site.
+
+- **Causal spin on the title screen** (the logo over the ship, 241-248
+  draws and 83 dispatches per frame, alternate 4 s windows from 56 s). The
+  two samples taken before the spin was armed are left out.
+
+  | Arm | Frame | GPU busy | Fence waits |
+  | --- | --- | --- | --- |
+  | Off (6 s) | 38.5 ms | 75% | 11.5 ms |
+  | On (6 s) | 43.9 ms | 69% | 7.9 ms |
+
+  - The spin added 10.3 ms per frame and the frame grew 5.3 ms: k = 0.51.
+    The rest came out of fence waits and command-processor idle time.
+  - The 2026-11-05 figure (k = 0.82) was taken in the space cinematic, a
+    different scene, so the two are not a before and after.
+- **Fence wait sites on the title screen** (50-60 s, 243 frames, 4.0 ms per
+  frame in all): the wait inside `CommandProcessor::WriteBack` 1.7 ms,
+  `WAIT_REG_MEM` on a producer submission 1.2 ms, waits outside the tagged
+  functions 0.7 ms, a full submission ring 0.3 ms.
+  - No site reaches 2 ms and the top two wait for GPU results.
+  - The frame was 44.4 ms with the GPU busy 62%: the processor computes
+    there rather than waits.
+  - The same scene ran 38.5 ms per frame in the spin run, so one pair cannot
+    show a change under about 6 ms per frame.
+- **Fence wait sites in the dunes** (the crash-site dunes, 98-108 s,
+  135 frames, 74.9 ms per frame, fence waits 15.9 ms per frame). The
+  per-site dump does not align exactly with the per-second samples, so the
+  sites are given as shares of the dumped fence time:
+
+  | Site | Share of fence time |
+  | --- | --- |
+  | Device-address draw retry, storage publication refused: a Texture object aliases the storage bytes (`StorageIsWholeGuestContent`) | 49% (774 waits) |
+  | Full submission ring (`SubmitCurrentLocked`) | 20% |
+  | Outside the tagged functions | 15% |
+  | `WriteBack` after a guest read (`ProcessorWriteBackRequired`) | 9% |
+  | `WAIT_REG_MEM` on a producer submission | 7% |
+
+  - This window is the ramp after the level load (6 to 19 fps). Its first
+    seconds upload 420-550 MB per second at 6-12 fps with the GPU 39-62%
+    busy, a load transient bound by the command processor.
+- **The steady dunes are mostly GPU-bound.** From 105 to 111 s the frame
+  rate held 19 fps (53.2 ms per frame) at 526-571 draws per frame, with the
+  render engine busy 84-88% (fdinfo cycles; the compute engine was idle).
+  - Draw and dispatch processing minus the 17.8 ms of fence waits came to
+    25.2 ms per frame. That figure sums the graphics processor and the
+    compute-pipe processors, which run on their own threads (see the last
+    bullet), so it is not serial frame time.
+  - Two earlier runs agree: seconds 112-115 of the 2026-11-10 vertex-search
+    run (18-20 fps, 87-88% busy, 24-28 ms of summed processor work) and
+    second 191 of the GPU-timestamp run (88% busy).
+  - The command processor waits behind a nearly full GPU, so removing one
+    wait site moves the wait.
+  - This agrees with the exclusion of 2026-10-18, where allowing publication
+    with older texture aliases moved the wait into `WaitRegMem32`.
+- **Scene.** The capture at 117 s is black, because the route then opens a
+  pause cinematic. The dunes are identified by the level the guest log
+  reports loading and by counters that match the earlier dunes runs (500-780
+  draws per frame).
+- **Two dune views reconcile the GPU records.** In the GPU-timestamp run
+  (`e82878229`, an earlier build), the 5 s dumps at 12.6-14.8 fps hold both
+  large compute programs every frame: the BVH kernel `0x3666fa39` 23-27 ms
+  per call, `0x874bd13f` 11-13 ms, and 25-27 ms of everything else, 93% of
+  wall time. That is the first column of the 2026-11-09 table ("where the
+  dunes frame goes"). The steady 19 fps view matches its dunes column
+  instead: GPU 46-50 ms with `0x3666fa39` about 20 ms and `0x874bd13f`
+  absent. Work outside the pair is 25-30 ms in all three measurements. No
+  timestamp run confirms the split on the current build.
+- **Ceiling at native resolution.** 60 fps needs, together, the BVH kernel
+  from about 20 ms to near zero, the rest of the GPU from about 26 to under
+  16 ms with no other program above about 2.4 ms per frame, and a command
+  processor that keeps up with a 16.7 ms frame; no serial measurement here
+  shows whether it can. With the BVH kernel gone entirely
+  the GPU would still take about 26 ms per frame.
+  The recorded levers on this program class are 8-14% each, and a native
+  lane mapping needs reconvergence guarantees that are not established, so
+  no wave64 lowering design is written. The one lever of that size is
+  internal resolution: at a 960x540 game patch the BVH kernel took 6.45
+  instead of 22.64 ms ("Internal resolution is the lever", measured then at
+  16.6-18.1 fps against 12-13; 37-41 fps in one scene on 2026-11-14 and 23-34 fps in three others,
+  records at the top). The GPU sum there was
+  still 36.0 ms per frame, so lower resolution gains fps but does not reach
+  60 either.
+- **Decision: no command-processor change for the dunes.**
+  - At 84-88% busy the GPU idles about 7 ms per frame. Removing all of that
+    idle time would take the steady dunes from 19 to about 22 fps at native
+    resolution and today's GPU cost. That is the most any command-processor
+    change can give there.
+  - On the title screen, k is 0.5 and every remaining CPU leaf is under 2 ms
+    per frame. The per-shader recipe stays excluded (stage 2 in
+    `docs/bringup/cp-draw-plan.md`).
+  - Publication with a Texture alias is not built.
+  - The remaining levers are GPU work.
+- **Revisited on an idle dune view (2026-11-10).** The decision above holds for the
+  moving route at 19 fps; it does not hold where the view stands still.
+  - With the route's input cut at 90 s, the robot stays at the crash-site spawn
+    point. There a frame costs about 72 ms (13.1-14.1 fps over five runs), the
+    render engine is 58-62 % busy, and the graphics CP thread is blocked about
+    35 ms per frame.
+  - The block is the host read of one `DRAW_INDEX_INDIRECT` record per frame
+    behind the BVH kernel. Removing it together with a deeper submission ring
+    gave 17.6 fps in a probe that also skipped an empty draw, so that figure is
+    an upper bound and not a gain.
+  - The record, the probe arms and the device-side draw are in
+    `docs/bringup/cp-gpu-sync-chain.md` ("Link 2 reopened"). The device-side
+    draw was first deferred and then built: a device converter writes the
+    geometry block and the group count, and the pass reserves only the groups
+    that fit the 1 GiB output cap. In one run that switched from the CPU path
+    to the device path at 101 s, the host argument reads disappeared and the
+    view went from 11.9 to 15.1 fps. That rate change is an upper bound,
+    because the first arm carried the comparison harness. Without the harness
+    the device path gave 16.1 fps, inside the range of earlier runs, so the
+    frame-rate gain is not established. Render-engine time stayed at 43.4 ms
+    per frame, and the processor (64-68 ms per frame) is still the limit.
+  - Every device-read record in the dune runs was empty. Records with work
+    occur only during the boot logos and are host-current. Forced down the
+    device path, 191 of them matched the host header exactly, and 307 passes
+    of 512 groups ran without a fault.
+  - The frame rate moved without an intended change: two later runs of a
+    rebuilt binary gave 16.5 and 17.3 fps, with the audio thread about 15 %
+    cheaper per second. The cause is open (rebuild, time and host load are
+    confounded). The 13.1-14.1 fps baseline is not current; re-measure before
+    comparing. Render-engine time stayed at 42-44 ms per frame, which caps
+    this view near 23 fps whatever the processor does.
+- **GPU bill on the idle dune view (2026-11-10).** Same idle route, window
+  96-116 s, a temporary probe writing a bottom-of-pipe timestamp after every
+  draw and dispatch in every chunk of a recording. Each item takes the
+  interval since the previous mark in GPU time order, so it includes gaps and
+  unmarked work before it; "tail" is the mark at the end of each recording.
+  The binary was built from 799fb76fd plus the command-processor counter fix
+  (88c21e1b9, the only code commit on the branch after it) and the temporary
+  probes. The run held 15.2 fps (the probe costs about 2-3 ms of engine time
+  per frame). The timestamps sum to 44.4 ms per frame against 44.7 ms of
+  render-engine time (busy x frame time) in the same run, so the bill
+  accounts for the engine time. The compute engine stayed idle, so every
+  queue's work ran on the render engine and that engine time covers all of
+  it. Recordings never overlapped (span union = span sum). The 67 recordings
+  per frame match the run's per-site submit counter, normalized by the flip
+  flush count: 56.5 submits per flip on the graphics queue and 6.3 on three
+  compute queues. Of the graphics ones, 29.3 come from
+  `SubmitRecordedWorkIfGpuIdle` (it flushes when the queue has nothing
+  pending, after at least 8 operations and 500 us), 19.5 from
+  `SubmitRecordedDispatchesBeforeDraw` and 7.7 from the other flush sites
+  (5.0 of them at the end of each guest submission, 1.0 at the flip).
+  These are the run's 99-109 s window. The "about 36" graphics submits
+  quoted in `cp-gpu-sync-chain.md` came from the earlier probe-arm runs,
+  about 20 before draws and 9 idle-GPU flushes, so the difference is the
+  idle-GPU rule firing more often. In this run that rule gave 6.9, 20.1 and
+  29.3 flushes per flip in the last three windows, while ring-full waits
+  held the command processor 388, 5 and 0 ms of each 10 s; the rule's
+  trigger was not traced.
+- **Same window on `aa282cbf4`** (strict, temporary probes, 2026-11-10,
+  97-116 s): 13.4 fps and 554 draws per frame (554-561 in the runs above),
+  but the guest's work differed: 121.7 guest dispatch packets per frame
+  against 103.1-103.5, 168 `WAIT_REG_MEM` against 152-153, new pipelines
+  in the window and 23 MB of uploads per frame against about 3 MB. The
+  graphics queue flushed 44.9 times per flip in the 99-109 s window against
+  56.5; the difference is the idle-GPU rule (19.5 against 28.2-29.3), and
+  no flush site disappeared. Render-engine time was about 50 ms per frame
+  against 42-45 ms; with different guest work, 1.5 against 0.5 CPUs of host
+  load outside the process and no GPU clock sampled, that is not a build
+  effect. Other DRM clients (read from the xe `fdinfo` cycle counters) used
+  0.6-1.6% of the render engine's cycles over the run.
+- **After about 116 s the route leaves the still view.** The robot lies
+  down on the sand with the camera close (capture at 205 s), draws fall to
+  about 370 per frame and render-engine time rises to 57-59 ms per frame.
+  Measurements of the still dune view must end by 116 s. A capture shortly
+  after that cut can be entirely black (all channels 0): runs on seven
+  older binaries (`dc07a6bcb`, `f53efbf48`, `d7828ae27`, `ab946a887`,
+  `d4b3548bf`, `a90c9c906`, `7b2e91397`) show it at 340-430 draws per
+  frame, and later captures in the same scene show the image again. It is
+  the title's fade, not a rendering failure.
+- **Excluded: a uniform per-draw GPU overhead behind the 20 us mean of
+  indexed draws.** Same run, 100-116 s, split by program pair (the probe's
+  top list covers 98 % of indexed-draw time). The time follows the
+  programs: the largest pair takes 48.6 us per draw and 30 % of the indexed
+  time, others take 115 and 525 us, and frequent pairs take 4.5 and 7.9 us
+  per draw including the probe's own mark. A floor that low excludes only a
+  cost every draw pays. A cost tied to pass begins or to dispatch-to-draw
+  switches would land on particular pairs and is not separated from their
+  shading, because the probe's output does not record which draw or
+  dispatch preceded each one.
+
+  | Per frame | Time | Count | Mean |
+  | --- | --- | --- | --- |
+  | Compute dispatches | 25.9 ms | 56 | 465 us |
+  | of which BVH traversal `0x3666fa39` | 19.7 ms | 1.0 | 19.7 ms |
+  | of which the next one, `0xff2adfc8` | 1.4 ms | 1.0 | 1.4 ms |
+  | Indexed draws | 10.1 ms | 508 | 20 us |
+  | of which the largest program pair | 3.0 ms | 61 | 49 us |
+  | Recording tails | 2.9 ms | 67 | 44 us |
+  | Non-indexed draws | 2.9 ms | 71 | 41 us |
+  | Geometry passes | 2.0 ms | 33 | 61 us |
+  | Device-fed dispatches | 0.6 ms | 5 | 112 us |
+
+  Outside the BVH kernel no single item reaches 5 ms per frame: the other
+  half of the GPU time is spread over about 740 marked items. 30 fps on this
+  view needs about 10 ms per frame off the GPU. The BVH levers in the records
+  do not reach that: the shared arrival counter and the eight dropped LDS
+  orderings are excluded below (about 0.2 and 0.5 ms per call), and keeping
+  cold guest registers in shared memory is untested with no estimate.
+  - A run with the 960x540 patch on this date lost its timing on the moving
+    route: the window held a load, not the dunes. It measured nothing, so the
+    figures in the ceiling bullet above remain the last ones.
+- **Not attributed.** The processor's counters exceed its user-mode samples
+  by 3.6-7.3 ms per frame (cpu-clock:u at 199 Hz, 66-72 s). The dispatch
+  counters include the compute-pipe threads, so part of that gap may be
+  theirs. Kernel stacks need `kernel.perf_event_paranoid` at 1 or lower.
+- **Processor counters are thread time summed over processors.**
+  - `88c21e1b9` times only the outermost `CommandProcessor::Run`. Before
+    it, the nested runs of `COND_INDIRECT_BUFFER` and `INDIRECT_BUFFER`
+    (`GraphicsRunOpParsers.cpp:804` and `:831`) were counted twice.
+  - That double count does not explain the excess seen in the dunes (83.1
+    against 74.6 ms per frame). The route shows no measurable nested runs:
+    runs per present stayed at 16.9-18.5 in every 10 s window from 60 to 116 s,
+    before and after the change. From 105 to 116 s the counter was 1.06
+    times wall time in both runs (17.0 and 17.3 fps).
+  - The change is verified by the build and by reading the code. No test
+    and no run on this route exercises a nested run.
+  - The excess has another source. The graphics ring and each compute pipe
+    have their own processor (`Gpu::GetRing`), and each runs on its own
+    thread (`ComputeRing::ThreadRun`) under its own run lock. The counter
+    adds them up, so it can exceed wall time. The dispatch and fence
+    counters read the same way.
+
+## Robot platformer: geometry passes batched into compute segments (2026-11-09)
+
+Same title, host, route and settings as the next record. The change is
+`59e3640cf` on `40d8c109f`; the comparison arm is `40d8c109f` built clean in
+the same build directory (Release, without link-time optimisation).
+
+- **Change.** A geometry pass whose pipeline writes no guest memory (no
+  buffer or image store or atomic, no GDS buffer bound) is recorded into a
+  compute-only command buffer, a segment, that is submitted ahead of the
+  chunk holding its pull draw. The render pass is no longer split per pass.
+  Consecutive passes join one segment while they write contiguous ranges of
+  the same output buffer and no hazard was recorded between them. A hazard
+  is any command recorded outside a render pass, a command-processor packet
+  outside draws, register writes, index state and buffer chaining, a draw
+  whose pipeline writes guest memory, or a pending pass that samples an
+  image written by a render pass begun since the segment opened. The chunk
+  before the segment zero-fills the segment's output range; the segment
+  ends with a compute-to-vertex barrier. A pass is recorded inline as before
+  when its pipeline writes guest memory or when the slot's chunk budget is
+  spent. The parser decodes no GLOBAL or FLAT store: such an opcode ends
+  the run as unknown, so it cannot reach a pass unclassified.
+- **Segments over the route** (temporary counters, whole run): 120,938
+  passes in 15,880 segments, 7.6 passes per segment. Segments of 1 pass:
+  5,371; 2: 888; 3-4: 866; 5-8: 4,553; 9-16: 2,341; 17-32: 853; 33 or more:
+  1,008. 4,175 draws broke a segment because their pipeline writes guest
+  memory. No geometry pipeline wrote guest memory and no pass hit the chunk
+  budget, so neither inline branch ran in this title. The sampled-image rule
+  found 0 hits in 108,182 checks against a non-empty attachment list; a
+  temporary build that seeded the list with each sampled image hit 1,691 of
+  1,691.
+- **Segment results equal inline results.** A temporary build (not
+  committed) re-ran sampled segment passes inline into a
+  scratch buffer and compared the bytes. Controls (the same pass with one
+  group fewer) were detected 40 of 40 times. In a bracket run, which
+  re-ran each sampled pass inline right before (P) and right after (A) its
+  segment execution (S), no row had P equal to A with S different (0 of
+  422). Every program except `360038d0f4cfb9a5` matched in every run.
+- **Open item: `360038d0f4cfb9a5` output depends on execution order.** It
+  binds one constant storage buffer and one sampled texture and is not
+  indexed. Under the compare instrument the first of its executions is the
+  one that differs most often, whether that is the segment or an inline
+  copy. One run executed the segment (S), then two inline copies (A, B):
+  S was the odd one out 44 times, A 11 and B 3. The bracket run executed P,
+  S, then A: P was odd 65 times, S 0 and A 4. This is independent of
+  batching. It was observed under the compare instrument only and was not
+  measured on the base build. Cause unknown.
+- **Validation.** One strict 105 s run of the route under the Khronos
+  validation layer, built before the sampled-image rule was added, ended
+  with exit status 0. It is not known whether that slower run reached the
+  dunes. The layer was loaded: it reported the recorded VUIDs 09600
+  (`docs/bringup/cross-title.md`) and 07753, 07752 and 02691 (this file).
+  Its only other message was
+  `VUID-VkPipelineDepthStencilStateCreateInfo-depthBoundsTestEnable-00598`
+  (12 times), from `GraphicsRenderPipeline.cpp:828`, which enables the
+  depth bounds test from guest state; this change does not touch that path,
+  and it was not checked on the base build. Suggested direction: enable the
+  `depthBounds` device feature where the host has it, and refuse explicitly
+  where it does not.
+- **Frame rate**, one matched pair on the user's dunes route. Settings:
+  60 fps cap, `PrintfDirection = Silent`, translator unchanged.
+  Independent runs of one build earlier ranged from 11 to 13.5 fps in the
+  same scene, so one pair does not separate a gain of this size from noise.
+
+  | Route window | `40d8c109f` | `59e3640cf` |
+  | --- | --- | --- |
+  | 60-118 s: render engine busy per frame | 38.7 ms | 34.6 ms |
+  | 60-118 s: command processor running per frame | 55.2 ms | 50.5 ms |
+  | 60-118 s: frame rate | 17.3 fps | 18.9 fps |
+  | Dunes (samples from 60 s with 500 or more draws per frame, 24 each) | 11.42 fps | 13.19 fps |
+
+  The skip-the-pass bound in the next record allows about +22 %. 60 fps is
+  still far away: the command processor stays above 50 ms per frame in
+  this build without link-time optimisation. The gain on an optimised build
+  was not measured.
+- **Other titles**: `docs/bringup/cross-title.md`, "Geometry segments on
+  other titles (2026-11-09)".
+
+## Robot platformer: geometry passes are latency-bound and overlap (2026-11-09)
+
+Same title, host, route and settings as the next record. Executables built
+from `b76f4a71e` plus `4cf83a445` and temporary diagnostics only.
+
+- **Shape.** Geometry passes emulate the guest's merged ES+GS stage as a
+  compute dispatch before each pull draw. In the dunes, `0xf4cfb9a5` passes
+  all have one group: one guest wave of 64 lanes, eight 8-lane host
+  subgroups, at most 16 primitives. Across the whole route its passes have
+  1-128 groups.
+- **Compile statistics** (ANV through `VK_KHR_pipeline_executable_properties`,
+  a copy of each geometry pipeline created with statistics capture):
+
+  | Geometry program | Width | Instructions | SENDs | Loops | Spills:fills | Max live |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | `0xf4cfb9a5` | SIMD8 | 44,571 | 2,151 | 292 | 862:1,132 | 274 |
+  | `0x8e51dd94` | SIMD8 | 46,438 | 2,335 | 315 | 791:1,053 | 287 |
+  | `0x0e89d742` | SIMD8 | 18,069 | 490 | 35 | 367:975 | 242 |
+  | `0xfc3d1580` | SIMD16 | 18,195 | 953 | 123 | 311:1,067 | 286 |
+
+  The rule set before the run (at least 100 fills means register pressure;
+  under about 16k invocations per pass means the pass cannot fill the GPU)
+  fired on both branches, so it did not choose a lever. The next run did.
+- **Latency-bound.** GPU timestamps by group count, whole route: passes of
+  2, 3, 4, 5, 9, 50 and 63 groups all cost 106-113 us; 128 groups cost
+  360 us. A pass of 2 groups runs for about as long as a pass of 63.
+  One-group passes cost more, 165 us over the route and 225 us in the dunes.
+- **Consecutive passes overlap.** Prediction set before the run: two copies
+  of the same dispatch, recorded back to back with no barrier, cost under
+  1.3x one copy if passes can overlap and over 1.7x if they serialize. A
+  temporary build issued every geometry dispatch twice in alternate 5 s
+  windows of the dunes, only for programs whose guest code has no memory
+  store, atomic or GDS instruction (all four above). `0xf4cfb9a5`: 233 us
+  doubled against 225 us single (1.04x, 10,470 and 13,903 passes);
+  `0x8e51dd94`: 97 against 98 us.
+- **Passes come in long runs.** A counter ended a run at every packet other
+  than draws, register writes, index state and buffer chaining. In 40 s of
+  dunes (494 frames): 65.6 geometry passes and 3.6 runs per frame, mean run
+  18.3 passes; 24,116 of 32,400 passes were in runs of 32-63. Every run ended
+  at `EVENT_WRITE`.
+- **What this bounds.** Today each pass is followed by its pull draw, with a
+  render pass break and barriers around it, so the GPU runs one wave for
+  about 225 us about 66 times a frame. Running the passes of a run together
+  would cost about one pass latency per run. That bounds the gain at about
+  10-11 ms of GPU time per frame (about 13.6 to 15.8 fps at the recording's
+  73 ms frame), not counting the render pass breaks it would also remove.
+  Not built at the time (built since: see the record above); the hazards a
+  design must respect are the guest's
+  synchronization events that end each run.
+- **Passes per recording.** A batch cannot cross a host recording, so a
+  second counter closed its count at every command-buffer end. In 40 s of
+  dunes, 94 % of 38,895 passes were in recordings that held 8 or more
+  passes: 64 % in 8-15, 17 % in 16-31, 13 % in 32-63. Most recordings hold
+  none (29,758 of 34,000). The recordings that hold passes are closed by
+  the idle-GPU submit before a draw (passes of 20,450) and by the submit of
+  recorded dispatches before a draw (18,006).
+- **Upper bound by skipping the pass.** In alternate 5 s windows of the
+  dunes a temporary build skipped every geometry dispatch and kept the fill,
+  barriers and pull draw. A zero-filled group allocates no primitive, so
+  those draws drew nothing. Skip windows ran 15.00 against 12.31 fps (arm
+  medians); each skip window against the mean of its two neighbours gave
+  1.11-1.26, median 1.19. Fence waits were 22.3 against 31.0 ms per frame.
+  This also drops the draws' pixel work, so it bounds any geometry-pass
+  change from above; the prediction set beforehand was to exclude batching
+  below +8 %.
+
+## Robot platformer: a dunes route, and where the dunes frame goes (2026-11-09)
+
+Same title, host and settings as the next record. Executables built from
+`b76f4a71e` plus `4cf83a445` and temporary diagnostics only, compiled in but
+off unless stated.
+
+- **A route with gameplay input.** The user recorded a route in pad-record
+  mode (`docs/input-replay.md`). It walks from the crash site into the open
+  dunes at about 94 s and plays there until about 140 s. A replay reached the
+  dunes again at about 94 s. Over 103-140 s, with frames counted from
+  presented flips:
+
+  | 103-140 s | Recording, diagnostics off | Replay, GPU timestamps on |
+  | --- | --- | --- |
+  | Frame rate | 13.6 fps (73.3 ms) | 12.2 fps (82.0 ms) |
+  | Draws per frame | 628 | 693 |
+  | Render engine busy | 89 % (about 65.5 ms) | 84 % (about 68.7 ms) |
+  | Command processor running | 75.0 ms | 82.3 ms |
+  | of which fence waits | 33.1 ms | 31.7 ms |
+
+  The replay is not frame-identical to the recording (65 more draws per
+  frame), so the two columns bound the instrument cost only loosely: at most
+  about 3 ms of GPU time per frame. The frame is over budget on both sides.
+  The GPU needs about 65 ms per frame. The command processor's time outside
+  fence waits is 42-51 ms. 60 fps needs the GPU cut by about 4x and that
+  time by 2.5-3x; removing either bound alone leaves the other above 40 ms.
+- **GPU timestamps by kind, dunes only.** Replay, the 41 s of timestamp dumps
+  inside the dunes, per frame at 12.2 fps. A mark follows every draw and
+  dispatch, and each item includes the gap since the previous mark:
+
+  | Per frame | Time | Count | Mean |
+  | --- | --- | --- | --- |
+  | Compute dispatches | 25.1 ms | 57 | 443 us |
+  | of which BVH traversal `0x3666fa39` | 18.7 ms | 0.9 | 20.1 ms |
+  | Indexed draws | 16.8 ms | 539 | 31 us |
+  | Geometry passes | 12.8 ms | 63 | 203 us |
+  | of which `0xf4cfb9a5` | 10.8 ms | 47 | 231 us |
+  | Non-indexed draws | 4.8 ms | 98 | 49 us |
+  | Draw tails | 2.7 ms | 52 | 52 us |
+
+  `0x3666fa39` alone exceeds the 16.7 ms budget. The geometry program
+  `0xf4cfb9a5` costs about 10-11 ms per frame in both scenes measured: 76
+  passes of about 145 us in the scene of the next record, 47 of about 231 us
+  here. The record above shows that a pass costs the same at 2 and at 63
+  groups, so these totals do not mean the cost follows the work per pass.
+- **Excluded: the compute-after-draw transition.** Hypothesis: a compute
+  dispatch recorded after a draw pays a pipeline switch that a dispatch after
+  another dispatch does not, so grouping geometry dispatches would save it.
+  Prediction set before the run: the same compute program costs at least
+  twice as much after a draw as after a dispatch. The timestamp instrument
+  split each dispatch by what preceded it in the command buffer. No program
+  reached the ratio. Mean per call by predecessor:
+
+  | Program | Buffer start | After a dispatch | After a draw |
+  | --- | --- | --- | --- |
+  | `0x90c95e2d` | 694 us | 817 us | - |
+  | `0x108c4737` | 578 us | 573 us | - |
+  | `0x82990f59` | - | 288 us | 278 us |
+  | `0x8723fe62` | 346 us | 163 us | - |
+  | Geometry `0xf4cfb9a5` | 190 us | - | 139 us |
+  | Geometry `0x8e51dd94` | 110 us | - | 97 us |
+
+  `0xf4cfb9a5` never followed another dispatch, so its own case is untested.
+  The command processor reads of indirect-draw records that dominate the
+  fence waits were already excluded as a frame-rate lever on 2026-11-02
+  ("real gameplay frame rate" record: the waits move).
+
+## Robot platformer: per-frame CPU read of indirect-draw records (2026-11-09)
+
+Same title, host, route and settings as the next record; executables built
+from `b76f4a71e` plus `4cf83a445` and temporary diagnostics only.
+
+- **The largest fence wait reads indirect-draw records.** A temporary
+  instrument logged the call stack of every fence wait of 5 ms or more. In the
+  GPU-bound scene (about 375 draws per frame), the top site was
+  `DrawIndexIndirect` reading its argument record from guest memory on the CPU
+  (`ReadCurrentGuestBytes`, then `BufferWait`), which drains the queue. It
+  happens about once per frame, waits about 18 ms, and follows the
+  BVH traversal kernel `0x3666fa39`.
+- **Why the device path refuses those draws.** Counters over a whole run:
+  7,125 indexed indirect draws. 1,235 were recorded with device-side arguments
+  and 5,888 were read on the CPU, 5,887 of them because the draw takes the
+  geometry pass. That pass sizes its output buffer and its dispatch from the
+  primitive and instance counts, so it needs the record on the CPU.
+- **Excluded in the GPU-bound scene: skipping the read.** A temporary build
+  switched every 5 s of wall time between the normal read and skipping the
+  draw. Skipping is valid only because every record read in the window was
+  empty: index count 1 and instance count 0, in 235 of 235. In that scene,
+  with the GPU busy 94-97 % of wall time, the skip arm ran at 16.29 fps
+  against 15.86 (+2.7 %), with fence waits of 37.7 against 38.8 ms per frame.
+  The wait moved to the command-buffer ring: the processor waits for a free
+  buffer of its eight while the GPU is busy. Geometry passes in that run used
+  at most 512 groups and 8.9 MB of output, with 4,353 dwords per group. That
+  build switched arms from boot. Before the window the normal arm read 174
+  records that were not empty, so the skip arm may have dropped real draws
+  there.
+- **The route does not control the scene after 150 s.** It has no gameplay
+  input: its last five presses are pause-menu inputs at 146-186 s, with
+  nothing after. The "dunes" figures in these records therefore come from an
+  idle scene: the robot standing in the open dunes, about 510-780 draws per
+  frame. Of seven runs, three were in that scene from 190 s or 212 s on. Four
+  were from 190 s to 250 s in an unidentified scene of about 375 draws per
+  frame, with the robot lying in the sand. Two of those four were sampled
+  earlier:
+  - both spent 16-18 unpaused seconds above 500 draws per frame;
+  - both spent about 10 s at 60 fps with under 100 draws per frame, between
+    the `options` presses at 175.9 and 186.2 s, probably the pause menu;
+  - in one, the 375-draw scene appeared just before that pause; in the
+    other, just after it. So the pause does not trigger it.
+
+  That scene is not the frame of the user's pause-menu freeze, which shows
+  the sky during a cinematic.
+- **Dunes: the same wait, the skip not measured there.** The read is also
+  the top wait site in the dunes. A run in the dunes (190-250 s) had 689 of its
+  691 waits of 5 ms or more with the same queue, the same preceding kernel and
+  the same lag after `0x3666fa39` (median 17.7 ms). The 1 s samples of the
+  three runs in the dunes bound the gain of removing every wait at 23-34 %.
+  A second skip run started skipping 155 s into the run. It reached only the
+  16 s span above 500 draws per frame, which a run without the skip also
+  shows; that span is not the idle dunes scene of the three runs. In that span:
+  - the read waited little (median 5.4 ms);
+  - draws fell and the frame rate rose throughout;
+  - adjacent windows, from five skip samples, gave about 0 % (skip at
+    164-166 s, 17.7-18.7 fps, against 18.4 fps normal at 168-171 s) and about
+    +8 % (skip at 173-174 s, 19.8-20.2 fps);
+  - fence waits per frame did not fall (about 22 ms normal, 26-34 ms
+    skipping).
+
+  The dunes scene remains unmeasured. Without that measurement the device
+  path for geometry-pass draws is not implemented. Measuring it needs a
+  route with gameplay input that walks into the open dunes and stays there
+  for 60 s or more without pausing, recorded on the executable and shader
+  caches of the measurement (`docs/input-replay.md`).
+
+## Robot platformer: paired kernel measurement, arena refusal fixed (2026-11-09)
+
+Applies to `PPSA21567 - ASTRO BOT` 01.018, Intel A770, Linux, Mesa 26.2.6,
+strict 60 fps-limited runs on the user route. Executables built from
+`b76f4a71e` plus temporary diagnostics only; the arena fix (`4cf83a445`) was
+added for the last run.
+
+- **Method: two translations in one run.** A temporary instrument (not
+  committed) translates one compute kernel twice, with a marker added to the
+  module key, and switches between the two each second of wall time. GPU
+  timestamps attribute each dispatch to its translation, and every 5 s dump
+  gives a pair measured in the same scene under the same host load. The
+  ratios of the compared dumps stayed within 1.026-1.062 and 0.911-0.947 in
+  the two runs below, while the kernel took 18.5-23.3 ms per call across separate runs, so
+  a few percent per kernel is measurable without repeated whole runs. Both arms compile fresh; the rest
+  of the shader store was warm from a run that held the uncommitted exchange
+  edit, so absolute times are not quoted as the tip's.
+- **Rendezvous changes, per kernel.** For the tile-lighting kernel
+  `0x3666fa39` (the largest BVH-family module), the translation of
+  `77dd4ce0c` against the same translator with part-local skips, compare
+  chains across side exits and conflict-ordered LDS turned off. In two
+  windows of the route (5 s dumps 38-42 and 43-52) it took 23.1 against
+  25.0 ms and 18.8 against 20.2 ms per call; median ratio 0.930 over 20 paired
+  dumps, every dump of both windows between 0.911 and 0.947. At about one call per frame this is
+  about 1.4 ms of a 65 ms frame, consistent with the frame rate staying within
+  the noise of separate runs (previous record).
+- **Excluded: loading a part's own word without a select.** Letting
+  `SplitWavePartWords` load every word, its own included, instead of
+  selecting its own value: 19.2 against 18.6 ms per call over the same part of
+  the route (dumps 37-51); median ratio 1.031 over 19 paired dumps, each of
+  those dumps slower (1.026-1.062).
+- **What bounds the frame, by window** (the arena run: GPU timestamps and
+  1 s performance samples, on a build with diagnostics):
+
+  | Per frame | 188-207 s | 215-262 s (dunes) |
+  | --- | --- | --- |
+  | Frame rate | 15.0 fps | 13.2 fps |
+  | GPU busy | 92 % of wall time | 46-50 ms, 15-32 ms idle |
+  | Command processor active (run minus waits) | 9.7 ms | 50.7 ms |
+  | Fence waits | 42.6 ms | 27.1 ms |
+  | Draws / dispatches | 360 / 86 | 639 / 83 |
+  | `0x3666fa39` / `0x874bd13f` | 24.1 / 12.4 ms | 19.6 ms / absent |
+
+  The first window is GPU-bound. In the dunes the processor's active time
+  alone (about 79 us per draw; state setup 13.0 and resource binding 12.75 ms
+  per frame lead) is as long as the GPU's busy time, and fence waits add
+  27 ms on top: the two run in series. A kernel cut there shortens the frame
+  only through shorter waits; overlapping them would bring the frame to about
+  50 ms. In dumps 47-50 the geometry kernel `0x360038d0f4cfb9a5` grew from 3.0
+  to 20.4 ms per frame; not traced.
+- **Where the kernel spends its time.** A temporary build that forces a miss
+  at every BVH node ran the kernel at 23.6 against 24.7 ms per call in the same
+  scene, so the node visits after the first cost about 1-2 ms (the trace
+  region as a whole is priced in the 2026-11-14 region record: 11.4 of
+  15.6 ms). The rest was read then as straight-line
+  shading (about 1,550 VALU instructions), split-wave exchanges and register
+  spills (8 KB of scratch per thread); the kernel is latency-bound. At
+  960x540 internal resolution (game patch, not strict) it takes 6.45 ms.
+- **Arena refusal fixed (`4cf83a445`).** A run stopped at 150 s, in the pause
+  cinematic, with `!create_all_the_same`: a 3840x2160 RGBA16F (mode 27)
+  storage view of 0x3fc0000 bytes at 0x53de40000 over 40 parents. 39 were
+  render targets and storage views crossing or inside it, which the arena
+  rule links. The 40th was a 640-wide sampled texture inside it, uploaded by
+  the CPU and with no device write. The arena rule accepted only storage
+  buffers as guest-byte caches. It now also accepts the CPU-texture link the
+  single-parent and alias paths use: guest memory holds the content, no
+  device write followed the upload, and no write-back is pending. With the fix
+  the same route ran to its planned 265 s close. A temporary marker showed
+  the predicate true for CPU textures in 8 multi-parent creations (the cap),
+  one with 35 parents. It does not show that no other clause admitted them.
+  The `GpuMemory` and `GraphicsState` unit suites pass (332 tests).
+- **Open.** The user's pause-menu freeze was in the same scene. This refusal
+  is a candidate cause, not a proven one. The same route without the fix had
+  passed 150 s once, so the stop is intermittent.
+
+## Robot platformer: fewer split-wave rendezvous, two refusals fixed (2026-11-09)
+
+Applies to `PPSA21567 - ASTRO BOT` 01.018, Intel A770, Linux, Mesa 26.2.6,
+strict 60 fps-limited runs on the user route. Commits `3d0b733a2`
+(lookup memo), `91be7a38a` (depth link) and `77dd4ce0c` (split-wave
+rendezvous, translator 210). The measured executables also held unrelated
+uncommitted GPU-memory and split-wave exchange edits of the worktree.
+
+- **Part-local skips.** A forward `S_CBRANCH_EXECZ` needed a whole-wave EXEC
+  test, so every part met at each one. A part with no active lane now skips
+  the range alone when the range is entered only through the branch, holds no
+  rendezvous and defines no scalar word that is live at the target. Covered by
+  four `EmulatorShaderMaskAnalysis.PartLocalSkip*` tests.
+- **Conflict-ordered LDS.** Every LDS access had a rendezvous before and
+  after it. Accesses now order across parts only where two conflict: one
+  writes and their bytes may meet in different lanes, with addresses taken as
+  affine forms of the thread coordinates. Reads, disjoint ranges and each
+  lane's own slot keep no rendezvous; `S_BARRIER` orders everything across it.
+  Covered by the `EmulatorShaderSplitLdsOrder` tests.
+- **Compare chains across side exits.** The BVH traversal kernel tests up to
+  four child pointers with `V_CMP_NE_U32 vcc, -1, vN` separated by
+  `S_CMP_LG_U64 vcc, 0` and a branch that only leaves the program. Those
+  compares now vote in one exchange. Static rendezvous sites in the largest
+  BVH-family module went from 114 to 108 (single ballots 69 -> 61, two more
+  grouped exchanges); the other family members from 113, 111, 107 and 107 to
+  107, 105, 101 and 101. The device test
+  `EmulatorPackedMipNative.SplitWaveGroupedLaneReadsAndComparesReturnWholeWaveWords`
+  now places a side exit inside its compare run and checks that the four
+  compares share one exchange and return whole-wave words.
+- **Frame effect: small, single runs.** Part-local skips with LDS order
+  (translator 209, warm store) ran the dunes at 15.15 fps against earlier
+  baselines of 14.1-14.7 fps, within their spread. With compare chains and
+  both fixes (translator 210), the dunes window from 212 to 250 s ran at
+  15.50 fps in the same scene as the 15.15 fps run; per-frame CPU costs were
+  equal within noise (descriptor and texture binding 1.81 against 1.73 ms).
+  Fewer rendezvous barely move the frame, so their count is not what bounds
+  the dunes.
+
+**Lookup memo fix (`3d0b733a2`).** The intermittent `!create_all_the_same`
+stop of the 2026-11-08 record follows this sequence on the recorded object
+tables. The sampled-lookup miss memo
+stored misses that came from the write order of storage images
+("latest storage image has another format", "render target yields to the
+newer chain") as if they were properties of the object graph. Recorded
+sequence: a depth-format storage view B was created over the range; an
+A-layout request with seed skipping saw B as the latest, missed and stored
+the miss; its creation reused the equal storage image A, which became the
+latest by stamp (146 and 147 ticks after B's creation in two runs); a later
+A-layout request with the same key and a required seed hit the memo, skipped
+the lookup that would now find A, and created an object with mixed parents.
+A diagnostic counted lookups that the fix sends past the memo in a live run.
+A miss is no longer stored when the latest storage image of the range was
+consulted.
+
+**Depth link (`91be7a38a`).** The `DepthStencilBuffer - Contains -
+RenderTexture` refusal (a 960x540 colour target at the base of a 1216x684
+depth target, recorded below) stopped one pause run at 151 s. The relation
+now links like the `Crosses` form already did: both host images stay, the
+depth target is not reclaimed and no bytes are converted. This removes a
+fatal stop; it does not establish the content provenance the earlier record
+asks for. If the guest reads through one image what it wrote through the
+other, Kyty still does not convert it. The verification run did not reach
+the relation, so the linked path has not run live.
+
+**Still open.**
+
+- A pause run stopped at 162 s with `GpuMemory write-back requested before
+  exact resource dependencies completed` (storage buffer, pending queue 8).
+  The stack diagnostic was not hit again before it was removed; no cause.
+- A pause in the descent cinematic that froze the game for the user did not
+  reproduce in four bounded runs: the pause menu drew and resumed at 128 s,
+  a gameplay pause worked, and one press landed as the cinematic ended. The
+  guest threads of the frozen run matched a healthy paused run. Live input
+  over the time-based route is a hypothesis, not a cause.
+- The verification run is one run; captures show the scene, not correctness
+  of the BVH results.
+
+## Robot platformer: remembered address-table entries excluded (2026-11-09)
+
+Hypothesis: the BVH traversal kernel `0x3666fa39` waits on guest address
+translation. Every node load first walks the device table (header, region
+directory, binary search, entry): four or more dependent reads before the
+node's own. Inside the traversal loop the only translated accesses are the
+intersection's node loads and the runtime-descriptor buffer loads that pick
+the next node, so two remembered entries per invocation should skip that
+walk on almost every call.
+
+- **Change tried.** `guest_device_address` kept the indices of the last two
+  entries that held a whole access in two Private variables. A call first
+  tested both remembered entries with the lookup's own fit test. An index of
+  at least the table's count read the table's zero prefix and never matched.
+  The header loads did not wait for that test. Entries are disjoint, so a hit
+  returns what the search would. The GPU load probe repeated its load to
+  exercise the hits; swapping the two remembered results failed four
+  device-address tests, so the probe covered them. Translator 208, patch kept
+  with the run evidence.
+- **Offline, same recipe at SIMD8 against translator 207.** Instructions
+  45,535 -> 47,355, loops 194 in both, spills:fills 626:2,668 -> 608:2,521.
+  The module passes `spirv-val`.
+- **Dunes, one run on a private store (the third after the version change).**
+  The BVH kernel took 25.3-26.3 ms per call over the dune dumps (24.9 ms on
+  translator 207's plateau). GPU time per frame was 61.8 ms against 62.3 ms,
+  and the frame rate was 13.6 fps against 14.9 fps. That run was the first to
+  compile the dune pipelines, and the GPU was 84 % busy against 91-93 %, so
+  the frame rate is not comparable; the GPU figures do not move. The ship
+  scene before the dunes ran 7.5-8.0 ms per call (8.3-8.7 ms before).
+- **Excluded.** Removing the walk from nearly every node load leaves the
+  kernel's time unchanged, so address translation is not what the BVH
+  traversal waits on in the dunes. Table chunks are 64 MB, so the BVH sits in
+  one or two entries and the remembered entries should hit. The hit rate was
+  not measured.
+- **Run notes.** On an empty private store, the first run stopped at the
+  save-card menu at 340 s. The second was still in the ship cinematic at
+  250 s and ended at 267 s on the known intermittent guest jump to address 0
+  (`rip 0x9004a0c3e`, seen since 2026-10-26). The third reached the dunes.
+
+## Robot platformer: BVH intersection runs only the node's layout (2026-11-09)
+
+Applies to `PPSA21567 - ASTRO BOT` 01.018, Intel A770, Linux, Mesa 26.2.6,
+strict 60 fps-limited runs on the user route to the dunes. Both arms are
+`e82878229` with the same unrelated uncommitted GPU-memory edits and
+diagnostic per-dispatch GPU timestamps (5 s dumps); the change arm adds this
+lowering (translator 207 against 205). One run per arm.
+
+- **Observed.** The BVH traversal kernel `0x3666fa39` keeps the node pointer
+  in a scalar register and copies it to the address VGPR before each of its
+  three `image_bvh_intersect_ray`, so every lane of a wave tests the same node
+  and the node type is wave-uniform. The lowering computed the fp16 box, fp32
+  box, child sort and triangle test (three divides) on every call, loaded all
+  32 node words, and did so for lanes outside EXEC as well; only the result
+  store was EXEC-gated.
+- **Change.** Lanes outside EXEC skip the call. A switch on the node type
+  (out-of-range nodes folded into their own cases) runs one layout: triangles
+  load 16 words, boxes 28, out-of-range triangles return the miss constants,
+  and user or out-of-range box nodes return four invalid pointers, as before.
+- **Offline, same recipe at SIMD8.** Instructions 45,665 -> 45,535, loops
+  188 -> 194 in both SPIR-V and ANV (one more address lookup per layout),
+  spills:fills 596:3,055 -> 626:2,668, scratch messages inside the traversal
+  loops 2,012 -> 1,827. The 19 stored modules with the lowering pass
+  `spirv-val`.
+- **Dunes, one run per arm.** Sampled frame rate over the whole dune
+  window 13.95 -> 14.92 fps (+7 %), over its last 25 s 14.40 -> 14.96 fps
+  (+4 %); GPU time per frame 65.0 -> 62.3 ms with the GPU 91-93 % busy. The
+  BVH kernel's elapsed time per call, dump by dump from dune entry, fell from
+  27.4 to 24.9 ms on the plateau (-9 %); that figure includes overlap with
+  other queued work, and the 2026-10-30 records measured a run-to-run spread
+  of 18.5-23.3 ms per call, so it is a direction, not an isolated cost.
+- **Correctness.** Kept by construction (same arithmetic per layout, same
+  out-of-range results), `spirv-val`, and the loop gate: all 47 split
+  recipes of the run have as many ANV loops as inlined SPIR-V loops. The
+  stop-time captures of both arms score healthy and show the same frame, but
+  whether that frame depends on BVH results was not established (a build
+  forcing every intersection to miss left earlier captures unchanged).
+- **Run notes.** The first run of translator 207 lagged the time-based route
+  (still in the opening cinematic at 340 s); the measured run is the second,
+  on a warm store. A first build placed the result `OpPhi` after a store and
+  failed pipeline creation at start; `spirv-val` reports it.
+- **Not covered.** No test executes the lowering; the out-of-range and user
+  node cases are kept by construction and are not exercised by the route.
+  Each arm is one run.
+
+## Robot platformer: relaxed split-wave exchange spins excluded (2026-11-09)
+
+Hypothesis: the rendezvous behind ballots, lane reads and their groups could
+spin on relaxed sequence loads, since the acquire fence after the loop already
+orders the bank reads; only the plain synchronization would keep its acquiring
+last load. ANV emits one SLM fence per acquire load, so this removes one fence
+per spin iteration. Offline on `0x3666fa39` the loops stayed (188), SLM fences
+went from 520 to 406 and the block loads were unchanged.
+
+**Excluded.** Over the 39 split compute recipes the change produced in a
+strict run, ANV reported fewer loops than the inlined SPIR-V holds in 27 (by
+one in 26, by four in one). On one of them, making only the exchange spin's
+last load acquire again restored the loop (10 -> 11). A spin of relaxed loads
+whose returned sequence the caller never reads (a dead guest result) has no
+effect the compiler must keep, so it is removed and that part does not wait.
+With two banks, its next publish can then overwrite a bank that a slower part
+still reads. A spin needs an effect the compiler keeps even when its result
+is dead; translator 205 already has exactly one acquire per spin, so this
+fence axis is closed.
+
+**Run notes.** The strict run (diagnostic per-dispatch GPU timestamps) had no
+device loss. It was the first run of a new translator version, so every
+shader recompiled and the time-based route lagged by about 45 s; the BVH
+kernel ran only 33 times and no per-call figure was comparable. The reference
+band for that kernel, from an earlier timestamp run over the dunes, is a
+median of 23.8 ms per call (10th-90th percentile 23.2-24.0 ms, about one call
+per frame). Count the first run after a translator change as warm-up, and
+gate loops over every split recipe offline before a game run when the change
+can be simulated.
+
+## Robot platformer: split-wave lane reads and compares share exchanges (2026-11-09)
+
+`ddc3664b6` (translator 205). The BVH traversal compute shader `0x3666fa39`
+runs as a guest wave64 split into 8-lane host subgroups on the Intel Arc
+A770. Each wave-wide value cost one cross-subgroup rendezvous. After each ray
+intersection it reads 2-4 lanes at one selector and evaluates runs of
+compares whose masks feed scalar arithmetic. Runs of `V_READLANE` at one
+selector now share one exchange: 44 reads form 32 groups, saving 12
+exchanges per pass through the two traversal loops. Runs of adjacent
+compares whose masks are not lane-local pack their votes and publish them
+together. No such compare run forms in `0x3666fa39`; in the translator 205
+store, 7 other split compute recipes of this title hold one or two.
+
+**Same-translator ANV statistics** (offline, SIMD8, not a frame effect). The
+unfused arm was translated by a diagnostic build into a private copy of the
+store with only this kernel's entries removed:
+
+| `0x3666fa39` | Instructions | SENDs | Spin loops | Spills:fills | Max live |
+| --- | --- | --- | --- | --- | --- |
+| Without grouping | 44,573 | 1,695 | 200 | 593:2,684 | 365 |
+| With grouping | 45,665 | 1,623 | 188 | 596:3,055 | 347 |
+
+The 12 fewer spin loops are exactly the lane-read groups. The rise in fills
+is within this kernel's register allocation sensitivity: a probe-only change
+moved them from 2,225 to 2,864 (2026-10-30 record).
+
+**Verification.** The device test
+`EmulatorPackedMipNative.SplitWaveGroupedLaneReadsAndComparesReturnWholeWaveWords`
+runs both groupings with a required subgroup size of 8 and checks every
+whole-wave word against its scalar value, with no validation errors. Forcing
+the ballot field shift to 0 makes it fail. It skips on devices whose minimum
+subgroup size is above 8.
+
+**Frame effect not isolated.** Two strict runs stopped with the intermittent
+`!create_all_the_same` refusal at 181 s and 137 s. The two that reached the
+dunes desynced from the time-based pad route: one stood idle at the start
+(13.29 fps, 54.6 GPU ms/f over 205-255 s), while the translator 203 baseline
+was moving among the rocks (10.88 fps, 79.4 GPU ms/f). The scenes differ, so
+no speedup is claimed. The route lands in different game states when load
+times vary; compare windows only when their captures show the same camera
+state.
+
+## Robot platformer: intermittent storage-view refusal (2026-11-08)
+
+On the Intel Arc A770, an isolated LTO executable with the same source as
+`fc39895dd` and no game patch stopped at 179.7 s with
+`!create_all_the_same` during the recorded route. The new 960x540,
+mode-27 storage image required its initial content. Of its six overlapping
+objects, an equal-range storage image had the same image parameters except
+that its creation was allowed to skip the guest seed; the other parents
+included a 3840x2160 render target with a recorded device write and storage
+images in other layouts. This reproduces the refusal without the six pending
+graphics changes in the worktree. It does not establish which parent owns all
+bytes needed by the incoming read.
+
+**Do not reuse on the timestamp alone.** A storage object's `write_time` is
+updated at binding, before the dispatch's mutation-conflict check. A binding
+can therefore advance it even if that attempt does not record the dispatch.
+Also, `skip_seed` currently affects both equality and the update callback;
+ignoring it in equality alone can leave a later guest update unuploaded.
+Establishing a recorded whole-image write, the intervening aliases and the
+required queue ordering is necessary before reusing that backing.
+
+An isolated, diagnostic-only binder trace filtered to the reported guest
+address reached 360 s without the refusal. It recorded repeated bindings of
+two different storage formats over the range and saw the exact mode-27 view
+once at startup; it did not capture the failing transition. The 245 s
+capture reached the dunes, with the previously documented visible haze; it
+is not evidence of correct graphics or successful movement. The instrumented
+run is not a performance comparison. The executable was stopped by its
+harness at the time limit.
+
+A second diagnostic traced the actual
+`vkCmdDispatch`/`vkCmdDispatchIndirect` recording after the mutation-conflict
+check. It saw 4,951 recordings with shader checksum `0x05472e62` and a storage
+descriptor at that address, but only one entry through the traced creation
+branch for that checksum. Descriptor address and recorded dispatch alone do
+not identify which host image was bound or prove completion. This retry was
+stopped manually after 240 s without reproducing the refusal.
+
+A third diagnostic traced the selected host image and materialization route.
+The same compute shader and storage descriptor first bound a render target,
+then a different storage image over the same guest address. The run stopped
+at 149 s on another mixed-parent `!create_all_the_same`, this time at
+`0x53de40000` for a 3840x2160 storage view. The address-filtered trace did
+not identify that view's contents or the unaccepted parent, and cannot prove
+a safe alias policy.
+
+Replaying the captured parent metadata through the alias predicates in a
+diagnostic test found six copyable render targets. The oldest target's GPU
+timestamp was 33646, while a sampled parent uploaded from CPU memory at 44757;
+the current admission rule rejects that combination. The replay is a
+reconstruction, not a second live reproduction of the failure. A separate
+test checked each of the 204800 eight-byte texels in that parent's range:
+the plan for a later render target maps every texel to the same guest byte.
+
+That coverage does not establish that the later target contains newer data
+for every texel: a draw can update only part of an attachment, and a tiled
+GPU-owned target can start undefined. `device_write_time` is marked for a
+draw, not proof of a complete overwrite. A prototype that admitted the case
+on copy coverage and that timestamp was therefore discarded. Three further
+baseline diagnostics, an isolated prototype run and a clear-timing diagnostic
+did not reproduce this alias refusal; the prototype path did not activate.
+No runtime fix or performance gain is established. A safe admission needs
+proven per-range content provenance and ordering, including later CPU writes.
+
 ## Robot platformer: real gameplay frame rate, internal resolution and FSR 3.1 (2026-11-02)
 
 Applies to `PPSA21567 - Astro Bot` 01.018, Intel A770, Linux, Mesa 26.2.5, Ryzen 5
@@ -394,6 +2763,9 @@ strict 60 fps-limited runs gw180 and gw181, `504361d49` plus temporary probes
     mark. Which clause is not yet measured.
   - Direction: count the failing clause per wait, then satisfy that case with
     a device-side copy in queue order.
+  - Measured and addressed on 2026-11-06: the failing step is the record
+    (`DeviceMayWriteGuestRange`). See "Device-address overlays for refused
+    storage publications" below.
 - CP cost alone is about 75 us/draw in the hub, near 11 fps at 1170 draws with
   no GPU cost at all, so the GPU work above is not the only limit.
 
@@ -903,7 +3275,12 @@ strict 60 fps-limited runs on the dune route (gw111-gw119).
   - Since the peak is mostly guest values, reshaping the module cannot cut
     it by the 30% that would remove most spills; only `spirv-opt` was tried.
     Keeping cold guest registers in shared memory, which has lower latency
-    than scratch, is untested.
+    than scratch, was worse when tried (2026-11-10 record above).
+  - Excluded (2026-11-10, from the gw115 probe log of the guest program):
+    running one guest wave per host workgroup, so that its parts could
+    rendezvous with workgroup barriers. The program holds two `S_BARRIER`
+    and one `DS_ADD_RTN_U32` on a 1920-dword LDS array, so the four guest
+    waves of a workgroup share LDS and must stay in one host workgroup.
   - The guest's scalar state stays uniform after translation. In the final
     NIR, 175 of 183 loops and 400 of 712 registers are convergent. So
     scalar values made per-lane by the translation are not the source of
@@ -4229,7 +6606,8 @@ profile showed `UtilFillImage` under `DMA_DATA` at 5 % of the main ring thread, 
 the flushes are bursts: 0 in most 5 s windows, about 150 in one. Deferring them on
 one run gave 19.9 fps against a same-code spread of 18.0-20.5.
 That spread came from the stall recorded under "Array uploads under guest stores", so a window mean could not judge
-this trial. Deferral has not been retested since; the fix there batches the uploads instead.
+this trial. Deferral has not been retested since; the fix there batches the uploads instead, and
+"Freezes from the pipeline cache and array uploads (2026-11-15)" re-uploads only the layers a store touched.
 
 Main ring thread after these changes, 150 samples: 54 % busy and flat, 22 % fence
 waits, 16 % register wait polls. No guest thread is busy. `DRAW_INDEX_INDIRECT`
@@ -4337,7 +6715,8 @@ timestamp dumps rather than by a window mean.
   | Utility fence wait time (burst dumps) | 1.94 s | 0.34 s |
 
   Frames over the last nine dumps go from 923 to 959. Frames in the burst still dip to 87-104 against about 110, and
-  the array is still re-detiled in full for each store. Validation over a 110 s run reports no copy error; it did report 46
+  the array was still re-detiled in full for each store until 2026-11-15 (see "Freezes from the pipeline cache and array
+  uploads"). Validation over a 110 s run reports no copy error; it did report 46
   `vkCmdDispatch` messages, so the layer was active, and whether those predate this change was not checked. A capture after the burst shows no corruption. `PPSA09809 - OCTOPATH TRAVELER II`
   reached only its loading screen in an 85 s run, so its cube arrays were not checked.
 - **The 16 % tail is a different thing.** It stays at 15-18 % of GPU time and about 5 ms per frame while submits per
@@ -4524,3 +6903,624 @@ read 31-39 fps; the same code spreads about 2.5 fps between windows.
   dispatch processing 5.8 ms.
 - Excluded: submitting recorded compute work as soon as the GPU is idle, as graphics work already
   does. 31.5, 39.3 and 32.6 fps against 31.4, 37.4 and 35.4 fps.
+
+## Device-address overlays for refused storage publications (2026-11-06)
+
+`PPSA21567 - Astro Bot`, dunes after the recorded user gameplay route, Intel Arc A770, ANV Mesa 26.2.5, xe, 60 fps limit.
+
+- **Cause measured on main.** Draw-time host waits in `RetryGuestDeviceAddressDraw` held 26.0 ms of 31.7 ms fence
+  time per frame (81.5 %, about 6 waits per frame, 585 draws per frame). 99 % of them came from
+  `GuestDeviceAddressRecordPublication` refusing a same-queue result that had passed `StorageIsWholeGuestContent`.
+  The refusal is `DeviceMayWriteGuestRange`: objects under 64 KiB that are not 64-byte aligned. That guard stays as
+  it is, since it prevents partial-cache-line device writes from reverting CPU stores.
+- **Change.** For such a refusal, `GuestDeviceAddressRecordOverlay` copies the object, in queue order, into a
+  device-local slot. The device-address table maps that slot over the object's guest range, so later
+  device-address reads on the same queue see the result without a host wait. Guest memory still gets the bytes
+  from the object's write-back.
+  - The same copy also goes to host-visible staging. Write-back completion publishes it if guest memory still
+    matches the dirty tracker.
+    - Why: `GpuMemoryCanWriteBackAtSubmission` defers the write-back of an object that a later submission uses.
+      Without the old host wait, objects rewritten every frame reached guest memory rarely: about 1,300 deferred
+      against 120 written per 2 s.
+    - One run of that build crashed on a null call while another session loaded the disk. Its cause was not
+      established.
+  - A slot is dropped when its guest range changes, when a device write lands over it, or when a reader on another
+    queue prepares. It is also dropped two flips after guest memory last matched the object. The refusal then falls
+    back to the old host wait.
+  - Snapshot publication compares every page against the last published bytes, and leaves the GPU's written-page
+    flags for the object's own write-back.
+- **Comparison method.** After the route ends (186 s), the scene varies from run to run whatever the build, so runs
+  are not aligned by time or frame number. Per-second samples are grouped by draws per frame, and captures confirm
+  the scene.
+
+| Content | Main | Overlays |
+| --- | --- | --- |
+| Cinematic, 350-410 draws/frame | 12.27 fps (120 s); fence 47.8 ms/frame; WAIT_REG_MEM 1.2 ms/frame | 13.67 fps (25 s); fence 42.6 ms/frame; WAIT_REG_MEM 19.6 ms/frame |
+| Heavier scene, 735-790 draws/frame | 11.01 fps (24 s); fence 39.0 ms/frame | 11.55 fps (27 s); fence 34.1 ms/frame |
+
+- **Gain.**
+  - In the cinematic, four overlay builds measured +11 to +13 %, which is consistent.
+  - The heavier scene shows +5 %, from samples under 30 s. That is not significant.
+  - The draw-time device-address wait is gone.
+- **Where the wait went.** Part of it returns as WAIT_REG_MEM producer waits, and as `CommandProcessor::WriteBack`
+  waits on host reads of GPU-written values (about 55-64 per second).
+  - Those reads come from `ReadCurrentGuestBytes` (indirect draw arguments read on the host) or from `WriteGds`.
+    Which of the two dominates is not yet measured.
+  - The other two callers are excluded. A tagged run counted no ACQUIRE_MEM L2 write-back in the window, so an
+    asynchronous L2 write-back would not help here. The dispatch caller records no time
+    (`dispatch_writeback` is zero in every run).
+- **Other titles sharing the path.** Both runs used the generic route for 125 s and stayed interactive at 60, 90
+  and 115 s. Neither had an error, and the captures render correctly.
+  - `PPSA09076 - DREDGE` reaches gameplay. It created 12 overlays during the run, and at most 3 were live at once.
+  - `PPSA28311 - Absolum` reaches gameplay (the campfire scene). It created 958 overlays in two bursts before
+    gameplay, at most 5 live at once.
+  - In Absolum gameplay, its device-address waits (about 40 per second) refuse earlier, in
+    `GuestDeviceAddressPendingWriteBack`, before any publication is recorded. The overlay does not cover that
+    path; it is a separate lever.
+- **Tests.** `EmulatorGuestDeviceAddress` covers the slicing of table entries by overlays. The CI suites and the
+  architecture-boundary and archive-DAG gates pass.
+- **Open.**
+  - Device-side indirect draw arguments, if `ReadCurrentGuestBytes` turns out to dominate the remaining waits.
+  - The WAIT_REG_MEM producer waits.
+
+## Device-side indexed indirect draws and lazy alias waits (2026-11-06)
+
+`PPSA21567 - Astro Bot`, dunes after the recorded user gameplay route, Intel Arc A770, ANV Mesa 26.2.5, xe, 60 fps limit.
+Every A/B below alternates the change on and off every 10 s inside one run and compares samples by draws per frame.
+
+- **Device `DRAW_INDEX_INDIRECT`.** When the record lies in a storage buffer that an earlier command of the same queue
+  writes, a one-invocation converter turns it into `vkCmdDrawIndexedIndirect` arguments in queue order: it clamps the
+  count to the `INDEX_BUFFER_SIZE` window, adds the host vertex offset (a sum outside int32 draws nothing) and latches
+  the instance count. A later direct draw waits for that recording and reads the latch. The host neither waits for
+  nor reads the record.
+  - Eligibility: no quad-list chunking, geometry pass or fragment transport, 16- or 32-bit indices, a known index
+    window. About 75 % of the dune records are geometry-pass draws and keep the host path, so about 25 % move.
+  - Alone it gains nothing: 14.11 fps off against 13.60 fps on (350-399 draws per frame). The argument wait moves
+    into `WAIT_REG_MEM` current-producer waits, about 137 per frame both ways, which double from 0.12 to 0.24 ms
+    each (18 to 35 ms per frame). Those are the waits the alias guard keeps synchronous.
+- **Lazy alias wait.** `WAIT_REG_MEM` now always consolidates a same-queue producer whose effects are a store or a
+  store with write-back. The writable storage buffers it leaves with pending uses and aliases whose refresh reads
+  guest bytes are recorded. The next draw or dispatch that creates or links such an alias waits for that storage's
+  submissions first (a mutation conflict, retried after the wait). Outside a draw or dispatch that use stops the
+  emulator.
+  - The unit test for the old guard lost its alias case, since the guard moved from the wait to the alias's use.
+
+| Draws per frame | Off (host path, synchronous guard) | On (device draws, lazy alias wait) |
+| --- | --- | --- |
+| 550-599 | 13.73 fps (56 s) | 14.66 fps (44 s), +6.8 % |
+| 600-649 | 13.09 fps | 13.61 fps, +4.0 % |
+
+  `WAIT_REG_MEM` time fell from 3.4 to 1.7 ms per frame. The on phases deferred 9,867 aliases and waited at 4,736
+  uses. The captures render correctly.
+- **Other titles.** `PPSA09076 - DREDGE` and `PPSA28311 - Absolum` on the generic route for 125 s stay interactive at
+  60, 90 and 115 s (27-31 and 40 fps), with no error, and the captures render correctly.
+- **Known limit.** A negative base vertex with indices small enough that a vertex index falls below zero: the host
+  path skips the whole draw, the device path draws it and lets robust buffer access bound the fetch. The host
+  cannot apply its predicate, since the drawn index range comes from the GPU-written record.
+- **Open: intermittent write-back stop.** 2 of 6 dune runs with waits consolidated over aliases stopped with
+  "GpuMemory write-back requested before exact resource dependencies completed"; about 15 runs with the synchronous
+  guard did not. A run on another branch hit it too, so it may predate this change. The static suspect is the
+  device-address read preparation (`GuestDeviceAddressWriteBack` → `WriteBackStorageRanges`), which writes back any
+  collected storage with incomplete uses that is neither in place nor held by an overlay. Not confirmed with a
+  backtrace. Fixed on 2026-11-07, see "Pending-storage scans missed overlays that aged out".
+- **Unrelated stop seen once.** "unknown relation: DepthStencilBuffer - Contains - RenderTexture" also occurs on
+  builds without this change.
+
+## Split part width in the dunes (2026-11-06, not committed)
+
+`PPSA21567 - Astro Bot`, dunes after the recorded user gameplay route, Intel Arc A770, ANV Mesa 26.2.5, xe, 60 fps
+limit, private module store. Question: does a narrower host part (more registers per guest lane) pay where a split or
+native program spills?
+
+- **Offline.** Recorded compute pipelines compiled on ANV report spills by width. At width 32 the native wave32
+  `0x874bd13f` has 2,918 spills and 10,021 fills. As 16-lane parts it has 1,578 and 6,220. `0xe1b1315d` drops
+  from 860:1,830 to 42:140. Wave64 programs split at 16 lanes spill when the module needs more than 128 registers
+  (`0x8723fe62`, `0x90c95e2d`, `0x108c4737`). `0xff2adfc8` and `0xc99976f9` do not spill.
+- **Exclusive GPU time per dispatch.** A diagnostic bracketed every guest dispatch with end-of-pipe timestamps. The
+  width rotated every 10 s inside one run, so each program ran at every width.
+
+| Program | Before | After | Change |
+| --- | --- | --- | --- |
+| `0x874bd13f` wave32 | native 9.71 ms | 16-lane parts 8.89 ms | -8 % |
+| `0xe1b1315d` wave32 | native 0.76 ms | 16-lane parts 0.31 ms | -60 % |
+| `0xfd1ee59c` wave32 | native 56 us | 16-lane parts 81 us | +45 % |
+| `0x2bcba9a2` wave32 | native 76 us | 16-lane parts 74 us | 0 |
+| `0x8723fe62` wave64 | 16 lanes 314 us | 8 lanes 221 us | -30 % |
+| `0x90c95e2d`, `0x108c4737` wave64 | 16 lanes | 8 lanes | -5 % |
+| `0xff2adfc8` wave64 | 16 lanes 1.37 ms | 8 lanes 2.07 ms | +51 % |
+| `0xc99976f9` wave64 | 16 lanes 85 us | 8 lanes 162 us | +90 % |
+
+  Narrower parts pay where the wider module spills, and cost rendezvous where it does not. The guest VGPR count does
+  not predict which case applies.
+- **Frame rate.** In the main bin (350-399 draws per frame) `0x3666fa39` runs twice and `0x874bd13f` once per frame.
+  The table compares means of 10 s samples, with standard errors.
+
+| A/B, alternated inside one run | Off | On | Change |
+| --- | --- | --- | --- |
+| Wave64 always 8 lanes and wave-sensitive wave32 in 16-lane parts | 14.15 ± 0.12 fps | 14.70 ± 0.19 fps | +3.9 % |
+| Wave-sensitive wave32 always in 16-lane parts | 14.52 ± 0.26 fps | 14.27 ± 0.15 fps | -1.7 % |
+| Three-way rotation: wave64 at 8 lanes / both rules | 14.27 ± 0.37 fps | 13.82 ± 0.25 / 14.48 ± 0.13 fps | -3 % / +1.5 % |
+
+  Only the first result reaches two standard errors, and the parts do not add up. The lever is at most 2-3 % of the
+  frame, below what 10 s alternation resolves. The exclusive savings do not reach the frame: the GPU is about 88 %
+  busy, these programs overlap the BVH dispatches, and frame time follows `0x3666fa39`. End-of-pipe timestamps also
+  serialize dispatches, so they overstate frame gains under overlap.
+- **Not committed.** No width rule changed. Removing the wave32 guard reaches every wave-sensitive wave32 program on
+  Intel. `PPSA03524 - GTA San Andreas Definitive Edition` could not be smoke-tested: this branch stops at boot
+  without the storage-image format support in the PR #65 fixes.
+  `PPSA09076 - DREDGE` and `PPSA28311 - Absolum` dispatch no wave32 programs.
+- **Open defect: wave32 in 8-lane parts.** With four 8-lane parts per wave32 the device was lost about 2 s after the
+  first dispatch of five dune programs: `0x874bd13f`, `0xe1b1315d`, `0x2bcba9a2`, `0xfd1ee59c`, `0xbf8ee9fc`.
+  Ten other wave32 programs ran correctly in 8-lane parts before that. The admission checks accept wave32 only in
+  16-lane parts, so the product never takes this layout.
+- **Re-read 2026-11-12, parked.** Nothing on HEAD changes the record: `0x874bd13f` still runs native at width 32
+  because a wave32 program splits only above 64 VGPRs. No new rule was built or measured.
+
+## Depth targets no longer wait for deferred storage aliases (2026-11-07)
+
+`PPSA21567 - Astro Bot`, dunes after the recorded user gameplay route, Intel Arc A770, ANV Mesa 26.2.5, xe, 60 fps
+limit, 170-300 s after launch.
+
+- **Observed.** 16.7 fps, 319 draws per frame. The command processor took 60.5 ms per frame (151 us per draw) and
+  waited on fences 11.8 times per frame for 32.1 ms. The device-address draw retry (`RetryGuestDeviceAddressDraw`)
+  waited on the host 1.65 times per frame, 23.8 ms per frame, about 14 ms each.
+- **Cause** (temporary counters, removed). 1.52 of the 1.65 waits were the lazy alias wait of the record above. A
+  depth target linked to writable storage that a consolidated `WAIT_REG_MEM` left pending waited for that storage
+  at its next draw: 0.96 per frame in auto draws, 0.55 in geometry passes and 0.01 in indexed draws. The guard
+  covers aliases whose refresh reads guest bytes, but a depth target reads none. It keeps no guest hash
+  (`check_hash` is false) and its update does nothing, so the write-back changes only its metadata. A new depth
+  target over pending storage already relies on queue order (`GpuMemoryShouldLinkPendingDepthStencilStorage`).
+- **Fix** (`GpuMemoryWriteBackRefreshReadsGuestBytes`). A depth target no longer counts as an alias whose refresh
+  reads guest bytes, so storage linked only to depth targets is not deferred. The write-back walk still
+  invalidates the depth target's metadata at completion.
+- **Result.**
+
+| Per frame, 170-300 s | Before (counter build) | After (counter build) | After (product build) |
+| --- | --- | --- | --- |
+| Retry host waits | 1.65, 23.8 ms | 0.07, 0.09 ms | - |
+| Command processor | 60.5 ms, 151 us per draw | 49.9 ms, 110 us per draw | 52.2 ms, 114 us per draw |
+| Fence waits | 11.8, 32.1 ms | 10.7, 30.4 ms | 10.9, 30.1 ms |
+| Frame rate | 16.7 fps | 17.2 fps | 17.0 fps |
+
+  The fence time barely moves because the frame here follows the GPU: about 60 ms of GPU timestamps per frame
+  (record of 2026-11-02). The waits moved to other fences. The captures at 170 and 300 s match the earlier ones.
+  The capture at 190 s is the cinematic's fade to black, which earlier runs also caught.
+  - `PPSA09076 - DREDGE`, generic route, 40-120 s: 21.58 to 20.08 us per draw, 35.1 to 35.9 fps, picture correct.
+  - `PPSA28311 - Absolum`, generic route, 80-120 s: 58.4 to 59.4 fps at the 60 fps limit, fence 2.2 to 2.3 ms per
+    frame, picture correct.
+  - All 108 tests pass, one skipped as before.
+- **Open.**
+  - In the dunes the frame is bound by the GPU programs `0x3666fa39` and `0x874bd13f`.
+  - 0.95 `DRAW_INDEX_INDIRECT` records per frame are declined on the device and read on the host after a full
+    drain.
+
+## Pending-storage scans missed overlays that aged out (2026-11-07, fixed)
+
+`PPSA21567 - Astro Bot`, boot and the recorded user gameplay route, Intel Arc A770, ANV Mesa 26.2.5, xe.
+
+- **Observed.** 5 of 13 runs on this branch stopped 6-12 s after launch with "GpuMemory write-back requested before
+  exact resource dependencies completed". The rate rose after the depth-target record above, because its host waits
+  had been completing pending storage before the stop could occur.
+- **Cause** (temporary backtrace and object dump, removed). The stack was `DrawIndexIndirect` →
+  `RecordIndexedDraw` → `PrepareGuestDeviceAddressForRead` → `GuestDeviceAddressWriteBack` →
+  `WriteBackStorageRanges` → `WriteBackObjectLocked`. The object was an 8-byte storage buffer with no alias and one
+  incomplete use on the consumer's own queue. Its overlay was for the same write but had been held too long
+  (`OverlayHeldTooLong`).
+  - An earlier pending scan (`PendingStorageWriteBack`) had skipped the object while its overlay still held, and
+    memoized "nothing pending" for the scan generation.
+  - A frame flip then aged the overlay, but nothing changed the scan generation. The next pending scan took the
+    memo path, which only revisits objects recorded as changed, and never looked at the object.
+  - `WriteBackStorageRanges` keeps its own memo, which also ends at a completion, so it scanned everything. It found
+    the object no longer held by its overlay and wrote it back before its use completed.
+- **Fix** (`GuestDeviceAddressFrameDone`). A frame flip invalidates the storage scans. An overlay's hold only expires
+  at a flip, so the next pending scan sees the object again. It then waits for the host, as designed for a result
+  that cannot be published. The cost is one full scan per frame per consumer queue.
+- **Result.**
+  - 0 of 7 counter-build runs stopped: one full route of 330 s and six boots of 45 s.
+  - Product build, 170-300 s: 17.2 fps, 116.6 us per draw, GPU 85.5 % busy, against 17.0 fps, 114.0 us and 85.9 %
+    before. The captures at 170 and 300 s render correctly.
+  - `PPSA09076 - DREDGE`, generic route, 40-120 s: 20.08 to 19.96 us per draw, 35.9 to 36.0 fps, picture correct.
+  - `PPSA28311 - Absolum`, generic route, 80-120 s: flips per second stay at 58-61 in every sample, before and after,
+    in two runs after. Per draw: draw processing 25-26 us, device-address preparation 0.68 against 0.67 us,
+    write-back 2.92 against 2.83 us. GPU work is 15.1 ms per frame. An earlier reading of 56.2 against 59.4 fps
+    divided by the window length when a 1 s sample fell outside the window. Picture correct.
+  - All 108 tests pass, one skipped as before.
+- **Excluded: a device path for geometry-pass indirect draws.** In the dunes 3052 `DRAW_INDEX_INDIRECT` records
+  declined the device path from 150 to 322 s, against 2344 that took it. 99.9 % of the declines need the geometry
+  compute pass, whose counts sit in push constants. A one-run ceiling read their arguments from guest memory without
+  the drain (temporary switch, removed). Over 158-178 s, with 554 draws per frame in both runs:
+
+| Per frame | Drain | No drain (ceiling) |
+| --- | --- | --- |
+| Frame rate | 15.41 fps | 15.62 fps |
+| GPU busy | 77.2 % | 78.3 % |
+| GPU work | 50.1 ms | 50.2 ms |
+| Fence waits | 10.7 | 7.9 |
+
+  The waits move to other fences and the frame follows GPU work, so the device path would gain about 1 %. The ceiling
+  run stopped at 180 s on "!create_all_the_same" for a storage texture, which is expected when draws use stale counts.
+
+## Display signal versus render work (2026-11-08)
+
+`PPSA21567 - Astro Bot` 01.018.000, clean LTO build of `f4823fbe5`, Intel
+Arc A770, Mesa 26.2.6, 60 fps presentation cap. The executable used no game
+patch. HD and 4K runs started from separate copies of the same save, shader
+store and pipeline cache and used the same recorded input. The configured
+render target was Fixed 1280x720, Display scope, with linear presentation.
+The window and the guest-reported screen were 1920x1080 for HD and 3840x2160
+for 4K; they cannot be varied independently in this build.
+
+- A separate diagnostic run broke inside `VideoOutGetOutputStatus` after the
+  status fields were written: Astro called it and received resolution `1`
+  under HD and `2` under 4K. The debugger and dispatch logging were enabled
+  for those observations, not for performance measurement.
+- In both configurations, the first three logged compute dispatches selected
+  by a 1920x1080 texture had the same shader addresses and group counts:
+  `0x500793000` (120x68), `0x500732a00` (30x68), and `0x5007c3f00`
+  (120x68). Their recorded descriptors include 1920x1080, 960x540, and
+  480x270 textures. This is evidence for these startup dispatches, not a
+  census of all passes or of the dunes.
+- The normal runs reported a registered guest display and actual present
+  source of 3840x2160 in both configurations. The present destination was
+  1920x1080 in HD and 3840x2160 in 4K. The coordinator reported a 1280x720
+  candidate and `scaling_applied=false`; the candidate is not evidence that
+  the game's rendering was reduced to 720p. Both captures made at 100 seconds
+  showed a space cinematics sequence, not matched gameplay frames.
+- Neither uninstrumented case reached the dunes: HD stopped after 159 s at
+  `!create_all_the_same` for overlapping storage textures, and 4K after 151 s
+  at `DepthStencilBuffer - Contains - RenderTexture`. A second HD run stopped
+  at 141 s on `!create_all_the_same`. These are existing categories of strict
+  memory-relationship stops; the trials do not establish that either screen
+  mode caused them. There is no matched gameplay FPS comparison from these
+  runs.
+
+Conclusion: changing the reported output is effective at the VideoOut API
+boundary, but it did not change the observed startup dispatches or final
+guest surface. It is not evidence that Astro will choose a lower internal
+render resolution. Presentation filtering cannot remove work already done by
+the game's render and compute passes. A gameplay comparison still requires
+reaching the same interactive scene without memory-relationship stops and
+measuring its internal pass extents and GPU/CPU timings under both signals.
+
+### Dune-view retries
+
+One further run per signal used the same settings and seed copies. Both used
+the same `f4823fbe5`-based LTO executable with one diagnostic-only local change:
+the memory failure report prints all 13 object parameters instead of ten.
+This changes neither resource decisions nor rendering. Both runs were stopped
+by the harness at 330 s; neither reproduced a memory stop. Captures at about
+190, 235, 280 and 325 s show the same first-dune view, with the character
+remaining in approximately the same place and playing idle animations. They do
+not establish successful recorded movement or broader gameplay stability.
+
+For the 26 performance samples with endpoints between 195 and 325 s, the
+agent counted 1866 presents over 129.903 s in HD (14.36 fps) and 1983 over
+129.886 s in 4K (15.27 fps). Capture requests occur in the interval and can
+disturb timing. These are single, sequential runs with different window and
+swapchain sizes; their small difference is not an isolated or statistically
+established effect of the reported output. Both continued to report a
+3840x2160 present source, and the HD run presented it to 1920x1080.
+
+The retry confirms that this initial dune view can be reached in each mode;
+it does not measure internal dune pass extents, GPU timestamps or input
+responsiveness. It also does not explain or fix the intermittent stops.
+
+Two later HD attempts to check pad input stopped before the dune view. One
+reported a mixed-parent storage-texture overlap; the other repeated the depth
+`Contains` color relationship: a 1216x684 depth image over a 960x540 color
+target at the same base. A preceding run stopped on that depth/color relation
+as well. The additional object parameters distinguish a fully overwritten
+storage image from one that needs its earlier contents. The correct content
+source and synchronization for these overlaps remain unproven. Since
+2026-11-09 the depth/color form links without reclaiming or converting
+(`91be7a38a`, top record); content provenance is still unproven.
+
+### Depth/color overlap investigation
+
+Three further HD diagnostic attempts based on `f4823fbe5` reproduced the
+`DepthStencilBuffer - Contains - RenderTexture` refusal at 103, 106 and
+150.6 seconds. The 150.6-second run recorded the immediately preceding
+color materialization: a 960x540, pitch-1024, single-sample tiled color image
+at the same base as a 1216x684 D32 depth image. The color allocation spans
+0x280000 bytes, while the depth allocation spans 0x3c0000 bytes. Color fast
+clear was disabled, but the color attachment had a nonzero DCC address. That
+fact alone does not establish that a pending DCC clear is absent.
+
+A fourth attempt instrumented the DCC clear tracker at color materialization
+and ran for 360 seconds without hitting this refusal; its earlier observations
+found no tracked event at the queried address. This is not evidence that the
+guest never wrote DCC metadata, nor evidence of the tracker state at the
+previous failures. Captures from this run show the introductory sequence;
+they do not demonstrate interactive gameplay or a 60 fps result.
+
+A diagnostic model of Kyty's current 64 KiB depth and color tile-address
+formulas, using slice zero without an XOR swizzle, maps the 518,400 visible
+color texels to 493,824 represented depth texels and 24,576 depth-padding
+positions; only 30,720 map to the same coordinate. The model uses the
+color's pitch of 1024 and the depth allocation's aligned pitch of 1280. These
+are software-model results, not independently verified hardware addresses or
+proof that those texels were written. They do demonstrate why copying equal
+coordinates between the host depth and color images is not a valid general
+conversion under these assumptions. Reclaiming the larger depth allocation
+also risks discarding bytes outside the color allocation. A correct solution
+needs the actual content provenance, ordering, padding handling and any DCC
+semantics; the current refusal remains unresolved.
+
+A fifth diagnostic attempt, with depth-use logging filtered to writes and
+clears, stopped at 161.5 seconds on a different error: `GpuMemory write-back
+requested before exact resource dependencies completed`, for a storage
+buffer. Its depth trace recorded an arm event for the target, but no later
+matching write or clear; the sought depth/color failure did not occur in this
+attempt. The executable includes `9b0abb808`, the earlier aged-overlay fix.
+The message alone does not establish that the previously fixed cause has
+recurred; this new occurrence needs its own call stack and dependency state.
+
+A sixth attempt reproduced the depth/color
+refusal at 94 seconds. The DCC tracker query immediately before the refused
+color creation found no tracked clear at that address. The filtered depth
+trace recorded two arms for host depth images at the same guest address and
+no subsequent matching draw write or clear. The trace starts after depth
+materialization and covers the traced draw path, so it neither proves initial
+contents nor excludes writes through other paths. The address and the absence
+of a tracker event are observations, not a general aliasing rule.
+
+The ordinary depth-image creation path starts with an undefined host image;
+its update callback does not upload guest bytes, and the first-use attachment
+logic can clear it. A separate creation path can seed depth from a storage
+image. The filtered trace does not establish which initialization produced
+the failing parent's contents. Consequently, read-only draws after the trace
+arms do not by themselves establish that guest memory is an authoritative
+copy of that depth image.
+
+To distinguish a recurrent write-back failure from the previously fixed
+aged-overlay issue, a diagnostic build was prepared to log the failing
+write-back's host stack and outstanding submission dependencies. The first
+attempt was the 94-second depth/color failure above; the second ran to 360
+seconds without either failure, so neither captured the requested stack.
+`GuestDeviceAddressFrameDone` advances overlay age on the flip path, while
+`PublishPendingStorageToGuestAddress` and the subsequent
+`GuestDeviceAddressWriteBack` are separate operations. An age transition
+between them is a concurrency hypothesis, not an established cause of the
+161.5-second failure. A fix must retain the required queue ordering and be
+tested against a reproduced pending-use transition.
+
+A third stack-instrumented attempt also reached
+the 360-second harness limit without either failure. Its recorded input left
+the game at the new-game menu; a diagnostic controller tap advanced it to
+the opening sequence near the end of the run. It did not cover the same route
+as the failure and is not evidence that the error is fixed.
+
+A later attempt with the new write-back error diagnostic compiled into the
+isolated executable reproduced the depth/color refusal at 122.6 seconds.
+The immediately preceding DCC
+tracker query again found no tracked clear. The write-back error did not
+occur, so its expanded message was not exercised by this run. The isolated
+build was based on `f4823fbe5` with the diagnostic source file matching
+`5c660ef7` and additional temporary tracing; it is not a clean build of the
+branch tip.
+
+A follow-up probe instrumented the first
+materialization of the selected depth address, but stopped at 149.3 seconds
+on `!create_all_the_same` for a 3840x2160 storage texture with mixed parents
+at `0x53de40000`. The selected depth address was not materialized before the
+stop. This repeats the storage-view frontier described at the start of this
+record and supplies no evidence of the failing depth image's initialization.
+
+A further depth-initialization probe hit
+`DepthStencilBuffer - Contains - RenderTexture` at 125.8 seconds. The selected
+address had two distinct depth image materializations during the run. At the
+failing submission, the depth image was created with an undefined Vulkan layout
+and no requested depth write or clear; color materialization at the same guest
+address was attempted in that same submission. The failure occurred before
+framebuffer creation, so this does not prove that the new depth image was
+subsequently cleared or used. The earlier image also began undefined, but the
+filtered lifetime trace does not establish its first-use initialization. The
+color DCC tracker again had no matching pending event at the refusal. These
+observations do not establish the guest depth contents or exclude depth tests,
+stencil operations, other writers, or guest metadata writes.
+
+The normal draw path materializes depth and color before it sanitizes and
+creates the framebuffer. Simply deleting the depth object when the overlapping
+color object is created would risk invalidating the depth pointer already held
+by that draw, as well as discarding the depth allocation's uncovered bytes.
+Any safe fix must account for simultaneous attachment use and content ownership;
+this probe does not yet provide a correctness basis for such a change.
+
+A follow-up run logged the depth state at
+materialization and reproduced the same refusal at 154.9 seconds. In the
+failing submission (`26369`), depth testing was enabled with Vulkan compare
+operation 3 (`LESS_OR_EQUAL`), depth writes and depth clear were disabled, and
+stencil testing was enabled. The depth image format at this frontier is D32,
+so the logged stencil enable alone does not establish an active stencil plane.
+The color materialization that failed had the same submission and guest base.
+Consequently, a read-only depth image cannot be dismissed as inert in this
+draw: its comparison can affect color coverage. These are instrumented
+observations, not a verified fix or a gameplay performance measurement.
+
+The [Vulkan render-pass specification](https://docs.vulkan.org/spec/latest/chapters/renderpass.html)
+prohibits using multiple attachments that alias the same device memory in one
+subpass. Thus binding two host images to overlapping Vulkan memory is not, by
+itself, a correct implementation of this guest draw. Separate host images need
+an explicit, correctly ordered way to construct their contents and reconcile
+later accesses; whether a snapshot is sufficient for the guest draw requires
+further evidence about its guest memory ordering and overlapping texel writes.
+
+A further isolated provenance probe ran for its
+360-second limit without either reported refusal. At an earlier creation of
+this same depth view, Kyty found 15 overlapping tracked objects, including a
+960x540 color render target at the same base and larger render targets, and
+selected `delete_all` followed by ordinary depth creation rather than
+creation from those objects. Detachment checks still apply to objects with
+write-back callbacks. The usage timestamps do not establish which guest bytes
+were written or whether their contents remained needed, so this observation
+alone cannot justify changing reclamation or choosing a seed image.
+
+The diagnostic run reached the desert scene. Nine reset performance snapshots
+ending between 255 and 295 seconds counted 646 presents over 45.079 seconds
+(14.33 fps); this instrumented run and its route are not an A/B performance
+comparison. A later diagnostic left-stick input was followed by a changed
+character pose and camera framing; the axis was explicitly returned to its
+neutral value. That is a limited input observation, not sustained gameplay or
+visual-equivalence validation. The manual capture's automated color heuristic
+reported `hot_corruption`; its verdict alone cannot establish corruption in a
+sand-colored scene without a reference comparison.
+
+## Freezes from the pipeline cache and array uploads (2026-11-15)
+
+`PPSA21567 - Astro Bot`, Arc A770, Mesa 26.3.0-devel (git 34ad0a45aab), kernel 7.2.15, dunes route with the 60 fps
+present cap, diagnostic builds, one run per arm. The game is on an NTFS volume; caches are on a btrfs volume mounted
+with `compress=zstd:3,ssd,discard=async`.
+
+- **Observed.** Freezes of 1-6 s in the first two minutes, with the ring thread blocked in `read()` of SPIR-V store
+  files of 5-380 KB. Each read took 1.2-2.0 s with no major fault. The thread was in uninterruptible sleep in btrfs
+  metadata reads (`read_extent_buffer_pages`).
+- **Cause 1: the pipeline cache was rewritten on every launch.** The 136 MB driver blob was saved about 25 s after
+  boot even when every pipeline hit it. The driver serializes an unchanged cache in a different byte order, so the
+  blob had the same size and a new digest. A host sampler showed a burst of about 22,000 writes to the disk, a second
+  in which none of 4 requests completed, then reads that waited 5.0 s in total and discards that took 2.0 s. The frame
+  rate reached 0 fps in that second.
+- **Fix 1.** Pipeline creation chains creation feedback. Only a pipeline the driver did not find in the application
+  cache marks the cache dirty.
+
+  | Run (one each) | Disk writes | Read wait |
+  | --- | --- | --- |
+  | Before | 77,500 | 260 s |
+  | After | 6,934 | 18 s |
+
+  The cache file was not rewritten after the fix. With an empty cache file it was still saved (43.9 MB), so new
+  pipelines are kept. The fix removes one producer of the stall, not the stall: two later runs with no cache save
+  still had SPIR-V reads of 0.5-2.0 s (4.6 s and 5.3 s in total).
+- **The disk side.** The volume is a DRAM-less NVMe drive that takes 1.6-2.0 s per discard. btrfs held 4.7-5.1 GB of
+  freed extents waiting for discard during these runs. In one run the backlog grew from 3.3 to 4.8 GB while the title
+  ran, and the driver's own shader cache was written in that run; which writes refilled it was not separated. The
+  run with the most discards between 40 and 60 s (95, 18.8 s of discard time, reads waiting 18.2 s) fell to 0 fps for
+  several seconds in that window. The run with none there stayed at 19.8 fps or above. Mount options and trim policy
+  are host settings; the emulator side is that the ring thread reads the SPIR-V store synchronously.
+- **Fix 3: the store reads a title's working set ahead of use.** In a run with a large discard backlog, store loads
+  on the ring thread summed to 20.4 s, with 260 ring-thread stalls inside `read()` and no shader compile. Reading
+  the files into the page cache first did not hold: their pages were evicted during the run, and the stalls moved to
+  metadata reads. A diagnostic build that read the run's 358 entries (64.1 MB, 147 ms) into process memory before
+  use cut the loads to 36 ms in total (3 ms at most) with no ring-thread stall; that run also had fewer discards
+  (8 s in total), so the host did not match. The shipped version records the entries a title loads in a manifest
+  inside the title's compute-recipe directory (it follows the translator version): this session's loads in
+  first-use order, then the names carried from earlier sessions. It is rewritten only when the set changed; a
+  third run of the same route left it untouched. The next
+  session reads the listed entries into memory on a background thread, bounded to 4,096 entries and 256 MiB. Each
+  entry is freed when it is loaded and passes the same checks as a file read. Same route, the shipped store in a build
+  with diagnostic lookup timers, store pages dropped from the page cache before the second run:
+
+  | Run | Manifest | Store loads | Total | Longest |
+  | --- | --- | --- | --- | --- |
+  | Records the set | none | 413 | 374 ms | 33 ms |
+  | Reads the set ahead | 451 entries | 429 | 73 ms | 2 ms |
+
+  The second run had the busier disk: 970 discards taking 11.4 s and 103 s of read wait on the device, against 5.7 s
+  and 10.8 s in the first (the 20.4 s run had 28.9 s and 86 s). Device counters include every process on the host,
+  and the second run's 40,000 writes were not attributed. The drops at 80, 92 and 95 s appear in both runs, so they
+  are not store reads.
+- **Cause 2: every `DMA_DATA` store re-detiled the whole 192-layer array.** Each store of 4-64 KiB into the 17.3 MB
+  array cost 6-9 ms. 192 such flushes per run summed to 1.8 s, in a burst at 65-76 s of the route.
+- **Fix 2.** Texture updates use the page-generation runs that storage buffers already use. The layers those runs
+  cover are detiled and uploaded. An empty baseline, label updates, backing versions and other texture kinds keep the
+  full upload. One binary with a diagnostic switch for the full path gave both arms:
+
+  | Arm | Flushes of 5 ms or more |
+  | --- | --- |
+  | Full upload | 192 |
+  | Touched layers | 12 |
+
+  Neither arm had the disk sampler, so their frame rates are not compared here.
+
+  The 190 partial uploads sent 1 layer (144 times), 2 layers (45) or 8 layers (1). A diagnostic hash of each layer's
+  guest bytes found no untouched layer that had changed in those 190 uploads; on the first one it reported a touched
+  layer as changed, so the check engaged. The two arms reached different shots at the capture times (the faster arm
+  is about 10 s ahead in the cinematic), so pictures were not compared frame for frame. Neither capture shows
+  corruption.
+- **Still open.** In one run, entering the dunes level dropped to 3 fps for about 3 s, with the ring thread reading
+  SPIR-V store files, translating shaders, creating pipelines and creating textures at that point. How much of it was
+  disk wait was not measured. Drops to 6-14 fps around 80, 92 and 95 s repeat with the working set read ahead, so
+  they are not store reads; the 79-80 s drop also stays (7.9 fps) with the native capture moved from 75 to 86 s, so
+  it is not the capture. Their cause is not identified. Whether the driver's own shader cache, written by the
+  driver rather than the emulator, also waits on the disk was not checked.
+- **Excluded: file status calls.** In one profiled run the title's main thread spent about 85 % of its sampled time
+  in the stat call between 89 and 92 s, while the game volume's filesystem driver used 30-50 % of a core with no
+  disk reads and the command-processor thread was blocked in a futex wait. A test build resolved an exactly spelled
+  package file with one host lookup (the resolver the APR path already uses) and counted the calls: up to 81 s after
+  launch the title made 27,648 stat calls, 7,382 on the one-lookup path, 752 on existing files that need the full
+  resolve and 19,456 on absent files (it probes numbered variants of its UI files). In that run the calls ran at
+  about 600-700 per second, nearly all absent files, from 66 to 76 s while the title held 29-34 fps, so the calls
+  themselves do not slow frames. In that run and in the profiled one the drop came in the second after a burst of
+  these probes ended (77 s and 92 s), which points at the load step that follows them. The test change was not kept:
+  it reached only 27 % of the calls and showed no measured gain.
+- **Drops from texture creation (2026-11-15).** Of 14 seconds under 15 fps in four runs of the dunes route (two of
+  them on the stat test build), 9 spent 363-599 ms of the second creating GPU objects while 247 MB to 1,011 MB was
+  uploaded, 3 spent 460-492 ms in draw state setup and 2 stayed under both thresholds (250 ms). In the three create
+  and setup seconds of the one run sampled per thread, the command-processor thread was on the CPU; in the profiled
+  run's setup second at 92 s it sat about 75 % in a futex wait. The large textures
+  (22,413,312 bytes each) cost a median 9.4-13.8 ms to create, of which 4.3-6.0 ms was the upload and 1.2-2.5 ms
+  Vulkan allocation: a fill above the 4 MiB pooled size created, mapped and freed its own staging buffer, paying an
+  allocation and a fault on every page each time. Completed fills now hand such buffers to a free list bounded at
+  128 MiB (db6d7c132). In two runs the same textures took a median 6.9 and 7.9 ms, with the upload at 1.5-1.6 ms and
+  allocation at 0.2-0.3 ms. A first version also kept pooled staging, and Minecraft's dense view then cost 8.80 us per
+  draw against 5.82 before (the list length was not measured), so only dedicated buffers are kept, and the next run measured
+  5.33 us per draw in that view (one run each; the view reached differs between runs). The route desyncs after a
+  hitch, so no frame-rate change is claimed for the dunes. In the run on the final build the five seconds under
+  15 fps were two of draw state setup (439 and 514 ms) and three in the heavier later scene (668-733 draws per frame)
+  with neither counter high; none was texture creation, and 8 of its 25 large textures still made two allocations.
+  The free list is not released when the graphics context is replaced, which only the test fixture does today;
+  in-flight fills had the same limit before.
+
+## Dunes baseline re-measured against 2026-11-14 (2026-11-18, measured)
+
+Intel Arc A770 (`8086:56a0`, Mesa ANV from git, 26.3.0), strict, 60 fps present limit, warm private SPIR-V and
+pipeline caches per build. `fe853a27b` (the build behind the 2026-11-14 causal test) against `575cb70f8`.
+
+**Causal runs.** One run per build with the 2026-11-14 probe (temporary, not committed; ported by hand to the
+dispatch call on HEAD) and the same 340 s route and settings: 3 s blocks rotating the dispatch of `0x3666fa39`
+issued or left out, crossed with a 10 us busy-wait after every draw. On both builds the probe left out every call
+in its arms. Blocks are matched to the per-second samples by the midpoint of each sample interval; this method
+gives back the 2026-11-14 table from its own run within 1.6 ms (frames exact).
+
+Neither run reached the 2026-11-14 scene (the controller in the sand, about 752 draws a frame): both walked on to
+the rock with the objective marker. From block 16 to the end (seven or eight blocks per arm) HEAD stood next to
+the rock looking up the dune and the base stood back facing the rock:
+
+| Build | Arm | Draws | Frame | Engine busy | Engine work a frame | Command runs a frame | Fence waits a frame |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `575cb70f8` | Program runs | 348 | 41.7 ms | 94 % | 36.8 ms | 30.9 ms | 13.0 ms |
+| `575cb70f8` | Program left out | 347 | 25.9 ms | 92 % | 24.8 ms | 20.2 ms | 1.9 ms |
+| `fe853a27b` | Program runs | 608 | 47.6 ms | 94 % | 44.1 ms | 31.2 ms | 8.2 ms |
+| `fe853a27b` | Program left out | 615 | 36.1 ms | 85 % | 30.9 ms | 30.1 ms | 0.6 ms |
+
+Command runs are thread time summed over the block, divided by flips.
+
+- **With the program the GPU sets the frame on both builds.** The added 3.5 ms (HEAD) and 6.2 ms (base) of
+  command work change the frame by at most 0.4 ms (k about 0).
+- **Without it HEAD is no longer purely command-bound.** The base still pays 0.82 ms of frame per ms added to the
+  command thread (36.1 -> 41.1 ms for 6.1 ms), close to the 2026-11-14 k = 1.02. On HEAD the frame moves 1.8 ms
+  for 3.5 ms (k about 0.5) with the engine busy 92 % of the frame. The views differ, so this is not attributed to
+  a commit.
+- **Same spot, both builds.** In its first four blocks (341-358 draws, one block per arm, right after the first
+  dispatch, which the 2026-11-14 protocol leaves out) the base stood where HEAD stood; the 197 s captures show the
+  same rock and slope with the base's camera slightly closer. Probe frame times: base 40.2 and 39.5 ms with the
+  program, 27.2 and 30.0 ms without; HEAD's first four blocks 42.3 and 41.3 ms, 26.8 and 27.9 ms, and its medians
+  above. No GPU regression shows at this work; the base sample is one block per arm. Per-block engine work is
+  noisier than the probe's frame times (HEAD reads 30-37 ms in program blocks at the same 42 ms frame).
+- **Near the 2026-11-14 draw count.** While walking, the base crossed 766-780 draws a frame (blocks 6-8): blocks 6 and 8,
+  with the program, ran 56 and 58 ms frames with 47-48 ms engine work, against 52.6 and 46.6 ms on 2026-11-14 at 752 draws.
+  HEAD was not measured at that count.
+- **Budget for 30 fps in HEAD's view.** Frame 41.7 ms, engine work 36.8 ms: the GPU is 3.5 ms over 33.3 ms with the
+  lighting program and 8.5 ms under it without. The command path (25.9 ms frames without the program) is not the
+  limit there.
+
+**Unprobed runs.** One warm run per build of the 225 s route earlier the same day, medians of 165-215 s grouped by
+draws a frame (the scenes differed; the HEAD binary carried the stamp `1d35b0a31` plus the then-uncommitted
+null export fix, with the same runtime source as `253d981a9`): in the shared 400-560 band the base ran 43.9 ms frames with 38.6 ms engine
+work and 67.7 us of command time a draw (436 draws), HEAD 46.0 ms, 44.5 ms and 58.5 us (539 draws). In an earlier
+HEAD run that left the route, one window of 1,150-1,230 draws took 67-73 ms of engine work against 38-40 ms on the
+base at a similar time; that scene was not compared and stays an open lead.
+
+Route outcomes on the 225 s route: both base runs reached the dunes; of the HEAD runs, the cold warm-up reached
+only the world map, one left the route for the ship crowd cinematic, one stopped at 140 s and one reached the
+dunes. The stop was a pixel program on the per-lane fragment path refused at its null export; fixed in
+`253d981a9`, where a null export emits nothing after the valid-mask bit has set which lanes stay alive.

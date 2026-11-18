@@ -119,6 +119,12 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	if (!GuestDeviceAddressBindInPlace(ctx, *vaddr, *size, vk_obj->usage, vk_obj, &vk_obj->in_place_window))
 	{
+		// Read-only shaders may read the object by its device address
+		// (ShaderStorageResources::by_address); window buffers already have one.
+		if (ctx->guest_device_address_supported)
+		{
+			vk_obj->usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+		}
 		VulkanCreateBuffer(ctx, *size, vk_obj);
 	}
 	if (vk_obj->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->buffer == nullptr condition ignored (continuing)\n"); }
@@ -205,6 +211,25 @@ bool StorageBufferWriteBackPublishedDevice(GraphicContext* ctx, void* obj, uint6
 	const bool adopted = LabelWriteBackAdoptDevice(vaddr, data, size, &vk_obj->writeback_cache, &vk_obj->label_publication, result);
 	UnmapBacking(ctx, vk_obj);
 	return adopted;
+}
+
+bool StorageBufferWriteBackSnapshot(void* obj, uint64_t vaddr, uint64_t size, const void* data, GpuWritebackResult* result)
+{
+	auto* vk_obj = static_cast<StorageVulkanBuffer*>(obj);
+	EXIT_IF(vk_obj == nullptr || data == nullptr || result == nullptr);
+	if (vk_obj->depth_meta_addr != 0 || vk_obj->guest_in_place || vk_obj->guest_addr != vaddr || vk_obj->guest_size != size)
+	{
+		return false;
+	}
+	// The GPU's written-page flags stay for the object's own write-back, which may publish a
+	// later write: this copy compares every page against the last published bytes instead.
+	auto&                 cache = vk_obj->writeback_cache;
+	uint32_t* const       flags = cache.WrittenPages();
+	std::vector<uint32_t> every_page((size + GpuWritebackPageCache::kDefaultPageSize - 1u) / GpuWritebackPageCache::kDefaultPageSize, 1u);
+	cache.TrackWrittenPages(every_page.data());
+	*result = LabelWriteBackCopy(reinterpret_cast<void*>(vaddr), data, size, &cache, &vk_obj->label_publication);
+	cache.TrackWrittenPages(flags);
+	return true;
 }
 
 bool StorageBufferGpuObject::Equal(const uint64_t* other) const

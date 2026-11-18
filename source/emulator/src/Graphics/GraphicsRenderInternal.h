@@ -219,6 +219,8 @@ struct VulkanPipeline
 	FragmentTransportPasses* transport = nullptr;
 	// Entry of the pipeline cache that owns this pipeline; lease release runs per recorded pipeline.
 	uint32_t cache_slot = 0;
+	// A shader stores to storage buffers or images, or binds GDS: geometry passes recorded later stay after it.
+	bool writes_guest_memory = true;
 };
 
 // A cache entry remains alive while a recorded executable command buffer can
@@ -288,7 +290,8 @@ public:
 	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
 	                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
 	                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
-	                               const VulkanSampleLocationState& sample_locations);
+	                               const VulkanSampleLocationState& sample_locations, ShaderId* prepared_vs_id = nullptr,
+	                               ShaderId* prepared_ps_id = nullptr);
 	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, const ShaderComputeInputInfo* input_info,
 	                               const HW::ComputeShaderInfo* cs_regs,
 	                               const HW::ShaderRegisters* sh_regs);
@@ -426,6 +429,8 @@ private:
 	{
 		VulkanDescriptorSet* set                                           = nullptr;
 		int                  next_free_set                                 = -1;
+		// The next live set with the same hash, newest first.
+		int                  next_same_hash                                = -1;
 		uint32_t             hash                                          = 0;
 		Stage                stage                                         = Stage::Unknown;
 		ShaderDescriptorLayoutPlan::Key layout_key = {};
@@ -477,6 +482,8 @@ private:
 	// each live set holds driver pool memory that pools never return.
 	static constexpr uint32_t LIVE_SETS_MAX = 16384;
 	static constexpr uint32_t TRIM_SETS     = 2048;
+	static constexpr uint32_t SEEN_SET_HASHES_BITS = 16;
+	static constexpr uint32_t SEEN_SET_HASHES      = 1u << SEEN_SET_HASHES_BITS;
 	// Released sets wait for reuse by the next set of their layout, up to this
 	// many in all; past it the oldest returns to its pool. Pools never give memory
 	// back to the system, so a held set only reserves pool space, while a driver
@@ -486,6 +493,7 @@ private:
 	static constexpr uint32_t RECYCLED_SETS_MAX = TRIM_SETS * 32;
 
 	int                  FindSet(const Set& s);
+	bool                 AdmitSet(uint64_t hash);
 	void                 IndexSet(int index);
 	VulkanDescriptorSet* UnindexSet(int index);
 	void                 ReleaseSet(int index);
@@ -493,6 +501,7 @@ private:
 	void                 LruUnlink(int index);
 	void                 LruAppend(int index);
 	void                 TrimSets();
+	void                 DeferUncachedSets(CommandBuffer* buffer);
 	void                 FreeOldestRecycled();
 	template <typename References>
 	void FreeSetsReferencing(uint64_t unique_id, References references);
@@ -506,7 +515,127 @@ private:
 	int          m_lru_oldest      = -1;
 	int          m_lru_newest      = -1;
 
-	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
+	// Chain heads by set hash in one open-addressed array: a lookup reads one
+	// slot where a chained map walks nodes scattered over the heap. Linear
+	// probing, power-of-two capacity grown at half load, backward-shift erase.
+	// A returned head stays valid until the next insert or erase.
+	class SetHeads
+	{
+	public:
+		int* Find(uint32_t hash)
+		{
+			const size_t index = SlotOf(hash);
+			return index == kNone ? nullptr : &m_slots[index].head;
+		}
+
+		// A new hash starts with head -1, an empty chain.
+		int& FindOrInsert(uint32_t hash)
+		{
+			if ((m_size + 1u) * 2u > m_slots.size())
+			{
+				Grow();
+			}
+			for (size_t i = Home(hash);; i = Next(i))
+			{
+				auto& slot = m_slots[i];
+				if (!slot.used)
+				{
+					slot = Slot {hash, -1, true};
+					m_size++;
+					return slot.head;
+				}
+				if (slot.hash == hash)
+				{
+					return slot.head;
+				}
+			}
+		}
+
+		void Erase(uint32_t hash)
+		{
+			size_t hole = SlotOf(hash);
+			EXIT_IF(hole == kNone);
+			// A later slot of the cluster moves back into the hole unless its home
+			// lies cyclically in (hole, slot]: probing from home must still reach it.
+			for (size_t i = Next(hole); m_slots[i].used; i = Next(i))
+			{
+				const size_t home    = Home(m_slots[i].hash);
+				const bool   reached = hole < i ? (hole < home && home <= i) : (hole < home || home <= i);
+				if (!reached)
+				{
+					m_slots[hole] = m_slots[i];
+					hole          = i;
+				}
+			}
+			m_slots[hole].used = false;
+			m_size--;
+		}
+
+		void Clear()
+		{
+			m_slots.assign(m_slots.size(), Slot {});
+			m_size = 0;
+		}
+
+	private:
+		struct Slot
+		{
+			uint32_t hash = 0;
+			int      head = -1;
+			bool     used = false;
+		};
+
+		static constexpr size_t   kNone        = SIZE_MAX;
+		static constexpr uint32_t kInitialBits = 12;
+
+		size_t Home(uint32_t hash) const { return static_cast<size_t>((hash * 0x9e3779b97f4a7c15ull) >> m_shift); }
+
+		size_t Next(size_t index) const { return (index + 1u) & (m_slots.size() - 1u); }
+
+		size_t SlotOf(uint32_t hash) const
+		{
+			if (m_slots.empty())
+			{
+				return kNone;
+			}
+			for (size_t i = Home(hash); m_slots[i].used; i = Next(i))
+			{
+				if (m_slots[i].hash == hash)
+				{
+					return i;
+				}
+			}
+			return kNone;
+		}
+
+		void Grow()
+		{
+			std::vector<Slot> old;
+			old.swap(m_slots);
+			m_slots.resize(old.empty() ? size_t {1} << kInitialBits : old.size() * 2u);
+			m_shift = old.empty() ? 64u - kInitialBits : m_shift - 1u;
+			for (const auto& slot: old)
+			{
+				if (!slot.used)
+				{
+					continue;
+				}
+				size_t i = Home(slot.hash);
+				while (m_slots[i].used)
+				{
+					i = Next(i);
+				}
+				m_slots[i] = slot;
+			}
+		}
+
+		std::vector<Slot> m_slots;
+		size_t            m_size  = 0;
+		uint32_t          m_shift = 64;
+	};
+
+	// The newest live set of each hash; the rest chain through next_same_hash.
+	SetHeads m_sets_by_hash;
 	// Live sets by the unique id of each image or buffer they reference.
 	std::unordered_map<uint64_t, std::vector<SetReference>> m_sets_by_resource;
 	// IndexSet scratch, kept to avoid an allocation per created set.
@@ -523,6 +652,12 @@ private:
 	std::unordered_map<VkDescriptorSetLayout, std::deque<RecycledOrder::iterator>> m_recycled_sets;
 	// Write-mask target of storage slots whose buffer is not written back.
 	VulkanBuffer m_write_mask_sink;
+	// Sets created outside the cache since the last deferral, and the submissions
+	// that recorded them; recycled once all of those complete.
+	std::vector<VulkanDescriptorSet*> m_uncached_sets;
+	std::vector<SubmissionId>         m_uncached_submissions;
+	// Hashes of sets that missed once, for AdmitSet.
+	std::vector<uint64_t> m_seen_set_hashes;
 };
 
 class SamplerCache
@@ -600,7 +735,8 @@ public:
 	void               FreeFramebufferByDepth(DepthStencilVulkanImage* image);
 
 private:
-	VideoOutVulkanImage* CreateDummyBuffer(VkFormat format, uint32_t width, uint32_t height, VkSampleCountFlagBits samples);
+	VideoOutVulkanImage* CreateDummyBuffer(VkFormat format, uint32_t width, uint32_t height, uint32_t layers,
+	                                       VkSampleCountFlagBits samples);
 
 	struct Framebuffer
 	{
@@ -866,6 +1002,9 @@ struct RenderDepthInfo
 	// DB_DEPTH_VIEW slice range; the depth image itself holds one slice.
 	uint32_t                    slice_start              = 0;
 	uint32_t                    slice_max                = 0;
+	// Slices a draw renders through the exported render-target index; above 1 it renders into the slice array of
+	// the first slice (MaterializeRenderDepthInfo).
+	uint32_t                    layers                   = 1;
 	bool                        htile                    = false;
 	bool                        neo                      = false;
 	uint64_t                    depth_buffer_size        = 0;
@@ -1745,6 +1884,9 @@ void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image
 VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVulkanImage* first, uint64_t addr, uint64_t slice_size,
                                            uint32_t width, uint32_t height, uint32_t layers, uint32_t fmt, uint32_t pitch,
                                            bool plain_guest_depth);
+// Copies each layer of a layered depth pass's slice array back to its slice image, at the end of the pass.
+void GraphicsRenderStoreLayeredDepth(VkCommandBuffer vk_buffer, DepthSliceArray* slice_array,
+                                     const std::vector<DepthStencilVulkanImage*>& slices);
 
 // --- Core (color / dump) ---
 
@@ -1760,6 +1902,47 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 VulkanBuffer* GraphicsRenderRecordDispatchIndirectArgs(CommandBuffer* buffer, const VulkanBuffer* source, uint64_t offset,
                                                        const uint32_t* max_group_count);
 void          GraphicsRenderCheckDispatchIndirectLimits();
+// Records a conversion of the 20-byte DRAW_INDEX_INDIRECT record at `offset` of `source` into host
+// indexed-draw arguments, in queue order: the count is clamped to `index_window` indexes past the
+// record's start, `vertex_offset` is added to its base vertex, and a draw with primitives latches its
+// instance count for `latch_queue`; an empty one latches `previous_instances` unless that is zero.
+// Returns the argument buffer, or nullptr when the conversion is unavailable.
+VulkanBuffer* GraphicsRenderRecordDrawIndexedIndirectArgs(CommandBuffer* buffer, const VulkanBuffer* source, uint64_t offset,
+                                                          uint32_t index_window, int32_t vertex_offset, uint32_t latch_queue,
+                                                          uint32_t previous_instances);
+// The 64-byte header of a geometry pass whose DRAW_INDEX_INDIRECT record the device reads: the
+// pass block (ShaderGeometryComputeInfo), the group count dispatched by the clear and the pass,
+// and the VkDrawIndirectCommand of the pull.
+constexpr uint32_t kGeometryIndirectHeaderBytes    = 64u;
+constexpr uint32_t kGeometryIndirectDispatchOffset = 32u;
+constexpr uint32_t kGeometryIndirectDrawOffset     = 48u;
+// What the host knows of such a draw. topology: 0 point list, 1 triangle list, 2 triangle strip;
+// index_shift: log2 of the index size.
+struct GeometryIndirectShape
+{
+	uint32_t index_window         = 0;
+	int32_t  vertex_offset        = 0;
+	uint32_t latch_queue          = 0;
+	uint32_t previous_instances   = 0;
+	uint64_t index_base           = 0;
+	uint32_t index_shift          = 0;
+	uint32_t topology             = 0;
+	uint32_t primitives_per_group = 0;
+	uint32_t group_lanes          = 0;
+	uint32_t max_groups           = 0;
+	uint64_t output_address       = 0;
+};
+// Records a conversion of the 20-byte DRAW_INDEX_INDIRECT record at `offset` of `source` into a
+// geometry pass header, in queue order, as the host resolves a record it reads: the record latches
+// its instance count as GraphicsRenderRecordDrawIndexedIndirectArgs does, and a draw of more than
+// `max_groups` groups dispatches nothing and is counted as skipped at completion. Returns the
+// header, or nullptr when the conversion is unavailable.
+VulkanBuffer* GraphicsRenderRecordGeometryIndirectArgs(CommandBuffer* buffer, const VulkanBuffer* source, uint64_t offset,
+                                                       const GeometryIndirectShape& shape);
+// Zeroes the groups the header dispatches, of `group_dwords` each from `output_offset` of `output`.
+bool GraphicsRenderRecordGeometryOutputClear(CommandBuffer* buffer, const VulkanBuffer* header, VulkanBuffer* output,
+                                             uint64_t output_offset, uint32_t group_dwords);
+void GraphicsRenderCheckGeometryIndirectRefusals();
 
 bool                            RenderColorSlotConfigured(const RenderColorInfo& color, uint32_t slot);
 bool                            RenderColorSlotActive(const RenderColorInfo& color, uint32_t slot);
@@ -1783,7 +1966,8 @@ void hw_check(const HW::Context& hw, bool allow_depth_stencil_copy = false);
 void hw_print(const HW::Context& hw);
 
 // --- Descriptor / stencil / Find* ---
-void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
+// Returns false when a stencil logic op (0x0a-0x0f) cannot be expressed exactly with Vulkan stencil state.
+bool get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
                        uint8_t zfail, uint8_t testval, uint8_t mask, uint8_t writemask, uint8_t opval);
 Vector<RenderTextureVulkanImage*>  FindRenderTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 // A dispatch proven to store `words` to every 16-byte record of its only
@@ -1794,8 +1978,20 @@ struct ComputeUniformBufferFill
 	uint64_t                size    = 0;
 	std::array<uint32_t, 4> words {};
 };
+// A dispatch proven to store `word` as the first 4-byte element of every
+// 256-byte color DCC block of [address, address + size), and nothing else.
+struct ComputeBlockHeadFill
+{
+	uint64_t address = 0;
+	uint64_t size    = 0;
+	uint32_t word    = 0;
+};
+// Returns true for a uniform fill. A block-head store is not one: it returns
+// false with `heads` set (size != 0), and the dispatch must execute.
 [[nodiscard]] bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x, uint32_t group_y,
-                                                   uint32_t group_z, ComputeUniformBufferFill* fill);
+                                                   uint32_t group_z, ComputeUniformBufferFill* fill, ComputeBlockHeadFill* heads);
+// Records that the dispatch just recorded stored the heads of every block of its range.
+bool PublishComputeColorBlockHeads(CommandBuffer* buffer, const ComputeBlockHeadFill& heads);
 // Records a fill of one repeated word as a transfer fill of the exact storage
 // object, with every page flagged written, in place of the dispatch. Returns
 // false, recording nothing, when the dispatch must execute.
@@ -1932,7 +2128,10 @@ void TraceRenderTargetLifetimeProbeDepthAttempt(
 void TraceRenderTargetLifetimeDepthClearPass(uint64_t submit_id, const RenderDepthInfo& depth,
 	                                         const VulkanFramebuffer& framebuffer);
 void TraceRenderTargetLifetimeResolve(uint64_t submit_id, const RenderColorInfo& source, const RenderColorInfo& destination);
-void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline);
+void SetDynamicParams(CommandBuffer* buffer, VkCommandBuffer vk_buffer, VulkanPipeline* pipeline);
+// A descriptor set layout with no bindings, created once and kept for the device's lifetime, so pipeline
+// layouts built from it stay valid while their pipelines are in use.
+VkDescriptorSetLayout EmptyDescriptorSetLayout(VkDevice device);
 
 // A pixel stage that needs the capture, shade and resolve strategy. The facts
 // text records host capabilities, program contract verdicts, plan sizing and

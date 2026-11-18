@@ -84,6 +84,16 @@ static KYTY_SYSV_ABI int ShareUnregisterContentEventCallback(void* callback)
 	return OK;
 }
 
+// sceShareGetRunningStatus: the emulator never captures or broadcasts, so no share feature is running.
+static KYTY_SYSV_ABI int ShareGetRunningStatus(uint32_t* status)
+{
+	PRINT_NAME();
+	// The error for a null status is not agreed on, so it is not answered.
+	EXIT_NOT_IMPLEMENTED(status == nullptr);
+	*status = 0;
+	return OK;
+}
+
 } // namespace Share
 
 LIB_DEFINE(InitShare_1)
@@ -98,6 +108,7 @@ LIB_DEFINE(InitShare_1)
 	LIB_FUNC("T64o-315wbg", Share::ShareLogAndOk);
 	LIB_FUNC("Sygnk9dr5WQ", Share::ShareRegisterContentEventCallback);
 	LIB_FUNC("KnsfHKmZqFA", Share::ShareUnregisterContentEventCallback);
+	LIB_FUNC("crFxyW3HdK0", Share::ShareGetRunningStatus);
 }
 
 } // namespace Kyty::Libs

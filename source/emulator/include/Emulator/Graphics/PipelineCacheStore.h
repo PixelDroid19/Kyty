@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <shared_mutex>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -85,6 +86,26 @@ enum class PipelineCacheStoreSaveResult
 	BudgetExceeded,
 	Failed
 };
+
+// A pipeline the driver did not find in the application cache adds an entry the
+// cache file lacks. Feedback without the valid bit counts as an added entry.
+[[nodiscard]] constexpr bool PipelineCacheCreationAddsEntry(VkResult result, VkPipelineCreationFeedbackFlags flags)
+{
+	constexpr VkPipelineCreationFeedbackFlags hit =
+	    VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT | VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+	return result == VK_SUCCESS && (flags & hit) != hit;
+}
+
+// Pipelines that hit the cache must not mark it dirty: the driver may serialize
+// an unchanged cache in a different byte order, so a save would rewrite the
+// whole file.
+void               PipelineCacheStoreRecordCreation(VkResult result, const VkPipelineCreationFeedback& feedback);
+[[nodiscard]] bool PipelineCacheStoreTakeAddedEntries();
+// Vulkan lets vkGetPipelineCacheData run while other threads create pipelines with
+// the same cache, but the Intel Windows driver then faults inside the read. Every
+// pipeline creation that passes the shared cache holds this lock shared, and a
+// checkpoint read holds it exclusive.
+[[nodiscard]] std::shared_mutex& PipelineCacheAccess();
 
 [[nodiscard]] std::vector<uint8_t>         PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& properties);
 [[nodiscard]] PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineCache cache,

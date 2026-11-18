@@ -36,6 +36,7 @@ public:
 	// Flags, one per page, that the GPU sets when it writes the page. A copy or
 	// adoption compares only flagged pages and clears every flag it reads.
 	void TrackWrittenPages(uint32_t* flags) { m_written_pages = flags; }
+	[[nodiscard]] uint32_t* WrittenPages() const { return m_written_pages; }
 
 	void Reset(const void* source, uint64_t size);
 	// Replaces the snapshot bytes of one run of a same-sized source.

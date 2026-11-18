@@ -210,6 +210,8 @@ public:
 	// Descriptor blocks of the pointer-table load at index; empty when a part
 	// of it has no consumer it alone defines.
 	[[nodiscard]] const std::vector<ShaderDescriptorBlock>& TableLoadBlocks(const ShaderCode& code, uint32_t index) const;
+	// One write of the SGPR reaches the instruction at index on every path.
+	[[nodiscard]] bool SgprWrittenOnEveryPath(const ShaderCode& code, uint32_t index, int reg) const;
 	[[nodiscard]] ShaderDynamicSLoadSpan DynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping) const;
 	// Copy-flow reads for the binding layout of `bind` (ShaderImageCopyLayout).
 	[[nodiscard]] std::vector<ShaderImageCopyRead> ImageCopyReads(const ShaderCode& code, const ShaderBindResources& bind,
@@ -233,9 +235,22 @@ private:
 	mutable bool                                                    m_constant_sampler_reads_ready = false;
 	mutable std::shared_ptr<const ShaderControlFlowGraph>           m_cfg;
 	mutable std::map<uint32_t, std::vector<ShaderDescriptorBlock>>  m_table_load_blocks;
+	mutable std::map<std::pair<uint32_t, int>, bool>                m_written_on_every_path;
 	// Keyed by load PC, last consumer PC, destination register and dword count.
 	mutable std::map<std::tuple<uint32_t, uint32_t, int, int>, ShaderDynamicSLoadSpan> m_dynamic_sload_spans;
-	mutable std::map<std::vector<int32_t>, std::vector<ShaderImageCopyRead>>           m_image_copy_reads;
+	struct LayoutHash
+	{
+		size_t operator()(const std::vector<int32_t>& layout) const
+		{
+			uint64_t hash = 1469598103934665603ull;
+			for (const int32_t value: layout)
+			{
+				hash = (hash ^ static_cast<uint32_t>(value)) * 1099511628211ull;
+			}
+			return static_cast<size_t>(hash);
+		}
+	};
+	mutable std::unordered_map<std::vector<int32_t>, std::vector<ShaderImageCopyRead>, LayoutHash> m_image_copy_reads;
 };
 
 [[nodiscard]] ShaderStorageUseEvidence       AnalyzeShaderStorageUse(const ShaderCode& code, int start_register,
@@ -271,15 +286,21 @@ bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, co
                                              int user_data_register_base = 0);
 // A whole-descriptor S_LOAD through the EUD pointer whose dwords no resource maps.
 bool ShaderEudDescriptorLoadIsUnmapped(const ShaderBindResources& bind, const ShaderInstruction& sload);
+// Every S_LOAD through the EUD pointer that reaches the V# at eud_offset_dw loads exactly
+// it, and every reader of it, followed through static lane spills, is a BUFFER_LOAD_FORMAT.
+bool ShaderEudDescriptorReadOnlyByFormatLoads(const ShaderCode& code, const ShaderBindResources& bind, int eud_offset_dw,
+                                              int user_data_register_base, const ShaderScalarFlow& scalar_flow);
 void ShaderAccumulateScalarBufferLoadSpan(const ShaderInstruction& inst, uint64_t* required_bytes, bool* dynamic_offset);
 void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                          ShaderParsedUsage* info, const uint32_t* extended_buffer, uint16_t eud_size_dw,
                                          int user_data_register_base, const ShaderScalarFlow& scalar_flow,
                                          const ShaderCodeResourceMemo* memo);
 // Records the buffer instructions whose bound V# register was redefined on
-// every path before them (bind->redefined_descriptor_consumers).
+// every path before them (bind->redefined_descriptor_consumers, or without
+// record_consumers bind->slot_only_consumers).
 void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
-                                             const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo = nullptr);
+                                             const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo = nullptr,
+                                             bool record_consumers = true);
 void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                              int user_sgpr_num, int user_data_register_base, const ShaderScalarFlow& scalar_flow,
                                              const ShaderCodeResourceMemo* memo);

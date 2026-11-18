@@ -183,6 +183,7 @@ constexpr uint64_t kKernelPrtPageSize = 64u * 1024u;
 // Configured flexible size for Gen5 queries (same budget as available for now).
 int KYTY_SYSV_ABI    KernelConfiguredFlexibleMemorySize(uint64_t* size);
 int KYTY_SYSV_ABI    KernelMprotect(const void* addr, size_t len, int prot);
+int KYTY_SYSV_ABI    KernelMtypeprotect(const void* addr, size_t len, int mtype, int prot);
 
 // Gen5 sceKernelVirtualQuery — NID rVjRvHJ0X6c. info_size must be sizeof(VirtualQueryInfo).
 constexpr uint32_t kKernelVirtualQueryNameLength = 32;

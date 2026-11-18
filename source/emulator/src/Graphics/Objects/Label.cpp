@@ -4,6 +4,7 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Vector.h"
 
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
@@ -731,6 +732,13 @@ void LabelManager::CompleteSubmission(SubmissionId submission)
 	}
 }
 
+// A write-back publishes device results the guest did not write, so it also advances the host-write epoch.
+static void NotifyPublishedWrite(uint64_t address, uint64_t bytes)
+{
+	GpuDirtyPageTracker::NoteHostWrite();
+	(void)GpuMemoryNotifyHostWrite(address, bytes);
+}
+
 GpuWritebackResult LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
                                               GpuWritebackPageCache* page_cache, LabelStoragePublication* publication)
 {
@@ -738,7 +746,7 @@ GpuWritebackResult LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_
 	// The exclusion snapshot and guest copy must be one transaction with label
 	// stores. Otherwise a newer label can publish between those two operations.
 	Core::LockGuard lock(m_mutex);
-	const auto notify_write = [](void*, uint64_t address, uint64_t bytes) { (void)GpuMemoryNotifyHostWrite(address, bytes); };
+	const auto notify_write = [](void*, uint64_t address, uint64_t bytes) { NotifyPublishedWrite(address, bytes); };
 	return publication->Copy(m_fence_holes, guest_dst, gpu_src, size, page_cache, notify_write, nullptr);
 }
 
@@ -748,7 +756,7 @@ bool LabelManager::WriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, con
 {
 	EXIT_IF(publication == nullptr);
 	Core::LockGuard lock(m_mutex);
-	const auto notify_write = [](void*, uint64_t address, uint64_t bytes) { (void)GpuMemoryNotifyHostWrite(address, bytes); };
+	const auto notify_write = [](void*, uint64_t address, uint64_t bytes) { NotifyPublishedWrite(address, bytes); };
 	return publication->AdoptUniform(guest_addr, size, words, page_cache, notify_write, nullptr, result);
 }
 
@@ -757,7 +765,7 @@ bool LabelManager::WriteBackAdoptDevice(uint64_t guest_addr, const void* gpu_src
 {
 	EXIT_IF(publication == nullptr);
 	Core::LockGuard lock(m_mutex);
-	const auto notify_write = [](void*, uint64_t address, uint64_t bytes) { (void)GpuMemoryNotifyHostWrite(address, bytes); };
+	const auto notify_write = [](void*, uint64_t address, uint64_t bytes) { NotifyPublishedWrite(address, bytes); };
 	return publication->AdoptDevice(guest_addr, gpu_src, size, page_cache, notify_write, nullptr, result);
 }
 

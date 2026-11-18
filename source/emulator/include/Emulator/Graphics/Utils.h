@@ -86,7 +86,8 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 //   4) the surface holds every array layer the descriptor views, for the same reason.
 // Binding a larger parent without a crop view samples the wrong tiles and
 // leaves horizontal bands or false-color geometry. Zero exact+format matches
-// rejects the alias; never fall back to a different gamma or extent.
+// rejects the alias; never fall back to a different extent. A surface in the
+// other gamma is bound only through Gen5PickGammaTwinSurfaceAlias.
 //
 // formats[i]/extents_w[i]/extents_h[i]/mip_levels[i]/array_layers[i] describe candidate i
 // of candidate_count (capped at 16); sample_levels is the number of levels the view
@@ -135,6 +136,32 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	}
 	*out_count = exact_n;
 	return true;
+}
+
+// After Gen5PickSampleSurfaceAliases rejects every candidate: a mutable surface
+// whose gamma twin (UNORM <-> sRGB) is the sample format, at the exact extent
+// with every viewed level and layer, holds the sampled texels. Returns its
+// index, read through a view in *out_view_format, or -1.
+[[nodiscard]] inline int Gen5PickGammaTwinSurfaceAlias(uint32_t sample_ufmt, bool use_srgb, uint32_t sample_width,
+                                                       uint32_t sample_height, uint32_t sample_levels, uint32_t sample_layers,
+                                                       size_t candidate_count, const VkFormat* formats, const bool* mutable_formats,
+                                                       const uint32_t* extents_w, const uint32_t* extents_h, const uint32_t* mip_levels,
+                                                       const uint32_t* array_layers, VkFormat* out_view_format)
+{
+	const size_t n = candidate_count < 16 ? candidate_count : 16;
+	for (size_t i = 0; i < n; i++)
+	{
+		const VkFormat twin = VulkanColorGammaTwin(formats[i]);
+		if (mutable_formats[i] && twin != VK_FORMAT_UNDEFINED &&
+		    VulkanGen5SampleFormatMatchesEffective(static_cast<uint16_t>(sample_ufmt), use_srgb, twin) &&
+		    extents_w[i] == sample_width && extents_h[i] == sample_height && mip_levels[i] >= sample_levels &&
+		    array_layers[i] >= sample_layers)
+		{
+			*out_view_format = twin;
+			return static_cast<int>(i);
+		}
+	}
+	return -1;
 }
 
 // Sample guest upload must not flush StorageBuffers first: SSBOs are linear
@@ -922,6 +949,8 @@ void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffe
 // ordered by the host waits, so a barrier recorded there drops those access
 // types and waits on all of that queue's commands instead.
 [[nodiscard]] VkPipelineStageFlags VulkanQueueBarrierScope(const CommandBuffer* buffer, VkPipelineStageFlags stages, VkAccessFlags* access);
+// vkCmdFillBuffer of an explicit size, split so the driver's host cost stays bounded.
+void VulkanCmdFillBuffer(VkCommandBuffer cmd, VkBuffer buffer, uint64_t offset, uint64_t size, uint32_t value);
 void VulkanDeleteBuffer(GraphicContext* gctx, VulkanBuffer* buffer);
 
 inline std::pair<int, int> UtilCalcMipmapOffset(uint32_t lod, uint32_t width, uint32_t height)
@@ -992,21 +1021,20 @@ enum class LabelForceCompleteKind : uint8_t
 	return completion_callback_issued;
 }
 
-[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool same_queue, uint8_t producer_effects,
-                                                                          bool pending_storage_has_aliases)
+[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool same_queue, uint8_t producer_effects)
 {
 	// A label store relies on same-queue GPU ordering until its submission's
-	// fence publishes it. A write-back may join it only when no pending storage
-	// write has a GPU alias: guest-side readers (memory reads, device-address
-	// views) already wait for pending storage themselves, while aliases are
-	// refreshed only by the write-back. Notification callbacks stay synchronous.
+	// fence publishes it. A write-back may join it: guest-side readers (memory
+	// reads, device-address views) already wait for pending storage themselves,
+	// and GPU aliases of pending storage wait at their next use
+	// (GpuMemoryDeferPendingStorageAliases). Notification callbacks stay synchronous.
 	constexpr uint8_t guest_store = 1u;
 	constexpr uint8_t write_back  = 2u;
 	if (!same_queue)
 	{
 		return false;
 	}
-	return producer_effects == guest_store || (producer_effects == (guest_store | write_back) && !pending_storage_has_aliases);
+	return producer_effects == guest_store || producer_effects == (guest_store | write_back);
 }
 
 // Completion callbacks a command-processor batch can record.

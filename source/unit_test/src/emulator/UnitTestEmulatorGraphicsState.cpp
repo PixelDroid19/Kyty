@@ -20,6 +20,7 @@
 #include "Emulator/Graphics/NativeCapture.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/GpuMemoryHostResultPages.h"
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
 #include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
@@ -1897,16 +1898,14 @@ struct CoveredIndexTestGpuObject: public GpuObject
 
 void EnsureGpuMemoryForTests()
 {
-	static bool initialized = false;
 	if (!Config::IsInitialized())
 	{
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-	if (!initialized)
+	if (g_gpu_memory == nullptr)
 	{
 		GpuMemoryInit();
-		initialized = true;
 	}
 }
 
@@ -2043,6 +2042,13 @@ TEST(EmulatorGraphicsState, PipelineCacheCheckpointsAreDirtyAndRateLimited)
 	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget / 2, budget / 2), budget);
 	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget - 1, 2), budget);
 	EXPECT_EQ(PipelineCacheStoreAccountWriteAttempt(budget, 1), budget);
+
+	constexpr VkPipelineCreationFeedbackFlags valid = VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT;
+	constexpr VkPipelineCreationFeedbackFlags hit   = VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+	EXPECT_FALSE(PipelineCacheCreationAddsEntry(VK_SUCCESS, valid | hit));
+	EXPECT_TRUE(PipelineCacheCreationAddsEntry(VK_SUCCESS, valid));
+	EXPECT_TRUE(PipelineCacheCreationAddsEntry(VK_SUCCESS, hit));
+	EXPECT_FALSE(PipelineCacheCreationAddsEntry(VK_ERROR_OUT_OF_HOST_MEMORY, valid));
 }
 
 TEST(EmulatorGraphicsState, SpirvBinaryCacheRequiresExactSourceAndCompileOptions)
@@ -2313,6 +2319,22 @@ TEST(EmulatorGraphicsState, GpuMemoryValidatesTheCompleteAllocatedGuestRangeRead
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(heap_base + heap_size - 4, 8), GpuMemoryRangeValidationStatus::Unallocated);
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(heap_base, 0), GpuMemoryRangeValidationStatus::InvalidArgument);
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(UINT64_MAX - 3, 8), GpuMemoryRangeValidationStatus::InvalidArgument);
+
+	// Two overlapping heaps: one heap must hold the whole range, not their union.
+	const uint64_t overlap_base = 0x0000005104000000ull;
+	GpuMemorySetAllocatedRange(overlap_base, 0x10000ull);
+	GpuMemorySetAllocatedRange(overlap_base + 0x8000ull, 0x18000ull);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(overlap_base + 0xc000ull, 0x8000ull), GpuMemoryRangeValidationStatus::Valid);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(overlap_base + 0x4000ull, 0x10000ull), GpuMemoryRangeValidationStatus::Unallocated);
+
+	// Two heaps with a gap between them: the gap is not allocated, nor is a range crossing it.
+	const uint64_t gap_base = 0x0000005105000000ull;
+	GpuMemorySetAllocatedRange(gap_base, 0x10000ull);
+	GpuMemorySetAllocatedRange(gap_base + 0x20000ull, 0x10000ull);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(gap_base + 0x18000ull, 8), GpuMemoryRangeValidationStatus::Unallocated);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(gap_base + 0xf000ull, 0x2000ull), GpuMemoryRangeValidationStatus::Unallocated);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(gap_base + 0xf000ull, 0x12000ull), GpuMemoryRangeValidationStatus::Unallocated);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(gap_base + 0x20000ull, 0x10000ull), GpuMemoryRangeValidationStatus::Valid);
 }
 
 namespace {
@@ -2446,6 +2468,26 @@ TEST(EmulatorGraphicsState, GpuMemoryFindForSubmissionDefersDeletionUntilComplet
 
 	GpuMemoryCompleteSubmission(submission);
 	EXPECT_EQ(g_test_gpu_object_deletes, 1);
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryFindIntersectingRecordsPartialDepthOwners)
+{
+	EnsureGpuMemoryForTests();
+	GraphicContext ctx {};
+	const uint64_t base = 0x0000005120000000ull;
+	const uint64_t block = 0x10000ull;
+	const SubmissionId submission = NextGpuMemoryFixtureSubmission(GpuQueueId(97));
+	const ScopedGpuMemoryFixtureRange range(&ctx, base, block * 4u, submission);
+	g_test_gpu_object_deletes = 0;
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, base, block * 2u, TestGpuObject(GpuMemoryObjectType::DepthStencilBuffer)), nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, base + block * 2u, block * 2u,
+	                                TestGpuObject(GpuMemoryObjectType::DepthStencilBuffer)), nullptr);
+	const auto found = GpuMemoryFindIntersectingObjectsForSubmission(submission, base + block, block * 2u);
+	ASSERT_EQ(found.Size(), 2u);
+	GpuMemoryFree(&ctx, base, block * 4u);
+	EXPECT_EQ(g_test_gpu_object_deletes, 0);
+	GpuMemoryCompleteSubmission(submission);
+	EXPECT_EQ(g_test_gpu_object_deletes, 2);
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryVersionsChangedBackingWithPendingUse)
@@ -3409,6 +3451,52 @@ TEST(EmulatorGraphicsState, TiledSampleDetileUsesTheGuestFormatElementWidth)
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(1u, 27u), 0u);
 }
 
+TEST(EmulatorGraphicsState, HostResultPagesCountObjectsHoldingUnpublishedResults)
+{
+	// A buffer holds a result the guest lacks only while it is writable and in use.
+	EXPECT_FALSE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::StorageBuffer, true, true));
+	EXPECT_FALSE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::VertexBuffer, true, true));
+	EXPECT_FALSE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::IndexBuffer, true, true));
+	EXPECT_FALSE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::StorageBuffer, false, false));
+	EXPECT_TRUE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::StorageBuffer, false, true));
+	EXPECT_TRUE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::VertexBuffer, false, true));
+	// A surface is counted whatever its state.
+	EXPECT_TRUE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::RenderTexture, true, false));
+	EXPECT_TRUE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::Texture, true, false));
+	EXPECT_TRUE(GpuMemoryObjectMayHoldHostResult(GpuMemoryObjectType::Label, false, false));
+
+	constexpr uint64_t       kPage = 0x1000;
+	constexpr uint64_t       kBase = 0x200000000ull;
+	GpuMemoryHostResultPages pages;
+	EXPECT_FALSE(pages.Any(kBase, 64 * kPage));
+
+	// One byte at the end of a page and the first byte of the next count both pages.
+	pages.Add(kBase + 3 * kPage - 1, 2);
+	EXPECT_FALSE(pages.Any(kBase, 2 * kPage));
+	EXPECT_TRUE(pages.Any(kBase, 2 * kPage + 1));
+	EXPECT_TRUE(pages.Any(kBase + 3 * kPage + 0xfff, 1));
+	EXPECT_FALSE(pages.Any(kBase + 4 * kPage, 60 * kPage));
+	EXPECT_FALSE(pages.Any(kBase + 3 * kPage, 0));
+
+	// Two objects on one page: the page stays counted until both are gone.
+	pages.Add(kBase + 2 * kPage, kPage);
+	pages.Remove(kBase + 3 * kPage - 1, 2);
+	EXPECT_TRUE(pages.Any(kBase + 2 * kPage + 8, 8));
+	EXPECT_FALSE(pages.Any(kBase + 3 * kPage, kPage));
+	pages.Remove(kBase + 2 * kPage, kPage);
+	EXPECT_FALSE(pages.Any(kBase, 64 * kPage));
+
+	// A range spanning several 2 MiB blocks is found from a query inside any of them.
+	pages.Add(kBase + 510 * kPage, 1030 * kPage);
+	EXPECT_FALSE(pages.Any(kBase, 510 * kPage));
+	EXPECT_TRUE(pages.Any(kBase + 1024 * kPage, 1));
+	EXPECT_TRUE(pages.Any(kBase + 1539 * kPage, kPage));
+	EXPECT_FALSE(pages.Any(kBase + 1540 * kPage, 4096 * kPage));
+	EXPECT_TRUE(pages.Any(kBase, 4096 * kPage));
+	pages.Remove(kBase + 510 * kPage, 1030 * kPage);
+	EXPECT_FALSE(pages.Any(kBase, 4096 * kPage));
+}
+
 TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
 {
 	GpuMemoryOverlapSnapshot empty;
@@ -3725,6 +3813,32 @@ TEST(EmulatorGraphicsState, KeepsColorExportsLogicalForPhysicalAttachmentOrder)
 			EXPECT_EQ(ShaderColorExportSourceComponent(channel_order, component), component);
 		}
 	}
+}
+
+TEST(EmulatorGraphicsState, TwoChannelAltSwapExportsWIntoSecondChannel)
+{
+	// SWAP_ALT on 8_8/16_16/32_32 stores export X in channel 0 and W in channel 1.
+	for (uint32_t cb_format: {0x3u, 0x5u, 0xbu})
+	{
+		HW::Context ctx;
+		HW::ColorInfo info;
+		info.format        = cb_format;
+		info.channel_order = 1u;
+		ctx.SetColorInfo(2, info);
+		const uint32_t order = ctx.GetShaderRegisters().target_output_order[2];
+		EXPECT_EQ(ShaderColorExportSourceComponent(order, 0), 0u);
+		EXPECT_EQ(ShaderColorExportSourceComponent(order, 1), 3u);
+	}
+	// The same swap on a four-channel format stays a host format order.
+	HW::Context ctx;
+	HW::ColorInfo info;
+	info.format        = 0xau;
+	info.channel_order = 1u;
+	ctx.SetColorInfo(0, info);
+	EXPECT_EQ(ShaderColorExportSourceComponent(ctx.GetShaderRegisters().target_output_order[0], 1), 1u);
+	EXPECT_EQ(ResolveRenderTextureFormat(0x3u, 0x0u, 0x1u).format, RenderTextureFormat::R8G8Unorm);
+	EXPECT_EQ(ResolveRenderTextureFormat(0x5u, 0x7u, 0x1u).format, RenderTextureFormat::R16G16Sfloat);
+	EXPECT_EQ(ResolveRenderTextureFormat(0x5u, 0x4u, 0x1u).format, RenderTextureFormat::R16G16Uint);
 }
 
 TEST(EmulatorGraphicsState, ResolvesObservedTwoChannelFloatRenderTarget)
@@ -4779,6 +4893,19 @@ TEST(EmulatorGraphicsState, DepthPassCanSuppressColorWrites)
 	EXPECT_EQ(State::ResolveColorWriteAgainstDepth(0x0fu, true, true), 0x0fu);
 }
 
+TEST(EmulatorGraphicsState, RoutesColorExportOrdinalsThroughShaderMaskTargets)
+{
+	// MRT1 and MRT2 used: COL_FORMAT 0x77 has no hole, CB_SHADER_MASK 0x770 does.
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x770u, 0u), 1u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x770u, 1u), 2u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x770u, 2u), 8u);
+	// Partial nibbles still enable their target and consume an ordinal.
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x10203001u, 1u), 3u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0x10203001u, 3u), 7u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0xffffffffu, 7u), 7u);
+	EXPECT_EQ(State::ResolvePixelExportTarget(0u, 0u), 8u);
+}
+
 TEST(EmulatorGraphicsState, RequiresPixelShaderOnlyForObservableFragmentWork)
 {
 	HW::ShaderRegisters shader {};
@@ -5096,7 +5223,9 @@ TEST(EmulatorGraphicsState, Gen5AgcSizeHelpersAndTrinityMode)
 	EXPECT_EQ(GraphicsCbNopGetSize(1), 4u);
 	EXPECT_EQ(GraphicsCbDispatchGetSize(), 20u);
 	EXPECT_EQ(GraphicsCbSetShRegisterRangeDirectGetSize(3), 20u);
-	EXPECT_EQ(GraphicsGetIsTrinityMode(), 0u);
+	bool is_trinity_mode = true;
+	EXPECT_EQ(GraphicsGetIsTrinityMode(&is_trinity_mode), OK);
+	EXPECT_FALSE(is_trinity_mode);
 	EXPECT_EQ(GraphicsDebugRaiseException(0x1234u), OK);
 
 	uint32_t write_cmd[4] = {KYTY_PM4(4, Pm4::IT_WRITE_DATA, 0u), 0u, 0u, 0u};
@@ -5421,7 +5550,7 @@ TEST(EmulatorGraphicsState, ReportsNoSystemServiceEventWithoutFabricatingOne)
 	const auto* record = symbols.Find(query);
 	ASSERT_NE(record, nullptr);
 
-	using ReceiveEventFunc = int (*)(void*);
+	using ReceiveEventFunc = int(KYTY_SYSV_ABI*)(void*);
 	auto    receive_event  = reinterpret_cast<ReceiveEventFunc>(record->vaddr);
 	uint8_t event[64]      = {};
 	for (auto& value: event)
@@ -5901,6 +6030,30 @@ TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesPrefersExactExtent)
 // A render target or storage image is one level. A descriptor that views a mip chain
 // (BASE_LEVEL..LAST_LEVEL) over it would read levels the image does not have, so the surface
 // is not an alias: the sample is built as a texture from its parents instead.
+TEST(EmulatorGraphicsState, Gen5PickGammaTwinSurfaceAliasReadsTheOtherGammaOfAMutableSurface)
+{
+	using namespace Kyty::Libs::Graphics;
+	// An sRGB RGBA8 sample (ufmt 130) of targets rendered UNORM.
+	const VkFormat formats[]   = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT,
+	                              VK_FORMAT_B8G8R8A8_UNORM};
+	const bool     mutables[]  = {false, true, true, true};
+	const uint32_t extents_w[] = {3840u, 1920u, 3840u, 3840u};
+	const uint32_t extents_h[] = {2160u, 1080u, 2160u, 2160u};
+	const uint32_t levels[]    = {1u, 1u, 1u, 1u};
+	const uint32_t layers[]    = {1u, 1u, 1u, 1u};
+	VkFormat       view        = VK_FORMAT_UNDEFINED;
+
+	// Not mutable, wrong extent and wrong texel size are skipped; the red/blue
+	// exchanged target is read through its own sRGB twin.
+	EXPECT_EQ(Gen5PickGammaTwinSurfaceAlias(130u, true, 3840u, 2160u, 1u, 1u, 4, formats, mutables, extents_w, extents_h, levels, layers, &view), 3);
+	EXPECT_EQ(view, VK_FORMAT_B8G8R8A8_SRGB);
+
+	// Without a mutable candidate of the right extent there is no alias.
+	EXPECT_EQ(Gen5PickGammaTwinSurfaceAlias(130u, true, 3840u, 2160u, 1u, 1u, 3, formats, mutables, extents_w, extents_h, levels, layers, &view), -1);
+	// A sample viewing more levels than the target has is not served by it.
+	EXPECT_EQ(Gen5PickGammaTwinSurfaceAlias(130u, true, 3840u, 2160u, 2u, 1u, 4, formats, mutables, extents_w, extents_h, levels, layers, &view), -1);
+}
+
 TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesNeedsEveryViewedMipLevel)
 {
 	using namespace Kyty::Libs::Graphics;
@@ -6708,6 +6861,8 @@ TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
 	                                                    GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
 	                                                    GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                    GpuMemoryObjectType::VertexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
 	                                                     GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
@@ -6754,8 +6909,8 @@ TEST(EmulatorGraphicsState, AllowsRenderTargetMultiSurfaceParents)
 	                                                    GpuMemoryObjectType::RenderTexture));
 	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
 	                                                     GpuMemoryObjectType::RenderTexture));
-	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
-	                                                     GpuMemoryObjectType::RenderTexture));
+	EXPECT_TRUE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::RenderTexture));
 	EXPECT_FALSE(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Equals,
 	                                                     GpuMemoryObjectType::Texture));
 	EXPECT_TRUE(GpuMemoryAllowsRenderTargetReclaimDepth(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
@@ -6933,7 +7088,9 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	                                                 GpuMemoryObjectType::Texture));
 	EXPECT_TRUE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
 	                                                 GpuMemoryObjectType::Texture));
-	EXPECT_FALSE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	EXPECT_TRUE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                 GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
 	                                                  GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
 	                                                  GpuMemoryObjectType::StorageTexture));
@@ -7592,19 +7749,18 @@ TEST(EmulatorGraphicsState, LabelFenceGdsStoreProtectsEveryWrittenDword)
 // SubmitAndFlip without an embedded R_FLIP/0x777 must still flip after BufferFlush.
 // Detect SubmitAndFlip via an explicit batch flag — not flip.handle != 0 (handle 0
 // is legal, and plain Submit also zeroes the flip fields).
-TEST(EmulatorGraphicsState, ACurrentSubmissionWaitConsolidatesStoresAndUnaliasedWriteBacks)
+TEST(EmulatorGraphicsState, ACurrentSubmissionWaitConsolidatesStoresAndWriteBacks)
 {
 	constexpr uint8_t store     = 1u;
 	constexpr uint8_t writeback = 2u;
 	constexpr uint8_t notify    = 4u;
-	EXPECT_TRUE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store, false));
-	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(false, store, false));
-	EXPECT_TRUE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | writeback, false));
-	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | writeback, true));
-	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(false, store | writeback, false));
-	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | notify, false));
-	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | writeback | notify, false));
-	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, 0u, false));
+	EXPECT_TRUE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(false, store));
+	EXPECT_TRUE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | writeback));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(false, store | writeback));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | notify));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | writeback | notify));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, 0u));
 }
 
 TEST(EmulatorGraphicsState, EveryCompletionPayloadDefersBatchCompletion)

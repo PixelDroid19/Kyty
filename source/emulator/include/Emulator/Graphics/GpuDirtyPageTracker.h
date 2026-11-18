@@ -97,6 +97,12 @@ class GpuDirtyPageTracker
 {
 public:
 	static GpuDirtyPageTracker& Instance() noexcept;
+
+	// Advances when the emulator announces a write of guest memory that no guest call asked for, and
+	// when a wait for work that may publish one returns. A reader of guest bytes that sees it
+	// unchanged before and after met no such event in between.
+	[[nodiscard]] static uint64_t HostWriteEpoch() noexcept { return s_host_write_epoch.load(std::memory_order_acquire); }
+	static void                   NoteHostWrite() noexcept { s_host_write_epoch.fetch_add(1, std::memory_order_acq_rel); }
 	explicit GpuDirtyPageTracker(bool enabled = true);
 	GpuDirtyPageTracker(const GpuDirtyPageProtectionOps& protection_ops, bool enabled = true);
 	~GpuDirtyPageTracker();
@@ -146,6 +152,15 @@ public:
 
 	[[nodiscard]] uint64_t             SnapshotGeneration(uintptr_t address, size_t size) const noexcept;
 	[[nodiscard]] bool                 ChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept;
+	// Advances after every change to the state ChangedSince reads (ranges, page
+	// and block entries, their write and fallback epochs, host writes). While it
+	// holds, ChangedSince returns what it returned for the same arguments.
+	[[nodiscard]] uint64_t EvidenceVersion() const noexcept { return m_evidence_version.load(std::memory_order_acquire); }
+	// Whether a page lying wholly inside the registered range changed since
+	// `snapshot`, on the evidence ChangedSince uses. Pages the range shares with
+	// other memory are not consulted; an unregistered range reports a change.
+	[[nodiscard]] bool                 InteriorChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept;
+	[[nodiscard]] uint64_t             PageSize() const noexcept;
 	[[nodiscard]] bool                 ReadObservationIsStable(uintptr_t address, size_t size,
 	                                                          const GpuDirtyReadObservation& observation) const noexcept;
 	[[nodiscard]] bool                 Enabled() const noexcept;
@@ -159,6 +174,7 @@ public:
 	[[nodiscard]] bool PageGenerations(uintptr_t address, size_t size, uint64_t* generations, size_t count) const noexcept;
 
 private:
+	static inline std::atomic<uint64_t> s_host_write_epoch {0};
 	friend struct GpuDirtyPageTrackerTestAccess;
 
 	struct PageEntry;
@@ -234,8 +250,15 @@ private:
 	// fixed table once, including sparse spans over unmapped guest memory.
 	static constexpr size_t kDirectWritePages  = 64u;
 	static constexpr size_t kDirectWriteBlocks = 2048u;
+	// One bit per block of pages, set before a page identity is published and
+	// never cleared. Guest copies notify about a million mostly untracked pages
+	// a second; a clear bit in this L1-sized map answers them without probing
+	// the page table.
+	static constexpr unsigned kIdentityFilterLog2 = 17u;
+	static constexpr size_t   kIdentityFilterBits = size_t {1} << kIdentityFilterLog2;
 
 	[[nodiscard]] uintptr_t         PageStart(uintptr_t address) const noexcept;
+	[[nodiscard]] size_t            IdentityFilterBit(uintptr_t page) const noexcept;
 	[[nodiscard]] uintptr_t         PageEnd(uintptr_t page) const noexcept;
 	[[nodiscard]] uintptr_t         RangeEnd(uintptr_t address, size_t size) const noexcept;
 	[[nodiscard]] PageEntry*        FindPage(uintptr_t page) noexcept;
@@ -313,8 +336,12 @@ private:
 	uint64_t m_next_host_write = 1;
 
 	uint64_t                      m_page_size = 0;
+	// Guest copies reach the page arithmetic about a million times a second; a
+	// shift and a mask replace the divisions there.
+	unsigned                      m_page_shift = 0;
 	std::unique_ptr<PageEntry[]>  m_pages;
 	std::unique_ptr<BlockEntry[]> m_blocks;
+	std::unique_ptr<std::atomic<uint64_t>[]> m_identity_filter;
 	std::map<RangeKey, RangeRecord> m_ranges;
 	// Rearm scratch: each block's change count read before its pages are
 	// visited, kUnprovenBlock once one of them was not found armed.
@@ -325,6 +352,16 @@ private:
 	uintptr_t                     m_max_range_bytes    = 0;
 	mutable std::mutex*           m_registration_mutex = nullptr;
 	std::atomic<uint64_t>*        m_epoch              = nullptr;
+	std::atomic<uint64_t>         m_evidence_version {0};
+	// Advances m_evidence_version when the change it guards has been made.
+	struct EvidenceChange
+	{
+		explicit EvidenceChange(GpuDirtyPageTracker* tracker): tracker(tracker) {}
+		~EvidenceChange() { tracker->m_evidence_version.fetch_add(1, std::memory_order_release); }
+		EvidenceChange(const EvidenceChange&)            = delete;
+		EvidenceChange& operator=(const EvidenceChange&) = delete;
+		GpuDirtyPageTracker* tracker;
+	};
 	GpuDirtyPageProtectionOps     m_protection_ops {};
 	// Guest protection authority. Restorers announce themselves in m_restorers
 	// and back off while m_authority_fences is nonzero; a VM change or a slot

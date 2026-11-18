@@ -1033,7 +1033,7 @@ TileGpuDetileStatus TileGpuDetileDepthD16Inline(GraphicContext* ctx, CommandBuff
 	before_clear.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &before_clear, 0u,
 	                     nullptr, 0u, nullptr);
-	vkCmdFillBuffer(vk_buffer, scratch->buffer, 0u, scratch_bytes, 0u);
+	VulkanCmdFillBuffer(vk_buffer, scratch->buffer, 0u, scratch_bytes, 0u);
 	VkMemoryBarrier before_compute {};
 	before_compute.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	before_compute.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;

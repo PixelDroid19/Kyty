@@ -85,6 +85,7 @@ namespace AudioIn {
 int KYTY_SYSV_ABI AudioInOpen(int user_id, uint32_t type, uint32_t index, uint32_t len, uint32_t freq, uint32_t param);
 int KYTY_SYSV_ABI AudioInInput(int handle, void* dest);
 int KYTY_SYSV_ABI AudioInClose(int handle);
+int KYTY_SYSV_ABI AudioInGetSilentState(int handle);
 
 } // namespace AudioIn
 
@@ -146,6 +147,22 @@ void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(void* buffer, uint32_t instance,
 int KYTY_SYSV_ABI   AjmBatchStartBuffer(uint32_t context, uint8_t* batch_buffer, uint32_t batch_size, int priority, AjmBatchError* error,
                                         uint32_t* batch_id);
 int KYTY_SYSV_ABI   AjmBatchWait(uint32_t context, uint32_t batch_id, uint32_t timeout, AjmBatchError* error);
+// The ATRAC9 config is the four FE-prefixed bytes of the stream header.
+constexpr size_t AJM_AT9_CONFIG_DATA_SIZE = 4;
+
+// Per channel, except the superframe size in bytes.
+struct AjmDecAt9ConfigDataInfo
+{
+	uint32_t channels;
+	uint32_t sample_rate;
+	uint32_t frame_samples;
+	uint32_t superframe_samples;
+	uint32_t superframe_size;
+};
+static_assert(sizeof(AjmDecAt9ConfigDataInfo) == 20);
+
+int KYTY_SYSV_ABI   AjmDecAt9ParseConfigData(const uint8_t* config, AjmDecAt9ConfigDataInfo* info);
+int KYTY_SYSV_ABI   AjmBatchErrorDump(const void* info, AjmBatchError* error);
 int KYTY_SYSV_ABI   AjmBatchCancel(uint32_t context, uint32_t batch_id);
 int KYTY_SYSV_ABI   AjmBatchJobInitialize(void* batch, uint32_t instance, const void* config, size_t config_size, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobClearContext(void* batch, uint32_t instance, void* result);

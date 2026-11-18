@@ -7,6 +7,7 @@
 #include "Emulator/SystemContentPort.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -99,9 +100,8 @@ void RemoveReplacedBlobs(const std::filesystem::path& current, const VkPhysicalD
 }
 
 // Identity of the blob the cache file holds, as this process last loaded or
-// wrote it. Pipelines that hit the cache still mark it dirty, and rewriting an
-// unchanged blob would spend the session write budget before new pipelines
-// appear.
+// wrote it. Rewriting an unchanged blob would spend the session write budget
+// before new pipelines appear.
 struct PersistedBlob
 {
 	std::mutex mutex;
@@ -130,7 +130,28 @@ bool MatchesPersisted(const std::vector<uint8_t>& data)
 	return blob.size == data.size() && blob.digest == XXH3_64bits(data.data(), data.size());
 }
 
+std::atomic<bool> g_added_entries {false};
+
 } // namespace
+
+void PipelineCacheStoreRecordCreation(VkResult result, const VkPipelineCreationFeedback& feedback)
+{
+	if (PipelineCacheCreationAddsEntry(result, feedback.flags))
+	{
+		g_added_entries.store(true, std::memory_order_relaxed);
+	}
+}
+
+bool PipelineCacheStoreTakeAddedEntries()
+{
+	return g_added_entries.exchange(false, std::memory_order_relaxed);
+}
+
+std::shared_mutex& PipelineCacheAccess()
+{
+	static std::shared_mutex access;
+	return access;
+}
 
 std::vector<uint8_t> PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& properties)
 {

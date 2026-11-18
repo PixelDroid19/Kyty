@@ -534,6 +534,43 @@ TEST(EmulatorGraphicsDirtyTracking, FaultAndRearmAdvanceGeneration)
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 
+// Callers reuse a clean ChangedSince answer while the evidence version holds, so
+// every change that can turn that answer must advance it.
+TEST(EmulatorGraphicsDirtyTracking, EvidenceVersionAdvancesOnEveryChangeChangedSinceReads)
+{
+	Mapping mapping;
+	ASSERT_NE(mapping.address, 0u);
+	GpuDirtyPageTracker tracker;
+	uint64_t version = tracker.EvidenceVersion();
+	const auto advanced = [&]
+	{
+		const uint64_t now  = tracker.EvidenceVersion();
+		const bool     moved = now != version;
+		version              = now;
+		return moved;
+	};
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	EXPECT_TRUE(advanced());
+	ASSERT_TRUE(tracker.PrepareForRead(mapping.address, mapping.size));
+	const uint64_t snapshot = tracker.SnapshotGeneration(mapping.address, mapping.size);
+	(void)advanced();
+	EXPECT_FALSE(tracker.ChangedSince(mapping.address, mapping.size, snapshot));
+	EXPECT_FALSE(advanced());
+	ASSERT_TRUE(tracker.HandleWriteFault(mapping.address));
+	*reinterpret_cast<uint8_t*>(mapping.address) = 0x5a;
+	EXPECT_TRUE(advanced());
+	EXPECT_TRUE(tracker.ChangedSince(mapping.address, mapping.size, snapshot));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	(void)advanced();
+	const uint64_t token = tracker.BeginHostWrite(mapping.address, 1u);
+	ASSERT_NE(token, 0u);
+	EXPECT_TRUE(advanced());
+	tracker.EndHostWrite(token);
+	EXPECT_TRUE(advanced());
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+	EXPECT_TRUE(advanced());
+}
+
 // A rearm that finds the whole range armed lets later rearms skip the page walk,
 // until a write to any of its pages makes that page writable again.
 TEST(EmulatorGraphicsDirtyTracking, ProvenArmedRangeIsProtectedAgainAfterAWrite)
@@ -997,6 +1034,29 @@ TEST(EmulatorGraphicsDirtyTracking, HostNotificationMarksEveryOverlappingPage)
 	EXPECT_TRUE(tracker.ChangedSince(mapping.address, mapping.size, before));
 	EXPECT_EQ(tracker.Mode(mapping.address, mapping.size), GpuDirtyTrackingMode::PageFault);
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
+// A write outside the range on a page it only partly covers changes the range's
+// page evidence but not its interior; a write on a page it wholly covers does.
+TEST(EmulatorGraphicsDirtyTracking, InteriorChangeSkipsPartlyCoveredPages)
+{
+	Mapping mapping(3u);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page    = GetPageSize();
+	const uint64_t      address = mapping.address + 16u;
+	const uint64_t      size    = 2u * page;
+	GpuDirtyPageTracker tracker;
+	ASSERT_TRUE(tracker.RegisterRange(address, size));
+	ASSERT_TRUE(tracker.PrepareForRead(address, size));
+	const uint64_t before = tracker.SnapshotGeneration(address, size);
+	EXPECT_FALSE(tracker.InteriorChangedSince(address, size, before));
+	(void)tracker.NotifyWrite(mapping.address, 1u);
+	EXPECT_TRUE(tracker.ChangedSince(address, size, before));
+	EXPECT_FALSE(tracker.InteriorChangedSince(address, size, before));
+	EXPECT_TRUE(tracker.InteriorChangedSince(address, size - 1u, before));
+	(void)tracker.NotifyWrite(mapping.address + page, 1u);
+	EXPECT_TRUE(tracker.InteriorChangedSince(address, size, before));
+	EXPECT_TRUE(tracker.UnregisterRange(address, size));
 }
 
 // Partial uploads copy only the pages whose generation moved: a write must

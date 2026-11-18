@@ -1327,42 +1327,6 @@ const std::vector<ShaderDynamicSLoadUse>& ShaderCodeResourceMemo::DescriptorSLoa
 	return m_descriptor_sload_uses;
 }
 
-static bool ShaderEudDwordHasStaticResource(const ShaderBindResources& bind, int offset_dw)
-{
-	const int  reg    = offset_dw + 16;
-	const auto within = [reg](int start, int dwords) { return reg >= start && reg < start + dwords; };
-	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
-	{
-		if (bind.storage_buffers.extended[i] && !bind.storage_buffers.dynamic_sload[i] && within(bind.storage_buffers.start_register[i], 4))
-		{
-			return true;
-		}
-	}
-	for (int i = 0; i < bind.textures2D.textures_num; ++i)
-	{
-		const auto& texture = bind.textures2D.desc[i];
-		if (texture.extended && !texture.dynamic_sload && within(texture.start_register, 8))
-		{
-			return true;
-		}
-	}
-	for (int i = 0; i < bind.samplers.samplers_num; ++i)
-	{
-		if (bind.samplers.extended[i] && !bind.samplers.dynamic_sload[i] && within(bind.samplers.start_register[i], 4))
-		{
-			return true;
-		}
-	}
-	for (int i = 0; i < bind.gds_pointers.pointers_num; ++i)
-	{
-		if (bind.gds_pointers.extended[i] && within(bind.gds_pointers.start_register[i], 1))
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
 bool ShaderEudDescriptorLoadIsUnmapped(const ShaderBindResources& bind, const ShaderInstruction& sload)
 {
 	int offset_dw = 0;
@@ -1371,14 +1335,286 @@ bool ShaderEudDescriptorLoadIsUnmapped(const ShaderBindResources& bind, const Sh
 	{
 		return false;
 	}
-	for (int word = 0; word < sload.dst.size; ++word)
+	const int words = sload.dst.size;
+	if (words <= 0)
 	{
-		if (!ShaderEudDwordHasStaticResource(bind, offset_dw + word))
+		return false;
+	}
+	EXIT_IF(words > 32);
+	// One pass over the static extended resources marks the loaded words they cover.
+	const int first   = offset_dw + 16;
+	uint32_t  covered = 0;
+	const auto cover  = [&](int start, int dwords)
+	{
+		for (int reg = std::max(start, first); reg < std::min(start + dwords, first + words); ++reg)
 		{
-			return true;
+			covered |= 1u << static_cast<uint32_t>(reg - first);
+		}
+	};
+	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	{
+		if (bind.storage_buffers.extended[i] && !bind.storage_buffers.dynamic_sload[i])
+		{
+			cover(bind.storage_buffers.start_register[i], 4);
 		}
 	}
-	return false;
+	for (int i = 0; i < bind.textures2D.textures_num; ++i)
+	{
+		const auto& texture = bind.textures2D.desc[i];
+		if (texture.extended && !texture.dynamic_sload)
+		{
+			cover(texture.start_register, 8);
+		}
+	}
+	for (int i = 0; i < bind.samplers.samplers_num; ++i)
+	{
+		if (bind.samplers.extended[i] && !bind.samplers.dynamic_sload[i])
+		{
+			cover(bind.samplers.start_register[i], 4);
+		}
+	}
+	for (int i = 0; i < bind.gds_pointers.pointers_num; ++i)
+	{
+		if (bind.gds_pointers.extended[i])
+		{
+			cover(bind.gds_pointers.start_register[i], 1);
+		}
+	}
+	const uint32_t all_words = words == 32 ? ~0u : (1u << static_cast<uint32_t>(words)) - 1u;
+	return covered != all_words;
+}
+
+// Where one word of a loaded V# lives: an SGPR, a VGPR lane a static
+// V_WRITELANE parked it in, or both (-1 when it is not there).
+struct ShaderDescriptorWordPlace
+{
+	int sgpr = -1;
+	int vgpr = -1;
+	int lane = -1;
+};
+using ShaderDescriptorPlaces = std::array<ShaderDescriptorWordPlace, 4>;
+
+static bool ShaderStaticLane(const ShaderOperand& operand, int* lane)
+{
+	if (operand.type != ShaderOperandType::IntegerInlineConstant || operand.constant.i < 0 || operand.constant.i > 63)
+	{
+		return false;
+	}
+	*lane = operand.constant.i;
+	return true;
+}
+
+// V_WRITELANE of one SGPR into a constant lane, the scalar spill store.
+static bool ShaderScalarSpillStore(const ShaderInstruction& inst, int* lane)
+{
+	return inst.type == ShaderInstructionType::VWritelaneB32 && inst.dst.type == ShaderOperandType::Vgpr && inst.src_num >= 2 &&
+	       inst.src[0].type == ShaderOperandType::Sgpr && inst.src[0].size == 1 && ShaderStaticLane(inst.src[1], lane);
+}
+
+static bool ShaderOperandCoversVgpr(const ShaderOperand& operand, int reg)
+{
+	return operand.type == ShaderOperandType::Vgpr && reg >= operand.register_id && reg < operand.register_id + std::max(operand.size, 1);
+}
+
+static bool ShaderIsBufferFormatLoad(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::BufferLoadFormatX || type == ShaderInstructionType::BufferLoadFormatXy ||
+	       type == ShaderInstructionType::BufferLoadFormatXyz || type == ShaderInstructionType::BufferLoadFormatXyzw;
+}
+
+static bool ShaderDescriptorPlacesLive(const ShaderDescriptorPlaces& places)
+{
+	return std::any_of(places.begin(), places.end(), [](const auto& place) { return place.sgpr >= 0 || place.vgpr >= 0; });
+}
+
+// False when inst reads a word of the V# other than as a whole-V# format load
+// or as the SGPR of a spill store; sets *consumed for a format load.
+static bool ShaderDescriptorReadIsFormatLoadOrSpill(const ShaderInstruction& inst, const ShaderDescriptorPlaces& places, bool* consumed)
+{
+	bool whole = true;
+	for (int word = 0; word < 4; ++word)
+	{
+		whole = whole && places[0].sgpr >= 0 && places[word].sgpr == places[0].sgpr + word;
+	}
+	int        lane  = 0;
+	const bool spill = ShaderScalarSpillStore(inst, &lane);
+	auto reads_word = [&](const ShaderOperand& operand)
+	{
+		return std::any_of(places.begin(), places.end(),
+		                   [&](const auto& place) { return place.sgpr >= 0 && ShaderOperandOverlapsSgprRange(operand, place.sgpr, 1); });
+	};
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		const auto& operand = inst.src[source];
+		if (!reads_word(operand) || (spill && source == 0))
+		{
+			continue;
+		}
+		if (!whole || source != 1 || !ShaderIsBufferFormatLoad(inst.type) || operand.type != ShaderOperandType::Sgpr ||
+		    operand.register_id != places[0].sgpr || operand.size != 4)
+		{
+			return false;
+		}
+		*consumed = true;
+	}
+	// A parked word leaves its lane only through a V_READLANE of that constant lane.
+	int        read_lane   = 0;
+	const bool static_read = inst.type == ShaderInstructionType::VReadlaneB32 && inst.src_num >= 2 && ShaderStaticLane(inst.src[1], &read_lane);
+	auto reads_lane = [&](const ShaderOperand& operand)
+	{
+		return std::any_of(places.begin(), places.end(),
+		                   [&](const auto& place) { return place.vgpr >= 0 && ShaderOperandCoversVgpr(operand, place.vgpr); });
+	};
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		if (reads_lane(inst.src[source]) && !(static_read && source == 0))
+		{
+			return false;
+		}
+	}
+	for (int source = 0; source < inst.mimg_address_num; ++source)
+	{
+		if (reads_word(inst.mimg_address[source]) || reads_lane(inst.mimg_address[source]))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+// Applies inst to where the words live: SGPR writes drop them, a spill store
+// parks them in a lane, a VGPR write drops the lanes, and a V_READLANE of a
+// parked lane brings the word back into an SGPR. False when a word would live
+// in two SGPRs or two lanes, which one place per word cannot follow.
+static bool ShaderMoveDescriptorPlaces(const ShaderInstruction& inst, ShaderDescriptorPlaces* places)
+{
+	std::array<int, 4> restored {-1, -1, -1, -1};
+	int                lane = 0;
+	if (inst.type == ShaderInstructionType::VReadlaneB32 && inst.src_num >= 2 && inst.src[0].type == ShaderOperandType::Vgpr &&
+	    inst.dst.type == ShaderOperandType::Sgpr && inst.dst.size == 1 && ShaderStaticLane(inst.src[1], &lane))
+	{
+		for (int word = 0; word < 4; ++word)
+		{
+			if ((*places)[word].vgpr == inst.src[0].register_id && (*places)[word].lane == lane)
+			{
+				restored[word] = inst.dst.register_id;
+			}
+		}
+	}
+	const bool spill = ShaderScalarSpillStore(inst, &lane);
+	for (int word = 0; word < 4; ++word)
+	{
+		auto& place = (*places)[word];
+		if (place.sgpr >= 0 && ShaderInstructionWritesSgprRange(inst, place.sgpr, 1))
+		{
+			place.sgpr = -1;
+		}
+		const bool lane_written = spill ? place.vgpr == inst.dst.register_id && place.lane == lane
+		                                : place.vgpr >= 0 && (ShaderOperandCoversVgpr(inst.dst, place.vgpr) ||
+		                                                      ShaderOperandCoversVgpr(inst.dst2, place.vgpr));
+		if (lane_written)
+		{
+			place.vgpr = -1;
+			place.lane = -1;
+		}
+		if (spill && place.sgpr == inst.src[0].register_id)
+		{
+			if (place.vgpr >= 0)
+			{
+				return false;
+			}
+			place.vgpr = inst.dst.register_id;
+			place.lane = lane;
+		}
+		if (restored[word] >= 0)
+		{
+			if (place.sgpr >= 0 && place.sgpr != restored[word])
+			{
+				return false;
+			}
+			place.sgpr = restored[word];
+		}
+	}
+	return true;
+}
+
+// Every reader of the V# the S_LOAD at index fills, followed through static
+// lane spills, is a format load of the whole V#, and the V# is dead in SGPRs
+// and lanes before any branch or the program ends.
+static bool ShaderLoadedDescriptorReadOnlyByFormatLoads(const ShaderCode& code, uint32_t index)
+{
+	const auto&            instructions = code.GetInstructions();
+	ShaderDescriptorPlaces places {};
+	for (int word = 0; word < 4; ++word)
+	{
+		places[word].sgpr = instructions.At(index).dst.register_id + word;
+	}
+	bool consumed = false;
+	for (uint32_t next = index + 1; next < instructions.Size() && ShaderDescriptorPlacesLive(places); ++next)
+	{
+		const auto& inst = instructions.At(next);
+		if (inst.type == ShaderInstructionType::SEndpgm)
+		{
+			return consumed;
+		}
+		if (inst.type == ShaderInstructionType::Unknown || inst.type == ShaderInstructionType::SSetpcB64 ||
+		    ShaderInstructionHasStaticBranchTarget(inst.type) || !ShaderDescriptorReadIsFormatLoadOrSpill(inst, places, &consumed) ||
+		    !ShaderMoveDescriptorPlaces(inst, &places))
+		{
+			return false;
+		}
+	}
+	return consumed && !ShaderDescriptorPlacesLive(places);
+}
+
+static bool ShaderIsScalarMemoryLoad(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::SLoadDword || type == ShaderInstructionType::SLoadDwordx2 ||
+	       type == ShaderInstructionType::SLoadDwordx4 || type == ShaderInstructionType::SLoadDwordx8 ||
+	       type == ShaderInstructionType::SLoadDwordx16;
+}
+
+bool ShaderEudDescriptorReadOnlyByFormatLoads(const ShaderCode& code, const ShaderBindResources& bind, int eud_offset_dw,
+                                              int user_data_register_base, const ShaderScalarFlow& scalar_flow)
+{
+	const auto& instructions = code.GetInstructions();
+	if (!bind.extended.used || bind.extended.read_at_runtime || eud_offset_dw < 0 ||
+	    scalar_flow.holding_entry_value.size() != instructions.Size())
+	{
+		return false;
+	}
+	const int pointer = bind.extended.start_register + user_data_register_base;
+	bool      found   = false;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst    = instructions.At(index);
+		const auto& entry   = scalar_flow.holding_entry_value[index];
+		const bool  holding = pointer >= 0 && pointer + 1 < kShaderScalarLivenessSgprs && entry.test(static_cast<size_t>(pointer)) &&
+		                     entry.test(static_cast<size_t>(pointer + 1));
+		if (!holding || !ShaderInstructionReadsSgprRange(inst, pointer, 2))
+		{
+			continue;
+		}
+		// Any other use of the pointer may read the V# where this scan cannot follow it.
+		int offset_dw = 0;
+		if (!ShaderIsScalarMemoryLoad(inst.type) ||
+		    !ShaderMatchesEudPointer(inst.src[0], bind.extended.start_register, user_data_register_base, entry) ||
+		    !ShaderGetSmemConstantDwordOffset(inst, &offset_dw) || inst.dst.type != ShaderOperandType::Sgpr)
+		{
+			return false;
+		}
+		if (offset_dw + inst.dst.size <= eud_offset_dw || offset_dw >= eud_offset_dw + 4)
+		{
+			continue;
+		}
+		if (offset_dw != eud_offset_dw || inst.type != ShaderInstructionType::SLoadDwordx4 || inst.dst.size != 4 ||
+		    !ShaderLoadedDescriptorReadOnlyByFormatLoads(code, index))
+		{
+			return false;
+		}
+		found = true;
+	}
+	return found;
 }
 
 ShaderEudDescriptorLoads ShaderFindEudDescriptorLoads(const ShaderCode& code)
@@ -2597,6 +2833,31 @@ static uint32_t ShaderUniqueReachingSgprWrite(const ShaderCode& code, const Shad
 	return UINT32_MAX;
 }
 
+bool ShaderCodeResourceMemo::SgprWrittenOnEveryPath(const ShaderCode& code, uint32_t index, int reg) const
+{
+	std::shared_ptr<const ShaderControlFlowGraph> cfg;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		const auto                  found = m_written_on_every_path.find({index, reg});
+		if (found != m_written_on_every_path.end())
+		{
+			return found->second;
+		}
+		cfg = m_cfg;
+	}
+	if (cfg == nullptr)
+	{
+		cfg = std::make_shared<const ShaderControlFlowGraph>(ShaderBuildControlFlowGraph(code));
+	}
+	const bool                  written = ShaderUniqueReachingSgprWrite(code, *cfg, index, reg) != UINT32_MAX;
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (m_cfg == nullptr)
+	{
+		m_cfg = cfg;
+	}
+	return m_written_on_every_path.emplace(std::make_pair(index, reg), written).first->second;
+}
+
 // Follows each V# dword of a buffer consumer back, through the only write
 // reaching it on every path, across scalar moves to the load that writes it.
 // The dwords must be four consecutive dwords of one table read through one
@@ -2967,7 +3228,8 @@ static bool ShaderBufferRegisterNamesBinding(const ShaderBindResources& bind, co
 }
 
 void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
-                                             const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo)
+                                             const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo,
+                                             bool record_consumers)
 {
 	EXIT_IF(bind == nullptr);
 	const auto& holding      = scalar_flow.holding_entry_value;
@@ -2977,6 +3239,7 @@ void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindR
 	{
 		return;
 	}
+	bind->descriptor_flow_proven = true;
 	const ShaderInstructionIndices direct  = memo == nullptr ? ShaderIndexInstructions(code) : ShaderInstructionIndices {};
 	const auto&                    indices = memo != nullptr ? memo->InstructionIndices(code) : direct;
 	for (const uint32_t index: indices.buffer_accesses)
@@ -2997,12 +3260,39 @@ void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindR
 		// The binding replaces the base dword with the descriptor slot; only a
 		// base still holding it addresses the bound buffer.
 		const int base = scalar ? inst.src[0].register_id : vector->register_id;
-		if (base < 0 || base >= kShaderScalarLivenessSgprs || holding[index].test(static_cast<size_t>(base)) ||
-		    !ShaderBufferRegisterNamesBinding(*bind, inst, user_data_register_base))
+		if (base < 0 || base >= kShaderScalarLivenessSgprs || !ShaderBufferRegisterNamesBinding(*bind, inst, user_data_register_base))
 		{
 			continue;
 		}
-		bind->redefined_descriptor_consumers.Add(inst.pc);
+		if (!holding[index].test(static_cast<size_t>(base)) && record_consumers)
+		{
+			bind->redefined_descriptor_consumers.Add(inst.pc);
+			continue;
+		}
+		if (!holding[index].test(static_cast<size_t>(base)))
+		{
+			// A slot-only consumer must never see the bound row, which may hold a
+			// device address: a path that keeps it refuses the buffer instead.
+			const bool written = memo != nullptr
+			                         ? memo->SgprWrittenOnEveryPath(code, index, base)
+			                         : ShaderUniqueReachingSgprWrite(code, ShaderBuildControlFlowGraph(code), index, base) != UINT32_MAX;
+			const int  bound   = ShaderStorageBufferBoundIndex(*bind, scalar ? inst.src[0] : *vector, user_data_register_base);
+			if (written)
+			{
+				bind->slot_only_consumers.Add(inst.pc);
+			} else if (bound >= 0)
+			{
+				bind->storage_buffers.row_redefined[bound] = true;
+			}
+			continue;
+		}
+		// A read by address also takes words 1 (high address) and 2 (size) from the row.
+		const int bound = ShaderStorageBufferBoundIndex(*bind, scalar ? inst.src[0] : *vector, user_data_register_base);
+		if (bound >= 0 && (base + 2 >= kShaderScalarLivenessSgprs || !holding[index].test(static_cast<size_t>(base + 1)) ||
+		                   !holding[index].test(static_cast<size_t>(base + 2))))
+		{
+			bind->storage_buffers.row_redefined[bound] = true;
+		}
 	}
 }
 

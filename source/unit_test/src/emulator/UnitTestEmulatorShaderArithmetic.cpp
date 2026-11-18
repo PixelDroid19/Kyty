@@ -132,7 +132,7 @@ void CheckDeclaredModuleIds(const ShaderCode& code, const Core::String8& source)
 }
 
 Core::String8 Emit(const ShaderCode& code, uint8_t float_mode = 0xc0u, bool ieee = false, bool dx10 = false, bool validate = false,
-                   Fp16Overflow overflow = Fp16Overflow::Disabled, bool split_wave = false)
+                   Fp16Overflow overflow = Fp16Overflow::Disabled, bool split_wave = false, uint32_t split_lanes = 32)
 {
 	// These are explicit synthetic initial controls, including known-disabled
 	// FP16_OVFL for the original fixtures. Production defaults remain unknown.
@@ -157,8 +157,8 @@ Core::String8 Emit(const ShaderCode& code, uint8_t float_mode = 0xc0u, bool ieee
 	if (split_wave)
 	{
 		compute.native_wave_sensitive  = true;
-		compute.required_subgroup_size = 32;
-		compute.wave_layout            = {ShaderComputeWaveStrategy::Split64On32, {1, 1, 1}, {64, 1, 1}, 64, 32, 1, 1, 0};
+		compute.required_subgroup_size = split_lanes;
+		compute.wave_layout            = {ShaderComputeWaveStrategy::Split64On32, {1, 1, 1}, {64, 1, 1}, 64, split_lanes, 1, 1, 0};
 	}
 	const bool cs = code.GetType() == ShaderType::Compute;
 	const auto source = SpirvGenerateSource(code, nullptr, cs ? nullptr : &input, cs ? &compute : nullptr);
@@ -349,6 +349,23 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	check_subb(3u, 5u, 5u, 1u, UINT32_MAX, 1u, "S_SUBB_U32 equal sources with borrow-in");
 	check_subb(3u, UINT32_MAX, UINT32_MAX, 1u, UINT32_MAX, 1u,
 	           "S_SUBB_U32 UINT32_MAX plus borrow-in does not wrap the borrow test");
+	// S_MIN/S_MAX set SCC when S0 is the strict winner, not when the result is non-zero.
+	const auto check_min_max = [](uint32_t opcode, uint32_t source0, uint32_t source1, uint32_t expected_result,
+	                              uint32_t expected_scc, const char* label) {
+		auto code = Parse({Sop2Word(opcode, 2u, 0u, 1u), kEnd});
+		const Program program(Emit(code, 0xc0u, false, false, true).c_str());
+		uint32_t actual_scc = UINT32_MAX;
+		Equal(EvaluateScalar(program, source0, source1, 0u, 0u, 1u - expected_scc, "%s2", &actual_scc), expected_result, label);
+		Equal(actual_scc, expected_scc, label);
+	};
+	check_min_max(0x07u, 0u, 5u, 0u, 1u, "S_MIN_U32 zero minimum from S0");
+	check_min_max(0x07u, UINT32_MAX, 1u, 1u, 0u, "S_MIN_U32 unsigned compare");
+	check_min_max(0x06u, UINT32_MAX, 1u, UINT32_MAX, 1u, "S_MIN_I32 signed compare");
+	check_min_max(0x08u, 7u, 7u, 7u, 0u, "S_MAX_I32 equal sources");
+	check_min_max(0x08u, UINT32_MAX, 0u, 0u, 0u, "S_MAX_I32 zero maximum from S1");
+	check_min_max(0x09u, 5u, 0u, 5u, 1u, "S_MAX_U32 S0 maximum");
+	check_min_max(0x06u, 5u, 1u, 1u, 0u, "S_MIN_I32 S1 minimum");
+	check_min_max(0x09u, 1u, UINT32_MAX, UINT32_MAX, 0u, "S_MAX_U32 unsigned S1 maximum");
 	{
 		auto code = Parse({Sop2Word(0x05u, 0u, 0u, 1u), kEnd});
 		const Program program(Emit(code, 0xc0u, false, false, true).c_str());
@@ -834,6 +851,453 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	std::_Exit(0);
 }
 
+// References written from the RDNA2 ISA descriptions of each opcode.
+uint32_t PermuteByteReference(uint32_t src0, uint32_t src1, uint32_t select)
+{
+	const uint64_t in = (uint64_t {src0} << 32u) | src1;
+	if (select >= 13u)
+	{
+		return 0xffu;
+	}
+	if (select == 12u)
+	{
+		return 0u;
+	}
+	if (select >= 8u)
+	{
+		return ((in >> (16u * (select - 8u) + 15u)) & 1u) != 0u ? 0xffu : 0u;
+	}
+	return static_cast<uint32_t>(in >> (8u * select)) & 0xffu;
+}
+
+uint32_t SignExtend(uint32_t value, uint32_t bits)
+{
+	const uint32_t sign  = 1u << (bits - 1u);
+	const uint32_t field = value & ((sign << 1u) - 1u);
+	return (field ^ sign) - sign;
+}
+
+[[noreturn]] void RunIntegerTernaryContracts(ShaderType stage)
+{
+	Initialize();
+	const Program  xor3(Emit(Parse(Ternary(0x178u), stage), 0u, false, false, true).c_str());
+	const Program  alignbit(Emit(Parse(Ternary(0x14eu), stage), 0u, false, false, true).c_str());
+	const Program  perm(Emit(Parse(Ternary(0x344u), stage), 0u, false, false, true).c_str());
+	const Program  mad_i24(Emit(Parse(Ternary(0x142u), stage), 0u, false, false, true).c_str());
+	const Program  mad_u16(Emit(Parse(Ternary(0x373u), stage), 0u, false, false, true).c_str());
+	const Program  mad_i16(Emit(Parse(Ternary(0x375u), stage), 0u, false, false, true).c_str());
+	const Program  lerp(Emit(Parse(Ternary(0x14du), stage), 0u, false, false, true).c_str());
+	const uint32_t values[] = {0u,          1u,          0x7fu,       0x80u,       0xffu,       0x8000u,     0x00ffffffu,
+	                           0x00800000u, 0x7fffffffu, 0x80000000u, 0xffffffffu, 0x12345678u, 0x89abcdefu, 0xfedcba98u};
+	for (uint32_t a: values)
+	{
+		for (uint32_t b: values)
+		{
+			for (uint32_t c: values)
+			{
+				Equal(Evaluate(xor3, a, b, c), a ^ b ^ c, "v_xor3_b32");
+				Equal(Evaluate(mad_i24, a, b, c), SignExtend(a, 24u) * SignExtend(b, 24u) + c, "v_mad_i32_i24");
+				Equal(Evaluate(mad_u16, a, b, c), (a & 0xffffu) * (b & 0xffffu) + c, "v_mad_u32_u16");
+				Equal(Evaluate(mad_i16, a, b, c), SignExtend(a, 16u) * SignExtend(b, 16u) + c, "v_mad_i32_i16");
+				uint32_t average = 0;
+				for (uint32_t k = 0; k < 4u; k++)
+				{
+					const uint32_t shift = 8u * k;
+					average |= ((((a >> shift) & 0xffu) + ((b >> shift) & 0xffu) + ((c >> shift) & 1u)) >> 1u) << shift;
+				}
+				Equal(Evaluate(lerp, a, b, c), average, "v_lerp_u8");
+			}
+			for (uint32_t shift = 0; shift < 64u; shift++)
+			{
+				const uint64_t pair = (uint64_t {a} << 32u) | b;
+				Equal(Evaluate(alignbit, a, b, shift), static_cast<uint32_t>(pair >> (shift & 31u)), "v_alignbit_b32");
+			}
+			for (uint32_t select = 0; select < 256u; select++)
+			{
+				const uint32_t selects =
+				    select | (((select + 5u) & 0xffu) << 8u) | (((select + 9u) & 0xffu) << 16u) | (((select * 7u) & 0xffu) << 24u);
+				uint32_t expected = 0;
+				for (uint32_t k = 0; k < 4u; k++)
+				{
+					expected |= PermuteByteReference(a, b, (selects >> (8u * k)) & 0xffu) << (8u * k);
+				}
+				Equal(Evaluate(perm, a, b, selects), expected, "v_perm_b32");
+			}
+		}
+	}
+	Equal(Evaluate(perm, 1u, 2u, 3u, 0xdeadbeefu, 0u), 0xdeadbeefu, "inactive v_perm_b32");
+	std::_Exit(0);
+}
+
+// The VOP3 encoding of an integer VOP1 op without modifiers computes what its VOP1 encoding computes.
+[[noreturn]] void RunIntegerUnaryVop3Forms(ShaderType stage)
+{
+	Initialize();
+	for (uint32_t opcode: {0x01u, 0x37u, 0x38u, 0x39u, 0x3au, 0x3bu})
+	{
+		const Program vop1(Emit(Parse(Unary(opcode, false), stage), 0u, false, false, true).c_str());
+		const Program vop3(Emit(Parse(Unary(opcode, true), stage), 0u, false, false, true).c_str());
+		for (uint32_t value: {0u, 1u, 0x80u, 0x00010000u, 0x7fffffffu, 0x80000000u, 0xfffffffeu, 0xffffffffu, 0x12345678u})
+		{
+			Equal(Evaluate(vop3, value), Evaluate(vop1, value), "VOP3 form of an integer VOP1 op");
+		}
+	}
+	std::_Exit(0);
+}
+
+// V_CMP_NEQ_F16 is !(S0 == S1), so a NaN input compares true; V_CMP_LG_F16 is ordered and compares false.
+[[noreturn]] void RunHalfNotEqualCompares(ShaderType stage)
+{
+	Initialize();
+	constexpr uint32_t kVccLo = 106u;
+	constexpr uint32_t kOne = 0x3c00u, kTwo = 0x4000u, kNan = 0x7e00u;
+	const auto compare = [&](uint32_t opcode, const char* destination, uint32_t a, uint32_t b)
+	{
+		const Program program(Emit(Parse({(0x35u << 26u) | (opcode << 16u) | kVccLo, 256u | (257u << 9u), kEnd}, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", a}, {"%v1", b}, {"%vcc_lo", 0u}, {"%vcc_hi", 0u}, {"%gl_SubgroupInvocationID", 0u},
+		                    {"%exec_lo", 1u}, {"%exec_hi", 0u}, {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   destination) &
+		       1u;
+	};
+	for (const auto& [opcode, destination]: {std::pair {0xEDu, "%vcc_lo"}, std::pair {0xFDu, "%exec_lo"}})
+	{
+		Equal(compare(opcode, destination, kOne, kOne), 0u, "not-equal of equal halves");
+		Equal(compare(opcode, destination, kOne, kTwo), 1u, "not-equal of different halves");
+		Equal(compare(opcode, destination, kNan, kOne), 1u, "not-equal with a NaN half");
+		Equal(compare(opcode, destination, kNan, kNan), 1u, "not-equal of two NaN halves");
+	}
+	Equal(compare(0xCDu, "%vcc_lo", kNan, kOne), 0u, "less-or-greater with a NaN half");
+	// V_CMP_NEQ_F64 reads both sources as register pairs (v[0:1], v[2:3]); the fixture holds no
+	// doubles, so it is only emitted and validated.
+	static_cast<void>(Emit(Parse({(0x35u << 26u) | (0x2Du << 16u) | kVccLo, 256u | (258u << 9u), kEnd}, stage), 0u, false, false, true));
+	std::_Exit(0);
+}
+
+// A 64-bit float source: an inline float is the double of that value, an inline integer is sign extended, a
+// literal is the high word (ISA 6.2), and abs/neg act on the sign of the high word.
+[[noreturn]] void RunF64SourceOperands(ShaderType stage)
+{
+	Initialize();
+	constexpr uint32_t kVccLo = 106u, kLiteral = 255u, kOne = 242u, kTwo = 244u, kInvTwoPi = 248u, kIntOne = 129u;
+	constexpr uint64_t kOneBits = 0x3ff0000000000000ull, kTwoBits = 0x4000000000000000ull;
+	const auto equal = [&](uint32_t src1, uint64_t v01, uint64_t v23, uint32_t modifiers0 = 0u, uint32_t modifiers1 = 0u,
+	                       uint32_t literal = 0u)
+	{
+		std::vector<uint32_t> words = {(0x35u << 26u) | (0x22u << 16u) | modifiers0 | kVccLo, 256u | (src1 << 9u) | modifiers1};
+		if (src1 == kLiteral) { words.push_back(literal); }
+		words.push_back(kEnd);
+		const Program program(Emit(Parse(words, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", static_cast<uint32_t>(v01)}, {"%v1", static_cast<uint32_t>(v01 >> 32u)},
+		                    {"%v2", static_cast<uint32_t>(v23)}, {"%v3", static_cast<uint32_t>(v23 >> 32u)}, {"%vcc_lo", 0u},
+		                    {"%vcc_hi", 0u}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", 1u}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   "%vcc_lo") &
+		       1u;
+	};
+	Equal(equal(258u, kTwoBits, kTwoBits), 1u, "f64 compare reads both VGPR pairs");
+	Equal(equal(258u, kTwoBits, kOneBits), 0u, "f64 compare of different VGPR pairs");
+	Equal(equal(kOne, kOneBits, 0u), 1u, "inline 1.0 is the double 1.0");
+	Equal(equal(kOne, kTwoBits, 0u), 0u, "inline 1.0 differs from 2.0");
+	Equal(equal(kInvTwoPi, 0x3fc45f306dc9c882ull, 0u), 1u, "inline 1/(2*PI) has its double encoding");
+	Equal(equal(kIntOne, 1u, 0u), 1u, "inline integer 1 is the 64-bit pattern 1");
+	Equal(equal(kLiteral, kTwoBits, 0u, 0u, 0u, 0x40000000u), 1u, "a literal is the high word");
+	Equal(equal(kOne, 0xbff0000000000000ull, 0u, 0u, 1u << 30u), 1u, "neg flips the sign of a constant source");
+	Equal(equal(kTwo, 0xc000000000000000ull, 0u, 1u << 8u), 1u, "abs clears the sign of a VGPR source");
+	Equal(equal(kTwo, 0xc000000000000000ull, 0u), 0u, "without abs the sign stays");
+	// The VOPC encoding of the same compares: src0 any source, vsrc1 a VGPR pair, VCC destination.
+	const auto vopc = [&](uint32_t opcode, uint32_t src0, uint64_t v01, uint64_t v23)
+	{
+		const Program program(Emit(Parse({(0x3eu << 25u) | (opcode << 17u) | (2u << 9u) | src0, kEnd}, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", static_cast<uint32_t>(v01)}, {"%v1", static_cast<uint32_t>(v01 >> 32u)},
+		                    {"%v2", static_cast<uint32_t>(v23)}, {"%v3", static_cast<uint32_t>(v23 >> 32u)}, {"%vcc_lo", 0u},
+		                    {"%vcc_hi", 0u}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", 1u}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   "%vcc_lo") &
+		       1u;
+	};
+	Equal(vopc(0x22u, 256u, kTwoBits, kTwoBits), 1u, "vopc f64 equal of two VGPR pairs");
+	Equal(vopc(0x22u, 256u, kTwoBits, kOneBits | 1u), 0u, "vopc f64 equal reads the low word of vsrc1");
+	Equal(vopc(0x21u, kOne, 0u, kTwoBits), 1u, "vopc f64 less-than of inline 1.0 and a VGPR pair");
+	const auto convert = [&](uint32_t source, uint32_t literal)
+	{
+		std::vector<uint32_t> words = {(0x3fu << 25u) | (16u << 17u) | (0x0Fu << 9u) | source};
+		if (source == kLiteral) { words.push_back(literal); }
+		words.push_back(kEnd);
+		return Evaluate(Program(Emit(Parse(words, stage), 0u, false, false, true).c_str()), 0u);
+	};
+	Equal(convert(kLiteral, 0x40080000u), 0x40400000u, "v_cvt_f32_f64 of a literal high word 3.0");
+	Equal(convert(kInvTwoPi, 0u), 0x3e22f983u, "v_cvt_f32_f64 of inline 1/(2*PI)");
+	const Program widen(Emit(Parse({(0x3fu << 25u) | (16u << 17u) | (0x10u << 9u) | 256u, kEnd}, stage), 0u, false, false, true).c_str());
+	const auto    widened = [&](const char* word)
+	{
+		return widen.Run({{"%v0", 0x3fc00000u}, {"%v16", 0xdeadbeefu}, {"%v17", 0xdeadbeefu}, {"%exec_lo", 1u}, {"%exec_hi", 0u},
+		                  {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                 word);
+	};
+	Equal(widened("%v16"), 0u, "v_cvt_f64_f32 of 1.5 low word");
+	Equal(widened("%v17"), 0x3ff80000u, "v_cvt_f64_f32 of 1.5 high word");
+	std::_Exit(0);
+}
+
+// VOPC compares decode to the VOP3 translation; one case per family, NaN where the predicate turns on it.
+[[noreturn]] void RunVopcCompareFamilies(ShaderType stage)
+{
+	Initialize();
+	constexpr uint32_t kHalfOne = 0x3c00u, kHalfNan = 0x7e00u, kFloatNan = 0x7fc00000u, kFloatOne = 0x3f800000u;
+	constexpr uint64_t kDoubleOne = 0x3ff0000000000000ull, kDoubleNan = 0x7ff8000000000000ull;
+	const auto vopc = [&](uint32_t opcode, uint64_t v01, uint64_t v23, const char* word)
+	{
+		const Program program(Emit(Parse({(0x3eu << 25u) | (opcode << 17u) | (2u << 9u) | 256u, kEnd}, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", static_cast<uint32_t>(v01)}, {"%v1", static_cast<uint32_t>(v01 >> 32u)},
+		                    {"%v2", static_cast<uint32_t>(v23)}, {"%v3", static_cast<uint32_t>(v23 >> 32u)}, {"%vcc_lo", 0u},
+		                    {"%vcc_hi", 0u}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", 1u}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   word) &
+		       1u;
+	};
+	Equal(vopc(0xCFu, kHalfOne, kHalfOne, "%vcc_lo"), 1u, "v_cmp_o_f16 of two numbers");
+	Equal(vopc(0xCFu, kHalfNan, kHalfOne, "%vcc_lo"), 0u, "v_cmp_o_f16 with a NaN");
+	Equal(vopc(0xE8u, kHalfOne, kHalfNan, "%vcc_lo"), 1u, "v_cmp_u_f16 with a NaN");
+	Equal(vopc(0xE8u, kHalfOne, kHalfOne, "%vcc_lo"), 0u, "v_cmp_u_f16 of two numbers");
+	Equal(vopc(0x27u, kDoubleOne, kDoubleOne, "%vcc_lo"), 1u, "v_cmp_o_f64 of two numbers");
+	Equal(vopc(0x27u, kDoubleOne, kDoubleNan, "%vcc_lo"), 0u, "v_cmp_o_f64 with a NaN");
+	Equal(vopc(0x28u, kDoubleNan, kDoubleOne, "%vcc_lo"), 1u, "v_cmp_u_f64 with a NaN");
+	Equal(vopc(0x28u, kDoubleOne, kDoubleOne, "%vcc_lo"), 0u, "v_cmp_u_f64 of two numbers");
+	Equal(vopc(0x18u, kFloatNan, kFloatOne, "%exec_lo"), 1u, "v_cmpx_u_f32 keeps the lane on a NaN");
+	Equal(vopc(0x18u, kFloatOne, kFloatOne, "%exec_lo"), 0u, "v_cmpx_u_f32 clears the lane of two numbers");
+	Equal(vopc(0x99u, 0xffffu, 1u, "%exec_lo"), 1u, "v_cmpx_lt_i16 compares signed");
+	Equal(vopc(0xB9u, 0xffffu, 1u, "%exec_lo"), 0u, "v_cmpx_lt_u16 compares unsigned");
+	Equal(vopc(0xFDu, kHalfNan, kHalfNan, "%exec_lo"), 1u, "v_cmpx_neq_f16 keeps the lane on a NaN");
+	Equal(vopc(0xFDu, kHalfOne, kHalfOne, "%exec_lo"), 0u, "v_cmpx_neq_f16 clears the lane of equal halves");
+	std::_Exit(0);
+}
+
+// CMPX F64, CMPX O/U/F/TRU F16 and the signed and unsigned 64-bit compares, in the VOPC and VOP3 encodings. A v_cmpx
+// writes EXEC = result AND incoming EXEC and leaves VCC alone; a signed 64-bit compare is signed on the high word only.
+[[noreturn]] void RunWideCompareForms(ShaderType stage)
+{
+	Initialize();
+	constexpr uint32_t kHalfOne = 0x3c00u, kHalfNan = 0x7e00u, kVcc = 106u, kSentinel = 0x5a5a5a5au, kLiteral = 255u;
+	constexpr uint64_t kDoubleOne = 0x3ff0000000000000ull, kDoubleTwo = 0x4000000000000000ull, kDoubleNan = 0x7ff8000000000000ull;
+	constexpr uint64_t kMinusOne = UINT64_MAX, kLowHighBit = 0x80000000ull;
+	const auto run = [&](std::vector<uint32_t> words, uint64_t v01, uint64_t v23, const char* word, uint32_t exec = 1u)
+	{
+		words.push_back(kEnd);
+		const Program program(Emit(Parse(words, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", static_cast<uint32_t>(v01)}, {"%v1", static_cast<uint32_t>(v01 >> 32u)},
+		                    {"%v2", static_cast<uint32_t>(v23)}, {"%v3", static_cast<uint32_t>(v23 >> 32u)}, {"%vcc_lo", kSentinel},
+		                    {"%vcc_hi", kSentinel}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", exec}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", exec}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   word);
+	};
+	const auto vopc = [&](uint32_t opcode, uint64_t v01, uint64_t v23, const char* word, uint32_t exec = 1u)
+	{ return run({(0x3eu << 25u) | (opcode << 17u) | (2u << 9u) | 256u}, v01, v23, word, exec); };
+	const auto vop3 = [&](uint32_t opcode, uint64_t v01, uint64_t v23, const char* word)
+	{ return run({(0x35u << 26u) | (opcode << 16u) | kVcc, 256u | (258u << 9u)}, v01, v23, word); };
+	// CMPX F64: the predicate strings of the VCC forms, with EXEC as the destination.
+	Equal(vopc(0x35u, kDoubleNan, kDoubleOne, "%exec_lo") & 1u, 0u, "v_cmpx_lg_f64 is ordered");
+	Equal(vopc(0x3Du, kDoubleNan, kDoubleOne, "%exec_lo") & 1u, 1u, "v_cmpx_neq_f64 is unordered");
+	Equal(vopc(0x31u, kDoubleOne, kDoubleTwo, "%exec_lo") & 1u, 1u, "v_cmpx_lt_f64 of 1.0 and 2.0");
+	Equal(vopc(0x31u, kDoubleTwo, kDoubleOne, "%exec_lo") & 1u, 0u, "v_cmpx_lt_f64 of 2.0 and 1.0");
+	Equal(vopc(0x37u, kDoubleOne, kDoubleNan, "%exec_lo") & 1u, 0u, "v_cmpx_o_f64 with a NaN");
+	Equal(vopc(0x38u, kDoubleOne, kDoubleNan, "%exec_lo") & 1u, 1u, "v_cmpx_u_f64 with a NaN");
+	Equal(vopc(0x31u, kDoubleOne, kDoubleTwo, "%vcc_lo"), kSentinel, "v_cmpx_lt_f64 leaves VCC alone");
+	Equal(vopc(0x31u, kDoubleOne, kDoubleTwo, "%exec_lo", 0u) & 1u, 0u, "a true v_cmpx_lt_f64 keeps an inactive lane off");
+	Equal(vop3(0x3Du, kDoubleNan, kDoubleOne, "%exec_lo") & 1u, 1u, "VOP3 v_cmpx_neq_f64 is unordered");
+	Equal(vopc(0x30u, kDoubleOne, kDoubleOne, "%exec_lo") & 1u, 0u, "v_cmpx_f_f64 clears the lane");
+	Equal(vopc(0x3Fu, kDoubleOne, kDoubleNan, "%exec_lo") & 1u, 1u, "v_cmpx_tru_f64 keeps the lane");
+	// CMPX F16 F/O/U/TRU.
+	Equal(vopc(0xDFu, kHalfOne, kHalfNan, "%exec_lo") & 1u, 0u, "v_cmpx_o_f16 with a NaN");
+	Equal(vopc(0xDFu, kHalfOne, kHalfOne, "%exec_lo") & 1u, 1u, "v_cmpx_o_f16 of two numbers");
+	Equal(vopc(0xF8u, kHalfNan, kHalfOne, "%exec_lo") & 1u, 1u, "v_cmpx_u_f16 with a NaN");
+	Equal(vopc(0xF8u, kHalfOne, kHalfOne, "%exec_lo") & 1u, 0u, "v_cmpx_u_f16 of two numbers");
+	Equal(vop3(0xF8u, kHalfNan, kHalfOne, "%exec_lo") & 1u, 1u, "VOP3 v_cmpx_u_f16 with a NaN");
+	Equal(vopc(0xD8u, kHalfOne, kHalfOne, "%exec_lo") & 1u, 0u, "v_cmpx_f_f16 clears the lane");
+	Equal(vopc(0xFFu, kHalfNan, kHalfOne, "%exec_lo") & 1u, 1u, "v_cmpx_tru_f16 keeps the lane");
+	// 64-bit integers: the high word decides the sign, the low word compares unsigned.
+	Equal(vopc(0xA1u, kMinusOne, 1u, "%vcc_lo") & 1u, 1u, "v_cmp_lt_i64 of -1 and 1");
+	Equal(vopc(0xE1u, kMinusOne, 1u, "%vcc_lo") & 1u, 0u, "v_cmp_lt_u64 of 0xffff...ffff and 1");
+	Equal(vopc(0xA1u, kLowHighBit, 1u, "%vcc_lo") & 1u, 0u, "v_cmp_lt_i64 compares the low word unsigned");
+	Equal(vopc(0xA4u, kLowHighBit, 1u, "%vcc_lo") & 1u, 1u, "v_cmp_gt_i64 compares the low word unsigned");
+	Equal(vop3(0xA6u, 1u, kMinusOne, "%vcc_lo") & 1u, 1u, "VOP3 v_cmp_ge_i64 of 1 and -1");
+	Equal(vopc(0xA7u, 0u, 1u, "%vcc_lo") & 1u, 1u, "v_cmp_t_i64");
+	Equal(vopc(0xE0u, 0u, 0u, "%vcc_lo") & 1u, 0u, "v_cmp_f_u64");
+	Equal(vopc(0xE7u, 0u, 1u, "%vcc_lo") & 1u, 1u, "v_cmp_t_u64");
+	Equal(vopc(0xB1u, kMinusOne, 1u, "%exec_lo") & 1u, 1u, "v_cmpx_lt_i64 of -1 and 1");
+	Equal(vopc(0xF1u, kMinusOne, 1u, "%exec_lo") & 1u, 0u, "v_cmpx_lt_u64 of 0xffff...ffff and 1");
+	Equal(vopc(0xB1u, kMinusOne, 1u, "%vcc_lo"), kSentinel, "v_cmpx_lt_i64 leaves VCC alone");
+	Equal(vopc(0xF5u, 1u, 2u, "%exec_lo", 0u) & 1u, 0u, "a true v_cmpx_ne_u64 keeps an inactive lane off");
+	Equal(vop3(0xF2u, 0x100000002ull, 0x100000002ull, "%exec_lo") & 1u, 1u, "VOP3 v_cmpx_eq_u64");
+	Equal(vop3(0xB0u, 0u, 0u, "%exec_lo") & 1u, 0u, "VOP3 v_cmpx_f_i64 clears the lane");
+	Equal(vop3(0xF7u, 0u, 1u, "%exec_lo") & 1u, 1u, "VOP3 v_cmpx_t_u64 keeps the lane");
+	Equal(vopc(0x90u, 0u, 0u, "%exec_lo") & 1u, 0u, "v_cmpx_f_i32 clears the lane");
+	Equal(vopc(0xD7u, 0u, 1u, "%exec_lo") & 1u, 1u, "v_cmpx_t_u32 keeps the lane");
+	// ISA 6.2: a 32-bit literal is sign extended for a signed source and zero extended for an unsigned one.
+	const auto literal = [&](uint32_t opcode, uint64_t v01)
+	{ return run({(0x35u << 26u) | (opcode << 16u) | kVcc, 256u | (kLiteral << 9u), 0xffffffffu}, v01, 0u, "%vcc_lo") & 1u; };
+	Equal(literal(0xA2u, kMinusOne), 1u, "a literal 0xffffffff is -1 for v_cmp_eq_i64");
+	Equal(literal(0xE2u, kMinusOne), 0u, "a literal 0xffffffff is not 0xffff...ffff for v_cmp_eq_u64");
+	Equal(literal(0xE2u, 0xffffffffull), 1u, "a literal 0xffffffff zero extends for v_cmp_eq_u64");
+	std::_Exit(0);
+}
+
+// v_cmp(x)_class: the S1 mask bits are signaling NaN, quiet NaN, -inf, -normal, -denormal, -0, +0, +denormal,
+// +normal and +inf. A v_cmpx writes EXEC and leaves VCC alone.
+[[noreturn]] void RunClassForms(ShaderType stage)
+{
+	Initialize();
+	constexpr uint32_t kVcc = 106u, kSentinel = 0x5a5a5a5au;
+	const auto run = [&](std::vector<uint32_t> words, uint64_t value, uint32_t mask, const char* word, uint32_t exec = 1u)
+	{
+		words.push_back(kEnd);
+		const Program program(Emit(Parse(words, stage), 0u, false, false, true).c_str());
+		return program.Run({{"%v0", static_cast<uint32_t>(value)}, {"%v1", static_cast<uint32_t>(value >> 32u)}, {"%v2", mask},
+		                    {"%vcc_lo", kSentinel}, {"%vcc_hi", kSentinel}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", exec},
+		                    {"%exec_hi", 0u}, {"%exec_lane_lo", exec}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+		                   word);
+	};
+	const auto vopc = [&](uint32_t opcode, uint64_t value, uint32_t bit, const char* word, uint32_t exec = 1u)
+	{ return run({(0x3eu << 25u) | (opcode << 17u) | (2u << 9u) | 256u}, value, 1u << bit, word, exec) & 1u; };
+	// modifiers: VOP3 abs bits 8-10 of the first dword, neg bits 29-31 of the second.
+	const auto vop3 = [&](uint32_t opcode, uint64_t value, uint32_t bit, const char* word, uint32_t abs, uint32_t neg)
+	{ return run({(0x35u << 26u) | (opcode << 16u) | (abs << 8u) | kVcc, 256u | (258u << 9u) | (neg << 29u)}, value, 1u << bit, word) & 1u; };
+	// F16 reads the low half only.
+	Equal(vopc(0x8Fu, 0x3c00u, 8u, "%vcc_lo"), 1u, "v_cmp_class_f16 of +1.0 is +normal");
+	Equal(vopc(0x8Fu, 0x3c00u, 3u, "%vcc_lo"), 0u, "v_cmp_class_f16 of +1.0 is not -normal");
+	Equal(vopc(0x8Fu, 0xffff3c00u, 8u, "%vcc_lo"), 1u, "v_cmp_class_f16 ignores the high half");
+	Equal(vopc(0x8Fu, 0x7e00u, 1u, "%vcc_lo"), 1u, "v_cmp_class_f16 quiet NaN");
+	Equal(vopc(0x8Fu, 0x7d00u, 0u, "%vcc_lo"), 1u, "v_cmp_class_f16 signaling NaN");
+	Equal(vopc(0x8Fu, 0x7d00u, 1u, "%vcc_lo"), 0u, "v_cmp_class_f16 signaling NaN is not quiet");
+	Equal(vopc(0x8Fu, 0x8001u, 4u, "%vcc_lo"), 1u, "v_cmp_class_f16 -denormal");
+	Equal(vopc(0x8Fu, 0x7c00u, 9u, "%vcc_lo"), 1u, "v_cmp_class_f16 +inf");
+	Equal(vop3(0x8Fu, 0xbc00u, 8u, "%vcc_lo", 1u, 0u), 1u, "VOP3 v_cmp_class_f16 with abs of -1.0 is +normal");
+	// F64: the low word carries fraction bits only.
+	Equal(vopc(0xA8u, 0x3ff0000000000000ull, 8u, "%vcc_lo"), 1u, "v_cmp_class_f64 of +1.0 is +normal");
+	Equal(vopc(0xA8u, 1u, 7u, "%vcc_lo"), 1u, "v_cmp_class_f64 of the smallest denormal");
+	Equal(vopc(0xA8u, 1u, 6u, "%vcc_lo"), 0u, "v_cmp_class_f64 of the smallest denormal is not +0");
+	Equal(vopc(0xA8u, 0x7ff0000000000001ull, 0u, "%vcc_lo"), 1u, "v_cmp_class_f64 low fraction bit makes a signaling NaN");
+	Equal(vopc(0xA8u, 0x7ff0000000000001ull, 9u, "%vcc_lo"), 0u, "v_cmp_class_f64 signaling NaN is not +inf");
+	Equal(vopc(0xA8u, 0x7ff8000000000000ull, 1u, "%vcc_lo"), 1u, "v_cmp_class_f64 quiet NaN");
+	Equal(vopc(0xA8u, 0x8000000000000000ull, 5u, "%vcc_lo"), 1u, "v_cmp_class_f64 -0");
+	Equal(vop3(0xA8u, 0x3ff0000000000000ull, 3u, "%vcc_lo", 0u, 1u), 1u, "VOP3 v_cmp_class_f64 with neg of +1.0 is -normal");
+	// CMPX writes EXEC.
+	Equal(vopc(0x98u, 0x3f800000u, 8u, "%exec_lo"), 1u, "v_cmpx_class_f32 of +1.0 keeps the lane");
+	Equal(vopc(0x98u, 0x3f800000u, 3u, "%exec_lo"), 0u, "v_cmpx_class_f32 of +1.0 as -normal clears the lane");
+	Equal(run({(0x3eu << 25u) | (0x98u << 17u) | (2u << 9u) | 256u}, 0x3f800000u, 1u << 8u, "%vcc_lo"), kSentinel,
+	      "v_cmpx_class_f32 leaves VCC alone");
+	Equal(vopc(0x98u, 0x3f800000u, 8u, "%exec_lo", 0u), 0u, "a true v_cmpx_class_f32 keeps an inactive lane off");
+	Equal(vopc(0x9Fu, 0x7e00u, 1u, "%exec_lo"), 1u, "v_cmpx_class_f16 quiet NaN");
+	Equal(vopc(0xB8u, 0xfff0000000000000ull, 2u, "%exec_lo"), 1u, "v_cmpx_class_f64 -inf");
+	Equal(vopc(0xB8u, 0xfff0000000000000ull, 9u, "%exec_lo"), 0u, "v_cmpx_class_f64 -inf is not +inf");
+	Equal(vop3(0xB8u, 0x7ff8000000000000ull, 1u, "%exec_lo", 0u, 0u), 1u, "VOP3 v_cmpx_class_f64 quiet NaN");
+	// F64 constants: an inline float is the double, an inline integer extends, a literal is the high word.
+	const auto constant = [&](std::vector<uint32_t> words, uint32_t bit) { return run(std::move(words), 0u, 1u << bit, "%vcc_lo") & 1u; };
+	Equal(constant({(0x3eu << 25u) | (0xA8u << 17u) | (2u << 9u) | 242u}, 8u), 1u, "v_cmp_class_f64 of the inline 1.0 is +normal");
+	Equal(constant({(0x3eu << 25u) | (0xA8u << 17u) | (2u << 9u) | 128u}, 6u), 1u, "v_cmp_class_f64 of the inline 0 is +0");
+	Equal(constant({(0x3eu << 25u) | (0xA8u << 17u) | (2u << 9u) | 255u, 0x7ff00000u}, 9u), 1u,
+	      "v_cmp_class_f64 of the literal 0x7ff00000 is +inf");
+	std::_Exit(0);
+}
+
+// The integer load does not produce the half encoding of an F16 inline float.
+[[noreturn]] void EmitClassF16WithInlineFloat()
+{
+	Initialize();
+	static_cast<void>(Emit(Parse({(0x3eu << 25u) | (0x8Fu << 17u) | (2u << 9u) | 242u, kEnd}), 0u, false, false, true));
+	std::_Exit(0);
+}
+
+// v_mad_u16 / v_mad_i16: D.16 = S0.16 * S1.16 + S2.16; OPSEL[2:0] pick the source halves and OPSEL[3] the
+// destination half, the other half kept.
+[[noreturn]] void RunMad16(ShaderType stage)
+{
+	Initialize();
+	const auto mad = [&](uint32_t opcode, uint32_t op_sel, uint32_t a, uint32_t b, uint32_t c, uint32_t old)
+	{
+		const Program program(Emit(Parse({(0x35u << 26u) | (opcode << 16u) | (op_sel << 11u) | 16u, 256u | (257u << 9u) | (258u << 18u), kEnd},
+		                                 stage),
+		                           0u, false, false, true)
+		                          .c_str());
+		return Evaluate(program, a, b, c, old);
+	};
+	Equal(mad(0x340u, 0u, 0xffffu, 2u, 3u, 0xa5a51234u), 0xa5a50001u, "v_mad_u16 keeps the low 16 bits and the high half");
+	Equal(mad(0x340u, 8u, 0xffffu, 2u, 3u, 0xa5a51234u), 0x00011234u, "v_mad_u16 with OPSEL[3] writes the high half");
+	Equal(mad(0x340u, 1u, 0x00050000u, 3u, 1u, 0u), 16u, "v_mad_u16 with OPSEL[0] reads the high half of src0");
+	Equal(mad(0x340u, 4u, 2u, 3u, 0x00070000u, 0u), 13u, "v_mad_u16 with OPSEL[2] reads the high half of src2");
+	Equal(mad(0x35Eu, 0u, 0xfffeu, 3u, 0x0010u, 0xffff0000u), 0xffff000au, "v_mad_i16 of -2 * 3 + 16");
+	std::_Exit(0);
+}
+
+[[noreturn]] void EmitMad16WithClamp()
+{
+	Initialize();
+	static_cast<void>(Emit(Parse({(0x35u << 26u) | (0x340u << 16u) | (1u << 15u) | 16u, 256u | (257u << 9u) | (258u << 18u), kEnd}), 0u,
+	                       false, false, true));
+	std::_Exit(0);
+}
+
+[[noreturn]] void ParseVop3Opcode833()
+{
+	Initialize();
+	static_cast<void>(Parse({(0x35u << 26u) | (0x341u << 16u) | 16u, 256u | (257u << 9u) | (258u << 18u), kEnd}));
+	std::_Exit(0);
+}
+
+// ISA 6.2 for an integer 64-bit source: an inline float is the double encoding, a literal is zero extended for
+// an unsigned source and sign extended for a signed one.
+[[noreturn]] void RunInt64SourceConstants()
+{
+	Initialize();
+	constexpr uint32_t kLiteral = 255u, kOne = 242u, kInlineZero = 128u;
+	const auto run = [&](const std::vector<uint32_t>& words, const char* destination)
+	{
+		const Program program(Emit(Parse(words), 0xc0u, false, false, true).c_str());
+		uint32_t      scc = 0;
+		return EvaluateScalar(program, 0u, 0u, 0u, 0u, 0u, destination, &scc);
+	};
+	const uint32_t ashr = Sop2Word(0x23u, 2u, kLiteral, kInlineZero);
+	Equal(run({ashr, 0x80000000u, kEnd}, "%s3"), 0xffffffffu, "s_ashr_i64 sign extends a negative literal");
+	Equal(run({ashr, 0x80000000u, kEnd}, "%s2"), 0x80000000u, "s_ashr_i64 keeps the literal low word");
+	Equal(run({ashr, 0x7fffffffu, kEnd}, "%s3"), 0u, "s_ashr_i64 of a positive literal");
+	// A constant shift amount or extract control is the usual encoding of both signed 64-bit ops.
+	const Program shift(Emit(Parse({Sop2Word(0x23u, 2u, 0u, 132u), kEnd}), 0xc0u, false, false, true).c_str());
+	uint32_t      scc = 0;
+	Equal(EvaluateScalar(shift, 0u, 0x80000000u, 0u, 0u, 0u, "%s3", &scc), 0xf8000000u, "s_ashr_i64 by an inline 4");
+	const Program extract(Emit(Parse({Sop2Word(0x2Au, 2u, 0u, kLiteral), (8u << 16u) | 4u, kEnd}), 0xc0u, false, false, true).c_str());
+	Equal(EvaluateScalar(extract, 0x00000ff0u, 0u, 0u, 0u, 0u, "%s3", &scc), 0xffffffffu, "s_bfe_i64 with a literal control");
+	Equal(EvaluateScalar(extract, 0x00000ff0u, 0u, 0u, 0u, 0u, "%s2", &scc), 0xffffffffu, "s_bfe_i64 sign extends the field");
+	const auto move = [](uint32_t source) { return (0x17du << 23u) | (2u << 16u) | (4u << 8u) | source; };
+	Equal(run({move(kOne), kEnd}, "%s3"), 0x3ff00000u, "s_mov_b64 of inline 1.0 is the double high word");
+	Equal(run({move(kOne), kEnd}, "%s2"), 0u, "s_mov_b64 of inline 1.0 is the double low word");
+	Equal(run({move(kLiteral), 0x80000000u, kEnd}, "%s3"), 0u, "s_mov_b64 zero extends a literal");
+	std::_Exit(0);
+}
+
+[[noreturn]] void ParseNotWithNegate()
+{
+	Initialize();
+	static_cast<void>(Parse(Unary(0x37u, true, 256u, 0u, 1u << 29u)));
+	std::_Exit(0);
+}
+
+// The emitter refuses (EXIT, status 65) instead of dropping a modifier the ISA does not define here.
+[[noreturn]] void EmitXor3WithModifier(uint32_t word0_bits, uint32_t word1_bits)
+{
+	Initialize();
+	auto words = Ternary(0x178u);
+	words[0] |= word0_bits;
+	words[1] |= word1_bits;
+	static_cast<void>(Emit(Parse(words), 0u, false, false, true));
+	std::_Exit(0);
+}
+
+[[noreturn]] void EmitSendmsg(uint32_t message)
+{
+	Initialize();
+	static_cast<void>(Emit(Parse({(0x17fu << 23u) | (0x10u << 16u) | message, kEnd}), 0u, false, false, true));
+	std::_Exit(0);
+}
+
 [[noreturn]] void RunSdwaHalfDestination(ShaderType stage = ShaderType::Pixel)
 {
 	Initialize();
@@ -982,6 +1446,111 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	if (!stores(pair, "OpStore %vcc_lo %mask_out_lo_0") || !stores(pair, "OpStore %vcc_hi %mask_out_hi_0"))
 	{
 		Fail("a two-word compare must write both mask words");
+	}
+	std::_Exit(0);
+}
+
+ShaderInstruction LaneInstruction(ShaderInstructionType type, ShaderOperandType dst_type, int dst, int source, int selector, uint32_t pc)
+{
+	ShaderInstruction inst {};
+	inst.pc                 = pc;
+	inst.type               = type;
+	inst.format             = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	inst.src_num            = 2;
+	inst.dst.type           = dst_type;
+	inst.dst.register_id    = dst;
+	inst.dst.size           = 1;
+	inst.src[0].type        = type == ShaderInstructionType::VReadlaneB32 ? ShaderOperandType::Vgpr : ShaderOperandType::Sgpr;
+	inst.src[0].register_id = source;
+	inst.src[0].size        = 1;
+	inst.src[1].type        = ShaderOperandType::Sgpr;
+	inst.src[1].register_id = selector;
+	inst.src[1].size        = 1;
+	return inst;
+}
+
+uint32_t CountOf(const Core::String8& text, const char* pattern)
+{
+	uint32_t count = 0;
+	for (uint32_t at = text.FindIndex(pattern); at != Core::STRING8_INVALID_INDEX; at = text.FindIndex(pattern, at + 1)) { ++count; }
+	return count;
+}
+
+// Split-wave V_READLANE at one selector share one exchange until an instruction between them rewrites a member's source.
+[[noreturn]] void RunSplitReadGroup()
+{
+	Initialize();
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	constexpr auto kRead  = ShaderInstructionType::VReadlaneB32;
+	constexpr auto kWrite = ShaderInstructionType::VWritelaneB32;
+	code.GetInstructions().Add(LaneInstruction(kRead, ShaderOperandType::Sgpr, 4, 0, 2, 0));
+	code.GetInstructions().Add(LaneInstruction(kRead, ShaderOperandType::Sgpr, 5, 1, 2, 8));
+	code.GetInstructions().Add(LaneInstruction(kWrite, ShaderOperandType::Vgpr, 3, 4, 6, 16));
+	code.GetInstructions().Add(LaneInstruction(kRead, ShaderOperandType::Sgpr, 7, 2, 2, 24));
+	code.GetInstructions().Add(LaneInstruction(kWrite, ShaderOperandType::Vgpr, 2, 5, 6, 32));
+	code.GetInstructions().Add(LaneInstruction(kRead, ShaderOperandType::Sgpr, 8, 2, 2, 40));
+	ShaderInstruction end {};
+	end.pc     = 48;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	code.GetInstructions().Add(end);
+	const auto source = Emit(code, 0xc0u, false, false, true, Fp16Overflow::Disabled, true);
+	if (CountOf(source, "OpFunctionCall %v4uint %split_read_group %rg0_0 %rg1_0 %rg2_0 %split_c0 %rgl_0") != 1u ||
+	    CountOf(source, "OpLoad %uint %split_read_word1") != 1u || CountOf(source, "OpLoad %uint %split_read_word2") != 1u ||
+	    CountOf(source, "OpFunctionCall %uint %split_read %") != 1u)
+	{
+		Fail("three reads at one selector must share one exchange, and a read of a rewritten source must exchange alone");
+	}
+	std::_Exit(0);
+}
+
+ShaderInstruction CompareInstruction(ShaderOperandType dst_type, int dst, int scalar, int vector, uint32_t pc)
+{
+	ShaderInstruction inst {};
+	inst.pc                 = pc;
+	inst.type               = ShaderInstructionType::VCmpNeU32;
+	inst.format             = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
+	inst.src_num            = 2;
+	inst.dst.type           = dst_type;
+	inst.dst.register_id    = dst;
+	inst.dst.size           = 2;
+	inst.src[0].type        = ShaderOperandType::Sgpr;
+	inst.src[0].register_id = scalar;
+	inst.src[0].size        = 1;
+	inst.src[1].type        = ShaderOperandType::Vgpr;
+	inst.src[1].register_id = vector;
+	inst.src[1].size        = 1;
+	return inst;
+}
+
+// Consecutive split-wave V_CMP whose masks leave the lane share one exchange; a compare that reads an earlier
+// member's mask exchanges alone.
+[[noreturn]] void RunSplitBallotGroup()
+{
+	Initialize();
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(CompareInstruction(ShaderOperandType::VccLo, 0, 28, 7, 0));
+	code.GetInstructions().Add(CompareInstruction(ShaderOperandType::Sgpr, 24, 30, 7, 8));
+	code.GetInstructions().Add(CompareInstruction(ShaderOperandType::Sgpr, 26, 29, 7, 16));
+	code.GetInstructions().Add(CompareInstruction(ShaderOperandType::Sgpr, 22, 24, 6, 24));
+	// Scalar reads make every mask wave-wide.
+	code.GetInstructions().Add(LaneInstruction(ShaderInstructionType::SAddU32, ShaderOperandType::Sgpr, 10, 24, 26, 32));
+	auto vcc_read      = LaneInstruction(ShaderInstructionType::SAddU32, ShaderOperandType::Sgpr, 11, 0, 22, 40);
+	vcc_read.src[0].type = ShaderOperandType::VccLo;
+	code.GetInstructions().Add(vcc_read);
+	ShaderInstruction end {};
+	end.pc     = 48;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	code.GetInstructions().Add(end);
+	const auto source = Emit(code, 0xc0u, false, false, true, Fp16Overflow::Disabled, true, 8);
+	if (CountOf(source, "OpFunctionCall %void %split_ballot_group %mask_out_packed_2") != 1u ||
+	    CountOf(source, "OpFunctionCall %v4uint %split_ballot_field") != 3u ||
+	    CountOf(source, "OpFunctionCall %v4uint %split_ballot %mask_out_active_3") != 1u)
+	{
+		Fail("three compares must share one exchange, and a compare of an earlier member's mask must exchange alone");
 	}
 	std::_Exit(0);
 }
@@ -1161,6 +1730,18 @@ std::vector<uint32_t> ModifiedBinary(uint32_t opcode, bool clamp, uint32_t omod)
 
 ShaderType g_float_mode_stage = ShaderType::Pixel;
 
+// v_add_f32_e64 v16, -|v0|, -|v1|: every source of one instruction carries both
+// input modifiers, so each must lower to its own module ids.
+void RunNegatedAbsoluteSources(ShaderType stage)
+{
+	Initialize();
+	const std::vector<uint32_t> words {(0x35u << 26u) | ((3u + 0x100u) << 16u) | (3u << 8u) | 16u, 256u | (257u << 9u) | (3u << 29u),
+	                                   kEnd};
+	const Program program(Emit(Parse(words, stage), 0xc0u, false, false, true).c_str());
+	Equal(Evaluate(program, Bits(2.0f), Bits(-3.0f)), Bits(-5.0f), "-|2| + -|-3|");
+	std::_Exit(0);
+}
+
 Program FloatModeProgram(const std::vector<uint32_t>& words, uint8_t float_mode, bool ieee, bool dx10)
 {
 	return Program(Emit(Parse(words, g_float_mode_stage), float_mode, ieee, dx10, true).c_str());
@@ -1250,24 +1831,107 @@ void IsNan(uint32_t actual, const char* label)
 		Equal(Evaluate(minimum, kNegZero, 0u), kNegZero, "min of signed zeros is -0 (reversed)");
 		Equal(Evaluate(maximum, kNegZero, 0u), 0u, "max of signed zeros is +0");
 		Equal(Evaluate(maximum, 0u, kNegZero), 0u, "max of signed zeros is +0 (reversed)");
+		for (const uint8_t mode: {0xc0u, 0xd0u, 0xe0u, 0xf0u})
+		{
+			const bool preserve = (mode & 0x10u) != 0u;
+			const auto min_words = ModifiedBinary(kMin, false, 0u);
+			const auto max_words = ModifiedBinary(kMax, false, 0u);
+			const Program min_mode(Emit(Parse(min_words, stage), mode, ieee, true, true).c_str());
+			const Program max_mode(Emit(Parse(max_words, stage), mode, ieee, true, true).c_str());
+			Equal(Evaluate(min_mode, 1u, 2u), preserve ? 1u : 0u, "min applies input denormal mode");
+			Equal(Evaluate(max_mode, 1u, 2u), preserve ? 2u : 0u, "max applies input denormal mode");
+			Equal(Evaluate(min_mode, 0x80000001u, 0u), preserve ? 0x80000001u : kNegZero, "min preserves the input sign");
+			Equal(Evaluate(max_mode, kNegZero, 1u), preserve ? 1u : 0u, "max of -0 and a positive subnormal");
+		}
+		auto neg_min = ModifiedBinary(kMin, false, 0u);
+		neg_min[1] |= 1u << 29u;
+		const Program modified(Emit(Parse(neg_min, stage), 0xd0u, ieee, true, true).c_str());
+		Equal(Evaluate(modified, 1u, 0u), 0x80000001u, "min source negate preserves a subnormal");
 		Equal(Evaluate(minimum, kOne, kTwo), kOne, "ordered min");
 		Equal(Evaluate(maximum, kOne, kTwo), kTwo, "ordered max");
+		Equal(Evaluate(minimum, 0xbf800000u, 0xc0000000u), 0xc0000000u, "min orders negative normals");
+		Equal(Evaluate(maximum, 0xbf800000u, kOne), kOne, "max orders across signs");
+		Equal(Evaluate(minimum, 0xff800000u, kOne), 0xff800000u, "min keeps negative infinity");
 
 		const Program min3 = FloatModeProgram(Ternary(kMin3), 0xc0u, ieee, true);
 		const Program max3 = FloatModeProgram(Ternary(kMax3), 0xc0u, ieee, true);
-		const Program med3 = FloatModeProgram(Ternary(kMed3), 0xc0u, ieee, true);
+		const Program med3 = FloatModeProgram(Ternary(kMed3), 0xd0u, ieee, true);
 		Equal(Evaluate(min3, kOne, kTwo, kThree), kOne, "min3 ordered");
 		Equal(Evaluate(max3, kOne, kTwo, kThree), kThree, "max3 ordered");
 		Equal(Evaluate(med3, kOne, kTwo, kThree), kTwo, "med3 ordered");
 		Equal(Evaluate(med3, kThree, kOne, kTwo), kTwo, "med3 maximum first");
 		Equal(Evaluate(med3, kOne, kThree, kTwo), kTwo, "med3 maximum second");
 		Equal(Evaluate(med3, 0u, 0u, kNegZero), 0u, "med3 of zeros");
+		Equal(Evaluate(med3, 0x00000001u, 0x00000003u, 0x00000002u), 0x00000002u, "med3 preserves subnormals");
+		const Program med3_flush = FloatModeProgram(Ternary(kMed3), 0xc0u, ieee, true);
+		Equal(Evaluate(med3_flush, 1u, 3u, 2u), 0u, "med3 selects among flushed operands");
 		Equal(Evaluate(min3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : kNegZero, "min3 with a signaling NaN");
 		Equal(Evaluate(max3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : 0u, "max3 with a signaling NaN");
 		Equal(Evaluate(med3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : kNegZero, "med3 with a NaN takes min3");
 		Equal(Evaluate(med3, kOne, kSignalingNan, kMinusThree), kMinusThree, "med3: quieted NaN then a number");
 		Equal(Evaluate(med3, kOne, kMinusThree, kSignalingNan), ieee ? kQuietedSignaling : kMinusThree,
 		      "med3: signaling NaN last");
+	}
+	std::_Exit(0);
+}
+
+// V_SUB_CO_CI_U32: D = S0 - S1 - borrow-in; the borrow-out is S1 + borrow-in > S0 without
+// wrapping. VOP2 reads and writes VCC; VOP3B writes the borrow to an explicit SGPR pair.
+[[noreturn]] void RunSubtractWithBorrowContracts()
+{
+	Initialize();
+	constexpr uint32_t kVccLo = 106u;
+	const std::vector<uint32_t> vop2 = {(0x29u << 25u) | (2u << 17u) | (1u << 9u) | 256u, kEnd};
+	const std::vector<uint32_t> vop3 = {(0x35u << 26u) | (0x129u << 16u) | (8u << 8u) | 2u, 256u | (257u << 9u) | (kVccLo << 18u), kEnd};
+	for (const bool e64: {false, true})
+	{
+		const Program program(Emit(Parse(e64 ? vop3 : vop2), 0xc0u, false, false, true).c_str());
+		const char* borrow_out = e64 ? "%s8" : "%vcc_lo";
+		const auto run = [&](uint32_t s0, uint32_t s1, uint32_t borrow_in, const char* destination) {
+			return program.Run({{"%v0", s0}, {"%v1", s1}, {"%v2", 0xa5a51234u}, {"%vcc_lo", borrow_in}, {"%vcc_hi", 0u},
+			                    {"%s8", 0xdeadbeefu}, {"%s9", 0xdeadbeefu}, {"%gl_SubgroupInvocationID", 0u}, {"%exec_lo", 1u},
+			                    {"%exec_hi", 0u}, {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
+			                   destination);
+		};
+		const auto check = [&](uint32_t s0, uint32_t s1, uint32_t borrow_in, uint32_t expected, uint32_t expected_borrow,
+		                       const char* label) {
+			Equal(run(s0, s1, borrow_in, "%v2"), expected, label);
+			Equal(run(s0, s1, borrow_in, borrow_out) & 1u, expected_borrow, label);
+		};
+		check(5u, 3u, 0u, 2u, 0u, "V_SUB_CO_CI_U32 no borrow");
+		check(5u, 4u, 1u, 0u, 0u, "V_SUB_CO_CI_U32 borrow-in reaches zero");
+		check(3u, 5u, 0u, 0xfffffffeu, 1u, "V_SUB_CO_CI_U32 source borrow");
+		check(5u, 5u, 1u, UINT32_MAX, 1u, "V_SUB_CO_CI_U32 equal sources with borrow-in");
+		check(UINT32_MAX, UINT32_MAX, 1u, UINT32_MAX, 1u, "V_SUB_CO_CI_U32 S1 plus borrow-in does not wrap");
+	}
+	std::_Exit(0);
+}
+
+// V_SIN_F32 / V_COS_F32 take turns: the ISA functional examples, quarter turns that must
+// land exactly, and a large phase whose fraction a 2*pi product would lose.
+[[noreturn]] void RunTrigTurnContracts()
+{
+	Initialize();
+	constexpr uint32_t kIsaNan = 0xffc00000u;
+	for (const bool e64: {false, true})
+	{
+		const Program sine(Emit(Parse(Unary(0x35u, e64)), 0xc0u, false, false, true).c_str());
+		const Program cosine(Emit(Parse(Unary(0x36u, e64)), 0xc0u, false, false, true).c_str());
+		Equal(Evaluate(sine, 0xff800000u), kIsaNan, "sin(-inf)");
+		Equal(Evaluate(sine, 0x7f800000u), kIsaNan, "sin(+inf)");
+		Equal(Evaluate(sine, 0xff7fffffu), 0u, "sin(-max float)");
+		Equal(Evaluate(sine, 0x80000000u), 0x80000000u, "sin(-0)");
+		Equal(Evaluate(sine, 0u), 0u, "sin(+0)");
+		Equal(Evaluate(sine, Bits(0.25f)), Bits(1.0f), "sin(0.25 turn)");
+		Equal(Evaluate(sine, Bits(-0.25f)), Bits(-1.0f), "sin(-0.25 turn)");
+		Equal(Evaluate(sine, Bits(1000.25f)), Bits(1.0f), "sin of a large phase keeps its fraction");
+		Equal(Evaluate(cosine, 0xff800000u), kIsaNan, "cos(-inf)");
+		Equal(Evaluate(cosine, 0x7f800000u), kIsaNan, "cos(+inf)");
+		Equal(Evaluate(cosine, 0xff7fffffu), Bits(1.0f), "cos(-max float)");
+		Equal(Evaluate(cosine, 0x80000000u), Bits(1.0f), "cos(-0)");
+		Equal(Evaluate(cosine, Bits(0.25f)), 0u, "cos(0.25 turn)");
+		Equal(Evaluate(cosine, Bits(0.5f)), Bits(-1.0f), "cos(0.5 turn)");
+		Equal(Evaluate(cosine, Bits(1000.5f)), Bits(-1.0f), "cos of a large phase keeps its fraction");
 	}
 	std::_Exit(0);
 }
@@ -1303,6 +1967,68 @@ void IsNan(uint32_t actual, const char* label)
 	Equal(Evaluate(to_signed, 0x7fc00000u), 0u, "signed conversion maps quiet NaN to zero");
 	Equal(Evaluate(to_signed, 0x7f800001u), 0u, "signed conversion maps signaling NaN to zero");
 	Equal(Evaluate(to_signed, 0x7f800000u, 0u, 0u, 0xdeadbeefu, 0u), 0xdeadbeefu, "inactive signed conversion retains the destination");
+
+	// RPI rounds half ties toward +infinity. FLR rounds every fraction down.
+	for (const bool e64: {false, true})
+	{
+		const Program to_nearest(Emit(Parse(Unary(0x0cu, e64), stage), 0xc0u, false, false, true).c_str());
+		const Program to_floor(Emit(Parse(Unary(0x0du, e64), stage), 0xc0u, false, false, true).c_str());
+		const Program to_floor_preserve(Emit(Parse(Unary(0x0du, e64), stage), 0xd0u, false, false, true).c_str());
+		Equal(Evaluate(to_nearest, Bits(2.5f)), 3u, "RPI rounds a positive tie up");
+		Equal(Evaluate(to_nearest, Bits(-1.5f)), 0xffffffffu, "RPI rounds a negative tie up");
+		Equal(Evaluate(to_nearest, 0x3effffffu), 0u, "RPI just below the positive half tie");
+		Equal(Evaluate(to_nearest, 0xbf000001u), 0xffffffffu, "RPI just below the negative half tie");
+		Equal(Evaluate(to_nearest, 0x4b000001u), 8388609u, "RPI preserves an already integral input");
+		Equal(Evaluate(to_floor, Bits(-1.5f)), 0xfffffffeu, "FLR rounds negative fractions down");
+		Equal(Evaluate(to_floor, 0x80000001u), 0u, "FLR flushes a negative input subnormal");
+		Equal(Evaluate(to_floor_preserve, 0x80000001u), UINT32_MAX, "FLR rounds a preserved negative input subnormal down");
+		for (const Program* conversion: {&to_nearest, &to_floor})
+		{
+			Equal(Evaluate(*conversion, 0x4effffffu), 0x7fffff80u, "rounded conversion keeps largest in-range f32");
+			for (const uint32_t bits: {0x4f000000u, 0x7f800000u, 0x7f800001u, 0x7fc12345u})
+			{
+				Equal(Evaluate(*conversion, bits), 0x7fffffffu, "rounded conversion saturates positive special input");
+				Equal(Evaluate(*conversion, bits | 0x80000000u), 0x80000000u, "rounded conversion saturates negative special input");
+			}
+			Equal(Evaluate(*conversion, 0x7f800000u, 0u, 0u, 0xdeadbeefu, 0u), 0xdeadbeefu, "inactive rounded conversion keeps dst");
+		}
+	}
+
+	// V_CVT_I32_F64 / V_CVT_U32_F64 truncate, saturate out-of-range values and map NaN to zero like FP32.
+	const auto f64 = [](uint64_t bits) { return std::array<uint32_t, 2> {static_cast<uint32_t>(bits), static_cast<uint32_t>(bits >> 32u)}; };
+	const auto from_double = [&](double value) {
+		uint64_t bits = 0;
+		std::memcpy(&bits, &value, sizeof(bits));
+		return f64(bits);
+	};
+	for (const bool e64: {false, true})
+	{
+		const Program to_i32(Emit(Parse(Unary(0x03u, e64), stage), 0xc0u, false, false, true).c_str());
+		const Program to_u32(Emit(Parse(Unary(0x15u, e64), stage), 0xc0u, false, false, true).c_str());
+		const auto i32 = [&](std::array<uint32_t, 2> words) { return Evaluate(to_i32, words[0], words[1]); };
+		const auto u32 = [&](std::array<uint32_t, 2> words) { return Evaluate(to_u32, words[0], words[1]); };
+		Equal(i32(from_double(-1.9)), 0xffffffffu, "f64 signed conversion truncates");
+		Equal(i32(from_double(2147483647.9)), 0x7fffffffu, "f64 signed conversion keeps the largest in-range value");
+		Equal(i32(from_double(2147483648.0)), 0x7fffffffu, "f64 signed conversion saturates at 2^31");
+		Equal(i32(from_double(-2147483648.9)), 0x80000000u, "f64 signed conversion keeps -2^31");
+		Equal(i32(from_double(-1e300)), 0x80000000u, "f64 signed conversion saturates below -2^31");
+		Equal(i32(f64(0x7ff0000000000000ull)), 0x7fffffffu, "f64 signed conversion saturates positive infinity");
+		Equal(i32(f64(0xfff0000000000000ull)), 0x80000000u, "f64 signed conversion saturates negative infinity");
+		Equal(i32(f64(0x7ff8000000000000ull)), 0u, "f64 signed conversion maps NaN to zero");
+		Equal(u32(from_double(4294967295.9)), 0xffffffffu, "f64 unsigned conversion keeps the largest in-range value");
+		Equal(u32(from_double(4294967296.0)), 0xffffffffu, "f64 unsigned conversion saturates at 2^32");
+		Equal(u32(from_double(-0.5)), 0u, "f64 unsigned conversion truncates toward zero");
+		Equal(u32(from_double(-1.0)), 0u, "f64 unsigned conversion saturates negative values");
+		Equal(u32(f64(0x7ff0000000000000ull)), 0xffffffffu, "f64 unsigned conversion saturates positive infinity");
+		Equal(u32(f64(0xfff0000000000000ull)), 0u, "f64 unsigned conversion saturates negative infinity");
+		Equal(u32(f64(0xfff8000000000000ull)), 0u, "f64 unsigned conversion maps NaN to zero");
+	}
+	const Program abs_i32(Emit(Parse(Unary(0x03u, true, 256u, 1u << 8u), stage), 0xc0u, false, false, true).c_str());
+	const Program neg_u32(Emit(Parse(Unary(0x15u, true, 256u, 0u, 1u << 29u), stage), 0xc0u, false, false, true).c_str());
+	const auto negative_double = from_double(-7.75);
+	Equal(Evaluate(abs_i32, negative_double[0], negative_double[1]), 7u, "e64 signed f64 conversion applies abs");
+	Equal(Evaluate(neg_u32, negative_double[0], negative_double[1]), 7u, "e64 unsigned f64 conversion applies neg");
+
 	std::_Exit(0);
 }
 
@@ -1325,6 +2051,8 @@ TEST(EmulatorShaderArithmetic, ComputeFloatModeClampOutputModifierAndMinMaxContr
 {
 	ASSERT_EXIT(RunFloatModeContracts(ShaderType::Compute), ::testing::ExitedWithCode(0), "");
 }
+TEST(EmulatorShaderArithmetic, SubtractWithBorrowWritesResultAndLaneBorrow) { ASSERT_EXIT(RunSubtractWithBorrowContracts(), ::testing::ExitedWithCode(0), ""); }
+TEST(EmulatorShaderArithmetic, SineAndCosineReduceTheirPhaseInTurns) { ASSERT_EXIT(RunTrigTurnContracts(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, FloatToIntegerConversionsSaturateWithoutUndefinedSpirvConversions)
 {
 	ASSERT_EXIT(RunFloatToIntegerConversionContracts(), ::testing::ExitedWithCode(0), "");
@@ -1332,6 +2060,91 @@ TEST(EmulatorShaderArithmetic, FloatToIntegerConversionsSaturateWithoutUndefined
 TEST(EmulatorShaderArithmetic, ComputeFloatToIntegerConversionsSaturateWithoutUndefinedSpirvConversions)
 {
 	ASSERT_EXIT(RunFloatToIntegerConversionContracts(ShaderType::Compute), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, NegatedAbsoluteModifiersOnTwoSources)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunNegatedAbsoluteSources(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, IntegerTernaryByteAndMultiplyAddContracts)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunIntegerTernaryContracts(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, IntegerUnaryVop3FormsMatchTheirVop1Forms)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunIntegerUnaryVop3Forms(stage), ::testing::ExitedWithCode(0), "");
+	}
+	ASSERT_EXIT(ParseNotWithNegate(), ::testing::ExitedWithCode(65), "");
+}
+TEST(EmulatorShaderArithmetic, HalfNotEqualComparesAreUnordered)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunHalfNotEqualCompares(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, F64SourcesExpandConstantsAndApplySignModifiers)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunF64SourceOperands(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, VopcComparesMatchTheirVop3Translation)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunVopcCompareFamilies(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, CmpxAnd64BitComparesWriteTheirMask)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunWideCompareForms(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
+TEST(EmulatorShaderArithmetic, ClassComparesClassifyEachWidth)
+{
+	for (ShaderType stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunClassForms(stage), ::testing::ExitedWithCode(0), "");
+	}
+	ASSERT_EXIT(EmitClassF16WithInlineFloat(), ::testing::ExitedWithCode(65), "");
+}
+TEST(EmulatorShaderArithmetic, Mad16WritesTheSelectedHalf)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunMad16(stage), ::testing::ExitedWithCode(0), "");
+	}
+	ASSERT_EXIT(EmitMad16WithClamp(), ::testing::ExitedWithCode(65), "");
+	ASSERT_EXIT(ParseVop3Opcode833(), ::testing::ExitedWithCode(65), "");
+}
+TEST(EmulatorShaderArithmetic, Int64SourcesExpandConstantsBySignedness)
+{
+	ASSERT_EXIT(RunInt64SourceConstants(), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, SendmsgDropsOnlyMessagesWithoutShaderEffect)
+{
+	ASSERT_EXIT(EmitSendmsg(9u), ::testing::ExitedWithCode(0), "");
+	ASSERT_EXIT(EmitSendmsg(7u), ::testing::ExitedWithCode(0), "");
+	ASSERT_EXIT(EmitSendmsg(0x22u), ::testing::ExitedWithCode(65), "");
+	ASSERT_EXIT(EmitSendmsg(3u), ::testing::ExitedWithCode(65), "");
+	ASSERT_EXIT(EmitSendmsg(8u), ::testing::ExitedWithCode(65), "");
+}
+TEST(EmulatorShaderArithmetic, IntegerTernaryRefusesEncodedModifiers)
+{
+	ASSERT_EXIT(EmitXor3WithModifier(0u, 0u), ::testing::ExitedWithCode(0), "");
+	ASSERT_EXIT(EmitXor3WithModifier(0u, 1u << 29u), ::testing::ExitedWithCode(65), "");
+	ASSERT_EXIT(EmitXor3WithModifier(1u << 15u, 0u), ::testing::ExitedWithCode(65), "");
 }
 TEST(EmulatorShaderArithmetic, CanonicalFp16EncodingsAssembleAndValidate) { ASSERT_EXIT(RunCanonicalModules(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, Fp16NarrowingValuesRoundingAndExec) { ASSERT_EXIT(RunNarrowing(), ::testing::ExitedWithCode(0), ""); }
@@ -1362,6 +2175,14 @@ TEST(EmulatorShaderArithmetic, DsBpermuteShuffleNamesTheSubgroupScope)
 TEST(EmulatorShaderArithmetic, DsBpermuteSplitWaveReadsGuestLanesThroughTheWaveExchange)
 {
 	ASSERT_EXIT(RunDsBpermuteAssembly(true), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, SplitWaveReadlanesAtOneSelectorShareOneExchange)
+{
+	ASSERT_EXIT(RunSplitReadGroup(), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, SplitWaveComparesShareOneBallotExchange)
+{
+	ASSERT_EXIT(RunSplitBallotGroup(), ::testing::ExitedWithCode(0), "");
 }
 TEST(EmulatorShaderArithmetic, BfeDefinedForEveryMaskedOffsetAndWidth) { ASSERT_EXIT(RunBfe(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, ComputeFp16EncodingsAssembleAndValidate)

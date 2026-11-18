@@ -60,13 +60,15 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
                      GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {56, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM,
                      GuestImageNumericType::FloatingPoint},
+    // RDNA2 ISA image format table: 57=8_8_8_8_SNORM; no sRGB form.
+    Gen5ImageFormat {57, VK_FORMAT_R8G8B8A8_SNORM, VK_FORMAT_R8G8B8A8_SNORM, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {60, VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R8G8B8A8_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {62, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {64, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {65, VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16B16A16_UNORM,
                      GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {66, VK_FORMAT_R16G16B16A16_SNORM, VK_FORMAT_R16G16B16A16_SNORM, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
-    Gen5ImageFormat {69, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_UNDEFINED, GuestImageNumericType::UnsignedInteger},
+    Gen5ImageFormat {69, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_R16G16B16A16_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {70, VK_FORMAT_R16G16B16A16_SINT, VK_FORMAT_R16G16B16A16_SINT, VK_FORMAT_UNDEFINED, GuestImageNumericType::SignedInteger},
     Gen5ImageFormat {71, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {75, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_UINT, GuestImageNumericType::UnsignedInteger},
@@ -276,6 +278,7 @@ uint32_t VulkanColorTexelBytes(VkFormat format)
 		case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
 		case VK_FORMAT_R8G8B8A8_UNORM:
 		case VK_FORMAT_R8G8B8A8_SRGB:
+		case VK_FORMAT_R8G8B8A8_SNORM:
 		case VK_FORMAT_R8G8B8A8_UINT:
 		case VK_FORMAT_B8G8R8A8_UNORM:
 		case VK_FORMAT_B8G8R8A8_SRGB: return 4u;
@@ -296,6 +299,18 @@ bool VulkanColorFormatsShareTexels(VkFormat a, VkFormat b)
 {
 	const uint32_t bytes = VulkanColorTexelBytes(a);
 	return bytes != 0u && bytes == VulkanColorTexelBytes(b);
+}
+
+VkFormat VulkanColorGammaTwin(VkFormat format)
+{
+	switch (format)
+	{
+		case VK_FORMAT_R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_SRGB;
+		case VK_FORMAT_R8G8B8A8_SRGB: return VK_FORMAT_R8G8B8A8_UNORM;
+		case VK_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_SRGB;
+		case VK_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_B8G8R8A8_UNORM;
+		default: return VK_FORMAT_UNDEFINED;
+	}
 }
 
 uint32_t VulkanColorTexelFormatList(VkFormat format, VkFormat* out, uint32_t capacity)

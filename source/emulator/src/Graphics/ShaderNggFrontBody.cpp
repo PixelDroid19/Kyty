@@ -77,13 +77,20 @@ public:
 		}
 		return false;
 	}
+	// The lanes of `node` all lie in one of `nodes`, or in both halves of a split of `node` or of an ancestor.
 	[[nodiscard]] bool Covers(const std::set<int>& nodes, int node) const
 	{
-		if (node < 0) { return false; }
 		for (int current = node; current >= 0; current = Parent(current))
 		{
-			if (nodes.count(current) != 0u) { return true; }
+			if (CoveredBySplits(nodes, current)) { return true; }
 		}
+		return false;
+	}
+
+private:
+	[[nodiscard]] bool CoveredBySplits(const std::set<int>& nodes, int node) const
+	{
+		if (nodes.count(node) != 0u) { return true; }
 		for (size_t then_node = 1; then_node < m_nodes.size(); ++then_node)
 		{
 			const auto& entry = m_nodes[then_node];
@@ -92,7 +99,7 @@ public:
 			{
 				const auto& other = m_nodes[else_node];
 				if (other.parent == node && other.compare == entry.compare && !other.then_side &&
-				    Covers(nodes, static_cast<int>(then_node)) && Covers(nodes, static_cast<int>(else_node)))
+				    CoveredBySplits(nodes, static_cast<int>(then_node)) && CoveredBySplits(nodes, static_cast<int>(else_node)))
 				{
 					return true;
 				}
@@ -101,7 +108,6 @@ public:
 		return false;
 	}
 
-private:
 	struct Node
 	{
 		int      parent;

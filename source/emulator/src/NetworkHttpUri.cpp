@@ -294,6 +294,48 @@ int KYTY_SYSV_ABI HttpUriParse(HttpUriElement* out, const char* source, void* po
 	return OK;
 }
 
+// Percent-encodes every byte outside the RFC 3986 unreserved set, with upper-case hex digits.
+int KYTY_SYSV_ABI HttpUriEscape(char* out, uint64_t* required_size, size_t capacity, const char* source)
+{
+	PRINT_NAME();
+
+	if (source == nullptr || (out == nullptr && required_size == nullptr))
+	{
+		return HTTP_ERROR_INVALID_VALUE;
+	}
+
+	static constexpr char hex[] = "0123456789ABCDEF";
+	std::string           escaped;
+	for (const char* c = source; *c != '\0'; ++c)
+	{
+		const auto value = static_cast<unsigned char>(*c);
+		if (std::isalnum(value) != 0 || value == '-' || value == '_' || value == '.' || value == '~')
+		{
+			escaped.push_back(*c);
+			continue;
+		}
+		escaped.push_back('%');
+		escaped.push_back(hex[value >> 4u]);
+		escaped.push_back(hex[value & 0x0fu]);
+	}
+
+	const size_t required = escaped.size() + 1;
+	if (required_size != nullptr)
+	{
+		*required_size = required;
+	}
+	if (out == nullptr)
+	{
+		return OK;
+	}
+	if (capacity < required)
+	{
+		return HTTP_ERROR_OUT_OF_MEMORY;
+	}
+	std::memcpy(out, escaped.c_str(), required);
+	return OK;
+}
+
 } // namespace Kyty::Libs::Network::Http
 
 #endif // KYTY_EMU_ENABLED

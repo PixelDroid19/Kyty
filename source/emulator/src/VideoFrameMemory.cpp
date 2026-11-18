@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/VirtualMemory.h"
 
+#include <atomic>
 #include <cerrno>
 #include <mutex>
 
@@ -11,6 +12,9 @@ namespace {
 
 std::mutex g_callbacks_mutex;
 Callbacks  g_callbacks {};
+// Guest memory copies and fills notify on every call, so this target is
+// published apart from the bundle and read without its lock.
+std::atomic<NotifyHostWriteCallback> g_notify_host_write {nullptr};
 
 bool callbacks_are_empty(const Callbacks& callbacks)
 {
@@ -41,6 +45,7 @@ bool InstallCallbacks(const Callbacks& callbacks)
 
 	std::lock_guard lock(g_callbacks_mutex);
 	g_callbacks = callbacks;
+	g_notify_host_write.store(callbacks.notify_host_write, std::memory_order_release);
 	return true;
 }
 
@@ -101,10 +106,9 @@ void UnregisterFrame(uint64_t base)
 
 void NotifyHostWrite(uint64_t base, uint64_t size)
 {
-	const auto callbacks = copy_callbacks();
-	if (callbacks.notify_host_write != nullptr)
+	if (const auto notify = g_notify_host_write.load(std::memory_order_acquire); notify != nullptr)
 	{
-		callbacks.notify_host_write(base, size);
+		notify(base, size);
 	}
 }
 

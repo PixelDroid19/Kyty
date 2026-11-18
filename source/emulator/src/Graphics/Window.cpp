@@ -10,6 +10,7 @@
 #include "Kyty/Core/Timer.h"
 #include "Kyty/Core/Vector.h"
 #include "Kyty/Core/VirtualMemory.h"
+#include "Kyty/Sys/SysTimer.h"
 
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Audio.h"
@@ -2327,7 +2328,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
                                    bool depth_clip_control_supported,
                                    ShaderComputeWaveVulkanState* compute_wave_state, bool guest_device_address,
                                    bool compute_derivative_group_linear, bool maximal_reconvergence_supported,
-                                   bool image_view_min_lod_supported, VulkanBlendFeatures* enabled_blend_features, VulkanSamplerFeatures* enabled_sampler_features)
+                                   bool image_view_min_lod_supported, bool device_fault_supported,
+                                   VulkanBlendFeatures* enabled_blend_features, VulkanSamplerFeatures* enabled_sampler_features)
 {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(r == nullptr);
@@ -2379,6 +2381,7 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features.depthBiasClamp    = supported_features.depthBiasClamp;
 	device_features.sampleRateShading = supported_features.sampleRateShading;
 	device_features.geometryShader = supported_features.geometryShader;
+	device_features.drawIndirectFirstInstance              = supported_features.drawIndirectFirstInstance;
 	device_features.depthClamp = supported_features.depthClamp;
 	device_features.shaderClipDistance = supported_features.shaderClipDistance;
 	device_features.shaderCullDistance = supported_features.shaderCullDistance;
@@ -2429,6 +2432,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	// Core since Vulkan 1.2 and mandatory there.
 	EXIT_IF(supported_12.timelineSemaphore == VK_FALSE);
 	device_features_12.timelineSemaphore = VK_TRUE;
+	EXIT_IF(supported_12.hostQueryReset == VK_FALSE);
+	device_features_12.hostQueryReset = VK_TRUE;
 	if (guest_device_address)
 	{
 		device_features.shaderInt64 = VK_TRUE;
@@ -2454,6 +2459,13 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	{
 		image_view_min_lod.pNext = device_feature_chain;
 		device_feature_chain     = &image_view_min_lod;
+	}
+	VkPhysicalDeviceFaultFeaturesEXT device_fault {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+	device_fault.deviceFault = VK_TRUE;
+	if (device_fault_supported)
+	{
+		device_fault.pNext   = device_feature_chain;
+		device_feature_chain = &device_fault;
 	}
 	device_features_12.pNext = device_feature_chain;
 	device_feature_chain = &device_features_12;
@@ -2850,6 +2862,39 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	return swapchain;
 }
 
+// The calibrated-timestamp extension whose host domain is the one the host performance counter reads, or null.
+static const char* VulkanClockMarkExtension(VkInstance instance, VkPhysicalDevice physical_device,
+                                            const Vector<VkExtensionProperties>& available, VkTimeDomainKHR* host_domain)
+{
+	*host_domain = Kyty::sys_performance_counter_clock() == Kyty::SysPerformanceClock::Monotonic
+	                   ? VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR
+	                   : VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
+	const auto has = [&available](const char* name)
+	{ return available.Contains(name, [](const VkExtensionProperties& e, const char* n) { return strcmp(e.extensionName, n) == 0; }); };
+	const bool  khr       = has(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+	const char* extension = khr ? VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME
+	                            : (has(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) ? VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME : nullptr);
+	if (extension == nullptr)
+	{
+		return nullptr;
+	}
+	const auto get_domains = reinterpret_cast<PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR>(vkGetInstanceProcAddr(
+	    instance, khr ? "vkGetPhysicalDeviceCalibrateableTimeDomainsKHR" : "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT"));
+	uint32_t count = 0;
+	if (get_domains == nullptr || get_domains(physical_device, &count, nullptr) != VK_SUCCESS)
+	{
+		return nullptr;
+	}
+	std::vector<VkTimeDomainKHR> domains(count);
+	if (get_domains(physical_device, &count, domains.data()) != VK_SUCCESS)
+	{
+		return nullptr;
+	}
+	const bool device_domain = std::find(domains.begin(), domains.end(), VK_TIME_DOMAIN_DEVICE_KHR) != domains.end();
+	const bool host          = std::find(domains.begin(), domains.end(), *host_domain) != domains.end();
+	return device_domain && host ? extension : nullptr;
+}
+
 static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 {
 	EXIT_IF(ctx == nullptr);
@@ -2865,6 +2910,12 @@ static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 		ctx->queues[id].index  = info.index;
 		EXIT_IF(ctx->queues[id].vk_queue != nullptr);
 		vkGetDeviceQueue(ctx->device, ctx->queues[id].family, ctx->queues[id].index, &ctx->queues[id].vk_queue);
+		uint32_t family_count = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(ctx->physical_device, &family_count, nullptr);
+		std::vector<VkQueueFamilyProperties> families(family_count);
+		vkGetPhysicalDeviceQueueFamilyProperties(ctx->physical_device, &family_count, families.data());
+		EXIT_IF(info.family >= family_count);
+		ctx->queues[id].timestamp_valid_bits = families[info.family].timestampValidBits;
 		if (ctx->queues[id].vk_queue == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ctx->queues[id].vk_queue == nullptr condition ignored (continuing)\n"); }
 	};
 
@@ -2976,7 +3027,7 @@ static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uin
 
 	Core::LockGuard lock(g_window_ctx->mutex);
 
-	vkDeviceWaitIdle(ctx->device);
+	VulkanWaitQueuesIdle(ctx);
 
 	if (s->render_finished_semaphores != nullptr)
 	{
@@ -3169,6 +3220,7 @@ static void VulkanCreate(WindowContext* ctx)
 	}
 
 	if (queues.compute.At(0).family != queues.graphics.At(0).family) { device_extensions.Add(VK_KHR_MAINTENANCE_10_EXTENSION_NAME); }
+	const char* clock_mark_extension = nullptr;
 
 	// Detect VK_EXT_color_write_enable support; drop it from the enabled extension
 	// list when absent (MoltenVK) so device creation still succeeds.
@@ -3214,6 +3266,7 @@ static void VulkanCreate(WindowContext* ctx)
 		maximal_reconvergence.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR;
 		VkPhysicalDeviceImageViewMinLodFeaturesEXT image_view_min_lod {};
 		image_view_min_lod.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT;
+		VkPhysicalDeviceFaultFeaturesEXT device_fault {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
 
 		void* query_chain = &features_13;
 		if (has_ext(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME))
@@ -3246,6 +3299,11 @@ static void VulkanCreate(WindowContext* ctx)
 			image_view_min_lod.pNext = query_chain;
 			query_chain              = &image_view_min_lod;
 		}
+		if (has_ext(VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
+		{
+			device_fault.pNext = query_chain;
+			query_chain        = &device_fault;
+		}
 		VkPhysicalDeviceFeatures2 available_features {};
 		available_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 		available_features.pNext = query_chain;
@@ -3271,6 +3329,18 @@ static void VulkanCreate(WindowContext* ctx)
 		if (ctx->graphic_ctx.image_view_min_lod_supported)
 		{
 			device_extensions.Add(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
+		}
+		ctx->graphic_ctx.device_fault_supported = has_ext(VK_EXT_DEVICE_FAULT_EXTENSION_NAME) && device_fault.deviceFault == VK_TRUE;
+		if (ctx->graphic_ctx.device_fault_supported)
+		{
+			device_extensions.Add(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+		}
+		KYTY_LOG_INFO("Device fault reports %s\n", ctx->graphic_ctx.device_fault_supported ? "enabled" : "unavailable");
+		clock_mark_extension = VulkanClockMarkExtension(ctx->graphic_ctx.instance, ctx->graphic_ctx.physical_device,
+		                                                dev_exts, &ctx->graphic_ctx.host_time_domain);
+		if (clock_mark_extension != nullptr)
+		{
+			device_extensions.Add(clock_mark_extension);
 		}
 
 		ctx->graphic_ctx.color_write_enable_supported =
@@ -3382,9 +3452,30 @@ static void VulkanCreate(WindowContext* ctx)
 			ctx->graphic_ctx.guest_dma_buf_import_supported =
 			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
 			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0;
+			const auto imports_as_draw_input = [ctx](VkExternalMemoryHandleTypeFlagBits handle_type)
+			{
+				VkPhysicalDeviceExternalBufferInfo info {};
+				info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO;
+				info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+				             VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+				             VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+				info.handleType = handle_type;
+				VkExternalBufferProperties properties {};
+				properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES;
+				vkGetPhysicalDeviceExternalBufferProperties(ctx->graphic_ctx.physical_device, &info, &properties);
+				const auto features = properties.externalMemoryProperties.externalMemoryFeatures;
+				return (features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
+				       (features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0;
+			};
+			ctx->graphic_ctx.guest_draw_input_import_supported =
+			    (!ctx->graphic_ctx.guest_host_pointer_import_supported ||
+			     imports_as_draw_input(VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)) &&
+			    (!ctx->graphic_ctx.guest_dma_buf_import_supported ||
+			     imports_as_draw_input(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT));
 			// Flexible memory is snapshotted either way; direct memory needs one of the imports.
 			ctx->graphic_ctx.guest_device_address_supported =
 			    ctx->graphic_ctx.guest_host_pointer_import_supported || ctx->graphic_ctx.guest_dma_buf_import_supported;
+			ShaderSetStorageAddressReads(ctx->graphic_ctx.guest_device_address_supported);
 			for (const char* extension: {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME})
 			{
 				if (ctx->graphic_ctx.guest_dma_buf_import_supported &&
@@ -3437,8 +3528,11 @@ static void VulkanCreate(WindowContext* ctx)
 	// promoted extension name is absent; default width is not a singleton range.
 	VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control {};
 	VkPhysicalDeviceSubgroupProperties subgroup_properties {};
+	VkPhysicalDeviceDriverProperties   driver_properties {};
 	VkPhysicalDeviceProperties2 physical_device_properties {};
+	driver_properties.sType     = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
 	subgroup_size_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
+	subgroup_size_control.pNext = &driver_properties;
 	subgroup_properties.sType   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
 	subgroup_properties.pNext   = &subgroup_size_control;
 	physical_device_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -3446,6 +3540,8 @@ static void VulkanCreate(WindowContext* ctx)
 	vkGetPhysicalDeviceProperties2(ctx->graphic_ctx.physical_device, &physical_device_properties);
 	ShaderSetNativeHalfConversion(DeviceHasExactHalfConversion(ctx->graphic_ctx.physical_device));
 	ctx->graphic_ctx.min_storage_buffer_offset_alignment = physical_device_properties.properties.limits.minStorageBufferOffsetAlignment;
+	ctx->graphic_ctx.separate_depth_kill_draws           = device_properties.vendorID == 0x8086u;
+	ctx->graphic_ctx.stencil_only_write_resync           = driver_properties.driverID == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA;
 	ctx->graphic_ctx.subgroup_size       = subgroup_properties.subgroupSize;
 	ctx->graphic_ctx.subgroup_stages     = subgroup_properties.supportedStages;
 	ctx->graphic_ctx.subgroup_operations = subgroup_properties.supportedOperations;
@@ -3479,6 +3575,7 @@ static void VulkanCreate(WindowContext* ctx)
 	ctx->graphic_ctx.depth_bias_clamp_supported    = device_features.depthBiasClamp == VK_TRUE;
 	ctx->graphic_ctx.sample_rate_shading_supported = device_features.sampleRateShading == VK_TRUE;
 	ctx->graphic_ctx.geometry_shader_supported = device_features.geometryShader == VK_TRUE;
+	ctx->graphic_ctx.draw_indirect_first_instance_supported         = device_features.drawIndirectFirstInstance == VK_TRUE;
 	ctx->graphic_ctx.blend_capabilities.max_color_attachments = device_properties.limits.maxColorAttachments;
 	ctx->graphic_ctx.blend_capabilities.max_dual_source_attachments = device_properties.limits.maxFragmentDualSrcAttachments;
 
@@ -3494,7 +3591,7 @@ static void VulkanCreate(WindowContext* ctx)
 	                       &ctx->graphic_ctx.compute_wave_vulkan_state, ctx->graphic_ctx.guest_device_address_supported,
 	                       ctx->graphic_ctx.compute_derivative_group_linear_supported,
 	                       ctx->graphic_ctx.shader_maximal_reconvergence_supported,
-	                       ctx->graphic_ctx.image_view_min_lod_supported,
+	                       ctx->graphic_ctx.image_view_min_lod_supported, ctx->graphic_ctx.device_fault_supported,
 	                       &ctx->graphic_ctx.blend_capabilities.enabled, &ctx->graphic_ctx.enabled_sampler_features);
 	if (ctx->graphic_ctx.device == nullptr)
 	{
@@ -3504,6 +3601,14 @@ static void VulkanCreate(WindowContext* ctx)
 	ctx->graphic_ctx.shader_maximal_reconvergence_enabled    = ctx->graphic_ctx.shader_maximal_reconvergence_supported;
 
 	VulkanCreateQueues(&ctx->graphic_ctx, queues);
+	if (clock_mark_extension != nullptr)
+	{
+		const bool khr = strcmp(clock_mark_extension, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) == 0;
+		ctx->graphic_ctx.get_calibrated_timestamps = reinterpret_cast<PFN_vkGetCalibratedTimestampsKHR>(
+		    vkGetDeviceProcAddr(ctx->graphic_ctx.device, khr ? "vkGetCalibratedTimestampsKHR" : "vkGetCalibratedTimestampsEXT"));
+		ctx->graphic_ctx.timestamp_period_ns = device_properties.limits.timestampPeriod;
+	}
+	KYTY_LOG_INFO("End-of-pipe clock marks use %s\n", ctx->graphic_ctx.get_calibrated_timestamps != nullptr ? "device timestamps" : "completion time");
 
 	ctx->swapchain = VulkanCreateSwapchain(&ctx->graphic_ctx, 2);
 	DebugOverlayInit(ctx->host_window, &ctx->graphic_ctx, ctx->swapchain);
@@ -3638,7 +3743,7 @@ void WindowUpdateTitle()
 		static double s_last_log_time = 0.0;
 		if (t - s_last_log_time >= 1.0)
 		{
-			KYTY_LOG_DEBUG( "KYTY_FPS_LOG frame=%d fps=%.3f t=%.3f\n", frame_num, fps_now, t);
+			std::fprintf(stderr, "KYTY_FPS_LOG frame=%d fps=%.3f t=%.3f\n", frame_num, fps_now, t);
 			s_last_log_time = t;
 		}
 	}

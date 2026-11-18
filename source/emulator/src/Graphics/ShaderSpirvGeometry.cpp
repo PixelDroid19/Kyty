@@ -47,6 +47,39 @@ static String8 GeometryStore(const String8& stem, const String8& word, const Str
 	    .ReplaceStr("<value>", value);
 }
 
+// Loads the 8-dword block from the device address in the push block's first two dwords, into the
+// names the push-block loads give its fields.
+// `words` names the uint constants 0..7.
+static void EmitGeometryDeviceBlockLoads(const String8& ptr, const String8& row0, const String8 (&words)[8], String8* output)
+{
+	*output += String8(R"(
+%geo_block_lo_ptr = OpAccessChain %<ptr> %vsharp %int_0 %<row0> %int_0
+%geo_block_hi_ptr = OpAccessChain %<ptr> %vsharp %int_0 %<row0> %int_1
+%geo_block_lo = OpLoad %uint %geo_block_lo_ptr
+%geo_block_hi = OpLoad %uint %geo_block_hi_ptr
+%geo_block_lo64 = OpUConvert %ulong %geo_block_lo
+%geo_block_hi64 = OpUConvert %ulong %geo_block_hi
+%geo_block_his = OpShiftLeftLogical %ulong %geo_block_hi64 %uint_32
+%geo_block = OpBitwiseOr %ulong %geo_block_his %geo_block_lo64
+)")
+	               .ReplaceStr("<ptr>", ptr)
+	               .ReplaceStr("<row0>", row0);
+	const char* fields[8] = {"geo_output_lo",      "geo_output_hi",  "geo_total",  "geo_slices", "geo_first_vertex",
+	                         "geo_first_instance", "geo_index_lo",   "geo_index_hi"};
+	for (uint32_t word = 0; word < 8u; ++word)
+	{
+		*output += String8(R"(
+%<f>_word64 = OpUConvert %ulong %<word>
+%<f>_bytes = OpShiftLeftLogical %ulong %<f>_word64 %uint_2
+%<f>_address = OpIAdd %ulong %geo_block %<f>_bytes
+%<f>_pointer = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %<f>_address
+%<f> = OpLoad %uint %<f>_pointer Aligned 4
+)")
+		               .ReplaceStr("<f>", String8(fields[word]))
+		               .ReplaceStr("<word>", words[word]);
+	}
+}
+
 bool Spirv::EmitGeometryProlog(String8* output) const
 {
 	const auto* bind = GetBindInfo();
@@ -78,6 +111,22 @@ bool Spirv::EmitGeometryProlog(String8* output) const
 	*output += String8(R"(
 %geo_group_ptr = OpAccessChain %_ptr_Input_uint %gl_WorkGroupID %uint_0
 %geo_group = OpLoad %uint %geo_group_ptr
+)");
+	if (geometry.device_block)
+	{
+		String8 words[8];
+		for (uint32_t word = 0; word < 8u; ++word)
+		{
+			words[word] = GetConstantUint(word);
+			if (!IsKnownUint(words[word]))
+			{
+				return false;
+			}
+		}
+		EmitGeometryDeviceBlockLoads(ptr, row0, words, output);
+	} else
+	{
+		*output += String8(R"(
 %geo_output_lo_ptr = OpAccessChain %<ptr> %vsharp %int_0 %<row0> %int_0
 %geo_output_hi_ptr = OpAccessChain %<ptr> %vsharp %int_0 %<row0> %int_1
 %geo_total_ptr = OpAccessChain %<ptr> %vsharp %int_0 %<row0> %int_2
@@ -94,6 +143,12 @@ bool Spirv::EmitGeometryProlog(String8* output) const
 %geo_index_hi_ptr = OpAccessChain %<ptr> %vsharp %int_0 %<row1> %int_3
 %geo_index_lo = OpLoad %uint %geo_index_lo_ptr
 %geo_index_hi = OpLoad %uint %geo_index_hi_ptr
+)")
+		               .ReplaceStr("<ptr>", ptr)
+		               .ReplaceStr("<row0>", row0)
+		               .ReplaceStr("<row1>", row1);
+	}
+	*output += String8(R"(
 %geo_index_lo64 = OpUConvert %ulong %geo_index_lo
 %geo_index_hi64 = OpUConvert %ulong %geo_index_hi
 %geo_index_his = OpShiftLeftLogical %ulong %geo_index_hi64 %uint_32

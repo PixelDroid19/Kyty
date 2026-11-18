@@ -215,6 +215,77 @@ TEST(EmulatorShaderMaskAnalysis, ReadfirstlaneNeedsWholeCompareExec)
 	EXPECT_TRUE(ShaderLaneMaskPlanOf(ParseShader(lane_reader)).local[0]);
 }
 
+TEST(EmulatorShaderMaskAnalysis, PartLocalSkipFreesTheCompareOfAnExecBranch)
+{
+	// v_cmp; s_and_saveexec; s_cbranch_execz over one v_mov_b32 v2, v0.
+	constexpr uint32_t v_mov_b32_v2_v0 = (0x3fu << 25u) | (2u << 17u) | (1u << 9u) | 256u;
+	const uint32_t     shader[]        = {kCmpLtU32S4, kCmpSources, kSAndSaveexecS6S4, kSCbranchExeczNext | 1u, v_mov_b32_v2_v0, kEndpgm};
+	const auto         code            = ParseShader(shader);
+	const auto         plan            = ShaderLaneMaskPlanOf(code, true);
+
+	ASSERT_EQ(plan.local.size(), 5u);
+	EXPECT_TRUE(plan.local[0]);
+	EXPECT_TRUE(plan.part_skipped[3]);
+	EXPECT_FALSE(plan.part_skipped[2]);
+	EXPECT_FALSE(plan.part_skipped[4]);
+	// Not asked: the branch keeps its demand for the complete EXEC.
+	EXPECT_FALSE(ShaderLaneMaskPlanOf(code).local[0]);
+	EXPECT_FALSE(ShaderLaneMaskPlanOf(code).part_skipped[3]);
+}
+
+TEST(EmulatorShaderMaskAnalysis, PartLocalSkipNeedsARangeWithoutRendezvous)
+{
+	// A lane exchange in the skipped range meets the other parts.
+	const uint32_t exchange[] = {kCmpLtU32S4, kCmpSources, kSAndSaveexecS6S4, kSCbranchExeczNext | 1u, kVReadfirstlaneS8V0, kEndpgm};
+	const auto     exchanged  = ShaderLaneMaskPlanOf(ParseShader(exchange), true);
+	EXPECT_FALSE(exchanged.local[0]);
+	EXPECT_FALSE(exchanged.part_skipped[3]);
+
+	// So does a compare in the range whose complete mask a scalar compare reads there.
+	const uint32_t gather[] = {kCmpLtU32S4, kCmpSources, kSAndSaveexecS6S4, kSCbranchExeczNext | 3u,
+	                           kCmpLtU32S4, kCmpSources, kSCmpLgU64S4Zero,  kEndpgm};
+	const auto     gathered = ShaderLaneMaskPlanOf(ParseShader(gather), true);
+	ASSERT_EQ(gathered.local.size(), 6u);
+	EXPECT_FALSE(gathered.local[0]);
+	EXPECT_FALSE(gathered.local[3]);
+	EXPECT_FALSE(gathered.part_skipped[3]);
+	EXPECT_FALSE(gathered.part_skipped[4]);
+}
+
+TEST(EmulatorShaderMaskAnalysis, PartLocalSkipNeedsScalarsDeadAtTheTarget)
+{
+	// The skipped s_mov_b32 s20, s14 would leave the parts with different s20 values for the reader after it.
+	constexpr uint32_t s_mov_b32_s20_s14 = (0x17du << 23u) | (20u << 16u) | (0x03u << 8u) | 14u;
+	constexpr uint32_t s_mov_b32_s22_s20 = (0x17du << 23u) | (22u << 16u) | (0x03u << 8u) | 20u;
+	const uint32_t     read[] = {kCmpLtU32S4, kCmpSources, kSAndSaveexecS6S4, kSCbranchExeczNext | 1u, s_mov_b32_s20_s14, s_mov_b32_s22_s20, kEndpgm};
+	const uint32_t     dead[] = {kCmpLtU32S4, kCmpSources, kSAndSaveexecS6S4, kSCbranchExeczNext | 1u, s_mov_b32_s20_s14, kEndpgm};
+
+	EXPECT_FALSE(ShaderLaneMaskPlanOf(ParseShader(read), true).part_skipped[3]);
+	EXPECT_FALSE(ShaderLaneMaskPlanOf(ParseShader(read), true).local[0]);
+	EXPECT_TRUE(ShaderLaneMaskPlanOf(ParseShader(dead), true).part_skipped[3]);
+}
+
+TEST(EmulatorShaderMaskAnalysis, PartLocalSkipNeedsARangeEnteredOnlyThroughItsBranch)
+{
+	// The branch at pc 16 skips a v_cmpx and a v_mov; the branch at pc 0 lands on that v_mov (pc 24).
+	constexpr uint32_t v_mov_b32_v2_v0 = (0x3fu << 25u) | (2u << 17u) | (1u << 9u) | 256u;
+	const uint32_t     entered[] = {kSCbranchExeczNext | 5u, kCmpLtU32S4, kCmpSources,     kSAndSaveexecS6S4,
+	                                kSCbranchExeczNext | 2u, kVCmpxLtU32, v_mov_b32_v2_v0, kEndpgm};
+	const uint32_t     nested[]  = {kCmpLtU32S4, kCmpSources, kSAndSaveexecS6S4, kSCbranchExeczNext | 2u, kVCmpxLtU32, v_mov_b32_v2_v0, kEndpgm};
+	const auto         plan      = ShaderLaneMaskPlanOf(ParseShader(entered), true);
+
+	ASSERT_EQ(plan.part_skipped.size(), 7u);
+	EXPECT_FALSE(plan.part_skipped[4]);
+	EXPECT_FALSE(plan.part_skipped[5]);
+	EXPECT_FALSE(plan.local[1]);
+
+	const auto alone = ShaderLaneMaskPlanOf(ParseShader(nested), true);
+	ASSERT_EQ(alone.part_skipped.size(), 6u);
+	EXPECT_TRUE(alone.part_skipped[3]);
+	EXPECT_TRUE(alone.part_skipped[4]);
+	EXPECT_TRUE(alone.local[0]);
+}
+
 namespace {
 
 constexpr uint32_t kCmpLtU32S6       = (0xd4u << 24u) | (0xc1u << 16u) | 6u;

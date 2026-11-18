@@ -244,7 +244,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Lshr_B64_Sdst2Ssrc02Ssrc1)
 KYTY_RECOMPILER_FUNC(Recompile_SAshrI64_Sdst2Ssrc02Ssrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
-	if (inst.dst.size != 2 || inst.src[0].size != 2 || inst.src[1].size != 1)
+	if (inst.dst.size != 2 || inst.src[0].size != 2 || inst.src[1].size > 1)
 	{
 		return false;
 	}
@@ -266,7 +266,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SAshrI64_Sdst2Ssrc02Ssrc1)
 	String8       load1;
 	String8       load2;
 	if (!operand_load_uint(spirv, inst.src[0], "ashr_source_lo_<index>", index_str, &load0, 0) ||
-	    !operand_load_uint(spirv, inst.src[0], "ashr_source_hi_<index>", index_str, &load1, 1) ||
+	    !operand_load_i64_word(spirv, inst.src[0], "ashr_source_hi_<index>", index_str, &load1, 1) ||
 	    !operand_load_uint(spirv, inst.src[1], "ashr_shift_source_<index>", index_str, &load2))
 	{
 		return false;
@@ -404,7 +404,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_I64_Sdst2Ssrc02Ssrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
 	if (inst.type != ShaderInstructionType::SBfeI64 || inst.format != ShaderInstructionFormat::Sdst2Ssrc02Ssrc1 || inst.src_num != 2 ||
-	    inst.dst.size != 2 || inst.src[0].size != 2 || inst.src[1].size != 1)
+	    inst.dst.size != 2 || inst.src[0].size != 2 || inst.src[1].size > 1)
 	{
 		return false;
 	}
@@ -426,7 +426,7 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_I64_Sdst2Ssrc02Ssrc1)
 	String8       load1;
 	String8       load2;
 	if (!operand_load_uint(spirv, inst.src[0], "bfei64_source_lo_<index>", index_str, &load0, 0) ||
-	    !operand_load_uint(spirv, inst.src[0], "bfei64_source_hi_<index>", index_str, &load1, 1) ||
+	    !operand_load_i64_word(spirv, inst.src[0], "bfei64_source_hi_<index>", index_str, &load1, 1) ||
 	    !operand_load_uint(spirv, inst.src[1], "bfei64_control_<index>", index_str, &load2))
 	{
 		return false;
@@ -1460,7 +1460,17 @@ KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02)
 	return true;
 }
 
-/* SInstPrefetch, SWaitcnt, SSendmsg */
+// ISA 12.5.1: save wave, stall wave gen, halt waves, ordered PS done and GS alloc req signal the hardware and leave
+// shader state alone. GS output and GS done carry the geometry stream, and any other type is not listed, so those
+// stop the translation instead of being dropped.
+KYTY_RECOMPILER_FUNC(Recompile_SSendmsg)
+{
+	const auto&    inst    = code.GetInstructions().At(index);
+	const uint32_t message = inst.src[0].constant.u & 0xfu;
+	return message >= 4u && message <= 9u && message != 8u;
+}
+
+/* SInstPrefetch, SWaitcnt */
 KYTY_RECOMPILER_FUNC(Recompile_Skip)
 {
 	return true;

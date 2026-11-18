@@ -332,7 +332,8 @@ KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
 	}
 
 	GpuMemoryNotifyHostWrite(dst, byte_count);
-	memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), byte_count);
+	// The ranges may overlap; memmove gives the result the IT_DMA_DATA path gives.
+	memmove(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), byte_count);
 	GraphicsRenderMemoryFlush(dst, byte_count);
 	GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaDataCustom, dst, byte_count, 0u, 0u, 0u);
 	return 7;
@@ -697,7 +698,7 @@ KYTY_CP_OP_PARSER(cp_op_flip)
 	f.flip_arg  = static_cast<int64_t>(buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u));
 
 	cp->SetFlip(f);
-	cp->Flip();
+	cp->Flip(cp->TakeFlipQueuedAtSubmit());
 
 	return 5;
 }
@@ -1056,7 +1057,7 @@ KYTY_CP_OP_PARSER(cp_op_marker)
 		case 0xd: cp->SetUserDataMarker(HW::UserSgprType::Region); break;
 		case 0x777:
 		{
-			cp->Flip();
+			cp->Flip(false);
 			break;
 		}
 		case 0x778:

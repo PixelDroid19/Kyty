@@ -44,6 +44,7 @@
 
 #include "ShaderControlFlowGraph.h"
 #include "ShaderMaskAnalysis.h"
+#include "ShaderSplitLdsOrder.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -56,6 +57,13 @@ constexpr uint8_t kShaderColorExportNumberUint     = 4u;
 {
 	return input != nullptr && target < 8u && input->target_output_mode[target] == kShaderColorExportModeUint16Abgr &&
 	       input->target_output_number[target] == kShaderColorExportNumberUint && input->target_output_order[target] == 0u;
+}
+
+// GLSL.std.450 unpack of a COMPR color export pair, by SPI_SHADER_COL_FORMAT:
+// 5 UNORM16_ABGR and 6 SNORM16_ABGR are normalized; 4 FP16_ABGR is half.
+[[nodiscard]] constexpr const char* ShaderCompressedColorExportUnpack(uint8_t mode)
+{
+	return mode == 5u ? "UnpackUnorm2x16" : mode == 6u ? "UnpackSnorm2x16" : "UnpackHalf2x16";
 }
 
 // Function-local array backing ds_*_addtid_b32 spill slots in non-compute
@@ -138,6 +146,15 @@ public:
 	// Split compute wave: pointwise mask algebra that gathers its own result
 	// from the lane-local masks it combines.
 	[[nodiscard]] bool IsLaneMaskGather(uint32_t index) const;
+	// Split compute wave: the run of V_READLANE instructions that shares one exchange with the one at index, head
+	// first; nullptr when it exchanges alone.
+	[[nodiscard]] const std::vector<uint32_t>* SplitReadGroup(uint32_t index) const;
+	// Split compute wave: the run of V_CMP instructions whose ballots share one exchange with the one at index,
+	// tail last; nullptr when it exchanges alone.
+	[[nodiscard]] const std::vector<uint32_t>* SplitBallotGroup(uint32_t index) const;
+	[[nodiscard]] String8                      SplitBallotGroupVotes(const std::vector<uint32_t>& group);
+	[[nodiscard]] String8                      SplitBallotGroupMask(const std::vector<uint32_t>& group, uint32_t index) const;
+	[[nodiscard]] uint32_t                     SplitBallotGroupLimit() const;
 	// Guest lanes per host subgroup of a split wave: 32 or 16.
 	[[nodiscard]] uint32_t SplitWavePartLanes() const;
 	// The SubgroupLocalInvocationId builtin. A split wave keeps the guest lane in %gl_SubgroupInvocationID.
@@ -145,9 +162,13 @@ public:
 	[[nodiscard]] String8 SplitWaveTypes() const;
 	[[nodiscard]] String8 SplitWaveVariables() const;
 	[[nodiscard]] String8 SplitWaveProlog() const;
-	[[nodiscard]] String8 SplitWaveDsOrder(uint32_t index) const;
+	[[nodiscard]] const ShaderSplitLdsOrder& SplitLdsOrder() const;
+	// The instruction's text with the rendezvous that order its LDS access around it.
+	[[nodiscard]] String8 SplitWaveDsOrder(uint32_t index, const String8& body) const;
 	[[nodiscard]] String8 SplitWaveFunctions() const;
 	void                  CheckSplitWaveCollectives(const String8& body) const;
+	// An instruction one part may skip alone must not rendezvous with the others.
+	void                  CheckSplitWavePartSkip(uint32_t index, const String8& body) const;
 	void                  MarkStorageWrites(uint32_t annotations_end, uint32_t main_begin);
 	[[nodiscard]] bool NativeComputeWaveLayoutIsValid() const;
 	[[nodiscard]] bool EmitNativeComputeWaveProlog(String8* output) const;
@@ -216,6 +237,8 @@ public:
 	[[nodiscard]] String8 EmitMetadataStore(int row, int field, const String8& reg) const;
 	[[nodiscard]] String8 EmitThreadLimitLoad(uint32_t axis, const String8& id) const;
 	[[nodiscard]] bool    UsesGuestDeviceAddress() const;
+	// Guest device addressing or storage buffers read by device address.
+	[[nodiscard]] bool    UsesPhysicalStorageBuffer() const;
 	[[nodiscard]] String8 GuestDeviceAddressTypes(bool ulong_declared) const;
 	[[nodiscard]] String8 GuestDeviceAddressFunction() const;
 	[[nodiscard]] bool    EmitGuestLoad(const String8& lo, const String8& hi, int dwords, const String8& prefix, String8* output) const;
@@ -351,6 +374,7 @@ public:
 	[[nodiscard]] bool IsDx10ClampEnabled() const { return GetFloatModeControls().dx10_clamp; }
 	[[nodiscard]] bool IsIeeeModeEnabled() const { return GetFloatModeControls().ieee_mode; }
 	// MODE.FP_DENORM single-precision field (bits 5:4): bit 5 clear flushes output denormals.
+	[[nodiscard]] bool Float32InputDenormalsFlushed() const { return (GetFloatModeControls().float_mode & 0x10u) == 0u; }
 	[[nodiscard]] bool Float32OutputDenormalsFlushed() const { return (GetFloatModeControls().float_mode & 0x20u) == 0u; }
 	// MODE.FP_DENORM double/half field (bits 7:6): bit 7 clear flushes output denormals.
 	[[nodiscard]] bool Float64Float16OutputDenormalsFlushed() const { return (GetFloatModeControls().float_mode & 0x80u) == 0u; }
@@ -553,6 +577,14 @@ private:
 	mutable std::vector<bool>     m_vertex_exec_full;
 	mutable bool                  m_lane_mask_plan_ready = false;
 	mutable ShaderLaneMaskPlan    m_lane_mask_plan;
+	mutable bool                  m_split_lds_order_ready = false;
+	mutable ShaderSplitLdsOrder   m_split_lds_order;
+	mutable bool                  m_split_read_groups_ready = false;
+	mutable std::vector<uint32_t> m_split_read_group_of;
+	mutable std::vector<std::vector<uint32_t>> m_split_read_groups;
+	mutable bool                  m_split_ballot_groups_ready = false;
+	mutable std::vector<uint32_t> m_split_ballot_group_of;
+	mutable std::vector<std::vector<uint32_t>> m_split_ballot_groups;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;
@@ -578,7 +610,8 @@ bool operand_is_constant(ShaderOperand op);
 bool operand_is_variable(ShaderOperand op);
 bool operand_covers_vgpr(ShaderOperand op, int reg);
 bool instruction_writes_vgpr(const ShaderInstruction& inst, int reg);
-bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t* pc, int* first_register);
+bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t* pc, int* first_register,
+                          uint32_t* instruction_index = nullptr);
 bool FragmentTapQueryLodSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t instruction_index);
 String8 packed_half_shadow_to_str(ShaderOperand op);
 SpirvValue operand_variable_to_str(ShaderOperand op);
@@ -591,6 +624,11 @@ bool operand_is_exec(ShaderOperand op);
 bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load);
 bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load, int shift = -1);
 bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load);
+uint64_t operand_f64_constant_bits(const ShaderOperand& op);
+// One word (shift 0 low, 1 high) of a 64-bit float source, with its constant expansion and sign modifiers applied.
+bool operand_load_f64_word(Spirv* spirv, const ShaderOperand& op, const String8& result_id, const String8& index, String8* load, int shift);
+// One word of a signed 64-bit integer source; a literal is sign extended.
+bool operand_load_i64_word(Spirv* spirv, const ShaderOperand& op, const String8& result_id, const String8& index, String8* load, int shift);
 String8 get_scc_check(SccCheck scc_check, int dst_num);
 bool UsesArrayed2dImages(const ShaderBindResources* bind, ShaderTextureUsage usage);
 bool UsesUnsignedIntegerImages(const ShaderBindResources* bind);
@@ -625,12 +663,15 @@ bool UsesNativeLaneExchange(const ShaderCode& code);
 // M0-relative moves lower to a named register only when M0 is a proven literal
 // in the same basic block. Returns the literal through m0 on success.
 bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0);
-// Gen5 BUFFER_LOAD_FORMAT lowers through shared functions that decode the
-// V#'s format and apply its DST_SEL; `bound_buffers` adds the storage-buffer
-// element reader next to the decoder.
-bool    SpirvUsesGen5BufferFormatLoads(const ShaderCode& code);
+// Gen5 BUFFER_LOAD_FORMAT and BUFFER_STORE_FORMAT lower through shared
+// functions that decode or encode the V#'s format; `bound_buffers` adds the
+// storage-buffer element reader and, for stores, the element writer.
+bool    SpirvUsesGen5BufferFormats(const ShaderCode& code);
+bool    SpirvUsesGen5BufferFormatStores(const ShaderCode& code);
 void    SpirvAddGen5BufferFormatConstants(Spirv* spirv);
-String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, bool bound_buffers);
+// Declares the format table the format functions read; it follows the constants.
+String8 SpirvGen5BufferFormatTable(const Spirv& spirv);
+String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, const ShaderCode& code, bool bound_buffers);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_STORE_BARRIER_MEMORY;

@@ -9,12 +9,14 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cinttypes>
 #include <cstddef>
@@ -2970,19 +2972,142 @@ int KYTY_SYSV_ABI NetGetsockopt(int id, int level, int option, void* value, int*
 	           : NET_ERROR_EFAULT;
 }
 
+// FreeBSD fd_set: 64-bit words, descriptor d at bit d % 64 of word d / 64.
+constexpr int kGuestFdSetSize = 1024;
+
+#if KYTY_NET_HOST_POSIX
+// select(2) on guest sockets: waits with host poll and rewrites each guest set to
+// its ready descriptors. Every watched descriptor must be an open socket.
+static int SelectSockets(int nfds, void* const guest_sets[3], int timeout_ms)
+{
+	constexpr short kWanted[3] = {POLLIN, POLLOUT, POLLPRI};
+	constexpr short kReady[3]  = {POLLIN | POLLHUP | POLLERR, POLLOUT | POLLERR, POLLPRI};
+	const size_t    set_size   = (static_cast<size_t>(nfds) + 63) / 64 * sizeof(uint64_t);
+
+	uint64_t sets[3][kGuestFdSetSize / 64] {};
+	for (int s = 0; s < 3; s++)
+	{
+		if (guest_sets[s] != nullptr &&
+		    (!IsGuestOutputRange(guest_sets[s], set_size) ||
+		     !Core::VirtualMemory::CopyFromGuest(sets[s], reinterpret_cast<uint64_t>(guest_sets[s]), set_size)))
+		{
+			return NET_ERROR_EFAULT;
+		}
+	}
+
+	std::vector<pollfd>         polled;
+	std::vector<int>            ids;
+	std::vector<SocketStatePtr> leases;
+	bool                        bad_descriptor = false;
+	for (int id = 0; id < nfds && !bad_descriptor; id++)
+	{
+		short events = 0;
+		for (int s = 0; s < 3; s++)
+		{
+			events |= ((sets[s][id / 64] >> (id % 64)) & 1u) != 0 ? kWanted[s] : 0;
+		}
+		if (events == 0)
+		{
+			continue;
+		}
+		auto state   = FindSocketState(id);
+		int  host_fd = -1;
+		bad_descriptor = !BeginSocketOperation(state, &host_fd);
+		if (!bad_descriptor)
+		{
+			leases.push_back(std::move(state));
+			ids.push_back(id);
+			polled.push_back(pollfd {host_fd, events, 0});
+		}
+	}
+
+	int ready      = 0;
+	int poll_errno = 0;
+	if (!bad_descriptor)
+	{
+		ready      = InterruptibleSocketCall([&] { return ::poll(polled.data(), polled.size(), timeout_ms); });
+		poll_errno = errno;
+	}
+	for (const auto& state: leases)
+	{
+		EndSocketOperation(state);
+	}
+	if (bad_descriptor)
+	{
+		return NET_ERROR_EBADF;
+	}
+	if (ready < 0)
+	{
+		return HostErrnoToNet(poll_errno);
+	}
+
+	uint64_t ready_sets[3][kGuestFdSetSize / 64] {};
+	int      count = 0;
+	for (size_t i = 0; i < polled.size(); i++)
+	{
+		for (int s = 0; s < 3; s++)
+		{
+			if ((polled[i].events & kWanted[s]) != 0 && (polled[i].revents & kReady[s]) != 0)
+			{
+				ready_sets[s][ids[i] / 64] |= uint64_t {1} << (ids[i] % 64);
+				count++;
+			}
+		}
+	}
+	for (int s = 0; s < 3; s++)
+	{
+		if (guest_sets[s] != nullptr && !Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(guest_sets[s]), ready_sets[s], set_size))
+		{
+			return NET_ERROR_EFAULT;
+		}
+	}
+	return count;
+}
+#endif
+
 int KYTY_SYSV_ABI NetSelect(int nfds, void* readfds, void* writefds, void* exceptfds, void* timeout)
 {
-	// select(0, nullptr, nullptr, nullptr, &timeout) is the POSIX sleep form.
-	// Returning immediately turns a timed wait into a hot loop in guest middleware.
 	if (nfds < 0)
 	{
 		return NET_ERROR_EINVAL;
 	}
-	if (nfds != 0 || readfds != nullptr || writefds != nullptr || exceptfds != nullptr)
+	// FreeBSD clamps nfds to the descriptor table instead of failing.
+	nfds = std::min(nfds, kGuestFdSetSize);
+
+	// PS5 timeval uses 64-bit time_t and suseconds_t on the x86-64 ABI.
+	int64_t tv[2] {};
+	if (timeout != nullptr && (!IsGuestReadableRange(timeout, sizeof(tv)) ||
+	                           !Core::VirtualMemory::CopyFromGuest(tv, reinterpret_cast<uint64_t>(timeout), sizeof(tv))))
 	{
+		return NET_ERROR_EFAULT;
+	}
+	const int64_t seconds      = tv[0];
+	const int64_t microseconds = tv[1];
+	if (seconds < 0 || microseconds < 0 || microseconds >= 1'000'000)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	const uint64_t seconds_u      = static_cast<uint64_t>(seconds);
+	const uint64_t microseconds_u = static_cast<uint64_t>(microseconds);
+	if (seconds_u > (UINT64_MAX - microseconds_u) / 1'000'000ull)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	uint64_t remaining = seconds_u * 1'000'000ull + microseconds_u;
+
+	if (nfds != 0 && (readfds != nullptr || writefds != nullptr || exceptfds != nullptr))
+	{
+#if KYTY_NET_HOST_POSIX
+		void* const sets[3]    = {readfds, writefds, exceptfds};
+		const int   timeout_ms = timeout == nullptr ? -1 : static_cast<int>(std::min<uint64_t>((remaining + 999) / 1000, INT32_MAX));
+		return SelectSockets(nfds, sets, timeout_ms);
+#else
 		return NET_ERROR_EOPNOTSUPP;
+#endif
 	}
 
+	// With no descriptor to watch, select is the POSIX sleep form. Returning
+	// immediately turns a timed wait into a hot loop in guest middleware.
 	if (timeout == nullptr)
 	{
 		// A null timeout blocks indefinitely. Use bounded sleeps so shutdown and signal
@@ -2994,22 +3119,6 @@ int KYTY_SYSV_ABI NetSelect(int nfds, void* readfds, void* writefds, void* excep
 		}
 	}
 
-	// PS5 timeval uses 64-bit time_t and suseconds_t on the x86-64 ABI.
-	const auto* tv             = static_cast<const int64_t*>(timeout);
-	const int64_t seconds      = tv[0];
-	const int64_t microseconds = tv[1];
-	if (seconds < 0 || microseconds < 0 || microseconds >= 1'000'000)
-	{
-		return NET_ERROR_EINVAL;
-	}
-
-	const uint64_t seconds_u      = static_cast<uint64_t>(seconds);
-	const uint64_t microseconds_u = static_cast<uint64_t>(microseconds);
-	if (seconds_u > (UINT64_MAX - microseconds_u) / 1'000'000ull)
-	{
-		return NET_ERROR_EINVAL;
-	}
-	uint64_t                          remaining = seconds_u * 1'000'000ull + microseconds_u;
 	Kernel::PthreadInterruptibleScope any_syscall;
 	while (remaining != 0)
 	{
@@ -4414,11 +4523,48 @@ int KYTY_SYSV_ABI HttpDeleteRequest(int req_id)
 	return OK;
 }
 
+int KYTY_SYSV_ABI HttpGetLastErrno(int req_id, int* err_num)
+{
+	PRINT_NAME();
+
+	KYTY_LOG_DEBUG("\t req_id = %d\n", req_id);
+
+	if (err_num == nullptr)
+	{
+		return HTTP_ERROR_INVALID_VALUE;
+	}
+
+	*err_num = 0;
+
+	EXIT_IF(g_net == nullptr);
+	// Whether an unknown request id is rejected is not agreed on, so it is not answered.
+	EXIT_NOT_IMPLEMENTED(!g_net->HttpValidRequest(Network::Id(req_id)));
+
+	return OK;
+}
+
 } // namespace Http
 
 namespace NetCtl {
 
+constexpr int NET_CTL_ERROR_CALLBACK_MAX  = -2143215357; /* 0x80412103 */
+constexpr int NET_CTL_ERROR_ID_NOT_FOUND  = -2143215356; /* 0x80412104 */
+constexpr int NET_CTL_ERROR_INVALID_ID    = -2143215355; /* 0x80412105 */
+constexpr int NET_CTL_ERROR_INVALID_ADDR  = -2143215353; /* 0x80412107 */
 constexpr int NET_CTL_ERROR_NOT_CONNECTED = -2143215352; /* 0x80412108 */
+
+constexpr int NET_CTL_EVENT_TYPE_DISCONNECTED = 1;
+constexpr int NET_CTL_EVENT_TYPE_IPOBTAINED   = 3;
+
+struct NetCtlCallbackSlot
+{
+	NetCtlCallback func       = nullptr;
+	void*          arg        = nullptr;
+	int            last_event = 0;
+};
+
+static std::mutex                            g_net_ctl_callbacks_mutex;
+static std::array<NetCtlCallbackSlot, 8>     g_net_ctl_callbacks;
 
 LIB_NAME("NetCtl", "NetCtl");
 
@@ -4498,10 +4644,37 @@ int KYTY_SYSV_ABI NetCtlGetNatInfo(NetCtlNatInfo* nat_info)
 	return Net::CopyGuestOutput(nat_info, reinterpret_cast<const uint8_t*>(&staged), sizeof(staged));
 }
 
+// A callback learns the connection state on the first check after it registers, then on every change.
 int KYTY_SYSV_ABI NetCtlCheckCallback()
 {
 	PRINT_NAME();
 
+	const int event = Config::NetworkConnected() ? NET_CTL_EVENT_TYPE_IPOBTAINED : NET_CTL_EVENT_TYPE_DISCONNECTED;
+
+	std::array<NetCtlCallbackSlot, g_net_ctl_callbacks.size()> due {};
+	{
+		std::lock_guard lock(g_net_ctl_callbacks_mutex);
+		for (size_t i = 0; i < g_net_ctl_callbacks.size(); i++)
+		{
+			auto& slot = g_net_ctl_callbacks[i];
+			if (slot.func == nullptr || slot.last_event == event)
+			{
+				continue;
+			}
+			slot.last_event = event;
+			due[i]          = slot;
+		}
+	}
+
+	// The guest callback may call back into NetCtl, so it runs without the lock.
+	for (const auto& slot: due)
+	{
+		if (slot.func != nullptr)
+		{
+			(void)Emulator::GuestRuntimePort::Invoke(reinterpret_cast<uint64_t>(slot.func), static_cast<uint64_t>(event),
+			                               reinterpret_cast<uint64_t>(slot.arg), 0);
+		}
+	}
 	return OK;
 }
 
@@ -4516,7 +4689,58 @@ int KYTY_SYSV_ABI NetCtlGetState(int* state)
 	return Net::CopyGuestOutput(state, reinterpret_cast<const uint8_t*>(&staged), sizeof(staged));
 }
 
-int KYTY_SYSV_ABI NetCtlRegisterCallback(NetCtlCallback func, void* /*arg*/, int* cid)
+int KYTY_SYSV_ABI NetCtlRegisterCallback(NetCtlCallback func, void* arg, int* cid)
+{
+	PRINT_NAME();
+
+	if (func == nullptr || cid == nullptr)
+	{
+		return NET_CTL_ERROR_INVALID_ADDR;
+	}
+
+	std::lock_guard lock(g_net_ctl_callbacks_mutex);
+	for (size_t i = 0; i < g_net_ctl_callbacks.size(); i++)
+	{
+		auto& slot = g_net_ctl_callbacks[i];
+		if (slot.func != nullptr)
+		{
+			continue;
+		}
+		const int staged = static_cast<int>(i);
+		const int result = Net::CopyGuestOutput(cid, reinterpret_cast<const uint8_t*>(&staged), sizeof(staged));
+		if (result != OK)
+		{
+			return result;
+		}
+		slot = {func, arg, 0};
+		return OK;
+	}
+	return NET_CTL_ERROR_CALLBACK_MAX;
+}
+
+int KYTY_SYSV_ABI NetCtlUnregisterCallback(int cid)
+{
+	PRINT_NAME();
+
+	KYTY_LOG_DEBUG("\t cid = %d\n", cid);
+
+	if (cid < 0 || static_cast<size_t>(cid) >= g_net_ctl_callbacks.size())
+	{
+		return NET_CTL_ERROR_INVALID_ID;
+	}
+
+	std::lock_guard lock(g_net_ctl_callbacks_mutex);
+	auto&           slot = g_net_ctl_callbacks[cid];
+	if (slot.func == nullptr)
+	{
+		return NET_CTL_ERROR_ID_NOT_FOUND;
+	}
+	slot = {};
+	return OK;
+}
+
+// The IPv6 table is not delivered to, so its callbacks keep the single id they always had.
+int KYTY_SYSV_ABI NetCtlRegisterCallbackV6(NetCtlCallback func, void* /*arg*/, int* cid)
 {
 	PRINT_NAME();
 
@@ -4723,28 +4947,33 @@ int KYTY_SYSV_ABI NpGetOnlineId(int user_id, NpOnlineId* online_id)
 	return OK;
 }
 
+static std::atomic_int g_np_request_id = 0;
+
 int KYTY_SYSV_ABI NpCreateAsyncRequest(const NpCreateAsyncRequestParameter* param)
 {
 	PRINT_NAME();
 
-	if (param == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	// The parameter only tunes the worker thread; the request is created without one.
+	if (param != nullptr)
+	{
+		KYTY_LOG_DEBUG("\t size              = %" PRIu64 "\n", param->size);
+		KYTY_LOG_DEBUG("\t cpu_affinity_mask = %" PRIu64 "\n", param->cpu_affinity_mask);
+		KYTY_LOG_DEBUG("\t thread_priority   = %d\n", param->thread_priority);
+	}
 
-	KYTY_LOG_DEBUG("\t size              = %" PRIu64 "\n", param->size);
-	KYTY_LOG_DEBUG("\t cpu_affinity_mask = %" PRIu64 "\n", param->cpu_affinity_mask);
-	KYTY_LOG_DEBUG("\t thread_priority   = %d\n", param->thread_priority);
+	return ++g_np_request_id;
+}
 
-	static std::atomic_int id = 0;
-
-	if (id >= 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	return ++id;
+// sceNpCreateRequest (NID GpLQDNKICac): the synchronous form takes no parameters; ids are never reused.
+int KYTY_SYSV_ABI NpCreateRequest()
+{
+	PRINT_NAME();
+	return ++g_np_request_id;
 }
 
 int KYTY_SYSV_ABI NpDeleteRequest(int req_id)
 {
 	PRINT_NAME();
-
-	if (req_id != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t req_id = %d\n", req_id);
 

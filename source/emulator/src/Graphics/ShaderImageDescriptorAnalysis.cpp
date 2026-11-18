@@ -1,5 +1,6 @@
 #include "ShaderStorageAnalysis.h"
 
+#include <algorithm>
 #include <array>
 #include <unordered_map>
 #include <vector>
@@ -10,11 +11,15 @@ namespace Kyty::Libs::Graphics {
 namespace {
 
 constexpr int kSgprCount = 104;
+// Scalar words parked in VGPR lanes by V_WRITELANE follow the SGPRs as
+// (vgpr * 64 + lane, origin) pairs; a pair with an unknown key is free.
+constexpr int kParkedLanes = 32;
+constexpr int kOriginCount = kSgprCount + kParkedLanes * 2;
 constexpr int16_t kUnknown = -1;
 constexpr int16_t kExtendedLo = ShaderTextureResources::RES_MAX * 8;
 constexpr int16_t kExtendedHi = kExtendedLo + 1;
 constexpr int16_t kFirstSamplerWord = kExtendedHi + 1;
-using Origins = std::array<int16_t, kSgprCount>;
+using Origins = std::array<int16_t, kOriginCount>;
 
 bool ValidRange(int first, int count)
 {
@@ -78,7 +83,8 @@ bool InitialOrigins(const ShaderBindResources& bind, int shift, Origins* origins
 	}
 	if (bind.extended.used)
 	{
-		const int first = bind.extended.start_register;
+		// The pointer row is relative to the user-data base, like every other row.
+		const int first = bind.extended.start_register + shift;
 		if (!ValidRange(first, 2)) { return false; }
 		(*origins)[first] = kExtendedLo;
 		(*origins)[first + 1] = kExtendedHi;
@@ -173,7 +179,7 @@ bool TransferLoad(const ShaderInstruction& instruction, const ShaderBindResource
 	const auto& base = instruction.src[0];
 	const auto& offset = instruction.src[1];
 	if (!bind.extended.used || base.type != ShaderOperandType::Sgpr || base.size != 2 || !ValidRange(base.register_id, 2) ||
-	    base.register_id != bind.extended.start_register || before[base.register_id] != kExtendedLo ||
+	    before[base.register_id] != kExtendedLo ||
 	    before[base.register_id + 1] != kExtendedHi || !Plain(base) || !Plain(offset) || instruction.smem_imm_offset != 0 ||
 	    (offset.type != ShaderOperandType::IntegerInlineConstant && offset.type != ShaderOperandType::LiteralConstant))
 	{
@@ -187,10 +193,88 @@ bool TransferLoad(const ShaderInstruction& instruction, const ShaderBindResource
 	return true;
 }
 
+bool ConstantLane(const ShaderOperand& operand, int* lane)
+{
+	if (operand.type != ShaderOperandType::IntegerInlineConstant || operand.constant.i < 0 || operand.constant.i > 63) { return false; }
+	*lane = operand.constant.i;
+	return true;
+}
+
+int16_t LaneKey(int vgpr, int lane)
+{
+	return static_cast<int16_t>(vgpr * 64 + lane);
+}
+
+int ParkedSlot(const Origins& origins, int16_t key)
+{
+	for (int slot = kSgprCount; slot < kOriginCount; slot += 2)
+	{
+		if (origins[slot] == key) { return slot; }
+	}
+	return -1;
+}
+
+void DropParkedVgprs(const ShaderOperand& destination, Origins* origins)
+{
+	if (destination.type != ShaderOperandType::Vgpr) { return; }
+	const int last = destination.register_id + std::max(destination.size, 1);
+	for (int slot = kSgprCount; slot < kOriginCount; slot += 2)
+	{
+		const int vgpr = (*origins)[slot] / 64;
+		if ((*origins)[slot] == kUnknown || vgpr < destination.register_id || vgpr >= last) { continue; }
+		(*origins)[slot]     = kUnknown;
+		(*origins)[slot + 1] = kUnknown;
+	}
+}
+
+// V_WRITELANE writes one lane and keeps the others, so only that lane's word changes.
+void TransferWritelane(const ShaderInstruction& instruction, const Origins& before, Origins* after)
+{
+	int lane = 0;
+	if (instruction.dst.type != ShaderOperandType::Vgpr || instruction.src_num < 2 || !ConstantLane(instruction.src[1], &lane) ||
+	    instruction.dst.register_id < 0 || instruction.dst.register_id > 255)
+	{
+		DropParkedVgprs(instruction.dst, after);
+		return;
+	}
+	const int16_t key = LaneKey(instruction.dst.register_id, lane);
+	int slot = ParkedSlot(*after, key);
+	if (slot < 0) { slot = ParkedSlot(*after, kUnknown); }
+	if (slot < 0) { return; }
+	const auto& source = instruction.src[0];
+	const bool  word   = source.type == ShaderOperandType::Sgpr && source.size == 1 && ValidRange(source.register_id, 1) && Plain(source);
+	(*after)[slot]     = word ? key : kUnknown;
+	(*after)[slot + 1] = word ? before[source.register_id] : kUnknown;
+}
+
+void TransferReadlane(const ShaderInstruction& instruction, const Origins& before, Origins* after)
+{
+	int lane = 0;
+	if (instruction.dst.type != ShaderOperandType::Sgpr || instruction.dst.size != 1 || !ValidRange(instruction.dst.register_id, 1) ||
+	    instruction.src_num < 2 || instruction.src[0].type != ShaderOperandType::Vgpr || !ConstantLane(instruction.src[1], &lane))
+	{
+		return;
+	}
+	const int slot = ParkedSlot(before, LaneKey(instruction.src[0].register_id, lane));
+	if (slot >= 0) { (*after)[instruction.dst.register_id] = before[slot + 1]; }
+}
+
 bool Transfer(const ShaderInstruction& instruction, const ShaderBindResources& bind, const Origins& before, Origins* after)
 {
 	*after = before;
 	if (!Invalidate(instruction.dst, after) || !Invalidate(instruction.dst2, after)) { return false; }
+	if (instruction.type == ShaderInstructionType::VWritelaneB32)
+	{
+		TransferWritelane(instruction, before, after);
+		return true;
+	}
+	DropParkedVgprs(instruction.dst, after);
+	DropParkedVgprs(instruction.dst2, after);
+	if (instruction.type == ShaderInstructionType::VReadlaneB32)
+	{
+		TransferReadlane(instruction, before, after);
+		return true;
+	}
 	const int copy_words = instruction.type == ShaderInstructionType::SMovB32 ? 1 :
 	                       instruction.type == ShaderInstructionType::SMovB64 ? 2 : 0;
 	if (copy_words == 0) { return TransferLoad(instruction, bind, before, after); }
@@ -220,7 +304,7 @@ void Merge(uint32_t index, const Origins& outgoing, std::vector<FlowState>* stat
 	auto& state = (*states)[index];
 	bool changed = !state.reachable;
 	if (!state.reachable) { state.words = outgoing; }
-	for (int word = 0; word < kSgprCount; ++word)
+	for (int word = 0; word < kOriginCount; ++word)
 	{
 		if (state.words[word] == kUnknown || state.words[word] == outgoing[word]) { continue; }
 		state.words[word] = kUnknown;
@@ -369,10 +453,15 @@ int ShaderFindImageStorageTextureDescriptor(const ShaderCode& code, uint32_t ind
 // layouts give equal ShaderAnalyzeImageCopyReads results for one code.
 std::vector<int32_t> ShaderImageCopyLayout(const ShaderBindResources& bind, int user_data_register_base)
 {
-	std::vector<int32_t> layout {user_data_register_base,      bind.textures2D.textures_num,
+	std::vector<int32_t> layout;
+	layout.reserve(8u + 4u * static_cast<size_t>(std::max(bind.textures2D.textures_num, 0)) +
+	               3u * static_cast<size_t>(std::max(bind.samplers.samplers_num, 0)) +
+	               2u * static_cast<size_t>(std::max(bind.gds_pointers.pointers_num, 0)) +
+	               2u * static_cast<size_t>(std::max(bind.direct_sgprs.sgprs_num, 0)) + 7u * bind.dynamic_sloads.records.Size());
+	layout.insert(layout.end(), {user_data_register_base,      bind.textures2D.textures_num,
 	                             bind.samplers.samplers_num,   bind.gds_pointers.pointers_num,
 	                             bind.direct_sgprs.sgprs_num,  bind.extended.used ? 1 : 0,
-	                             bind.extended.start_register, static_cast<int32_t>(bind.extended.eud_size_dw)};
+	                             bind.extended.start_register, static_cast<int32_t>(bind.extended.eud_size_dw)});
 	if (!ValidBind(bind, user_data_register_base))
 	{
 		return layout;

@@ -133,6 +133,7 @@ int KYTY_SYSV_ABI HttpCreateConnectionWithURL(int tmpl_id, const char* url, int 
 int KYTY_SYSV_ABI HttpDeleteConnection(int conn_id);
 int KYTY_SYSV_ABI HttpCreateRequestWithURL2(int conn_id, const char* method, const char* url, uint64_t content_length);
 int KYTY_SYSV_ABI HttpDeleteRequest(int req_id);
+int KYTY_SYSV_ABI HttpGetLastErrno(int req_id, int* err_num);
 int KYTY_SYSV_ABI HttpAddRequestHeader(int id, const char* name, const char* value, uint32_t mode);
 int KYTY_SYSV_ABI HttpSetEpoll(int id, HttpEpollHandle eh, void* user_arg);
 int KYTY_SYSV_ABI HttpUnsetEpoll(int id);
@@ -162,6 +163,8 @@ int KYTY_SYSV_ABI  NetCtlGetNatInfo(NetCtlNatInfo* nat_info);
 int KYTY_SYSV_ABI  NetCtlCheckCallback();
 int KYTY_SYSV_ABI  NetCtlGetState(int* state);
 int KYTY_SYSV_ABI  NetCtlRegisterCallback(NetCtlCallback func, void* arg, int* cid);
+int KYTY_SYSV_ABI  NetCtlUnregisterCallback(int cid);
+int KYTY_SYSV_ABI  NetCtlRegisterCallbackV6(NetCtlCallback func, void* arg, int* cid);
 int KYTY_SYSV_ABI  NetCtlGetInfo(int code, NetCtlInfo* info);
 
 } // namespace NetCtl
@@ -185,6 +188,7 @@ int KYTY_SYSV_ABI  NpRegisterNpReachabilityStateCallback(void* callback, void* u
 int KYTY_SYSV_ABI  NpGetNpId(int user_id, NpId* np_id);
 int KYTY_SYSV_ABI  NpGetOnlineId(int user_id, NpOnlineId* online_id);
 int KYTY_SYSV_ABI  NpCreateAsyncRequest(const NpCreateAsyncRequestParameter* param);
+int KYTY_SYSV_ABI  NpCreateRequest();
 int KYTY_SYSV_ABI  NpDeleteRequest(int req_id);
 int KYTY_SYSV_ABI  NpCheckNpAvailability(int req_id, const char* user, void* result);
 int KYTY_SYSV_ABI  NpPollAsync(int req_id, int* result);

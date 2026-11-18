@@ -3,6 +3,7 @@
 
 #include "GraphicsRenderInternal.h"
 #include "GraphicsRenderPipelineLimits.h"
+#include "ShaderSpirvInternal.h"
 #include "ShaderSpirvToolchain.h"
 
 #include "Kyty/Core/Common.h"
@@ -58,6 +59,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 #include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -329,7 +331,7 @@ static void CreateLayout(VkDescriptorSetLayout* set_layouts, uint32_t* set_layou
 
 // Placeholder set for guest stages a host shader does not read. It stays alive
 // for the device lifetime, so pipelines keep a stable layout identity.
-static VkDescriptorSetLayout EmptyDescriptorSetLayout(VkDevice device)
+VkDescriptorSetLayout EmptyDescriptorSetLayout(VkDevice device)
 {
 	static std::once_flag    once;
 	static VkDescriptorSetLayout layout = VK_NULL_HANDLE;
@@ -891,7 +893,11 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	VkGraphicsPipelineCreateInfo pipeline_info {};
 	pipeline_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-	pipeline_info.pNext               = nullptr;
+	VkPipelineCreationFeedback           feedback {};
+	VkPipelineCreationFeedbackCreateInfo feedback_info {};
+	feedback_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+	feedback_info.pPipelineCreationFeedback = &feedback;
+	pipeline_info.pNext               = &feedback_info;
 	pipeline_info.flags               = 0;
 	pipeline_info.stageCount          = shader_stage_count;
 	pipeline_info.pStages             = shader_stages;
@@ -913,8 +919,10 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	EXIT_IF(pipeline->pipeline != nullptr);
 
 	const auto     vk_create_start = DebugStatsClock::now();
+	std::shared_lock cache_access(PipelineCacheAccess());
 	const VkResult create_result =
 	    vkCreateGraphicsPipelines(gctx->device, gctx->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline->pipeline);
+	PipelineCacheStoreRecordCreation(create_result, feedback);
 	const auto vk_create_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - vk_create_start).count();
 	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(vk_create_ns));
 
@@ -1092,12 +1100,20 @@ static VkResult CreateComputePipelineFromRecipe(GraphicContext* gctx, const Comp
 	                                                               : vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, layout);
 	if (result == VK_SUCCESS)
 	{
+		VkPipelineCreationFeedback           feedback {};
+		VkPipelineCreationFeedbackCreateInfo feedback_info {};
+		feedback_info.sType                     = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+		feedback_info.pPipelineCreationFeedback = &feedback;
+
 		VkComputePipelineCreateInfo info {};
 		info.sType             = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		info.pNext             = &feedback_info;
 		info.stage             = comp_shader_stage_info;
 		info.layout            = *layout;
 		info.basePipelineIndex = -1;
+		std::shared_lock cache_access(PipelineCacheAccess());
 		result                 = vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, pipeline);
+		PipelineCacheStoreRecordCreation(result, feedback);
 	}
 	vkDestroyShaderModule(gctx->device, comp_shader_module, nullptr);
 	return result;
@@ -1327,9 +1343,12 @@ PipelineCache::Pipeline* PipelineCache::Find(const Pipeline& p)
 	for (auto it = first; it != last; ++it)
 	{
 		auto& pn = m_pipelines[it->second];
-		if (pn.pipeline != nullptr && !pn.lifetime.RetirementRequested() && p.vs_shader_id == pn.vs_shader_id &&
-		    p.ps_shader_id == pn.ps_shader_id && p.cs_shader_id == pn.cs_shader_id && p.render_pass == pn.render_pass &&
-		    *p.static_params == *pn.static_params && *p.dynamic_params == *pn.dynamic_params)
+		// Pipelines of one key share their shaders' hashes and mostly differ in pass and
+		// state: compare those before walking the shader ids. Dynamic parameters stay last,
+		// their comparison requires pipelines of the same shaders.
+		if (pn.pipeline != nullptr && !pn.lifetime.RetirementRequested() && p.render_pass == pn.render_pass &&
+		    *p.static_params == *pn.static_params && p.vs_shader_id == pn.vs_shader_id && p.ps_shader_id == pn.ps_shader_id &&
+		    p.cs_shader_id == pn.cs_shader_id && *p.dynamic_params == *pn.dynamic_params)
 		{
 			pn.last_use = ++m_use_clock;
 			return &pn;
@@ -1441,6 +1460,13 @@ void PipelineCache::SaveDriverCacheIfDue()
 		return;
 	}
 
+	// A background compile may hold the cache for seconds; the checkpoint waits for a later lookup instead.
+	std::unique_lock cache_access(PipelineCacheAccess(), std::try_to_lock);
+	if (!cache_access.owns_lock())
+	{
+		return;
+	}
+
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
 
@@ -1547,10 +1573,6 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	if (static_params.rasterization_samples != VK_SAMPLE_COUNT_1_BIT)
 	{
 		EXIT("fragment transport needs single-sample rasterization: %s\n", requirement_facts.c_str());
-	}
-	if (!framebuffer->compatibility.begins_without_clear)
-	{
-		EXIT("fragment transport cannot begin a clearing pass yet: %s\n", requirement_facts.c_str());
 	}
 	if (!TransportColorTargetsWritable(color))
 	{
@@ -1678,7 +1700,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
                                               RenderDepthInfo* depth,
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
                                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
-                                              const VulkanSampleLocationState& sample_locations)
+                                              const VulkanSampleLocationState& sample_locations, ShaderId* prepared_vs_id,
+                                              ShaderId* prepared_ps_id)
 {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
 
@@ -1714,17 +1737,21 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	}
 
 	ShaderRequireVertexProgram(&vs_regs, vs_input_info);
-	auto vs_id = ShaderGetIdVS(&vs_regs, vs_input_info);
-	auto ps_id = ShaderGetIdPS(&ps_regs, ps_input_info);
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	EXIT_IF(gctx == nullptr);
 
+	// Built in place: every draw makes both ids, and a copy would allocate them again. Ids prepared
+	// with the inputs move in.
 	Pipeline p {};
-	p.render_pass    = framebuffer->compatibility;
-	p.ps_shader_id   = ps_id;
-	p.vs_shader_id   = vs_id;
-	p.static_params  = new PipelineStaticParameters {};
-	p.dynamic_params = new PipelineDynamicParameters {};
+	p.render_pass  = framebuffer->compatibility;
+	p.ps_shader_id = prepared_ps_id != nullptr ? std::move(*prepared_ps_id) : ShaderGetIdPS(&ps_regs, ps_input_info);
+	p.vs_shader_id = prepared_vs_id != nullptr ? std::move(*prepared_vs_id) : ShaderGetIdVS(&vs_regs, vs_input_info);
+	const ShaderId& vs_id = p.vs_shader_id;
+	const ShaderId& ps_id = p.ps_shader_id;
+	PipelineStaticParameters  lookup_static {};
+	PipelineDynamicParameters lookup_dynamic {};
+	p.static_params  = &lookup_static;
+	p.dynamic_params = &lookup_dynamic;
 
 	p.dynamic_params->vk_dynamic_state_line_width           = true;
 	p.dynamic_params->vk_dynamic_state_stencil_compare_mask = true;
@@ -1851,6 +1878,12 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			p.static_params->color_mask[rt] = uint16_mrt_output
 			                                      ? State::ResolveColorWriteAgainstUint16Export(export_admitted_mask, export_enable)
 			                                      : export_admitted_mask;
+			if (ps_input_info->target_output_order[rt] == HW::kColorExportOrderTwoChannelAlt)
+			{
+				// The guest mask names export components; the attachment's second channel holds W.
+				const uint8_t mask              = p.static_params->color_mask[rt];
+				p.static_params->color_mask[rt] = static_cast<uint8_t>((mask & 1u) | ((mask >> 2u) & 2u));
+			}
 			p.static_params->color_srcblend[rt]       = blend.color_srcblend;
 			p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
 			p.static_params->color_destblend[rt]      = blend.color_destblend;
@@ -1893,13 +1926,23 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 
 	if (found != nullptr)
 	{
-		*found->dynamic_params = *p.dynamic_params;
-		delete p.static_params;
-		delete p.dynamic_params;
+		*found->dynamic_params = lookup_dynamic;
 		AttachPipelineLease(recording_buffer, *found);
 		SaveDriverCacheIfDue();
+		// Prepared ids go back to their record, so the front thread that built them also frees them.
+		if (prepared_vs_id != nullptr)
+		{
+			*prepared_vs_id = std::move(p.vs_shader_id);
+		}
+		if (prepared_ps_id != nullptr)
+		{
+			*prepared_ps_id = std::move(p.ps_shader_id);
+		}
 		return found->pipeline;
 	}
+	// A stored pipeline owns its parameters; only a miss needs heap copies.
+	p.static_params  = new PipelineStaticParameters(lookup_static);
+	p.dynamic_params = new PipelineDynamicParameters(lookup_dynamic);
 
 	const auto miss_start = DebugStatsClock::now();
 	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
@@ -1972,9 +2015,16 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	DebugStatsRecordShaderTranslationCache(vs_translation.hit, vs_translation.evicted);
 
 
+	// A geometry pull reads only the records of its pass.
+	bool writes_guest_memory =
+	    ShaderGdsBufferBound(vs_input_info->bind.gds_pointers) ||
+	    (!vs_input_info->geometry_pull && ShaderCodeWritesStorage(ShaderParseVS(&vs_regs, &sh_regs, vs_input_info)));
+
 	if (ps_input_info->stage_enabled)
 	{
 		const auto ps_transport_code = ShaderParsePS(&ps_regs, &sh_regs);
+		writes_guest_memory          = writes_guest_memory || ShaderGdsBufferBound(ps_input_info->bind.gds_pointers) ||
+		                      ShaderCodeWritesStorage(ps_transport_code);
 		const auto requirement       = FragmentTransportRequire(ps_transport_code, *ps_input_info,
 		                                                        static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr), *p.static_params,
 		                                                        framebuffer->extent);
@@ -1997,9 +2047,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			p.transport                   = passes;
 			p.pipeline->transport         = passes;
 			p.pipeline->framebuffer_extent = framebuffer->extent;
+			p.pipeline->writes_guest_memory = writes_guest_memory;
 			StorePipeline(transport_slot, p);
 			AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(transport_slot)]);
-			m_driver_cache_dirty = true;
+			m_driver_cache_dirty = m_driver_cache_dirty || PipelineCacheStoreTakeAddedEntries();
 			SaveDriverCacheIfDue();
 			return m_pipelines[static_cast<int>(transport_slot)].pipeline;
 		}
@@ -2046,13 +2097,14 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	                                    VK_NULL_HANDLE, false);
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
-	p.pipeline->framebuffer_extent = framebuffer->extent;
+	p.pipeline->framebuffer_extent  = framebuffer->extent;
+	p.pipeline->writes_guest_memory = writes_guest_memory;
 
 	StorePipeline(slot, p);
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
-	m_driver_cache_dirty = true;
+	m_driver_cache_dirty = m_driver_cache_dirty || PipelineCacheStoreTakeAddedEntries();
 	SaveDriverCacheIfDue();
 	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(miss_ns));
@@ -2079,8 +2131,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	Pipeline p {};
 	p.cs_shader_id   = cs_id;
-	p.static_params  = new PipelineStaticParameters {};
-	p.dynamic_params = new PipelineDynamicParameters {};
+	PipelineStaticParameters  lookup_static {};
+	PipelineDynamicParameters lookup_dynamic {};
+	p.static_params  = &lookup_static;
+	p.dynamic_params = &lookup_dynamic;
 
 	p.dynamic_params->vk_dynamic_state_line_width           = true;
 	p.dynamic_params->vk_dynamic_state_stencil_compare_mask = true;
@@ -2095,13 +2149,14 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	if (found != nullptr)
 	{
-		*found->dynamic_params = *p.dynamic_params;
-		delete p.static_params;
-		delete p.dynamic_params;
+		*found->dynamic_params = lookup_dynamic;
 		AttachPipelineLease(recording_buffer, *found);
 		SaveDriverCacheIfDue();
 		return found->pipeline;
 	}
+	// A stored pipeline owns its parameters; only a miss needs heap copies.
+	p.static_params  = new PipelineStaticParameters(lookup_static);
+	p.dynamic_params = new PipelineDynamicParameters(lookup_dynamic);
 
 	const auto miss_start = DebugStatsClock::now();
 	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
@@ -2128,7 +2183,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
-	m_driver_cache_dirty = true;
+	m_driver_cache_dirty = m_driver_cache_dirty || PipelineCacheStoreTakeAddedEntries();
 	SaveDriverCacheIfDue();
 	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));
@@ -2154,6 +2209,10 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 	id.ids.Add(geometry.waves);
 	id.ids.Add(geometry.indexed ? geometry.index_format + 1u : 0u);
 	id.ids.Add(geometry.part_lanes);
+	if (geometry.device_block)
+	{
+		id.ids.Add(0x44424c4bu); // DBLK: block read from device memory.
+	}
 
 	Pipeline p {};
 	p.cs_shader_id   = id;
@@ -2186,11 +2245,12 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 
 	const uint32_t slot = FindAvailableSlot();
 	p.pipeline          = CreatePipelineInternal(&host, translation.binary, p.static_params, p.dynamic_params);
+	p.pipeline->writes_guest_memory = ShaderCodeWritesStorage(code) || ShaderGdsBufferBound(input_info->bind.gds_pointers);
 	StorePipeline(slot, p);
 	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
 	DumpPipeline("create", static_cast<int>(slot));
 
-	m_driver_cache_dirty = true;
+	m_driver_cache_dirty = m_driver_cache_dirty || PipelineCacheStoreTakeAddedEntries();
 	SaveDriverCacheIfDue();
 	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));

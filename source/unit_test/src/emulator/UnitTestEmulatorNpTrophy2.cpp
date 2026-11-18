@@ -27,8 +27,8 @@ Loader::SymbolResolve ResolveFor(const char16_t* nid, Loader::SymbolType type)
 	return query;
 }
 
-using CreateHandleFn  = int (*)(int32_t* handle);
-using CreateContextFn = int (*)(int32_t* context, int32_t user_id, uint32_t service_label, uint64_t options);
+using CreateHandleFn  = int(KYTY_SYSV_ABI*)(int32_t* handle);
+using CreateContextFn = int(KYTY_SYSV_ABI*)(int32_t* context, int32_t user_id, uint32_t service_label, uint64_t options);
 
 } // namespace
 

@@ -1155,6 +1155,16 @@ static int KYTY_SYSV_ABI PosixUnlink(const char* path)
 	return POSIX_N_CALL(Kernel::FileSystem::KernelUnlink(path));
 }
 
+static int KYTY_SYSV_ABI PosixRmdir(const char* path)
+{
+	return POSIX_N_CALL(Kernel::FileSystem::KernelRmdir(path));
+}
+
+static int KYTY_SYSV_ABI PosixChmod(const char* path, uint16_t mode)
+{
+	return POSIX_N_CALL(Kernel::FileSystem::KernelChmod(path, mode));
+}
+
 static int KYTY_SYSV_ABI PosixRename(const char* from, const char* to)
 {
 	PRINT_NAME();
@@ -1586,6 +1596,8 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("8nY19bKoiZk", LibKernel::PosixFcntl);
 	LIB_FUNC("ih4CD9-gghM", LibKernel::PosixFtruncate);
 	LIB_FUNC("VAzswvTOCzI", LibKernel::PosixUnlink);
+	LIB_FUNC("c7ZnT7V1B98", LibKernel::PosixRmdir);
+	LIB_FUNC("z0dtnPxYgtg", LibKernel::PosixChmod);
 	LIB_FUNC("FN4gaPmuFV8", LibKernel::write);
 	LIB_FUNC("ezv-RSBNKqI", LibKernel::pread);
 	LIB_FUNC("C2kJ-byS5rM", LibKernel::pwrite);
@@ -1671,6 +1683,7 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("Ft3EtsZzAoY", Kernel::Aio::AioDeleteRequests);
 	LIB_FUNC("nKWi-N2HBV4", FileSystem::KernelPwrite);
 	LIB_FUNC("eV9wAD2riIA", FileSystem::KernelStat);
+	LIB_FUNC("uWyW3v98sU4", FileSystem::KernelCheckReachability);
 	LIB_FUNC("kBwCPsYX-m4", FileSystem::KernelFstat);
 	LIB_FUNC("VW3TVZiM4-E", FileSystem::KernelFtruncate);
 	LIB_FUNC("kAt6VDbHmro", FileSystem::KernelWritev);
@@ -1683,6 +1696,7 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("j2AIqSqJP0w", FileSystem::KernelGetdents);
 	LIB_FUNC("1-LFLmRFxxM", FileSystem::KernelMkdir);
 	LIB_FUNC("naInUjYt3so", FileSystem::KernelRmdir);
+	LIB_FUNC("fgIsQ10xYVA", FileSystem::KernelChmod);
 	// Gen5 APR path resolution / submit / wait (raw system calls, see AprSyscall).
 	LIB_FUNC("gEpBkcwxUjw", AprSyscall<FileSystem::KernelAprResolveFilepathsToIdsAndFileSizes>::Call);
 	LIB_FUNC("WT-5NKy42fw", AprSyscall<FileSystem::KernelAprResolveFilepathsToIds>::Call);
@@ -1734,6 +1748,7 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("yDBwVAolDgg", Memory::KernelIsStack);
 	LIB_FUNC("7oxv3PPCumo", Memory::KernelReserveVirtualRange);
 	LIB_FUNC("vSMAm3cxYTY", Memory::KernelMprotect);
+	LIB_FUNC("9bfdLIyuwCY", Memory::KernelMtypeprotect);
 	// Posix dual NIDs for the same Orbis memory helpers.
 	LIB_FUNC("YQOfxL4QfeU", Memory::KernelMprotect);
 	LIB_FUNC("UqDGjXA5yUM", Memory::KernelMunmap);

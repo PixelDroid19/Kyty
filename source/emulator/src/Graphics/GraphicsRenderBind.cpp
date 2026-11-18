@@ -55,6 +55,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <memory>
+#include <unordered_map>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -106,8 +107,8 @@ struct DrawMaterialTraceSession
 	const DrawMaterialTraceContext* draw = nullptr;
 	bool                            trace_rt_lifetime = false;
 	uint32_t                        ordinal = 0;
-	uint32_t                        textures_num = 0;
-	DrawMaterialTraceTexture        textures[TEXTURES_MAX] {};
+	// Filled only while a trace is engaged: every descriptor bind builds a session.
+	std::vector<DrawMaterialTraceTexture> textures;
 };
 
 static bool RenderTargetLifetimeTraceRequested()
@@ -261,11 +262,11 @@ static void RecordDrawMaterialTraceTexture(DrawMaterialTraceSession* session, in
 	{
 		return;
 	}
-	if (session->draw == nullptr || session->textures_num >= DrawMaterialTraceSession::TEXTURES_MAX)
+	if (session->draw == nullptr || session->textures.size() >= DrawMaterialTraceSession::TEXTURES_MAX)
 	{
 		return;
 	}
-	auto& record            = session->textures[session->textures_num++];
+	auto& record            = session->textures.emplace_back();
 	record.descriptor_index = descriptor_index;
 	record.slot             = descriptor.slot;
 	record.start_register   = descriptor.start_register;
@@ -1783,7 +1784,7 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 	    depth != nullptr && depth->stencil_test_enable ? 1u : 0u, draw.blend_enable, draw.blend_src, draw.blend_op, draw.blend_dst,
 	    draw.blend_bypass, draw.color_mask, draw.color_on_depth_fail, draw.color_off_depth_pass, draw.cull_front, draw.cull_back,
 	    draw.face, draw.vp_x, draw.vp_y, draw.vp_width, draw.vp_height, draw.vp_zmin, draw.vp_zmax, draw.dx_clip,
-	    scissor.left, scissor.top, scissor.right, scissor.bottom, session.textures_num);
+	    scissor.left, scissor.top, scissor.right, scissor.bottom, static_cast<uint32_t>(session.textures.size()));
 	const auto* host = g_render_ctx != nullptr ? g_render_ctx->GetGraphicCtx() : nullptr;
 	std::fprintf(out,
 	             "KYTY_TRACE_PS_WAVE ordinal=%u ps_in_control=0x%08x guest_wave32=%u required_subgroup=%u"
@@ -2057,7 +2058,7 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 			}
 		}
 	}
-	for (uint32_t i = 0; i < session.textures_num; ++i)
+	for (uint32_t i = 0; i < session.textures.size(); ++i)
 	{
 		const auto& texture = session.textures[i];
 		const auto* image   = texture.image;
@@ -2582,15 +2583,33 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 // The vertex object at object_addr was seeded from guest bytes; storage results of this
 // queue the guest does not hold yet are copied over the bytes the draw reads, [vaddr,
 // vaddr + size). A shared vertex pool can hold hundreds of them; other draws copy their own.
-static void CopyPendingStorageIntoVertices(CommandBuffer* buffer, VulkanBuffer* vertices, uint64_t object_addr, uint64_t vaddr, uint64_t size)
+// Returns the storage result to fetch instead, when one result holds every byte the draw reads from
+// `fetch_base` on and its write is already ordered before this point of the recording; the draw then
+// reads it in place without leaving the render pass.
+static const GpuMemoryStorageSeedSource* CopyPendingStorageIntoVertices(CommandBuffer* buffer, VkCommandBuffer vk_buffer,
+                                                                       VulkanBuffer* vertices, uint64_t object_addr,
+                                                                       uint64_t fetch_base, uint64_t vaddr, uint64_t size,
+                                                                       std::vector<GpuMemoryStorageSeedSource>* sources_out)
 {
 	SubmissionId reader;
 	EXIT_IF(!buffer->GetSubmissionId(&reader));
-	std::vector<GpuMemoryStorageSeedSource> sources;
+	auto& sources = *sources_out;
+	sources.clear();
 	GpuMemoryCollectStorageForGuestSeed(vaddr, size, reader, &sources);
 	if (sources.empty())
 	{
-		return;
+		return nullptr;
+	}
+	if (sources.size() == 1)
+	{
+		const auto&    source     = sources[0];
+		const uint64_t block_base = source.vaddr - source.offset;
+		if (source.vaddr == vaddr && source.size == size && fetch_base >= block_base &&
+		    (source.buffer->usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) != 0u &&
+		    buffer->OrderEarlierDeviceWrite(source.device_write_time, vk_buffer))
+		{
+			return &source;
+		}
 	}
 
 	auto*           cmd = buffer->RecordOutsideRenderPass();
@@ -2616,6 +2635,7 @@ static void CopyPendingStorageIntoVertices(CommandBuffer* buffer, VulkanBuffer* 
 		vkCmdCopyBuffer(cmd, source.buffer->buffer, vertices->buffer, 1, &region);
 	}
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+	return nullptr;
 }
 
 static VkBuffer ZeroVertexBuffer(GraphicContext* ctx)
@@ -2676,10 +2696,23 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
 
 	const VertexStreamDrawRange range {first_record, required_records, records_exact, first_instance, instance_count};
+	std::vector<GpuMemoryStorageSeedSource> seed_sources;
 	for (int i = 0; i < input.buffers_num; i++)
 	{
 		const auto& buffer_info = input.buffers[i];
 		const auto [address, size, read_begin, tail_fetched] = ResolveVertexStreamRead(input, i, range);
+		// Guest memory that holds the stream's current bytes is fetched from its imported
+		// pages. A fetch past the records reads zero, which only a copy provides.
+		VkBuffer     guest_pages  = nullptr;
+		VkDeviceSize guest_offset = 0;
+		auto*        ctx          = g_render_ctx->GetGraphicCtx();
+		if (!tail_fetched && read_begin < size &&
+		    GuestDeviceAddressResolveDrawInput(ctx, address, size, &guest_pages, &guest_offset) &&
+		    GpuMemoryRangeHoldsGuestBytes(address + read_begin, size - read_begin))
+		{
+			buffer->DeferredState(vk_buffer)->BindVertexBuffers(static_cast<uint32_t>(i), 1, &guest_pages, &guest_offset);
+			continue;
+		}
 
 		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin,
 		                                                  tail_fetched);
@@ -2702,32 +2735,52 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 			// declared stream, bound at the draw's record, serves them all instead of one per window.
 			const uint64_t declared     = ShaderBufferByteSize(buffer_info.stride, buffer_info.num_records);
 			const bool     whole_stream = declared != 0u && declared <= kGpuMemoryMaxTransientReadOnlyBytes;
-			const uint64_t object_addr  = whole_stream ? buffer_info.addr : address;
-			const uint64_t object_size  = whole_stream ? declared : size;
+			const uint64_t stream_addr  = whole_stream ? buffer_info.addr : address;
+			const uint64_t stream_size  = whole_stream ? declared : size;
+			// A pool drawn from an advancing V# base declares each draw's stream inside the previous one,
+			// or across it: bind into the object that holds the stream, or else the draw's exact fetch
+			// window, instead of replacing that object on every draw.
+			uint64_t object_addr = 0;
+			uint64_t object_size = 0;
+			if (!GpuMemoryFindVertexContaining(stream_addr, stream_size, &object_addr, &object_size) &&
+			    (!whole_stream || tail_fetched || !GpuMemoryFindVertexContaining(address, size, &object_addr, &object_size)))
+			{
+				object_addr = stream_addr;
+				object_size = stream_size;
+			}
 			vertices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, object_addr,
 			                                                            object_size, VertexBufferGpuObject()));
 			offset   = address - object_addr;
 			if (vertices != nullptr)
 			{
-				// With the fetch range unknown the draw can read anywhere in the object.
-				const uint64_t copy_addr = tail_fetched ? object_addr : address + read_begin;
-				const uint64_t copy_size = tail_fetched ? object_size : size - read_begin;
+				// With the fetch range unknown the draw can read anywhere in its stream.
+				const uint64_t copy_addr = tail_fetched ? stream_addr : address + read_begin;
+				const uint64_t copy_size = tail_fetched ? stream_size : size - read_begin;
 				if (copy_size != 0u)
 				{
-					CopyPendingStorageIntoVertices(buffer, vertices, object_addr, copy_addr, copy_size);
+					// A fetch past the stream reads zero only from the seeded copy.
+					const auto* in_place = CopyPendingStorageIntoVertices(buffer, tail_fetched ? VK_NULL_HANDLE : vk_buffer, vertices,
+					                                                      object_addr, address, copy_addr, copy_size, &seed_sources);
+					if (in_place != nullptr)
+					{
+						const uint64_t block_base = in_place->vaddr - in_place->offset;
+						VkDeviceSize   in_place_offset = in_place->buffer->guest_offset + (address - block_base);
+						buffer->DeferredState(vk_buffer)->BindVertexBuffers(static_cast<uint32_t>(i), 1, &in_place->buffer->buffer, &in_place_offset);
+						continue;
+					}
 				}
 			}
 		}
 		if (vertices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vertices == nullptr condition ignored (continuing)\n"); }
 
 		offset += vertices->guest_offset;
-		vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &vertices->buffer, &offset);
+		buffer->DeferredState(vk_buffer)->BindVertexBuffers(static_cast<uint32_t>(i), 1, &vertices->buffer, &offset);
 	}
 	if (VulkanVertexInputHasEmptyResource(input))
 	{
 		const VkBuffer     zero   = ZeroVertexBuffer(g_render_ctx->GetGraphicCtx());
 		const VkDeviceSize offset = 0;
-		vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(input.buffers_num), 1, &zero, &offset);
+		buffer->DeferredState(vk_buffer)->BindVertexBuffers(static_cast<uint32_t>(input.buffers_num), 1, &zero, &offset);
 	}
 }
 
@@ -3022,9 +3075,133 @@ static void ExitStorageBufferMaterializationFailure(uint64_t submit_id, uint64_t
 	     have_provenance && provenance.truncated ? 1 : 0, provenance_text_truncated ? 1 : 0, provenance_entries);
 }
 
+// The device address of [addr, addr + size) when a draw can read the guest
+// pages in place: inside one imported run, dword aligned, and no live object
+// over it holds a result the guest memory does not show yet.
+static bool StorageGuestPagesAddress(uint64_t addr, uint64_t size, uint64_t* device_address)
+{
+	VkBuffer pages  = nullptr;
+	uint64_t offset = 0;
+	return GuestDeviceAddressResolveDrawInput(g_render_ctx->GetGraphicCtx(), addr, size, &pages, &offset, device_address) &&
+	       (*device_address & 3u) == 0 && GpuMemoryRangeHoldsGuestBytes(addr, size);
+}
+
+static uint64_t MaxStorageBufferRange()
+{
+	static const uint64_t range = []
+	{
+		VkPhysicalDeviceProperties properties {};
+		vkGetPhysicalDeviceProperties(g_render_ctx->GetGraphicCtx()->physical_device, &properties);
+		return static_cast<uint64_t>(properties.limits.maxStorageBufferRange);
+	}();
+	return range;
+}
+
+// Read-only storage slots bound to imported guest pages. Each view keeps one
+// unique id per buffer, offset and size, so the descriptor sets built with it can
+// be found again; the views go when an import does, or when they outgrow the bound.
+class GuestPagesViews
+{
+public:
+	// Called before a draw takes views, never while one holds them.
+	void BeginDraw()
+	{
+		const uint64_t removals = GuestDeviceAddressChunkRemovals();
+		if (removals != m_removals || m_views.size() >= kMaxViews)
+		{
+			Clear();
+			m_removals = removals;
+		}
+	}
+
+	VulkanBuffer* Get(VkBuffer pages, uint64_t offset, uint64_t size)
+	{
+		auto& view = m_views[{pages, offset, size}];
+		if (view == nullptr)
+		{
+			view                   = std::make_unique<VulkanBuffer>();
+			view->buffer           = pages;
+			view->usage            = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+			view->descriptor_range = size;
+			view->guest_offset     = offset;
+			VulkanAssignMemoryUniqueId(&view->memory);
+		}
+		return view.get();
+	}
+
+private:
+	static constexpr size_t kMaxViews = 64u * 1024u;
+
+	struct Key
+	{
+		VkBuffer pages  = nullptr;
+		uint64_t offset = 0;
+		uint64_t size   = 0;
+
+		bool operator==(const Key& other) const { return pages == other.pages && offset == other.offset && size == other.size; }
+	};
+	struct KeyHash
+	{
+		size_t operator()(const Key& key) const
+		{
+			return std::hash<uint64_t> {}((reinterpret_cast<uintptr_t>(key.pages) * 0x9E3779B97F4A7C15ull) ^ (key.offset * 31u) ^ key.size);
+		}
+	};
+
+	void Clear()
+	{
+		for (auto& [key, view]: m_views)
+		{
+			g_render_ctx->GetDescriptorCache()->FreeDescriptor(view.get());
+		}
+		m_views.clear();
+	}
+
+	std::unordered_map<Key, std::unique_ptr<VulkanBuffer>, KeyHash> m_views;
+	uint64_t                                                         m_removals = UINT64_MAX;
+};
+
+static GuestPagesViews& StorageGuestPagesViews()
+{
+	thread_local GuestPagesViews views;
+	return views;
+}
+
+// A view of [addr, addr + size) when a draw can read the guest pages in place
+// through a storage slot: the conditions of a by-address read, and a buffer
+// offset the device can bind.
+static bool StorageGuestPagesView(uint64_t addr, uint64_t size, VulkanBuffer** view)
+{
+	auto*    ctx    = g_render_ctx->GetGraphicCtx();
+	VkBuffer pages  = nullptr;
+	uint64_t offset = 0;
+	if (size > MaxStorageBufferRange() || !GuestDeviceAddressResolveDrawInput(ctx, addr, size, &pages, &offset) ||
+	    offset % ctx->min_storage_buffer_offset_alignment != 0u || !GpuMemoryRangeHoldsGuestBytes(addr, size))
+	{
+		return false;
+	}
+	*view = StorageGuestPagesViews().Get(pages, offset, size);
+	return true;
+}
+
+// A V# row read by device address (ShaderStorageResources::by_address): words
+// 0-1 take the address, word 2 the bytes behind it; the stride and word 3 stay.
+// The shader sign-extends bit 47, so canonical high-half addresses fit too.
+static void WriteStorageAddressRow(uint64_t device_address, uint64_t backed_bytes, ShaderBufferResource* r)
+{
+	const uint64_t high = device_address >> 47u;
+	if ((high != 0u && high != 0x1ffffu) || (device_address & 3u) != 0)
+	{
+		EXIT("storage buffer device address 0x%016" PRIx64 " is not a dword-aligned canonical 48-bit address\n", device_address);
+	}
+	r->UpdateAddress48(device_address & ((1ull << 48u) - 1u));
+	r->fields[2] = static_cast<uint32_t>(std::min<uint64_t>(backed_bytes, UINT32_MAX));
+}
+
+// `snapshot_slots`: slots whose bytes a later proof reads from an immutable snapshot.
 static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkShaderStageFlags stage,
 	                              const ShaderBindResources& bind, VulkanBuffer** buffers, uint32_t** sgprs,
-	                              uint64_t shader_checksum)
+	                              uint64_t shader_checksum, uint64_t snapshot_slots)
 {
 	KYTY_PROFILER_FUNCTION();
 	const auto& storage_buffers = bind.storage_buffers;
@@ -3035,6 +3212,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 	EXIT_IF(buffer == nullptr);
 
 	bool gen5 = Config::IsNextGen();
+	StorageGuestPagesViews().BeginDraw();
 
 	for (int i = 0; i < storage_buffers.buffers_num; i++)
 	{
@@ -3049,7 +3227,10 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 		{
 			// OutOfBounds modes (0..3) are descriptor policy; Vulkan SSBO
 			// robust access covers the common case. Do not hard-fail.
-			if (!ShaderGen5StorageDescriptorSupported(r, storage_buffers.accesses[i]))
+			// BUFFER_STORE_FORMAT encodes 32-bit elements only, so a written typed V# keeps the 32-bit rule.
+			const bool format_loads = storage_buffers.accesses[i] == ShaderStorageAccess::Typed && storage_buffers.format_loads_only[i] &&
+			                          ShaderGen5FormatLoadDescriptorSupported(r);
+			if (!format_loads && !ShaderGen5StorageDescriptorSupported(r, storage_buffers.accesses[i]))
 			{
 				Emulator::Agent::Lifecycle::StorageFrontierContext context {};
 				context.binding         = DescribeStorageBinding(storage_buffers, i);
@@ -3107,6 +3288,11 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 		trace.requested_size = declared_size;
 		trace.read_only = read_only;
 		VulkanBuffer* buf = nullptr;
+		const bool    by_address     = storage_buffers.by_address[i];
+		uint64_t      device_address = 0;
+		uint64_t      backed_bytes   = 0;
+		bool          reads_copy     = false;
+		uint64_t      copy_bytes     = 0;
 		if (raw_empty_oob || storage_buffers.unread_stream[i])
 		{
 			trace.path = raw_empty_oob ? "raw_empty_oob_carrier" : "unread_stream_carrier";
@@ -3174,7 +3360,11 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				trace.path = "copied_static_smem";
 				trace.transient_attempted = true;
 				trace.transient_bytes_arg = requested_size;
-				buf = buffer->UploadTransientBuffer(smem_span, requested_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+				buf = buffer->UploadTransientBuffer(smem_span, requested_size,
+				                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+				                                        (by_address ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u));
+				reads_copy  = true;
+				copy_bytes  = requested_size;
 				trace.transient_buffer = buf;
 			} else if (Kernel::Memory::KernelMappedRange guest_mapping {};
 			           materialized_size == 0 && !Kernel::Memory::KernelQueryMappedRange(addr, 1, &guest_mapping))
@@ -3228,6 +3418,17 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				     eud.eud_object_write_back ? 1 : 0, eud.eud_dependencies_complete ? 1 : 0,
 				     eud_near_readable ? 1 : 0, eud_near[0], eud_near[1], eud_near[2], eud_near[3], eud_near[4],
 				     eud_near[5], eud_near[6], eud_near[7]);
+			} else if (by_address && materialized_size == requested_size &&
+			           StorageGuestPagesAddress(addr, materialized_size, &device_address))
+			{
+				trace.path   = "device_address_in_place";
+				backed_bytes = materialized_size;
+				buf          = buffer->UploadTransientZeroCarrier(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+			} else if (!by_address && read_only && materialized_size == requested_size &&
+			           (snapshot_slots & (uint64_t {1} << static_cast<uint32_t>(i))) == 0u &&
+			           StorageGuestPagesView(addr, materialized_size, &buf))
+			{
+				trace.path = "guest_pages_in_place";
 			} else
 			{
 				if (materialized_size != requested_size)
@@ -3237,11 +3438,14 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
 
 				trace.path = "persistent_range";
+				reads_copy = true;
+				copy_bytes = materialized_size;
 				StorageBufferGpuObject buf_info(stride, num_records, read_only);
 				trace.transient_attempted = true;
 				trace.transient_bytes_arg = materialized_size;
-				trace.transient_buffer = TryUploadTransientReadOnlyBuffer(buffer, addr, materialized_size, read_only,
-				                                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+				const VkBufferUsageFlags usage =
+				    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (by_address ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
+				trace.transient_buffer = TryUploadTransientReadOnlyBuffer(buffer, addr, materialized_size, read_only, usage);
 				buf = trace.transient_buffer;
 				if (buf == nullptr)
 				{
@@ -3264,9 +3468,25 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				                                       trace, buf);
 		}
 
+		if (by_address)
+		{
+			if (reads_copy)
+			{
+				// The copy or object the slot path would bind, read at its own address.
+				EXIT_IF((buf->usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) == 0u);
+				VkBufferDeviceAddressInfo info {};
+				info.sType     = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+				info.buffer    = buf->buffer;
+				device_address = vkGetBufferDeviceAddress(g_render_ctx->GetGraphicCtx()->device, &info) + buf->guest_offset;
+				backed_bytes   = std::min<uint64_t>(copy_bytes, buf->descriptor_range);
+				buf            = buffer->UploadTransientZeroCarrier(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+			}
+			WriteStorageAddressRow(device_address, backed_bytes, &r);
+		}
+
 		buffers[i] = buf;
 
-		if (storage_buffers.start_register[i] >= 0)
+		if (!by_address && storage_buffers.start_register[i] >= 0)
 		{
 			if (gen5)
 			{
@@ -3436,6 +3656,52 @@ static bool CopyNewerStoragePrefixLayers(CommandBuffer* buffer, VulkanImage* tex
 	return true;
 }
 
+// A dispatch writes the render target that covers the exact range of a storage
+// image, while a sample in another format of the same texels reads the mutable
+// storage image. Neither is written back, so copy the render target's newer
+// content into the storage image first. `targets` cover the storage image's
+// exact range. Colour draws stamp no image, so only storage writes and the
+// render target's own content establish that it is newer.
+static bool CopyNewerRenderTargetIntoStorage(CommandBuffer* buffer, const Vector<RenderTextureVulkanImage*>& targets,
+                                             StorageTextureVulkanImage* storage)
+{
+	const auto   written = [](const VulkanImage* image) { return std::max(image->storage_write_stamp, image->content_stamp); };
+	const auto   extent  = storage->GetGuestExtent();
+	VulkanImage* source  = nullptr;
+	for (auto* target: targets)
+	{
+		if (target->format != storage->format || target->samples != VK_SAMPLE_COUNT_1_BIT || target->IsResolutionScaled() ||
+		    !target->MatchesGuestExtent(extent.width, extent.height) || target->mip_levels < storage->mip_levels ||
+		    target->array_layers < storage->array_layers || written(target) <= written(storage))
+		{
+			continue;
+		}
+		if (source == nullptr || written(target) > written(source))
+		{
+			source = target;
+		}
+	}
+	if (source == nullptr)
+	{
+		return false;
+	}
+	Vector<ImageImageCopy> regions(storage->mip_levels);
+	for (uint32_t level = 0; level < storage->mip_levels; ++level)
+	{
+		auto& region       = regions[level];
+		region             = {};
+		region.src_image   = source;
+		region.src_level   = level;
+		region.dst_level   = level;
+		region.width       = std::max(extent.width >> level, 1u);
+		region.height      = std::max(extent.height >> level, 1u);
+		region.layer_count = storage->array_layers;
+	}
+	UtilImageToImage(buffer, regions, storage, static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+	storage->content_stamp = VulkanImageNextStamp();
+	return true;
+}
+
 // Sampled descriptors whose GPU-owned lookups (stencil plane, depth, render
 // and storage targets) found nothing to bind. That outcome changes only when an
 // object enters or leaves GPU memory, so while the object-graph generation is
@@ -3491,6 +3757,71 @@ private:
 	std::array<Entry, Capacity> m_entries {};
 };
 
+// Unmapped PRT pages are not host-readable; only a fully physical range is read directly.
+static bool RangeIsPhysical(uint64_t vaddr, uint64_t size)
+{
+	Kernel::Memory::KernelMappedRange mapped {};
+	return Kernel::Memory::KernelQueryMappedRange(vaddr, size, &mapped) && mapped.kind == Kernel::Memory::KernelMappedRangeKind::Physical;
+}
+
+// A sampled depth surface with HTILE reads its tiles' clear value where a tile is cleared. Its guest
+// bytes are the sampled values only when every word of its HTILE is one known clear word (zero: [0, 0];
+// 0xfffffff0: [1, 1]) and every sampled element of the single layer already holds that value.
+static bool HtileClearMatchesGuestDepth(uint64_t htile_addr, uint64_t depth_addr, uint32_t fmt, uint32_t width, uint32_t height,
+                                        uint32_t pitch)
+{
+	const uint32_t bytes     = State::Gen5DepthSampleBytesPerElement(fmt);
+	const uint64_t layer     = State::Gen5DepthSampleLayerBytes(fmt, pitch, height);
+	TileSizeAlign  htile     = {};
+	TileSizeAlign  depth     = {};
+	TileSizeAlign  stencil   = {};
+	const uint32_t z_format  = fmt == 22u ? 3u : 1u;
+	if (htile_addr == 0u || bytes == 0u || layer == 0u ||
+	    !TileGetDepthSize(width, height, 0, z_format, 0, true, true, true, &stencil, &htile, &depth) || htile.size == 0u ||
+	    !RangeIsPhysical(htile_addr, htile.size) || !RangeIsPhysical(depth_addr, layer))
+	{
+		return false;
+	}
+	DepthMetaPatternSnapshot pattern {};
+	if (!DepthMetaInspectPattern(reinterpret_cast<const void*>(htile_addr), htile.size, &pattern) ||
+	    (pattern.kind != DepthMetaPatternKind::UniformZero && pattern.kind != DepthMetaPatternKind::RecognizedClear))
+	{
+		return false;
+	}
+	// Only the detiled width x height elements are sampled; the rest of the 64 KiB block is padding.
+	const bool           one      = pattern.kind == DepthMetaPatternKind::RecognizedClear;
+	const uint32_t       expected = !one ? 0u : (bytes == 4u ? 0x3f800000u : 0xffffu);
+	std::vector<uint8_t> linear(static_cast<size_t>(width) * height * bytes);
+	TileConvertDepth64KBToLinear(linear.data(), reinterpret_cast<const void*>(depth_addr), width, height, pitch, bytes);
+	for (size_t offset = 0; offset < linear.size(); offset += bytes)
+	{
+		uint32_t element = 0;
+		std::memcpy(&element, linear.data() + offset, bytes);
+		if (element != expected) { return false; }
+	}
+	return true;
+}
+
+// What PrepareTextures did besides filling its outputs: the images it read, in order, and whether it
+// recorded commands, stamped an image or compared image stamps on the way (any of which makes the
+// result depend on more than its inputs and the registry state).
+struct TextureStageEffects
+{
+	VulkanImage* reads[ShaderTextureResources::RES_MAX] {};
+	int          reads_num = 0;
+	bool         side_work = false;
+
+	void RecordRead(VulkanImage* image)
+	{
+		if (reads_num < ShaderTextureResources::RES_MAX)
+		{
+			reads[reads_num] = image;
+		}
+		// An overflow leaves reads_num past the bound, which makes the call ineligible for reuse.
+		reads_num++;
+	}
+};
+
 static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
                             const ShaderSamplerResources& samplers, VulkanImage** images_sampled, VulkanImage** images_storage,
                             int* images_sampled_view, VulkanImage** images_sampled_depth, int* images_sampled_depth_view,
@@ -3500,9 +3831,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
                             int* images_sampled_array_uint_view, VulkanImage** images_sampled_3d_uint,
                             int* images_sampled_3d_uint_view, int* images_storage_view, uint64_t storage_seed_skip_mask,
                             uint32_t** sgprs, DrawMaterialTraceSession* material_trace, const VulkanImage* stencil_attached_depth,
-                            bool scaled_sampling_refused, const RenderColorInfo* pass_color, bool compute_stage)
+                            bool scaled_sampling_refused, const RenderColorInfo* pass_color, bool compute_stage,
+                            TextureStageEffects* effects)
 {
 	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(effects == nullptr);
 
 	EXIT_IF(images_sampled == nullptr);
 	EXIT_IF(images_sampled_depth == nullptr);
@@ -3886,12 +4219,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				{
 					auto* depth_image = static_cast<DepthStencilVulkanImage*>(tex);
 					auto* plane       = DepthStencilBufferGetStencilStoragePlane(g_render_ctx->GetGraphicCtx(), depth_image);
+					effects->side_work = true;
 					if (!UtilCopyStencilBits(buffer, depth_image, plane, static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL)))
 					{
 						EXIT("stencil storage plane seed failed: extent=%ux%u format=%u layout=%u\n", depth_image->extent.width,
 						     depth_image->extent.height, static_cast<uint32_t>(depth_image->format),
 						     static_cast<uint32_t>(depth_image->layout));
 					}
+					effects->side_work = true;
 					buffer->DeferStencilPlaneStoreBack(depth_image);
 					tex         = plane;
 					materialize = "stencil-storage-plane";
@@ -3970,6 +4305,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					// The guest-memory depth sample contract: metadata (HTILE) or MSAA would change what the layer bytes mean.
 					const bool plain_guest_depth = tile == 24u && levels == 1u && !r.MsaaDepth() && r.MetaAddr() == 0u;
 					const auto array_extent = depth_exact ? owner->extent : VkExtent2D {width, height};
+					effects->side_work = true;
 					tex = GraphicsRenderDepthSliceArray(buffer, owner, addr, size.size, array_extent.width, array_extent.height, view_layers,
 					                                    fmt, pitch, plain_guest_depth);
 					materialize = "depth-slice-array";
@@ -3982,12 +4318,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				{
 					auto* depth_image = static_cast<DepthStencilVulkanImage*>(tex);
 					auto* plane       = DepthStencilBufferGetStoragePlane(g_render_ctx->GetGraphicCtx(), depth_image);
+					effects->side_work = true;
 					if (!UtilCopyTexelBits(buffer, depth_image, plane, static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL)))
 					{
 						EXIT("depth storage plane seed failed: extent=%ux%u format=%u layout=%u\n", depth_image->extent.width,
 						     depth_image->extent.height, static_cast<uint32_t>(depth_image->format),
 						     static_cast<uint32_t>(depth_image->layout));
 					}
+					effects->side_work = true;
 					buffer->DeferDepthPlaneStoreBack(depth_image);
 					tex         = plane;
 					materialize = "depth-storage-plane";
@@ -3999,6 +4337,9 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		// surface); only guest memory would miss that content.
 		if (!depth_texture)
 		{
+			// Which storage image of a range was written last changes while the object graph stays: a miss that
+			// asked for it is not a property of the graph.
+			bool write_order_asked = false;
 			auto rtex      = lookups_missed ? decltype(FindRenderTexture(buffer, addr, size.size, true)) {}
 			                                : FindRenderTexture(buffer, addr, size.size, true);
 			render_texture = !rtex.IsEmpty();
@@ -4045,9 +4386,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				uint32_t     cand_h[16]   = {};
 				uint32_t     cand_mips[16] = {};
 				uint32_t     cand_layers[16] = {};
+				bool         cand_mutable[16] = {};
 				for (size_t i = 0; i < cand_n; i++)
 				{
 					cand_fmt[i]             = rtex.At(static_cast<int>(i))->format;
+					cand_mutable[i]         = rtex.At(static_cast<int>(i))->mutable_format;
 					const auto guest_extent = rtex.At(static_cast<int>(i))->GetGuestExtent();
 					cand_w[i]               = guest_extent.width;
 					cand_h[i]               = guest_extent.height;
@@ -4059,6 +4402,19 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				bool   reject_alias = false;
 				EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, use_srgb, width, height, view_last_level + 1u, view_layers, cand_n, cand_fmt, cand_w,
 				                                      cand_h, cand_mips, cand_layers, filtered, &filtered_n, &reject_alias));
+				// Guest memory is untyped: a target rendered UNORM may be sampled sRGB
+				// (or the reverse); read the live target through a sampled view in that gamma.
+				const bool gamma_view_allowed = reject_alias && !textures.desc[i].textures2d_without_sampler;
+				const int  gamma_alias        = gamma_view_allowed ? Gen5PickGammaTwinSurfaceAlias(fmt, use_srgb, width, height, view_last_level + 1u, view_layers,
+				                                                                           cand_n, cand_fmt, cand_mutable, cand_w, cand_h,
+				                                                                           cand_mips, cand_layers, &reinterpret_format)
+				                                                   : -1;
+				if (gamma_alias >= 0)
+				{
+					reject_alias = false;
+					filtered[0]  = gamma_alias;
+					filtered_n   = 1;
+				}
 				if (reject_alias)
 				{
 					render_texture = false;
@@ -4111,16 +4467,20 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					// chain: a write view of the chain belongs to it even when a color alias of one level was drawn more
 					// recently, and any other view reads the color alias only while that holds the newer writes.
 					const auto* chain = rt_exact ? nullptr : FindLatestStorageTexture(buffer, addr, size.size);
+					write_order_asked = chain != nullptr;
 					const bool chain_write = chain != nullptr && textures.desc[i].usage != ShaderTextureUsage::ReadOnly && chain->mip_levels > tex->mip_levels;
+					effects->side_work |= chain != nullptr;
 					if (chain_write || (chain != nullptr && chain->storage_write_stamp > std::max(tex->storage_write_stamp, tex->content_stamp)))
 					{
-						tex            = nullptr;
-						render_texture = false;
-						materialize    = "rt-yields-to-chain";
+						tex                = nullptr;
+						render_texture     = false;
+						reinterpret_format = VK_FORMAT_UNDEFINED;
+						materialize        = "rt-yields-to-chain";
 					}
 					// Storage views and refused sampling address guest texels.
 					if (tex != nullptr && tex->IsResolutionScaled() && (textures.desc[i].textures2d_without_sampler || scaled_sampling_refused))
 					{
+						effects->side_work = true;
 						tex = DemoteScaledRenderTexture(submit_id, buffer, rtex.At(static_cast<int>(alias_index)), addr, size.size,
 						                                pass_color);
 						materialize = "rt-demoted";
@@ -4137,6 +4497,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					Vector<StorageTextureVulkanImage*> stex;
 					auto* latest_stex = FindLatestStorageTexture(buffer, addr, size.size);
 					const bool st_exact = latest_stex != nullptr;
+					write_order_asked   = write_order_asked || st_exact;
 					if (st_exact)
 					{
 						stex.Add(latest_stex);
@@ -4219,6 +4580,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 							alias_index = static_cast<size_t>(filtered[alias_index]);
 						}
 						tex = stex.At(static_cast<int>(alias_index));
+						effects->side_work = true;
+						StorageTextureMergeCpuWrites(buffer, stex.At(static_cast<int>(alias_index)));
 					}
 					// Guest memory is untyped: an image a dispatch wrote as R8_UINT
 					// holds the bytes a later R8_UNORM sample of the same range reads.
@@ -4237,6 +4600,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 							storage_texture    = true;
 							reinterpret_format = sample_format;
 							materialize        = "st-reinterpret";
+							effects->side_work = true;
+							StorageTextureMergeCpuWrites(buffer, candidate);
+							if (rt_exact && candidate->guest_vaddr == addr && candidate->guest_size == size.size &&
+							    CopyNewerRenderTargetIntoStorage(buffer, rtex, candidate))
+							{
+								materialize = "st-reinterpret-rt-copy";
+							}
 							break;
 						}
 					}
@@ -4251,7 +4621,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					KYTY_LOG_DEBUG("WARNING: Gen5 sampled texture has no exact render-target backing and no guest-memory upload:  (continuing)\n");
 				}
 			}
-			if (!lookups_missed && !render_texture && tex == nullptr)
+			if (!lookups_missed && !render_texture && tex == nullptr && !write_order_asked)
 			{
 				lookup_memo->Store(lookup_key, lookup_generation);
 			}
@@ -4386,11 +4756,17 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				        fmt, tile, static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()),
 				        static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
 				        static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()),
-				        static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(), r.MetaAddr() != 0u, addr, width,
+				        static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(),
+				        r.MetaAddr() != 0u && (r.Depth() != 0u ||
+				                               !HtileClearMatchesGuestDepth(static_cast<uint64_t>(r.MetaAddr()) << 8u, addr, fmt,
+				                                                            static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+				                                                            static_cast<uint32_t>(pitch))),
+				        addr, width,
 				        height, pitch, size.size, textures.desc[i].sample_operation);
 				materialize_depth = physical_ok && source_ok && shape_ok;
-				// The overlapping objects decide whether guest bytes can be trusted; keep them for the refusal below.
-				int written = std::snprintf(depth_refusal, sizeof(depth_refusal), " physical=%d mapped_kind=%u source=%u shape=%d overlaps=%u:",
+				// The overlapping objects decide whether guest bytes can be trusted; keep them for the refusal below,
+				// which is the only reader of the text.
+				int written = materialize_depth ? 0 : std::snprintf(depth_refusal, sizeof(depth_refusal), " physical=%d mapped_kind=%u source=%u shape=%d overlaps=%u:",
 				                            physical_ok ? 1 : 0, static_cast<uint32_t>(mapped.kind), static_cast<uint32_t>(depth_source),
 				                            shape_ok ? 1 : 0, overlaps_ok ? overlaps.total_count : 0u);
 				for (uint32_t entry = 0; overlaps_ok && entry < overlaps.entry_count && written > 0 &&
@@ -4440,6 +4816,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					materialize   = depth_source == GpuMemoryDepthD16Source::StorageBuffer ? "depth-storage" : "depth-guest";
 					if (depth_texture && depth_storage != nullptr)
 					{
+						effects->side_work = true;
 						const auto detile_status = TileGpuDetileDepthD16Inline(
 						    g_render_ctx->GetGraphicCtx(), buffer, depth_storage, depth_storage_offset, depth_storage->guest_size, tex,
 						    width, height, pitch);
@@ -4517,6 +4894,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					const auto source_shape = source != nullptr ? source->GetGuestExtent() : VkExtent2D {};
 					uint32_t   copy_width   = 0;
 					uint32_t   copy_height  = 0;
+					effects->side_work |= source != nullptr;
 					if (source != nullptr && source->storage_write_stamp > tex->content_stamp &&
 					    Gen5BlockCompressedStorageCopyExtent(fmt, width, height, source->format, source_shape.width, source_shape.height,
 					                                         &copy_width, &copy_height))
@@ -4526,15 +4904,18 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						regions[0].src_image = source;
 						regions[0].width     = copy_width;
 						regions[0].height    = copy_height;
+						effects->side_work = true;
 						UtilImageToImage(buffer, regions, tex, static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
 						tex->content_stamp = VulkanImageNextStamp();
 						materialize        = "st-block-copy";
 					}
 				}
+				effects->side_work |= gen5 && arrayed_2d && base_array == 0u;
 				if (gen5 && arrayed_2d && base_array == 0u &&
 				    CopyNewerStoragePrefixLayers(buffer, tex, addr, fmt, width, height, pitch, levels, tile, depth))
 				{
 					materialize = "st-prefix-copy";
+					effects->side_work = true;
 				}
 			}
 		}
@@ -4550,6 +4931,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			image.bytes_per_element = ShaderGen5TextureBytesPerElement(fmt);
 			image.alpha_on_msb      = r.DccAlphaPos();
 			image.single_surface    = levels == 1u && !arrayed_2d && !three_dimensional;
+			effects->side_work = true;
 			ConsumeImageColorDccClear(buffer, image);
 		}
 		if (tex == nullptr)
@@ -4559,6 +4941,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				materialize = "continue-without-backing";
 			}
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tex == nullptr condition ignored (continuing)\n");
+		} else
+		{
+			buffer->ReadImage(tex);
+			effects->RecordRead(tex);
 		}
 		if (!textures.desc[i].textures2d_without_sampler &&
 		    textures.desc[i].sample_operation != State::ImageSampleOperation::Regular)
@@ -4689,6 +5075,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			images_storage[index_storage] = tex;
 			if (tex != nullptr && textures.desc[i].usage != ShaderTextureUsage::ReadOnly)
 			{
+				effects->side_work = true;
 				tex->storage_write_stamp = VulkanImageNextStamp();
 			}
 			const bool storage_array = arrayed_2d && tex != nullptr && tex->type == VulkanImageType::StorageTexture;
@@ -4804,12 +5191,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// Keep attachment/storage views intact and cache the complete sampled
 				// view identity so two simultaneous aliases can use different DST_SEL.
 				const uint32_t last_level = view_last_level;
-				// A reinterpreting view reads in the sample's format; otherwise the
-				// surface may store the sample's bytes with red and blue exchanged.
+				// The surface, or the reinterpreting view of it, may store the
+				// sample's bytes with red and blue exchanged.
 				const uint32_t alias_swizzle =
-				    gen5 && reinterpret_format == VK_FORMAT_UNDEFINED
-				        ? VulkanGen5SampleSurfaceSelectors(static_cast<uint16_t>(fmt), use_srgb, tex->format, view_swizzle)
-				        : view_swizzle;
+				    gen5 ? VulkanGen5SampleSurfaceSelectors(static_cast<uint16_t>(fmt), use_srgb,
+				                                            reinterpret_format != VK_FORMAT_UNDEFINED ? reinterpret_format : tex->format,
+				                                            view_swizzle)
+				         : view_swizzle;
 				VulkanImageViewDescriptor sampled_descriptor {};
 				if (last_level < base_level ||
 				    !VulkanPlanSampledImageView(*tex, three_dimensional ? VK_IMAGE_VIEW_TYPE_3D :
@@ -5128,6 +5516,22 @@ static void PrepareDirectSgprs(const ShaderDirectSgprsResources& direct_sgprs, u
 	}
 }
 
+// The storage slots ValidateUploadedStorageSeedCoverage reads its bounds from.
+static uint64_t SeedCoverageBoundsSlots(const ShaderBindResources& bind, uint64_t mask, const ShaderStorageImageTileCoverage* coverage)
+{
+	uint64_t slots = 0;
+	for (int i = 0; coverage != nullptr && i < bind.textures2D.textures_num && i < ShaderTextureResources::RES_MAX; ++i)
+	{
+		const int index = coverage[i].bounds_storage_buffer_index;
+		if ((mask & (uint64_t {1} << static_cast<uint32_t>(i))) != 0u && coverage[i].origin_byte_offset >= 0 && index >= 0 &&
+		    index < DescriptorCache::BUFFERS_MAX)
+		{
+			slots |= uint64_t {1} << static_cast<uint32_t>(index);
+		}
+	}
+	return slots;
+}
+
 static uint64_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const ShaderBindResources& bind,
                                                     VulkanBuffer* const* uploaded_buffers, uint64_t mask,
                                                     const ShaderStorageImageTileCoverage* coverage)
@@ -5222,6 +5626,205 @@ static void RequireScaledImageReads(ScaledImageReadAccess access, const ShaderSa
 	}
 }
 
+// Texture-stage reuse. A bind whose texture and sampler words, seed-skip mask, attached
+// depth, pass colour and sampling refusal equal an earlier bind's in the same command buffer and
+// submission gets that bind's images, views and SGPR words, when the earlier bind recorded no side
+// work, every object it resolved was a cached reuse, and since then no object entered or left a
+// heap, no guest byte range changed and the materialization cache dropped nothing.
+// The reuse repeats the cached-object uses and the image reads of the earlier bind.
+class TextureStageReuse
+{
+public:
+	static constexpr int IMAGE_ARRAYS = 8;
+
+	struct Bind
+	{
+		const ShaderTextureResources* textures               = nullptr;
+		const ShaderSamplerResources* samplers               = nullptr;
+		uint64_t                      seed_skip_mask         = 0;
+		const VulkanImage*            stencil_attached_depth = nullptr;
+		const RenderColorInfo*        pass_color             = nullptr;
+		bool                          scaled_sampling_refused = false;
+		DescriptorCache::Stage        stage                  = DescriptorCache::Stage::Vertex;
+		VulkanImage**                 images[IMAGE_ARRAYS]   = {};
+		int*                          views[IMAGE_ARRAYS]    = {};
+	};
+
+	[[nodiscard]] bool Replay(uint64_t submit_id, CommandBuffer* buffer, const Bind& bind, uint32_t** sgprs);
+	void Store(uint64_t submit_id, CommandBuffer* buffer, const Bind& bind, const uint32_t* sgprs_begin, const uint32_t* sgprs_end,
+	           const TextureStageEffects& effects, const GpuMemoryCachedUseCapture& capture);
+
+private:
+	static constexpr int ENTRIES       = 64;
+	static constexpr int BINDINGS_MAX  = ShaderTextureResources::RES_MAX;
+	static constexpr int SGPRS_MAX     = ShaderTextureResources::RES_MAX * 8;
+
+	struct Binding
+	{
+		int          array = 0;
+		int          slot  = 0;
+		VulkanImage* image = nullptr;
+		int          view  = 0;
+	};
+
+	struct Entry
+	{
+		bool                      valid = false;
+		uint64_t                  fingerprint = 0;
+		ShaderTextureResources    textures;
+		ShaderSamplerResources    samplers;
+		uint64_t                  seed_skip_mask = 0;
+		const VulkanImage*        stencil_attached_depth = nullptr;
+		RenderColorInfo           pass_color {};
+		bool                      has_pass_color = false;
+		bool                      scaled_sampling_refused = false;
+		DescriptorCache::Stage    stage = DescriptorCache::Stage::Vertex;
+		const CommandBuffer*      buffer = nullptr;
+		uint64_t                  submit_id = 0;
+		SubmissionId              submission {};
+		Binding                   bindings[BINDINGS_MAX];
+		int                       bindings_num = 0;
+		uint32_t                  sgprs[SGPRS_MAX] {};
+		int                       sgprs_num = 0;
+		VulkanImage*              reads[ShaderTextureResources::RES_MAX] {};
+		int                       reads_num = 0;
+		GpuMemoryCachedUseCapture capture;
+	};
+
+	static uint64_t Fingerprint(const CommandBuffer* buffer, const Bind& bind);
+	static bool     SameInputs(const Entry& e, const Bind& bind);
+
+	std::unique_ptr<Entry[]> m_entries;
+};
+
+uint64_t TextureStageReuse::Fingerprint(const CommandBuffer* buffer, const Bind& bind)
+{
+	const auto& t = *bind.textures;
+	const int   n = std::clamp(t.textures_num, 0, 2);
+	uint64_t    h = (static_cast<uint64_t>(t.textures_num) << 32u) ^ (static_cast<uint64_t>(bind.samplers->samplers_num) << 8u) ^
+	             static_cast<uint64_t>(bind.stage) ^ reinterpret_cast<uintptr_t>(buffer);
+	const auto* bytes = reinterpret_cast<const uint8_t*>(t.desc);
+	for (size_t i = 0; i + 8 <= sizeof(t.desc[0]) * static_cast<size_t>(n); i += 8)
+	{
+		uint64_t w = 0;
+		std::memcpy(&w, bytes + i, 8);
+		h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+		h ^= h >> 29u;
+	}
+	return h;
+}
+
+bool TextureStageReuse::SameInputs(const Entry& e, const Bind& bind)
+{
+	static_assert(std::is_trivially_copyable_v<ShaderTextureResources> && std::is_trivially_copyable_v<ShaderSamplerResources> &&
+	              std::is_trivially_copyable_v<RenderColorInfo>);
+	return e.stage == bind.stage && e.seed_skip_mask == bind.seed_skip_mask && e.stencil_attached_depth == bind.stencil_attached_depth &&
+	       e.scaled_sampling_refused == bind.scaled_sampling_refused && e.has_pass_color == (bind.pass_color != nullptr) &&
+	       (bind.pass_color == nullptr || std::memcmp(&e.pass_color, bind.pass_color, sizeof(e.pass_color)) == 0) &&
+	       std::memcmp(&e.textures, bind.textures, sizeof(e.textures)) == 0 &&
+	       std::memcmp(&e.samplers, bind.samplers, sizeof(e.samplers)) == 0;
+}
+
+bool TextureStageReuse::Replay(uint64_t submit_id, CommandBuffer* buffer, const Bind& bind, uint32_t** sgprs)
+{
+	if (m_entries == nullptr)
+	{
+		return false;
+	}
+	const uint64_t fingerprint = Fingerprint(buffer, bind);
+	auto&          e           = m_entries[fingerprint % ENTRIES];
+	SubmissionId   submission {};
+	if (!e.valid || e.fingerprint != fingerprint || e.buffer != buffer || e.submit_id != submit_id ||
+	    !buffer->GetSubmissionId(&submission) || !(submission == e.submission) || !SameInputs(e, bind))
+	{
+		return false;
+	}
+	if (!GpuMemoryRepeatCachedUses(submit_id, buffer, e.capture))
+	{
+		e.valid = false;
+		return false;
+	}
+	for (int i = 0; i < e.bindings_num; i++)
+	{
+		const auto& b              = e.bindings[i];
+		bind.images[b.array][b.slot] = b.image;
+		bind.views[b.array][b.slot]  = b.view;
+	}
+	std::memcpy(*sgprs, e.sgprs, sizeof(uint32_t) * static_cast<size_t>(e.sgprs_num));
+	*sgprs += e.sgprs_num;
+	for (int i = 0; i < e.reads_num; i++)
+	{
+		buffer->ReadImage(e.reads[i]);
+	}
+	return true;
+}
+
+void TextureStageReuse::Store(uint64_t submit_id, CommandBuffer* buffer, const Bind& bind, const uint32_t* sgprs_begin,
+                              const uint32_t* sgprs_end, const TextureStageEffects& effects, const GpuMemoryCachedUseCapture& capture)
+{
+	const auto sgprs_num = sgprs_end - sgprs_begin;
+	SubmissionId submission {};
+	if (effects.side_work || effects.reads_num > ShaderTextureResources::RES_MAX || !capture.AllCached() || sgprs_num < 0 ||
+	    sgprs_num > SGPRS_MAX || !buffer->GetSubmissionId(&submission))
+	{
+		return;
+	}
+	if (m_entries == nullptr)
+	{
+		m_entries = std::make_unique<Entry[]>(ENTRIES);
+	}
+	const uint64_t fingerprint = Fingerprint(buffer, bind);
+	auto&          e           = m_entries[fingerprint % ENTRIES];
+	e.valid                    = false;
+	e.bindings_num             = 0;
+	for (int a = 0; a < IMAGE_ARRAYS; a++)
+	{
+		for (int slot = 0; slot < ShaderTextureResources::RES_MAX; slot++)
+		{
+			if (bind.images[a][slot] == nullptr)
+			{
+				continue;
+			}
+			if (e.bindings_num == BINDINGS_MAX)
+			{
+				return;
+			}
+			e.bindings[e.bindings_num++] = {a, slot, bind.images[a][slot], bind.views[a][slot]};
+		}
+	}
+	e.fingerprint             = fingerprint;
+	std::memcpy(&e.textures, bind.textures, sizeof(e.textures));
+	std::memcpy(&e.samplers, bind.samplers, sizeof(e.samplers));
+	e.seed_skip_mask          = bind.seed_skip_mask;
+	e.stencil_attached_depth  = bind.stencil_attached_depth;
+	e.has_pass_color          = bind.pass_color != nullptr;
+	if (e.has_pass_color)
+	{
+		std::memcpy(&e.pass_color, bind.pass_color, sizeof(e.pass_color));
+	}
+	e.scaled_sampling_refused = bind.scaled_sampling_refused;
+	e.stage                   = bind.stage;
+	e.buffer                  = buffer;
+	e.submit_id               = submit_id;
+	e.submission              = submission;
+	std::memcpy(e.sgprs, sgprs_begin, sizeof(uint32_t) * static_cast<size_t>(sgprs_num));
+	e.sgprs_num = static_cast<int>(sgprs_num);
+	std::copy(effects.reads, effects.reads + effects.reads_num, e.reads);
+	e.reads_num = effects.reads_num;
+	e.capture   = capture;
+	e.valid     = true;
+}
+
+
+// Opt-in texture diagnostics inside PrepareTextures log or dump per call, so they disable reuse.
+static bool TextureStageDiagnosticsRequested()
+{
+	static const bool requested = std::getenv("KYTY_SAMPLE_BIND_METADATA_LOG") != nullptr ||
+	                              std::getenv("KYTY_SAMPLE_BIND_CATALOG") != nullptr || std::getenv("KYTY_DUMP_TEXTURE_BIND") != nullptr ||
+	                              std::getenv("KYTY_DUMP_BOUND_SAMPLE") != nullptr || std::getenv("KYTY_DUMP_VIDEO_BIND") != nullptr;
+	return requested;
+}
+
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint64_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
@@ -5273,7 +5876,9 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		VulkanImage*  textures2d_storage[DescriptorCache::TEXTURES_STORAGE_MAX] = {};
 		int           textures2d_storage_view[DescriptorCache::TEXTURES_STORAGE_MAX];
 		uint64_t      samplers[DescriptorCache::SAMPLERS_MAX];
-		uint32_t      sgprs[DescriptorCache::METADATA_DWORDS_MAX] = {};
+		// Only the first push_constant_size bytes are written and read; zero just those.
+		uint32_t      sgprs[DescriptorCache::METADATA_DWORDS_MAX];
+		std::memset(sgprs, 0, bind.push_constant_size);
 
 		uint32_t* sgprs_ptr = sgprs;
 
@@ -5283,7 +5888,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.storage_buffers.buffers_num > 0)
 		{
 			const auto stage_start = BindingStageClock::now();
-			PrepareStorageBuffers(submit_id, buffer, vk_stage, bind, storage_buffers, &sgprs_ptr, shader_checksum);
+			PrepareStorageBuffers(submit_id, buffer, vk_stage, bind, storage_buffers, &sgprs_ptr, shader_checksum,
+			                      SeedCoverageBoundsSlots(bind, storage_seed_skip_mask, storage_seed_coverage));
 			if (record_draw_timing) { DebugStatsRecordDrawDescriptorStorage(BindingStageElapsedNs(stage_start)); }
 			need_descriptor = true;
 		}
@@ -5292,14 +5898,42 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			const auto stage_start = BindingStageClock::now();
 			storage_seed_skip_mask = ValidateUploadedStorageSeedCoverage(buffer, bind, storage_buffers,
 			                                                             storage_seed_skip_mask, storage_seed_coverage);
-			PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage,
-			                textures2d_sampled_view, textures2d_sampled_depth, textures2d_sampled_depth_view,
-			                textures2d_array_sampled, textures2d_array_sampled_view, textures3d_sampled,
-			                textures3d_sampled_view, textures2d_sampled_uint, textures2d_sampled_uint_view,
-			                textures2d_array_sampled_uint, textures2d_array_sampled_uint_view, textures3d_sampled_uint,
-			                textures3d_sampled_uint_view, textures2d_storage_view, storage_seed_skip_mask, &sgprs_ptr, &trace_session,
-			                stencil_attached_depth, ScaledSamplingRefused(scaled_image_reads, bind.samplers), pass_color,
-			                stage == DescriptorCache::Stage::Compute);
+			const bool              scaled_sampling_refused = ScaledSamplingRefused(scaled_image_reads, bind.samplers);
+			TextureStageReuse::Bind reuse_bind {&bind.textures2D, &bind.samplers, storage_seed_skip_mask, stencil_attached_depth,
+			                                    pass_color, scaled_sampling_refused, stage,
+			                                    {textures2d_sampled, textures2d_sampled_depth, textures2d_array_sampled, textures3d_sampled,
+			                                     textures2d_sampled_uint, textures2d_array_sampled_uint, textures3d_sampled_uint,
+			                                     textures2d_storage},
+			                                    {textures2d_sampled_view, textures2d_sampled_depth_view, textures2d_array_sampled_view,
+			                                     textures3d_sampled_view, textures2d_sampled_uint_view, textures2d_array_sampled_uint_view,
+			                                     textures3d_sampled_uint_view, textures2d_storage_view}};
+			thread_local TextureStageReuse texture_stage_reuse;
+			// An engaged material or render-target trace records per call inside PrepareTextures.
+			const bool reusable = stage != DescriptorCache::Stage::Compute && trace_session.draw == nullptr &&
+			                      !trace_session.trace_rt_lifetime && !TextureStageDiagnosticsRequested();
+			if (!reusable || !texture_stage_reuse.Replay(submit_id, buffer, reuse_bind, &sgprs_ptr))
+			{
+				TextureStageEffects       effects;
+				GpuMemoryCachedUseCapture capture;
+				uint32_t* const           sgprs_begin  = sgprs_ptr;
+				if (reusable)
+				{
+					GpuMemoryBeginCachedUseCapture(&capture);
+				}
+				PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage,
+				                textures2d_sampled_view, textures2d_sampled_depth, textures2d_sampled_depth_view,
+				                textures2d_array_sampled, textures2d_array_sampled_view, textures3d_sampled,
+				                textures3d_sampled_view, textures2d_sampled_uint, textures2d_sampled_uint_view,
+				                textures2d_array_sampled_uint, textures2d_array_sampled_uint_view, textures3d_sampled_uint,
+				                textures3d_sampled_uint_view, textures2d_storage_view, storage_seed_skip_mask, &sgprs_ptr,
+				                &trace_session, stencil_attached_depth, scaled_sampling_refused, pass_color,
+				                stage == DescriptorCache::Stage::Compute, &effects);
+				if (reusable)
+				{
+					GpuMemoryEndCachedUseCapture();
+					texture_stage_reuse.Store(submit_id, buffer, reuse_bind, sgprs_begin, sgprs_ptr, effects, capture);
+				}
+			}
 			if (Config::GetRenderResolutionScope() == Config::RenderResolutionScope::RenderTargets)
 			{
 				RequireScaledImageReads(scaled_image_reads, bind.samplers, stage,
@@ -5384,8 +6018,6 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			}
 			need_descriptor = true;
 		}
-
-		auto* vk_buffer = buffer->RecordState();
 
 		if (bind.textures2D.textures_num > 0)
 		{
@@ -5522,6 +6154,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			}
 		}
 
+		// After the barriers above: a geometry pass is placed here (see CommandBuffer::BeginGeometryPass).
+		auto* commands = buffer->DeferredState(buffer->StateTarget());
 		if (need_descriptor)
 		{
 			auto* descriptor_set = g_render_ctx->GetDescriptorCache()->GetDescriptor(
@@ -5534,38 +6168,33 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 
 			EXIT_IF(descriptor_set == nullptr);
 
-			vkCmdBindDescriptorSets(vk_buffer, pipeline_bind_point, layout, bind.descriptor_set_slot, 1, &descriptor_set->set, 0, nullptr);
+			commands->BindDescriptorSet(pipeline_bind_point, layout, bind.descriptor_set_slot, descriptor_set->set);
 		}
 		if (!bind.vsharp_uniform_buffer)
 		{
-			vkCmdPushConstants(vk_buffer, layout, vk_stage, bind.push_constant_offset, bind.push_constant_size, sgprs);
+			commands->PushConstants(layout, vk_stage, bind.push_constant_offset, bind.push_constant_size, sgprs);
 		}
 		if (record_draw_timing) { DebugStatsRecordDrawDescriptorFinalize(BindingStageElapsedNs(finalize_start)); }
 	}
 	EmitDrawMaterialTrace(submit_id, trace_session, &bind);
 }
 
-static void VulkanCmdSetColorWriteEnableEXT(GraphicContext* ctx, VkCommandBuffer command_buffer, uint32_t attachment_count,
-                                            const VkBool32* p_color_write_enables)
+static PFN_vkCmdSetColorWriteEnableEXT ColorWriteEnableFunc(GraphicContext* ctx)
 {
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(ctx->instance == nullptr);
 
 	static auto func =
 	    reinterpret_cast<PFN_vkCmdSetColorWriteEnableEXT>(vkGetInstanceProcAddr(ctx->instance, "vkCmdSetColorWriteEnableEXT"));
-
-	if (func != nullptr)
-	{
-		func(command_buffer, attachment_count, p_color_write_enables);
-	} else
-	{
-		KYTY_LOG_DEBUG("WARNING: vkCmdSetColorWriteEnableEXT not present, skipping\n");
-	}
+	return func;
 }
 
-void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline)
+void SetDynamicParams(CommandBuffer* buffer, VkCommandBuffer vk_buffer, VulkanPipeline* pipeline)
 {
 	KYTY_PROFILER_FUNCTION();
+
+	EXIT_IF(buffer == nullptr);
+	auto* commands = buffer->DeferredState(vk_buffer);
 
 	EXIT_IF(pipeline == nullptr);
 	EXIT_IF(pipeline->static_params == nullptr);
@@ -5573,32 +6202,39 @@ void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline)
 
 	if (pipeline->dynamic_params->vk_dynamic_state_line_width)
 	{
-		vkCmdSetLineWidth(vk_buffer, pipeline->dynamic_params->line_width);
+		commands->SetLineWidth(pipeline->dynamic_params->line_width);
 	}
 
 	if (pipeline->static_params->stencil_test_enable)
 	{
 		if (pipeline->dynamic_params->vk_dynamic_state_stencil_compare_mask)
 		{
-			vkCmdSetStencilCompareMask(vk_buffer, VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.compareMask);
-			vkCmdSetStencilCompareMask(vk_buffer, VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.compareMask);
+			commands->SetStencilCompareMask(VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.compareMask);
+			commands->SetStencilCompareMask(VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.compareMask);
 		}
 		if (pipeline->dynamic_params->vk_dynamic_state_stencil_write_mask)
 		{
-			vkCmdSetStencilWriteMask(vk_buffer, VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.writeMask);
-			vkCmdSetStencilWriteMask(vk_buffer, VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.writeMask);
+			commands->SetStencilWriteMask(VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.writeMask);
+			commands->SetStencilWriteMask(VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.writeMask);
 		}
 		if (pipeline->dynamic_params->vk_dynamic_state_stencil_reference)
 		{
-			vkCmdSetStencilReference(vk_buffer, VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.reference);
-			vkCmdSetStencilReference(vk_buffer, VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.reference);
+			commands->SetStencilReference(VK_STENCIL_FACE_FRONT_BIT, pipeline->dynamic_params->stencil_front.reference);
+			commands->SetStencilReference(VK_STENCIL_FACE_BACK_BIT, pipeline->dynamic_params->stencil_back.reference);
 		}
 	}
 
 	if (pipeline->dynamic_params->vk_dynamic_state_color_write_enable_ext && g_render_ctx->GetGraphicCtx()->color_write_enable_supported)
 	{
-		VkBool32 enable = (pipeline->dynamic_params->color_write_enable ? VK_TRUE : VK_FALSE);
-		VulkanCmdSetColorWriteEnableEXT(g_render_ctx->GetGraphicCtx(), vk_buffer, 1, &enable);
+		const VkBool32 enable = (pipeline->dynamic_params->color_write_enable ? VK_TRUE : VK_FALSE);
+		auto*          func   = ColorWriteEnableFunc(g_render_ctx->GetGraphicCtx());
+		if (func != nullptr)
+		{
+			commands->SetColorWriteEnable(func, enable);
+		} else
+		{
+			KYTY_LOG_DEBUG("WARNING: vkCmdSetColorWriteEnableEXT not present, skipping\n");
+		}
 	}
 
 	if (pipeline->dynamic_params->vk_dynamic_state_viewport)
@@ -5618,7 +6254,7 @@ void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline)
 		viewport.height   = xy.height;
 		viewport.minDepth = depth_range.min_depth;
 		viewport.maxDepth = depth_range.max_depth;
-		vkCmdSetViewport(vk_buffer, 0, 1, &viewport);
+		commands->SetViewport(viewport);
 	}
 
 	if (pipeline->dynamic_params->vk_dynamic_state_scissor)
@@ -5649,19 +6285,19 @@ void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline)
 		VkRect2D scissor {};
 		scissor.offset = {left, top};
 		scissor.extent = {static_cast<uint32_t>(right - left), static_cast<uint32_t>(bottom - top)};
-		vkCmdSetScissor(vk_buffer, 0, 1, &scissor);
+		commands->SetScissor(scissor);
 	}
 
 	if (pipeline->dynamic_params->vk_dynamic_state_blend_constants)
 	{
 		const float blend_constants[4] = {pipeline->dynamic_params->blend_color_red, pipeline->dynamic_params->blend_color_green,
 		                                  pipeline->dynamic_params->blend_color_blue, pipeline->dynamic_params->blend_color_alpha};
-		vkCmdSetBlendConstants(vk_buffer, blend_constants);
+		commands->SetBlendConstants(blend_constants);
 	}
 
 	if (pipeline->static_params->depth_bias_enable && pipeline->dynamic_params->vk_dynamic_state_depth_bias)
 	{
-		vkCmdSetDepthBias(vk_buffer, pipeline->dynamic_params->depth_bias_constant_factor, pipeline->dynamic_params->depth_bias_clamp,
+		commands->SetDepthBias(pipeline->dynamic_params->depth_bias_constant_factor, pipeline->dynamic_params->depth_bias_clamp,
 		                  pipeline->dynamic_params->depth_bias_slope_factor);
 	}
 }

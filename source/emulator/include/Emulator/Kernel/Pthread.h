@@ -9,6 +9,7 @@
 
 #include <mutex>
 #include <shared_mutex>
+#include <type_traits>
 
 // IWYU pragma: no_include <pthread.h>
 
@@ -279,6 +280,15 @@ private:
 void PthreadInterruptibleWait(Core::CondVar* cond_var, Core::Mutex* mutex);
 bool PthreadInterruptibleWaitFor(Core::CondVar* cond_var, Core::Mutex* mutex, uint32_t micros);
 
+// Block on a host pthread lock inside a PthreadInterruptibleScope. On Windows
+// winpthreads blocks a contended lock on an event that nothing interrupts, so
+// these take it in bounded slices and a context request raised meanwhile is
+// delivered as a slice ends. Elsewhere they lock directly. Return the pthread
+// result.
+int PthreadLockHostMutex(std::mutex::native_handle_type mutex);
+int PthreadLockHostRwlockShared(std::shared_mutex::native_handle_type rwlock);
+int PthreadLockHostRwlockExclusive(std::shared_mutex::native_handle_type rwlock);
+
 // Takes a host mutex that a thread may keep while it runs guest code (a lock
 // the guest holds explicitly, a guest callback in progress), so blocking on it
 // is a safe point. The mutex must sleep on a word inside its own object, and
@@ -290,7 +300,14 @@ template <typename Mutex>
 	if (!lock.owns_lock())
 	{
 		PthreadInterruptibleScope wait(&mutex, sizeof(mutex));
-		lock.lock();
+		if constexpr (std::is_same_v<Mutex, std::shared_mutex>)
+		{
+			EXIT_IF(PthreadLockHostRwlockExclusive(mutex.native_handle()) != 0);
+		} else
+		{
+			EXIT_IF(PthreadLockHostMutex(mutex.native_handle()) != 0);
+		}
+		lock = std::unique_lock<Mutex>(mutex, std::adopt_lock);
 	}
 	return lock;
 }
@@ -303,7 +320,8 @@ template <typename Mutex>
 	if (!lock.owns_lock())
 	{
 		PthreadInterruptibleScope wait(&mutex, sizeof(mutex));
-		lock.lock();
+		EXIT_IF(PthreadLockHostRwlockShared(mutex.native_handle()) != 0);
+		lock = std::shared_lock<Mutex>(mutex, std::adopt_lock);
 	}
 	return lock;
 }

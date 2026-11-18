@@ -9,6 +9,7 @@
 #define XXH_INLINE_ALL
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -22,6 +23,7 @@
 #include <system_error>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <xxhash/xxhash.h>
 
@@ -154,6 +156,53 @@ size_t CacheUsage(const std::filesystem::path& root)
 	return total;
 }
 
+// Reads a whole entry file: Miss when it cannot be read, Corrupt when its size is out of bounds.
+SpirvBinaryCacheLoadResult ReadEntryFile(const std::filesystem::path& path, size_t max_entry_bytes, std::vector<uint8_t>* data)
+{
+	std::ifstream file(path, std::ios::binary | std::ios::ate);
+	if (!file)
+	{
+		return SpirvBinaryCacheLoadResult::Miss;
+	}
+	const auto end = file.tellg();
+	if (end < 0)
+	{
+		return SpirvBinaryCacheLoadResult::Miss;
+	}
+	const auto file_size = static_cast<uint64_t>(end);
+	if (file_size < k_header_size || file_size > max_entry_bytes)
+	{
+		return SpirvBinaryCacheLoadResult::Corrupt;
+	}
+
+	data->resize(static_cast<size_t>(file_size));
+	file.seekg(0, std::ios::beg);
+	if (!file.read(reinterpret_cast<char*>(data->data()), static_cast<std::streamsize>(data->size())))
+	{
+		// A concurrent atomic replacement can make a previously observed path
+		// temporarily unavailable. Treat persistence as a miss; malformed data
+		// that was read completely is still rejected by the validation of the load.
+		return SpirvBinaryCacheLoadResult::Miss;
+	}
+	return SpirvBinaryCacheLoadResult::Hit;
+}
+
+// A working-set manifest line must name an entry of this store, never another path.
+bool IsEntryName(const std::string& name)
+{
+	constexpr size_t key_digits = 32;
+	if (name.size() != key_digits + sizeof(k_module_extension) - 1)
+	{
+		return false;
+	}
+	const auto extension = name.substr(key_digits);
+	return (extension == k_source_extension || extension == k_module_extension) &&
+	       std::all_of(name.begin(), name.begin() + key_digits, [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+}
+
+// The manifest is rewritten at most this often, and once more when the store stops.
+constexpr auto k_working_set_flush_interval = std::chrono::seconds(10);
+
 } // namespace
 
 struct SpirvBinaryCacheStore::State
@@ -195,6 +244,21 @@ struct SpirvBinaryCacheStore::State
 	std::mutex                                                     hook_mutex;
 	WriteHookForTesting                                            write_hook        = nullptr;
 	void*                                                          write_hook_opaque = nullptr;
+
+	// Working set, guarded by queue_mutex. The manifest lists this session's loads
+	// in first-use order, then the names carried over from earlier sessions, so
+	// the entries of what is played now come first under the caps.
+	std::filesystem::path                                 working_set_manifest;
+	std::vector<std::string>                              session_loads;
+	std::unordered_set<std::string>                       session_names;
+	std::vector<std::string>                              carried;
+	std::unordered_set<std::string>                       carried_names;
+	bool                                                  carried_pruned = false;
+	std::chrono::steady_clock::time_point                 working_set_flushed;
+	std::unordered_map<std::string, std::vector<uint8_t>> preloaded;
+	bool                                                  preload_done = true;
+	std::condition_variable                               preload_finished;
+	std::thread                                           preloader;
 };
 
 SpirvBinaryCacheStore::SpirvBinaryCacheStore(std::filesystem::path root, SpirvBinaryCacheLimits limits): m_state(new State)
@@ -213,6 +277,11 @@ SpirvBinaryCacheStore::~SpirvBinaryCacheStore()
 			m_state->stopping = true;
 		}
 		m_state->queue_ready.notify_one();
+		// The worker writes the manifest once the read finished, so join the reader first.
+		if (m_state->preloader.joinable())
+		{
+			m_state->preloader.join();
+		}
 		if (m_state->worker.joinable())
 		{
 			m_state->worker.join();
@@ -265,6 +334,7 @@ SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::LoadEntry(const uint8_t* ident
 		                         m_state->completed.end());
 		return SpirvBinaryCacheLoadResult::Corrupt;
 	};
+	std::vector<uint8_t> data;
 	{
 		std::lock_guard<std::mutex> queue_lock(m_state->queue_mutex);
 		if (const auto found = m_state->active.find(key_name); found != m_state->active.end())
@@ -277,34 +347,33 @@ SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::LoadEntry(const uint8_t* ident
 				return SpirvBinaryCacheLoadResult::Hit;
 			}
 		}
+		if (!m_state->working_set_manifest.empty())
+		{
+			if (m_state->session_loads.size() < m_state->limits.max_working_set_entries && m_state->session_names.insert(key_name).second)
+			{
+				m_state->session_loads.push_back(key_name);
+			}
+			if (const auto found = m_state->preloaded.find(key_name); found != m_state->preloaded.end())
+			{
+				data = std::move(found->second);
+				m_state->preloaded.erase(found);
+			}
+		}
 	}
-	const auto path = m_state->root / key_name;
-
-	std::ifstream file(path, std::ios::binary | std::ios::ate);
-	if (!file)
+	if (data.empty())
 	{
-		return cache_miss();
+		const auto read = ReadEntryFile(m_state->root / key_name, m_state->limits.max_entry_bytes, &data);
+		if (read == SpirvBinaryCacheLoadResult::Miss)
+		{
+			return cache_miss();
+		}
+		if (read == SpirvBinaryCacheLoadResult::Corrupt)
+		{
+			return cache_corrupt();
+		}
 	}
-	const auto end = file.tellg();
-	if (end < 0)
-	{
-		return cache_miss();
-	}
-	const auto file_size = static_cast<uint64_t>(end);
-	if (file_size < k_header_size || file_size > m_state->limits.max_entry_bytes)
-	{
-		return cache_corrupt();
-	}
-
-	std::vector<uint8_t> data(static_cast<size_t>(file_size));
-	file.seekg(0, std::ios::beg);
-	if (!file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size())))
-	{
-		// A concurrent atomic replacement can make a previously observed path
-		// temporarily unavailable. Treat persistence as a miss; malformed data
-		// that was read completely is still rejected by the validation below.
-		return cache_miss();
-	}
+	// Preloaded bytes passed the same size bounds when they were read.
+	const auto file_size = static_cast<uint64_t>(data.size());
 
 	const uint8_t* header = data.data();
 	if (memcmp(header, k_magic, sizeof(k_magic)) != 0 || ReadU32(header + 8) != k_header_size || ReadU32(header + 12) != k_format_version ||
@@ -459,19 +528,50 @@ void SpirvBinaryCacheStore::WorkerMain()
 	for (;;)
 	{
 		std::shared_ptr<State::PendingEntry> pending;
+		std::string                          manifest_text;
+		std::filesystem::path                manifest;
+		bool                                 stop = false;
 		{
 			std::unique_lock<std::mutex> lock(m_state->queue_mutex);
-			m_state->queue_ready.wait(lock, [this] { return m_state->stopping || !m_state->queue.empty(); });
-			if (m_state->queue.empty())
+			m_state->queue_ready.wait_for(lock, k_working_set_flush_interval,
+			                              [this] { return m_state->stopping || !m_state->queue.empty(); });
+			if (!m_state->queue.empty())
 			{
-				if (m_state->stopping)
+				pending = std::move(m_state->queue.front());
+				m_state->queue.pop_front();
+			} else
+			{
+				stop = m_state->stopping;
+				if (stop)
 				{
-					return;
+					// The reader stops at its next entry; the last flush needs the names it carried.
+					m_state->preload_finished.wait(lock, [this] { return m_state->preload_done; });
 				}
-				continue;
+				const auto now       = std::chrono::steady_clock::now();
+				const bool flush_due = stop || now - m_state->working_set_flushed >= k_working_set_flush_interval;
+				// Until the read finishes the names of earlier sessions are not known.
+				if (m_state->preload_done && flush_due)
+				{
+					manifest_text                = TakeWorkingSetManifest();
+					manifest                     = m_state->working_set_manifest;
+					m_state->working_set_flushed = now;
+				}
 			}
-			pending = std::move(m_state->queue.front());
-			m_state->queue.pop_front();
+		}
+		if (!manifest_text.empty())
+		{
+			std::error_code error;
+			std::filesystem::create_directories(manifest.parent_path(), error);
+			// A lost manifest only costs the next session its preload.
+			(void)AtomicFileWrite(manifest, manifest_text.data(), manifest_text.size());
+		}
+		if (pending == nullptr)
+		{
+			if (stop)
+			{
+				return;
+			}
+			continue;
 		}
 
 		const auto result =
@@ -688,6 +788,129 @@ void SpirvBinaryCacheStore::SetWriteHookForTesting(WriteHookForTesting hook, voi
 	std::lock_guard<std::mutex> lock(m_state->hook_mutex);
 	m_state->write_hook        = hook;
 	m_state->write_hook_opaque = opaque;
+}
+
+void SpirvBinaryCacheStore::StartWorkingSet(std::filesystem::path manifest)
+{
+	EXIT_IF(m_state == nullptr);
+	if (manifest.empty())
+	{
+		return;
+	}
+	std::lock_guard<std::mutex> lock(m_state->queue_mutex);
+	if (!m_state->working_set_manifest.empty() || m_state->stopping)
+	{
+		return;
+	}
+	m_state->working_set_manifest = std::move(manifest);
+	m_state->working_set_flushed  = std::chrono::steady_clock::now();
+	m_state->preload_done         = false;
+	m_state->preloader            = std::thread([this] { PreloadMain(); });
+}
+
+void SpirvBinaryCacheStore::WaitForWorkingSet()
+{
+	EXIT_IF(m_state == nullptr);
+	std::unique_lock<std::mutex> lock(m_state->queue_mutex);
+	m_state->preload_finished.wait(lock, [this] { return m_state->preload_done; });
+}
+
+void SpirvBinaryCacheStore::PreloadMain()
+{
+	std::filesystem::path manifest;
+	{
+		std::lock_guard<std::mutex> lock(m_state->queue_mutex);
+		manifest = m_state->working_set_manifest;
+	}
+	std::vector<std::string> names;
+	std::ifstream            file(manifest);
+	for (std::string name; names.size() < m_state->limits.max_working_set_entries && std::getline(file, name);)
+	{
+		if (IsEntryName(name))
+		{
+			names.push_back(std::move(name));
+		}
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(m_state->queue_mutex);
+		m_state->carried_names.insert(names.begin(), names.end());
+		m_state->carried = std::move(names);
+		names            = m_state->carried;
+	}
+
+	size_t preloaded_bytes = 0;
+	for (const auto& name: names)
+	{
+		{
+			std::lock_guard<std::mutex> lock(m_state->queue_mutex);
+			// A name already loaded this session would only hold unused bytes.
+			if (m_state->stopping || preloaded_bytes >= m_state->limits.max_working_set_bytes)
+			{
+				break;
+			}
+			if (m_state->session_names.count(name) != 0)
+			{
+				continue;
+			}
+		}
+		std::vector<uint8_t> data;
+		const auto           read = ReadEntryFile(m_state->root / name, m_state->limits.max_entry_bytes, &data);
+
+		std::lock_guard<std::mutex> lock(m_state->queue_mutex);
+		// An entry evicted from the store leaves the set, so the set keeps room for new ones.
+		if (read == SpirvBinaryCacheLoadResult::Miss)
+		{
+			m_state->carried_names.erase(name);
+			m_state->carried_pruned = true;
+			continue;
+		}
+		if (read == SpirvBinaryCacheLoadResult::Hit && data.size() <= m_state->limits.max_working_set_bytes - preloaded_bytes &&
+		    m_state->session_names.count(name) == 0)
+		{
+			preloaded_bytes += data.size();
+			m_state->preloaded.emplace(name, std::move(data));
+		}
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(m_state->queue_mutex);
+		m_state->preload_done = true;
+	}
+	m_state->preload_finished.notify_all();
+}
+
+std::string SpirvBinaryCacheStore::TakeWorkingSetManifest()
+{
+	// Rewritten only when the set changed: a session that replays known entries in any order writes nothing.
+	const bool gained = std::any_of(m_state->session_loads.begin(), m_state->session_loads.end(),
+	                                [this](const std::string& name) { return m_state->carried_names.count(name) == 0; });
+	if (!gained && !m_state->carried_pruned)
+	{
+		return {};
+	}
+	std::vector<std::string> next = m_state->session_loads;
+	for (const auto& name: m_state->carried)
+	{
+		if (next.size() >= m_state->limits.max_working_set_entries)
+		{
+			break;
+		}
+		if (m_state->carried_names.count(name) != 0 && m_state->session_names.count(name) == 0)
+		{
+			next.push_back(name);
+		}
+	}
+	std::string text;
+	for (const auto& name: next)
+	{
+		text += name;
+		text += '\n';
+	}
+	m_state->carried_names  = std::unordered_set<std::string>(next.begin(), next.end());
+	m_state->carried        = std::move(next);
+	m_state->carried_pruned = false;
+	return text;
 }
 
 std::filesystem::path SpirvBinaryCacheDefaultRoot()

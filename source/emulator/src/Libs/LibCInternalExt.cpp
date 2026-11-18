@@ -35,8 +35,18 @@ void KYTY_SYSV_ABI LibcHeapGetTraceInfo(Info* info)
 	info->mstate_table          = g_mstate_table;
 }
 
+// The heap reports a corruption or misuse it found; the title chooses what to do after it returns.
+int KYTY_SYSV_ABI LibcHeapErrorReportForGame(void* msp, void* ptr, int error)
+{
+	PRINT_NAME();
+	KYTY_LOG_LIMIT(Log::Level::Error, 16, "libc heap error %d (msp=0x%016" PRIx64 " ptr=0x%016" PRIx64 ")\n", error,
+	               reinterpret_cast<uint64_t>(msp), reinterpret_cast<uint64_t>(ptr));
+	return 0;
+}
+
 LIB_DEFINE(InitLibcInternalExt_1)
 {
+	LIB_FUNC("al3JzFI9MQ0", LibcInternalExt::LibcHeapErrorReportForGame);
 	LIB_FUNC("NWtTN10cJzE", LibcInternalExt::LibcHeapGetTraceInfo);
 	LIB_FUNC("qBS714-Jr3g", LibC::c_cxa_thread_atexit);
 }

@@ -1608,6 +1608,18 @@ TEST(EmulatorTileDetile, SizesSingleMipStandard4KBBcArraysInBlocks)
 	ASSERT_EQ(level.element_height, 17u);
 	ASSERT_EQ(level.tiled_pitch, 32u);
 
+	std::vector<uint8_t> touched(2u, 0u);
+	ASSERT_TRUE(Gen5MarkTextureArrayLayersTouched(layout, 8192u - 1u, 1u, &touched));
+	EXPECT_EQ(touched, (std::vector<uint8_t> {1u, 0u}));
+	ASSERT_TRUE(Gen5MarkTextureArrayLayersTouched(layout, 8192u - 1u, 2u, &touched));
+	EXPECT_EQ(touched, (std::vector<uint8_t> {1u, 1u}));
+	std::vector<uint8_t> rejected(2u, 0u);
+	EXPECT_FALSE(Gen5MarkTextureArrayLayersTouched(layout, 16384u - 1u, 2u, &rejected));
+	EXPECT_FALSE(Gen5MarkTextureArrayLayersTouched(layout, 0u, 0u, &rejected));
+	std::vector<uint8_t> wrong_count(3u, 0u);
+	EXPECT_FALSE(Gen5MarkTextureArrayLayersTouched(layout, 0u, 1u, &wrong_count));
+	EXPECT_EQ(rejected, std::vector<uint8_t>(2u, 0u));
+
 	std::vector<uint8_t> expected(static_cast<size_t>(layout.linear_size));
 	std::vector<uint8_t> tiled(static_cast<size_t>(layout.tiled_size), 0u);
 	for (uint32_t layer = 0; layer < layout.layers; ++layer)

@@ -12,6 +12,7 @@
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/DeferredStateCommands.h"
 #include "Emulator/Graphics/DiagnosticDump.h"
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -41,6 +42,7 @@
 #include <cinttypes>
 #include <cstring>
 #include <cstdio>
+#include <immintrin.h>
 #include <cstdlib>
 #include <map>
 #include <string>
@@ -61,6 +63,7 @@ namespace {
 // one set per draw tile, and tiles are bounded per draw.
 constexpr uint32_t kTransportBindingsMax = 5;
 constexpr uint32_t kTransportSetsMax     = 1024;
+constexpr uint32_t kTimestampsPerPool = 1024;
 
 VulkanSubmitAttemptTrail g_submit_fault_trail;
 
@@ -793,9 +796,68 @@ bool VulkanLatchFaultSnapshot(VulkanSubmitAttemptTrail* submits, VulkanRecentDra
 	return true;
 }
 
+void VulkanReportDeviceFault(VkResult result)
+{
+	// Written to stderr like the fatal exit that follows, so silent runs keep it. Bounded:
+	// a hang usually reports a few addresses and vendor codes.
+	constexpr uint32_t kMaxFaultEntries = 32;
+	static std::atomic_flag reported = ATOMIC_FLAG_INIT;
+	if (result != VK_ERROR_DEVICE_LOST || g_render_ctx == nullptr)
+	{
+		return;
+	}
+	const auto* ctx = g_render_ctx->GetGraphicCtx();
+	if (ctx == nullptr || !ctx->device_fault_supported || reported.test_and_set())
+	{
+		return;
+	}
+	auto get_fault_info = reinterpret_cast<PFN_vkGetDeviceFaultInfoEXT>(vkGetDeviceProcAddr(ctx->device, "vkGetDeviceFaultInfoEXT"));
+	if (get_fault_info == nullptr)
+	{
+		return;
+	}
+	VkDeviceFaultCountsEXT counts {VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+	VkResult               query = get_fault_info(ctx->device, &counts, nullptr);
+	if (query != VK_SUCCESS)
+	{
+		std::fprintf(stderr, "KYTY_DEVICE_FAULT query failed: result=%d\n", static_cast<int>(query));
+		return;
+	}
+	const uint32_t total_addresses = counts.addressInfoCount;
+	const uint32_t total_vendor    = counts.vendorInfoCount;
+	counts.addressInfoCount        = std::min(counts.addressInfoCount, kMaxFaultEntries);
+	counts.vendorInfoCount         = std::min(counts.vendorInfoCount, kMaxFaultEntries);
+	counts.vendorBinarySize        = 0;
+	std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+	std::vector<VkDeviceFaultVendorInfoEXT>  vendor(counts.vendorInfoCount);
+	VkDeviceFaultInfoEXT                     info {VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
+	info.pAddressInfos = addresses.data();
+	info.pVendorInfos  = vendor.data();
+	query              = get_fault_info(ctx->device, &counts, &info);
+	if (query != VK_SUCCESS && query != VK_INCOMPLETE)
+	{
+		std::fprintf(stderr, "KYTY_DEVICE_FAULT query failed: result=%d\n", static_cast<int>(query));
+		return;
+	}
+	std::fprintf(stderr, "KYTY_DEVICE_FAULT description=\"%s\" addresses=%" PRIu32 " vendor=%" PRIu32 "\n", info.description, total_addresses,
+	               total_vendor);
+	for (uint32_t i = 0; i < counts.addressInfoCount; ++i)
+	{
+		std::fprintf(stderr, "KYTY_DEVICE_FAULT_ADDRESS type=%d address=0x%016" PRIx64 " precision=0x%" PRIx64 "\n",
+		               static_cast<int>(addresses[i].addressType), static_cast<uint64_t>(addresses[i].reportedAddress),
+		               static_cast<uint64_t>(addresses[i].addressPrecision));
+	}
+	for (uint32_t i = 0; i < counts.vendorInfoCount; ++i)
+	{
+		std::fprintf(stderr, "KYTY_DEVICE_FAULT_VENDOR code=0x%" PRIx64 " data=0x%" PRIx64 " description=\"%s\"\n", vendor[i].vendorFaultCode,
+		               vendor[i].vendorFaultData, vendor[i].description);
+	}
+}
+
 void VulkanSubmitFaultReport(const char* stage, VkResult result, const VulkanSubmitAttempt* immediate,
                              const VulkanSubmitAttempt* command_buffer_context)
 {
+	VulkanReportDeviceFault(result);
 	VulkanFaultSnapshot captured;
 	if (!VulkanLatchFaultSnapshot(VulkanSubmitFaultTraceTrail(), VulkanRecentDrawTraceTrail(), result, &captured))
 	{
@@ -972,12 +1034,24 @@ class TransientBufferPool
 	// A matching snapshot this large is tracked for guest writes, so later probes
 	// skip the comparison. Smaller ones compare faster than page protection costs.
 	static constexpr uint64_t kMinTrackedSnapshotSize = 4096u;
-	// A 3D frame records tens of command buffers (about forty in the fishing
-	// title). Snapshots leased by the last frame or two are kept for the next
-	// probe while the pool can grow; ring constants that return later hold
-	// new bytes, so keeping them longer only costs memory.
-	static constexpr uint64_t kRetainedRecordings = 64u;
+	// A 3D frame records tens of command buffers (about seventy in the fishing
+	// title), and most snapshot keys return 256 to 512 recordings later, over
+	// a third of them with the same bytes. Snapshots are kept that long while
+	// the pool can grow: a returning key reuses its snapshot, or takes its own
+	// stale entry back, so draws bind the buffers their descriptor sets were
+	// built with. Recycled after 64 recordings, every returning key took
+	// another buffer and half of the descriptor lookups missed.
+	static constexpr uint64_t kRetainedRecordings = 1024u;
 	static constexpr uint64_t kExpiredRecordings  = 4u * kRetainedRecordings;
+	// Past 256 MiB, retention gives way. A title that streams hundreds of MB
+	// per second through the pool would otherwise fill it, and a capture the
+	// full pool refuses falls back to a fenced upload. The rest of the budget
+	// holds the recordings in flight.
+	static constexpr uint64_t kRetainedBytes = kGpuMemoryTransientBufferPoolMaxBytes * 4u;
+	// A covering capture grows only into a snapshot leased this recently (under
+	// a frame). Older ones hold another frame's windows: growing into them
+	// tripled the bytes copied per draw in a streaming title.
+	static constexpr uint64_t kUnionRecordings = 64u;
 	// Snapshot sizes are never zero, so this size marks the key of covering snapshots.
 	static constexpr uint64_t kCoveringKeySize = 0u;
 
@@ -1017,6 +1091,7 @@ public:
 		entry->snapshot_valid = false;
 		entry->index_range_width = 0;
 		entry->nonzero_end    = std::max(entry->nonzero_end, size);
+		entry->buffer.uncached_descriptor_sets = false;
 		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
 		Commit(entry, size, true);
 		if (shares_contents)
@@ -1141,17 +1216,19 @@ public:
 					ClearTail(previous, size);
 				}
 				Lease(previous, leases);
-				previous->buffer.descriptor_range = previous->snapshot_size;
-				*reused                           = true;
+				previous->buffer.descriptor_range         = previous->snapshot_size;
+				previous->buffer.uncached_descriptor_sets = false;
+				*reused                                   = true;
 				return &previous->buffer;
 			}
 		}
-		// A covering capture grows to the union with the base's latest snapshot,
-		// so the next draws of the stream find their windows in it. A union the
-		// snapshot path refuses leaves the draw with its own window.
+		// A covering capture grows to the union with the base's latest snapshot
+		// when a recent recording leased it, so the next draws of the stream find
+		// their windows in it. A union the snapshot path refuses leaves the draw
+		// with its own window.
 		uint64_t capture_begin = read_begin;
 		uint64_t capture_end   = size;
-		if (covering && chain != nullptr)
+		if (covering && chain != nullptr && chain->newest->lease_generation + kUnionRecordings > m_lease_generation)
 		{
 			const uint64_t union_begin = std::min(capture_begin, chain->newest->snapshot_begin);
 			const uint64_t union_end   = std::max(capture_end, chain->newest->snapshot_size);
@@ -1169,11 +1246,13 @@ public:
 		// range the guest rewrites every frame keeps its buffers. Snapshots
 		// still leased by recent recordings are recycled only when the pool
 		// cannot grow.
-		bool   created = false;
-		Entry* entry   = TakeFree(m_free, usage, capture_end);
+		bool           created   = false;
+		SnapshotChain* own_chain = nullptr;
+		Entry*         entry     = TakeFree(m_free, usage, capture_end);
 		if (entry == nullptr && previous != nullptr)
 		{
-			entry = TakeStale(chain, capture_end);
+			entry     = TakeStale(chain, capture_end);
+			own_chain = entry != nullptr ? chain : nullptr;
 		}
 		if (entry == nullptr)
 		{
@@ -1207,7 +1286,7 @@ public:
 		uint64_t copy_ns              = 0u;
 		// A refused capture may already have copied part of the range, so the
 		// entry's previous snapshot is dropped first.
-		UnindexSnapshot(entry);
+		UnindexSnapshot(entry, own_chain);
 		entry->snapshot_valid    = false;
 		entry->index_range_width = 0;
 		entry->nonzero_end       = std::max(entry->nonzero_end, capture_end);
@@ -1221,6 +1300,10 @@ public:
 			{
 				DiscardNew(ctx, entry);
 			}
+			if (own_chain != nullptr && own_chain->newest == nullptr)
+			{
+				m_snapshots.Erase(KeyOf(entry));
+			}
 			return nullptr;
 		}
 		*validation_ns += atomic_validation_ns;
@@ -1230,7 +1313,10 @@ public:
 		entry->snapshot_vaddr    = vaddr;
 		entry->snapshot_size     = capture_end;
 		entry->snapshot_begin    = capture_begin;
-		IndexSnapshot(entry);
+		// Until the key is reused, only this draw binds the buffer, so its descriptor set skips
+		// the cache. The key's own stale entry keeps the buffer its cached sets bound.
+		entry->buffer.uncached_descriptor_sets = own_chain == nullptr;
+		IndexSnapshot(entry, own_chain);
 		Commit(entry, capture_end, zero_tail);
 		Lease(entry, leases);
 		finish_upload_time();
@@ -1348,8 +1434,15 @@ public:
 
 	void Reset()
 	{
-		m_zero_carriers.clear();
-		m_shared_contents.clear();
+		// clear() zero-fills the whole bucket array even when the map holds nothing.
+		if (!m_zero_carriers.empty())
+		{
+			m_zero_carriers.clear();
+		}
+		if (!m_shared_contents.empty())
+		{
+			m_shared_contents.clear();
+		}
 		for (auto* entry: m_entries)
 		{
 			entry->used = false;
@@ -1375,7 +1468,7 @@ public:
 			delete entry;
 		}
 		m_entries.clear();
-		m_snapshots.clear();
+		m_snapshots.Clear();
 		m_free.clear();
 		m_free_snapshots.clear();
 		m_released = {};
@@ -1423,16 +1516,138 @@ private:
 		uint32_t probes_until_track = 0;
 	};
 
+	// Snapshot chains by key in one open-addressed array: a probe reads one slot
+	// where a chained map walks nodes scattered over the heap. Linear probing,
+	// power-of-two capacity grown at half load, backward-shift erase. A returned
+	// chain stays valid until the next insert or erase.
+	class SnapshotIndex
+	{
+	public:
+		SnapshotChain* Find(const SnapshotKey& key)
+		{
+			const size_t index = SlotOf(key);
+			return index == kNone ? nullptr : &m_slots[index].chain;
+		}
+
+		SnapshotChain& FindOrInsert(const SnapshotKey& key)
+		{
+			if ((m_size + 1u) * 2u > m_slots.size())
+			{
+				Grow();
+			}
+			for (size_t i = Home(key);; i = Next(i))
+			{
+				auto& slot = m_slots[i];
+				if (!slot.used)
+				{
+					slot = Slot {key, {}, true};
+					m_size++;
+					return slot.chain;
+				}
+				if (slot.key == key)
+				{
+					return slot.chain;
+				}
+			}
+		}
+
+		void Erase(const SnapshotKey& key)
+		{
+			size_t hole = SlotOf(key);
+			EXIT_IF(hole == kNone);
+			// A later slot of the cluster moves back into the hole unless its home
+			// lies cyclically in (hole, slot]: probing from home must still reach it.
+			for (size_t i = Next(hole); m_slots[i].used; i = Next(i))
+			{
+				const size_t home    = Home(m_slots[i].key);
+				const bool   reached = hole < i ? (hole < home && home <= i) : (hole < home || home <= i);
+				if (!reached)
+				{
+					m_slots[hole] = m_slots[i];
+					hole          = i;
+				}
+			}
+			m_slots[hole].used = false;
+			m_size--;
+		}
+
+		void Clear()
+		{
+			m_slots.assign(m_slots.size(), Slot {});
+			m_size = 0;
+		}
+
+	private:
+		struct Slot
+		{
+			SnapshotKey   key;
+			SnapshotChain chain;
+			bool          used = false;
+		};
+
+		static constexpr size_t   kNone        = SIZE_MAX;
+		static constexpr uint32_t kInitialBits = 10;
+
+		size_t Home(const SnapshotKey& key) const
+		{
+			// Guest addresses are aligned, so the slot comes from the high bits of a final mix.
+			return static_cast<size_t>((SnapshotKeyHash {}(key) * 0x9e3779b97f4a7c15ull) >> m_shift);
+		}
+
+		size_t Next(size_t index) const { return (index + 1u) & (m_slots.size() - 1u); }
+
+		size_t SlotOf(const SnapshotKey& key) const
+		{
+			if (m_slots.empty())
+			{
+				return kNone;
+			}
+			for (size_t i = Home(key); m_slots[i].used; i = Next(i))
+			{
+				if (m_slots[i].key == key)
+				{
+					return i;
+				}
+			}
+			return kNone;
+		}
+
+		void Grow()
+		{
+			std::vector<Slot> old;
+			old.swap(m_slots);
+			m_slots.resize(old.empty() ? size_t {1} << kInitialBits : old.size() * 2u);
+			m_shift = old.empty() ? 64u - kInitialBits : m_shift - 1u;
+			for (const auto& slot: old)
+			{
+				if (!slot.used)
+				{
+					continue;
+				}
+				size_t i = Home(slot.key);
+				while (m_slots[i].used)
+				{
+					i = Next(i);
+				}
+				m_slots[i] = slot;
+			}
+		}
+
+		std::vector<Slot> m_slots;
+		size_t            m_size  = 0;
+		uint32_t          m_shift = 64;
+	};
+
 	// Latest committed entry first: the one most likely to still match guest memory.
 	Entry* FindSnapshot(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin, SnapshotChain** chain)
 	{
-		const auto it = m_snapshots.find(SnapshotKey {vaddr, size, usage});
-		if (it == m_snapshots.end())
+		auto* found = m_snapshots.Find(SnapshotKey {vaddr, size, usage});
+		if (found == nullptr)
 		{
 			return nullptr;
 		}
-		*chain = &it->second;
-		for (auto* entry = it->second.newest; entry != nullptr; entry = entry->snapshot_older)
+		*chain = found;
+		for (auto* entry = found->newest; entry != nullptr; entry = entry->snapshot_older)
 		{
 			if (entry->snapshot_begin <= read_begin)
 			{
@@ -1445,13 +1660,13 @@ private:
 	// Latest committed entry first that holds the whole read window.
 	Entry* FindCovering(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin, SnapshotChain** chain)
 	{
-		const auto it = m_snapshots.find(SnapshotKey {vaddr, kCoveringKeySize, usage});
-		if (it == m_snapshots.end())
+		auto* found = m_snapshots.Find(SnapshotKey {vaddr, kCoveringKeySize, usage});
+		if (found == nullptr)
 		{
 			return nullptr;
 		}
-		*chain = &it->second;
-		for (auto* entry = it->second.newest; entry != nullptr; entry = entry->snapshot_older)
+		*chain = found;
+		for (auto* entry = found->newest; entry != nullptr; entry = entry->snapshot_older)
 		{
 			if (entry->snapshot_begin <= read_begin && entry->snapshot_size >= size)
 			{
@@ -1466,9 +1681,10 @@ private:
 		return {entry->snapshot_vaddr, entry->snapshot_covering ? kCoveringKeySize : entry->snapshot_size, entry->usage};
 	}
 
-	void IndexSnapshot(Entry* entry)
+	// A given chain is the one of the entry's key.
+	void IndexSnapshot(Entry* entry, SnapshotChain* own_chain = nullptr)
 	{
-		auto& chain           = m_snapshots[KeyOf(entry)];
+		auto& chain           = own_chain != nullptr ? *own_chain : m_snapshots.FindOrInsert(KeyOf(entry));
 		entry->snapshot_older = chain.newest;
 		entry->snapshot_newer = nullptr;
 		if (chain.newest != nullptr)
@@ -1481,16 +1697,22 @@ private:
 		chain.newest = entry;
 	}
 
-	void UnindexSnapshot(Entry* entry)
+	// A given chain is the entry's own, and the caller indexes the entry into it
+	// again; it stays in the map while empty, which keeps its tracking backoff.
+	void UnindexSnapshot(Entry* entry, SnapshotChain* own_chain = nullptr)
 	{
 		if (!entry->snapshot_valid)
 		{
 			return;
 		}
 		Untrack(entry);
-		const auto it = m_snapshots.find(KeyOf(entry));
-		EXIT_IF(it == m_snapshots.end());
-		auto& chain = it->second;
+		SnapshotChain* found = own_chain;
+		if (found == nullptr)
+		{
+			found = m_snapshots.Find(KeyOf(entry));
+			EXIT_IF(found == nullptr);
+		}
+		auto& chain = *found;
 		if (entry->snapshot_older != nullptr)
 		{
 			entry->snapshot_older->snapshot_newer = entry->snapshot_newer;
@@ -1507,9 +1729,9 @@ private:
 		}
 		entry->snapshot_older = nullptr;
 		entry->snapshot_newer = nullptr;
-		if (chain.newest == nullptr)
+		if (chain.newest == nullptr && own_chain == nullptr)
 		{
-			m_snapshots.erase(it);
+			m_snapshots.Erase(KeyOf(entry));
 		}
 	}
 
@@ -1729,11 +1951,14 @@ private:
 		return nullptr;
 	}
 
-	// The fitting free snapshot released longest ago, unless a recent recording leased it.
+	// The fitting free snapshot released longest ago, unless a recent recording
+	// leased it and the pool holds less than its retained bytes.
 	Entry* TakeAged(uint32_t usage, uint64_t size)
 	{
-		auto* entry = TakeFreeSnapshot(usage, size);
-		return entry != nullptr && entry->lease_generation + kRetainedRecordings <= m_lease_generation ? entry : nullptr;
+		auto*      entry = TakeFreeSnapshot(usage, size);
+		const bool aged =
+		    entry != nullptr && (entry->lease_generation + kRetainedRecordings <= m_lease_generation || m_total_bytes >= kRetainedBytes);
+		return aged ? entry : nullptr;
 	}
 
 	bool CanCreate(uint64_t size, uint32_t usage, GpuMemoryTransientBufferAllocationClass allocation_class)
@@ -1970,7 +2195,7 @@ private:
 
 	std::vector<Entry*> m_entries;
 	// Entries holding a valid snapshot, by the guest range and usage they hold.
-	std::unordered_map<SnapshotKey, SnapshotChain, SnapshotKeyHash> m_snapshots;
+	SnapshotIndex m_snapshots;
 	// Unused entries without a snapshot, by usage, size and creation order.
 	std::unordered_map<uint32_t, FreeIndex> m_free;
 	// Unused entries holding a snapshot, by usage, size and release order.
@@ -2025,14 +2250,9 @@ bool CommandBuffer::IsInvalid() const
 {
 	EXIT_IF(g_render_ctx == nullptr);
 
-	if (m_pool != nullptr)
-	{
-		Core::LockGuard lock(m_pool->mutex);
-
-		return (m_index == static_cast<uint32_t>(-1) || m_index >= m_pool->buffers_count);
-	}
-
-	return true;
+	// No pool lock: buffers_count is fixed when the pool is created, and only this
+	// buffer's Allocate and Free change m_index. Every draw checks this many times.
+	return m_pool == nullptr || m_index == static_cast<uint32_t>(-1) || m_index >= m_pool->buffers_count;
 }
 
 void CommandBuffer::Allocate()
@@ -2063,6 +2283,8 @@ void CommandBuffer::Allocate()
 			}
 			ReleasePipelineLeases();
 			m_index = i;
+			// Callers may take a recording handle before Begin.
+			m_main = m_pool->buffers[i];
 			break;
 		}
 	}
@@ -2108,11 +2330,17 @@ void CommandBuffer::Free()
 		vkDestroyDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, nullptr);
 		m_transport_descriptor_pool = VK_NULL_HANDLE;
 	}
+	for (auto* query_pool: m_timestamp_pools)
+	{
+		vkDestroyQueryPool(g_render_ctx->GetGraphicCtx()->device, query_pool, nullptr);
+	}
+	m_timestamp_pools.clear();
+	m_timestamps = 0;
 	DestroyRecordingUploads();
 
 	m_pool->busy[m_index] = false;
 	MarkCommandBufferResetting();
-	const auto reset_result = vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+	const auto reset_result = ResetCommandBuffers();
 	if (reset_result != VK_SUCCESS)
 	{
 		VulkanSubmitFaultReport("command_buffer_free_reset", reset_result);
@@ -2121,6 +2349,7 @@ void CommandBuffer::Free()
 	}
 	ReleasePipelineLeases();
 	m_index = static_cast<uint32_t>(-1);
+	m_main  = nullptr;
 
 	if (!IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsInvalid() condition ignored (continuing)\n"); }
 }
@@ -2200,7 +2429,10 @@ void CommandBuffer::ReleasePipelineLeases()
 void CommandBuffer::Begin()
 {
 	EXIT_IF(IsInvalid());
+	EXIT_IF(!m_deferred.Empty());
 	m_open_render_pass.reset();
+	// End closes the pass, which stores every layered depth pass back.
+	EXIT_IF(!m_layered_depth_stores.empty());
 	{
 		std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
 		EXIT_IF(m_recording || m_resetting);
@@ -2227,12 +2459,33 @@ void CommandBuffer::Begin()
 	{
 		vkResetDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, 0);
 	}
+	for (uint32_t i = 0; i * kTimestampsPerPool < m_timestamps; i++)
+	{
+		vkResetQueryPool(g_render_ctx->GetGraphicCtx()->device, m_timestamp_pools[i], 0, kTimestampsPerPool);
+	}
+	m_timestamps                = 0;
+	m_previous_draw_kills_depth = false;
 	DestroyRecordingUploads();
 	m_device_awaited.clear();
 	m_device_wait_semaphores.clear();
 	m_device_wait_values.clear();
+	// A barrier at the start of a recording still orders it after earlier submissions.
+	m_latest_full_barrier   = false;
+	m_full_barrier_recorded = false;
+	m_recording_begin_time  = GpuMemoryGetCurrentTime();
+	// Chunks of an executed recording that was not reset are reset again when they begin.
+	m_chunks.clear();
+	m_geometry_segment = {};
+	m_geometry_pass    = {};
+	m_geometry_hazards = 0;
+	m_geometry_output  = nullptr;
+	m_geometry_offset  = 0;
+	m_segment_attachments.clear();
 
 	auto* buffer = m_pool->buffers[m_index];
+	m_chunks.push_back(buffer);
+	m_main = buffer;
+	ForgetDrawPipeline();
 
 	VkCommandBufferBeginInfo begin_info {};
 	begin_info.sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -2353,40 +2606,268 @@ VulkanBuffer* CommandBuffer::TransportStorage(uint64_t size, uint32_t usage)
 	return size <= storage->descriptor_range ? storage : nullptr;
 }
 
+// Ranges start on the strictest storage-buffer offset alignment Vulkan allows.
+static uint64_t GeometryOutputSpan(uint64_t size)
+{
+	constexpr uint64_t kAlignment = 256u;
+	return (size + kAlignment - 1u) & ~(kAlignment - 1u);
+}
+
 // Shared like the transport storage: each geometry pass orders its fill after
-// the earlier pulls of the queue. Capacity grows by powers of two, so the
-// replaced buffers kept until the pool is destroyed stay below the current one.
-VulkanBuffer* CommandBuffer::GeometryOutput(uint64_t size)
+// the earlier pulls of the queue. Capacity grows by powers of two when one pass
+// needs more, so the replaced buffers kept until the pool is destroyed stay
+// below the current one. A range that does not fit after the earlier ones of
+// the recording starts over at 0, which the next fill orders the same way.
+VulkanBuffer* CommandBuffer::GeometryOutput(uint64_t size, uint64_t* offset)
 {
 	EXIT_IF(IsInvalid());
-	EXIT_IF(size == 0u);
+	EXIT_IF(size == 0u || offset == nullptr);
 	constexpr uint64_t kMinBytes = 16u * 1024u * 1024u;
-	constexpr uint64_t kMaxBytes = 1024u * 1024u * 1024u;
-	if (size > kMaxBytes)
+	if (size > kGeometryOutputMaxBytes)
 	{
 		return nullptr;
 	}
 	Core::LockGuard lock(m_pool->mutex);
 	auto*&          output = m_pool->geometry_output;
-	if (output != nullptr && size <= output->descriptor_range)
+	if (output == nullptr || size > output->descriptor_range)
 	{
-		return output;
+		uint64_t capacity = kMinBytes;
+		while (capacity < size)
+		{
+			capacity *= 2u;
+		}
+		if (output != nullptr)
+		{
+			m_pool->retired_geometry_outputs.push_back(output);
+		}
+		output        = new VulkanBuffer;
+		output->usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		output->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		VulkanCreateBuffer(g_render_ctx->GetGraphicCtx(), capacity, output);
+		output->descriptor_range = capacity;
 	}
-	uint64_t capacity = kMinBytes;
-	while (capacity < size)
+	if (output != m_geometry_output || m_geometry_offset + size > output->descriptor_range)
 	{
-		capacity *= 2u;
+		m_geometry_output = output;
+		m_geometry_offset = 0;
 	}
-	if (output != nullptr)
-	{
-		m_pool->retired_geometry_outputs.push_back(output);
-	}
-	output                  = new VulkanBuffer;
-	output->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-	output->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-	VulkanCreateBuffer(g_render_ctx->GetGraphicCtx(), capacity, output);
-	output->descriptor_range = capacity;
+	*offset = m_geometry_offset;
+	m_geometry_offset += GeometryOutputSpan(size);
 	return output;
+}
+
+void CommandBuffer::BeginGeometryPass(VulkanBuffer* output, uint64_t offset, uint64_t size)
+{
+	EXIT_IF(IsInvalid());
+	EXIT_IF(output == nullptr || m_geometry_pass.pending || m_geometry_pass.segment != nullptr);
+	m_geometry_pass         = {};
+	m_geometry_pass.pending = true;
+	m_geometry_pass.output  = output;
+	m_geometry_pass.offset  = offset;
+	m_geometry_pass.end     = offset + GeometryOutputSpan(size);
+}
+
+VkCommandBuffer CommandBuffer::EndGeometryPass()
+{
+	EXIT_IF(IsInvalid());
+	// A bind that took no state placed nothing: the pass is recorded inline.
+	auto* segment = m_geometry_pass.segment;
+	// Commands outside a render pass after the placement would run after the pass.
+	EXIT_IF(segment != nullptr && m_geometry_hazards != m_geometry_pass.hazards);
+	m_geometry_pass = {};
+	return segment;
+}
+
+// Joins the open segment when nothing it must follow was recorded since it
+// opened and the pass's output continues the segment's range; else opens one.
+VkCommandBuffer CommandBuffer::PlaceGeometryPass()
+{
+	auto&      pass    = m_geometry_pass;
+	auto&      segment = m_geometry_segment;
+	const bool joins   = segment.passes != nullptr && segment.hazards == m_geometry_hazards && segment.output == pass.output &&
+	                   segment.end == pass.offset;
+	pass.pending = false;
+	if (!joins)
+	{
+		if (m_chunks.size() + 2u > 1u + VulkanCommandPool::CHUNKS_PER_SLOT)
+		{
+			return nullptr;
+		}
+		CloseGeometrySegment();
+		OpenGeometrySegment(pass.output, pass.offset);
+	}
+	segment.end  = pass.end;
+	pass.segment = segment.passes;
+	pass.hazards = m_geometry_hazards;
+	return pass.segment;
+}
+
+void CommandBuffer::BindDrawPipeline(VkCommandBuffer vk_buffer, VkPipeline pipeline)
+{
+	EXIT_IF(vk_buffer == VK_NULL_HANDLE || pipeline == VK_NULL_HANDLE);
+
+	if (vk_buffer == m_draw_pipeline_buffer && pipeline == m_draw_pipeline)
+	{
+		return;
+	}
+	DeferredState(vk_buffer)->BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+	m_draw_pipeline_buffer = vk_buffer;
+	m_draw_pipeline        = pipeline;
+}
+
+VkCommandBuffer CommandBuffer::BeginChunk()
+{
+	const size_t used = m_chunks.size() - 1u;
+	EXIT_IF(used >= VulkanCommandPool::CHUNKS_PER_SLOT);
+	auto* chunk = m_pool->chunks[m_index * VulkanCommandPool::CHUNKS_PER_SLOT + used];
+	m_chunks.push_back(chunk);
+	ForgetDrawPipeline();
+
+	VkCommandBufferBeginInfo begin_info {};
+	begin_info.sType  = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	const auto result = vkBeginCommandBuffer(chunk, &begin_info);
+	if (result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("command_buffer_begin", result);
+		EXIT("vkBeginCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(result), m_queue, m_index);
+	}
+	return chunk;
+}
+
+// The main chunk recorded so far stays open to receive the segment's fill on
+// close; later commands go to a new one after the segment.
+void CommandBuffer::OpenGeometrySegment(VulkanBuffer* output, uint64_t offset)
+{
+	FlushDeferredState();
+	CloseRenderPass();
+	m_latest_full_barrier = false;
+
+	auto& segment       = m_geometry_segment;
+	segment.predecessor = m_main;
+	segment.passes      = BeginChunk();
+	m_main              = BeginChunk();
+	segment.output      = output;
+	segment.begin       = offset;
+	segment.end         = offset;
+	segment.hazards     = m_geometry_hazards;
+}
+
+static void EndChunk(VkCommandBuffer chunk, int queue, uint32_t slot)
+{
+	const auto result = vkEndCommandBuffer(chunk);
+	if (result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("command_buffer_end", result);
+		EXIT("vkEndCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(result), queue, slot);
+	}
+}
+
+void CommandBuffer::CloseGeometrySegment()
+{
+	FlushDeferredState();
+	auto& segment = m_geometry_segment;
+	if (segment.passes == nullptr)
+	{
+		return;
+	}
+	// The pulls after the segment read its records.
+	VkMemoryBarrier barrier {};
+	barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier(segment.passes, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &barrier, 0,
+	                     nullptr, 0, nullptr);
+	EndChunk(segment.passes, m_queue, m_index);
+
+	// The zeroed output, after the pulls recorded before the segment that may still read the range.
+	auto* before = segment.predecessor;
+	vkCmdPipelineBarrier(before, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0,
+	                     nullptr);
+	VulkanCmdFillBuffer(before, segment.output->buffer, segment.begin, segment.end - segment.begin, 0u);
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	vkCmdPipelineBarrier(before, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+	                     nullptr);
+	EndChunk(before, m_queue, m_index);
+	segment = {};
+	m_segment_attachments.clear();
+}
+
+void CommandBuffer::NoteSegmentAttachment(const VulkanImage* image)
+{
+	if (image != nullptr && std::find(m_segment_attachments.begin(), m_segment_attachments.end(), image) == m_segment_attachments.end())
+	{
+		m_segment_attachments.push_back(image);
+	}
+}
+
+void CommandBuffer::ReadImage(const VulkanImage* image)
+{
+	EXIT_IF(IsInvalid());
+	if (m_geometry_pass.pending &&
+	    std::find(m_segment_attachments.begin(), m_segment_attachments.end(), image) != m_segment_attachments.end())
+	{
+		m_geometry_hazards++;
+	}
+}
+
+VkResult CommandBuffer::ResetCommandBuffers()
+{
+	FlushDeferredState();
+	auto result = vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+	for (size_t i = 1; i < m_chunks.size() && result == VK_SUCCESS; i++)
+	{
+		result = vkResetCommandBuffer(m_chunks[i], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+	}
+	m_chunks.clear();
+	m_deferred.Clear();
+	m_deferred_target = VK_NULL_HANDLE;
+	return result;
+}
+
+void CommandBuffer::SeparateDepthKillDraw(bool kills_with_depth_write)
+{
+	EXIT_IF(IsInvalid());
+	const bool separate         = kills_with_depth_write || m_previous_draw_kills_depth;
+	m_previous_draw_kills_depth = kills_with_depth_write;
+	auto* gctx                  = g_render_ctx->GetGraphicCtx();
+	if (!separate || !gctx->separate_depth_kill_draws)
+	{
+		return;
+	}
+	// Nothing reads the value: the pipelined write itself keeps the draws apart.
+	WriteSeparatingTimestamp();
+}
+
+void CommandBuffer::WriteSeparatingTimestamp()
+{
+	EXIT_IF(IsInvalid());
+	auto*          gctx       = g_render_ctx->GetGraphicCtx();
+	const uint32_t pool_index = m_timestamps / kTimestampsPerPool;
+	if (pool_index == m_timestamp_pools.size())
+	{
+		VkQueryPoolCreateInfo info {};
+		info.sType             = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+		info.queryType         = VK_QUERY_TYPE_TIMESTAMP;
+		info.queryCount        = kTimestampsPerPool;
+		VkQueryPool query_pool = VK_NULL_HANDLE;
+		const auto  result     = vkCreateQueryPool(gctx->device, &info, nullptr, &query_pool);
+		if (result != VK_SUCCESS)
+		{
+			EXIT("vkCreateQueryPool failed: result=%d\n", static_cast<int>(result));
+		}
+		vkResetQueryPool(gctx->device, query_pool, 0, kTimestampsPerPool);
+		m_timestamp_pools.push_back(query_pool);
+	}
+	WriteTimestamp({m_timestamp_pools[pool_index], m_timestamps % kTimestampsPerPool});
+	m_timestamps++;
+}
+
+void CommandBuffer::WriteTimestamp(const TimestampQuery& query)
+{
+	EXIT_IF(IsInvalid() || query.pool == VK_NULL_HANDLE);
+	m_latest_full_barrier = false;
+	DeferredState(m_main)->WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query.pool, query.query);
 }
 
 VkDescriptorSet CommandBuffer::AllocateTransportDescriptorSet(VkDescriptorSetLayout layout)
@@ -2457,6 +2938,12 @@ void CommandBuffer::DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth)
 	}
 }
 
+void CommandBuffer::DeferLayeredDepthStore(DepthSliceArray* array, std::vector<DepthStencilVulkanImage*> slices)
+{
+	EXIT_IF(array == nullptr || slices.empty());
+	m_layered_depth_stores.push_back({array, std::move(slices)});
+}
+
 void CommandBuffer::DeferStencilPlaneStoreBack(DepthStencilVulkanImage* depth)
 {
 	EXIT_IF(depth == nullptr || depth->stencil_storage_plane == nullptr);
@@ -2495,6 +2982,7 @@ void CommandBuffer::End()
 	EXIT_IF(IsInvalid());
 
 	auto* buffer = RecordOutsideRenderPass();
+	CloseGeometrySegment();
 
 	const auto result = vkEndCommandBuffer(buffer);
 	if (result != VK_SUCCESS)
@@ -2528,6 +3016,7 @@ VulkanSubmitAttempt CommandBuffer::MakeSubmitAttempt(VulkanSubmitKind kind, bool
 
 void CommandBuffer::ReportSubmitFault(const char* stage, VkResult result) const
 {
+	VulkanReportDeviceFault(result);
 	if (result != VK_ERROR_DEVICE_LOST || !VulkanSubmitFaultTraceEnabled())
 	{
 		return;
@@ -2669,8 +3158,7 @@ void CommandBuffer::Execute()
 	EXIT_IF(IsInvalid());
 	AwaitImageFills();
 
-	auto* buffer = m_pool->buffers[m_index];
-	auto* fence  = m_pool->fences[m_index];
+	auto* fence = m_pool->fences[m_index];
 
 	VkSubmitInfo submit_info {};
 	submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -2678,8 +3166,8 @@ void CommandBuffer::Execute()
 	submit_info.waitSemaphoreCount   = 0;
 	submit_info.pWaitSemaphores      = nullptr;
 	submit_info.pWaitDstStageMask    = nullptr;
-	submit_info.commandBufferCount   = 1;
-	submit_info.pCommandBuffers      = &buffer;
+	submit_info.commandBufferCount   = static_cast<uint32_t>(m_chunks.size());
+	submit_info.pCommandBuffers      = m_chunks.data();
 	submit_info.signalSemaphoreCount = 0;
 	submit_info.pSignalSemaphores    = nullptr;
 
@@ -2727,8 +3215,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 	EXIT_IF(signal_semaphore == nullptr);
 	AwaitImageFills();
 
-	auto* buffer = m_pool->buffers[m_index];
-	auto* fence  = m_pool->fences[m_index];
+	auto* fence = m_pool->fences[m_index];
 
 	VkSubmitInfo submit_info {};
 	submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -2736,8 +3223,8 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 	submit_info.waitSemaphoreCount   = 0;
 	submit_info.pWaitSemaphores      = nullptr;
 	submit_info.pWaitDstStageMask    = nullptr;
-	submit_info.commandBufferCount   = 1;
-	submit_info.pCommandBuffers      = &buffer;
+	submit_info.commandBufferCount   = static_cast<uint32_t>(m_chunks.size());
+	submit_info.pCommandBuffers      = m_chunks.data();
 	submit_info.signalSemaphoreCount = 0;
 	submit_info.pSignalSemaphores    = nullptr;
 
@@ -2816,6 +3303,7 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 		    MarkRecentDrawsFenceCompleted();
 		    g_render_ctx->GetVertexClipProbeRenderer()->Complete(this);
 		    GraphicsRenderCheckDispatchIndirectLimits();
+		    GraphicsRenderCheckGeometryIndirectRefusals();
 		    const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
 		    if (fence_reset_result != VK_SUCCESS)
 		    {
@@ -2824,8 +3312,7 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 			         m_index);
 		    }
 		    MarkCommandBufferResetting();
-		    const auto command_reset_result =
-		        vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+		    const auto command_reset_result = ResetCommandBuffers();
 		    if (command_reset_result != VK_SUCCESS)
 		    {
 			    ReportSubmitFault("fence_status_command_reset", command_reset_result);
@@ -2867,6 +3354,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 			    MarkRecentDrawsFenceCompleted();
 			    g_render_ctx->GetVertexClipProbeRenderer()->Complete(this);
 			    GraphicsRenderCheckDispatchIndirectLimits();
+			    GraphicsRenderCheckGeometryIndirectRefusals();
 			    if (drain_label_callbacks)
 			    {
 				    LabelDrainCompleted();
@@ -2881,8 +3369,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 			    if (reset_command_buffer)
 			    {
 				    MarkCommandBufferResetting();
-				    const auto command_reset_result =
-				        vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+				    const auto command_reset_result = ResetCommandBuffers();
 				    if (command_reset_result != VK_SUCCESS)
 				    {
 					    ReportSubmitFault("fence_wait_command_reset", command_reset_result);
@@ -2934,6 +3421,15 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 {
 	EXIT_IF(IsInvalid());
 	EXIT_IF(framebuffer == nullptr);
+	if (m_geometry_segment.passes != nullptr)
+	{
+		for (const auto& target: color->attachment)
+		{
+			NoteSegmentAttachment(target.vulkan_buffer);
+			NoteSegmentAttachment(target.existing_video_image);
+		}
+		NoteSegmentAttachment(depth->vulkan_buffer);
+	}
 
 	bool       with_depth     = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	const bool with_color     = (RenderColorHasActiveTarget(*color) && RenderColorFirstActiveImage(*color) != nullptr);
@@ -2943,15 +3439,20 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	    RenderPassContinuesAttachments(*framebuffer, *color, *depth, with_color, with_depth))
 	{
 		DebugStatsRecordRenderPassContinuation();
+		// The encoded commands belong inside the continued pass; nothing is recorded here directly.
+		HandOffDeferredState();
 		return;
 	}
+	// Commands encoded before the call belong before the pass.
+	FlushDeferredState();
 	if (Config::GetPresentationFilter() == Config::PresentationFilter::Fsr3)
 	{
 		PresentationFsr3NoteRenderPass(*color, *depth);
 	}
 	CloseRenderPass();
+	m_latest_full_barrier = false;
 
-	auto* buffer = m_pool->buffers[m_index];
+	auto* buffer = m_main;
 
 	if (!with_depth && !with_color) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !with_depth && !with_color condition ignored (continuing)\n"); }
 
@@ -3178,8 +3679,10 @@ void CommandBuffer::CloseRenderPass()
 		return;
 	}
 	m_open_render_pass.reset();
+	m_latest_full_barrier = false;
+	FlushDeferredState();
 
-	auto* buffer = m_pool->buffers[m_index];
+	auto* buffer = m_main;
 	vkCmdEndRenderPass(buffer);
 
 	// Without this dependency hosts can hang when a later draw samples a color
@@ -3193,28 +3696,550 @@ void CommandBuffer::CloseRenderPass()
 	                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
 	                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
 	                     0, 1, &memory_barrier, 0, nullptr, 0, nullptr);
+
+	for (const auto& store: m_layered_depth_stores)
+	{
+		GraphicsRenderStoreLayeredDepth(buffer, store.array, store.slices);
+	}
+	m_layered_depth_stores.clear();
 }
 
 VkCommandBuffer CommandBuffer::RecordOutsideRenderPass()
 {
 	EXIT_IF(IsInvalid());
+	FlushDeferredState();
 	CloseRenderPass();
-	return m_pool->buffers[m_index];
+	m_latest_full_barrier = false;
+	m_geometry_hazards++;
+	return m_main;
 }
 
-VkCommandBuffer CommandBuffer::RecordState() const
+VkCommandBuffer CommandBuffer::RecordState()
+{
+	FlushDeferredState();
+	return StateTarget();
+}
+
+VkCommandBuffer CommandBuffer::StateTarget()
 {
 	EXIT_IF(IsInvalid());
-	return m_pool->buffers[m_index];
+	m_latest_full_barrier = false;
+	if (m_geometry_pass.pending)
+	{
+		auto* segment = PlaceGeometryPass();
+		if (segment != nullptr)
+		{
+			return segment;
+		}
+	}
+	return m_main;
 }
 
 VkCommandBuffer CommandBuffer::RecordInsideRenderPass() const
 {
 	EXIT_IF(IsInvalid());
 	EXIT_IF(!m_open_render_pass.has_value());
-	return m_pool->buffers[m_index];
+	m_latest_full_barrier = false;
+	FlushDeferredState();
+	return m_main;
 }
 
+DeferredStateCommands* CommandBuffer::DeferredState(VkCommandBuffer target)
+{
+	EXIT_IF(IsInvalid() || target == VK_NULL_HANDLE);
+	if (target != m_deferred_target)
+	{
+		FlushDeferredState();
+		m_deferred_target = target;
+	}
+	return &m_deferred;
+}
+
+void CommandBuffer::HandOffDeferredState()
+{
+	if (m_deferred.Empty())
+	{
+		return;
+	}
+	if (m_pool->replay == nullptr)
+	{
+		Core::LockGuard lock(m_pool->mutex);
+		if (m_pool->replay == nullptr)
+		{
+			m_pool->replay = new DeferredReplayWorker;
+		}
+	}
+	m_pool->replay->HandOff(m_deferred_target, &m_deferred);
+}
+
+DeferredStateCommands* CommandBuffer::DeferredDraw()
+{
+	EXIT_IF(IsInvalid());
+	EXIT_IF(!m_open_render_pass.has_value());
+	m_latest_full_barrier = false;
+	return DeferredState(m_main);
+}
+
+void CommandBuffer::FlushDeferredState() const
+{
+	if (m_pool->replay != nullptr)
+	{
+		m_pool->replay->Drain();
+	}
+	if (!m_deferred.Empty())
+	{
+		m_deferred.Replay(m_deferred_target);
+	}
+}
+
+void CommandBuffer::FullMemoryBarrier()
+{
+	EXIT_IF(IsInvalid());
+	if (m_latest_full_barrier)
+	{
+		return;
+	}
+	VkMemoryBarrier mem_barrier {};
+	mem_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	mem_barrier.pNext         = nullptr;
+	mem_barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+	mem_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+	vkCmdPipelineBarrier(RecordOutsideRenderPass(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1,
+	                     &mem_barrier, 0, nullptr, 0, nullptr);
+	m_latest_full_barrier   = true;
+	m_full_barrier_recorded = true;
+}
+
+bool CommandBuffer::OrderEarlierDeviceWrite(uint64_t device_write_time, VkCommandBuffer target)
+{
+	EXIT_IF(IsInvalid());
+	if (target != m_main || device_write_time >= m_recording_begin_time)
+	{
+		return false;
+	}
+	if (!m_full_barrier_recorded)
+	{
+		FullMemoryBarrier();
+	}
+	return target == m_main;
+}
+
+
+namespace {
+
+enum class DeferredOp : uint8_t
+{
+	BindPipeline,
+	BindIndexBuffer,
+	BindVertexBuffers,
+	BindDescriptorSet,
+	PushConstants,
+	SetLineWidth,
+	SetStencilCompareMask,
+	SetStencilWriteMask,
+	SetStencilReference,
+	SetColorWriteEnable,
+	SetViewport,
+	SetScissor,
+	SetBlendConstants,
+	SetDepthBias,
+	DrawIndexed,
+	WriteTimestamp,
+};
+
+struct DeferredPipeline
+{
+	VkPipelineBindPoint bind_point;
+	VkPipeline          pipeline;
+};
+struct DeferredIndexBuffer
+{
+	VkBuffer     buffer;
+	VkDeviceSize offset;
+	VkIndexType  type;
+};
+struct DeferredVertexBuffers
+{
+	uint32_t first;
+	uint32_t count;
+};
+struct DeferredDescriptorSet
+{
+	VkPipelineBindPoint bind_point;
+	VkPipelineLayout    layout;
+	uint32_t            slot;
+	VkDescriptorSet     set;
+};
+struct DeferredPushConstants
+{
+	VkPipelineLayout   layout;
+	VkShaderStageFlags stages;
+	uint32_t           offset;
+	uint32_t           size;
+};
+struct DeferredStencilValue
+{
+	VkStencilFaceFlags faces;
+	uint32_t           value;
+};
+struct DeferredColorWrite
+{
+	PFN_vkCmdSetColorWriteEnableEXT func;
+	VkBool32                        enable;
+};
+struct DeferredBlendConstants
+{
+	float constants[4];
+};
+struct DeferredTimestamp
+{
+	VkPipelineStageFlagBits stage;
+	VkQueryPool             pool;
+	uint32_t                query;
+};
+struct DeferredDepthBias
+{
+	float constant_factor;
+	float clamp;
+	float slope_factor;
+};
+struct DeferredDrawIndexed
+{
+	uint32_t index_count;
+	uint32_t instance_count;
+	uint32_t first_index;
+	int32_t  vertex_offset;
+	uint32_t first_instance;
+};
+
+template <typename T>
+T TakeDeferred(const uint8_t* bytes, size_t* position)
+{
+	T value;
+	std::memcpy(&value, bytes + *position, sizeof(T));
+	*position += sizeof(T);
+	return value;
+}
+
+} // namespace
+
+template <typename T>
+void DeferredStateCommands::Append(uint8_t op, const T& args)
+{
+	const size_t position = m_bytes.size();
+	m_bytes.resize(position + 1u + sizeof(T));
+	m_bytes[position] = op;
+	std::memcpy(m_bytes.data() + position + 1u, &args, sizeof(T));
+}
+
+void DeferredStateCommands::AppendBytes(const void* data, size_t size)
+{
+	const size_t position = m_bytes.size();
+	m_bytes.resize(position + size);
+	std::memcpy(m_bytes.data() + position, data, size);
+}
+
+void DeferredStateCommands::BindPipeline(VkPipelineBindPoint bind_point, VkPipeline pipeline)
+{
+	Append(static_cast<uint8_t>(DeferredOp::BindPipeline), DeferredPipeline {bind_point, pipeline});
+}
+
+void DeferredStateCommands::BindIndexBuffer(VkBuffer buffer, VkDeviceSize offset, VkIndexType type)
+{
+	Append(static_cast<uint8_t>(DeferredOp::BindIndexBuffer), DeferredIndexBuffer {buffer, offset, type});
+}
+
+void DeferredStateCommands::BindVertexBuffers(uint32_t first, uint32_t count, const VkBuffer* buffers, const VkDeviceSize* offsets)
+{
+	EXIT_IF(count == 0 || count > VERTEX_BUFFERS_MAX || buffers == nullptr || offsets == nullptr);
+	Append(static_cast<uint8_t>(DeferredOp::BindVertexBuffers), DeferredVertexBuffers {first, count});
+	AppendBytes(buffers, sizeof(VkBuffer) * count);
+	AppendBytes(offsets, sizeof(VkDeviceSize) * count);
+}
+
+void DeferredStateCommands::BindDescriptorSet(VkPipelineBindPoint bind_point, VkPipelineLayout layout, uint32_t slot, VkDescriptorSet set)
+{
+	Append(static_cast<uint8_t>(DeferredOp::BindDescriptorSet), DeferredDescriptorSet {bind_point, layout, slot, set});
+}
+
+void DeferredStateCommands::PushConstants(VkPipelineLayout layout, VkShaderStageFlags stages, uint32_t offset, uint32_t size,
+                                          const void* values)
+{
+	EXIT_IF(size > PUSH_CONSTANT_BYTES_MAX || (size > 0 && values == nullptr));
+	Append(static_cast<uint8_t>(DeferredOp::PushConstants), DeferredPushConstants {layout, stages, offset, size});
+	AppendBytes(values, size);
+}
+
+void DeferredStateCommands::SetLineWidth(float width)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetLineWidth), width);
+}
+
+void DeferredStateCommands::SetStencilCompareMask(VkStencilFaceFlags faces, uint32_t mask)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetStencilCompareMask), DeferredStencilValue {faces, mask});
+}
+
+void DeferredStateCommands::SetStencilWriteMask(VkStencilFaceFlags faces, uint32_t mask)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetStencilWriteMask), DeferredStencilValue {faces, mask});
+}
+
+void DeferredStateCommands::SetStencilReference(VkStencilFaceFlags faces, uint32_t reference)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetStencilReference), DeferredStencilValue {faces, reference});
+}
+
+void DeferredStateCommands::SetColorWriteEnable(PFN_vkCmdSetColorWriteEnableEXT func, VkBool32 enable)
+{
+	EXIT_IF(func == nullptr);
+	Append(static_cast<uint8_t>(DeferredOp::SetColorWriteEnable), DeferredColorWrite {func, enable});
+}
+
+void DeferredStateCommands::SetViewport(const VkViewport& viewport)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetViewport), viewport);
+}
+
+void DeferredStateCommands::SetScissor(const VkRect2D& scissor)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetScissor), scissor);
+}
+
+void DeferredStateCommands::SetBlendConstants(const float constants[4])
+{
+	DeferredBlendConstants args {};
+	std::memcpy(args.constants, constants, sizeof(args.constants));
+	Append(static_cast<uint8_t>(DeferredOp::SetBlendConstants), args);
+}
+
+void DeferredStateCommands::SetDepthBias(float constant_factor, float clamp, float slope_factor)
+{
+	Append(static_cast<uint8_t>(DeferredOp::SetDepthBias), DeferredDepthBias {constant_factor, clamp, slope_factor});
+}
+
+void DeferredStateCommands::DrawIndexed(uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset,
+                                        uint32_t first_instance)
+{
+	Append(static_cast<uint8_t>(DeferredOp::DrawIndexed),
+	       DeferredDrawIndexed {index_count, instance_count, first_index, vertex_offset, first_instance});
+}
+
+void DeferredStateCommands::WriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool pool, uint32_t query)
+{
+	Append(static_cast<uint8_t>(DeferredOp::WriteTimestamp), DeferredTimestamp {stage, pool, query});
+}
+
+void DeferredStateCommands::Take(DeferredStateCommands* other)
+{
+	EXIT_IF(other == nullptr || other == this);
+	if (m_bytes.empty())
+	{
+		m_bytes.swap(other->m_bytes);
+	} else
+	{
+		m_bytes.insert(m_bytes.end(), other->m_bytes.begin(), other->m_bytes.end());
+	}
+	other->m_bytes.clear();
+}
+
+void DeferredStateCommands::Replay(VkCommandBuffer vk_buffer)
+{
+	EXIT_IF(vk_buffer == VK_NULL_HANDLE);
+	const uint8_t* bytes    = m_bytes.data();
+	size_t         position = 0;
+	while (position < m_bytes.size())
+	{
+		const auto op = static_cast<DeferredOp>(bytes[position++]);
+		switch (op)
+		{
+			case DeferredOp::BindPipeline:
+			{
+				const auto a = TakeDeferred<DeferredPipeline>(bytes, &position);
+				vkCmdBindPipeline(vk_buffer, a.bind_point, a.pipeline);
+				break;
+			}
+			case DeferredOp::BindIndexBuffer:
+			{
+				const auto a = TakeDeferred<DeferredIndexBuffer>(bytes, &position);
+				vkCmdBindIndexBuffer(vk_buffer, a.buffer, a.offset, a.type);
+				break;
+			}
+			case DeferredOp::BindVertexBuffers:
+			{
+				const auto a = TakeDeferred<DeferredVertexBuffers>(bytes, &position);
+				std::array<VkBuffer, VERTEX_BUFFERS_MAX>     buffers {};
+				std::array<VkDeviceSize, VERTEX_BUFFERS_MAX> offsets {};
+				std::memcpy(buffers.data(), bytes + position, sizeof(VkBuffer) * a.count);
+				position += sizeof(VkBuffer) * a.count;
+				std::memcpy(offsets.data(), bytes + position, sizeof(VkDeviceSize) * a.count);
+				position += sizeof(VkDeviceSize) * a.count;
+				vkCmdBindVertexBuffers(vk_buffer, a.first, a.count, buffers.data(), offsets.data());
+				break;
+			}
+			case DeferredOp::BindDescriptorSet:
+			{
+				const auto a = TakeDeferred<DeferredDescriptorSet>(bytes, &position);
+				vkCmdBindDescriptorSets(vk_buffer, a.bind_point, a.layout, a.slot, 1, &a.set, 0, nullptr);
+				break;
+			}
+			case DeferredOp::PushConstants:
+			{
+				const auto a = TakeDeferred<DeferredPushConstants>(bytes, &position);
+				vkCmdPushConstants(vk_buffer, a.layout, a.stages, a.offset, a.size, bytes + position);
+				position += a.size;
+				break;
+			}
+			case DeferredOp::SetLineWidth: vkCmdSetLineWidth(vk_buffer, TakeDeferred<float>(bytes, &position)); break;
+			case DeferredOp::SetStencilCompareMask:
+			{
+				const auto a = TakeDeferred<DeferredStencilValue>(bytes, &position);
+				vkCmdSetStencilCompareMask(vk_buffer, a.faces, a.value);
+				break;
+			}
+			case DeferredOp::SetStencilWriteMask:
+			{
+				const auto a = TakeDeferred<DeferredStencilValue>(bytes, &position);
+				vkCmdSetStencilWriteMask(vk_buffer, a.faces, a.value);
+				break;
+			}
+			case DeferredOp::SetStencilReference:
+			{
+				const auto a = TakeDeferred<DeferredStencilValue>(bytes, &position);
+				vkCmdSetStencilReference(vk_buffer, a.faces, a.value);
+				break;
+			}
+			case DeferredOp::SetColorWriteEnable:
+			{
+				const auto a = TakeDeferred<DeferredColorWrite>(bytes, &position);
+				a.func(vk_buffer, 1, &a.enable);
+				break;
+			}
+			case DeferredOp::SetViewport:
+			{
+				const auto a = TakeDeferred<VkViewport>(bytes, &position);
+				vkCmdSetViewport(vk_buffer, 0, 1, &a);
+				break;
+			}
+			case DeferredOp::SetScissor:
+			{
+				const auto a = TakeDeferred<VkRect2D>(bytes, &position);
+				vkCmdSetScissor(vk_buffer, 0, 1, &a);
+				break;
+			}
+			case DeferredOp::SetBlendConstants:
+			{
+				const auto a = TakeDeferred<DeferredBlendConstants>(bytes, &position);
+				vkCmdSetBlendConstants(vk_buffer, a.constants);
+				break;
+			}
+			case DeferredOp::SetDepthBias:
+			{
+				const auto a = TakeDeferred<DeferredDepthBias>(bytes, &position);
+				vkCmdSetDepthBias(vk_buffer, a.constant_factor, a.clamp, a.slope_factor);
+				break;
+			}
+			case DeferredOp::DrawIndexed:
+			{
+				const auto a = TakeDeferred<DeferredDrawIndexed>(bytes, &position);
+				vkCmdDrawIndexed(vk_buffer, a.index_count, a.instance_count, a.first_index, a.vertex_offset, a.first_instance);
+				break;
+			}
+			case DeferredOp::WriteTimestamp:
+			{
+				const auto a = TakeDeferred<DeferredTimestamp>(bytes, &position);
+				vkCmdWriteTimestamp(vk_buffer, a.stage, a.pool, a.query);
+				break;
+			}
+			default: EXIT("unknown deferred state command %u\n", static_cast<unsigned>(op));
+		}
+	}
+	m_bytes.clear();
+}
+
+DeferredReplayWorker::DeferredReplayWorker(): m_thread([this] { Run(); }) {}
+
+DeferredReplayWorker::~DeferredReplayWorker()
+{
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_stop = true;
+	}
+	m_wake.notify_one();
+	m_thread.join();
+}
+
+void DeferredReplayWorker::HandOff(VkCommandBuffer target, DeferredStateCommands* commands)
+{
+	EXIT_IF(target == VK_NULL_HANDLE || commands == nullptr);
+	bool wake = false;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		// One target at a time: a command buffer switch drains first.
+		EXIT_IF(!m_pending.Empty() && m_pending_target != target);
+		m_pending_target = target;
+		m_pending.Take(commands);
+		m_has_pending.store(true, std::memory_order_release);
+		wake = m_sleeping;
+	}
+	if (wake)
+	{
+		m_wake.notify_one();
+	}
+}
+
+void DeferredReplayWorker::Drain()
+{
+	std::unique_lock<std::mutex> lock(m_mutex);
+	if (m_pending.Empty() && !m_busy)
+	{
+		return;
+	}
+	if (m_sleeping)
+	{
+		m_wake.notify_one();
+	}
+	m_idle.wait(lock, [this] { return m_pending.Empty() && !m_busy; });
+}
+
+void DeferredReplayWorker::Run()
+{
+	// Draws arrive every few microseconds while a frame records: polling that long keeps a
+	// hand-off from paying a wake-up, and the thread sleeps once the stream pauses.
+	constexpr auto kPollWindow = std::chrono::microseconds(200);
+	for (;;)
+	{
+		const auto poll_start = std::chrono::steady_clock::now();
+		while (!m_has_pending.load(std::memory_order_acquire) && std::chrono::steady_clock::now() - poll_start < kPollWindow)
+		{
+			_mm_pause();
+		}
+		VkCommandBuffer target = VK_NULL_HANDLE;
+		{
+			std::unique_lock<std::mutex> lock(m_mutex);
+			m_sleeping = true;
+			m_wake.wait(lock, [this] { return m_stop || !m_pending.Empty(); });
+			m_sleeping = false;
+			if (m_pending.Empty())
+			{
+				return;
+			}
+			m_running.Take(&m_pending);
+			target = m_pending_target;
+			m_has_pending.store(false, std::memory_order_relaxed);
+			m_busy = true;
+		}
+		m_running.Replay(target);
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_busy = false;
+			if (m_pending.Empty())
+			{
+				m_idle.notify_all();
+			}
+		}
+	}
+}
 
 } // namespace Kyty::Libs::Graphics
 

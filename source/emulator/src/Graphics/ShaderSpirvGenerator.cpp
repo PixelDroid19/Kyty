@@ -34,7 +34,8 @@ KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>
 
 namespace Kyty::Libs::Graphics {
 
-bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t* pc, int* first_register)
+bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t* pc, int* first_register,
+                          uint32_t* instruction_index)
 {
 	if (!config.enabled || pc == nullptr || first_register == nullptr || code.GetType() != ShaderType::Pixel)
 	{
@@ -55,6 +56,10 @@ bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig&
 			}
 			*pc             = inst.pc;
 			*first_register = inst.dst.register_id;
+			if (instruction_index != nullptr)
+			{
+				*instruction_index = ordinal;
+			}
 			return true;
 		}
 		ordinal++;
@@ -69,9 +74,9 @@ bool FragmentTapQueryLodSelection(const ShaderCode& code, const ShaderFragmentTa
 		return false;
 	}
 	uint32_t tap_pc       = 0;
+	uint32_t tap_index    = 0;
 	int      tap_register = 0;
-	return FragmentTapSelection(code, config, &tap_pc, &tap_register) &&
-	       code.GetInstructions().At(instruction_index).pc == tap_pc &&
+	return FragmentTapSelection(code, config, &tap_pc, &tap_register, &tap_index) && instruction_index == tap_index &&
 	       code.GetInstructions().At(instruction_index).type == ShaderInstructionType::ImageSampleB;
 }
 
@@ -616,10 +621,12 @@ static bool spirv_uses_dpp_row(const ShaderCode& code)
 	return false;
 }
 
+// Gen5 format stores merge partial dwords with atomics, through %buf_uint too.
 static bool spirv_uses_buffer_atomics(const ShaderCode& code)
 {
-	return Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd,
-	                                           ShaderInstructionType::BufferAtomicUmax});
+	return (Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd,
+	                                            ShaderInstructionType::BufferAtomicUmax})) ||
+	       SpirvUsesGen5BufferFormatStores(code);
 }
 
 static bool spirv_uses_buffer_descriptor_addressing(const ShaderCode& code)
@@ -653,7 +660,7 @@ static bool spirv_uses_f64(const ShaderCode& code)
 	                      ShaderInstructionType::VCmpGeF64, ShaderInstructionType::VCmpTruF64, ShaderInstructionType::VCmpNgeF64,
 	                      ShaderInstructionType::VCmpNlgF64, ShaderInstructionType::VCmpNgtF64, ShaderInstructionType::VCmpNleF64,
 	                      ShaderInstructionType::VCmpNeqF64, ShaderInstructionType::VCmpNltF64, ShaderInstructionType::VCmpOF64,
-	                      ShaderInstructionType::VCmpUF64, ShaderInstructionType::VCvtF64F32, ShaderInstructionType::VCvtF32F64,
+	                      ShaderInstructionType::VCmpUF64, ShaderInstructionType::VCmpxLtF64, ShaderInstructionType::VCmpxEqF64, ShaderInstructionType::VCmpxLeF64, ShaderInstructionType::VCmpxGtF64, ShaderInstructionType::VCmpxLgF64, ShaderInstructionType::VCmpxGeF64, ShaderInstructionType::VCmpxOF64, ShaderInstructionType::VCmpxUF64, ShaderInstructionType::VCmpxNgeF64, ShaderInstructionType::VCmpxNlgF64, ShaderInstructionType::VCmpxNgtF64, ShaderInstructionType::VCmpxNleF64, ShaderInstructionType::VCmpxNeqF64, ShaderInstructionType::VCmpxNltF64, ShaderInstructionType::VCvtF64F32, ShaderInstructionType::VCvtF32F64,
 	                      ShaderInstructionType::VCvtI32F64, ShaderInstructionType::VCvtU32F64, ShaderInstructionType::VCvtF64I32,
 	                      ShaderInstructionType::VCvtF64U32, ShaderInstructionType::VAddF64, ShaderInstructionType::VSubF64,
 	                      ShaderInstructionType::VMulF64, ShaderInstructionType::VSqrtF64, ShaderInstructionType::VMinF64,
@@ -687,7 +694,7 @@ static bool spirv_uses_f16(const ShaderCode& code)
 	                      ShaderInstructionType::VCmpNeqF16, ShaderInstructionType::VCmpNltF16, ShaderInstructionType::VCmpOF16,
 	                      ShaderInstructionType::VCmpUF16, ShaderInstructionType::VAddF16, ShaderInstructionType::VSubF16,
 	                      ShaderInstructionType::VMulF16, ShaderInstructionType::VMinF16, ShaderInstructionType::VMaxF16,
-	                      ShaderInstructionType::VMadF16, ShaderInstructionType::VFmaF16, ShaderInstructionType::VCvtF16F32,
+	                      ShaderInstructionType::VFmaF16, ShaderInstructionType::VCvtF16F32,
 	                      ShaderInstructionType::VCvtF32F16, ShaderInstructionType::VTruncF16, ShaderInstructionType::VCeilF16,
 	                      ShaderInstructionType::VFloorF16, ShaderInstructionType::VRndneF16, ShaderInstructionType::VSqrtF16,
 	                      ShaderInstructionType::VRcpF16, ShaderInstructionType::VRsqF16, ShaderInstructionType::VLogF16,
@@ -765,6 +772,10 @@ void Spirv::WriteHeader()
 		capabilities.Add("OpCapability ShaderLayer");
 		vars.Add("%gl_Layer");
 	}
+	if (SpirvUsesGen5BufferFormats(m_code))
+	{
+		vars.Add("%gen5_buffer_format_words");
+	}
 	if (m_ps_input_info != nullptr && m_ps_input_info->AncillaryEnabled())
 	{
 		capabilities.Add("OpCapability Geometry");
@@ -825,6 +836,14 @@ void Spirv::WriteHeader()
 			vars.Add("%split_host_lane");
 			vars.Add("%split_exchange");
 			vars.Add("%split_count");
+			vars.Add("%split_read_word1");
+			vars.Add("%split_read_word2");
+			vars.Add("%split_read_word3");
+			vars.Add("%split_ballot_packed");
+			for (uint32_t part = 0; part < 8u; ++part)
+			{
+				vars.Add(String8::FromPrintf("%%split_ballot_part%u", part));
+			}
 		}
 	}
 
@@ -836,7 +855,7 @@ void Spirv::WriteHeader()
 		// by the generated OpBitcast instructions.
 		capabilities.Add("OpCapability Int64");
 	}
-	if (UsesGuestDeviceAddress())
+	if (UsesPhysicalStorageBuffer())
 	{
 		if (!spirv_uses_f64(m_code))
 		{
@@ -1066,7 +1085,8 @@ void Spirv::WriteHeader()
 	                .ReplaceStr("<Imports>", imports.Concat("\n" + String8(' ', 15)))
 	                .ReplaceStr("<Extensions>", extensions.Concat("\n" + String8(' ', 15)))
 	                .ReplaceStr("OpMemoryModel Logical GLSL450",
-	                            UsesGuestDeviceAddress() ? "OpMemoryModel PhysicalStorageBuffer64 GLSL450" : "OpMemoryModel Logical GLSL450");
+	                            UsesPhysicalStorageBuffer() ? "OpMemoryModel PhysicalStorageBuffer64 GLSL450"
+	                                                        : "OpMemoryModel Logical GLSL450");
 }
 
 void Spirv::WriteDebug()
@@ -1076,7 +1096,7 @@ void Spirv::WriteDebug()
 		int index = 0;
 		for (const auto& p: m_code.GetDebugPrintfs())
 		{
-			m_source += String8::FromPrintf("%%printf_str_%d = OpString \"%s\"", index, p.format.C_Str());
+			m_source += String8::FromPrintf("%%printf_str_%d = OpString \"%s\"\n", index, p.format.C_Str());
 			index++;
 		}
 	}
@@ -1551,6 +1571,7 @@ void Spirv::WriteTypes()
 %function_gen5_buffer_format_bytes = OpTypeFunction %uint %uint
 %function_gen5_buffer_element = OpTypeFunction %v4uint %v4uint %uint %uint
 %function_gen5_buffer_load_words = OpTypeFunction %v4uint %uint %uint %uint
+%function_gen5_buffer_store_words = OpTypeFunction %void %uint %uint %uint %v4uint
           %function_sbuffer_load_dword = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_2 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_4 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
@@ -1601,7 +1622,7 @@ static const char* compute_types = R"(
 	m_source += optional_types;
 	m_source += types;
 	// Guest addressing types build on %uint from the base types.
-	if (UsesGuestDeviceAddress())
+	if (UsesPhysicalStorageBuffer())
 	{
 		m_source += GuestDeviceAddressTypes(spirv_uses_f64(m_code));
 	}
@@ -1903,6 +1924,10 @@ void Spirv::WriteConstants()
 	{
 		m_source += String8::FromPrintf("%%%s = OpConstant %%%s %s\n", c.id.c_str(), c.type_str.c_str(), c.literal_str.c_str());
 	}
+	if (SpirvUsesGen5BufferFormats(m_code))
+	{
+		m_source += SpirvGen5BufferFormatTable(*this);
+	}
 }
 
 void Spirv::WriteGlobalVariables()
@@ -2044,7 +2069,8 @@ void Spirv::WriteGlobalVariables()
 		}
 	}
 
-	if (m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
+	// The host stage, as for its types and the entry-point interface: a transported pixel shader runs as compute.
+	if (HostType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
 	{
 		vars.Add("%lds = OpVariable %_ptr_Workgroup_lds_array_uint Workgroup");
 	}
@@ -3100,6 +3126,14 @@ void Spirv::WriteInstructions()
 			m_source += String8::FromPrintf("; reduction step: %s\n", ShaderCode::DbgInstructionToStr(inst).c_str());
 			continue;
 		}
+		const auto* ballot_group = SplitBallotGroup(static_cast<uint32_t>(index));
+		if (ballot_group != nullptr && ballot_group->front() != static_cast<uint32_t>(index))
+		{
+			// Its vote went out in the head's exchange.
+			m_source += String8::FromPrintf("; %s\n%s\n", ShaderCode::DbgInstructionToStr(inst).c_str(),
+			                                SplitBallotGroupMask(*ballot_group, static_cast<uint32_t>(index)).c_str());
+			continue;
+		}
 
 		String8 dst = MaterializeAssembledDescriptors(inst);
 		String8 dst_debug;
@@ -3120,6 +3154,10 @@ void Spirv::WriteInstructions()
 		{
 			// The per-lane fragment emitter has no packed D16 form.
 			ok = !inst.mimg_d16;
+		} else if (UsesFragmentCompute() && inst.type == ShaderInstructionType::Exp)
+		{
+			// A pixel export the per-lane emitter refuses has no compute form.
+			ok = false;
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::GeometryExport)
 		{
 			ok = EmitGeometryExport(inst, static_cast<uint32_t>(index), &dst);
@@ -3168,11 +3206,9 @@ void Spirv::WriteInstructions()
 		{
 			dst = GuardImageDestinationStores(dst, inst, static_cast<uint32_t>(index));
 		}
-		// ds_swizzle and ds_bpermute touch no LDS and rendezvous on their own.
-		if (UsesSplitComputeWave() && Core::EnumName8(inst.type).StartsWith("Ds") && inst.type != ShaderInstructionType::DsSwizzleB32 &&
-		    inst.type != ShaderInstructionType::DsBpermuteB32)
+		if (UsesSplitComputeWave())
 		{
-			dst += SplitWaveDsOrder(static_cast<uint32_t>(index));
+			dst = SplitWaveDsOrder(static_cast<uint32_t>(index), dst);
 		}
 		if (UsesVertexClipProbe() && ShaderInstructionIsScalarBufferLoad(inst))
 		{
@@ -3182,6 +3218,11 @@ void Spirv::WriteInstructions()
 		{
 			dst = ResolveMaskAccesses(inst, static_cast<uint32_t>(index), dst);
 		}
+		if (ballot_group != nullptr)
+		{
+			dst += SplitBallotGroupVotes(*ballot_group) + SplitBallotGroupMask(*ballot_group, static_cast<uint32_t>(index));
+		}
+		CheckSplitWavePartSkip(static_cast<uint32_t>(index), dst);
 		if (UsesFragmentCompute() && inst.type == ShaderInstructionType::SEndpgm)
 		{
 			// A kill tail (exec=0, null export, s_endpgm) leaves the program end
@@ -3200,9 +3241,11 @@ void Spirv::WriteInstructions()
 		m_source += String8::FromPrintf("%s\n", dst.c_str());
 
 		uint32_t tap_pc = 0;
+		uint32_t tap_index = 0;
 		int      tap_register = 0;
 		if (m_ps_input_info != nullptr &&
-		    FragmentTapSelection(m_code, m_ps_input_info->fragment_tap, &tap_pc, &tap_register) && inst.pc == tap_pc)
+		    FragmentTapSelection(m_code, m_ps_input_info->fragment_tap, &tap_pc, &tap_register, &tap_index) &&
+		    static_cast<uint32_t>(index) == tap_index)
 		{
 			const bool query_lod_tap = FragmentTapQueryLodSelection(m_code, m_ps_input_info->fragment_tap,
 			                                                             static_cast<uint32_t>(index));
@@ -3309,7 +3352,7 @@ void Spirv::WriteFunctions()
 	}
 
 	if (m_code.HasAnyOf({ShaderInstructionType::VMulHiI32, ShaderInstructionType::VMulLoI32, ShaderInstructionType::VMulLoU32, ShaderInstructionType::VMulHiU32,
-	                     ShaderInstructionType::VMadU32U24, ShaderInstructionType::VMulU32U24, ShaderInstructionType::VMulI32I24,
+	                     ShaderInstructionType::VMadU32U24, ShaderInstructionType::VMadI32I24, ShaderInstructionType::VMulU32U24, ShaderInstructionType::VMulI32I24,
 	                     ShaderInstructionType::SMulHiU32}))
 	{
 		m_source += FUNC_MUL_EXTENDED;
@@ -3339,14 +3382,15 @@ void Spirv::WriteFunctions()
 	    ShaderInstructionType::BufferLoadDwordx4, ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy,
 	    ShaderInstructionType::BufferLoadFormatXyz, ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionType::TBufferLoadFormatX,
 	    ShaderInstructionType::TBufferLoadFormatXy, ShaderInstructionType::TBufferLoadFormatXyz, ShaderInstructionType::TBufferLoadFormatXyzw});
-	// Gen5 BUFFER_LOAD_FORMAT decodes through the shared format functions;
-	// the format helpers serve typed TBUFFER loads and the legacy encoding.
-	const bool gen5_format_loads          = SpirvUsesGen5BufferFormatLoads(m_code);
+	// Gen5 BUFFER_LOAD_FORMAT and BUFFER_STORE_FORMAT go through the shared
+	// format functions; the format helpers serve typed TBUFFER loads and the
+	// legacy encoding.
+	const bool gen5_formats               = SpirvUsesGen5BufferFormats(m_code);
 	const bool needs_tbuffer_load_helpers = m_code.HasAnyOf({ShaderInstructionType::TBufferLoadFormatX,
 	                                                         ShaderInstructionType::TBufferLoadFormatXy,
 	                                                         ShaderInstructionType::TBufferLoadFormatXyz,
 	                                                         ShaderInstructionType::TBufferLoadFormatXyzw}) ||
-	                                        (!gen5_format_loads &&
+	                                        (!gen5_formats &&
 	                                         m_code.HasAnyOf({ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy,
 	                                                          ShaderInstructionType::BufferLoadFormatXyz,
 	                                                          ShaderInstructionType::BufferLoadFormatXyzw}));
@@ -3354,9 +3398,9 @@ void Spirv::WriteFunctions()
 	    ShaderInstructionType::BufferStoreDword, ShaderInstructionType::BufferStoreDwordx2, ShaderInstructionType::BufferStoreDwordx3,
 	    ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX, ShaderInstructionType::BufferStoreFormatXy,
 	    ShaderInstructionType::BufferStoreFormatXyzw});
-	const bool needs_tbuffer_store_helpers = m_code.HasAnyOf({ShaderInstructionType::BufferStoreFormatX,
-	                                                          ShaderInstructionType::BufferStoreFormatXy,
-	                                                          ShaderInstructionType::BufferStoreFormatXyzw});
+	const bool needs_tbuffer_store_helpers = !gen5_formats && m_code.HasAnyOf({ShaderInstructionType::BufferStoreFormatX,
+	                                                                           ShaderInstructionType::BufferStoreFormatXy,
+	                                                                           ShaderInstructionType::BufferStoreFormatXyzw});
 
 	// The scalar format predicate is a dependency of the typed buffer helper
 	// families only. Raw dword operations use the buffer helpers directly and
@@ -3366,9 +3410,9 @@ void Spirv::WriteFunctions()
 		m_source += TBUFFER_FORMAT_SCALAR32;
 	}
 
-	if (gen5_format_loads && (has_storage_buffers || UsesGuestDeviceAddress()))
+	if (gen5_formats && (has_storage_buffers || UsesGuestDeviceAddress()))
 	{
-		m_source += SpirvGen5BufferFormatFunctions(*this, has_storage_buffers);
+		m_source += SpirvGen5BufferFormatFunctions(*this, m_code, has_storage_buffers);
 	}
 
 	if (has_storage_buffers && needs_buffer_load_helpers)
@@ -3432,8 +3476,17 @@ void Spirv::FindConstants()
 		}
 	}
 	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU16U32}) || spirv_uses_i16(m_code)) { AddConstantUint(0xffffu); }
+	if (m_code.HasAnyOf({ShaderInstructionType::VAlignbitB32, ShaderInstructionType::VPermB32, ShaderInstructionType::VMadI32I24,
+	                     ShaderInstructionType::VMadU32U16, ShaderInstructionType::VMadI32I16, ShaderInstructionType::VLerpU8}))
+	{
+		for (uint32_t value: {0u, 1u, 2u, 3u, 4u, 8u, 12u, 15u, 16u, 24u, 31u, 32u, 255u, 0xffffu})
+		{
+			AddConstantUint(value);
+		}
+	}
 	if (m_code.HasAnyOf({ShaderInstructionType::VAddI16, ShaderInstructionType::VAddU16, ShaderInstructionType::VSubI16,
 	                     ShaderInstructionType::VSubU16, ShaderInstructionType::VMulI16, ShaderInstructionType::VMulU16,
+	                     ShaderInstructionType::VMadU16, ShaderInstructionType::VMadI16,
 	                     ShaderInstructionType::VMinI16, ShaderInstructionType::VMinU16, ShaderInstructionType::VMaxI16,
 	                     ShaderInstructionType::VMaxU16, ShaderInstructionType::VLshrrevB16, ShaderInstructionType::VAshrrevI16,
 	                     ShaderInstructionType::VLshlrevB16,
@@ -3509,6 +3562,18 @@ void Spirv::FindConstants()
 		AddConstantInt(static_cast<int>(m_bind->geometry_offset_dw / 4u));
 		AddConstantInt(static_cast<int>(m_bind->geometry_offset_dw / 4u + 1u));
 	}
+	if (m_bind != nullptr && m_bind->storage_address_used)
+	{
+		// Loads by device address: address mask and shift, dword alignment and access sizes.
+		for (uint32_t value: {0xffffu, 0xfffffffcu, 32u})
+		{
+			AddConstantUint(value);
+		}
+		for (uint32_t bytes = 4u; bytes <= 64u; bytes += 4u)
+		{
+			AddConstantUint(bytes);
+		}
+	}
 	if (UsesGuestDeviceAddress())
 	{
 		// Guest-pointer S_LOAD and GLOBAL lowering name their offsets, the
@@ -3541,7 +3606,7 @@ void Spirv::FindConstants()
 			}
 		}
 	}
-	if (SpirvUsesGen5BufferFormatLoads(m_code))
+	if (SpirvUsesGen5BufferFormats(m_code))
 	{
 		SpirvAddGen5BufferFormatConstants(this);
 	}
@@ -3566,8 +3631,9 @@ void Spirv::FindConstants()
 	// Float min/max NaN selection, single-precision output modifiers and float-to-integer
 	// conversion boundaries work on bit patterns. The predecessor f32 values keep SPIR-V
 	// conversion inputs in range where the next f32 would already exceed the integer limit.
-	for (uint32_t value: {0x003fffffu, 0x00400000u, 0x00800000u, 0x01000000u, 0x4effffffu, 0x4f7fffffu, 0x7e800000u, 0x7f000000u,
-	                      0x7f7fffffu, 0x7f800000u, 0x7fc00000u, 0xcf000000u, 0xffffffffu})
+	// Float min/max ordering keys take the sign with a shift by 31.
+	for (uint32_t value: {31u, 0x003fffffu, 0x00400000u, 0x00800000u, 0x01000000u, 0x4effffffu, 0x4f000000u, 0x4f7fffffu, 0x7e800000u,
+	                      0x7f000000u, 0x7f7fffffu, 0x7f800000u, 0x7fc00000u, 0xcf000000u, 0xffffffffu})
 	{
 		AddConstantUint(value);
 	}
@@ -3739,9 +3805,21 @@ void Spirv::FindConstants()
 				AddConstantUint(inst.src[i].dpp_row_mask);
 				AddConstantUint(inst.src[i].dpp_bank_mask);
 			}
+			if (inst.src[i].size == 2 && (inst.src[i].absolute || inst.src[i].negate))
+			{
+				AddConstantUint(0x7fffffffu);
+				AddConstantUint(0x80000000u);
+			}
 			if (operand_is_constant(inst.src[i]))
 			{
 				AddConstant(inst.src[i]);
+				if (inst.src[i].size == 2)
+				{
+					const uint64_t f64_bits = operand_f64_constant_bits(inst.src[i]);
+					AddConstantUint(static_cast<uint32_t>(f64_bits));
+					AddConstantUint(static_cast<uint32_t>(f64_bits >> 32u));
+					AddConstantUint(0xffffffffu);
+				}
 				// MUBUF/MTBUF soffset is OpStore'd into %temp_int_* (signed).
 				// LiteralConstant only registers as Uint via AddConstant; also
 				// emit the Int twin so GetConstantInt succeeds at recompile.
@@ -3762,10 +3840,20 @@ void Spirv::FindConstants()
 			// V_LOG_F32 of +-0 is -infinity; GLSL Log2 leaves it undefined.
 			AddConstantUint(0xff800000u);
 		}
-		if (inst.type == ShaderInstructionType::VCmpClassF32)
+		if (const int width = ShaderFloatClassWidth(inst.type); width != 0)
 		{
 			for (uint32_t value = 0; value < 10u; ++value) { AddConstantUint(value); }
-			for (const uint32_t mask: {0x7f800000u, 0x007fffffu, 0x00400000u, 0x80000000u, 0x7fffffffu}) { AddConstantUint(mask); }
+			if (width == 16)
+			{
+				for (const uint32_t mask: {0x7c00u, 0x03ffu, 0x0200u, 0x8000u, 0x7fffu}) { AddConstantUint(mask); }
+			} else
+			{
+				for (const uint32_t mask: {0x7f800000u, 0x007fffffu, 0x00400000u, 0x80000000u, 0x7fffffffu}) { AddConstantUint(mask); }
+			}
+			if (width == 64)
+			{
+				for (const uint32_t mask: {0x7ff00000u, 0x000fffffu, 0x00080000u}) { AddConstantUint(mask); }
+			}
 		}
 		if (inst.type == ShaderInstructionType::ImageBvhIntersectRay)
 		{
@@ -3807,6 +3895,16 @@ void Spirv::FindConstants()
 		{
 			AddConstantUint(0xffu);
 			AddConstantUint(0xffffu);
+		}
+		// LDS-bit buffer loads address LDS like ds_*_addtid_b32 and store zero out of range.
+		if (inst.type == ShaderInstructionType::BufferLoadDword && (inst.buffer_flags & 1u) != 0 && m_cs_input_info != nullptr &&
+		    m_cs_input_info->lds_dwords > 0)
+		{
+			AddConstantUint(0xffffu);
+			AddConstantUint(63u);
+			AddConstantUint(inst.buffer_imm_offset);
+			AddConstantUint(m_cs_input_info->lds_dwords);
+			AddConstantFloat(0.0f);
 		}
 		// DS emitters resolve inst.ds_offset through GetConstantUint: the
 		// read2 pair is dword-scaled while single-offset DS ops carry bytes.
@@ -4030,6 +4128,11 @@ void Spirv::FindVariables()
 		for (int address = 0; address < inst.mimg_address_num; ++address)
 		{
 			AddVariable(inst.mimg_address[address]);
+		}
+		if (inst.type == ShaderInstructionType::BufferLoadDword && (inst.buffer_flags & 1u) != 0)
+		{
+			// LDS-bit loads address LDS through M0 without listing it as an operand.
+			AddVariable(ShaderOperandType::M0, 0, 1);
 		}
 		uint32_t m0 = 0;
 		if ((inst.type == ShaderInstructionType::VMovrelsB32 || inst.type == ShaderInstructionType::VMovreldB32 ||

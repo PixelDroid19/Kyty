@@ -169,4 +169,46 @@ endif()
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${KYTY_C_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${KYTY_CPP_FLAGS}")
 
+config_profile_guided_optimization()
+
+endmacro()
+
+# Profile-guided optimization on Linux. GENERATE builds an instrumented emulator that writes its
+# counters to KYTY_PGO_DIR when the process exits or is stopped with SIGTERM; USE rebuilds in the
+# same build directory from those counters. Partial training keeps code that the training runs did
+# not reach optimized for speed, so titles outside the training set do not fall back to -Os code.
+macro(config_profile_guided_optimization)
+
+set(KYTY_PGO "OFF" CACHE STRING "Profile-guided optimization: OFF, GENERATE or USE")
+set_property(CACHE KYTY_PGO PROPERTY STRINGS OFF GENERATE USE)
+set(KYTY_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Profile data directory used by KYTY_PGO")
+
+if(NOT KYTY_PGO STREQUAL "OFF")
+	if(NOT LINUX)
+		message(FATAL_ERROR "KYTY_PGO is supported on Linux only")
+	endif()
+	if(KYTY_PGO STREQUAL "GENERATE")
+		add_compile_definitions(KYTY_PGO_GENERATE)
+		if(CLANG)
+			set(KYTY_PGO_FLAGS "-fprofile-generate=${KYTY_PGO_DIR}")
+		else()
+			set(KYTY_PGO_FLAGS "-fprofile-generate=${KYTY_PGO_DIR} -fprofile-update=prefer-atomic")
+		endif()
+	elseif(KYTY_PGO STREQUAL "USE")
+		if(CLANG)
+			# Clang reads one merged file: llvm-profdata merge -o ${KYTY_PGO_DIR}/kyty.profdata ${KYTY_PGO_DIR}/*.profraw
+			set(KYTY_PGO_FLAGS "-fprofile-use=${KYTY_PGO_DIR}/kyty.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date")
+		else()
+			set(KYTY_PGO_FLAGS "-fprofile-use=${KYTY_PGO_DIR} -fprofile-correction -fprofile-partial-training -Wno-missing-profile -Wno-error=coverage-mismatch")
+		endif()
+	else()
+		message(FATAL_ERROR "KYTY_PGO must be OFF, GENERATE or USE (got '${KYTY_PGO}')")
+	endif()
+	message(STATUS "Profile-guided optimization: ${KYTY_PGO} (${KYTY_PGO_DIR})")
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${KYTY_PGO_FLAGS}")
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${KYTY_PGO_FLAGS}")
+	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${KYTY_PGO_FLAGS}")
+	set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${KYTY_PGO_FLAGS}")
+endif()
+
 endmacro()

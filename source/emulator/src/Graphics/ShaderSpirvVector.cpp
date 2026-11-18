@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -59,49 +60,88 @@ static bool Fp64Fp16OutputModifierActive(const Spirv* spirv, const ShaderInstruc
 	return inst.dst.multiplier != 1.0f && spirv != nullptr && !spirv->IsIeeeModeEnabled() && spirv->Float64Float16OutputDenormalsFlushed();
 }
 
-// V_MIN_F32 / V_MAX_F32 operand selection (ISA 12.7): a NaN first operand returns the
-// second operand, otherwise a NaN second operand returns the first (so two NaNs return
-// the second, as ShaderSelectRdna2MinMaxResultBits records); in IEEE mode a signaling NaN
-// is returned quieted, the first operand first; the minimum of signed zeros is -0 and the
-// maximum +0. Quiet NaNs are never modified. The result id is %<tag>.
+// Apply source modifiers on the bit pattern so a host that flushes floating-point
+// operations still preserves denormals (and NaN signs) for these instructions.
+static bool LoadFloatWithBitModifiers(Spirv* spirv, ShaderOperand op, const String8& result, const String8& index, String8* load)
+{
+	const bool absolute = op.absolute;
+	const bool negate   = op.negate;
+	if (!absolute && !negate)
+	{
+		return operand_load_float(spirv, op, result, index, load);
+	}
+	op.absolute = false;
+	op.negate   = false;
+	const String8 raw = "unmodified_" + result;
+	if (!operand_load_float(spirv, op, raw, index, load))
+	{
+		return false;
+	}
+	String8 text = "\n%raw_bits_<r> = OpBitcast %uint %<raw>\n";
+	String8 bits = "%raw_bits_<r>";
+	if (absolute)
+	{
+		text += "%abs_bits_<r> = OpBitwiseAnd %uint " + bits + " %uint_0x7fffffff\n";
+		bits = "%abs_bits_<r>";
+	}
+	if (negate)
+	{
+		text += "%neg_bits_<r> = OpBitwiseXor %uint " + bits + " %uint_0x80000000\n";
+		bits = "%neg_bits_<r>";
+	}
+	text += "%<r> = OpBitcast %float " + bits + "\n";
+	*load += text.ReplaceStr("<raw>", raw).ReplaceStr("<r>", result);
+	return true;
+}
+
+static String8 FloatMinMaxInput(const Spirv* spirv, const String8& tag, const String8& operand)
+{
+	const bool flush = spirv->Float32InputDenormalsFlushed();
+	const char* text = flush ? R"(
+        %<t>_raw = OpBitcast %uint %<a>
+        %<t>_mag = OpBitwiseAnd %uint %<t>_raw %uint_0x7fffffff
+        %<t>_tiny = OpULessThan %bool %<t>_mag %uint_0x00800000
+        %<t>_zero = OpBitwiseAnd %uint %<t>_raw %uint_0x80000000
+        %<t> = OpSelect %uint %<t>_tiny %<t>_zero %<t>_raw
+)" : "\n%<t> = OpBitcast %uint %<a>\n";
+	return String8(text).ReplaceStr("<t>", tag).ReplaceStr("<a>", operand);
+}
+
+// Compare signed ordering keys, reversing the magnitude bits for negative operands.
+// This orders -0 before +0 and preserves subnormals even when the host flushes FP.
+// In IEEE mode a signaling NaN is quieted, taking the first one if both signal.
+// Otherwise choose the numeric operand, or the second operand for two NaNs.
 static String8 FloatMinMaxPair(const Spirv* spirv, const String8& tag, const String8& a, const String8& b, bool maximum)
 {
 	static const char* text = R"(
-        %<t>_ab = OpBitcast %uint %<a>
-        %<t>_bb = OpBitcast %uint %<b>
-        %<t>_an = OpIsNan %bool %<a>
-        %<t>_num = OpExtInst %float %GLSL_std_450 <op> %<a> %<b>
-        %<t>_equal = OpFOrdEqual %bool %<a> %<b>
-        %<t>_merged = <zero_op> %uint %<t>_ab %<t>_bb
-        %<t>_tied = OpBitcast %float %<t>_merged
-        %<t>_ordered = OpSelect %float %<t>_equal %<t>_tied %<t>_num
-        %<t>_quiet = OpSelect %float %<t>_an %<b> %<t>_ordered
+        %<t>_am = OpBitwiseAnd %uint %<a> %uint_0x7fffffff
+        %<t>_bm = OpBitwiseAnd %uint %<b> %uint_0x7fffffff
+        %<t>_an = OpUGreaterThan %bool %<t>_am %uint_0x7f800000
+        %<t>_bn = OpUGreaterThan %bool %<t>_bm %uint_0x7f800000
+        %<t>_asign = OpShiftRightArithmetic %uint %<a> %uint_31
+        %<t>_bsign = OpShiftRightArithmetic %uint %<b> %uint_31
+        %<t>_aflip = OpBitwiseAnd %uint %<t>_asign %uint_0x7fffffff
+        %<t>_bflip = OpBitwiseAnd %uint %<t>_bsign %uint_0x7fffffff
+        %<t>_akey = OpBitwiseXor %uint %<a> %<t>_aflip
+        %<t>_bkey = OpBitwiseXor %uint %<b> %<t>_bflip
+        %<t>_first = <compare> %bool %<t>_akey %<t>_bkey
+        %<t>_numeric = OpSelect %uint %<t>_first %<a> %<b>
+        %<t>_second_nan = OpSelect %uint %<t>_bn %<a> %<t>_numeric
+        %<t>_quiet = OpSelect %uint %<t>_an %<b> %<t>_second_nan
 <ieee>)";
 	static const char* ieee = R"(
-        %<t>_ae = OpBitwiseAnd %uint %<t>_ab %uint_0x7fc00000
-        %<t>_be = OpBitwiseAnd %uint %<t>_bb %uint_0x7fc00000
-        %<t>_ap = OpBitwiseAnd %uint %<t>_ab %uint_0x003fffff
-        %<t>_bp = OpBitwiseAnd %uint %<t>_bb %uint_0x003fffff
-        %<t>_ae_s = OpIEqual %bool %<t>_ae %uint_0x7f800000
-        %<t>_be_s = OpIEqual %bool %<t>_be %uint_0x7f800000
-        %<t>_ap_s = OpINotEqual %bool %<t>_ap %uint_0
-        %<t>_bp_s = OpINotEqual %bool %<t>_bp %uint_0
-        %<t>_as = OpLogicalAnd %bool %<t>_ae_s %<t>_ap_s
-        %<t>_bs = OpLogicalAnd %bool %<t>_be_s %<t>_bp_s
-        %<t>_aqb = OpBitwiseOr %uint %<t>_ab %uint_0x00400000
-        %<t>_bqb = OpBitwiseOr %uint %<t>_bb %uint_0x00400000
-        %<t>_aq = OpBitcast %float %<t>_aqb
-        %<t>_bq = OpBitcast %float %<t>_bqb
-        %<t>_second = OpSelect %float %<t>_bs %<t>_bq %<t>_quiet
-        %<t> = OpSelect %float %<t>_as %<t>_aq %<t>_second
-)";
-	static const char* plain = R"(
-        %<t> = OpCopyObject %float %<t>_quiet
+        %<t>_ap = OpULessThan %bool %<t>_am %uint_0x7fc00000
+        %<t>_bp = OpULessThan %bool %<t>_bm %uint_0x7fc00000
+        %<t>_as = OpLogicalAnd %bool %<t>_an %<t>_ap
+        %<t>_bs = OpLogicalAnd %bool %<t>_bn %<t>_bp
+        %<t>_aq = OpBitwiseOr %uint %<a> %uint_0x00400000
+        %<t>_bq = OpBitwiseOr %uint %<b> %uint_0x00400000
+        %<t>_second = OpSelect %uint %<t>_bs %<t>_bq %<t>_quiet
+        %<t> = OpSelect %uint %<t>_as %<t>_aq %<t>_second
 )";
 	return String8(text)
-	    .ReplaceStr("<ieee>", spirv->IsIeeeModeEnabled() ? ieee : plain)
-	    .ReplaceStr("<op>", maximum ? "NMax" : "NMin")
-	    .ReplaceStr("<zero_op>", maximum ? "OpBitwiseAnd" : "OpBitwiseOr")
+	    .ReplaceStr("<ieee>", spirv->IsIeeeModeEnabled() ? ieee : "\n%<t> = OpCopyObject %uint %<t>_quiet\n")
+	    .ReplaceStr("<compare>", maximum ? "OpSGreaterThan" : "OpSLessThan")
 	    .ReplaceStr("<t>", tag)
 	    .ReplaceStr("<a>", a)
 	    .ReplaceStr("<b>", b);
@@ -350,10 +390,12 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 		        .ReplaceStr("<index>", index_str);
 		return true;
 	}
-	if (info->target_output_mode[mrt] != 4)
+	const uint8_t mode = info->target_output_mode[mrt];
+	if (mode != 4 && mode != 5 && mode != 6)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->target_output_mode[mrt] != 4 condition ignored (continuing)\n");
 	}
+	const char* unpack = ShaderCompressedColorExportUnpack(mode);
 
 	if (!operand_is_variable(inst.src[0]))
 	{
@@ -412,11 +454,11 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 		 %exp_old2_<index> = OpCompositeExtract %float %exp_old_<index> 2
 		 %exp_old3_<index> = OpCompositeExtract %float %exp_old_<index> 3
          <load_src0>
-         %t3_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t2_<index>
+         %t3_<index> = OpExtInst %v2float %GLSL_std_450 <unpack> %t2_<index>
          %t4_<index> = OpCompositeExtract %float %t3_<index> 0
          %t5_<index> = OpCompositeExtract %float %t3_<index> 1
          <load_src1>
-		 %t8_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t7_<index>
+		 %t8_<index> = OpExtInst %v2float %GLSL_std_450 <unpack> %t7_<index>
          %t9_<index> = OpCompositeExtract %float %t8_<index> 0
          %t10_<index> = OpCompositeExtract %float %t8_<index> 1
 		 <tap_load>
@@ -470,6 +512,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 	                   .ReplaceStr("<load_src0>", load_src0)
 	                   .ReplaceStr("<load_src1>", load_src1)
 	                   .ReplaceStr("<tap_load>", tap_load)
+	                   .ReplaceStr("<unpack>", unpack)
 	                   .ReplaceStr("<src0>", src0_value.value)
 	                   .ReplaceStr("<src1>", src1_value.value)
 	                   .ReplaceStr("<mrt>", param[0]);
@@ -1682,6 +1725,26 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1)
 	return true;
 }
 
+// The tail that stores lane bit %t3_<index>. A v_cmpx writes EXEC only; the others write VCC, VCC_HI or an SGPR pair
+// with the high word cleared.
+static bool CompareMaskStore(const ShaderInstruction& inst, String8* store)
+{
+	if (ShaderInstructionTypeStartsWith(inst.type, "VCmpx"))
+	{
+		*store = String8(CMPX_EXEC_STORE).ReplaceStr("<execz>", EXECZ);
+		return true;
+	}
+	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
+	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
+
+	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
+	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
+	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	*store = String8("OpStore %<dst0> %t3_<index>\n").ReplaceStr("<dst0>", dst_value0.value) + clear_high;
+	return true;
+}
+
 /* Generalized f64 compare: operands are register pairs. Recombine each pair
  * into a double, compare (param[0]) and write the VCC lane mask. */
 KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_XXX_SmaskVsrc0Vsrc1)
@@ -1695,26 +1758,22 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_XXX_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
-	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
+	String8 store;
+	if (!CompareMaskStore(inst, &store)) { return false; }
 
-	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
-	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_lo_<index>", index_str, &load1lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[1], "t1_lo_<index>", index_str, &load1lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_hi_<index>", index_str, &load1hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[1], "t1_hi_<index>", index_str, &load1hi, 1))
 	{
 		return false;
 	}
@@ -1732,13 +1791,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_XXX_SmaskVsrc0Vsrc1)
           %d1_<index> = OpBitcast %double %d1u_<index>
           %t2_<index> = <param> %bool %d0_<index> %d1_<index>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
-          OpStore %<dst0> %t3_<index>
-          <clear_high>
+          <store>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
-	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<clear_high>", clear_high)
+	                   .ReplaceStr("<store>", store)
 	                   .ReplaceStr("<load0lo>", load0lo)
 	                   .ReplaceStr("<load0hi>", load0hi)
 	                   .ReplaceStr("<load1lo>", load1lo)
@@ -1765,11 +1821,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32F64_SVdstSVsrc0)
 
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
@@ -1780,7 +1836,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32F64_SVdstSVsrc0)
         %d0v_<index> = OpCompositeConstruct %v2uint %t0_lo_<index> %t0_hi_<index>
         %d0u_<index> = OpBitcast %ulong %d0v_<index>
         %d0_<index> = OpBitcast %double %d0u_<index>
-        %t_<index> = OpConvertFToF %float %d0_<index>
+        %t_<index> = OpFConvert %float %d0_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
         %exec_keep_<index> = OpLoad %float %<dst>
@@ -1831,7 +1887,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF64F32_SVdst2SVsrc0)
 
 	static const char* text = R"(
     <load0>
-        %d0_<index> = OpConvertFToF %double %t0_<index>
+        %d0_<index> = OpFConvert %double %t0_<index>
         %du_<index> = OpBitcast %ulong %d0_<index>
         %dv_<index> = OpBitcast %v2uint %du_<index>
         %lo_<index> = OpCompositeExtract %uint %dv_<index> 0
@@ -1872,11 +1928,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtI32F64_SVdstSVsrc0)
 
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
@@ -1887,7 +1943,21 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtI32F64_SVdstSVsrc0)
         %d0v_<index> = OpCompositeConstruct %v2uint %t0_lo_<index> %t0_hi_<index>
         %d0u_<index> = OpBitcast %ulong %d0v_<index>
         %d0_<index> = OpBitcast %double %d0u_<index>
-        %i_<index> = OpConvertFToS %int %d0_<index>
+        ; Out-of-range values saturate and NaN converts to 0 (ISA 12.8); only in-range values reach the conversion.
+        %imin_<index> = OpBitcast %int %uint_0x80000000
+        %imax_<index> = OpBitcast %int %uint_0x7fffffff
+        %dmin_<index> = OpConvertSToF %double %imin_<index>
+        %dmax_<index> = OpConvertSToF %double %imax_<index>
+        %dzero_<index> = OpConvertSToF %double %int_0
+        %dnan_<index> = OpIsNan %bool %d0_<index>
+        %dlow_<index> = OpFOrdLessThan %bool %d0_<index> %dmin_<index>
+        %dhigh_<index> = OpFOrdGreaterThan %bool %d0_<index> %dmax_<index>
+        %dout_<index> = OpLogicalOr %bool %dlow_<index> %dhigh_<index>
+        %dbad_<index> = OpLogicalOr %bool %dout_<index> %dnan_<index>
+        %dsafe_<index> = OpSelect %double %dbad_<index> %dzero_<index> %d0_<index>
+        %iconv_<index> = OpConvertFToS %int %dsafe_<index>
+        %ilow_<index> = OpSelect %int %dlow_<index> %imin_<index> %iconv_<index>
+        %i_<index> = OpSelect %int %dhigh_<index> %imax_<index> %ilow_<index>
         %t_<index> = OpBitcast %float %i_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
@@ -2272,11 +2342,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtU32F64_SVdstSVsrc0)
 
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
@@ -2287,7 +2357,17 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtU32F64_SVdstSVsrc0)
         %d0v_<index> = OpCompositeConstruct %v2uint %t0_lo_<index> %t0_hi_<index>
         %d0u_<index> = OpBitcast %ulong %d0v_<index>
         %d0_<index> = OpBitcast %double %d0u_<index>
-        %i_<index> = OpConvertFToU %uint %d0_<index>
+        ; Out-of-range values saturate and NaN converts to 0 (ISA 12.8); only in-range values reach the conversion.
+        %dmax_<index> = OpConvertUToF %double %uint_0xffffffff
+        %dzero_<index> = OpConvertUToF %double %uint_0
+        %dnan_<index> = OpIsNan %bool %d0_<index>
+        %dlow_<index> = OpFOrdLessThan %bool %d0_<index> %dzero_<index>
+        %dhigh_<index> = OpFOrdGreaterThan %bool %d0_<index> %dmax_<index>
+        %dout_<index> = OpLogicalOr %bool %dlow_<index> %dhigh_<index>
+        %dbad_<index> = OpLogicalOr %bool %dout_<index> %dnan_<index>
+        %dsafe_<index> = OpSelect %double %dbad_<index> %dzero_<index> %d0_<index>
+        %uconv_<index> = OpConvertFToU %uint %dsafe_<index>
+        %i_<index> = OpSelect %uint %dhigh_<index> %uint_0xffffffff %uconv_<index>
         %t_<index> = OpBitcast %float %i_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
@@ -2381,11 +2461,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VF64_Unary_SVdst2SVsrc0)
 
 	if (dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
@@ -2445,11 +2525,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VFractF64_SVdst2SVsrc0)
 
 	if (dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_lo.type != SpirvType::Float || dst_hi.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
@@ -2699,9 +2779,9 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpxF16_XXX_SmaskVsrc0Vsrc1)
 	return true;
 }
 
-/* Generalized packed 16-bit integer ALU: extend both operands (signed when
- * param[1]=="s"), apply param[0] in 32 bits, truncate the result to the low
- * 16 bits and store. */
+/* Generalized packed 16-bit integer ALU: extend the two or three operands
+ * (signed when param[1]=="s"), apply param[0] in 32 bits, truncate the result
+ * to 16 bits and store it in the destination half OPSEL[3] selects. */
 KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -2728,8 +2808,14 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 	{
 		return false;
 	}
+	const bool ternary = inst.src_num == 3;
+	String8    load2;
+	if (ternary && !operand_load_uint(spirv, inst.src[2], "t2_<index>", index_str, &load2))
+	{
+		return false;
+	}
 
-	// OPSEL[1:0] pick the source halves (ISA 6.2.5).
+	// OPSEL[2:0] pick the source halves (ISA 6.2.5).
 	const auto half = [&](int source) {
 		return String8(R"(
         %h<s>_<index> = <op> %uint %t<s>_<index> <count>
@@ -2738,26 +2824,28 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 		    .ReplaceStr("<count>", (inst.vop3_op_sel >> source) & 1u ? "%<uint_16>" : "");
 	};
 	const bool is_signed = (param[1] != nullptr && strcmp(param[1], "s") == 0);
-	String8 extend = half(0) + half(1);
-	if (is_signed)
-	{
-		extend += R"(
-        %i0s_<index> = OpShiftLeftLogical %uint %h0_<index> %<uint_16>
-        %i0x_<index> = OpShiftRightArithmetic %uint %i0s_<index> %<uint_16>
-        %i1s_<index> = OpShiftLeftLogical %uint %h1_<index> %<uint_16>
-        %i1x_<index> = OpShiftRightArithmetic %uint %i1s_<index> %<uint_16>
+	const char* extension = is_signed ? R"(
+        %i<s>s_<index> = OpShiftLeftLogical %uint %h<s>_<index> %<uint_16>
+        %i<s>x_<index> = OpShiftRightArithmetic %uint %i<s>s_<index> %<uint_16>
+)"
+	                                  : R"(
+        %i<s>x_<index> = OpBitwiseAnd %uint %h<s>_<index> %<uint_ffff>
 )";
-	} else
+	const int sources = ternary ? 3 : 2;
+	String8   extend;
+	for (int source = 0; source < sources; source++)
 	{
-		extend += R"(
-        %i0x_<index> = OpBitwiseAnd %uint %h0_<index> %<uint_ffff>
-        %i1x_<index> = OpBitwiseAnd %uint %h1_<index> %<uint_ffff>
-)";
+		extend += half(source);
+	}
+	for (int source = 0; source < sources; source++)
+	{
+		extend += String8(extension).ReplaceStr("<s>", String8::FromPrintf("%d", source));
 	}
 
 	static const char* text = R"(
     <load0>
     <load1>
+    <load2>
     <extend>
         <param0>
         %tdst_<index> = OpLoad %float %<dst>
@@ -2772,6 +2860,7 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 	*dst_source += String8(text)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<load2>", load2)
 	                   .ReplaceStr("<extend>", extend)
 	                   .ReplaceStr("<param0>", param[0])
 	                   .ReplaceStr("<dst>", dst_value.value)
@@ -2783,8 +2872,20 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 	return true;
 }
 
+// A special-compare predicate is every non-null param line, in order; the ordered and unordered forms need four.
+static String8 SpecialComparePredicate(const char* const* param)
+{
+	String8 predicate;
+	for (int i = 0; i < 4 && param[i] != nullptr; i++)
+	{
+		predicate += param[i];
+		predicate += "\n";
+	}
+	return predicate;
+}
+
 /* Packed-f16 special compares (false/ordered/unordered/true) that write VCC.
- * param[0] selects the predicate body operating on %hc0_/%hc1_. */
+ * The param lines form the predicate body operating on %hc0_/%hc1_. */
 KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_Special_SmaskVsrc0Vsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -2794,12 +2895,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_Special_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
-	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
-
-	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
-	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
+	String8 store;
+	if (!CompareMaskStore(inst, &store)) { return false; }
 
 	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
@@ -2819,16 +2916,13 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_Special_SmaskVsrc0Vsrc1)
           %hc1_<index> = OpCompositeExtract %float %hc1v_<index> 0
           <predicate>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
-          OpStore %<dst0> %t3_<index>
-          <clear_high>
+          <store>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
-	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<clear_high>", clear_high)
+	                   .ReplaceStr("<store>", store)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<predicate>", param[0])
+	                   .ReplaceStr("<predicate>", SpecialComparePredicate(param))
 	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
@@ -2845,26 +2939,22 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_Special_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
-	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
+	String8 store;
+	if (!CompareMaskStore(inst, &store)) { return false; }
 
-	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
-	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[0], "t0_hi_<index>", index_str, &load0hi, 1))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_lo_<index>", index_str, &load1lo, 0))
+	if (!operand_load_f64_word(spirv, inst.src[1], "t1_lo_<index>", index_str, &load1lo, 0))
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_hi_<index>", index_str, &load1hi, 1))
+	if (!operand_load_f64_word(spirv, inst.src[1], "t1_hi_<index>", index_str, &load1hi, 1))
 	{
 		return false;
 	}
@@ -2882,18 +2972,15 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_Special_SmaskVsrc0Vsrc1)
           %d1_<index> = OpBitcast %double %d1u_<index>
           <predicate>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
-          OpStore %<dst0> %t3_<index>
-          <clear_high>
+          <store>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
-	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<clear_high>", clear_high)
+	                   .ReplaceStr("<store>", store)
 	                   .ReplaceStr("<load0lo>", load0lo)
 	                   .ReplaceStr("<load0hi>", load0hi)
 	                   .ReplaceStr("<load1lo>", load1lo)
 	                   .ReplaceStr("<load1hi>", load1hi)
-	                   .ReplaceStr("<predicate>", param[0])
+	                   .ReplaceStr("<predicate>", SpecialComparePredicate(param))
 	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
@@ -3024,15 +3111,21 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2)
 
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	const bool min_max = inst.type == ShaderInstructionType::VMin3F32 || inst.type == ShaderInstructionType::VMax3F32 ||
+	                     inst.type == ShaderInstructionType::VMed3F32;
+	const auto load_float = [&](int operand, const char* result, String8* load) {
+		return min_max ? LoadFloatWithBitModifiers(spirv, inst.src[operand], result, index_str, load)
+		               : operand_load_float(spirv, inst.src[operand], result, index_str, load);
+	};
+	if (!load_float(0, "t0_<index>", &load0))
 	{
 		return false;
 	}
-	if (!operand_load_float(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	if (!load_float(1, "t1_<index>", &load1))
 	{
 		return false;
 	}
-	if (!operand_load_float(spirv, inst.src[2], "t2_<index>", index_str, &load2))
+	if (!load_float(2, "t2_<index>", &load2))
 	{
 		return false;
 	}
@@ -3717,6 +3810,55 @@ static bool RecompileLaneReductionRead(uint32_t index, const ShaderLaneReduction
 	return true;
 }
 
+// A run of V_READLANE at one selector in a split wave (Spirv::SplitReadGroup): the head reads every member's source
+// in one exchange and leaves word k in %split_read_word<k> until member k stores it at its own position.
+static bool RecompileSplitReadGroup(const ShaderCode& code, uint32_t index, const std::vector<uint32_t>& group, const String8& dst,
+                                    String8* dst_source, Spirv* spirv)
+{
+	const String8 index_str = String8::FromPrintf("%u", index);
+	if (group[0] != index)
+	{
+		const auto slot = static_cast<uint32_t>(std::find(group.begin(), group.end(), index) - group.begin());
+		EXIT_IF(slot == 0u || slot >= group.size());
+		*dst_source += String8::FromPrintf("%%readlane_%u = OpLoad %%uint %%split_read_word%u\nOpStore %%%s %%readlane_%u\n", index, slot,
+		                                   dst.c_str(), index);
+		return true;
+	}
+	String8 text;
+	String8 words;
+	for (uint32_t slot = 0; slot < 4u; ++slot)
+	{
+		if (slot >= group.size())
+		{
+			words += " %split_c0";
+			continue;
+		}
+		String8 load;
+		if (!operand_load_uint(spirv, code.GetInstructions().At(group[slot]).src[0], String8::FromPrintf("rg%u_<index>", slot), index_str,
+		                       &load))
+		{
+			return false;
+		}
+		text += load + "\n";
+		words += String8::FromPrintf(" %%rg%u_<index>", slot);
+	}
+	String8 lane;
+	if (!operand_load_uint(spirv, code.GetInstructions().At(index).src[1], "rgl_<index>", index_str, &lane))
+	{
+		return false;
+	}
+	text += lane + "\n%readgroup_<index> = OpFunctionCall %v4uint %split_read_group" + words + " %rgl_<index>\n" +
+	        "%readlane_<index> = OpCompositeExtract %uint %readgroup_<index> 0\nOpStore %<dst> %readlane_<index>\n";
+	for (uint32_t slot = 1; slot < group.size(); ++slot)
+	{
+		text += String8::FromPrintf("%%readgroup_<index>_%u = OpCompositeExtract %%uint %%readgroup_<index> %u\n"
+		                            "OpStore %%split_read_word%u %%readgroup_<index>_%u\n",
+		                            slot, slot, slot, slot);
+	}
+	*dst_source += text.ReplaceStr("<index>", index_str).ReplaceStr("<dst>", dst);
+	return true;
+}
+
 // v_readlane_b32 ignores EXEC and reads the requested physical wave lane.
 KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 {
@@ -3757,6 +3899,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 	    HasInvalidatedScalarSpill(code, index, spill_register, spill_lane))
 	{
 		return false;
+	}
+	if (const auto* group = spirv->SplitReadGroup(index); group != nullptr)
+	{
+		return RecompileSplitReadGroup(code, index, *group, dst_value.value, dst_source, spirv);
 	}
 
 	String8 index_str = String8::FromPrintf("%u", index);
@@ -4921,8 +5067,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VMinMaxF32_SVdstSVsrc0SVsrc1)
 {
 	const bool    maximum = std::strcmp(param[0], "FMax") == 0;
 	const String8 tag     = String8::FromPrintf("mm_%u", index);
-	const String8 result  = FloatMinMaxPair(spirv, tag, "t0_<index>", "t1_<index>", maximum) +
-	                       "        %t_<index> = OpCopyObject %float %" + tag + "\n";
+	const String8 a       = tag + "_a";
+	const String8 b       = tag + "_b";
+	const String8 result  = FloatMinMaxInput(spirv, a, "t0_<index>") + FloatMinMaxInput(spirv, b, "t1_<index>") +
+	                       FloatMinMaxPair(spirv, tag, a, b, maximum) + "        %t_<index> = OpBitcast %float %" + tag + "\n";
 	const char* const params[4] = {result.c_str(), nullptr, nullptr, nullptr};
 	return Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1(index, code, dst_source, spirv, params, scc_check);
 }
@@ -4933,36 +5081,50 @@ KYTY_RECOMPILER_FUNC(Recompile_VMinMaxF32_SVdstSVsrc0SVsrc1)
 KYTY_RECOMPILER_FUNC(Recompile_VMinMax3F32_VdstVsrc0Vsrc1Vsrc2)
 {
 	const String8 tag = String8::FromPrintf("mm_%u", index);
-	String8       result;
+	const String8 a   = tag + "_a";
+	const String8 b   = tag + "_b";
+	const String8 c   = tag + "_c";
+	String8 result = FloatMinMaxInput(spirv, a, "t0_<index>") + FloatMinMaxInput(spirv, b, "t1_<index>") +
+	                 FloatMinMaxInput(spirv, c, "t2_<index>");
 	if (std::strcmp(param[0], "Med3") == 0)
 	{
-		result += FloatMinMaxPair(spirv, tag + "_lo01", "t0_<index>", "t1_<index>", false);
-		result += FloatMinMaxPair(spirv, tag + "_min3", tag + "_lo01", "t2_<index>", false);
-		result += FloatMinMaxPair(spirv, tag + "_hi01", "t0_<index>", "t1_<index>", true);
-		result += FloatMinMaxPair(spirv, tag + "_max3", tag + "_hi01", "t2_<index>", true);
-		result += FloatMinMaxPair(spirv, tag + "_hi12", "t1_<index>", "t2_<index>", true);
-		result += FloatMinMaxPair(spirv, tag + "_hi02", "t0_<index>", "t2_<index>", true);
+		result += FloatMinMaxPair(spirv, tag + "_lo01", a, b, false);
+		result += FloatMinMaxPair(spirv, tag + "_min3", tag + "_lo01", c, false);
+		result += FloatMinMaxPair(spirv, tag + "_hi01", a, b, true);
+		result += FloatMinMaxPair(spirv, tag + "_max3", tag + "_hi01", c, true);
+		result += FloatMinMaxPair(spirv, tag + "_hi12", b, c, true);
+		result += FloatMinMaxPair(spirv, tag + "_hi02", a, c, true);
 		result += String8(R"(
         %<t>_n0 = OpIsNan %bool %t0_<index>
         %<t>_n1 = OpIsNan %bool %t1_<index>
         %<t>_n2 = OpIsNan %bool %t2_<index>
         %<t>_n01 = OpLogicalOr %bool %<t>_n0 %<t>_n1
         %<t>_nan = OpLogicalOr %bool %<t>_n01 %<t>_n2
-        %<t>_top0 = OpFOrdEqual %bool %<t>_max3 %t0_<index>
-        %<t>_top1 = OpFOrdEqual %bool %<t>_max3 %t1_<index>
-        %<t>_rest = OpSelect %float %<t>_top1 %<t>_hi02 %<t>_hi01
-        %<t>_median = OpSelect %float %<t>_top0 %<t>_hi12 %<t>_rest
-        %t_<index> = OpSelect %float %<t>_nan %<t>_min3 %<t>_median
+        %<t>_max_mag = OpBitwiseAnd %uint %<t>_max3 %uint_0x7fffffff
+        %<t>_median_a_mag = OpBitwiseAnd %uint %<t>_a %uint_0x7fffffff
+        %<t>_median_b_mag = OpBitwiseAnd %uint %<t>_b %uint_0x7fffffff
+        %<t>_max_zero = OpIEqual %bool %<t>_max_mag %uint_0
+        %<t>_median_a_zero = OpIEqual %bool %<t>_median_a_mag %uint_0
+        %<t>_median_b_zero = OpIEqual %bool %<t>_median_b_mag %uint_0
+        %<t>_zero0 = OpLogicalAnd %bool %<t>_max_zero %<t>_median_a_zero
+        %<t>_zero1 = OpLogicalAnd %bool %<t>_max_zero %<t>_median_b_zero
+        %<t>_exact0 = OpIEqual %bool %<t>_max3 %<t>_a
+        %<t>_exact1 = OpIEqual %bool %<t>_max3 %<t>_b
+        %<t>_top0 = OpLogicalOr %bool %<t>_zero0 %<t>_exact0
+        %<t>_top1 = OpLogicalOr %bool %<t>_zero1 %<t>_exact1
+        %<t>_rest = OpSelect %uint %<t>_top1 %<t>_hi02 %<t>_hi01
+        %<t>_median = OpSelect %uint %<t>_top0 %<t>_hi12 %<t>_rest
+        %<t> = OpSelect %uint %<t>_nan %<t>_min3 %<t>_median
 )")
 		              .ReplaceStr("<t>", tag);
 	}
 	else
 	{
 		const bool maximum = std::strcmp(param[0], "FMax") == 0;
-		result += FloatMinMaxPair(spirv, tag + "_p", "t0_<index>", "t1_<index>", maximum);
-		result += FloatMinMaxPair(spirv, tag, tag + "_p", "t2_<index>", maximum);
-		result += "        %t_<index> = OpCopyObject %float %" + tag + "\n";
+		result += FloatMinMaxPair(spirv, tag + "_p", a, b, maximum);
+		result += FloatMinMaxPair(spirv, tag, tag + "_p", c, maximum);
 	}
+	result += "        %t_<index> = OpBitcast %float %" + tag + "\n";
 	const char* const params[4] = {result.c_str(), nullptr, nullptr, nullptr};
 	return Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2(index, code, dst_source, spirv, params, scc_check);
 }
@@ -4984,11 +5146,16 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1)
 
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	const bool min_max = inst.type == ShaderInstructionType::VMinF32 || inst.type == ShaderInstructionType::VMaxF32;
+	const auto load_float = [&](int operand, const char* result, String8* load) {
+		return min_max ? LoadFloatWithBitModifiers(spirv, inst.src[operand], result, index_str, load)
+		               : operand_load_float(spirv, inst.src[operand], result, index_str, load);
+	};
+	if (!load_float(0, "t0_<index>", &load0))
 	{
 		return false;
 	}
-	if (!operand_load_float(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	if (!load_float(1, "t1_<index>", &load1))
 	{
 		return false;
 	}
@@ -5314,47 +5481,74 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_I32_VdstVsrc0Vsrc1Vsrc2)
 	return true;
 }
 
-/* V_CVT_FLR_I32_F32 and V_CVT_RPI_I32_F32 keep their distinct rounding rules. */
+// RPI and FLR saturate by sign, including signed NaNs, as observed on RDNA2.
 KYTY_RECOMPILER_FUNC(Recompile_VCvt_XXX_F32_SVdstSVsrc0)
 {
 	const auto& inst = code.GetInstructions().At(index);
-
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
-	// integer operation ignores these VOP3 encoding bits.
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+	const bool rpi   = inst.type == ShaderInstructionType::VCvtRpiI32F32;
+	const auto dst   = operand_variable_to_str(inst.dst);
+	const String8 index_str = String8::FromPrintf("%u", index);
 
 	String8 load0;
-
-	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	if (!LoadFloatWithBitModifiers(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
 		return false;
 	}
 
-	// TODO() check VSKIP
-	// TODO() check EXEC
-	// TODO() check SP_DENORM_IN
-
 	static const char* text = R"(
     <load0>
-    <param0>
-    <param1>
-    <param2>
-    %t_<index> = OpBitcast %float %t2_<index>
-    OpStore %<dst> %t_<index>
+        %raw_<index> = OpBitcast %uint %t0_<index>
+        %mag_<index> = OpBitwiseAnd %uint %raw_<index> %uint_0x7fffffff
+        %neg_<index> = OpUGreaterThan %bool %raw_<index> %uint_0x7fffffff
+        %sat_<index> = OpSelect %uint %neg_<index> %uint_0x80000000 %uint_0x7fffffff
+        %out_<index> = OpUGreaterThanEqual %bool %mag_<index> %uint_0x4f000000
+        %safe_<index> = OpSelect %float %out_<index> %float_0_000000 %t0_<index>
+    <round>
+        %result_bits_<index> = OpSelect %uint %out_<index> %sat_<index> %rounded_<index>
+        %result_<index> = OpBitcast %float %result_bits_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %result_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
 )";
+	// Use the exact half-tie residual instead of adding 0.5 to the original float.
+	static const char* nearest_text = R"(
+        %even_<index> = OpExtInst %float %GLSL_std_450 RoundEven %safe_<index>
+        %residual_<index> = OpFSub %float %safe_<index> %even_<index>
+        %tie_<index> = OpFOrdEqual %bool %residual_<index> %float_0_500000
+        %adjust_<index> = OpSelect %uint %tie_<index> %uint_1 %uint_0
+        %integer_<index> = OpConvertFToS %int %even_<index>
+        %integer_bits_<index> = OpBitcast %uint %integer_<index>
+        %rounded_<index> = OpIAdd %uint %integer_bits_<index> %adjust_<index>
+)";
+	// Floor(-subnormal) is -1 if the guest keeps inputs, even on a flushing host.
+	static const char* floor_text = R"(
+        %floor_<index> = OpExtInst %float %GLSL_std_450 Floor %safe_<index>
+        %integer_<index> = OpConvertFToS %int %floor_<index>
+        %integer_bits_<index> = OpBitcast %uint %integer_<index>
+        %tiny_<index> = OpULessThan %bool %mag_<index> %uint_0x00800000
+        <select_tiny>
+        %rounded_<index> = OpSelect %uint %tiny_<index> <tiny_result> %integer_bits_<index>
+)";
+	static const char* preserved_tiny = R"(
+        %nonzero_<index> = OpINotEqual %bool %mag_<index> %uint_0
+        %neg_nonzero_<index> = OpLogicalAnd %bool %neg_<index> %nonzero_<index>
+        %floor_tiny_<index> = OpSelect %uint %neg_nonzero_<index> %uint_0xffffffff %uint_0
+)";
+	String8 round = nearest_text;
+	if (!rpi)
+	{
+		const bool flushed = spirv->Float32InputDenormalsFlushed();
+		round = String8(floor_text)
+		            .ReplaceStr("<select_tiny>", flushed ? "" : preserved_tiny)
+		            .ReplaceStr("<tiny_result>", flushed ? "%uint_0" : "%floor_tiny_<index>");
+	}
 	*dst_source += String8(text)
-	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<dst>", dst.value)
 	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<param0>", param[0])
-	                   .ReplaceStr("<param1>", param[1])
-	                   .ReplaceStr("<param2>", (param[2] == nullptr ? "" : param[2]))
+	                   .ReplaceStr("<round>", round)
 	                   .ReplaceStr("<index>", index_str);
-
 	return true;
 }
 
@@ -5676,7 +5870,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 {
 	const auto& inst = code.GetInstructions().At(index);
 	const bool native_wave32 = spirv->NativeWave32();
-	if (inst.type == ShaderInstructionType::VSubrevCoCiU32 && !ShaderReverseBorrowMaskHasProvenance(code, index, native_wave32))
+	const bool borrow = inst.type == ShaderInstructionType::VSubrevCoCiU32 || inst.type == ShaderInstructionType::VSubCoCiU32;
+	if (borrow && !ShaderReverseBorrowMaskHasProvenance(code, index, native_wave32))
 	{
 		return false;
 	}
@@ -5687,11 +5882,11 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 	{
 		return false;
 	}
-	if (inst.type == ShaderInstructionType::VSubrevCoCiU32 &&
+	if (borrow &&
 	    (inst.dst.clamp || inst.dst.multiplier != 1.0f || inst.src[0].negate || inst.src[0].absolute || inst.src[1].negate ||
 	     inst.src[1].absolute || inst.src[2].negate || inst.src[2].absolute))
 	{
-		// V_SUBREV_CO_CI_U32 is integer arithmetic. Its VOP3B clamp and
+		// V_SUB(REV)_CO_CI_U32 is integer arithmetic. Its VOP3B clamp and
 		// source/output modifiers have distinct ISA semantics, so do not
 		// silently inherit the shared emitter's warning-only behavior.
 		return false;
@@ -5749,14 +5944,15 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
                OpStore %<dst2_0> %t213_<index>
                <clear_high>
 )";
-	// The mask accessor supplies the selected guest lane's borrow-in bit.
-	static const char* subrev_text = R"(
+	// The mask accessor supplies the selected guest lane's borrow-in bit. The
+	// borrow-out is minuend < subtrahend + borrow-in without wrapping (ISA 12.7).
+	static const char* borrow_text = R"(
               <load0>
               <load1>
               <load2>
         %subrev_carry_nonzero_<index> = OpINotEqual %bool %t2_<index> %uint_0
         %subrev_carry_<index> = OpSelect %uint %subrev_carry_nonzero_<index> %uint_1 %uint_0
-        %subrev_base_<index> = OpISubBorrow %ResTypeU %t1_<index> %t0_<index>
+        %subrev_base_<index> = OpISubBorrow %ResTypeU <minuend> <subtrahend>
         %subrev_value_<index> = OpCompositeExtract %uint %subrev_base_<index> 0
         %subrev_base_borrow_<index> = OpCompositeExtract %uint %subrev_base_<index> 1
         %subrev_adjusted_<index> = OpISubBorrow %ResTypeU %subrev_value_<index> %subrev_carry_<index>
@@ -5781,9 +5977,11 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 	switch (inst.type)
 	{
 		case ShaderInstructionType::VAddCoCiU32: text = add_text; break;
-		case ShaderInstructionType::VSubrevCoCiU32: text = subrev_text; break;
+		case ShaderInstructionType::VSubrevCoCiU32:
+		case ShaderInstructionType::VSubCoCiU32: text = borrow_text; break;
 		default: return false;
 	}
+	const bool reverse = inst.type == ShaderInstructionType::VSubrevCoCiU32;
 	// A wave32 carry writes one word. The adjacent scalar word can hold
 	// another live mask, including a comparison explicitly stored in VCC_HI.
 	const auto clear_high = native_wave32 ? String8 {} : String8("OpStore %<dst2_1> %uint_0").ReplaceStr("<dst2_1>", dst2_value1.value);
@@ -5794,6 +5992,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<load2>", load2)
+	                   .ReplaceStr("<minuend>", reverse ? "%t1_<index>" : "%t0_<index>")
+	                   .ReplaceStr("<subtrahend>", reverse ? "%t0_<index>" : "%t1_<index>")
 	                   .ReplaceStr("<index>", index_str);
 
 	return true;

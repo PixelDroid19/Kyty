@@ -319,6 +319,9 @@ std::string PerformanceResult(bool reset)
 	out += ",\"guest_address_residency_calls\":" + std::to_string(stats.guest_address_residency_calls);
 	out += ",\"guest_address_residency_ns\":" + std::to_string(stats.guest_address_residency_ns);
 	out += ",\"guest_address_residency_max_ns\":" + std::to_string(stats.guest_address_residency_max_ns);
+	out += ",\"guest_address_population_calls\":" + std::to_string(stats.guest_address_population_calls);
+	out += ",\"guest_address_population_ns\":" + std::to_string(stats.guest_address_population_ns);
+	out += ",\"guest_address_population_max_ns\":" + std::to_string(stats.guest_address_population_max_ns);
 	out += ",\"guest_address_refresh_calls\":" + std::to_string(stats.guest_address_refresh_calls);
 	out += ",\"guest_address_refresh_ns\":" + std::to_string(stats.guest_address_refresh_ns);
 	out += ",\"guest_address_refresh_max_ns\":" + std::to_string(stats.guest_address_refresh_max_ns);

@@ -1355,6 +1355,21 @@ int KYTY_SYSV_ABI AudioInClose(int handle)
 	return OK;
 }
 
+// sceAudioInGetSilentState (NID BohEAQ7DlUE): 0 while a recording device feeds the port, otherwise the
+// no-device state. A port opened with the microphone disabled delivers silence.
+int KYTY_SYSV_ABI AudioInGetSilentState(int handle)
+{
+	PRINT_NAME();
+	constexpr int SILENT_STATE_DEVICE_NONE = 1;
+
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr || !audio->AudioInValid(HostAudio::Id(handle)))
+	{
+		return AUDIO_IN_ERROR_INVALID_HANDLE;
+	}
+	return audio->AudioInRecording(HostAudio::Id(handle)) ? 0 : SILENT_STATE_DEVICE_NONE;
+}
+
 } // namespace AudioIn
 
 namespace VoiceQoS {

@@ -285,6 +285,8 @@ static VkImageAspectFlags TexelBitsLayoutAspect(const VulkanImage* image)
 	return IsTexelBitsDepthFormat(image->format) ? DepthFormatAspectMask(image->format) : VK_IMAGE_ASPECT_COLOR_BIT;
 }
 
+constexpr uint64_t kTexelBitsBandBytes = 16u * 1024u * 1024u;
+
 // Moves one plane of each image through a tightly packed buffer, which is the only copy Vulkan
 // guarantees between a depth or stencil aspect and a colour image.
 static bool CopyPlaneBits(CommandBuffer* buffer, VulkanImage* src_image, VkImageAspectFlags src_aspect, VulkanImage* dst_image,
@@ -297,42 +299,51 @@ static bool CopyPlaneBits(CommandBuffer* buffer, VulkanImage* src_image, VkImage
 	{
 		return false;
 	}
-	const uint64_t bytes   = static_cast<uint64_t>(src_image->extent.width) * src_image->extent.height * texel_bytes;
-	auto*          scratch = buffer->AllocateTransientCopyBuffer(bytes);
+	// The plane moves in bands of rows through one scratch of at most kTexelBitsBandBytes: a whole
+	// 10240x2048 16-bit plane (40 MiB) did not fit the transient pool's per-command-buffer budget.
+	const uint32_t width     = src_image->extent.width;
+	const uint32_t height    = src_image->extent.height;
+	const uint64_t row_bytes = static_cast<uint64_t>(width) * texel_bytes;
+	const auto     band_rows = static_cast<uint32_t>(std::clamp<uint64_t>(kTexelBitsBandBytes / row_bytes, 1u, height));
+	auto*          scratch   = buffer->AllocateTransientCopyBuffer(row_bytes * band_rows);
 	if (scratch == nullptr || scratch->buffer == nullptr)
 	{
 		return false;
 	}
 
-	auto* vk_buffer = buffer->RecordOutsideRenderPass();
-	// The command buffer reuses one bounded scratch allocation: finish earlier uses before this copy writes it.
-	VkMemoryBarrier scratch_barrier {};
-	scratch_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-	scratch_barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-	scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u,
-	                     nullptr, 0u, nullptr);
-
+	auto*               vk_buffer  = buffer->RecordOutsideRenderPass();
 	const VkImageLayout src_layout = src_image->layout;
-	VkBufferImageCopy   region {};
-	region.imageSubresource.aspectMask = src_aspect;
-	region.imageSubresource.layerCount = 1u;
-	region.imageExtent                 = {src_image->extent.width, src_image->extent.height, 1u};
 	set_image_layout(buffer, vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), src_layout,
 	                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, scratch->buffer, 1u, &region);
-	set_image_layout(buffer, vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-	                 src_layout);
-
-	scratch_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u, nullptr,
-	                     0u, nullptr);
-
-	region.imageSubresource.aspectMask = dst_aspect;
 	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	vkCmdCopyBufferToImage(vk_buffer, scratch->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
+
+	VkMemoryBarrier scratch_barrier {};
+	scratch_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	VkBufferImageCopy region {};
+	region.imageSubresource.layerCount = 1u;
+	for (uint32_t y = 0; y < height; y += band_rows)
+	{
+		// The command buffer reuses one bounded scratch allocation: finish earlier uses before this band writes it.
+		scratch_barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+		scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u,
+		                     nullptr, 0u, nullptr);
+		region.imageSubresource.aspectMask = src_aspect;
+		region.imageOffset                 = {0, static_cast<int32_t>(y), 0};
+		region.imageExtent                 = {width, std::min(band_rows, height - y), 1u};
+		vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, scratch->buffer, 1u, &region);
+
+		scratch_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u,
+		                     nullptr, 0u, nullptr);
+		region.imageSubresource.aspectMask = dst_aspect;
+		vkCmdCopyBufferToImage(vk_buffer, scratch->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
+	}
+
+	set_image_layout(buffer, vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	                 src_layout);
 	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 	                 static_cast<VkImageLayout>(dst_layout));
 	return true;
@@ -834,6 +845,26 @@ void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffe
 	VulkanBindBufferMemory(gctx, buffer, &buffer->memory);
 }
 
+// A driver may record a buffer fill as a 2D surface whose width it finds by
+// trying candidate divisors of the element count one at a time: a count with
+// a large prime factor costs milliseconds of host time. A body in whole
+// 64 KiB costs about one step per 64 KiB, and a tail of fewer than 16384
+// words fits one row.
+void VulkanCmdFillBuffer(VkCommandBuffer cmd, VkBuffer buffer, uint64_t offset, uint64_t size, uint32_t value)
+{
+	constexpr uint64_t kFillUnit = 64u * 1024u;
+
+	const uint64_t body = size - size % kFillUnit;
+	if (body != 0)
+	{
+		vkCmdFillBuffer(cmd, buffer, offset, body, value);
+	}
+	if (body != size)
+	{
+		vkCmdFillBuffer(cmd, buffer, offset + body, size - body, value);
+	}
+}
+
 void VulkanDeleteBuffer(GraphicContext* gctx, VulkanBuffer* buffer)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -1202,9 +1233,80 @@ public:
 			}
 		}
 		Destroy(&completed);
+
+		std::vector<VulkanBuffer> free;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			free.swap(m_free);
+			m_free_bytes = 0;
+		}
+		for (auto& staging: free)
+		{
+			VulkanDeleteBuffer(m_ctx, &staging);
+		}
+	}
+
+	// A fill reuses the staging of a completed one: a new buffer per fill costs an allocation and a first-touch
+	// fault on every page of its mapping, milliseconds for a large texture.
+	VulkanBuffer TakeStaging(GraphicContext* ctx, uint64_t size)
+	{
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			const auto best = FindFreeLocked(ctx, size);
+			if (best != m_free.end())
+			{
+				VulkanBuffer staging = *best;
+				m_free_bytes -= staging.descriptor_range;
+				m_free.erase(best);
+				return staging;
+			}
+		}
+		VulkanBuffer staging {};
+		staging.usage           = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+		staging.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		VulkanCreateBuffer(ctx, size, &staging);
+		return staging;
 	}
 
 private:
+	static constexpr uint64_t FREE_BYTES_MAX = 128ull * 1024ull * 1024ull;
+
+	// The smallest free staging that holds `size` and is at most twice as large.
+	std::vector<VulkanBuffer>::iterator FindFreeLocked(const GraphicContext* ctx, uint64_t size)
+	{
+		auto best = m_free.end();
+		if (ctx != m_ctx)
+		{
+			return best;
+		}
+		for (auto it = m_free.begin(); it != m_free.end(); ++it)
+		{
+			const uint64_t capacity = it->descriptor_range;
+			if (capacity >= size && capacity / 2 <= size && (best == m_free.end() || capacity < best->descriptor_range))
+			{
+				best = it;
+			}
+		}
+		return best;
+	}
+
+	// Only a dedicated allocation is kept: a pooled staging is already cheap to get, and keeping small ones would make
+	// the free list long.
+	void Recycle(VulkanBuffer* staging)
+	{
+		if (staging->memory.pool_block == nullptr)
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_free_bytes + staging->descriptor_range <= FREE_BYTES_MAX)
+			{
+				m_free_bytes += staging->descriptor_range;
+				m_free.push_back(*staging);
+				return;
+			}
+		}
+		VulkanDeleteBuffer(m_ctx, staging);
+	}
+
 	static constexpr uint64_t OPEN_BYTES_MAX = 64ull * 1024ull * 1024ull;
 	// The util command pool has CommandProcessorSubmissionSlots::SlotCount buffers shared with synchronous transfers.
 	static constexpr size_t IN_FLIGHT_MAX = 4;
@@ -1229,6 +1331,7 @@ private:
 		const auto result   = vkWaitSemaphores(m_ctx->device, &info, UINT64_MAX);
 		if (result != VK_SUCCESS)
 		{
+			VulkanReportDeviceFault(result);
 			EXIT("vkWaitSemaphores (image fills) failed: result=%d\n", static_cast<int>(result));
 		}
 	}
@@ -1280,16 +1383,18 @@ private:
 			delete batch.buffer;
 			for (auto& staging: batch.staging)
 			{
-				VulkanDeleteBuffer(m_ctx, &staging);
+				Recycle(&staging);
 			}
 		}
 	}
 
-	std::mutex        m_mutex;
-	GraphicContext*   m_ctx = nullptr;
-	Batch             m_open;
-	std::deque<Batch> m_in_flight;
-	uint64_t          m_last_id = 0;
+	std::mutex                m_mutex;
+	GraphicContext*           m_ctx = nullptr;
+	Batch                     m_open;
+	std::deque<Batch>         m_in_flight;
+	uint64_t                  m_last_id = 0;
+	std::vector<VulkanBuffer> m_free;
+	uint64_t                  m_free_bytes = 0;
 };
 
 static ImageFillQueue g_image_fills;
@@ -1301,10 +1406,7 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* image, const void* src_data
 	EXIT_IF(image == nullptr);
 
 	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
-	VulkanBuffer               staging_buffer {};
-	staging_buffer.usage           = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-	staging_buffer.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-	VulkanCreateBuffer(ctx, size, &staging_buffer);
+	VulkanBuffer               staging_buffer = g_image_fills.TakeStaging(ctx, size);
 
 	void* data = nullptr;
 	VulkanMapMemory(ctx, &staging_buffer.memory, &data);

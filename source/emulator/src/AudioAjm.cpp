@@ -2030,6 +2030,42 @@ int KYTY_SYSV_ABI AjmBatchStartBuffer(uint32_t context, uint8_t* batch_buffer, u
 	return OK;
 }
 
+// sceAjmDecAt9ParseConfigData (NID 1t3ixYNXyuc): the stream layout the four ATRAC9 config bytes describe.
+int KYTY_SYSV_ABI AjmDecAt9ParseConfigData(const uint8_t* config, AjmDecAt9ConfigDataInfo* info)
+{
+	PRINT_NAME();
+
+	if (config == nullptr || info == nullptr)
+	{
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	std::string error;
+	const auto  decoder = AjmDecoder::OpenAtrac9FromConfig(config, AJM_AT9_CONFIG_DATA_SIZE, &error);
+	if (decoder == nullptr)
+	{
+		KYTY_LOG_ERROR("sceAjmDecAt9ParseConfigData: %s\n", error.c_str());
+		return AJM_ERROR_INVALID_PARAMETER;
+	}
+	info->channels           = decoder->Channels();
+	info->sample_rate        = decoder->SampleRate();
+	info->frame_samples      = decoder->Atrac9FrameSamples();
+	info->superframe_samples = decoder->Atrac9FrameSamples() * decoder->Atrac9FramesPerSuperframe();
+	info->superframe_size    = decoder->BlockAlign();
+	return OK;
+}
+
+// sceAjmBatchErrorDump (NID WfAiBW8Wcek): the dump is a developer aid; the caller gets a cleared error record.
+int KYTY_SYSV_ABI AjmBatchErrorDump(const void* info, AjmBatchError* error)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t info = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
+	if (error != nullptr)
+	{
+		*error = AjmBatchError {};
+	}
+	return OK;
+}
+
 int KYTY_SYSV_ABI AjmBatchWait(uint32_t context, uint32_t batch_id, uint32_t timeout, AjmBatchError* error)
 {
 	PRINT_NAME();
@@ -2627,10 +2663,10 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 					if (format.channels == 0 || bytes_per_frame == 0 || format.block_align == 0 ||
 					    job.input_size > AJM_MAX_DIRECT_JOB_INPUT_SIZE ||
 					    job.output_size > Core::VirtualMemory::GuestMappingSnapshot::kMaxBytes ||
-					    job.input_size % format.block_align != 0 || job.output_size % bytes_per_frame != 0)
+					    job.output_size % bytes_per_frame != 0)
 					{
 						lock.unlock();
-						RejectMalformedAjmData("ATRAC9 job extent is not a whole number of samples or superframes");
+						RejectMalformedAjmData("ATRAC9 job output is not a whole number of sample frames");
 					}
 					if (job.input_size > AJM_MAX_DIRECT_BATCH_INPUT_SIZE - atrac9_input_admitted)
 					{

@@ -286,7 +286,7 @@ TEST(EmulatorKernelProcess, DeleteSemaphoreWakesBlockedWaiter)
 	EXPECT_EQ(Kernel::Semaphore::KernelDeleteSema(sem), LibKernel::KERNEL_ERROR_ESRCH);
 }
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX || KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 namespace {
 
 std::atomic<uint32_t> g_context_handler_calls {0};
@@ -586,11 +586,18 @@ TEST(EmulatorKernelProcess, ContextRequestInterruptsGuestCode)
 	constexpr size_t  kPageSize       = 4096;
 	// Guest code lives low in the address space, like the loader's programs.
 	constexpr uint64_t kGuestCodeAddress = 0x0000'0e00'0000'0000ull;
-	void*              code              = mmap(reinterpret_cast<void*>(kGuestCodeAddress), kPageSize, PROT_READ | PROT_WRITE,
-	                                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	void* code = mmap(reinterpret_cast<void*>(kGuestCodeAddress), kPageSize, PROT_READ | PROT_WRITE,
+	                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
 	ASSERT_EQ(code, reinterpret_cast<void*>(kGuestCodeAddress));
 	std::memcpy(code, kSpinUntilSet, sizeof(kSpinUntilSet));
 	ASSERT_EQ(mprotect(code, kPageSize, PROT_READ | PROT_EXEC), 0);
+#else
+	ASSERT_TRUE(Core::VirtualMemory::AllocFixed(kGuestCodeAddress, kPageSize, Core::VirtualMemory::Mode::ReadWrite));
+	void* code = reinterpret_cast<void*>(kGuestCodeAddress);
+	std::memcpy(code, kSpinUntilSet, sizeof(kSpinUntilSet));
+	ASSERT_TRUE(Core::VirtualMemory::Protect(kGuestCodeAddress, kPageSize, Core::VirtualMemory::Mode::ExecuteRead));
+#endif
 	const auto begin = reinterpret_cast<uint64_t>(code);
 	Emulator::GuestCodeRanges::Add(begin, begin + kPageSize);
 
@@ -608,7 +615,11 @@ TEST(EmulatorKernelProcess, ContextRequestInterruptsGuestCode)
 	EXPECT_EQ(reinterpret_cast<uint64_t>(value), 7u);
 
 	Emulator::GuestCodeRanges::Remove(begin, begin + kPageSize);
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	EXPECT_EQ(munmap(code, kPageSize), 0);
+#else
+	EXPECT_TRUE(Core::VirtualMemory::Free(kGuestCodeAddress));
+#endif
 }
 
 // A collector keeps a stopped thread inside its handler, here inside a
@@ -1023,7 +1034,7 @@ TEST(EmulatorKernelProcess, ConvertUtcToLocaltimeWritesUtcTimezoneOutputs)
 	const auto* rec = symbols.Find(KernelNativeFunc(u"-o5uEDpN+oY"));
 	ASSERT_NE(rec, nullptr);
 
-	using convert_utc_to_localtime_fn_t = int (*)(int64_t, int64_t*, Kernel::KernelTimesec*, uint64_t*);
+	using convert_utc_to_localtime_fn_t = int(KYTY_SYSV_ABI*)(int64_t, int64_t*, Kernel::KernelTimesec*, uint64_t*);
 	auto* convert_utc_to_localtime = reinterpret_cast<convert_utc_to_localtime_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(convert_utc_to_localtime, nullptr);
 
@@ -1052,7 +1063,7 @@ TEST(EmulatorKernelProcess, ConvertLocaltimeToUtcResolvesNidAndWritesTimezoneOut
 	const auto* rec = symbols.Find(KernelNativeFunc(u"0NTHN1NKONI"));
 	ASSERT_NE(rec, nullptr);
 
-	using convert_localtime_to_utc_fn_t = int (*)(int64_t, int64_t, int64_t*, Kernel::KernelTimezone*, int32_t*);
+	using convert_localtime_to_utc_fn_t = int(KYTY_SYSV_ABI*)(int64_t, int64_t, int64_t*, Kernel::KernelTimezone*, int32_t*);
 	auto* convert_localtime_to_utc = reinterpret_cast<convert_localtime_to_utc_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(convert_localtime_to_utc, nullptr);
 
@@ -1333,7 +1344,7 @@ TEST(EmulatorKernelProcess, ResolvesKernelGetEventId)
 	const auto* rec            = symbols.Find(query);
 	ASSERT_NE(rec, nullptr);
 
-	using get_event_id_fn_t = uintptr_t (*)(const KernelEvent*);
+	using get_event_id_fn_t = uintptr_t(KYTY_SYSV_ABI*)(const KernelEvent*);
 	auto* get_event_id      = reinterpret_cast<get_event_id_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(get_event_id, nullptr);
 
@@ -1382,10 +1393,10 @@ TEST(EmulatorKernelProcess, AprSubmitTriggersTheRecordIdOnCompletion)
 	const auto* reset_rec = symbols.Find(query);
 	ASSERT_NE(reset_rec, nullptr);
 
-	using ctor_fn_t   = int (*)(void*);
-	using set_buffer_fn_t = int (*)(void*, void*, uint32_t);
-	using event_fn_t  = int (*)(void*, void*, uint64_t, uint64_t, uint64_t);
-	using reset_fn_t  = int (*)(void*);
+	using ctor_fn_t   = int(KYTY_SYSV_ABI*)(void*);
+	using set_buffer_fn_t = int(KYTY_SYSV_ABI*)(void*, void*, uint32_t);
+	using event_fn_t  = int(KYTY_SYSV_ABI*)(void*, void*, uint64_t, uint64_t, uint64_t);
+	using reset_fn_t  = int(KYTY_SYSV_ABI*)(void*);
 	auto* ctor        = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(ctor_rec->vaddr));
 	auto* set_buffer  = reinterpret_cast<set_buffer_fn_t>(static_cast<uintptr_t>(set_buffer_rec->vaddr));
 	auto* add_event   = reinterpret_cast<event_fn_t>(static_cast<uintptr_t>(event_rec->vaddr));
@@ -1485,10 +1496,10 @@ TEST(EmulatorKernelProcess, AprReadAndCompletionExecuteAtSubmitInRecordOrder)
 		return rec != nullptr ? rec->vaddr : 0;
 	};
 
-	using ctor_fn_t       = int (*)(void*);
-	using set_buffer_fn_t = int (*)(void*, void*, uint32_t);
-	using read_fn_t       = int (*)(void*, uint64_t, uint64_t, uint32_t, void*, uint64_t, uint64_t);
-	using write_fn_t      = int (*)(void*, uint64_t*, uint64_t);
+	using ctor_fn_t       = int(KYTY_SYSV_ABI*)(void*);
+	using set_buffer_fn_t = int(KYTY_SYSV_ABI*)(void*, void*, uint32_t);
+	using read_fn_t       = int(KYTY_SYSV_ABI*)(void*, uint64_t, uint64_t, uint32_t, void*, uint64_t, uint64_t);
+	using write_fn_t      = int(KYTY_SYSV_ABI*)(void*, uint64_t*, uint64_t);
 	auto* ctor            = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(resolve("8aI7R7WaOlc")));
 	auto* set_buffer      = reinterpret_cast<set_buffer_fn_t>(static_cast<uintptr_t>(resolve("N-FSPA4S3nI")));
 	auto* read_file       = reinterpret_cast<read_fn_t>(static_cast<uintptr_t>(resolve("mQ16-QdKv7k")));
@@ -2036,6 +2047,124 @@ TEST(EmulatorKernelProcess, PosixSemDestroyWakesBlockedWaiter)
 	ASSERT_EQ(Posix::sem_destroy(guest.get()), OK);
 	ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
 	EXPECT_EQ(result.get(), Posix::POSIX_EINVAL);
+}
+
+TEST(EmulatorKernelProcess, ApplicationMountRefusesEveryMutation)
+{
+	EnsureFileSystemSubsystem();
+
+	const String root = U"/tmp/kyty_app0_read_only_test/";
+	const String data = U"/tmp/kyty_app0_read_only_test_data/";
+	Core::File::DeleteDirectories(root);
+	Core::File::DeleteDirectories(data);
+	ASSERT_TRUE(Core::File::CreateDirectories(root + U"sub/"));
+	ASSERT_TRUE(Core::File::CreateDirectories(data));
+	{
+		Core::File file;
+		ASSERT_TRUE(file.Create(root + U"asset.bin"));
+		file.Write("asset", 5);
+	}
+	{
+		Core::File file;
+		ASSERT_TRUE(file.Create(data + U"save.bin"));
+	}
+	Kernel::FileSystem::Mount(root, U"/app0/");
+	Kernel::FileSystem::Mount(data, U"/data/");
+
+	constexpr int write_only = 0x0001;
+	constexpr int read_write = 0x0002;
+	constexpr int append     = 0x0008;
+	constexpr int create     = 0x0200;
+	constexpr int truncate   = 0x0400;
+	for (const int flags: {write_only, read_write, append, create, truncate, write_only | create | truncate})
+	{
+		EXPECT_EQ(Kernel::FileSystem::KernelOpen("/app0/asset.bin", flags, 0666), LibKernel::KERNEL_ERROR_EPERM);
+	}
+	EXPECT_EQ(Kernel::FileSystem::KernelOpen("/app0/new.bin", write_only | create, 0666), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelOpen("/app0/sub/../asset.bin", read_write, 0), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelUnlink("/app0/asset.bin"), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelRename("/app0/asset.bin", "/data/asset.bin"), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelRename("/data/save.bin", "/app0/save.bin"), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelMkdir("/app0/made", 0755), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelRmdir("/app0/sub"), LibKernel::KERNEL_ERROR_EPERM);
+
+	// The install is untouched and still reads.
+	EXPECT_TRUE(Core::File::IsFileExisting(root + U"asset.bin"));
+	EXPECT_FALSE(Core::File::IsFileExisting(root + U"new.bin"));
+	EXPECT_FALSE(Core::File::IsFileExisting(root + U"save.bin"));
+	EXPECT_FALSE(Core::File::IsDirectoryExisting(root + U"made"));
+	EXPECT_TRUE(Core::File::IsDirectoryExisting(root + U"sub"));
+	EXPECT_TRUE(Core::File::IsFileExisting(data + U"save.bin"));
+	const int fd = Kernel::FileSystem::KernelOpen("/app0/asset.bin", 0, 0);
+	ASSERT_GE(fd, 0);
+	Kernel::FileSystem::FileStat stat {};
+	ASSERT_EQ(Kernel::FileSystem::KernelFstat(fd, &stat), OK);
+	EXPECT_EQ(stat.st_size, 5);
+	EXPECT_EQ(Kernel::FileSystem::KernelClose(fd), OK);
+
+	// Other mounts still change.
+	EXPECT_EQ(Kernel::FileSystem::KernelMkdir("/data/made", 0755), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelRmdir("/data/made"), OK);
+
+	Kernel::FileSystem::Umount(U"/app0/");
+	Kernel::FileSystem::Umount(U"/data/");
+	Core::File::DeleteDirectories(root);
+	Core::File::DeleteDirectories(data);
+}
+
+TEST(EmulatorKernelProcess, ChmodSetsTheModeAFileDescriptorReports)
+{
+	EnsureFileSystemSubsystem();
+
+	const String root = U"/tmp/kyty_chmod_test/";
+	ASSERT_TRUE(Core::File::CreateDirectories(root));
+	{
+		Core::File file;
+		ASSERT_TRUE(file.Create(root + U"save.bin"));
+	}
+	Kernel::FileSystem::Mount(root, U"/data/");
+
+	ASSERT_EQ(Kernel::FileSystem::KernelChmod("/data/save.bin", 0640), OK);
+	const int fd = Kernel::FileSystem::KernelOpen("/data/save.bin", 0, 0);
+	ASSERT_GE(fd, 0);
+	Kernel::FileSystem::FileStat stat {};
+	ASSERT_EQ(Kernel::FileSystem::KernelFstat(fd, &stat), OK);
+	EXPECT_EQ(stat.st_mode & 07777u, 0640u);
+	EXPECT_EQ(Kernel::FileSystem::KernelClose(fd), OK);
+
+	EXPECT_EQ(Kernel::FileSystem::KernelChmod("/data/missing.bin", 0600), LibKernel::KERNEL_ERROR_ENOENT);
+
+	// The package mount refuses, and the host file keeps its bits.
+	Kernel::FileSystem::Mount(root, U"/app0/");
+	EXPECT_EQ(Kernel::FileSystem::KernelChmod("/app0/save.bin", 0600), LibKernel::KERNEL_ERROR_EPERM);
+	EXPECT_EQ(Kernel::FileSystem::KernelChmod("/app0", 0700), LibKernel::KERNEL_ERROR_EPERM);
+	const int app_fd = Kernel::FileSystem::KernelOpen("/app0/save.bin", 0, 0);
+	ASSERT_GE(app_fd, 0);
+	ASSERT_EQ(Kernel::FileSystem::KernelFstat(app_fd, &stat), OK);
+	EXPECT_EQ(stat.st_mode & 07777u, 0640u);
+	EXPECT_EQ(Kernel::FileSystem::KernelClose(app_fd), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelChmod(nullptr, 0600), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+TEST(EmulatorKernelProcess, ReachabilityNamesTheMountedPathsThatExist)
+{
+	EnsureFileSystemSubsystem();
+
+	const String root = U"/tmp/kyty_reachability_test/";
+	ASSERT_TRUE(Core::File::CreateDirectories(root));
+	{
+		Core::File file;
+		ASSERT_TRUE(file.Create(root + U"present.bin"));
+	}
+	Kernel::FileSystem::Mount(root, U"/data/");
+
+	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability("/data/present.bin"), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability("/data/missing.bin"), LibKernel::KERNEL_ERROR_ENOENT);
+	// The entropy devices have no mount; the kernel serves them.
+	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability("/dev/urandom"), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability(nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	const std::string too_long = "/data/" + std::string(250, 'a');
+	EXPECT_EQ(Kernel::FileSystem::KernelCheckReachability(too_long.c_str()), LibKernel::KERNEL_ERROR_ENAMETOOLONG);
 }
 
 UT_END();

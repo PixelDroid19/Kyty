@@ -33,6 +33,8 @@ static_assert(offsetof(HttpUriElement, port) == 64);
 
 // Query mode requires only required_size. Fill mode requires both out and pool.
 int KYTY_SYSV_ABI HttpUriParse(HttpUriElement* out, const char* source, void* pool, uint64_t* required_size, size_t pool_size);
+// Query mode passes only required_size; the escaped string fills out when it fits in capacity.
+int KYTY_SYSV_ABI HttpUriEscape(char* out, uint64_t* required_size, size_t capacity, const char* source);
 
 } // namespace Kyty::Libs::Network::Http
 

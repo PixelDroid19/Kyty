@@ -54,6 +54,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <tuple>
@@ -227,8 +228,12 @@ bool ShaderInstructionTypeChangesExec(ShaderInstructionType type)
 		return true;
 	}
 	const auto value = static_cast<uint32_t>(type);
-	if (value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxEqF32) &&
-	    value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxUF32))
+	if ((value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxEqF32) &&
+	     value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxUF32)) ||
+	    (value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxLtF64) &&
+	     value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxGeU64)) ||
+	    (value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxClassF16) &&
+	     value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxClassF64)))
 	{
 		return true;
 	}
@@ -1331,6 +1336,9 @@ struct ShaderVertexProgram
 	ShaderCode             code;
 	// EUD scans use the front stream even when the linked program adds a continuation.
 	std::shared_ptr<const ShaderScalarFlow> front_scalar_flow;
+	// Flow of `code`: the continuation branch keeps it resolvable where the
+	// front's terminal setpc does not.
+	std::shared_ptr<const ShaderScalarFlow> scalar_flow;
 	// Resource analyses of front_code (EUD scans) and of code (image reads).
 	ShaderCodeResourceMemo front_resource_memo;
 	ShaderCodeResourceMemo resource_memo;
@@ -1339,12 +1347,15 @@ struct ShaderVertexProgram
 	std::array<uint32_t, 4> fingerprint {};
 	// Native-wave classification of `code`, computed once per guest width.
 	ShaderNativeWaveVerdict native_wave;
-	// Width-neutrality of the fused NGG front, proved once for this immutable code.
-	ShaderNggFrontVerdict  ngg_front;
+	// Width-neutrality of the fused NGG front, shared by every program with this content.
+	std::shared_ptr<const ShaderNggFrontVerdict> ngg_front;
 	// Scans of front_code that every draw used to repeat.
 	bool                   front_has_getpc              = false;
 	bool                   front_has_global_memory_load = false;
 	std::bitset<108>       front_sbuffer_base_sgprs;
+	// Indices of the front_code instructions the per-draw binding checks inspect.
+	std::vector<uint32_t>  front_buffer_loads;
+	std::vector<uint32_t>  front_pointer_scalar_loads;
 	// Vertex-stream access scan of `code` for the last fetch-register pair it was asked for.
 	mutable std::mutex                                          stream_access_mutex;
 	mutable std::shared_ptr<const ShaderVertexStreamAccessScan> stream_access;
@@ -1375,6 +1386,16 @@ static ShaderVertexProgramCache* g_vs_isa_cache = nullptr;
 static std::mutex                g_vs_isa_cache_mutex;
 static uint64_t                  g_vs_isa_cache_bytes = 0;
 static uint64_t                  g_vs_program_generation = 1;
+// NGG front verdicts by program content. A remapped or evicted program rebuilt from
+// the same bytes reuses the proof instead of repeating it on the command processor.
+// Content keys stay valid across retirement, so neither invalidation clears them.
+using ShaderNggFrontVerdictKey = std::pair<std::array<uint32_t, 4>, bool>; // fingerprint, registered-front parse
+static constexpr size_t kNggFrontVerdictEntries = 4096u;
+static std::map<ShaderNggFrontVerdictKey, std::shared_ptr<const ShaderNggFrontVerdict>>* g_ngg_front_verdicts = nullptr;
+static std::mutex g_ngg_front_verdicts_mutex;
+// Advances with every retirement of vertex programs, under the exclusive lifetime
+// lock, so a lookup remembered under the shared lock holds while it is unchanged.
+static uint64_t g_vs_lookup_generation = 1;
 
 static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program);
 
@@ -1387,6 +1408,7 @@ static bool ShaderRangesOverlap(uint64_t a, uint64_t a_size, uint64_t b, uint64_
 // offset results that read guest code in [addr, addr + size).
 static void ShaderInvalidateVertexProgramRangeLocked(uint64_t addr, uint64_t size)
 {
+	++g_vs_lookup_generation;
 	std::scoped_lock cache_lock(g_vs_isa_cache_mutex, g_vertex_offset_sgpr_mutex);
 	if (g_vs_isa_cache != nullptr)
 	{
@@ -1419,6 +1441,7 @@ static void ShaderInvalidateVertexProgramsLocked()
 {
 	EXIT_IF(g_vs_program_generation == UINT64_MAX);
 	++g_vs_program_generation;
+	++g_vs_lookup_generation;
 	std::scoped_lock cache_lock(g_vs_isa_cache_mutex, g_vertex_offset_sgpr_mutex);
 	if (g_vs_isa_cache != nullptr) { g_vs_isa_cache->clear(); }
 	g_vs_isa_cache_bytes = 0;
@@ -1554,6 +1577,7 @@ void ShaderInit()
 	g_vertex_offset_sgpr_map = new std::unordered_map<uint64_t, VertexOffsetCacheEntry>();
 	g_shader_continuations   = new std::unordered_map<uint64_t, uint64_t>();
 	g_vs_isa_cache           = new ShaderVertexProgramCache();
+	g_ngg_front_verdicts     = new std::map<ShaderNggFrontVerdictKey, std::shared_ptr<const ShaderNggFrontVerdict>>();
 }
 
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
@@ -2025,6 +2049,16 @@ static std::array<uint32_t, 4> ShaderVertexProgramFingerprint(const ShaderVertex
 	        static_cast<uint32_t>(hash.high64), static_cast<uint32_t>(hash.high64 >> 32u)};
 }
 
+static std::shared_ptr<const ShaderNggFrontVerdict> SharedNggFrontVerdict(const ShaderNggFrontVerdictKey& key)
+{
+	EXIT_IF(g_ngg_front_verdicts == nullptr);
+	std::lock_guard<std::mutex> lock(g_ngg_front_verdicts_mutex);
+	auto& verdicts = *g_ngg_front_verdicts;
+	if (auto found = verdicts.find(key); found != verdicts.end()) { return found->second; }
+	if (verdicts.size() >= kNggFrontVerdictEntries) { verdicts.clear(); }
+	return verdicts[key] = std::make_shared<ShaderNggFrontVerdict>();
+}
+
 static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program)
 {
 	// Budget retained IR capacities, counting shared front/linked storage twice
@@ -2043,12 +2077,14 @@ static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program)
 		         static_cast<uint64_t>(code->GetDebugPrintfs().Capacity()) * sizeof(ShaderDebugPrintf);
 	}
 	bytes += static_cast<uint64_t>(program.gs_user_data_loads.capacity()) * sizeof(ShaderGsUserDataDescriptorLoad);
-	if (program.front_scalar_flow != nullptr)
+	bytes += static_cast<uint64_t>(program.front_buffer_loads.capacity() + program.front_pointer_scalar_loads.capacity()) *
+	         sizeof(uint32_t);
+	for (const auto* flow: {program.front_scalar_flow.get(), program.scalar_flow.get()})
 	{
-		const auto& flow = *program.front_scalar_flow;
+		if (flow == nullptr) { continue; }
 		bytes += sizeof(ShaderScalarFlow) +
-		         static_cast<uint64_t>(flow.entry_sources.capacity()) * sizeof(ShaderSgprEntrySources) +
-		         static_cast<uint64_t>(flow.holding_entry_value.capacity()) *
+		         static_cast<uint64_t>(flow->entry_sources.capacity()) * sizeof(ShaderSgprEntrySources) +
+		         static_cast<uint64_t>(flow->holding_entry_value.capacity()) *
 		         sizeof(std::bitset<kShaderScalarLivenessSgprs>);
 	}
 	return bytes;
@@ -2088,6 +2124,19 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 	program->front_has_getpc              = program->front_code.HasAnyOf({ShaderInstructionType::SGetpcB64});
 	program->front_has_global_memory_load = ShaderHasGlobalMemoryLoad(program->front_code);
 	program->front_sbuffer_base_sgprs     = ShaderScalarBufferBaseSgprs(program->front_code);
+	for (uint32_t index = 0; index < program->front_code.GetInstructions().Size(); ++index)
+	{
+		const auto& inst = program->front_code.GetInstructions().At(index);
+		if (ShaderInstructionIsBufferLoad(inst.type))
+		{
+			program->front_buffer_loads.push_back(index);
+		}
+		if (ShaderInstructionIsScalarMemoryLoad(inst.type) && inst.src_num >= 1 &&
+		    (inst.src[0].type == ShaderOperandType::Sgpr || inst.src[0].type == ShaderOperandType::VccLo))
+		{
+			program->front_pointer_scalar_loads.push_back(index);
+		}
+	}
 	program->code = program->front_code;
 	std::vector<uint32_t> back_words;
 	if (ShaderHasTerminalSetpc(program->front_code))
@@ -2110,11 +2159,13 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 		ShaderAppendContinuation(&program->code, back, key.continuation_addr);
 	}
 	ShaderCopyDebugPrintfsLocked(&program->code);
+	program->scalar_flow = ShaderScalarFlowOf(program->code);
 	if (gs_front)
 	{
 		program->gs_user_data_loads = ShaderFindGsUserDataDescriptorLoads(program->code);
 	}
 	program->fingerprint = ShaderVertexProgramFingerprint(*program, front, back_words);
+	program->ngg_front   = SharedNggFrontVerdict({program->fingerprint, boundary == ShaderParseBoundary::RegisteredFront});
 	ShaderProbeWrite("vs", program->code, nullptr, nullptr);
 	const uint64_t cache_cost = ShaderVertexProgramCacheCost(*program);
 	// This is a cache-retention budget, not a production program-size limit.
@@ -2131,6 +2182,43 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 	}
 	g_vs_isa_cache->emplace(key, program);
 	g_vs_isa_cache_bytes += cache_cost;
+	return program;
+}
+
+// Caller holds the shared lifetime lock. A draw stream binds a few programs over
+// and over; remembering each thread's recent ones skips three locked map lookups.
+static std::shared_ptr<const ShaderVertexProgram> LookupVertexProgramLocked(const HW::VertexShaderInfo& regs, bool gs_front,
+                                                                           ShaderMappedData* data)
+{
+	struct Recent
+	{
+		uint64_t                                 generation = 0;
+		uint64_t                                 shader_addr = 0;
+		uint64_t                                 bound_back_addr = 0;
+		uint64_t                                 checksum = 0;
+		bool                                     gs_front = false;
+		ShaderMappedData                         data;
+		std::weak_ptr<const ShaderVertexProgram> program;
+	};
+	// Weak: an evicted program, up to megabytes of IR, is not kept alive here.
+	static thread_local std::array<Recent, 16> recent;
+	const uint64_t shader_addr = gs_front ? regs.es_regs.data_addr : regs.vs_regs.data_addr;
+	auto&          slot        = recent[((shader_addr >> 8u) ^ (shader_addr >> 12u)) % recent.size()];
+	if (slot.generation == g_vs_lookup_generation && slot.shader_addr == shader_addr && slot.bound_back_addr == regs.gs_back_addr &&
+	    slot.checksum == regs.gs_regs.chksum && slot.gs_front == gs_front)
+	{
+		if (auto program = slot.program.lock(); program != nullptr)
+		{
+			*data = slot.data;
+			return program;
+		}
+	}
+	if (!ShaderGetMappedData(shader_addr, data) || data->code_size_bytes == 0u)
+	{
+		EXIT("Gen5 vertex shader has no bounded mapped code range: address=0x%016" PRIx64 "\n", shader_addr);
+	}
+	auto program = GetCachedVertexProgramLocked(regs, *data, gs_front);
+	slot         = {g_vs_lookup_generation, shader_addr, regs.gs_back_addr, regs.gs_regs.chksum, gs_front, *data, program};
 	return program;
 }
 
@@ -2646,8 +2734,98 @@ static void ShaderGetDirectSgpr(ShaderDirectSgprsResources* info, int start_inde
 	info->sgprs_num++;
 }
 
+namespace {
+
+std::atomic<bool> g_storage_address_reads {false};
+
+// A read-only V# from user data whose every consumer is a raw dword load the
+// translator can issue from a device address; anything the slot path or the
+// SGPR words carry beyond that keeps the slot.
+bool ShaderStorageBufferReadsByAddress(const ShaderStorageResources& storage, int i)
+{
+	return Config::IsNextGen() && g_storage_address_reads.load(std::memory_order_relaxed) && storage.dword_loads_only[i] &&
+	       storage.start_register[i] >= 0 && storage.sources[i] != ShaderStorageBindingSource::DynamicScalarLoad &&
+	       storage.accesses[i] == ShaderStorageAccess::Raw && ShaderStorageUsageIsReadOnly(storage.usages[i]) &&
+	       storage.exact_matches[i] && !storage.decoded_unknown[i] && !storage.indirect_descriptor_use[i] &&
+	       !storage.dynamic_sload[i] && !storage.unread_stream[i] && !storage.extended[i] && !storage.raw_tbuffer_use[i] &&
+	       !storage.row_redefined[i];
+}
+
+} // namespace
+
+// The vertex front gets no general ISA analysis, so the access of each V# is
+// taken from the front code alone; ShaderCalcBindingIndices then reads the
+// read-only dword-loaded ones by address. A program with a continuation keeps
+// its metadata evidence, and a V# whose register the front redefines, or whose
+// use does not decode, keeps it too: the front's reads may not be of that V#.
+static void ShaderProveFrontStorageReads(const ShaderVertexProgram& program, ShaderBindResources* bind, int user_data_register_base)
+{
+	if (!g_storage_address_reads.load(std::memory_order_relaxed) || program.back_bytes != 0u || program.front_scalar_flow == nullptr ||
+	    bind->storage_buffers.buffers_num == 0)
+	{
+		return;
+	}
+	ShaderCollectRedefinedBufferDescriptors(program.front_code, bind, user_data_register_base, *program.front_scalar_flow,
+	                                        &program.front_resource_memo, false);
+	if (!bind->descriptor_flow_proven)
+	{
+		return;
+	}
+	auto& storage = bind->storage_buffers;
+	for (int i = 0; i < storage.buffers_num; i++)
+	{
+		if (storage.start_register[i] < 0 || storage.dynamic_sload[i] || ShaderStorageResourceHasDynamicSLoad(*bind, i))
+		{
+			continue;
+		}
+		// An extended V# reaches the front only through EUD loads, whose readers
+		// no dynamic mapping covers when the V# travels through a lane spill.
+		if (storage.extended[i])
+		{
+			if (storage.start_register[i] >= 16 &&
+			    ShaderEudDescriptorReadOnlyByFormatLoads(program.front_code, *bind, storage.start_register[i] - 16, user_data_register_base,
+			                                             *program.front_scalar_flow))
+			{
+				storage.accesses[i]                = ShaderStorageAccess::Typed;
+				storage.exact_matches[i]           = true;
+				storage.dword_loads_only[i]        = false;
+				storage.format_loads_only[i]       = true;
+				storage.decoded_unknown[i]         = false;
+				storage.indirect_descriptor_use[i] = false;
+				storage.raw_tbuffer_use[i]         = false;
+			}
+			continue;
+		}
+		const auto use = AnalyzeShaderStorageUse(program.front_code, storage.start_register[i] + user_data_register_base,
+		                                         &program.front_resource_memo);
+		if (use.access == ShaderStorageAccess::Unknown || use.decoded_unknown || use.indirect_descriptor_use || storage.row_redefined[i])
+		{
+			continue;
+		}
+		storage.accesses[i]                = use.access;
+		storage.exact_matches[i]           = true;
+		storage.dword_loads_only[i]        = use.dword_loads_only;
+		storage.format_loads_only[i]       = use.format_loads_only;
+		storage.decoded_unknown[i]         = false;
+		storage.indirect_descriptor_use[i] = false;
+		storage.raw_tbuffer_use[i]         = use.raw_tbuffer_use;
+	}
+}
+
+void ShaderSetStorageAddressReads(bool supported)
+{
+	g_storage_address_reads.store(supported, std::memory_order_relaxed);
+}
+
 void ShaderCalcBindingIndices(ShaderBindResources* bind)
 {
+	bind->storage_address_used = false;
+	for (int i = 0; i < bind->storage_buffers.buffers_num; i++)
+	{
+		bind->storage_buffers.by_address[i] =
+		    bind->descriptor_flow_proven && ShaderStorageBufferReadsByAddress(bind->storage_buffers, i);
+		bind->storage_address_used          = bind->storage_address_used || bind->storage_buffers.by_address[i];
+	}
 	KYTY_PROFILER_FUNCTION();
 
 	int binding_index = 0;
@@ -3789,6 +3967,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		bind->storage_buffers.raw_vmem_oob_guarded[i]    = matched_evidence.raw_vmem_oob_guarded;
 		bind->storage_buffers.raw_smem_use[i]            = matched_evidence.raw_smem_use;
 		bind->storage_buffers.raw_tbuffer_use[i]         = matched_evidence.raw_tbuffer_use;
+		bind->storage_buffers.dword_loads_only[i]        = evidence.exact_match && exact_evidence.dword_loads_only;
+		bind->storage_buffers.format_loads_only[i]       = evidence.exact_match && exact_evidence.format_loads_only;
 		bind->storage_buffers.raw_smem_required_bytes[i] = matched_evidence.raw_smem_required_bytes;
 		bind->storage_buffers.raw_smem_dynamic_offset[i] = matched_evidence.raw_smem_dynamic_offset;
 
@@ -3840,10 +4020,12 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			const int binding_register = descriptor.extended
 			                                 ? ShaderGen5EudOffsetBase(user_sgpr_num) + (descriptor.start_register - 16)
 			                                 : descriptor.start_register;
-			auto image = AnalyzeShaderDirectImageUse(*code, binding_register + user_data_register_base, nullptr, code_memo);
+			// Only reads through the registers still holding the bound T# describe it; a shader may
+			// reload the same SGPRs with other descriptors later.
+			auto image = AnalyzeShaderDirectImageUse(*code, binding_register + user_data_register_base, &entry_values, code_memo);
 			if (image.texture == ShaderTextureUsage::Unknown && user_data_register_base != 0)
 			{
-				image = AnalyzeShaderDirectImageUse(*code, binding_register, nullptr, code_memo);
+				image = AnalyzeShaderDirectImageUse(*code, binding_register, &entry_values, code_memo);
 			}
 			if (image.texture != ShaderTextureUsage::Unknown)
 			{
@@ -3967,7 +4149,7 @@ uint32_t ShaderVertexStreamRecordOffset(const ShaderVertexInputInfo& input_info)
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Kyty::Core::String8 ShaderVertexNggFrontRefusal(const ShaderVertexInputInfo& info)
 {
-	return info.program != nullptr && info.gs_prolog ? info.program->ngg_front.Refusal(info.native_wave.guest_wave_size)
+	return info.program != nullptr && info.gs_prolog ? info.program->ngg_front->Refusal(info.native_wave.guest_wave_size)
 	                                                  : Kyty::Core::String8();
 }
 
@@ -4021,20 +4203,28 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 // A scalar load whose base is a pointer the program computed (VCC or an SGPR
 // outside the user-data window) has no binding-time mapping: it reads guest
 // memory at run time.
-static bool ShaderHasComputedPointerScalarLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_base,
-                                               int user_data_count)
+static bool ShaderIsComputedPointerScalarLoad(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_base,
+                                              int user_data_count)
 {
-	const auto& instructions = code.GetInstructions();
-	return std::any_of(instructions.begin(), instructions.end(),
-	                   [&](const ShaderInstruction& inst)
-	                   {
-		                   const bool computed_base =
-		                       inst.src_num >= 1 && (inst.src[0].type == ShaderOperandType::VccLo ||
-		                                             (inst.src[0].type == ShaderOperandType::Sgpr &&
-		                                              (inst.src[0].register_id < user_data_base ||
-		                                               inst.src[0].register_id + 1 >= user_data_base + user_data_count)));
-		                   return computed_base && ShaderScalarLoadNeedsGuestAddress(inst, bind);
-	                   });
+	const bool computed_base = inst.src_num >= 1 && (inst.src[0].type == ShaderOperandType::VccLo ||
+	                                                 (inst.src[0].type == ShaderOperandType::Sgpr &&
+	                                                  (inst.src[0].register_id < user_data_base ||
+	                                                   inst.src[0].register_id + 1 >= user_data_base + user_data_count)));
+	return computed_base && ShaderScalarLoadNeedsGuestAddress(inst, bind);
+}
+
+// A vector buffer load through a runtime descriptor or a computed-pointer scalar
+// load in front_code; only the instructions either can match are visited.
+static bool VertexFrontReadsGuestMemory(const ShaderVertexProgram& program, const ShaderBindResources& bind, int user_data_base,
+                                        int user_data_count)
+{
+	const auto& instructions = program.front_code.GetInstructions();
+	return std::any_of(program.front_buffer_loads.begin(), program.front_buffer_loads.end(),
+	                   [&](uint32_t index)
+	                   { return ShaderVectorBufferUsesRuntimeDescriptor(bind, instructions.At(index), user_data_base); }) ||
+	       std::any_of(program.front_pointer_scalar_loads.begin(), program.front_pointer_scalar_loads.end(),
+	                   [&](uint32_t index)
+	                   { return ShaderIsComputedPointerScalarLoad(instructions.At(index), bind, user_data_base, user_data_count); });
 }
 
 void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
@@ -4095,11 +4285,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		// This is not a snapshot of arbitrary writes to the pointed-to resources.
 		// Nested code/debug helpers must use their Locked forms under this lease.
 		shader_lifetime_lock.lock();
-		if (!ShaderGetMappedData(shader_addr, &data) || data.code_size_bytes == 0u)
-		{
-			EXIT("Gen5 vertex shader has no bounded mapped code range: address=0x%016" PRIx64 "\n", shader_addr);
-		}
-		info->program = GetCachedVertexProgramLocked(*regs, data, gs_instead_of_vs);
+		info->program = LookupVertexProgramLocked(*regs, gs_instead_of_vs, &data);
 	}
 
 	if (ps5)
@@ -4134,13 +4320,19 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		// are resolved separately from the rebased metadata sharp table.
 		ShaderParseUsage2(usage_user, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr, kGen5GsFrontUserDataBase,
 		                  true, vs_isa, nullptr, info->program->front_scalar_flow.get(), nullptr, &info->program->front_resource_memo);
+		// The program may reload a bound V# register with another descriptor (a
+		// vertex stream from a table); consumers after a reload on every path
+		// read through that runtime V#, the others keep the bound buffer.
+		ShaderCollectRedefinedBufferDescriptors(info->program->code, &info->bind, kGen5GsFrontUserDataBase, *info->program->scalar_flow,
+		                                        &info->program->resource_memo);
+		ShaderProveFrontStorageReads(*info->program, &info->bind, kGen5GsFrontUserDataBase);
 		ShaderBindGsUserDataDescriptors(info->program->code, info->program->gs_user_data_loads, regs->gs_user_data_addr, user_sgpr,
 		                                &info->bind, &usage, &info->program->resource_memo);
 		if (vs_isa != nullptr)
 		{
 			info->native_wave = info->program->native_wave.Get(info->program->code, guest_wave_size);
 			info->required_subgroup_size =
-			    ShaderApplyNggFrontProof(&info->native_wave, info->program->code, shader_stages, info->program->ngg_front)
+			    ShaderApplyNggFrontProof(&info->native_wave, info->program->code, shader_stages, *info->program->ngg_front)
 			        ? guest_wave_size
 			        : 0u;
 			ShaderAssociateSampledTextureSamplers(info->program->code, &info->bind, kGen5GsFrontUserDataBase,
@@ -4150,8 +4342,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			info->bind.program_base_used   = info->program->front_has_getpc;
 			info->bind.program_base        = info->bind.program_base_used ? shader_addr : 0u;
 			info->bind.device_address_used =
-			    info->program->front_has_global_memory_load || ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) ||
-			    ShaderHasComputedPointerScalarLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase, static_cast<int>(user_sgpr_num));
+			    info->program->front_has_global_memory_load || !info->bind.redefined_descriptor_consumers.IsEmpty() ||
+			    VertexFrontReadsGuestMemory(*info->program, info->bind, kGen5GsFrontUserDataBase, static_cast<int>(user_sgpr_num));
 		}
 	} else
 	{
@@ -4488,6 +4680,75 @@ bool ShaderScalarLoadIsZero(const ShaderBindResources& bind, const ShaderInstruc
 	return true;
 }
 
+static bool ShaderPixelMrtExportTarget(const ShaderInstruction& inst, uint32_t* target, bool* compressed);
+
+// Physical target of each color export ordinal under CB_SHADER_MASK. An ordinal
+// left without an enabled target goes to a target the mask disables, whose
+// export mode is ZERO, so it stores nothing. Returns false when every ordinal
+// already lands on its own index (no hole before an enabled target).
+static bool ShaderResolveColorExportRoute(uint32_t shader_mask, uint32_t route[8])
+{
+	uint32_t disabled_target = 8u;
+	bool     routed          = false;
+	for (uint32_t i = 0; i < 8u; i++)
+	{
+		const uint32_t target = State::ResolvePixelExportTarget(shader_mask, i);
+		route[i]              = target;
+		routed |= target < 8u && target != i;
+		if (disabled_target == 8u && ((shader_mask >> (i * 4u)) & 0xFu) == 0u)
+		{
+			disabled_target = i;
+		}
+	}
+	for (uint32_t i = 0; i < 8u; i++)
+	{
+		if (route[i] >= 8u)
+		{
+			route[i] = routed ? disabled_target : i;
+		}
+	}
+	return routed;
+}
+
+// Rewrites MRT export targets from ordinals to physical targets, so every later
+// stage indexes targets. Null exports are discard tails and keep their format.
+static void ShaderRouteColorExports(ShaderCode* code, const uint32_t route[8])
+{
+	using namespace ShaderInstructionFormat;
+	static const Format k_compr[8] = {Mrt0Vsrc0Vsrc1ComprVmDone, Mrt1Vsrc0Vsrc1ComprVm, Mrt2Vsrc0Vsrc1ComprVm,
+	                                  Mrt3Vsrc0Vsrc1ComprVm,     Mrt4Vsrc0Vsrc1ComprVm, Mrt5Vsrc0Vsrc1ComprVm,
+	                                  Mrt6Vsrc0Vsrc1ComprVm,     Mrt7Vsrc0Vsrc1ComprVm};
+	static const Format k_full[8]  = {Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone, Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm, Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm,
+	                                  Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm,     Mrt4Vsrc0Vsrc1Vsrc2Vsrc3Vm, Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm,
+	                                  Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm,     Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm};
+	auto& instructions = code->GetInstructions();
+	for (uint32_t i = 0; i < instructions.Size(); i++)
+	{
+		auto&    inst         = instructions[i];
+		uint32_t export_index = 0u;
+		bool     compressed   = false;
+		if (inst.type == ShaderInstructionType::Exp && ShaderPixelMrtExportTarget(inst, &export_index, &compressed))
+		{
+			inst.format = (compressed ? k_compr : k_full)[route[export_index]];
+		}
+	}
+}
+
+static ShaderPixelColorExports ShaderRouteColorExportSummary(const ShaderPixelColorExports& exports, const uint32_t route[8])
+{
+	ShaderPixelColorExports routed;
+	for (uint32_t i = 0; i < 8u; i++)
+	{
+		const auto from = static_cast<uint8_t>(1u << i);
+		const auto to   = static_cast<uint8_t>(1u << route[i]);
+		routed.enable[route[i]] |= exports.enable[i];
+		routed.packed |= (exports.packed & from) != 0u ? to : 0u;
+		routed.full |= (exports.full & from) != 0u ? to : 0u;
+		routed.partial_targets |= (exports.partial_targets & from) != 0u ? to : 0u;
+	}
+	return routed;
+}
+
 void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
                           uint32_t cb_target_mask, ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable)
 {
@@ -4498,7 +4759,6 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	EXIT_IF(regs == nullptr);
 	EXIT_IF(sh == nullptr);
 
-	*ps_info = {};
 	ps_info->float_mode = regs->ps_regs.rsrc1.float_mode;
 	ps_info->dx10_clamp = regs->ps_regs.rsrc1.dx10_clamp;
 	ps_info->ieee_mode  = regs->ps_regs.rsrc1.ieee_mode;
@@ -4539,10 +4799,19 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	// The CB writes a target only through the channels CB_TARGET_MASK and
 	// CB_SHADER_MASK both enable; an export to any other target is discarded,
 	// whatever SPI_SHADER_COL_FORMAT and the stale CB_COLOR*_INFO say.
+	// SPI_SHADER_COL_FORMAT is indexed by export ordinal, CB_COLOR*_INFO by target.
+	uint32_t   export_route[8] = {};
+	const bool exports_routed  = ShaderResolveColorExportRoute(sh->m_cbShaderMask, export_route);
+	ps_info->routed_color_targets = 0u;
 	for (int i = 0; i < 8; i++)
 	{
+		if (exports_routed && ((sh->m_cbShaderMask >> (i * 4)) & 0xFu) != 0u)
+		{
+			ps_info->routed_color_targets |= static_cast<uint8_t>(1u << i);
+		}
 		const bool written             = State::ResolveColorWriteMask(cb_target_mask, sh->m_cbShaderMask, static_cast<uint32_t>(i)) != 0u;
-		ps_info->target_output_mode[i] = written ? sh->target_output_mode[i] : 0u;
+		const auto export_index        = static_cast<uint32_t>(std::find(export_route, export_route + 8, static_cast<uint32_t>(i)) - export_route);
+		ps_info->target_output_mode[i] = written && export_index < 8u ? sh->target_output_mode[export_index] : 0u;
 		// A discarded target's order and type are stale registers. No emitter reads
 		// them, and in the shader identity they would split one program into variants
 		// the driver compiles again.
@@ -4607,7 +4876,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->native_wave = analysis.native_wave->Get(*analysis.code, ps_wave32 ? 32u : 64u);
 		ps_info->required_subgroup_size = analysis.pixel_analysis->uses_native_wave_state ? ps_info->native_wave.guest_wave_size : 0u;
 		ps_info->has_only_null_exports = analysis.pixel_analysis->has_only_null_exports;
-		ps_info->color_exports         = analysis.pixel_analysis->color_exports;
+		ps_info->color_exports         = exports_routed ? ShaderRouteColorExportSummary(analysis.pixel_analysis->color_exports, export_route)
+		                                                : analysis.pixel_analysis->color_exports;
 		// DB_SHADER_CONTROL decides whether an output-free shader runs; its memory
 		// writes stay unexecuted unless EXEC_ON_NOOP requests them.
 		if (allow_noop_stage_disable)
@@ -4637,7 +4907,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		code.SetType(ShaderType::Pixel);
 		ShaderParseMapped(regs->ps_regs.data_addr, &code);
 		ps_info->has_only_null_exports = ShaderHasOnlyNullPixelExports(code);
-		ps_info->color_exports         = ShaderSummarizePixelColorExports(code);
+		ps_info->color_exports         = exports_routed ? ShaderRouteColorExportSummary(ShaderSummarizePixelColorExports(code), export_route)
+		                                                : ShaderSummarizePixelColorExports(code);
 		ps_info->native_wave = ShaderAnalyzeNativeWave(code, 64u);
 		ps_info->required_subgroup_size = ShaderUsesNativeWaveState(code) ? 64u : 0u;
 	}
@@ -5517,6 +5788,10 @@ ShaderCode ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegist
 			DebugStatsScopedTimer timer(RecordShaderPipelineMissParse);
 			ShaderParseMapped(regs->ps_regs.data_addr, &code, ShaderContinuationMode::None, true);
 		}
+		if (uint32_t export_route[8] = {}; ShaderResolveColorExportRoute(sh->m_cbShaderMask, export_route))
+		{
+			ShaderRouteColorExports(&code, export_route);
+		}
 		if (Config::IsNextGen())
 		{
 			// GFX10 EXTRA_LDS_SIZE is encoded in blocks of 128 dwords. The
@@ -5770,18 +6045,38 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 //	return ShaderUpdateBindInfo(code, &input_info->bind);
 //}
 
-// Collects one shader identity in a reserved local buffer; the identity vector
-// then takes every word in one copy instead of a copy-on-write check per word.
+// Collects one shader identity in a per-thread buffer whose capacity is kept, since
+// identities are built on every draw; the identity vector then takes every word in
+// one copy instead of a copy-on-write check per word.
 class ShaderIdWriter
 {
 public:
-	ShaderIdWriter() { m_words.reserve(512); }
+	ShaderIdWriter(): m_words(Words())
+	{
+		EXIT_IF(InUse());
+		InUse() = true;
+		m_words.clear();
+	}
+	~ShaderIdWriter() { InUse() = false; }
+
+	KYTY_CLASS_NO_COPY(ShaderIdWriter);
 
 	void Add(uint32_t word) { m_words.push_back(word); }
 	void Finish(ShaderId* id) const { id->ids.Add(m_words.data(), static_cast<uint32_t>(m_words.size())); }
 
 private:
-	std::vector<uint32_t> m_words;
+	static std::vector<uint32_t>& Words()
+	{
+		thread_local std::vector<uint32_t> words;
+		return words;
+	}
+	static bool& InUse()
+	{
+		thread_local bool in_use = false;
+		return in_use;
+	}
+
+	std::vector<uint32_t>& m_words;
 };
 
 static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bind)
@@ -5794,6 +6089,16 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 	if (bind.device_address_used)
 	{
 		ids->Add(bind.device_address_offset_dw);
+	}
+	ids->Add(static_cast<uint32_t>(bind.storage_address_used));
+	if (bind.storage_address_used)
+	{
+		uint32_t by_address = 0;
+		for (int i = 0; i < bind.storage_buffers.buffers_num; i++)
+		{
+			by_address |= static_cast<uint32_t>(bind.storage_buffers.by_address[i]) << static_cast<uint32_t>(i);
+		}
+		ids->Add(by_address);
 	}
 	ids->Add(static_cast<uint32_t>(bind.thread_limits_used));
 	if (bind.thread_limits_used)
@@ -5864,6 +6169,11 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 
 	ids->Add(bind.redefined_descriptor_consumers.Size());
 	for (const auto pc: bind.redefined_descriptor_consumers)
+	{
+		ids->Add(pc);
+	}
+	ids->Add(bind.slot_only_consumers.Size());
+	for (const auto pc: bind.slot_only_consumers)
 	{
 		ids->Add(pc);
 	}
@@ -6232,6 +6542,11 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
 	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
 
+	if (input_info->routed_color_targets != 0u)
+	{
+		ids.Add(0x4d525431u); // MRT1: export ordinals routed past a CB_SHADER_MASK hole.
+		ids.Add(input_info->routed_color_targets);
+	}
 	// The export declarations, component order and channel type are part of the
 	// generated SPIR-V interface. They must distinguish pipelines that use the
 	// same guest shader with different render-target formats or COMP_SWAP values.

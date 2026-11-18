@@ -689,7 +689,9 @@ int StartGpuMappingRuntime(LifecycleBridge* bridge, GuestLoad* load)
 	}
 	Kyty::Emulator::GpuMemoryFault::GetPort().NotifyFaultHandlerInstalled();
 	const Kernel::Memory::GpuMappingLifecycleCallbacks callbacks {bridge, LifecycleBridge::Register, LifecycleBridge::Invalidate,
-	                                                             LifecycleBridge::Release, LifecycleBridge::Protect};
+	                                                             LifecycleBridge::Release, LifecycleBridge::Protect,
+	                                                             +[](void* c, const Kernel::Memory::KernelGpuMappingRange* r, size_t n, uint64_t* t) { *t = 0; return LifecycleBridge::Invalidate(c, r, n); },
+	                                                             +[](void*, uint64_t) { return true; }, +[](void*, uint64_t) {}};
 	return Kernel::Memory::GetGpuMappingLifecyclePort().Install(callbacks) ? 0 : 3;
 }
 
@@ -1485,7 +1487,8 @@ int PhysicalReleaseRetiresDeviceAddressRangeProbe()
 
 // Physical pages written one at a time are imported as their whole 64 MiB chunk:
 // two separate writes give one entry, repeated preparation imports nothing new
-// and leaves the untouched block unpopulated, and a write there adds its block.
+// and leaves the untouched block unpopulated, and a write there adds its block at
+// the first preparation after an ordering point (a submission, in a title).
 int PhysicalImportCoversResidentBlockProbe()
 {
 	static LifecycleBridge bridge;
@@ -1525,6 +1528,7 @@ int PhysicalImportCoversResidentBlockProbe()
 		if (status == 0 && second_block_resident() != 0) { status = 44; }
 	}
 	WriteMarker(guest + kBlockBytes + kGuestPageBytes, kMarkerC);
+	GuestDeviceAddressNoteOrderingPoint();
 	if (status == 0 && (!GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries) || entries != 2)) { status = 45; }
 	if (status == 0) { status = load.Expect("second block", table, entries, guest + kBlockBytes + kGuestPageBytes, kMarkerC); }
 
@@ -1765,6 +1769,66 @@ TEST(EmulatorGuestDeviceAddress, DirectoryRegionHoldsTheEntryOfEveryAddress)
 	EXPECT_LE(directory.words[far + 1u] - directory.words[far], 1u);
 	const auto empty = GuestDeviceAddressBuildDirectory(nullptr, 0);
 	EXPECT_EQ(empty.words, (std::vector<uint32_t> {0u, 0u}));
+}
+
+// Every guest byte an overlay covers translates into the overlay; every other
+// byte keeps its chunk's translation and the bytes imported after it.
+TEST(EmulatorGuestDeviceAddress, OverlaysReplaceTheBytesTheyCoverInTheTable)
+{
+	const std::vector<GuestDeviceAddressEntry> chunks = {
+	    {0x10000, 0x4000, 0xa0000, 0x5000}, {0x14000, 0x2000, 0xb0000, 0x2000}, {0x20000, 0x1000, 0xc0000, 0x1000}};
+	const std::vector<GuestDeviceAddressEntry> overlays = {
+	    {0x10100, 0x40, 0xf0000, 0xc0},  // inside the first chunk
+	    {0x10200, 0x10, 0xf1000, 0x90},  // a second one in the same chunk
+	    {0x13ff0, 0x20, 0xf2000, 0xa0},  // across the first two chunks
+	    {0x18000, 0x20, 0xf3000, 0xa0},  // in the gap
+	    {0x30000, 0x20, 0xf4000, 0xa0}}; // past the last chunk
+	const auto table = GuestDeviceAddressOverlayEntries(chunks, overlays);
+	for (std::size_t i = 1; i < table.size(); ++i)
+	{
+		EXPECT_LE(table[i - 1].guest + table[i - 1].size, table[i].guest) << i;
+	}
+	const auto translate = [&](uint64_t guest, uint64_t* device, uint64_t* span_left)
+	{
+		const auto entry = std::upper_bound(table.begin(), table.end(), guest,
+		                                    [](uint64_t value, const GuestDeviceAddressEntry& e) { return value < e.guest; });
+		if (entry == table.begin() || guest - std::prev(entry)->guest >= std::prev(entry)->size)
+		{
+			return false;
+		}
+		const auto& found = *std::prev(entry);
+		*device           = found.device + (guest - found.guest);
+		*span_left        = found.span - (guest - found.guest);
+		return true;
+	};
+	const auto expected = [&](uint64_t guest, uint64_t* device, uint64_t* span_left)
+	{
+		for (const auto* list: {&overlays, &chunks})
+		{
+			for (const auto& e: *list)
+			{
+				if (guest >= e.guest && guest - e.guest < e.size)
+				{
+					*device    = e.device + (guest - e.guest);
+					*span_left = e.span - (guest - e.guest);
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+	for (uint64_t guest = 0xf000; guest < 0x31000; guest += 0x10)
+	{
+		uint64_t device = 0, span = 0, want_device = 0, want_span = 0;
+		const bool found = translate(guest, &device, &span);
+		ASSERT_EQ(found, expected(guest, &want_device, &want_span)) << std::hex << guest;
+		if (found)
+		{
+			EXPECT_EQ(device, want_device) << std::hex << guest;
+			EXPECT_EQ(span, want_span) << std::hex << guest;
+		}
+	}
+	EXPECT_EQ(GuestDeviceAddressOverlayEntries(chunks, {}).size(), chunks.size());
 }
 
 TEST(EmulatorGuestDeviceAddress, RepeatedPrepareDoesNotImportUntouchedNeighbours) { RunIsolated(StableResidencyProbe); }

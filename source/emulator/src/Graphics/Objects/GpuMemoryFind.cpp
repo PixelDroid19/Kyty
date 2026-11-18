@@ -95,6 +95,27 @@ Vector<GpuMemoryObject> GpuMemory::FindObjects(const uint64_t* vaddr, const uint
 	return ret;
 }
 
+Vector<GpuMemoryObject> GpuMemory::FindIntersectingObjects(uint64_t vaddr, uint64_t size, const SubmissionId& submission)
+{
+	Core::LockGuard lock(m_mutex);
+	Vector<GpuMemoryObject> ret;
+	std::vector<int> heaps;
+	HeapsIntersecting(&vaddr, &size, 1, &heaps);
+	for (const int heap_id: heaps)
+	{
+		auto& heap = m_heaps[heap_id];
+		for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1))
+		{
+			auto& object = heap.objects[block.object_id];
+			EXIT_IF(object.free);
+			RecordUse(&object.info, submission);
+			object.info.use_last_frame = GpuMemoryAliasLookupUseFrame(m_current_frame, object.info.use_last_frame);
+			ret.Add(object.info.object);
+		}
+	}
+	return ret;
+}
+
 Vector<GpuMemoryObject> GpuMemory::FindEqualObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission)
 {
 	Core::LockGuard lock(m_mutex);
@@ -334,6 +355,55 @@ bool GpuMemory::QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size,
 	return true;
 }
 
+bool GpuMemory::RangeHoldsGuestBytes(uint64_t vaddr, uint64_t size)
+{
+	if (size == 0 || vaddr > UINT64_MAX - (size - 1u))
+	{
+		return false;
+	}
+	// Draws check thousands of ranges a frame inside a few allocations. A window
+	// proven allocated and free of host results stays proven until the
+	// generation moves; a range answered from it orders before that change.
+	struct Window
+	{
+		const GpuMemory* owner      = nullptr;
+		uint64_t         generation = UINT64_MAX;
+		uint64_t         begin      = 0;
+		uint64_t         end        = 0;
+	};
+	constexpr uint64_t                            kWindowBytes = 1024u * 1024u;
+	constexpr uint64_t                            kWindows     = 256u;
+	thread_local std::array<Window, kWindows>* const windows   = new std::array<Window, kWindows>;
+	auto&          window     = (*windows)[(vaddr / kWindowBytes) % kWindows];
+	const uint64_t generation = m_guest_bytes_generation.load(std::memory_order_acquire);
+	if (window.owner == this && window.generation == generation && vaddr >= window.begin && vaddr < window.end &&
+	    size <= window.end - vaddr)
+	{
+		return true;
+	}
+	Core::LockGuard lock(m_mutex);
+	if (ValidateAllocatedRangeLocked(vaddr, size) != GpuMemoryRangeValidationStatus::Valid || m_host_result_pages.Any(vaddr, size))
+	{
+		return false;
+	}
+	const uint64_t stable = m_guest_bytes_generation.load(std::memory_order_relaxed);
+	const auto     after  = std::upper_bound(m_heap_index.begin(), m_heap_index.end(), vaddr,
+	                                         [](uint64_t value, const HeapSpan& span) { return value < span.begin; });
+	if ((stable & 1u) != 0u || after == m_heap_index.begin())
+	{
+		return true;
+	}
+	const auto&    span  = *std::prev(after);
+	const uint64_t align = vaddr - vaddr % kWindowBytes;
+	const uint64_t begin = std::max(span.begin, align);
+	const uint64_t end   = std::min(span.end, align > UINT64_MAX - kWindowBytes ? UINT64_MAX : align + kWindowBytes);
+	if (begin < end && !m_host_result_pages.Any(begin, end - begin))
+	{
+		window = {this, stable, begin, end};
+	}
+	return true;
+}
+
 bool GpuMemory::CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission)
 {
 	if (!GpuMemoryCanUseTransientReadOnlyBuffer(true, size, true, true) || vaddr > UINT64_MAX - (size - 1u))
@@ -343,7 +413,7 @@ bool GpuMemory::CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemo
 
 	const auto      query = GpuMemoryRangeQueryKey::Create(&vaddr, &size, 1, false);
 	Core::LockGuard lock(m_mutex);
-	if (ValidateAllocatedRangeLocked(vaddr, size, query) != GpuMemoryRangeValidationStatus::Valid)
+	if (ValidateAllocatedRangeLocked(vaddr, size) != GpuMemoryRangeValidationStatus::Valid)
 	{
 		return false;
 	}
@@ -419,7 +489,7 @@ bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, voi
 	const auto      query = GpuMemoryRangeQueryKey::Create(&vaddr, &size, 1, false);
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
-	if (ValidateAllocatedRangeLocked(vaddr, size, query) != GpuMemoryRangeValidationStatus::Valid)
+	if (ValidateAllocatedRangeLocked(vaddr, size) != GpuMemoryRangeValidationStatus::Valid)
 	{
 		finish_validation();
 		return false;
@@ -480,7 +550,7 @@ bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, con
 	const auto      query = GpuMemoryRangeQueryKey::Create(&vaddr, &size, 1, false);
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
-	if (ValidateAllocatedRangeLocked(vaddr, size, query) != GpuMemoryRangeValidationStatus::Valid)
+	if (ValidateAllocatedRangeLocked(vaddr, size) != GpuMemoryRangeValidationStatus::Valid)
 	{
 		finish_validation();
 		return false;
@@ -490,8 +560,12 @@ bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, con
 		finish_validation();
 		return false;
 	}
-	finish_validation();
+	// The validation end is the compare start: one clock read for both.
 	const auto compare_start = DebugStatsClock::now();
+	if (validation_ns != nullptr)
+	{
+		*validation_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(compare_start - validation_start).count());
+	}
 	// No page protection: a CPU store racing this comparison can make it match
 	// a state memory never held at one instant, the same race the console GPU
 	// has when the guest writes a buffer a pending draw reads. Guests order
@@ -519,7 +593,8 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 		m_materialization_cache.InvalidateRange(vaddr[vi], size[vi], writer);
 	}
 
-	int heap_id = GetHeapId(vaddr[0], size[0]);
+	const ResetHashFind* found   = FindResetHashTarget(vaddr, size, vaddr_num, type);
+	int                  heap_id = found != nullptr ? found->heap_id : GetHeapId(vaddr[0], size[0]);
 
 	if (heap_id < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: heap_id < 0 condition ignored (continuing)\n"); }
 
@@ -527,9 +602,13 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 
 	uint64_t new_hash = 0;
 
-	int fast_id = -1;
-	if (FindFast(heap_id, vaddr, size, vaddr_num, type, false, &fast_id))
+	int fast_id = found != nullptr ? found->object_id : -1;
+	if (found != nullptr || FindFast(heap_id, vaddr, size, vaddr_num, type, false, &fast_id))
 	{
+		if (found == nullptr)
+		{
+			RememberResetHashTarget(vaddr, size, vaddr_num, type, heap_id, fast_id);
+		}
 		auto& h = heap.objects[fast_id];
 		EXIT_IF(h.free);
 		auto& o = h.info;
@@ -631,6 +710,42 @@ bool GpuMemory::FindFast(int heap_id, const uint64_t* vaddr, const uint64_t* siz
 
 	return false;
 }
+
+// A remembered find stays the FindFast answer while no block entered or left a heap
+// and the heap index is unchanged.
+const GpuMemory::ResetHashFind* GpuMemory::FindResetHashTarget(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
+                                                               GpuMemoryObjectType type) const
+{
+	const uint64_t graph_generation = m_object_graph_generation.load(std::memory_order_acquire);
+	const uint64_t heap_generation  = m_guest_bytes_generation.load(std::memory_order_acquire);
+	for (const auto& find: m_reset_hash_finds)
+	{
+		if (find.vaddr_num != vaddr_num || find.type != type || find.graph_generation != graph_generation ||
+		    find.heap_generation != heap_generation || !std::equal(vaddr, vaddr + vaddr_num, find.vaddr) ||
+		    !std::equal(size, size + vaddr_num, find.size))
+		{
+			continue;
+		}
+		return &find;
+	}
+	return nullptr;
+}
+
+void GpuMemory::RememberResetHashTarget(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, int heap_id,
+                                        int object_id)
+{
+	auto& find             = m_reset_hash_finds[m_reset_hash_find_next];
+	m_reset_hash_find_next = (m_reset_hash_find_next + 1u) % RESET_HASH_FINDS;
+	std::copy(vaddr, vaddr + vaddr_num, find.vaddr);
+	std::copy(size, size + vaddr_num, find.size);
+	find.vaddr_num        = vaddr_num;
+	find.type             = type;
+	find.heap_id          = heap_id;
+	find.object_id        = object_id;
+	find.graph_generation = m_object_graph_generation.load(std::memory_order_acquire);
+	find.heap_generation  = m_guest_bytes_generation.load(std::memory_order_acquire);
+}
+
 Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
                                                          bool only_first)
 {
@@ -642,7 +757,6 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 	EXIT_IF(vaddr == nullptr || size == nullptr);
 	EXIT_IF(only_first && vaddr_num != 1);
 
-	Vector<GpuMemory::OverlappedBlock> ret;
 	if (heap.overlap_cache == nullptr)
 	{
 		heap.overlap_cache = new OverlapQueryCache;
@@ -654,7 +768,7 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 		// range-query cache, whose keys intentionally reject zero-sized spans.
 		if (size[i] == 0)
 		{
-			return ret;
+			return {};
 		}
 	}
 	const auto query = GpuMemoryRangeQueryKey::Create(vaddr, size, vaddr_num, only_first);
@@ -664,8 +778,14 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 		return *cached;
 	}
 
-	const Vector<int> candidates =
-	    vaddr_num == 1 ? heap.objects_map2->FindAll(vaddr[0], size[0]) : heap.objects_map2->FindAll(vaddr, size, vaddr_num);
+	// Declared after the cache hit, which shares the cached array: a Vector allocates even empty.
+	Vector<GpuMemory::OverlappedBlock> ret;
+	auto&                              candidates = m_find_blocks_candidates;
+	heap.objects_map2->FindAll(vaddr, size, vaddr_num, &candidates);
+	if (!candidates.IsEmpty())
+	{
+		ret.Expand(candidates.Size());
+	}
 	for (int index: candidates)
 	{
 		const auto& object = heap.objects[index];
@@ -715,6 +835,27 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 		heap.objects_map2->Insert(vaddr[vi], size[vi], obj_id);
 	}
 	return nb;
+}
+
+void GpuMemory::SetHostResultPagesCounted(Object* object, bool counted)
+{
+	if (object->host_result_counted == counted)
+	{
+		return;
+	}
+	object->host_result_counted = counted;
+	m_guest_bytes_generation.fetch_add(1, std::memory_order_acq_rel);
+	for (int vi = 0; vi < object->block.vaddr_num; vi++)
+	{
+		if (counted)
+		{
+			m_host_result_pages.Add(object->block.vaddr[vi], object->block.size[vi]);
+		} else
+		{
+			m_host_result_pages.Remove(object->block.vaddr[vi], object->block.size[vi]);
+		}
+	}
+	m_guest_bytes_generation.fetch_add(1, std::memory_order_release);
 }
 
 void GpuMemory::DeleteBlock(Block* b, int heap_id, int obj_id)

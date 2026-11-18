@@ -37,8 +37,14 @@ replay follows wall-clock time, so loading-time differences
 between the recorded and the replayed run shift the guest state the inputs
 meet; record with the shader caches the replay will use.
 
+Save data persists between runs (`<build>/user/savedata`, or `KYTY_SAVEDATA_DIR`), and a title that
+finds its earlier progress can take another path through its menus. Give each scripted run the save state
+the route was recorded with, usually a fresh empty `KYTY_SAVEDATA_DIR` per run.
+
 The route is applied after the host/controller state and is OR-ed with the
-diagnostic agent overlay. It reports a connected pad while active, so titles
+diagnostic agent overlay. Route buttons are OR-ed with held ones; on a stick
+axis the route holds, a live stick or key moved off rest wins, so the user can
+still steer during a replay. It reports a connected pad while active, so titles
 that gate their startup screens on controller presence follow the same path as
 an attached device. It does not alter graphics, timing, or game memory.
 
@@ -69,4 +75,7 @@ Keyboard and active physical-controller button holds have separate ownership.
 Releasing or disconnecting one source preserves a button held by the other,
 including its transition history. Each stick and trigger axis follows the
 source moved farthest from rest; script and agent overlays continue to merge
-after the host state.
+after the host state. An agent axis, like a route axis, applies only while the
+live axis is at rest (128 for a stick, 0 for a trigger): an agent that releases
+a stick by writing its rest value does not pin the user's stick for the rest of
+the session (`pad clear` releases every agent axis).

@@ -3310,6 +3310,28 @@ against the same correct gameplay capture.
   index, clip-space, visual, or stall evidence. Do not wait through this
   pre-gate degradation merely to collect a late trace; retain the bounded index
   peek for a future route that reaches the material checkpoint cheaply.
+- Split-wave exchange spins on relaxed loads (2026-11-09, PPSA21567 - ASTRO
+  BOT): excluded. When a ballot or lane read's result is dead, ANV removes a
+  spin made only of relaxed loads, so that part stops waiting and a later
+  publish can overwrite a bank another part still reads. Keep one acquiring
+  load per spin. Record: `docs/titles/robot-platformer.md`.
+- BVH intersection branched on EXEC and node type (2026-11-09, PPSA21567 -
+  ASTRO BOT, translator 207): adopted on one run per arm. The traversal tests
+  one node per wave, so one layout runs per call; dune frame rate +4-7 %, GPU
+  time per frame -2.7 ms. Record: `docs/titles/robot-platformer.md`.
+- Remembering the last two address-table entries per invocation (2026-11-09,
+  PPSA21567 - ASTRO BOT, translator 208): excluded. The dependent table walk
+  before each BVH node load was skipped, yet the kernel's dune time per call
+  and the GPU time per frame did not move. Translation latency is not the BVH
+  traversal's bottleneck. Record: `docs/titles/robot-platformer.md`.
+- Reshaping the BVH kernel's translation to cut its spills (2026-11-10,
+  PPSA21567 - ASTRO BOT, translator 210, offline ANV statistics): excluded.
+  Packing cold scalar registers into lanes removes at most 149 of 1072
+  outer-loop fills (frame effect not measured), not monotonic in the
+  register set and valid only for values proven uniform; workgroup memory is
+  worse; removing every rendezvous still leaves 1740 fills; relaxed exchange
+  ordering removes fences but no fills. The spills are the guest's live
+  ranges at 128 registers. Record: `docs/titles/robot-platformer.md`.
 
 ## Validation gate for the next change
 

@@ -12,7 +12,9 @@
 #include "Emulator/Log.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdlib>
+#include <vector>
 
 UT_BEGIN(EmulatorShaderGetpc);
 
@@ -362,6 +364,321 @@ TEST(EmulatorShaderGetpc, FormatLoadsDecodeDescriptorFormatOnBothPaths)
 	EXPECT_FALSE(binary.IsEmpty());
 }
 
+// A V# read only by format loads binds in any decodable format; a format store keeps the strict 32-bit binding rule
+// (the translator encodes any format, see FormatStoresEncodeDescriptorFormat, but the bind gate is unchanged).
+TEST(EmulatorShaderGetpc, FormatLoadOnlyStorageAcceptsEveryDecodableFormat)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	ShaderInstruction load {};
+	load.type                 = ShaderInstructionType::BufferLoadFormatX;
+	load.format               = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	load.dst                  = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	load.src[0]               = {.type = ShaderOperandType::Vgpr, .register_id = 5, .size = 1};
+	load.src[1]               = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+	load.src[2].type          = ShaderOperandType::IntegerInlineConstant;
+	load.src_num              = 3;
+	load.buffer_idxen         = true;
+	ShaderInstruction store   = load;
+	store.pc                  = 8;
+	store.type                = ShaderInstructionType::BufferStoreFormatX;
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	const auto analyze = [&](bool with_store)
+	{
+		ShaderCode code;
+		code.SetType(ShaderType::Compute);
+		code.GetInstructions().Add(load);
+		if (with_store) { code.GetInstructions().Add(store); }
+		end.pc = with_store ? 16u : 8u;
+		code.GetInstructions().Add(end);
+		return AnalyzeShaderStorageUse(code, 8);
+	};
+	const auto loads = analyze(false);
+	EXPECT_EQ(loads.access, ShaderStorageAccess::Typed);
+	EXPECT_TRUE(loads.format_loads_only);
+	const auto written = analyze(true);
+	EXPECT_EQ(written.access, ShaderStorageAccess::Typed);
+	EXPECT_FALSE(written.format_loads_only);
+
+	ShaderBufferResource r16 {};
+	r16.fields[1] = 2u << 16u;                    // stride 2
+	r16.fields[2] = 64u;
+	r16.fields[3] = (11u << 12u) | DstSel(4, 0, 0, 0); // R16_UINT
+	EXPECT_TRUE(ShaderGen5FormatLoadDescriptorSupported(r16));
+	EXPECT_FALSE(ShaderGen5StorageDescriptorSupported(r16, ShaderStorageAccess::Typed));
+	r16.fields[3] = DstSel(4, 0, 0, 0); // INVALID
+	EXPECT_FALSE(ShaderGen5FormatLoadDescriptorSupported(r16));
+}
+
+// The front loads an extended V# into s[0:3], parks it in v1 lanes 0..3 while
+// s0 holds other data, restores it and reads it with one format load.
+TEST(EmulatorShaderGetpc, ExtendedDescriptorFollowedThroughLaneSpillToFormatLoad)
+{
+	constexpr int kBase    = 8;
+	constexpr int kPointer = 24; // API register of the EUD pointer, s[32:33] in the front
+	const auto sgpr = [](int reg, int size = 1) { return ShaderOperand {.type = ShaderOperandType::Sgpr, .register_id = reg, .size = size}; };
+	const auto vgpr = [](int reg, int size = 1) { return ShaderOperand {.type = ShaderOperandType::Vgpr, .register_id = reg, .size = size}; };
+	const auto lane = [](int value)
+	{
+		ShaderOperand operand {.type = ShaderOperandType::IntegerInlineConstant, .size = 1};
+		operand.constant.i = value;
+		return operand;
+	};
+	const auto eud_load = [&](ShaderInstructionType type, int dst, int dwords, uint32_t byte_offset)
+	{
+		ShaderInstruction inst {};
+		inst.type   = type;
+		inst.dst    = sgpr(dst, dwords);
+		inst.src[0] = sgpr(kPointer + kBase, 2);
+		inst.src[1] = {.type = ShaderOperandType::LiteralConstant, .size = 1};
+		inst.src[1].constant.u = byte_offset;
+		inst.src_num           = 2;
+		return inst;
+	};
+	const auto unary = [](ShaderInstructionType type, const ShaderOperand& dst, const ShaderOperand& src0, const ShaderOperand& src1)
+	{
+		ShaderInstruction inst {};
+		inst.type    = type;
+		inst.dst     = dst;
+		inst.src[0]  = src0;
+		inst.src[1]  = src1;
+		inst.src_num = 2;
+		return inst;
+	};
+	const auto format_access = [&](ShaderInstructionType type)
+	{
+		ShaderInstruction inst {};
+		inst.type         = type;
+		inst.dst          = vgpr(6, 2);
+		inst.src[0]       = vgpr(0);
+		inst.src[1]       = sgpr(0, 4);
+		inst.src[2].type  = ShaderOperandType::IntegerInlineConstant;
+		inst.src_num      = 3;
+		inst.buffer_idxen = true;
+		return inst;
+	};
+	const auto spill   = [&](int word) { return unary(ShaderInstructionType::VWritelaneB32, vgpr(1), sgpr(word), lane(word)); };
+	const auto restore = [&](int word) { return unary(ShaderInstructionType::VReadlaneB32, sgpr(word), vgpr(1), lane(word)); };
+	const auto program = [&]()
+	{
+		std::vector<ShaderInstruction> body {eud_load(ShaderInstructionType::SLoadDwordx4, 0, 4, 96)};
+		for (int word = 0; word < 4; ++word) { body.push_back(spill(word)); }
+		for (int word = 0; word < 4; ++word) { body.push_back(unary(ShaderInstructionType::SMovB32, sgpr(word), sgpr(40 + word), {})); }
+		for (int word = 0; word < 4; ++word) { body.push_back(restore(word)); }
+		body.push_back(format_access(ShaderInstructionType::BufferLoadFormatXy));
+		body.push_back(unary(ShaderInstructionType::VMovB32, vgpr(1), lane(0), {}));
+		body.push_back(eud_load(ShaderInstructionType::SLoadDwordx4, 0, 4, 0));
+		return body;
+	};
+	ShaderBindResources bind {};
+	bind.extended.used           = true;
+	bind.extended.start_register = kPointer;
+	const auto proves = [&](std::vector<ShaderInstruction> body)
+	{
+		ShaderCode code;
+		code.SetType(ShaderType::Vertex);
+		ShaderInstruction end {};
+		end.type = ShaderInstructionType::SEndpgm;
+		body.push_back(end);
+		for (size_t index = 0; index < body.size(); ++index)
+		{
+			body[index].pc = static_cast<uint32_t>(index * 8u);
+			code.GetInstructions().Add(body[index]);
+		}
+		return ShaderEudDescriptorReadOnlyByFormatLoads(code, bind, 24, kBase, *ShaderScalarFlowOf(code));
+	};
+	const auto edited = [&](size_t index, const ShaderInstruction& inst)
+	{
+		auto body = program();
+		body.insert(body.begin() + static_cast<std::ptrdiff_t>(index), inst);
+		return body;
+	};
+
+	EXPECT_TRUE(proves(program()));
+	// Instructions 0 load, 1-4 spill, 5-8 clobber s[0:3], 9-12 restore, 13 format load.
+	constexpr size_t kRestore = 9;
+	constexpr size_t kConsumer = 13;
+	// No load reaches the V# of the next table row.
+	EXPECT_FALSE([&]()
+	{
+		ShaderCode code;
+		for (const auto& inst: program()) { code.GetInstructions().Add(inst); }
+		return ShaderEudDescriptorReadOnlyByFormatLoads(code, bind, 28, kBase, *ShaderScalarFlowOf(code));
+	}());
+	// Lane 2 refilled with other data before the readback.
+	EXPECT_FALSE(proves(edited(kRestore, unary(ShaderInstructionType::VWritelaneB32, vgpr(1), sgpr(9), lane(2)))));
+	// The spill VGPR is rewritten before the readback.
+	EXPECT_FALSE(proves(edited(kRestore, unary(ShaderInstructionType::VMovB32, vgpr(1), lane(0), {}))));
+	// The parked words are read as vector data.
+	EXPECT_FALSE(proves(edited(kRestore, unary(ShaderInstructionType::VMovB32, vgpr(2), vgpr(1), {}))));
+	// A branch while the V# is still live.
+	ShaderInstruction branch {};
+	branch.type    = ShaderInstructionType::SBranch;
+	branch.src_num = 1;
+	branch.src[0]  = lane(0);
+	EXPECT_FALSE(proves(edited(kRestore, branch)));
+	// The program ends with the V# still in s[0:3] and the lanes: no reader is left.
+	auto ends_live = program();
+	ends_live.resize(kConsumer + 1);
+	EXPECT_TRUE(proves(ends_live));
+	// Only three words come back to the quad the format load reads.
+	auto partial = program();
+	partial.erase(partial.begin() + static_cast<std::ptrdiff_t>(kRestore + 3));
+	EXPECT_FALSE(proves(partial));
+	// One word restored while another SGPR still holds it.
+	EXPECT_FALSE(proves(edited(5, unary(ShaderInstructionType::VReadlaneB32, sgpr(7), vgpr(1), lane(0)))));
+	// A store through the V#.
+	auto stored       = program();
+	stored[kConsumer] = format_access(ShaderInstructionType::BufferStoreFormatX);
+	EXPECT_FALSE(proves(stored));
+	// A raw load through the V#.
+	auto raw       = program();
+	raw[kConsumer] = format_access(ShaderInstructionType::BufferLoadDwordx2);
+	EXPECT_FALSE(proves(raw));
+	// A load that covers only part of the V#.
+	EXPECT_FALSE(proves(edited(1, eud_load(ShaderInstructionType::SLoadDwordx8, 8, 8, 80))));
+	// The pointer is copied, so other loads may reach the V#.
+	EXPECT_FALSE(proves(edited(1, unary(ShaderInstructionType::SMovB64, sgpr(50, 2), sgpr(kPointer + kBase, 2), {}))));
+	// A spilled V# whose table words no resource maps is read at runtime.
+	bind.extended.read_at_runtime = true;
+	EXPECT_FALSE(proves(program()));
+}
+
+// BUFFER_STORE_FORMAT encodes the V#'s format instead of storing only 32-bit
+// formats, and merges a partial dword through the uint alias.
+TEST(EmulatorShaderGetpc, FormatStoresEncodeDescriptorFormat)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction narrow {};
+	narrow.type               = ShaderInstructionType::BufferStoreFormatX;
+	narrow.format             = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	narrow.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	narrow.src[0]             = {.type = ShaderOperandType::Vgpr, .register_id = 5, .size = 1};
+	narrow.src[1]             = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+	narrow.src[2].type        = ShaderOperandType::IntegerInlineConstant;
+	narrow.src[2].constant.u  = 0;
+	narrow.src_num            = 3;
+	narrow.buffer_idxen       = true;
+	narrow.buffer_flags       = 0;
+	ShaderInstruction pair    = narrow;
+	pair.pc                   = 8;
+	pair.type                 = ShaderInstructionType::BufferStoreFormatXy;
+	pair.format               = ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen;
+	pair.dst                  = {.type = ShaderOperandType::Vgpr, .register_id = 1, .size = 2};
+	ShaderInstruction end {};
+	end.pc     = 16;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(narrow);
+	code.GetInstructions().Add(pair);
+	code.GetInstructions().Add(end);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = input.threads_num[1] = input.threads_num[2] = 1;
+	input.bind.storage_buffers.buffers_num        = 1;
+	input.bind.storage_buffers.start_register[0] = 8;
+	input.bind.storage_buffers.usages[0]          = ShaderStorageUsage::ReadWrite;
+	ShaderCalcBindingIndices(&input.bind);
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("%gen5_mubuf_store_0_0 = OpFunctionCall %void %gen5_buffer_store_words"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gen5_mubuf_store_1_0 = OpFunctionCall %void %gen5_buffer_store_words"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpAtomicOr %uint %gbsw_up0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%tbuffer_store_format_x"), Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
+}
+
+TEST(EmulatorShaderGetpc, NegatedAbsoluteSourcesKeepDistinctTemporaries)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// v_add_f32 v0, -|v1|, -|v2| lowers each source through its own FAbs result.
+	ShaderInstruction add {};
+	add.type      = ShaderInstructionType::VAddF32;
+	add.format    = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	add.dst       = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	add.src[0]    = {.type = ShaderOperandType::Vgpr, .register_id = 1, .size = 1};
+	add.src[1]    = {.type = ShaderOperandType::Vgpr, .register_id = 2, .size = 1};
+	add.src_num   = 2;
+	for (auto& src: {&add.src[0], &add.src[1]})
+	{
+		src->negate   = true;
+		src->absolute = true;
+	}
+	ShaderInstruction end {};
+	end.pc     = 8;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(add);
+	code.GetInstructions().Add(end);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = input.threads_num[1] = input.threads_num[2] = 1;
+	ShaderCalcBindingIndices(&input.bind);
+	const auto       source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	Vector<uint32_t> binary;
+	String8          error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+}
+
+TEST(EmulatorShaderGetpc, LdsLoadWritesWorkgroupMemoryNotVdata)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction load {};
+	load.type               = ShaderInstructionType::BufferLoadDword;
+	load.format             = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	load.dst                = {.type = ShaderOperandType::Null, .register_id = 0, .size = 1};
+	load.src[0]             = {.type = ShaderOperandType::Vgpr, .register_id = 5, .size = 1};
+	load.src[1]             = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+	load.src[2].type        = ShaderOperandType::IntegerInlineConstant;
+	load.src[2].constant.u  = 0;
+	load.src_num            = 3;
+	load.buffer_idxen       = true;
+	load.buffer_imm_offset  = 16;
+	load.buffer_flags       = 1;
+	ShaderInstruction end {};
+	end.pc     = 8;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(load);
+	code.GetInstructions().Add(end);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 64;
+	input.threads_num[1] = input.threads_num[2] = 1;
+	input.lds_dwords                              = 256;
+	input.bind.storage_buffers.buffers_num        = 1;
+	input.bind.storage_buffers.start_register[0] = 8;
+	input.bind.storage_buffers.usages[0]          = ShaderStorageUsage::ReadOnly;
+	ShaderCalcBindingIndices(&input.bind);
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("OpFunctionCall %void %buffer_load_float1 %temp_float"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_Workgroup_uint %lds %addtid_idx_bll0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpStore %v0 "), Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
+}
+
 TEST(EmulatorShaderGetpc, OnlyAttributeTableFormatLoadsAreVertexFetches)
 {
 	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
@@ -546,6 +863,70 @@ TEST(EmulatorShaderGetpc, RedefinedBoundDescriptorReadsRuntimeDescriptor)
 	EXPECT_FALSE(ShaderScalarBufferUsesRuntimeDescriptor(bind, instructions.At(0)));
 	EXPECT_TRUE(ShaderScalarBufferUsesRuntimeDescriptor(bind, instructions.At(2)));
 	EXPECT_TRUE(ShaderVectorBufferUsesRuntimeDescriptor(bind, instructions.At(3)));
+}
+
+// A stage without runtime V# lowering (the vertex front) keeps a reloaded
+// consumer on the slot path. That is sound only when every path reloads the
+// register; a path that keeps the bound row refuses the buffer instead.
+static ShaderBindResources SlotOnlyBind(bool reload_on_one_branch)
+{
+	const ShaderOperand descriptor {.type = ShaderOperandType::Sgpr, .register_id = 12, .size = 4};
+	ShaderInstruction   scalar_load {};
+	scalar_load.type    = ShaderInstructionType::SBufferLoadDword;
+	scalar_load.dst     = {.type = ShaderOperandType::Sgpr, .register_id = 20, .size = 1};
+	scalar_load.src_num = 2;
+	scalar_load.src[0]  = descriptor;
+	scalar_load.src[1]  = {.type = ShaderOperandType::LiteralConstant, .size = 1};
+	ShaderInstruction branch {};
+	branch.type               = ShaderInstructionType::SCbranchScc0;
+	branch.format             = ShaderInstructionFormat::Label;
+	branch.src[0].type        = ShaderOperandType::LiteralConstant;
+	branch.src[0].constant.i  = 4; // skips the reload
+	branch.src_num            = 1;
+	ShaderInstruction reload {};
+	reload.type = ShaderInstructionType::SGetpcB64;
+	reload.dst  = {.type = ShaderOperandType::Sgpr, .register_id = 12, .size = 2};
+	ShaderInstruction vector_load {};
+	vector_load.type    = ShaderInstructionType::BufferLoadDword;
+	vector_load.dst     = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	vector_load.src_num = 3;
+	vector_load.src[0]  = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	vector_load.src[1]  = descriptor;
+	ShaderInstruction end {};
+	end.type = ShaderInstructionType::SEndpgm;
+
+	ShaderCode code;
+	for (auto inst: reload_on_one_branch ? std::vector {scalar_load, branch, reload, vector_load, end}
+	                                     : std::vector {scalar_load, reload, vector_load, end})
+	{
+		inst.pc = code.GetInstructions().Size() * 4u;
+		code.GetInstructions().Add(inst);
+	}
+	if (reload_on_one_branch)
+	{
+		code.GetLabels().Add(ShaderLabel(12u, 4u));
+		code.GetIndirectLabels().Add(ShaderLabel(8u, 4u));
+	}
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num       = 1;
+	bind.storage_buffers.start_register[0] = 12;
+	ShaderCodeResourceMemo memo;
+	ShaderCollectRedefinedBufferDescriptors(code, &bind, 0, *ShaderScalarFlowOf(code), &memo, false);
+	EXPECT_TRUE(bind.descriptor_flow_proven);
+	EXPECT_EQ(bind.redefined_descriptor_consumers.Size(), 0u);
+	return bind;
+}
+
+TEST(EmulatorShaderGetpc, SlotOnlyConsumerNeedsTheRegisterReloadedOnEveryPath)
+{
+	const auto straight = SlotOnlyBind(false);
+	ASSERT_EQ(straight.slot_only_consumers.Size(), 1u);
+	EXPECT_EQ(straight.slot_only_consumers.At(0), 8u);
+	EXPECT_FALSE(straight.storage_buffers.row_redefined[0]);
+
+	const auto branched = SlotOnlyBind(true);
+	EXPECT_EQ(branched.slot_only_consumers.Size(), 0u);
+	EXPECT_TRUE(branched.storage_buffers.row_redefined[0]);
 }
 
 static String8 VertexScalarProbeSource(bool enabled, uint32_t loads)

@@ -9,6 +9,7 @@
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Log.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <string>
@@ -46,6 +47,28 @@ String8 ReplaceMaskToken(const String8& source, const String8& from, const Strin
 		}
 	}
 	return String8(text.c_str());
+}
+
+// A grouped compare adds its vote to %split_ballot_packed; the last member's vote publishes every vote in one
+// exchange.
+String8 GroupedMaskVote(const std::vector<uint32_t>& group, uint32_t index, uint32_t lanes, const String8& tag)
+{
+	const auto position = static_cast<uint32_t>(std::find(group.begin(), group.end(), index) - group.begin());
+	EXIT_IF(position >= group.size());
+	String8 previous = "split_c0";
+	String8 text;
+	if (position > 0u)
+	{
+		previous = "mask_out_previous_" + tag;
+		text     = "%" + previous + " = OpLoad %uint %split_ballot_packed\n";
+	}
+	text += String8::FromPrintf("%%mask_out_packed_%s = OpFunctionCall %%uint %%split_ballot_pack %%%s %%mask_out_active_%s %%split_c%u\n",
+	                            tag.c_str(), previous.c_str(), tag.c_str(), position * lanes);
+	if (position + 1u < group.size())
+	{
+		return text + "OpStore %split_ballot_packed %mask_out_packed_" + tag + "\n";
+	}
+	return text + "%mask_out_group_" + tag + " = OpFunctionCall %void %split_ballot_group %mask_out_packed_" + tag + "\n";
 }
 
 } // namespace
@@ -235,6 +258,43 @@ static bool WritesFullExec(const ShaderInstruction& inst, bool wave32)
 	        (source.type == ShaderOperandType::LiteralConstant && source.constant.u == 0xffffffffu));
 }
 
+// The later members of a grouped compare vote at the head: nothing between them changes their sources or EXEC.
+String8 Spirv::SplitBallotGroupVotes(const std::vector<uint32_t>& group)
+{
+	String8 text;
+	for (size_t member = 1; member < group.size(); ++member)
+	{
+		const auto& inst = m_code.GetInstructions().At(group[member]);
+		const auto* func = RecompFunc(inst.type, inst.format);
+		String8     vote;
+		EXIT_IF(func == nullptr || !func->func(group[member], m_code, &vote, this, func->param, func->scc_check));
+		text += ResolveMaskAccesses(inst, group[member], vote);
+	}
+	return text;
+}
+
+// Writes one grouped compare's mask out of the words its group published.
+String8 Spirv::SplitBallotGroupMask(const std::vector<uint32_t>& group, uint32_t index) const
+{
+	const auto member = static_cast<uint32_t>(std::find(group.begin(), group.end(), index) - group.begin());
+	EXIT_IF(member >= group.size());
+	const auto& mask = m_code.GetInstructions().At(index).dst;
+	const auto  lo   = mask.size == 1 ? operand_variable_to_str(mask) : operand_variable_to_str(mask, 0);
+	const auto  name = String8::FromPrintf("mask_out_member_%u", index);
+	auto        text = String8::FromPrintf("%%%s = OpFunctionCall %%v4uint %%split_ballot_field %%split_c%u\n"
+	                                       "%%%s_lo = OpCompositeExtract %%uint %%%s 0\n"
+	                                       "OpStore %%%s %%%s_lo\n",
+	                                       name.c_str(), member * SplitWavePartLanes(), name.c_str(), name.c_str(), lo.value.c_str(),
+	                                       name.c_str());
+	if (mask.size == 2 && !NativeWave32())
+	{
+		const auto hi = operand_variable_to_str(mask, 1);
+		text += String8::FromPrintf("%%%s_hi = OpCompositeExtract %%uint %%%s 1\nOpStore %%%s %%%s_hi\n", name.c_str(), name.c_str(),
+		                            hi.value.c_str(), name.c_str());
+	}
+	return text;
+}
+
 String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index, const String8& source) const
 {
 	String8 result = source;
@@ -287,18 +347,22 @@ String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index
 			const auto value       = String8(text.substr(value_begin, end - value_begin).c_str());
 			// The collective stays outside software-EXEC control flow. Capture
 			// incoming EXEC before the first store, including EXEC destinations.
-			const auto packed =
-			    String8(R"(
+			const auto* group = SplitBallotGroup(index);
+			const auto  vote  = String8(R"(
 %mask_out_exec_<tag> = OpLoad %uint %exec_lane_lo
 %mask_out_live_<tag> = OpINotEqual %bool %mask_out_exec_<tag> %uint_0
 %mask_out_pred_<tag> = OpINotEqual %bool <value> %uint_0
 %mask_out_active_<tag> = OpLogicalAnd %bool %mask_out_live_<tag> %mask_out_pred_<tag>
-<ballot>
+)");
+			const auto  stores = group != nullptr ? GroupedMaskVote(*group, index, SplitWavePartLanes(), tag)
+			                                      : String8(R"(<ballot>
 %mask_out_lo_<tag> = OpCompositeExtract %uint %mask_out_ballot_<tag> 0
 %mask_out_hi_<tag> = OpCompositeExtract %uint %mask_out_ballot_<tag> 1
 OpStore %<lo> %mask_out_lo_<tag>
 <store_hi>
-)")
+)");
+			const auto packed =
+			    (vote + stores)
 			        .ReplaceStr("<ballot>", IsLaneLocalMaskResult(index) ? NativeOwnBitMask("mask_out_active_" + tag, "mask_out_ballot_" + tag)
 			                                                             : NativeMaskBallot("mask_out_active_" + tag, "mask_out_ballot_" + tag))
 			        .ReplaceStr("<store_hi>", !hi.value.IsEmpty() && !NativeWave32() ? "OpStore %<hi> %mask_out_hi_<tag>" : "")
@@ -1224,7 +1288,14 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 		{
 			if (shift < 0 || shift >= 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift < 0 || shift >= 2 condition ignored (continuing)\n"); }
 
-			if (shift == 0)
+			if (op.type == ShaderOperandType::FloatInlineConstant)
+			{
+				// ISA 6.2: a 64-bit operand takes the double encoding of an inline float.
+				const uint64_t bits = operand_f64_constant_bits(op);
+				*load = String8("%<result_id> = OpCopyObject %uint %<id>")
+				            .ReplaceStr("<id>", spirv->GetConstantUint(static_cast<uint32_t>(shift == 1 ? bits >> 32u : bits)))
+				            .ReplaceStr("<result_id>", raw_id);
+			} else if (shift == 0)
 			{
 				String8 id = spirv->GetConstant(op);
 				*load      = String8("%<result_id> = OpBitcast %uint %<id>")
@@ -1282,6 +1353,75 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 	{
 		*load += String8(' ', 10) + sdwa_swizzle_uint(raw_id, result_id, index, op.swizzle, op.sdwa_sext);
 	}
+	return true;
+}
+
+uint64_t operand_f64_constant_bits(const ShaderOperand& op)
+{
+	EXIT_IF(!operand_is_constant(op));
+	// ISA 6.2: an inline float is the double of the same value (1/(2*PI) has its own double encoding),
+	// an inline integer is sign extended, and a 32-bit literal is the high word with a zero low word.
+	switch (op.type)
+	{
+		case ShaderOperandType::FloatInlineConstant:
+		{
+			if (op.constant.u == 0x3e22f983u) { return 0x3fc45f306dc9c882ull; }
+			const double value = op.constant.f;
+			uint64_t     bits  = 0;
+			std::memcpy(&bits, &value, sizeof(bits));
+			return bits;
+		}
+		case ShaderOperandType::IntegerInlineConstant: return static_cast<uint64_t>(static_cast<int64_t>(op.constant.i));
+		case ShaderOperandType::LiteralConstant: return static_cast<uint64_t>(op.constant.u) << 32u;
+		default: EXIT("unexpected 64-bit float constant operand\n");
+	}
+	return 0;
+}
+
+bool operand_load_f64_word(Spirv* spirv, const ShaderOperand& op, const String8& result_id, const String8& index, String8* load, int shift)
+{
+	EXIT_IF(load == nullptr || op.size != 2 || (shift != 0 && shift != 1));
+	ShaderOperand unsigned_op = op;
+	unsigned_op.absolute      = false;
+	unsigned_op.negate        = false;
+	// abs and neg act on the sign, which is bit 31 of the high word.
+	const bool    signed_word = shift == 1 && (op.absolute || op.negate);
+	const String8 raw_id      = signed_word ? "f64_unsigned_" + result_id : result_id;
+	if (operand_is_constant(unsigned_op))
+	{
+		const uint64_t bits = operand_f64_constant_bits(unsigned_op);
+		*load = String8("%<result> = OpCopyObject %uint %<word>\n")
+		            .ReplaceStr("<word>", spirv->GetConstantUint(static_cast<uint32_t>(shift == 0 ? bits : bits >> 32u)))
+		            .ReplaceStr("<result>", raw_id)
+		            .ReplaceStr("<index>", index);
+	} else if (!operand_load_uint(spirv, unsigned_op, raw_id, index, load, shift))
+	{
+		return false;
+	}
+	if (!signed_word) { return true; }
+	const String8 abs_id = op.negate ? "f64_abs_" + result_id : result_id;
+	String8       sign   = String8("%<raw>");
+	if (op.absolute)
+	{
+		*load += String8("%<abs> = OpBitwiseAnd %uint %<raw> %uint_0x7fffffff\n");
+		sign = "%<abs>";
+	}
+	if (op.negate) { *load += String8("%<result> = OpBitwiseXor %uint <sign> %uint_0x80000000\n").ReplaceStr("<sign>", sign); }
+	*load = load->ReplaceStr("<abs>", abs_id).ReplaceStr("<raw>", raw_id).ReplaceStr("<result>", result_id).ReplaceStr("<index>", index);
+	return true;
+}
+
+bool operand_load_i64_word(Spirv* spirv, const ShaderOperand& op, const String8& result_id, const String8& index, String8* load, int shift)
+{
+	// ISA 6.2: a literal feeding a signed 64-bit source is sign extended.
+	if (op.type != ShaderOperandType::LiteralConstant || op.size != 2 || shift != 1)
+	{
+		return operand_load_uint(spirv, op, result_id, index, load, shift);
+	}
+	*load = String8("%<result> = OpCopyObject %uint %<word>\n")
+	            .ReplaceStr("<word>", spirv->GetConstantUint((op.constant.u & 0x80000000u) != 0u ? 0xffffffffu : 0u))
+	            .ReplaceStr("<result>", result_id)
+	            .ReplaceStr("<index>", index);
 	return true;
 }
 
@@ -1344,25 +1484,25 @@ bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id
 		if (op.negate && op.absolute)
 		{
 			l     = uint_load + String8(' ', 10) +
-			        String8("%swf_<index> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
-			        String8("%abs_<index> = OpExtInst %float %GLSL_std_450 FAbs %swf_<index>\n") + String8(' ', 10) +
-			        String8("%<result> = OpFNegate %float %abs_<index>\n");
+			        String8("%swf_<result> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
+			        String8("%abs_<result> = OpExtInst %float %GLSL_std_450 FAbs %swf_<result>\n") + String8(' ', 10) +
+			        String8("%<result> = OpFNegate %float %abs_<result>\n");
 			*load = l.ReplaceStr("<index>", index).ReplaceStr("<result>", result_id);
 			return true;
 		}
 		if (op.absolute)
 		{
 			l     = uint_load + String8(' ', 10) +
-			        String8("%swf_<index> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
-			        String8("%<result> = OpExtInst %float %GLSL_std_450 FAbs %swf_<index>\n");
+			        String8("%swf_<result> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
+			        String8("%<result> = OpExtInst %float %GLSL_std_450 FAbs %swf_<result>\n");
 			*load = l.ReplaceStr("<index>", index).ReplaceStr("<result>", result_id);
 			return true;
 		}
 		if (op.negate)
 		{
 			l     = uint_load + String8(' ', 10) +
-			        String8("%swf_<index> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
-			        String8("%<result> = OpFNegate %float %swf_<index>\n");
+			        String8("%swf_<result> = OpBitcast %float %su_<result_id>\n").ReplaceStr("<result_id>", result_id) + String8(' ', 10) +
+			        String8("%<result> = OpFNegate %float %swf_<result>\n");
 			*load = l.ReplaceStr("<index>", index).ReplaceStr("<result>", result_id);
 			return true;
 		}
@@ -1400,8 +1540,8 @@ bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id
 
 	if (op.negate && op.absolute)
 	{
-		l += String8(' ', 10) + String8("%abs_<index> = OpExtInst %float %GLSL_std_450 FAbs %<result_id>\n") + String8(' ', 10) +
-		     String8("%<result> = OpFNegate %float %abs_<index>\n");
+		l += String8(' ', 10) + String8("%abs_<result> = OpExtInst %float %GLSL_std_450 FAbs %<result_id>\n") + String8(' ', 10) +
+		     String8("%<result> = OpFNegate %float %abs_<result>\n");
 
 		*load = l.ReplaceStr("<index>", index).ReplaceStr("<result_id>", "a" + result_id).ReplaceStr("<result>", result_id);
 

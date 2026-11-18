@@ -23,14 +23,24 @@ namespace Kyty::Libs::Graphics {
 // in-block S_*_B64 gather. Such a mask needs no wave-wide gather.
 // gather: a pointwise S_*_B64 whose result a wave-wide reader needs and which
 // combines in-block local masks; it gathers its own result once.
+// part_skipped: the instruction lies in a range a forward S_CBRANCH_EXECZ
+// skips and that one part of a split wave may skip alone, on its own lanes:
+// the range holds no rendezvous and defines no scalar word read after it, so
+// the branch needs no complete EXEC. Only set when part-local skips are asked,
+// which takes a wave64 guest: a wave32 compare writes one word of its pair.
 // All false when the CFG cannot be resolved.
 struct ShaderLaneMaskPlan
 {
 	std::vector<bool> local;
 	std::vector<bool> gather;
+	std::vector<bool> part_skipped;
 };
 
-[[nodiscard]] ShaderLaneMaskPlan ShaderLaneMaskPlanOf(const ShaderCode& code);
+[[nodiscard]] ShaderLaneMaskPlan ShaderLaneMaskPlanOf(const ShaderCode& code, bool part_local_skips = false);
+
+// Successor instruction indices per instruction; false when a branch target
+// cannot be resolved.
+[[nodiscard]] bool ShaderInstructionSuccessors(const ShaderCode& code, std::vector<std::vector<uint32_t>>* successors);
 
 } // namespace Kyty::Libs::Graphics
 

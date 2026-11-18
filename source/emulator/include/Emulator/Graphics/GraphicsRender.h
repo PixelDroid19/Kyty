@@ -5,6 +5,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
+#include "Emulator/Graphics/DeferredStateCommands.h"
 #include "Emulator/Graphics/GraphicsGeState.h"
 #include "Emulator/Kernel/EventQueue.h"
 
@@ -35,8 +36,10 @@ struct TransientSnapshotLeases;
 class DiagnosticDumpWriter;
 struct ShaderNativeWaveInfo;
 struct ShaderProgramSnapshot;
+struct VulkanImage;
 struct VideoOutVulkanImage;
 struct DepthStencilVulkanImage;
+struct DepthSliceArray;
 struct TextureVulkanImage;
 struct StorageTextureVulkanImage;
 struct RenderTextureVulkanImage;
@@ -612,6 +615,8 @@ VulkanRecentDrawPacket VulkanRecentDrawSetPacket(VulkanRecentDrawPacket packet);
 // or fence completion. Its kind/result/semaphore/completed fields are unused.
 void VulkanSubmitFaultReport(const char* stage, VkResult result, const VulkanSubmitAttempt* immediate = nullptr,
                              const VulkanSubmitAttempt* command_buffer_context = nullptr);
+// Logs the driver's description of the first device loss when VK_EXT_device_fault is enabled.
+void VulkanReportDeviceFault(VkResult result);
 
 class CommandBuffer
 {
@@ -645,8 +650,52 @@ public:
 	// constants, dynamic state and query scopes are legal in both scopes
 	// (RecordState), draws only inside one (RecordInsideRenderPass).
 	[[nodiscard]] VkCommandBuffer RecordOutsideRenderPass();
-	[[nodiscard]] VkCommandBuffer RecordState() const;
+	[[nodiscard]] VkCommandBuffer RecordState();
 	[[nodiscard]] VkCommandBuffer RecordInsideRenderPass() const;
+	// A draw's state binds and dynamic state for `target`, a handle RecordState or StateTarget
+	// returned, and its indexed draws inside the open render pass, are encoded here. A continued
+	// render pass hands them to the pool's replay worker; every handle accessor and every command
+	// this class records itself first waits for that worker and replays the rest, so the recorded
+	// order is the order of the calls.
+	[[nodiscard]] VkCommandBuffer        StateTarget();
+	[[nodiscard]] DeferredStateCommands* DeferredState(VkCommandBuffer target);
+	[[nodiscard]] DeferredStateCommands* DeferredDraw();
+	void                                 FlushDeferredState() const;
+	// Hands the encoded commands to the pool's replay worker without waiting.
+	void HandOffDeferredState();
+	// Binds a draw's graphics pipeline unless this recording bound it last on `vk_buffer`. Only pipelines
+	// the pipeline cache leases to this recording come here, so a remembered handle stays unique until reset.
+	void BindDrawPipeline(VkCommandBuffer vk_buffer, VkPipeline pipeline);
+	// Every other graphics pipeline bind replaces the remembered one.
+	void ForgetDrawPipeline()
+	{
+		m_draw_pipeline_buffer = VK_NULL_HANDLE;
+		m_draw_pipeline        = VK_NULL_HANDLE;
+	}
+	// Geometry passes run ahead of the draws recorded after them, which on some
+	// devices costs a pipeline drain per pass. A pass that only reads guest memory
+	// therefore joins a geometry segment: a compute-only command buffer submitted
+	// between the commands recorded before it opened and those after, whose passes
+	// overlap. Passes join while no command was recorded outside a render pass and
+	// no Break happened since the segment opened; any other pass opens a new one.
+	// Between Begin and End the pass binds its descriptors; the first RecordState
+	// places it, End returns its segment or nullptr when it is recorded inline.
+	void BeginGeometryPass(VulkanBuffer* output, uint64_t offset, uint64_t size);
+	[[nodiscard]] VkCommandBuffer EndGeometryPass();
+	// Later geometry passes run after every command recorded so far: guest packets
+	// that may order memory and draws that write it call this.
+	void BreakGeometrySegment() { m_geometry_hazards++; }
+	// A pending pass that reads an image a render pass wrote since the segment
+	// opened must run after that render pass, which follows the segment.
+	void ReadImage(const VulkanImage* image);
+	// Orders every earlier command of the queue before every later one, for all
+	// stages and memory accesses. Guest cache flushes often come several in a row;
+	// when the latest command already is such a barrier, another orders nothing more.
+	void FullMemoryBarrier();
+	// Makes a device write stamped at `device_write_time` visible to the commands recorded next into
+	// `target`, recording at most one full memory barrier per recording. False when the write may
+	// belong to this recording or `target` is not its current main buffer.
+	[[nodiscard]] bool OrderEarlierDeviceWrite(uint64_t device_write_time, VkCommandBuffer target);
 	void WaitForFence();
 	void WaitForFenceWithoutLabelCallbacks();
 	void WaitForFenceAndReset();
@@ -718,8 +767,10 @@ public:
 	// compute scratch cannot exhaust its budget. The same ordering and lifetime rules apply.
 	VulkanBuffer* AllocateTransientCopyBuffer(uint64_t size);
 	// Device-local intermediate written and read only by GPU commands of this recording (for example a
-	// geometry pass output), with its own budget. The same ordering and lifetime rules apply.
-	VulkanBuffer* GeometryOutput(uint64_t size);
+	// geometry pass output), with its own budget. The same ordering and lifetime rules apply. The passes of a
+	// recording take consecutive ranges at *offset. A range above kGeometryOutputMaxBytes is refused.
+	VulkanBuffer* GeometryOutput(uint64_t size, uint64_t* offset);
+	static constexpr uint64_t kGeometryOutputMaxBytes = 1024u * 1024u * 1024u;
 	// Storage-buffer set for one fragment-transport draw state. The pool is reset
 	// when the recording starts, so its sets live exactly as long as the commands
 	// that bind them.
@@ -736,16 +787,33 @@ public:
 	void DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth);
 	void DeferStencilPlaneStoreBack(DepthStencilVulkanImage* depth);
 	void StoreBackDepthPlanes();
+	// A layered depth pass renders into the slice array of its first slice; the array's layers return to the slice
+	// images when the pass ends.
+	void DeferLayeredDepthStore(DepthSliceArray* array, std::vector<DepthStencilVulkanImage*> slices);
 	// A submission of another queue this recording waits for on the device before it executes, through that
 	// queue's timeline value; later submissions of a queue complete after earlier ones.
 	void AwaitSubmissionOnDevice(SubmissionId submission, VkSemaphore timeline, uint64_t value);
 	// Flushes recorded image fills and makes this submission wait for them on the device.
 	void AwaitImageFills();
+	// Called before each graphics draw is recorded. Where the device needs it, a bottom-of-pipe timestamp
+	// separates a draw whose pixel shader kills pixels while depth writes are on from the draw before and after it.
+	void SeparateDepthKillDraw(bool kills_with_depth_write);
+	struct TimestampQuery
+	{
+		VkQueryPool pool  = VK_NULL_HANDLE;
+		uint32_t    query = 0;
+	};
+	// Records a bottom-of-pipe timestamp at this point of the stream into a query its caller owns and keeps unreset
+	// until the submission completed and the value was read.
+	void WriteTimestamp(const TimestampQuery& query);
 	[[nodiscard]] bool AwaitsSubmissionOnDevice(SubmissionId submission) const;
 	[[nodiscard]] const std::vector<SubmissionId>& DeviceAwaitedSubmissions() const { return m_device_awaited; }
 
 private:
 	friend class PipelineCache;
+
+	// A timestamp nobody reads, in a query the recording owns and resets when it begins again.
+	void WriteSeparatingTimestamp();
 
 	struct OpenRenderPass
 	{
@@ -754,7 +822,39 @@ private:
 		bool          continuable = false;
 	};
 
+	struct GeometrySegment
+	{
+		VkCommandBuffer passes = nullptr;
+		// Main chunk before the segment; it zeroes the segment's output when the segment closes.
+		VkCommandBuffer predecessor = nullptr;
+		VulkanBuffer*   output      = nullptr;
+		uint64_t        begin       = 0;
+		uint64_t        end         = 0;
+		uint64_t        hazards     = 0;
+	};
+	struct GeometryPass
+	{
+		bool            pending = false;
+		VulkanBuffer*   output  = nullptr;
+		uint64_t        offset  = 0;
+		uint64_t        end     = 0;
+		VkCommandBuffer segment = nullptr;
+		uint64_t        hazards = 0;
+	};
+	struct LayeredDepthStore
+	{
+		DepthSliceArray*                      array = nullptr;
+		std::vector<DepthStencilVulkanImage*> slices;
+	};
+
 	[[nodiscard]] bool AttachPipelineLease(VulkanPipeline* pipeline, bool* added);
+	[[nodiscard]] VkCommandBuffer PlaceGeometryPass();
+	void                          NoteSegmentAttachment(const VulkanImage* image);
+	void                          OpenGeometrySegment(VulkanBuffer* output, uint64_t offset);
+	void                          CloseGeometrySegment();
+	[[nodiscard]] VkCommandBuffer BeginChunk();
+	// Resets the slot's command buffer and the chunks the last recording used.
+	[[nodiscard]] VkResult ResetCommandBuffers();
 	void               MarkCommandBufferResetting();
 	void               ReleasePipelineLeases();
 	void               DestroyRecordingUploads();
@@ -774,12 +874,40 @@ private:
 	TransientSnapshotLeases*   m_snapshot_leases           = nullptr;
 	std::vector<VulkanBuffer*> m_recording_uploads;
 	VkDescriptorPool           m_transport_descriptor_pool = VK_NULL_HANDLE;
+	// Timestamp queries written by WriteTimestamp; reset from the host when the recording begins.
+	std::vector<VkQueryPool> m_timestamp_pools;
+	uint32_t                 m_timestamps                = 0;
+	bool                     m_previous_draw_kills_depth = false;
 
 	mutable std::mutex           m_pipeline_lease_mutex;
 	std::vector<VulkanPipeline*> m_pipeline_leases;
 	mutable bool                 m_recording = false;
 	bool                         m_resetting = false;
 	std::optional<OpenRenderPass> m_open_render_pass;
+	// The latest command recorded is a full memory barrier. Every recording handle clears it.
+	mutable bool m_latest_full_barrier = false;
+	// Encoded draw-tail commands and the command buffer they replay into.
+	mutable DeferredStateCommands m_deferred;
+	VkCommandBuffer               m_deferred_target = VK_NULL_HANDLE;
+	// Writes stamped before the recording began were recorded in earlier submissions; once a full
+	// memory barrier is recorded, every later command of the recording sees them.
+	uint64_t m_recording_begin_time  = 0;
+	bool     m_full_barrier_recorded = false;
+	// The graphics pipeline BindDrawPipeline bound last, and the command buffer it went to.
+	VkCommandBuffer m_draw_pipeline_buffer = VK_NULL_HANDLE;
+	VkPipeline      m_draw_pipeline        = VK_NULL_HANDLE;
+	// Command buffers of the recording in submission order: the slot's buffer, then a segment and the main chunk
+	// after it for each geometry segment. m_main receives every command but the segments' passes.
+	std::vector<VkCommandBuffer> m_chunks;
+	VkCommandBuffer              m_main = nullptr;
+	GeometrySegment              m_geometry_segment;
+	GeometryPass                 m_geometry_pass;
+	uint64_t                     m_geometry_hazards = 0;
+	VulkanBuffer*                m_geometry_output  = nullptr;
+	uint64_t                     m_geometry_offset  = 0;
+	// Images the render passes begun since the open segment opened write.
+	std::vector<const VulkanImage*> m_segment_attachments;
+	std::vector<LayeredDepthStore>        m_layered_depth_stores;
 	std::vector<DepthStencilVulkanImage*> m_depth_plane_store_backs;
 	std::vector<DepthStencilVulkanImage*> m_stencil_plane_store_backs;
 	std::vector<SubmissionId>             m_device_awaited;
@@ -802,10 +930,29 @@ private:
 void GraphicsRenderInit();
 void GraphicsRenderCreateContext();
 
+// The vertex and pixel shader input information of one indexed draw, prepared ahead of its recording
+// from registers equal to the draw's. The recording takes ownership of the contents.
+struct PreparedDrawInputs;
+// Fills `inputs` and returns true when the recording of an indexed draw with these registers reaches
+// its shader input analysis outside a geometry pass. Reads the registers and guest memory only.
+[[nodiscard]] bool GraphicsRenderPrepareIndexedDrawInputs(const HW::Context& ctx, const HW::UserConfig& ucfg, HW::Shader* sh_ctx,
+                                                          uint32_t index_count, uint32_t instance_count, PreparedDrawInputs* inputs);
+// `prepared` is null or holds inputs prepared from registers equal to this draw's.
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                              uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
-                             SubmissionId* pending_submission);
+                             SubmissionId* pending_submission, PreparedDrawInputs* prepared = nullptr);
+// A DRAW_INDEX_INDIRECT whose record at `args_address` the device reads in queue order, from the storage
+// buffer an earlier command of this queue writes. The host knows only the `index_window` indexes from
+// `index_base`. False when the draw needs the record on the host instead; nothing was recorded then.
+// A recorded draw latches NUM_INSTANCES for `latch_queue`, as described by
+// GraphicsRenderRecordDrawIndexedIndirectArgs, and GraphicsRenderReadDrawIndexedIndirectInstances
+// returns it once the recording completes.
+[[nodiscard]] bool     GraphicsRenderDrawIndexIndirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
+                                                       HW::Shader* sh_ctx, uint32_t index_type_and_size, uint32_t index_window,
+                                                       const void* index_base, uint64_t args_address, uint32_t latch_queue,
+                                                       uint32_t previous_instances, SubmissionId* pending_submission);
+[[nodiscard]] uint32_t GraphicsRenderReadDrawIndexedIndirectInstances(uint32_t latch_queue);
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
 	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count, int32_t vertex_offset_add,
 	                             uint32_t first_instance, SubmissionId* pending_submission);

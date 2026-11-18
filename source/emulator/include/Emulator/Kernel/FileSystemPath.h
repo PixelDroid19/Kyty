@@ -97,13 +97,14 @@ inline bool Contains(const std::filesystem::path& root, const std::filesystem::p
 	return std::mismatch(root.begin(), root.end(), candidate.begin(), candidate.end()).first == root.end();
 }
 
-// `canonical_root` must come from Canonical().
+// `canonical_root` must come from Canonical(). The result uses '/' separators on every host,
+// the form the rest of Kyty splits host filenames on.
 inline std::string ResolveContained(const std::filesystem::path& canonical_root, const std::string& relative)
 {
 	const auto suffix = std::filesystem::u8path(relative);
 	if (suffix.has_root_path() || relative.find('\0') != std::string::npos) { return {}; }
 	const auto candidate = CanonicalBelow(canonical_root, suffix);
-	return Contains(canonical_root, candidate) ? candidate.u8string() : std::string();
+	return Contains(canonical_root, candidate) ? candidate.generic_u8string() : std::string();
 }
 
 // Canonical form of a host path. When it lies lexically below one of the
@@ -198,8 +199,11 @@ inline std::shared_ptr<const CaseFoldedDirectory> CaseFoldedEntries(const std::f
 // several entries differ only in case (the host copy then has no guest image).
 inline std::string FindEntryIgnoringCase(const std::filesystem::path& directory, const std::string& name)
 {
+#if !defined(_WIN32)
+	// Only a case-sensitive host proves the exact spelling with one lookup; Windows opens any spelling.
 	std::error_code error;
 	if (std::filesystem::exists(directory / std::filesystem::u8path(name), error)) { return name; }
+#endif
 	const auto folded = CaseFoldedEntries(directory);
 	if (folded == nullptr) { return {}; }
 	const auto it = folded->entries.find(LowerAscii(name));
@@ -213,9 +217,12 @@ inline std::string FindEntryIgnoringCase(const std::filesystem::path& directory,
 // stays verbatim, so creation and ENOENT follow the guest.
 inline std::string MatchCaseInsensitive(const std::string& root, const std::string& relative)
 {
+	const auto base = std::filesystem::u8path(root);
+	if (relative.empty()) { return relative; }
+#if !defined(_WIN32)
 	std::error_code error;
-	const auto      base = std::filesystem::u8path(root);
-	if (relative.empty() || std::filesystem::exists(base / std::filesystem::u8path(relative), error)) { return relative; }
+	if (std::filesystem::exists(base / std::filesystem::u8path(relative), error)) { return relative; }
+#endif
 	std::string           result;
 	std::filesystem::path directory = base;
 	bool                  matching  = true;

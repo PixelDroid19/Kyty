@@ -113,12 +113,19 @@ GpuDirtyPageTracker::GpuDirtyPageTracker(bool enabled)
 
 GpuDirtyPageTracker::GpuDirtyPageTracker(const GpuDirtyPageProtectionOps& protection_ops, bool enabled)
     : m_page_size(Core::VirtualMemory::GetPageSize()), m_pages(enabled ? new PageEntry[kPageTableSize] : nullptr),
-      m_blocks(enabled ? new BlockEntry[kBlockTableSize] : nullptr), m_registration_mutex(enabled ? new std::mutex : nullptr),
+      m_blocks(enabled ? new BlockEntry[kBlockTableSize] : nullptr),
+      m_identity_filter(enabled ? new std::atomic<uint64_t>[kIdentityFilterBits / 64u]() : nullptr),
+      m_registration_mutex(enabled ? new std::mutex : nullptr),
       m_epoch(enabled ? new std::atomic<uint64_t>(0) : nullptr), m_protection_ops(protection_ops),
       m_authority {this, &AuthorityBeginChange, &AuthorityDecide, &AuthorityEndChange},
       m_enabled(enabled && protection_ops.remove_write_and_capture != nullptr && protection_ops.remove_write != nullptr &&
                 protection_ops.restore != nullptr && protection_ops.restore_signal_safe != nullptr)
 {
+	if ((m_page_size & (m_page_size - 1u)) != 0u)
+	{
+		EXIT("dirty-page tracker needs a power-of-two host page size\n");
+	}
+	m_page_shift = m_page_size == 0 ? 0u : static_cast<unsigned>(__builtin_ctzll(m_page_size));
 }
 
 GpuDirtyPageTracker::~GpuDirtyPageTracker()
@@ -242,7 +249,7 @@ void GpuDirtyPageTracker::LowerFence() noexcept
 
 uintptr_t GpuDirtyPageTracker::PageStart(uintptr_t address) const noexcept
 {
-	return m_page_size == 0 ? 0 : address - address % m_page_size;
+	return address & ~(m_page_size - 1u);
 }
 
 uintptr_t GpuDirtyPageTracker::PageEnd(uintptr_t page) const noexcept
@@ -287,9 +294,21 @@ const GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindPage(uintptr_t pa
 	return const_cast<GpuDirtyPageTracker*>(this)->FindPage(page);
 }
 
+size_t GpuDirtyPageTracker::IdentityFilterBit(uintptr_t page) const noexcept
+{
+	return static_cast<size_t>(((page >> m_page_shift) / kBlockPages) & (kIdentityFilterBits - 1u));
+}
+
 GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindWritePage(uintptr_t page) noexcept
 {
 	if (page == 0 || m_pages == nullptr)
+	{
+		return nullptr;
+	}
+	// The bit is set before the key is published, so a clear bit means the probe
+	// below could not find the page either.
+	const size_t filter_bit = IdentityFilterBit(page);
+	if ((m_identity_filter[filter_bit / 64u].load(std::memory_order_acquire) & (uint64_t {1} << (filter_bit % 64u))) == 0u)
 	{
 		return nullptr;
 	}
@@ -348,6 +367,7 @@ uint64_t GpuDirtyPageTracker::BlockWritePageMask(uintptr_t page) noexcept
 
 void GpuDirtyPageTracker::ReactivateRetiredPage(PageEntry* entry) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (entry->refs.load(std::memory_order_acquire) != 0u ||
 	    entry->protection_state.load(std::memory_order_acquire) != static_cast<uint32_t>(GpuDirtyProtectionState::Retired))
 	{
@@ -373,6 +393,7 @@ void GpuDirtyPageTracker::ReactivateRetiredPage(PageEntry* entry) noexcept
 
 GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t page) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	const size_t start = GpuDirtyPageTableIndex(page, kPageTableSize - 1u);
 	PageEntry*   first_tombstone = nullptr;
 	auto         initialize      = [this, page](PageEntry* entry) noexcept -> PageEntry*
@@ -395,6 +416,8 @@ GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t 
 		entry->original_token.store(0, std::memory_order_relaxed);
 		entry->original_mode_valid.store(0, std::memory_order_relaxed);
 		m_blocks[block].page_mask.fetch_or(uint64_t {1} << ((page / m_page_size) % kBlockPages), std::memory_order_relaxed);
+		const size_t filter_bit = IdentityFilterBit(page);
+		m_identity_filter[filter_bit / 64u].fetch_or(uint64_t {1} << (filter_bit % 64u), std::memory_order_release);
 		entry->key.store(page, std::memory_order_release);
 		++m_page_identity_count;
 		ReleaseIdentityWriter();
@@ -429,6 +452,7 @@ GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t 
 // Later fault lookups skip the tombstone and will resolve any reused key anew.
 void GpuDirtyPageTracker::ReleasePageSlot(PageEntry* entry) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	AcquireIdentityWriter();
 	RaiseFence();
 	const uintptr_t page  = entry->key.load(std::memory_order_relaxed);
@@ -494,6 +518,7 @@ const GpuDirtyPageTracker::BlockEntry* GpuDirtyPageTracker::FindBlock(uintptr_t 
 
 uint32_t GpuDirtyPageTracker::FindOrCreateBlock(uintptr_t page) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	const uintptr_t key             = BlockKey(page);
 	const size_t    start           = GpuDirtyPageTableIndex(key << 12u, kBlockTableSize - 1u);
 	size_t          first_tombstone = kBlockTableSize;
@@ -627,7 +652,7 @@ void GpuDirtyPageTracker::VisitOverlappingRangesLocked(uintptr_t begin, uintptr_
 template <typename Visitor>
 void GpuDirtyPageTracker::VisitWritePages(uintptr_t first, uintptr_t last, const Visitor& visitor) noexcept
 {
-	if ((last - first) / m_page_size < kDirectWritePages)
+	if (((last - first) >> m_page_shift) < kDirectWritePages)
 	{
 		for (uintptr_t page = first;; page += m_page_size)
 		{
@@ -788,6 +813,7 @@ bool GpuDirtyPageTracker::AdmitPages(uintptr_t first, uintptr_t last) noexcept
 
 bool GpuDirtyPageTracker::RegisterRange(uintptr_t address, size_t size) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (!m_enabled || m_page_size == 0 || address == 0 || size == 0)
 	{
 		return false;
@@ -861,6 +887,7 @@ bool GpuDirtyPageTracker::RegisterRange(uintptr_t address, size_t size) noexcept
 
 bool GpuDirtyPageTracker::UnregisterRange(uintptr_t address, size_t size) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (!m_enabled || m_registration_mutex == nullptr)
 	{
 		return false;
@@ -957,6 +984,7 @@ void GpuDirtyPageTracker::MarkFallback(uintptr_t page, uintptr_t end) noexcept
 // the evidence later; none is visited here.
 void GpuDirtyPageTracker::MarkPageFallback(PageEntry* page) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (page == nullptr)
 	{
 		return;
@@ -972,6 +1000,7 @@ void GpuDirtyPageTracker::MarkPageFallback(PageEntry* page) noexcept
 
 void GpuDirtyPageTracker::MarkPageWrite(PageEntry* page) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (page == nullptr)
 	{
 		return;
@@ -1915,6 +1944,7 @@ void GpuDirtyPageTracker::PrepareHostWriteLocked(uintptr_t address, size_t size)
 
 uint64_t GpuDirtyPageTracker::BeginHostWrite(uintptr_t address, size_t size) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (!Enabled() || address == 0 || RangeEnd(address, size) == 0)
 	{
 		return 0;
@@ -1945,6 +1975,7 @@ uint64_t GpuDirtyPageTracker::BeginHostWrite(uintptr_t address, size_t size) noe
 
 void GpuDirtyPageTracker::EndHostWrite(uint64_t token) noexcept
 {
+	const EvidenceChange evidence_change(this);
 	if (token == 0) { return; }
 	EXIT_IF(!Enabled());
 	std::lock_guard<std::mutex> lock(*m_registration_mutex);
@@ -2021,6 +2052,39 @@ bool GpuDirtyPageTracker::ChangedSince(uintptr_t address, size_t size, uint64_t 
 		                             result = result || changed(range, record);
 	                             });
 	return result || !found;
+}
+
+bool GpuDirtyPageTracker::InteriorChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept
+{
+	if (!Enabled())
+	{
+		return true;
+	}
+	std::lock_guard<std::mutex> lock(*m_registration_mutex);
+	const uintptr_t             end   = RangeEnd(address, size);
+	const auto                  range = m_ranges.find({address, end});
+	if (end == 0 || range == m_ranges.end())
+	{
+		return true;
+	}
+	const uintptr_t first = PageStart(address) == address ? address : PageEnd(PageStart(address));
+	const uintptr_t stop  = PageStart(end);
+	if (first >= stop)
+	{
+		return false;
+	}
+	const uintptr_t last = stop - m_page_size;
+	if (HasHostWriteLocked(first, last))
+	{
+		return true;
+	}
+	const auto evidence = SegmentEvidence(first / m_page_size, last / m_page_size);
+	return !evidence.complete || evidence.fallback_epoch > range->second.registered_epoch || evidence.write_epoch > snapshot;
+}
+
+uint64_t GpuDirtyPageTracker::PageSize() const noexcept
+{
+	return m_page_size;
 }
 
 bool GpuDirtyPageTracker::ReadObservationIsStable(uintptr_t address, size_t size,

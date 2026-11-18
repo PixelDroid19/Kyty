@@ -12,6 +12,9 @@ namespace Kyty::Kernel::SyncOnAddress {
 // Blocks while the aligned 32-bit value at address equals expected_value.
 // A null timeout waits indefinitely; the currently supported flags value is 0.
 int KYTY_SYSV_ABI KernelSyncOnAddressWait(uint64_t address, uint32_t expected_value, const uint32_t* timeout, uint32_t flags);
+// The sized forms take no flags; the 64-bit one compares an aligned 64-bit value.
+int KYTY_SYSV_ABI KernelSyncOnAddressWait32(uint64_t address, uint32_t expected_value, const uint32_t* timeout);
+int KYTY_SYSV_ABI KernelSyncOnAddressWait64(uint64_t address, uint64_t expected_value, const uint32_t* timeout);
 int KYTY_SYSV_ABI KernelSyncOnAddressWake(uint64_t address, int64_t wake_count);
 
 // _umtx_op: UMTX_OP_WAIT blocks while the 64-bit value at object equals value,

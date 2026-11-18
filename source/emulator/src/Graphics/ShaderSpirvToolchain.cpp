@@ -112,7 +112,10 @@ static bool SpirvCompile(const String8& src, Vector<uint32_t>* dst, String8* err
 	{
 		case Config::ShaderOptimizationType::Performance: opt.RegisterPerformancePasses(); break;
 		case Config::ShaderOptimizationType::Size: opt.RegisterSizePasses(); break;
-		default: optimize = false; break;
+		// Literals of guest code the translation never reaches (link addresses of a
+		// fetch front) would otherwise make identical programs distinct modules,
+		// which the driver compiles again instead of hitting its cache.
+		default: opt.RegisterPass(spvtools::CreateEliminateDeadConstantPass()); break;
 	}
 
 	if (optimize && !opt.Run(spirv.data(), spirv.size(), &spirv))

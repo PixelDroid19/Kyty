@@ -127,6 +127,21 @@ const char* AccessName(ExceptionHandler::AccessViolationType type) noexcept
 	}
 }
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+extern "C" char __executable_start; // NOLINT(bugprone-reserved-identifier): defined by the linker at the image start
+#endif
+
+uint64_t HostImageBase() noexcept
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr));
+#elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	return reinterpret_cast<uint64_t>(&__executable_start);
+#else
+	return 0;
+#endif
+}
+
 void WriteCrashReport(const ExceptionHandler::ExceptionInfo& info) noexcept
 {
 	if (g_crash_report_path_size == 0)
@@ -145,6 +160,9 @@ void WriteCrashReport(const ExceptionHandler::ExceptionInfo& info) noexcept
 	AppendHexJson(json, sizeof(json), &size, info.access_violation_vaddr);
 	AppendText(json, sizeof(json), &size, ",\"rip\":");
 	AppendHexJson(json, sizeof(json), &size, info.exception_address);
+	// The host executable is relocated by ASLR; its load address turns rip and stack values into symbolizable offsets.
+	AppendText(json, sizeof(json), &size, ",\"host_image_base\":");
+	AppendHexJson(json, sizeof(json), &size, HostImageBase());
 	AppendText(json, sizeof(json), &size, ",\"registers\":{");
 	static constexpr const char* names[]  = {"rsp", "rbp", "rflags", "rax", "rbx", "rcx", "rdx", "rsi", "rdi",
 	                                         "r8",  "r9",  "r10",    "r11", "r12", "r13", "r14", "r15"};
@@ -2153,7 +2171,7 @@ bool DecommitGuestRange(uint64_t address, uint64_t size)
 	{
 		return false;
 	}
-#if defined(__linux__) && !defined(__APPLE__)
+#if (defined(__linux__) && !defined(__APPLE__)) || KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	return sys_virtual_decommit_guest_range(address, size);
 #else
 	return false;

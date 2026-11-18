@@ -14,6 +14,8 @@ LIB_DEFINE(InitSyncOnAddress_1)
 {
 	LIB_FUNC("Hc4CaR6JBL0", Kernel::SyncOnAddress::KernelSyncOnAddressWait);
 	LIB_FUNC("q2y-wDIVWZA", Kernel::SyncOnAddress::KernelSyncOnAddressWake);
+	LIB_FUNC("B2n8aDorSH4", Kernel::SyncOnAddress::KernelSyncOnAddressWait32);
+	LIB_FUNC("PZQhiiLXRFs", Kernel::SyncOnAddress::KernelSyncOnAddressWait64);
 }
 
 } // namespace Kyty::Libs

@@ -650,6 +650,192 @@ int KYTY_SYSV_ABI SigninDialogTerminate()
 
 } // namespace SigninDialog
 
+namespace NpCommerceDialog {
+
+LIB_NAME("NpCommerce", "NpCommerce");
+
+static std::atomic<int>      g_status {CommonDialog::STATUS_NONE};
+static std::atomic<uint64_t> g_user_data {0};
+
+int KYTY_SYSV_ABI NpCommerceDialogInitialize()
+{
+	PRINT_NAME();
+
+	int expected = CommonDialog::STATUS_NONE;
+	if (!g_status.compare_exchange_strong(expected, CommonDialog::STATUS_INITIALIZED, std::memory_order_acq_rel))
+	{
+		return CommonDialog::ERROR_ALREADY_INITIALIZED;
+	}
+	return OK;
+}
+
+static int FinishOpen(uint32_t mode, uint64_t user_data)
+{
+	if (g_status.load(std::memory_order_acquire) == CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_NOT_INITIALIZED;
+	}
+	KYTY_LOG_DEBUG("\t mode = %u\n", mode);
+	g_user_data.store(user_data, std::memory_order_relaxed);
+	g_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI NpCommerceDialogOpen(const NpCommerceDialogParam* param)
+{
+	PRINT_NAME();
+	return param == nullptr ? CommonDialog::ERROR_ARG_NULL : FinishOpen(param->mode, param->user_data);
+}
+
+int KYTY_SYSV_ABI NpCommerceDialogOpen2(const NpCommerceDialogParam2* param)
+{
+	PRINT_NAME();
+	return param == nullptr ? CommonDialog::ERROR_ARG_NULL : FinishOpen(param->mode, param->user_data);
+}
+
+int KYTY_SYSV_ABI NpCommerceDialogUpdateStatus()
+{
+	PRINT_NAME();
+	return g_status.load(std::memory_order_acquire);
+}
+
+// Returns the result code as well as writing it, as the library does.
+int KYTY_SYSV_ABI NpCommerceDialogGetResult(NpCommerceDialogResult* result)
+{
+	PRINT_NAME();
+
+	if (result == nullptr)
+	{
+		return CommonDialog::ERROR_ARG_NULL;
+	}
+	const int status = g_status.load(std::memory_order_acquire);
+	if (status == CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_NOT_INITIALIZED;
+	}
+	if (status != CommonDialog::STATUS_FINISHED)
+	{
+		return CommonDialog::ERROR_NOT_FINISHED;
+	}
+
+	*result           = NpCommerceDialogResult {};
+	result->result    = RESULT_USER_CANCELED;
+	result->user_data = g_user_data.load(std::memory_order_relaxed);
+	return RESULT_USER_CANCELED;
+}
+
+int KYTY_SYSV_ABI NpCommerceDialogTerminate()
+{
+	PRINT_NAME();
+
+	if (g_status.exchange(CommonDialog::STATUS_NONE, std::memory_order_acq_rel) == CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_NOT_INITIALIZED;
+	}
+	return OK;
+}
+
+} // namespace NpCommerceDialog
+
+namespace WebBrowserDialog {
+
+LIB_NAME("WebBrowserDialog", "WebBrowserDialog");
+
+static std::atomic<int> g_status {CommonDialog::STATUS_NONE};
+
+int KYTY_SYSV_ABI WebBrowserDialogInitialize()
+{
+	PRINT_NAME();
+
+	int expected = CommonDialog::STATUS_NONE;
+	if (!g_status.compare_exchange_strong(expected, CommonDialog::STATUS_INITIALIZED, std::memory_order_acq_rel))
+	{
+		return CommonDialog::ERROR_ALREADY_INITIALIZED;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI WebBrowserDialogOpen(const void* param)
+{
+	PRINT_NAME();
+
+	if (param == nullptr)
+	{
+		return CommonDialog::ERROR_ARG_NULL;
+	}
+	if (g_status.load(std::memory_order_acquire) == CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_NOT_INITIALIZED;
+	}
+	g_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI WebBrowserDialogOpenForPredeterminedContent(const void* param)
+{
+	PRINT_NAME();
+	return WebBrowserDialogOpen(param);
+}
+
+int KYTY_SYSV_ABI WebBrowserDialogGetStatus()
+{
+	PRINT_NAME();
+	return g_status.load(std::memory_order_acquire);
+}
+
+int KYTY_SYSV_ABI WebBrowserDialogUpdateStatus()
+{
+	PRINT_NAME();
+	return g_status.load(std::memory_order_acquire);
+}
+
+int KYTY_SYSV_ABI WebBrowserDialogGetResult(WebBrowserDialogResult* result)
+{
+	PRINT_NAME();
+
+	if (result == nullptr)
+	{
+		return CommonDialog::ERROR_ARG_NULL;
+	}
+	const int status = g_status.load(std::memory_order_acquire);
+	if (status == CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_NOT_INITIALIZED;
+	}
+	if (status != CommonDialog::STATUS_FINISHED)
+	{
+		return CommonDialog::ERROR_NOT_FINISHED;
+	}
+	// The extended block belongs to the caller and has nothing to report.
+	result->result = RESULT_USER_CANCELED;
+	return OK;
+}
+
+int KYTY_SYSV_ABI WebBrowserDialogClose()
+{
+	PRINT_NAME();
+
+	if (g_status.load(std::memory_order_acquire) != CommonDialog::STATUS_RUNNING)
+	{
+		return CommonDialog::ERROR_NOT_RUNNING;
+	}
+	g_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI WebBrowserDialogTerminate()
+{
+	PRINT_NAME();
+
+	if (g_status.exchange(CommonDialog::STATUS_NONE, std::memory_order_acq_rel) == CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_NOT_INITIALIZED;
+	}
+	return OK;
+}
+
+} // namespace WebBrowserDialog
+
 } // namespace Kyty::Libs::Dialog
 
 #endif // KYTY_EMU_ENABLED

@@ -84,6 +84,10 @@ enum class Gen5CatalogImageFormat: uint16_t
 // format, format first; the view-format list of a mutable storage image.
 [[nodiscard]] uint32_t VulkanColorTexelFormatList(VkFormat format, VkFormat* out, uint32_t capacity);
 
+// The 8-bit color format holding the same texels with the other transfer
+// function (UNORM <-> sRGB), or VK_FORMAT_UNDEFINED when there is none.
+[[nodiscard]] VkFormat VulkanColorGammaTwin(VkFormat format);
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

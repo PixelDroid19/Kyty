@@ -417,10 +417,12 @@ void DescriptorCache::FreeOldestRecycled()
 
 uint32_t DescriptorCache::CalcHash(const Set& s)
 {
-	uint32_t hash = 0;
+	// FNV-1a over whole words: every lookup hashes the full layout key, and a
+	// per-byte mix of each word cost more than the rest of the lookup.
+	uint32_t hash = 2166136261u;
 	for (uint32_t word: s.layout_key)
 	{
-		hash = (hash * 33u) ^ Core::hash32(word);
+		hash = (hash ^ word) * 16777619u;
 	}
 	hash += Core::hash8(static_cast<uint8_t>(s.stage));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.storage_buffers.size()));
@@ -475,14 +477,31 @@ bool DescriptorCache::SameBindings(const Set& a, const Set& b)
 	       (!a.vsharp_uniform_buffer || a.vsharp_uniform_buffer_key == b.vsharp_uniform_buffer_key);
 }
 
+// Called under m_mutex. True when a set with this hash was asked for before: one
+// slot per hash bucket remembers the last hash that missed there.
+bool DescriptorCache::AdmitSet(uint64_t hash)
+{
+	if (m_seen_set_hashes.empty())
+	{
+		m_seen_set_hashes.resize(SEEN_SET_HASHES);
+	}
+	auto& seen = m_seen_set_hashes[(hash * 0x9E3779B97F4A7C15ull) >> (64u - SEEN_SET_HASHES_BITS)];
+	if (seen == hash)
+	{
+		return true;
+	}
+	seen = hash;
+	return false;
+}
+
 int DescriptorCache::FindSet(const Set& s)
 {
-	const auto* list = m_sets_map.Find(s.hash);
-	if (list == nullptr)
+	const int* head = m_sets_by_hash.Find(s.hash);
+	if (head == nullptr)
 	{
 		return -1;
 	}
-	for (int index: *list)
+	for (int index = *head; index != -1; index = m_sets[index].next_same_hash)
 	{
 		const auto& set = m_sets[index];
 		if (set.set != nullptr && SameBindings(set, s))
@@ -522,6 +541,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	KYTY_PROFILER_BLOCK("DescriptorCache::GetDescriptor::search");
 
 	TrimSets();
+	DeferUncachedSets(buffer);
 
 	int        storage_buffers_num    = bind.storage_buffers.buffers_num;
 	const int  sampled_total = bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_sampled_depth_num +
@@ -681,6 +701,15 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		return m_sets[found].set;
 	}
 
+	// A set binding a buffer the snapshot pool just recaptured for another guest range
+	// is never looked up again, and a set seen for the first time often is not either:
+	// indexing it and trimming it later costs more than its creation. It returns to the
+	// recycled sets once its submission completes; a set asked for again is cached.
+	SubmissionId uncached_submission {};
+	const bool   recaptured = std::any_of(storage_buffers, storage_buffers + storage_buffers_num, [](const VulkanBuffer* storage)
+	                                      { return storage != nullptr && storage->uncached_descriptor_sets; });
+	const bool   uncached   = (recaptured || !AdmitSet(nset.hash)) && buffer != nullptr && buffer->GetSubmissionId(&uncached_submission);
+
 	KYTY_PROFILER_END_BLOCK;
 
 	KYTY_PROFILER_BLOCK("DescriptorCache::GetDescriptor::create");
@@ -688,7 +717,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	auto* new_set = Allocate(stage, layout_plan);
 	EXIT_IF(new_set == nullptr);
 
-	VkDescriptorBufferInfo buffer_info[BUFFERS_MAX] {};
+	VkDescriptorBufferInfo buffer_info[BUFFERS_MAX];
 	for (int i = 0; i < storage_buffers_num; i++)
 	{
 		// PrepareStorageBuffers must always materialize a carrier (including empty OOB
@@ -701,15 +730,16 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	}
 
 	const bool             write_mask = bind.storage_buffers.write_mask_binding_index >= 0;
-	VkDescriptorBufferInfo write_mask_info[BUFFERS_MAX] {};
+	VkDescriptorBufferInfo write_mask_info[BUFFERS_MAX];
 	for (int i = 0; write_mask && i < storage_buffers_num; i++)
 	{
 		const VulkanBuffer* mask  = storage_buffers[i]->write_mask != nullptr ? storage_buffers[i]->write_mask : WriteMaskSink(gctx);
 		write_mask_info[i].buffer = mask->buffer;
+		write_mask_info[i].offset = 0;
 		write_mask_info[i].range  = mask->descriptor_range;
 	}
 
-	VkDescriptorImageInfo texture2d_sampled_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture2d_sampled_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures2d_sampled_num; i++)
 	{
 		texture2d_sampled_info[i].sampler   = nullptr;
@@ -722,7 +752,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                    : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
-	VkDescriptorImageInfo texture2d_sampled_depth_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture2d_sampled_depth_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < nset.textures2d_sampled_depth_num; i++)
 	{
 		texture2d_sampled_depth_info[i].sampler     = nullptr;
@@ -731,7 +761,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		texture2d_sampled_depth_info[i].imageLayout = SampledDepthLayout(textures2d_sampled_depth_view[i]);
 	}
 
-	VkDescriptorImageInfo texture2d_array_sampled_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture2d_array_sampled_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures2d_array_sampled_num; i++)
 	{
 		texture2d_array_sampled_info[i].sampler   = nullptr;
@@ -745,7 +775,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                          : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
-	VkDescriptorImageInfo texture2d_storage_info[TEXTURES_STORAGE_MAX] {};
+	VkDescriptorImageInfo texture2d_storage_info[TEXTURES_STORAGE_MAX];
 	for (int i = 0; i < textures2d_storage_num; i++)
 	{
 		texture2d_storage_info[i].sampler     = nullptr;
@@ -753,7 +783,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		texture2d_storage_info[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 	}
 
-	VkDescriptorImageInfo sampler_info[SAMPLERS_MAX] {};
+	VkDescriptorImageInfo sampler_info[SAMPLERS_MAX];
 	for (int i = 0; i < samplers_num; i++)
 	{
 		sampler_info[i].sampler     = g_render_ctx->GetSamplerCache()->GetSampler(samplers[i]);
@@ -761,7 +791,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		sampler_info[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
 
-	VkDescriptorBufferInfo gds_buffer_info[GDS_BUFFER_MAX] {};
+	VkDescriptorBufferInfo gds_buffer_info[GDS_BUFFER_MAX];
 	for (int i = 0; i < gds_buffers_num; i++)
 	{
 		gds_buffer_info[i].buffer = gds_buffers[i]->buffer;
@@ -769,7 +799,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		gds_buffer_info[i].range  = VK_WHOLE_SIZE;
 	}
 
-	VkDescriptorImageInfo texture3d_sampled_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture3d_sampled_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures3d_sampled_num; i++)
 	{
 		texture3d_sampled_info[i].sampler     = nullptr;
@@ -780,7 +810,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                  : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
 
-	VkDescriptorImageInfo texture2d_sampled_uint_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture2d_sampled_uint_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures2d_sampled_uint_num; i++)
 	{
 		texture2d_sampled_uint_info[i].sampler   = nullptr;
@@ -794,7 +824,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                         : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
-	VkDescriptorImageInfo texture2d_array_sampled_uint_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture2d_array_sampled_uint_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures2d_array_sampled_uint_num; i++)
 	{
 		texture2d_array_sampled_uint_info[i].sampler   = nullptr;
@@ -809,7 +839,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                               : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
-	VkDescriptorImageInfo texture3d_sampled_uint_info[TEXTURES_SAMPLED_MAX] {};
+	VkDescriptorImageInfo texture3d_sampled_uint_info[TEXTURES_SAMPLED_MAX];
 	for (int i = 0; i < textures3d_sampled_uint_num; i++)
 	{
 		texture3d_sampled_uint_info[i].sampler     = nullptr;
@@ -842,7 +872,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 
 	constexpr uint32_t B_MAX = 13;
 
-	VkWriteDescriptorSet descriptor_write[B_MAX] = {};
+	VkWriteDescriptorSet descriptor_write[B_MAX];
 
 	if (storage_buffers_num > 0)
 	{
@@ -1054,6 +1084,16 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 
 	vkUpdateDescriptorSets(gctx->device, binding_num, descriptor_write, 0, nullptr);
 
+	if (uncached)
+	{
+		if (m_uncached_submissions.empty() || m_uncached_submissions.back() != uncached_submission)
+		{
+			m_uncached_submissions.push_back(uncached_submission);
+		}
+		m_uncached_sets.push_back(new_set);
+		return new_set;
+	}
+
 	nset.set = new_set;
 
 	int index = 0;
@@ -1070,11 +1110,9 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		m_sets.Add(nset);
 	}
 
-	auto& ids = m_sets_map[nset.hash];
-	if (!ids.Contains(index))
-	{
-		ids.Add(index);
-	}
+	int& head                    = m_sets_by_hash.FindOrInsert(nset.hash);
+	m_sets[index].next_same_hash = head;
+	head                         = index;
 	IndexSet(index);
 	m_live_sets++;
 	RecordSetUse(index, buffer);
@@ -1134,18 +1172,43 @@ VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 			m_sets_by_resource.erase(it);
 		}
 	}
-	auto*          released = set.set;
-	const uint32_t hash     = set.hash;
-	// A free slot keeps no binding storage.
-	set               = Set {};
+	auto* released = set.set;
+	int*  head     = m_sets_by_hash.Find(set.hash);
+	EXIT_IF(head == nullptr);
+	if (*head == index)
+	{
+		if (set.next_same_hash == -1)
+		{
+			m_sets_by_hash.Erase(set.hash);
+		} else
+		{
+			*head = set.next_same_hash;
+		}
+	} else
+	{
+		int previous = *head;
+		while (m_sets[previous].next_same_hash != index)
+		{
+			previous = m_sets[previous].next_same_hash;
+			EXIT_IF(previous == -1);
+		}
+		m_sets[previous].next_same_hash = set.next_same_hash;
+	}
+	// A free slot keeps the capacity of its binding vectors: the set later copied
+	// into it then allocates nothing.
+	Set freed;
+	const auto keep = [](auto* from, auto* to)
+	{
+		from->clear();
+		std::swap(*from, *to);
+	};
+	keep(&set.storage_buffers, &freed.storage_buffers);
+	keep(&set.images, &freed.images);
+	keep(&set.samplers_id, &freed.samplers_id);
+	keep(&set.resources, &freed.resources);
+	set               = std::move(freed);
 	set.next_free_set = m_first_free_set;
 	m_first_free_set  = index;
-	auto& hash_ids    = m_sets_map[hash];
-	hash_ids.Remove(index);
-	if (hash_ids.IsEmpty())
-	{
-		m_sets_map.Remove(hash);
-	}
 	EXIT_IF(m_live_sets == 0);
 	m_live_sets--;
 	return released;
@@ -1230,31 +1293,66 @@ void DescriptorCache::LruAppend(int index)
 // freed after every submission that recorded them completes.
 void DescriptorCache::TrimSets()
 {
-	struct Retired
-	{
-		std::vector<SubmissionId> submissions;
-		VulkanDescriptorSet*      set;
-	};
-	std::vector<Retired> retired;
+	std::vector<SubmissionId>         submissions;
+	std::vector<VulkanDescriptorSet*> sets;
 	{
 		Core::LockGuard lock(m_mutex);
 		if (m_live_sets < LIVE_SETS_MAX)
 		{
 			return;
 		}
+		sets.reserve(TRIM_SETS);
 		for (uint32_t i = 0; i < TRIM_SETS && m_lru_oldest != -1; i++)
 		{
-			const int index = m_lru_oldest;
-			retired.push_back({m_sets.At(index).uses.Dependencies(), UnindexSet(index)});
+			const int   index = m_lru_oldest;
+			const auto& uses  = m_sets.At(index).uses.Dependencies();
+			// Only a set with a recorded use joins the trim order.
+			EXIT_IF(uses.empty());
+			submissions.insert(submissions.end(), uses.begin(), uses.end());
+			sets.push_back(UnindexSet(index));
 		}
 	}
+	if (sets.empty())
+	{
+		return;
+	}
+	// One deferral for the whole trim: these are the least recently used sets, so
+	// waiting for the newest of their uses delays their recycling by little.
 	// The deletion queue may run a ready task synchronously, and resource deletion
 	// enters this cache under the GPU memory lock: enqueue without holding m_mutex.
-	for (auto& entry: retired)
+	GpuMemoryDeferUntilSubmissionsComplete(std::move(submissions), [this, sets = std::move(sets)]() {
+		for (auto* set: sets)
+		{
+			Recycle(set);
+		}
+	});
+}
+
+// A recording's uncached sets wait for its submission as one deferral, made when
+// another recording asks for a set. As in TrimSets, the deletion queue may run a
+// ready task synchronously: enqueue without holding m_mutex.
+void DescriptorCache::DeferUncachedSets(CommandBuffer* buffer)
+{
+	SubmissionId current {};
+	const bool   has_current = buffer != nullptr && buffer->GetSubmissionId(&current);
+
+	std::vector<SubmissionId>         submissions;
+	std::vector<VulkanDescriptorSet*> sets;
 	{
-		auto* set = entry.set;
-		GpuMemoryDeferUntilSubmissionsComplete(std::move(entry.submissions), [this, set]() { Recycle(set); });
+		Core::LockGuard lock(m_mutex);
+		if (m_uncached_sets.empty() || (has_current && m_uncached_submissions.back() == current))
+		{
+			return;
+		}
+		submissions.swap(m_uncached_submissions);
+		sets.swap(m_uncached_sets);
 	}
+	GpuMemoryDeferUntilSubmissionsComplete(std::move(submissions), [this, sets = std::move(sets)]() {
+		for (auto* set: sets)
+		{
+			Recycle(set);
+		}
+	});
 }
 
 // Candidates come from the reverse index; `references` keeps each caller's
@@ -1352,7 +1450,7 @@ void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
 	}
 
 	m_descriptor_set_layouts.clear();
-	m_sets_map.Clear();
+	m_sets_by_hash.Clear();
 	m_sets_by_resource.clear();
 	m_sets.Clear();
 	m_pools.Clear();
@@ -1412,11 +1510,20 @@ void DeleteDescriptor(RenderTextureVulkanImage* image)
 	g_render_ctx->GetDescriptorCache()->FreeDescriptor(image);
 }
 
-static bool get_stencil_op(VkStencilOp* f, uint32_t* ref, uint8_t op, uint8_t testval, uint8_t opval)
+// Logic ops (0x0a-0x0f) combine the stored value with STENCILOPVAL. Vulkan has no logic stencil ops, so each
+// becomes ZERO, INVERT or a set restricted to the bits the op changes (*write_bits, ANDed into the write mask);
+// returns false through *exact when one Vulkan op cannot produce the result.
+static bool get_stencil_op(VkStencilOp* f, uint32_t* ref, uint8_t* write_bits, bool* exact, uint8_t op, uint8_t testval,
+                           uint8_t writemask, uint8_t opval)
 {
 	VkStencilOp vk      = VK_STENCIL_OP_KEEP;
 	uint32_t    r       = opval;
 	bool        use_ref = true;
+	uint8_t     bits    = 0xffu;
+	// NAND and NOR are a single op only when STENCILOPVAL is all zeros or all ones within the write mask.
+	const bool opval_none = (opval & writemask) == 0u;
+	const bool opval_all  = (opval & writemask) == writemask;
+	*exact                = true;
 
 	switch (op)
 	{
@@ -1459,33 +1566,106 @@ static bool get_stencil_op(VkStencilOp* f, uint32_t* ref, uint8_t op, uint8_t te
 			vk      = VK_STENCIL_OP_DECREMENT_AND_WRAP;
 			use_ref = false;
 			break; /* SubWrap        */
-		case 0x0a:                                                /* And            */
-		case 0x0b:                                                /* Or             */
-		case 0x0c:                                                /* Xor            */
-		case 0x0d:                                                /* Nand           */
-		case 0x0e:                                                /* Nor            */
-		case 0x0f:                                                /* Xnor           */
+		case 0x0a:
+			vk      = VK_STENCIL_OP_ZERO;
+			bits    = static_cast<uint8_t>(~opval);
+			use_ref = false;
+			break; /* And            */
+		case 0x0b:
+			// The reference is also the compare value; keeping testval's bits leaves the compare intact
+			// unless opval sets a compared bit testval lacks (checked by the caller).
+			vk   = VK_STENCIL_OP_REPLACE;
+			r    = static_cast<uint32_t>(testval | opval);
+			bits = opval;
+			break; /* Or             */
+		case 0x0c:
+			vk      = VK_STENCIL_OP_INVERT;
+			bits    = opval;
+			use_ref = false;
+			break; /* Xor            */
+		case 0x0d:
+			if (opval_all)
+			{
+				vk      = VK_STENCIL_OP_INVERT;
+				use_ref = false;
+			} else if (opval_none)
+			{
+				vk = VK_STENCIL_OP_REPLACE;
+				r  = 0xFF;
+			} else
+			{
+				use_ref = false;
+				*exact  = false;
+			}
+			break; /* Nand           */
+		case 0x0e:
+			if (opval_all)
+			{
+				vk      = VK_STENCIL_OP_ZERO;
+				use_ref = false;
+			} else if (opval_none)
+			{
+				vk      = VK_STENCIL_OP_INVERT;
+				use_ref = false;
+			} else
+			{
+				use_ref = false;
+				*exact  = false;
+			}
+			break; /* Nor            */
+		case 0x0f:
+			vk      = VK_STENCIL_OP_INVERT;
+			bits    = static_cast<uint8_t>(~opval);
+			use_ref = false;
+			break; /* Xnor           */
 		default: KYTY_LOG_DEBUG("WARNING: invalid PM4 op (continuing)\n"); break;
 	}
-	*f   = vk;
-	*ref = r;
+	*f          = vk;
+	*ref        = r;
+	*write_bits = bits;
 	return use_ref;
 }
 
-void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
-                              uint8_t zfail, uint8_t testval, uint8_t mask, uint8_t writemask, uint8_t opval)
+bool get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
+                       uint8_t zfail, uint8_t testval, uint8_t mask, uint8_t writemask, uint8_t opval)
 {
 	EXIT_IF(s == nullptr || d == nullptr);
 
-	uint32_t ref[3]     = {};
-	bool     use_ref[3] = {};
+	uint32_t ref[3]        = {};
+	bool     use_ref[3]    = {};
+	uint8_t  write_bits[3] = {};
+	bool     op_exact[3]   = {};
 
-	use_ref[0]     = get_stencil_op(&s->failOp, ref + 0, fail, testval, opval);
-	use_ref[1]     = get_stencil_op(&s->passOp, ref + 1, zpass, testval, opval);
-	use_ref[2]     = get_stencil_op(&s->depthFailOp, ref + 2, zfail, testval, opval);
+	use_ref[0]     = get_stencil_op(&s->failOp, ref + 0, write_bits + 0, op_exact + 0, fail, testval, writemask, opval);
+	use_ref[1]     = get_stencil_op(&s->passOp, ref + 1, write_bits + 1, op_exact + 1, zpass, testval, writemask, opval);
+	use_ref[2]     = get_stencil_op(&s->depthFailOp, ref + 2, write_bits + 2, op_exact + 2, zfail, testval, writemask, opval);
 	s->compareOp   = static_cast<VkCompareOp>(func);
 	d->compareMask = mask;
-	d->writeMask   = writemask;
+	bool exact     = op_exact[0] && op_exact[1] && op_exact[2];
+
+	// The three ops share one write mask: the ops that write must agree on the bits a logic op narrows it to.
+	// When they do not, the narrowing ops are dropped (KEEP) so the other ops keep their full mask.
+	VkStencilOp* ops[3]     = {&s->failOp, &s->passOp, &s->depthFailOp};
+	uint8_t      narrow     = 0xffu;
+	bool         narrow_set = false;
+	bool         conflict   = false;
+	for (int i = 0; i < 3; i++)
+	{
+		if (*ops[i] == VK_STENCIL_OP_KEEP) { continue; }
+		conflict   = conflict || (narrow_set && write_bits[i] != narrow);
+		narrow     = write_bits[i];
+		narrow_set = true;
+	}
+	if (conflict)
+	{
+		exact  = false;
+		narrow = 0xffu;
+		for (int i = 0; i < 3; i++)
+		{
+			if (write_bits[i] != 0xffu) { *ops[i] = VK_STENCIL_OP_KEEP; }
+		}
+	}
+	d->writeMask = static_cast<uint8_t>(writemask & narrow);
 
 	if (use_ref[0])
 	{
@@ -1502,6 +1682,17 @@ void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicStat
 	{
 		d->reference = testval;
 	}
+
+	// A logic op that writes through the reference moves the compare value off testval.
+	const bool logic_op      = fail >= 0x0au || zpass >= 0x0au || zfail >= 0x0au;
+	const bool compare_reads = func != VK_COMPARE_OP_NEVER && func != VK_COMPARE_OP_ALWAYS;
+	if (logic_op && compare_reads && ((d->reference ^ testval) & mask) != 0u) { exact = false; }
+	if (logic_op && !exact)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: stencil logic op not expressible as one Vulkan op (fail=%u zpass=%u zfail=%u opval=0x%02x writemask=0x%02x)\n",
+		               fail, zpass, zfail, opval, writemask);
+	}
+	return exact;
 }
 
 Vector<RenderTextureVulkanImage*> FindRenderTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact)

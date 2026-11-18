@@ -150,7 +150,7 @@ bool Gen5GetTextureArrayLayout(uint32_t format, uint32_t width, uint32_t height,
 	const bool standard_4kb       = tile == 5u;
 	const bool block_compressed   = ShaderGen5TextureIsBlockCompressed(format);
 	const bool standard_64kb      = tile == 9u && TileGet64KBBlockWidth(bytes_per_element) != 0u;
-	const bool render_target_64kb = tile == 27u && (bytes_per_element == 1u || bytes_per_element == 4u || bytes_per_element == 8u) &&
+	const bool render_target_64kb = tile == 27u && (bytes_per_element == 1u || bytes_per_element == 2u || bytes_per_element == 4u || bytes_per_element == 8u) &&
 	                                !ShaderGen5TextureIsBlockCompressed(format);
 	// Gen5GetStandard256BTextureMipLayout validates the element size, block-compressed formats included.
 	const bool standard_256b_chain = tile == 1u && levels > 1u;
@@ -258,6 +258,23 @@ bool Gen5DetileTextureArrayLayer(void* dst, uint64_t dst_size, const void* src, 
 	}
 	const auto* input_layer = static_cast<const uint8_t*>(src) + tiled_offset;
 	return DetileOneLayer(static_cast<uint8_t*>(dst), input_layer, layout, layer);
+}
+
+bool Gen5MarkTextureArrayLayersTouched(const Gen5TextureArrayLayout& layout, uint64_t offset, uint64_t bytes,
+                                       std::vector<uint8_t>* touched)
+{
+	if (touched == nullptr || touched->size() != layout.layers || layout.tiled_slice.size == 0u || bytes == 0u ||
+	    offset >= layout.tiled_size || bytes > layout.tiled_size - offset)
+	{
+		return false;
+	}
+	const uint64_t first = offset / layout.tiled_slice.size;
+	const uint64_t last  = (offset + bytes - 1u) / layout.tiled_slice.size;
+	for (uint64_t layer = first; layer <= last; layer++)
+	{
+		(*touched)[static_cast<size_t>(layer)] = 1u;
+	}
+	return true;
 }
 
 bool Gen5DetileTextureArray(void* dst, uint64_t dst_size, const void* src, uint64_t src_size, const Gen5TextureArrayLayout& layout)

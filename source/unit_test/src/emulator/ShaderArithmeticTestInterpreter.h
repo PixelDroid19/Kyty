@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // CPU contract evaluator for the first straight-line guest instruction of a
@@ -147,6 +148,8 @@ public:
 			}
 			Fail("undefined label " + label);
 		};
+		// Ids typed %double hold their low and high words in words[0] and words[1].
+		std::unordered_set<std::string> doubles;
 		for (size_t index = 0; index < m_body.size(); ++index)
 		{
 			const auto& t = m_body[index];
@@ -163,6 +166,14 @@ public:
 			const auto& op = t[2];
 			const auto arg = [&](size_t i) { return value(t.at(i)).words[0]; };
 			const auto fp = [&](size_t i) { return Float(arg(i)); };
+			const auto compared = [&](size_t i) -> double {
+				if (doubles.count(t.at(i)) == 0u) { return fp(i); }
+				const auto&    words = value(t.at(i)).words;
+				const uint64_t bits  = words[0] | (static_cast<uint64_t>(words[1]) << 32u);
+				double         d     = 0.0;
+				std::memcpy(&d, &bits, sizeof(d));
+				return d;
+			};
 			Value result;
 			uint32_t& r = result.words[0];
 			if (op == "OpLoad" || op == "OpBitcast" || op == "OpCopyObject") { result = value(t.at(4)); }
@@ -173,6 +184,11 @@ public:
 			else if (op == "OpNot") { r = ~arg(4); }
 			else if (op == "OpIAdd") { r = arg(4) + arg(5); }
 			else if (op == "OpISub") { r = arg(4) - arg(5); }
+			else if (op == "OpIMul") { r = arg(4) * arg(5); }
+			else if (op == "OpBitReverse")
+			{
+				for (uint32_t bit = 0; bit < 32u; ++bit) { r |= ((arg(4) >> bit) & 1u) << (31u - bit); }
+			}
 			else if (op == "OpShiftLeftLogical" || op == "OpShiftRightLogical" || op == "OpShiftRightArithmetic")
 			{
 				const auto shift = arg(5);
@@ -203,6 +219,7 @@ public:
 			else if (op == "OpINotEqual") { r = arg(4) != arg(5); }
 			else if (op == "OpULessThan") { r = arg(4) < arg(5); }
 			else if (op == "OpSLessThan") { r = static_cast<int32_t>(arg(4)) < static_cast<int32_t>(arg(5)); }
+			else if (op == "OpSGreaterThan") { r = static_cast<int32_t>(arg(4)) > static_cast<int32_t>(arg(5)); }
 			else if (op == "OpULessThanEqual") { r = arg(4) <= arg(5); }
 			else if (op == "OpUGreaterThan") { r = arg(4) > arg(5); }
 			else if (op == "OpUGreaterThanEqual") { r = arg(4) >= arg(5); }
@@ -213,18 +230,36 @@ public:
 			else if (op == "OpFSub") { r = Bits(fp(4) - fp(5)); }
 			else if (op == "OpFMul") { r = Bits(fp(4) * fp(5)); }
 			else if (op == "OpFNegate") { r = arg(4) ^ 0x80000000u; }
-			else if (op == "OpFOrdEqual") { r = fp(4) == fp(5); }
-			else if (op == "OpFOrdNotEqual") { r = !std::isnan(fp(4)) && !std::isnan(fp(5)) && fp(4) != fp(5); }
-			else if (op == "OpFOrdLessThan") { r = fp(4) < fp(5); }
-			else if (op == "OpFOrdLessThanEqual") { r = fp(4) <= fp(5); }
-			else if (op == "OpFOrdGreaterThan") { r = fp(4) > fp(5); }
-			else if (op == "OpIsNan") { r = std::isnan(fp(4)); }
-			else if (op == "OpIsInf") { r = std::isinf(fp(4)); }
+			else if (op == "OpFOrdEqual") { r = compared(4) == compared(5); }
+			else if (op == "OpFOrdNotEqual") { r = !std::isnan(compared(4)) && !std::isnan(compared(5)) && compared(4) != compared(5); }
+			else if (op == "OpFUnordNotEqual") { r = std::isnan(compared(4)) || std::isnan(compared(5)) || compared(4) != compared(5); }
+			else if (op == "OpFOrdLessThan") { r = compared(4) < compared(5); }
+			else if (op == "OpFOrdLessThanEqual") { r = compared(4) <= compared(5); }
+			else if (op == "OpFOrdGreaterThan") { r = compared(4) > compared(5); }
+			else if (op == "OpFConvert" && t.at(3) == "%float" && doubles.count(t.at(4)) != 0u) { r = Bits(static_cast<float>(compared(4))); }
+			else if (op == "OpFConvert" && t.at(3) == "%double")
+			{
+				const double   d    = fp(4);
+				uint64_t       bits = 0;
+				std::memcpy(&bits, &d, sizeof(bits));
+				result.words[0] = static_cast<uint32_t>(bits);
+				result.words[1] = static_cast<uint32_t>(bits >> 32u);
+			}
+			else if (op == "OpIsNan") { r = std::isnan(compared(4)); }
+			else if (op == "OpIsInf") { r = std::isinf(compared(4)); }
+			else if ((op == "OpConvertUToF" || op == "OpConvertSToF") && t.at(3) == "%double")
+			{
+				const double   d    = op == "OpConvertUToF" ? static_cast<double>(arg(4)) : static_cast<double>(static_cast<int32_t>(arg(4)));
+				uint64_t       bits = 0;
+				std::memcpy(&bits, &d, sizeof(bits));
+				result.words[0] = static_cast<uint32_t>(bits);
+				result.words[1] = static_cast<uint32_t>(bits >> 32u);
+			}
 			else if (op == "OpConvertUToF") { r = Bits(static_cast<float>(arg(4))); }
 			else if (op == "OpConvertSToF") { r = Bits(static_cast<float>(static_cast<int32_t>(arg(4)))); }
 			else if (op == "OpConvertFToU")
 			{
-				const double input = fp(4);
+				const double input = compared(4);
 				if (!std::isfinite(input) || input < 0.0 || input >= 4294967296.0)
 				{
 					Fail("undefined conversion");
@@ -232,15 +267,27 @@ public:
 				r = static_cast<uint32_t>(input);
 			} else if (op == "OpConvertFToS")
 			{
-				if (!std::isfinite(fp(4)) || fp(4) < -2147483648.0 || fp(4) >= 2147483648.0) { Fail("undefined conversion"); }
-				r = static_cast<uint32_t>(static_cast<int32_t>(fp(4)));
+				if (!std::isfinite(compared(4)) || compared(4) < -2147483648.0 || compared(4) >= 2147483648.0) { Fail("undefined conversion"); }
+				r = static_cast<uint32_t>(static_cast<int32_t>(compared(4)));
 			}
-			else if (op == "OpCompositeExtract") { r = value(t.at(4)).words.at(std::strtoul(t.at(5).c_str(), nullptr, 0)); }
+			// The fixture runs one lane, invocation 0, so a ballot holds only that lane's predicate.
+			else if (op == "OpGroupNonUniformBallot") { r = arg(5) != 0u ? 1u : 0u; }
+			else if (op == "OpCompositeConstruct")
+			{
+				if (t.size() > 8u) { Fail("composite wider than four words"); }
+				for (size_t i = 4; i < t.size(); ++i) { result.words.at(i - 4u) = arg(i); }
+			} else if (op == "OpISubBorrow")
+			{
+				result.words[0] = arg(4) - arg(5);
+				result.words[1] = arg(4) < arg(5) ? 1u : 0u;
+			} else if (op == "OpCompositeExtract") { r = value(t.at(4)).words.at(std::strtoul(t.at(5).c_str(), nullptr, 0)); }
 			else if (op == "OpExtInst")
 			{
 				const auto& ext = t.at(5);
 				if (ext == "UMin") { r = std::min(arg(6), arg(7)); }
 				else if (ext == "UMax") { r = std::max(arg(6), arg(7)); }
+				else if (ext == "SMin") { r = static_cast<uint32_t>(std::min(static_cast<int32_t>(arg(6)), static_cast<int32_t>(arg(7)))); }
+				else if (ext == "SMax") { r = static_cast<uint32_t>(std::max(static_cast<int32_t>(arg(6)), static_cast<int32_t>(arg(7)))); }
 				else if (ext == "SClamp")
 				{
 					const auto signed_arg = [&](size_t index) { return static_cast<int32_t>(arg(index)); };
@@ -251,6 +298,19 @@ public:
 					uint32_t word = arg(6);
 					r = UINT32_MAX;
 					while (word != 0u) { ++r; word >>= 1u; }
+				}
+				else if (ext == "FindILsb")
+				{
+					const uint32_t word = arg(6);
+					r = UINT32_MAX;
+					for (uint32_t bit = 0; bit < 32u && r == UINT32_MAX; ++bit) { r = ((word >> bit) & 1u) != 0u ? bit : UINT32_MAX; }
+				}
+				else if (ext == "FindSMsb")
+				{
+					// The most significant bit that differs from the sign bit; -1 for 0 and -1.
+					const uint32_t word = (arg(6) & 0x80000000u) != 0u ? ~arg(6) : arg(6);
+					r = UINT32_MAX;
+					for (uint32_t bit = 0; bit < 32u; ++bit) { r = ((word >> bit) & 1u) != 0u ? bit : r; }
 				}
 				else if (ext == "UnpackHalf2x16")
 				{
@@ -279,6 +339,7 @@ public:
 				else { Fail("unimplemented extended instruction " + ext); }
 			}
 			else { Fail("unimplemented instruction " + op); }
+			if (t.at(3) == "%double") { doubles.insert(t[0]); }
 			values[t[0]] = result;
 		}
 		if (scc != nullptr) { *scc = value("%scc").words[0]; }

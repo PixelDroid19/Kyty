@@ -2,8 +2,10 @@
 
 #include "Emulator/Graphics/FragmentTransportShaders.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
+#include "Emulator/Graphics/Utils.h"
 
 #include "GraphicsRenderInternal.h"
 
@@ -106,8 +108,18 @@ VkPipeline CreateKernelPipeline(VkDevice device, VkPipelineCache cache, VkPipeli
 	info.stage.pName  = "main";
 	info.layout       = layout;
 	info.basePipelineIndex = -1;
+	VkPipelineCreationFeedback           feedback {};
+	VkPipelineCreationFeedbackCreateInfo feedback_info {};
+	feedback_info.sType                     = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+	feedback_info.pPipelineCreationFeedback = &feedback;
+	info.pNext                              = &feedback_info;
 	VkPipeline pipeline = VK_NULL_HANDLE;
-	const auto result   = vkCreateComputePipelines(device, cache, 1, &info, nullptr, &pipeline);
+	VkResult   result   = VK_SUCCESS;
+	{
+		std::shared_lock cache_access(PipelineCacheAccess());
+		result = vkCreateComputePipelines(device, cache, 1, &info, nullptr, &pipeline);
+	}
+	PipelineCacheStoreRecordCreation(result, feedback);
 	vkDestroyShaderModule(device, module, nullptr);
 	return result == VK_SUCCESS ? pipeline : VK_NULL_HANDLE;
 }
@@ -336,8 +348,8 @@ void FragmentTransportBeginTile(CommandBuffer* buffer, const FragmentTransportRe
 	        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 
 	auto cmd = buffer->RecordOutsideRenderPass();
-	vkCmdFillBuffer(cmd, resources.control->buffer, resources.control_offset, resources.control_bytes, 0u);
-	vkCmdFillBuffer(cmd, resources.references->buffer, resources.references_offset, resources.references_bytes, 0xffffffffu);
+	VulkanCmdFillBuffer(cmd, resources.control->buffer, resources.control_offset, resources.control_bytes, 0u);
+	VulkanCmdFillBuffer(cmd, resources.references->buffer, resources.references_offset, resources.references_bytes, 0xffffffffu);
 
 	Barrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,

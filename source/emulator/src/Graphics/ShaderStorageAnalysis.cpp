@@ -674,6 +674,7 @@ bool MetaFillMatchesDestinationStore(const ShaderInstruction& inst, int destinat
 constexpr int      k_uniform_buffer_fill_descriptor_words  = 4;
 constexpr uint32_t k_uniform_buffer_fill_max_shift         = 10u;
 constexpr uint32_t k_uniform_buffer_fill_instruction_count = 7u;
+constexpr uint32_t k_uniform_buffer_fill_max_instructions  = 8u;
 
 bool UniformBufferFillOperandIsPlain(const ShaderOperand& operand)
 {
@@ -1036,6 +1037,65 @@ ShaderComputeUniformBufferFillEvidence MatchLoadedBufferFill(const ShaderCode& c
 	return result;
 }
 
+// The loaded quad fill: the linear invocation index, an s_buffer_load_dwordx4
+// of the 16 bytes at offset 0 of a one-descriptor source, four v_mov of those
+// scalars in order and a buffer_store_format_xyzw of them at the index.
+ShaderComputeUniformBufferFillEvidence MatchLoadedQuadBufferFill(const ShaderCode& code, const uint32_t (&semantic_indices)[8])
+{
+	ShaderComputeUniformBufferFillEvidence result {};
+	const auto&                            instructions = code.GetInstructions();
+	const auto& index = instructions.At(semantic_indices[0]);
+	const auto& load  = instructions.At(semantic_indices[1]);
+	const auto& end   = instructions.At(semantic_indices[7]);
+	int         index_register     = -1;
+	int         workgroup_register = -1;
+	uint32_t    workgroup_shift    = 0;
+	if (!UniformBufferFillMatchesLinearIndex(index, &index_register, &workgroup_register, &workgroup_shift))
+	{
+		return result;
+	}
+	const int source       = load.src[0].register_id;
+	const int loaded_first = load.dst.register_id;
+	if (load.type != ShaderInstructionType::SBufferLoadDwordx4 || load.format != ShaderInstructionFormat::Sdst4SvSoffset ||
+	    load.src_num != 2 || !MetaFillOperandIsSgpr(load.dst, loaded_first, k_uniform_buffer_fill_descriptor_words) ||
+	    !MetaFillOperandIsSgpr(load.src[0], source, k_meta_fill_descriptor_words) || !MetaFillScalarOffsetIs(load, 0u) ||
+	    (workgroup_register >= source && workgroup_register < source + k_meta_fill_descriptor_words))
+	{
+		return result;
+	}
+	const int value_start_register = instructions.At(semantic_indices[2]).dst.register_id;
+	if (index_register >= value_start_register && index_register < value_start_register + k_uniform_buffer_fill_descriptor_words)
+	{
+		return result;
+	}
+	for (int component = 0; component < k_uniform_buffer_fill_descriptor_words; ++component)
+	{
+		int value_register = -1;
+		if (!UniformBufferFillMatchesValueMove(instructions.At(semantic_indices[2 + component]), value_start_register + component,
+		                                       &value_register) ||
+		    value_register != loaded_first + component)
+		{
+			return result;
+		}
+	}
+	int destination_start_register = -1;
+	if (!UniformBufferFillMatchesStore(instructions.At(semantic_indices[6]), index_register, value_start_register,
+	                                   &destination_start_register) ||
+	    destination_start_register == source || end.type != ShaderInstructionType::SEndpgm ||
+	    end.format != ShaderInstructionFormat::Empty || end.src_num != 0 || semantic_indices[7] + 1u != instructions.Size())
+	{
+		return result;
+	}
+
+	result.destination_start_register = destination_start_register;
+	result.workgroup_register         = workgroup_register;
+	result.workgroup_shift            = workgroup_shift;
+	result.record_bytes               = 16;
+	result.value_buffer_register      = source;
+	result.valid                      = true;
+	return result;
+}
+
 } // namespace
 
 ShaderComputeUniformBufferFillEvidence AnalyzeShaderComputeUniformBufferFill(const ShaderCode& code)
@@ -1051,7 +1111,7 @@ ShaderComputeUniformBufferFillEvidence AnalyzeShaderComputeUniformBufferFill(con
 		return result;
 	}
 
-	uint32_t semantic_indices[k_uniform_buffer_fill_instruction_count] = {};
+	uint32_t semantic_indices[k_uniform_buffer_fill_max_instructions] = {};
 	uint32_t semantic_count                                               = 0;
 	for (uint32_t instruction_index = 0; instruction_index < instructions.Size(); ++instruction_index)
 	{
@@ -1059,7 +1119,7 @@ ShaderComputeUniformBufferFillEvidence AnalyzeShaderComputeUniformBufferFill(con
 		{
 			continue;
 		}
-		if (semantic_count == k_uniform_buffer_fill_instruction_count)
+		if (semantic_count == k_uniform_buffer_fill_max_instructions)
 		{
 			return result;
 		}
@@ -1075,6 +1135,12 @@ ShaderComputeUniformBufferFillEvidence AnalyzeShaderComputeUniformBufferFill(con
 		const uint32_t loaded_indices[5] = {semantic_indices[0], semantic_indices[1], semantic_indices[2], semantic_indices[3],
 		                                    semantic_indices[4]};
 		return MatchLoadedBufferFill(code, loaded_indices);
+	}
+	if (semantic_count == 8u)
+	{
+		const uint32_t quad_indices[8] = {semantic_indices[0], semantic_indices[1], semantic_indices[2], semantic_indices[3],
+		                                  semantic_indices[4], semantic_indices[5], semantic_indices[6], semantic_indices[7]};
+		return MatchLoadedQuadBufferFill(code, quad_indices);
 	}
 	if (semantic_count != k_uniform_buffer_fill_instruction_count)
 	{
@@ -1345,6 +1411,9 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 	bool     raw_tbuffer_use         = false;
 	uint64_t raw_smem_required_bytes = 0;
 	bool     raw_smem_dynamic_offset = false;
+	bool     dword_load              = false;
+	bool     other_consumer          = false;
+	bool     format_store            = false;
 
 	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
 	{
@@ -1437,6 +1506,20 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 			}
 			if (matches)
 			{
+				const bool is_dword_load = inst.type == ShaderInstructionType::BufferLoadDword ||
+				                           inst.type == ShaderInstructionType::BufferLoadDwordx2 ||
+				                           inst.type == ShaderInstructionType::BufferLoadDwordx3 ||
+				                           inst.type == ShaderInstructionType::BufferLoadDwordx4 ||
+				                           inst.type == ShaderInstructionType::SBufferLoadDword ||
+				                           inst.type == ShaderInstructionType::SBufferLoadDwordx2 ||
+				                           inst.type == ShaderInstructionType::SBufferLoadDwordx4 ||
+				                           inst.type == ShaderInstructionType::SBufferLoadDwordx8 ||
+				                           inst.type == ShaderInstructionType::SBufferLoadDwordx16;
+				dword_load       = dword_load || is_dword_load;
+				other_consumer   = other_consumer || !is_dword_load;
+				format_store     = format_store || inst.type == ShaderInstructionType::BufferStoreFormatX ||
+				                   inst.type == ShaderInstructionType::BufferStoreFormatXy ||
+				                   inst.type == ShaderInstructionType::BufferStoreFormatXyzw;
 				raw              = raw || candidate_raw;
 				typed            = typed || candidate_typed;
 				guarded_raw_vmem = guarded_raw_vmem || candidate_raw_vmem;
@@ -1466,17 +1549,19 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 		}
 	}
 
+	const bool format_loads_only = typed && !raw && !format_store && !decoded_unknown && !indirect_descriptor_use;
 	if (raw && typed)
 	{
 		return {ShaderStorageAccess::Mixed, decoded_unknown,        indirect_descriptor_use,
 		        guarded_raw_vmem,           raw_smem_use,           raw_tbuffer_use,
-		        raw_smem_required_bytes,    raw_smem_dynamic_offset};
+		        raw_smem_required_bytes,    raw_smem_dynamic_offset, dword_load && !other_consumer};
 	}
 	if (typed)
 	{
 		return {ShaderStorageAccess::Typed, decoded_unknown,        indirect_descriptor_use,
 		        guarded_raw_vmem,           raw_smem_use,           raw_tbuffer_use,
-		        raw_smem_required_bytes,    raw_smem_dynamic_offset};
+		        raw_smem_required_bytes,    raw_smem_dynamic_offset, dword_load && !other_consumer,
+		        format_loads_only};
 	}
 	return {raw ? ShaderStorageAccess::Raw : ShaderStorageAccess::Unknown,
 	        decoded_unknown,
@@ -1485,7 +1570,8 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 	        raw_smem_use,
 	        raw_tbuffer_use,
 	        raw_smem_required_bytes,
-	        raw_smem_dynamic_offset};
+	        raw_smem_dynamic_offset,
+	        dword_load && !other_consumer};
 }
 
 bool ShaderGen5SampledTextureShapeForMimgDimension(uint8_t dimension, ShaderGen5SampledTextureShape* shape)
@@ -1859,7 +1945,8 @@ bool ShaderTileControlFlowIsLinear(const ShaderInstruction& inst, bool final_ins
 	if ((type >= ShaderInstructionType::SAndSaveexecB32 && type <= ShaderInstructionType::SOrn1SaveexecB32) ||
 	    (type >= ShaderInstructionType::SAndSaveexecB64 && type <= ShaderInstructionType::SXorSaveexecB64) ||
 	    (type >= ShaderInstructionType::VCmpLtU64 && type <= ShaderInstructionType::VCmpGeU64) ||
-	    (type >= ShaderInstructionType::VCmpEqF32 && type <= ShaderInstructionType::VCmpxUF32))
+	    (type >= ShaderInstructionType::VCmpEqF32 && type <= ShaderInstructionType::VCmpxUF32) ||
+	    (type >= ShaderInstructionType::VCmpxLtF64 && type <= ShaderInstructionType::VCmpxClassF64))
 	{
 		return false;
 	}

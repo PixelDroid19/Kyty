@@ -1,4 +1,7 @@
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderBufferFormat.h"
+
+#include "Emulator/Graphics/HardwareContext.h"
 
 #include "Kyty/Core/DbgAssert.h"
 
@@ -8,13 +11,12 @@
 
 namespace Kyty::Libs::Graphics {
 
-bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
-                                       int user_data_register_base)
+int ShaderStorageBufferBoundIndex(const ShaderBindResources& bind, const ShaderOperand& resource, int user_data_register_base)
 {
 	if (resource.type != ShaderOperandType::Sgpr || user_data_register_base < 0 ||
 	    resource.register_id < user_data_register_base)
 	{
-		return false;
+		return -1;
 	}
 	const int api_register = resource.register_id - user_data_register_base;
 	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
@@ -22,10 +24,16 @@ bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const S
 		const int start = bind.storage_buffers.start_register[i];
 		if (start >= 0 && start == api_register)
 		{
-			return true;
+			return i;
 		}
 	}
-	return false;
+	return -1;
+}
+
+bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
+                                       int user_data_register_base)
+{
+	return ShaderStorageBufferBoundIndex(bind, resource, user_data_register_base) >= 0;
 }
 
 bool ShaderBufferConsumerRedefinesDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst)
@@ -73,8 +81,8 @@ bool ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format)
 
 bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 {
-	// GFX10+ unified formats 20 and 22 represent scalar 32-bit resource views.
-	return format == 20 || format == 22;
+	// GFX10+ unified formats 20-22 (32_UINT, 32_SINT, 32_FLOAT) represent scalar 32-bit resource views.
+	return format >= 20 && format <= 22;
 }
 
 static bool ShaderRawStorageSixteenBitFormat(uint32_t format)
@@ -161,6 +169,11 @@ uint32_t ShaderRawBufferByteAddress(const ShaderBufferResource& resource, uint32
 	return byte_address + scalar_offset;
 }
 
+bool ShaderGen5FormatLoadDescriptorSupported(const ShaderBufferResource& resource)
+{
+	return ShaderGen5BufferFormat(resource.Format()) != nullptr;
+}
+
 bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access)
 {
 	if (access == ShaderStorageAccess::Raw)
@@ -237,6 +250,8 @@ void ExcludeUnusedMetadataStorage(ShaderStorageResources* resources, ShaderDynam
 			resources->raw_vmem_oob_guarded[active_count]    = resources->raw_vmem_oob_guarded[source];
 			resources->raw_smem_use[active_count]             = resources->raw_smem_use[source];
 			resources->raw_tbuffer_use[active_count]          = resources->raw_tbuffer_use[source];
+			resources->dword_loads_only[active_count]         = resources->dword_loads_only[source];
+			resources->format_loads_only[active_count]        = resources->format_loads_only[source];
 			resources->raw_smem_required_bytes[active_count]  = resources->raw_smem_required_bytes[source];
 			resources->raw_smem_dynamic_offset[active_count]  = resources->raw_smem_dynamic_offset[source];
 			resources->dynamic_sload[active_count]            = resources->dynamic_sload[source];
@@ -282,13 +297,17 @@ bool ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format)
 
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component)
 {
-	if (channel_order > 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: channel_order > 3 condition ignored (continuing)\n"); }
+	if (channel_order > HW::kColorExportOrderTwoChannelAlt) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: channel_order > 4 condition ignored (continuing)\n"); }
 	if (output_component > 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: output_component > 3 condition ignored (continuing)\n"); }
 
 	// The attachment VkFormat and image view own physical component order.
 	// Shader exports remain logical RGBA; applying COMP_SWAP here as well would
 	// swap the same components twice in render-to-texture feedback passes.
-	(void)channel_order;
+	// Only the two-channel ALT swap has no host format: its second channel holds W.
+	if (channel_order == HW::kColorExportOrderTwoChannelAlt && output_component == 1u)
+	{
+		return 3u;
+	}
 	return output_component;
 }
 
@@ -313,6 +332,7 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 		case 36: return 4;   // UFMT_10_11_11_FLOAT
 		case 50: return 4;   // UFMT_2_10_10_10_UNORM
 		case 56: return 4;   // UFMT_8_8_8_8_UNORM
+		case 57: return 4;   // UFMT_8_8_8_8_SNORM
 		case 60: return 4;   // UFMT_8_8_8_8_UINT
 		case 62: return 8;   // UFMT_32_32_UINT
 		case 64: return 8;   // UFMT_32_32_FLOAT

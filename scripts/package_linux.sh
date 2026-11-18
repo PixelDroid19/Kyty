@@ -15,10 +15,17 @@ BUILD_DIR="$(realpath -m "$1")"
 ARCHIVE="$(realpath -m "$2")"
 PACKAGE_NAME="$(basename "${ARCHIVE}" .tar.gz)"
 JOBS="${KYTY_PACKAGE_JOBS:-4}"
+# KYTY_PGO=USE builds from the counters of an instrumented build of the same build directory
+# (docs/HOST_RUNTIME.md, "Profile-guided builds").
+PGO_ARGS=(-DKYTY_PGO="${KYTY_PGO:-OFF}")
+if [[ -n "${KYTY_PGO_DIR:-}" ]]; then
+	PGO_ARGS+=(-DKYTY_PGO_DIR="$(realpath -m "${KYTY_PGO_DIR}")")
+fi
 
 cmake -S "${ROOT}/source" -B "${BUILD_DIR}" -G Ninja \
 	-DCMAKE_BUILD_TYPE=Release \
 	-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+	"${PGO_ARGS[@]}" \
 	-DKYTY_PROJECT_NAME=Emulator \
 	-DKYTY_WARNINGS_ARE_ERRORS=OFF \
 	-DKYTY_BUILD_LAUNCHER=ON \

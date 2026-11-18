@@ -533,6 +533,7 @@ public:
 	void             QueueGpuFlip(int handle);
 	bool             RunBufferUnmapTransaction(const VideoOutBufferRange* ranges, size_t range_count, VideoOutQuiescedAction action,
 	                                           void* data);
+	bool             BuffersOverlap(uint64_t vaddr, uint64_t size);
 
 	void Init(uint32_t width, uint32_t height);
 
@@ -559,6 +560,8 @@ private:
 	[[nodiscard]] static Graphics::VideoOutRegistrationIdentity FlipIdentityLocked(VideoOutConfig* ctx, int index);
 	void              DetachRegisteredBuffersForUnmapLocked(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool CaptureImageLocked(const void* buffer, VideoOutRegisteredImageSnapshot* snapshot);
+	void               NoteDisplayAddressLocked(const void* buffer);
+	[[nodiscard]] bool MayHoldDisplayImage(const void* buffer) const;
 	[[nodiscard]] bool CaptureRegisteredImageLocked(VideoOutConfig* cfg, int index,
 	                                                VideoOutRegisteredImageSnapshot* snapshot,
 	                                                Graphics::VideoOutRegistrationIdentity accepted = {});
@@ -585,6 +588,11 @@ private:
 	Core::Mutex                           m_mutex;
 	std::mutex                            m_registration_mutex;
 	Graphics::VideoOutHostAccessGate      m_host_access_gate;
+	// Every address a display buffer was registered at, kept after unregistration, so a sampled
+	// texture elsewhere skips the lookup. Past the capacity every lookup searches.
+	static constexpr uint32_t                                  kDisplayAddressesMax = 64;
+	std::array<std::atomic<const void*>, kDisplayAddressesMax> m_display_addresses {};
+	std::atomic<uint32_t>                                      m_display_address_count {0};
 	Graphics::VideoOutMaterializationGate m_registration_gate;
 	Graphics::VideoOutMaterializationGate m_materialization_gate;
 	VideoOutConfig                        m_video_out_ctx[VIDEO_OUT_NUM_MAX];
@@ -1126,6 +1134,46 @@ bool VideoOutContext::CaptureImageLocked(const void* buffer, VideoOutRegisteredI
 	return false;
 }
 
+void VideoOutContext::NoteDisplayAddressLocked(const void* buffer)
+{
+	const uint32_t count = m_display_address_count.load(std::memory_order_relaxed);
+	if (count > kDisplayAddressesMax)
+	{
+		return;
+	}
+	for (uint32_t i = 0; i < count; i++)
+	{
+		if (m_display_addresses[i].load(std::memory_order_relaxed) == buffer)
+		{
+			return;
+		}
+	}
+	if (count < kDisplayAddressesMax)
+	{
+		m_display_addresses[count].store(buffer, std::memory_order_relaxed);
+	}
+	m_display_address_count.store(count + 1u, std::memory_order_release);
+}
+
+// The guest registers a buffer before it submits work that samples it, and that submission
+// reaches the command processor through synchronized queues, so the registration is visible here.
+bool VideoOutContext::MayHoldDisplayImage(const void* buffer) const
+{
+	const uint32_t count = m_display_address_count.load(std::memory_order_acquire);
+	if (count > kDisplayAddressesMax)
+	{
+		return true;
+	}
+	for (uint32_t i = 0; i < count; i++)
+	{
+		if (m_display_addresses[i].load(std::memory_order_relaxed) == buffer)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 bool VideoOutContext::RegisteredImageMatchesLocked(const VideoOutRegisteredImageSnapshot& snapshot) const
 {
 	if (snapshot.config == nullptr || snapshot.slot < 0 || snapshot.slot >= 16 ||
@@ -1284,8 +1332,12 @@ VideoOutContext::ResolveRegisteredImageForSubmission(VideoOutRegisteredImageSnap
 VideoOutBufferImageInfo VideoOutContext::FindImageForSubmission(const void* buffer, Graphics::CommandBuffer* command_buffer,
                                                                 bool materialize)
 {
-	auto access = m_host_access_gate.Acquire();
 	EXIT_IF(command_buffer == nullptr);
+	if (!MayHoldDisplayImage(buffer))
+	{
+		return {};
+	}
+	auto access = m_host_access_gate.Acquire();
 	auto* graphic_ctx = GetGraphicCtx();
 	Graphics::SubmissionId submission;
 	if (!command_buffer->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !command_buffer->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
@@ -1754,10 +1806,16 @@ KYTY_SYSV_ABI int VideoOutGetResolutionStatus(int handle, VideoOutResolutionStat
 
 	EXIT_IF(g_video_out_context == nullptr);
 
-	if (status == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: status == nullptr condition ignored (continuing)\n"); }
+	if (status == nullptr)
+	{
+		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+	}
 
 	auto session = g_video_out_context->AcquireSession(handle);
-	if (!session) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !session condition ignored (continuing)\n"); }
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
 	*status = session.Get()->resolution;
 
 	return Kernel::OK;
@@ -2321,6 +2379,7 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 			EXIT_IF(ctx->registration_sequence == UINT64_MAX);
 			staged_buffers[i].registration_generation  = ++ctx->registration_sequence;
 			ctx->buffers[slot]                          = staged_buffers[i];
+			NoteDisplayAddressLocked(staged_buffers[i].buffer);
 			ctx->buffer_registration_reserved[slot]     = false;
 			KYTY_LOG_DEBUG("\tbuffers[%d] = %016" PRIx64 "\n", slot, reinterpret_cast<uint64_t>(addresses[i]));
 		}
@@ -2633,6 +2692,27 @@ void VideoOutWaitFlipDone(int handle, int index)
 	if (index < 0 || index > 15) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index < 0 || index > 15 condition ignored (continuing)\n"); }
 
 	g_video_out_context->GetFlipQueue().Wait(ctx, index);
+}
+
+bool VideoOutContext::BuffersOverlap(uint64_t vaddr, uint64_t size)
+{
+	Core::LockGuard lock(m_mutex);
+	for (const auto& ctx: m_video_out_ctx)
+	{
+		for (const auto& buffer: ctx.buffers)
+		{
+			if (buffer.buffer != nullptr && VideoOutRangesOverlap(vaddr, size, reinterpret_cast<uint64_t>(buffer.buffer), buffer.buffer_size))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool VideoOutBuffersOverlap(uint64_t vaddr, uint64_t size)
+{
+	return g_video_out_context == nullptr || g_video_out_context->BuffersOverlap(vaddr, size);
 }
 
 bool VideoOutRunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action, void* data)

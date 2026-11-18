@@ -64,10 +64,25 @@ struct ImeKeyboardState
 	uint64_t handler = 0;
 };
 
+// sceImeOpen param: the user id leads it and the rest starts zeroed.
+constexpr size_t  IME_PARAM_SIZE         = 0x60;
+constexpr int32_t USER_SERVICE_USER_ID_INVALID = -1;
+
 static std::mutex       g_mutex;
 static ImeKeyboardState g_keyboard;
 
 // sceImeKeyboardOpen — NID eaFXjfJv3xs (user_id, param)
+static void KYTY_SYSV_ABI ImeParamInit(void* param)
+{
+	PRINT_NAME();
+	if (param == nullptr)
+	{
+		return;
+	}
+	std::memset(param, 0, IME_PARAM_SIZE);
+	std::memcpy(param, &USER_SERVICE_USER_ID_INVALID, sizeof(USER_SERVICE_USER_ID_INVALID));
+}
+
 static int KYTY_SYSV_ABI ImeKeyboardOpen(int user_id, const ImeKeyboardParam* param)
 {
 	PRINT_NAME();
@@ -146,6 +161,16 @@ static int KYTY_SYSV_ABI ImeSetText(const char16_t* text, uint32_t length)
 	return IME_ERROR_NOT_OPENED;
 }
 
+// sceImeSetCaret — NID WLxUN2WMim8 (caret)
+// Moves the caret of the sceImeOpen panel. As with sceImeSetText, no panel is ever open, and the
+// library checks the panel before the argument.
+static int KYTY_SYSV_ABI ImeSetCaret(const void* caret)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t caret = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(caret));
+	return IME_ERROR_NOT_OPENED;
+}
+
 // sceImeUpdate — NID -4GCfYdNF1s
 // Runs on the title's thread; delivers the queued keyboard events to the keyboard handler.
 static int KYTY_SYSV_ABI ImeUpdate(void* handler)
@@ -183,12 +208,14 @@ static int KYTY_SYSV_ABI ImeUpdate(void* handler)
 
 LIB_DEFINE(InitIme_1)
 {
+	LIB_FUNC("WmYDzdC4EHI", Ime::ImeParamInit);
 	LIB_FUNC("eaFXjfJv3xs", Ime::ImeKeyboardOpen);
 	LIB_FUNC("PMVehSlfZ94", Ime::ImeKeyboardClose);
 	LIB_FUNC("dKadqZFgKKQ", Ime::ImeKeyboardGetResourceId);
 	LIB_FUNC("VkqLPArfFdc", Ime::ImeKeyboardGetInfo);
 	LIB_FUNC("ua+13Hk9kKs", Ime::ImeKeyboardSetMode);
 	LIB_FUNC("ieCNrVrzKd4", Ime::ImeSetText);
+	LIB_FUNC("WLxUN2WMim8", Ime::ImeSetCaret);
 	LIB_FUNC("-4GCfYdNF1s", Ime::ImeUpdate);
 }
 

@@ -117,14 +117,36 @@ struct KytyCxaException
 	_Unwind_Exception   unwindHeader;
 };
 
+// A dependent exception mirrors the primary header up to the unwind header, so
+// the runtime finds either one from the same unwind-header offset.
 struct KytyCxaDependentException
 {
-	void*               primaryException;
+	void*                primaryException;
 	void (*exceptionDestructor)(void*);
-	void*               unexpectedHandler;
-	void*               terminateHandler;
-	_Unwind_Exception   unwindHeader;
+	void*                unexpectedHandler;
+	void*                terminateHandler;
+	KytyCxaException*    nextException;
+	int                  handlerCount;
+	int                  handlerSwitchValue;
+	const unsigned char* actionRecord;
+	const unsigned char* languageSpecificData;
+	void*                catchTemp;
+	void*                adjustedPtr;
+	_Unwind_Exception    unwindHeader;
 };
+static_assert(offsetof(KytyCxaDependentException, unwindHeader) == offsetof(KytyCxaException, unwindHeader));
+
+// The shared reference count std::exception_ptr and __cxa_end_catch both use sits
+// in front of the primary header that __cxa_allocate_exception returns.
+struct KytyCxaRefcountedException
+{
+	int              referenceCount;
+	KytyCxaException exc;
+};
+
+// Exception classes compare as 64-bit values, "GNUCC++" in the high bytes.
+constexpr uint64_t kCxaPrimaryExceptionClass   = 0x474e5543432b2b00ull;
+constexpr uint64_t kCxaDependentExceptionClass = 0x474e5543432b2b01ull;
 
 struct KytyCxaEhGlobals
 {
@@ -526,19 +548,19 @@ static KYTY_SYSV_ABI void cxx_delete_array_sized(void* p, size_t /*size*/)
 
 // libc++ _ZnwmSt11align_val_t: aligned operator new. c_memalign keeps the
 // allocation in the same owner/tracking table as plain new/delete.
-void* cxx_new_aligned(size_t size, size_t alignment)
+KYTY_SYSV_ABI void* cxx_new_aligned(size_t size, size_t alignment)
 {
 	return c_memalign(alignment, size != 0 ? size : 1);
 }
 
 // libc++ _ZdlPvRKSt9nothrow_t: the nothrow tag does not affect deallocation.
-void cxx_delete_nothrow(void* p)
+KYTY_SYSV_ABI void cxx_delete_nothrow(void* p)
 {
 	cxx_delete(p);
 }
 
 // libc++ _ZSt15get_new_handlerv: Kyty installs no replacement new handler.
-void* c_get_new_handler()
+KYTY_SYSV_ABI void* c_get_new_handler()
 {
 	return nullptr;
 }
@@ -935,12 +957,136 @@ static int c_vsscanf_classic(const char* s, const char* fmt, va_list args)
 #endif
 }
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+constexpr size_t kMaxScanDestinations = 128;
+
+struct HostScanCall
+{
+	std::string                               format;
+	std::array<void*, kMaxScanDestinations> destinations {};
+	size_t                                    count = 0;
+};
+
+// Copies a conversion's scanset, which may itself start with ']' or "^]".
+static const char* CopyScanset(const char* p, std::string* out)
+{
+	out->push_back(*p++);
+	if (*p == '^')
+	{
+		out->push_back(*p++);
+	}
+	if (*p == ']')
+	{
+		out->push_back(*p++);
+	}
+	while (*p != '\0' && *p != ']')
+	{
+		out->push_back(*p++);
+	}
+	if (*p == ']')
+	{
+		out->push_back(*p);
+	}
+	return p;
+}
+
+// Translates one conversion after its '%'. Returns the position of its last character, or nullptr for
+// positional arguments, which the destinations cannot be ordered for.
+static const char* TranslateScanConversion(const char* p, HostScanCall* call, bool* stored)
+{
+	*stored = (*p != '*');
+	if (!*stored)
+	{
+		call->format.push_back(*p++);
+	}
+	while (std::isdigit(static_cast<unsigned char>(*p)) != 0)
+	{
+		call->format.push_back(*p++);
+	}
+	if (*p == '$')
+	{
+		return nullptr;
+	}
+	const char* length = p;
+	while (*p != '\0' && std::strchr("hljztLqm", *p) != nullptr)
+	{
+		p++;
+	}
+	// The guest is LP64 and Windows is LLP64: a guest long is the host's long long.
+	const bool guest_long = (p - length == 1 && *length == 'l' && *p != '\0' && std::strchr("diouxXn", *p) != nullptr);
+	call->format.append(guest_long ? "ll" : std::string(length, p));
+	if (*p == '[')
+	{
+		return CopyScanset(p, &call->format);
+	}
+	if (*p != '\0')
+	{
+		call->format.push_back(*p);
+	}
+	return p;
+}
+
+// The guest passes a SysV va_list; the Windows x64 va_list is a pointer to consecutive 8-byte slots.
+// Every storing scanf conversion takes one pointer, so the destinations are copied there in format order.
+static bool PrepareHostScanCall(const char* fmt, VaList* guest, HostScanCall* call)
+{
+	if (fmt == nullptr)
+	{
+		return false;
+	}
+	for (const char* p = fmt; *p != '\0'; p++)
+	{
+		call->format.push_back(*p);
+		if (*p != '%')
+		{
+			continue;
+		}
+		if (p[1] == '%')
+		{
+			call->format.push_back(*++p);
+			continue;
+		}
+		bool stored = false;
+		p           = TranslateScanConversion(p + 1, call, &stored);
+		if (p == nullptr || (stored && call->count == kMaxScanDestinations))
+		{
+			return false;
+		}
+		if (stored && *p != '\0')
+		{
+			call->destinations[call->count++] = VaArg_ptr<void>(guest);
+		}
+		if (*p == '\0')
+		{
+			break;
+		}
+	}
+	return true;
+}
+#endif
+
+// Runs a host v*scanf with the guest's destinations.
+template <class Scan>
+static int ForwardScan(const char* fmt, VaList* guest, Scan scan)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	HostScanCall call;
+	if (!PrepareHostScanCall(fmt, guest, &call))
+	{
+		return EOF;
+	}
+	return scan(call.format.c_str(), reinterpret_cast<va_list>(call.destinations.data()));
+#else
+	return scan(fmt, *reinterpret_cast<va_list*>(guest));
+#endif
+}
+
 static KYTY_SYSV_ABI int c_sscanf(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
 	const char* s   = VaArg_ptr<const char>(&ctx.va_list);
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
-	return c_vsscanf_classic(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+	return ForwardScan(fmt, &ctx.va_list, [s](const char* host_fmt, va_list args) { return c_vsscanf_classic(s, host_fmt, args); });
 }
 static KYTY_SYSV_ABI int c_fscanf(VA_ARGS)
 {
@@ -952,11 +1098,15 @@ static KYTY_SYSV_ABI int c_fscanf(VA_ARGS)
 	{
 		return EOF;
 	}
+	return ForwardScan(fmt, &ctx.va_list,
+	                   [f](const char* host_fmt, va_list args)
+	                   {
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
-	return __isoc99_vfscanf(f, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+		                   return __isoc99_vfscanf(f, host_fmt, args);
 #else
-	return ::vfscanf(f, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+		                   return ::vfscanf(f, host_fmt, args);
 #endif
+	                   });
 }
 // Gen5 sscanf_s — NID 24m4Z4bUaoY. Annex K requires rsize after %s/%c/%[ destinations;
 // integer formats match sscanf. Forward identically for now; refine if a title
@@ -966,7 +1116,7 @@ static KYTY_SYSV_ABI int c_sscanf_s(VA_ARGS)
 	VA_CONTEXT(ctx);
 	const char* s   = VaArg_ptr<const char>(&ctx.va_list);
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
-	return c_vsscanf_classic(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+	return ForwardScan(fmt, &ctx.va_list, [s](const char* host_fmt, va_list args) { return c_vsscanf_classic(s, host_fmt, args); });
 }
 
 // Gen5 clock — NID QZP6I9ZZxpE. Observed as seed input XOR rdtscp.
@@ -4298,17 +4448,39 @@ static KYTY_SYSV_ABI void cxa_rethrow()
 }
 
 // std::exception_ptr support, absent from the statically-linked libstdc++.
-// Shared-exception refcounts are tracked in a side table keyed by the thrown
-// object so the host libstdc++ header layout is never probed for a field it
-// does not carry.
-static std::unordered_map<void*, unsigned>& CxaSharedRefcounts()
+static KytyCxaRefcountedException* CxaRefcountedHeader(void* thrown_exception)
 {
-	static std::unordered_map<void*, unsigned> refcounts;
-	return refcounts;
+	return static_cast<KytyCxaRefcountedException*>(thrown_exception) - 1;
 }
 
-// __cxa_current_primary_exception — the primary (non-dependent) unwind header
-// for the exception currently being propagated or handled.
+static KYTY_SYSV_ABI void cxa_increment_exception_refcount(void* thrown_exception)
+{
+	if (thrown_exception != nullptr)
+	{
+		__atomic_add_fetch(&CxaRefcountedHeader(thrown_exception)->referenceCount, 1, __ATOMIC_ACQ_REL);
+	}
+}
+
+// The last reference destroys and frees the thrown object, as __cxa_end_catch does.
+static KYTY_SYSV_ABI void cxa_decrement_exception_refcount(void* thrown_exception)
+{
+	if (thrown_exception == nullptr)
+	{
+		return;
+	}
+	auto* header = CxaRefcountedHeader(thrown_exception);
+	if (__atomic_sub_fetch(&header->referenceCount, 1, __ATOMIC_ACQ_REL) == 0)
+	{
+		if (header->exc.exceptionDestructor != nullptr)
+		{
+			header->exc.exceptionDestructor(thrown_exception);
+		}
+		__cxa_free_exception(thrown_exception);
+	}
+}
+
+// __cxa_current_primary_exception — the thrown object of the exception being
+// handled, with a new reference; null for none or a foreign exception.
 static KYTY_SYSV_ABI void* cxa_current_primary_exception()
 {
 	auto* globals = static_cast<KytyCxaEhGlobals*>(__cxa_get_globals());
@@ -4316,35 +4488,36 @@ static KYTY_SYSV_ABI void* cxa_current_primary_exception()
 	{
 		return nullptr;
 	}
-	return &globals->caughtExceptions->unwindHeader;
+	auto*          header          = globals->caughtExceptions;
+	const uint64_t exception_class = header->unwindHeader.exception_class;
+	void*          thrown_exception = nullptr;
+	if (exception_class == kCxaPrimaryExceptionClass)
+	{
+		thrown_exception = header + 1;
+	} else if (exception_class == kCxaDependentExceptionClass)
+	{
+		thrown_exception = reinterpret_cast<KytyCxaDependentException*>(header)->primaryException;
+	} else
+	{
+		return nullptr;
+	}
+	cxa_increment_exception_refcount(thrown_exception);
+	return thrown_exception;
 }
 
-static KYTY_SYSV_ABI void cxa_increment_exception_refcount(void* thrown_exception)
+// Releases a dependent exception and the primary reference it holds.
+static void CxaDependentExceptionCleanup(_Unwind_Reason_Code /*code*/, _Unwind_Exception* unwind_header)
 {
-	if (thrown_exception != nullptr)
-	{
-		CxaSharedRefcounts()[thrown_exception]++;
-	}
-}
-
-static KYTY_SYSV_ABI void cxa_decrement_exception_refcount(void* thrown_exception)
-{
-	if (thrown_exception == nullptr)
-	{
-		return;
-	}
-	auto& table = CxaSharedRefcounts();
-	auto  it    = table.find(thrown_exception);
-	if (it != table.end() && --it->second == 0)
-	{
-		table.erase(it);
-		__cxa_free_exception(thrown_exception);
-	}
+	auto* dep = reinterpret_cast<KytyCxaDependentException*>(reinterpret_cast<char*>(unwind_header) -
+	                                                         offsetof(KytyCxaDependentException, unwindHeader));
+	void* primary = dep->primaryException;
+	__cxa_free_dependent_exception(dep);
+	cxa_decrement_exception_refcount(primary);
 }
 
 // __cxa_rethrow_primary_exception — raise a dependent exception that refers to
-// the still-live primary. Mirrors libc++abi: bump the primary's refcount, then
-// raise a dependent object whose unwind header carries the dependent marker.
+// the still-live primary: bump the primary's refcount, then raise a dependent
+// object whose unwind header carries the dependent class.
 static KYTY_SYSV_ABI void cxa_rethrow_primary_exception(void* thrown_exception)
 {
 	if (thrown_exception == nullptr)
@@ -4359,10 +4532,10 @@ static KYTY_SYSV_ABI void cxa_rethrow_primary_exception(void* thrown_exception)
 	dep->exceptionDestructor = primary->exceptionDestructor;
 	dep->unexpectedHandler   = primary->unexpectedHandler;
 	dep->terminateHandler    = primary->terminateHandler;
-	std::memcpy(&dep->unwindHeader.exception_class, "GNUCC++\x01", 8);
-	dep->unwindHeader.exception_cleanup = [](_Unwind_Reason_Code, _Unwind_Exception* e) {
-		__cxa_free_dependent_exception(reinterpret_cast<KytyCxaDependentException*>(e));
-	};
+	dep->unwindHeader.exception_class   = kCxaDependentExceptionClass;
+	dep->unwindHeader.exception_cleanup = CxaDependentExceptionCleanup;
+	// __cxa_begin_catch takes this exception off the uncaught count.
+	static_cast<KytyCxaEhGlobals*>(__cxa_get_globals())->uncaughtExceptions++;
 	_Unwind_RaiseException(&dep->unwindHeader);
 	EXIT("__cxa_rethrow_primary_exception returned (no landing pad) obj=%p\n", thrown_exception);
 }
@@ -4716,12 +4889,12 @@ static KYTY_SYSV_ABI void c_throw_cpp_error(int err)
 // / _ZSt25_Rethrow_future_exceptionSt13exception_ptr /
 // _ZSt26__throw_bad_variant_accessv. These are terminal error paths in the
 // guest libc++ runtime; like _Throw_Cpp_error they cannot unwind through HLE.
-void cxx_throw_bad_weak_ptr()
+KYTY_SYSV_ABI void cxx_throw_bad_weak_ptr()
 {
 	EXIT("std::__throw_bad_weak_ptr()\n");
 }
 
-void cxx_throw_future_error(const void* error_code)
+KYTY_SYSV_ABI void cxx_throw_future_error(const void* error_code)
 {
 	int32_t value = 0;
 	if (error_code != nullptr)
@@ -4731,12 +4904,12 @@ void cxx_throw_future_error(const void* error_code)
 	EXIT("std::__throw_future_error(%d)\n", value);
 }
 
-void cxx_rethrow_future_exception(const void* exception_ptr)
+KYTY_SYSV_ABI void cxx_rethrow_future_exception(const void* exception_ptr)
 {
 	EXIT("std::__rethrow_future_exception(%p)\n", exception_ptr);
 }
 
-void cxx_throw_bad_variant_access()
+KYTY_SYSV_ABI void cxx_throw_bad_variant_access()
 {
 	EXIT("std::__throw_bad_variant_access()\n");
 }
@@ -4767,7 +4940,7 @@ static void cxx_destroy_exception_string(void* self)
 	obj[0x10] = 0;
 }
 
-void cxx_runtime_error_dtor(void* self)
+KYTY_SYSV_ABI void cxx_runtime_error_dtor(void* self)
 {
 	if (self != nullptr)
 	{
@@ -4775,7 +4948,7 @@ void cxx_runtime_error_dtor(void* self)
 	}
 }
 
-void cxx_invalid_argument_dtor(void* self)
+KYTY_SYSV_ABI void cxx_invalid_argument_dtor(void* self)
 {
 	if (self != nullptr)
 	{
@@ -4783,7 +4956,7 @@ void cxx_invalid_argument_dtor(void* self)
 	}
 }
 
-void cxx_future_error_dtor(void* self)
+KYTY_SYSV_ABI void cxx_future_error_dtor(void* self)
 {
 	if (self != nullptr)
 	{
@@ -4820,7 +4993,7 @@ static void c16_set_pending(void* state, uint8_t pending)
 }
 
 // Gen5 libc_v1 c16rtomb — NID EOLQfNZ9HpE.
-int c_c16rtomb(char* out, uint16_t c16, void* state)
+KYTY_SYSV_ABI int c_c16rtomb(char* out, uint16_t c16, void* state)
 {
 	if (state == nullptr)
 	{
@@ -4899,7 +5072,7 @@ int c_c16rtomb(char* out, uint16_t c16, void* state)
 
 // Gen5 libc_v1 mbrtoc16 — NID ogPDBoLmCcA. Note the firmware's high-surrogate
 // join keeps the value encoded at +0x3fc0 before OR 0xd800; reproduced as-is.
-size_t c_mbrtoc16(uint16_t* out, const char* input, size_t size, void* state)
+KYTY_SYSV_ABI size_t c_mbrtoc16(uint16_t* out, const char* input, size_t size, void* state)
 {
 	if (state == nullptr)
 	{
@@ -5039,45 +5212,21 @@ bool FsNotFoundErrno(int error)
 	return error == 2 /*ENOENT*/ || error == 20 /*ENOTDIR*/ || error == 22 /*EINVAL*/ || error == 63 /*ENAMETOOLONG*/;
 }
 
-int FsStatus(const char* path, uint32_t* permissions, int* error, bool follow_links)
+// The helpers receive guest paths; the kernel file calls map them through the
+// mount table and apply its write policy, so every helper goes through them.
+int FsErrno(int kernel_result)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	const auto      status = follow_links ? std::filesystem::status(path, ec) : std::filesystem::symlink_status(path, ec);
-	if (ec || status.type() == std::filesystem::file_type::not_found)
+	return kernel_result & 0xffff;
+}
+
+// Guest file systems hold no symbolic links, so a stat and an lstat agree.
+int FsStatus(const char* path, uint32_t* permissions, int* error)
+{
+	Kernel::FileSystem::FileStat info {};
+	const int                    result = Kernel::FileSystem::KernelStat(path, &info);
+	if (result != OK)
 	{
-		const int code = ec ? (ec.value() & 0xffff) : 2;
-		if (error != nullptr)
-		{
-			*error = code;
-		}
-		return FsNotFoundErrno(code) ? -1 : 0;
-	}
-	if (permissions != nullptr)
-	{
-		*permissions = static_cast<uint32_t>(status.permissions()) & 0x0fffu;
-	}
-	if (error != nullptr)
-	{
-		*error = 0;
-	}
-	switch (status.type())
-	{
-		case std::filesystem::file_type::regular: return 1;
-		case std::filesystem::file_type::directory: return 2;
-		case std::filesystem::file_type::symlink: return 3;
-		case std::filesystem::file_type::block: return 4;
-		case std::filesystem::file_type::character: return 5;
-		case std::filesystem::file_type::fifo: return 6;
-		case std::filesystem::file_type::socket: return 7;
-		default: return 8;
-	}
-#else
-	struct stat info {};
-	const int   result = follow_links ? ::stat(path, &info) : ::lstat(path, &info);
-	if (result != 0)
-	{
-		const int code = errno & 0xffff;
+		const int code = FsErrno(result);
 		if (error != nullptr)
 		{
 			*error = code;
@@ -5092,8 +5241,7 @@ int FsStatus(const char* path, uint32_t* permissions, int* error, bool follow_li
 	{
 		*error = 0;
 	}
-	return FsModeFileType(static_cast<uint32_t>(info.st_mode));
-#endif
+	return FsModeFileType(info.st_mode);
 }
 
 char* FsReadDir(char* buffer, void* opaque, int* type)
@@ -5130,8 +5278,17 @@ char* FsReadDir(char* buffer, void* opaque, int* type)
 
 void* FsOpenDir(char* buffer, const char* path, int* error, int* type)
 {
-	std::error_code ec;
-	std::filesystem::directory_iterator iterator(path, ec);
+	const auto host = path != nullptr ? Kernel::FileSystem::GetExistingFilename(String::FromUtf8(path)) : String();
+	if (host.IsEmpty())
+	{
+		if (error != nullptr)
+		{
+			*error = 2; // ENOENT
+		}
+		return nullptr;
+	}
+	std::error_code                     ec;
+	std::filesystem::directory_iterator iterator(std::filesystem::u8path(host.C_Str()), ec);
 	if (ec)
 	{
 		if (error != nullptr)
@@ -5165,153 +5322,92 @@ void* FsOpenDir(char* buffer, const char* path, int* error, int* type)
 } // namespace
 
 // _ZNSt10filesystem9_Open_dirERA260_cPKcRiRNS_9file_typeE — NID 8iuHpl+kg8A.
-void* c_fs_open_dir(char* buffer, const char* path, int* error, int* type)
+KYTY_SYSV_ABI void* c_fs_open_dir(char* buffer, const char* path, int* error, int* type)
 {
 	return FsOpenDir(buffer, path, error, type);
 }
 
 // _ZNSt10filesystem9_Read_dirERA260_cPvRNS_9file_typeE — NID w5CGykBBU5M.
-char* c_fs_read_dir(char* buffer, void* stream, int* type)
+KYTY_SYSV_ABI char* c_fs_read_dir(char* buffer, void* stream, int* type)
 {
 	return FsReadDir(buffer, stream, type);
 }
 
 // _ZNSt10filesystem10_Close_dirEPv — NID xGbaQPsHCFI.
-void c_fs_close_dir(void* stream)
+KYTY_SYSV_ABI void c_fs_close_dir(void* stream)
 {
 	delete static_cast<FsDirStream*>(stream);
 }
 
 // _ZNSt10filesystem5_StatEPKcPNS_5permsEPi — NID 8KeeeFcEdls.
-int c_fs_stat(const char* path, uint32_t* permissions, int* error)
+KYTY_SYSV_ABI int c_fs_stat(const char* path, uint32_t* permissions, int* error)
 {
-	return FsStatus(path, permissions, error, true);
+	return FsStatus(path, permissions, error);
 }
 
 // _ZNSt10filesystem6_LstatEPKcPNS_5permsEPi — NID tizCFt051h8.
-int c_fs_lstat(const char* path, uint32_t* permissions, int* error)
+KYTY_SYSV_ABI int c_fs_lstat(const char* path, uint32_t* permissions, int* error)
 {
-	return FsStatus(path, permissions, error, false);
+	return FsStatus(path, permissions, error);
 }
 
 // _ZNSt10filesystem10_File_sizeEPKcPi — NID 3U2eeEqUwR0. Unlike the other
 // helpers this stores the raw Sony kernel error code in *error.
-uint64_t c_fs_file_size(const char* path, int* error)
+KYTY_SYSV_ABI uint64_t c_fs_file_size(const char* path, int* error)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	const auto      size = std::filesystem::file_size(path, ec);
-	if (ec)
-	{
-		if (error != nullptr)
-		{
-			*error = static_cast<int>(0x80020000u | (ec.value() & 0xffff));
-		}
-		return static_cast<uint64_t>(-1);
-	}
-#else
-	struct stat info {};
-	if (::stat(path, &info) != 0)
-	{
-		if (error != nullptr)
-		{
-			*error = static_cast<int>(0x80020000u | (errno & 0xffff));
-		}
-		return static_cast<uint64_t>(-1);
-	}
-	const auto size = static_cast<uint64_t>(info.st_size);
-#endif
+	Kernel::FileSystem::FileStat info {};
+	const int                    result = Kernel::FileSystem::KernelStat(path, &info);
 	if (error != nullptr)
 	{
-		*error = 0;
+		*error = result;
 	}
-	return size;
+	return result == OK ? static_cast<uint64_t>(info.st_size) : static_cast<uint64_t>(-1);
 }
 
 // _ZNSt10filesystem9_Make_dirEPKcS1_ — NID x7pQExTeqBY. The second path, when
 // present, supplies the permissions; EEXIST is reported as success.
-int c_fs_make_dir(const char* path, const char* permissions_source)
+KYTY_SYSV_ABI int c_fs_make_dir(const char* path, const char* permissions_source)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	std::filesystem::perms mode = std::filesystem::perms::all;
+	uint16_t mode = 0777;
 	if (permissions_source != nullptr)
 	{
-		const auto status = std::filesystem::status(permissions_source, ec);
-		if (ec || status.type() == std::filesystem::file_type::not_found)
+		Kernel::FileSystem::FileStat info {};
+		const int                    result = Kernel::FileSystem::KernelStat(permissions_source, &info);
+		if (result != OK)
 		{
-			return -(ec ? (ec.value() & 0xffff) : 2);
-		}
-		mode = status.permissions();
-	}
-	if (!std::filesystem::create_directory(path, ec))
-	{
-		return ec ? -(ec.value() & 0xffff) : 0;
-	}
-	// The standard library takes the permissions separately from the creation.
-	std::filesystem::permissions(path, mode, ec);
-	return ec ? -(ec.value() & 0xffff) : 1;
-#else
-	mode_t mode = 0777;
-	if (permissions_source != nullptr)
-	{
-		struct stat info {};
-		if (::stat(permissions_source, &info) != 0)
-		{
-			return -(errno & 0xffff);
+			return -FsErrno(result);
 		}
 		mode = info.st_mode;
 	}
-	if (::mkdir(path, mode) == 0)
+	const int result = Kernel::FileSystem::KernelMkdir(path, mode);
+	if (result == OK)
 	{
 		return 1;
 	}
-	if (errno == 17 /*EEXIST*/)
-	{
-		return 0;
-	}
-	return -(errno & 0xffff);
-#endif
+	return FsErrno(result) == 17 /*EEXIST*/ ? 0 : -FsErrno(result);
 }
 
 // _ZNSt10filesystem11_Remove_dirEPKc — NID YDQxE4cIwa4.
-bool c_fs_remove_dir(const char* path)
+KYTY_SYSV_ABI bool c_fs_remove_dir(const char* path)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	return std::filesystem::remove(path, ec) && !ec;
-#else
-	return ::rmdir(path) == 0;
-#endif
+	return Kernel::FileSystem::KernelRmdir(path) == OK;
 }
 
 // _ZNSt10filesystem7_RenameEPKcS1_ — NID srwl1hhFoUI.
-int c_fs_rename(const char* from, const char* to)
+KYTY_SYSV_ABI int c_fs_rename(const char* from, const char* to)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	std::filesystem::rename(from, to, ec);
-	return ec ? (ec.value() & 0xffff) : 0;
-#else
-	return ::rename(from, to) == 0 ? 0 : (errno & 0xffff);
-#endif
+	return FsErrno(Kernel::FileSystem::KernelRename(from, to));
 }
 
 // _ZNSt10filesystem7_UnlinkEPKc — NID Iok1WdvAROg.
-int c_fs_unlink(const char* path)
+KYTY_SYSV_ABI int c_fs_unlink(const char* path)
 {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	std::error_code ec;
-	const bool removed = std::filesystem::remove(path, ec);
-	return (removed && !ec) ? 0 : (ec ? (ec.value() & 0xffff) : 2);
-#else
-	return ::unlink(path) == 0 ? 0 : (errno & 0xffff);
-#endif
+	return FsErrno(Kernel::FileSystem::KernelUnlink(path));
 }
 
 // _ZNSt10filesystem12_Current_getERA260_c — NID 8VKAqiw7lC0. The guest libc
 // reports the virtual root as its working directory.
-bool c_fs_current_get(char* buffer)
+KYTY_SYSV_ABI bool c_fs_current_get(char* buffer)
 {
 	buffer[0] = '/';
 	buffer[1] = 0;
@@ -5320,17 +5416,17 @@ bool c_fs_current_get(char* buffer)
 
 // _ZNSt10filesystem18_Xfilesystem_error* — NIDs B0CeIhQty7Y, C6-7Mo5WbwU,
 // Wut42WAe7Rw. Throwing cannot cross the HLE boundary; report and stop.
-void c_fs_throw_error(const char* what, FsErrorCode error)
+KYTY_SYSV_ABI void c_fs_throw_error(const char* what, FsErrorCode error)
 {
 	EXIT("std::filesystem_error: %s (error %d)\n", what != nullptr ? what : "", error.value);
 }
 
-void c_fs_throw_error_path(const char* what, const void* /*path*/, FsErrorCode error)
+KYTY_SYSV_ABI void c_fs_throw_error_path(const char* what, const void* /*path*/, FsErrorCode error)
 {
 	EXIT("std::filesystem_error: %s (error %d)\n", what != nullptr ? what : "", error.value);
 }
 
-void c_fs_throw_error_paths(const char* what, const void* /*path1*/, const void* /*path2*/, FsErrorCode error)
+KYTY_SYSV_ABI void c_fs_throw_error_paths(const char* what, const void* /*path1*/, const void* /*path2*/, FsErrorCode error)
 {
 	EXIT("std::filesystem_error: %s (error %d)\n", what != nullptr ? what : "", error.value);
 }
@@ -5650,6 +5746,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("g7zzzLDYGw0", LibC::c_strdup);
 	LIB_FUNC("2X5agFjKxMc", LibC::c_calloc);
 	LIB_FUNC("smbQukfxYJM", LibC::c_getenv);
+	LIB_FUNC("M4YYbSFfJ8g", LibC::c_setenv);
 	LIB_FUNC("PtsB1Q9wsFA", LibC::c_setlocale);
 	LIB_FUNC("802pFCwC9w0", LibC::c_udivti3);
 	LIB_FUNC("Y7aJ1uydPMo", LibC::c_realloc);

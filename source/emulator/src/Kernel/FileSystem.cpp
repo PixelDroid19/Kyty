@@ -359,6 +359,8 @@ static FileDescriptors* InitializeDescriptors()
 
 // Defined with APR helpers; used by KernelOpen/KernelStat for package font fallback.
 static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name);
+static bool TryResolvePackageFile(const char* guest_path, String* host_path, uint64_t* size);
+static void RememberOdHostPath(const String& guest_path, const String& host_path);
 static int HostErrorFromKernel(int error);
 
 static void sec_to_timespec(KernelTimespec* ts, double sec)
@@ -1039,6 +1041,23 @@ String GetExistingFilename(const String& mounted_file_name)
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+// The application package is a read-only mount, and its host files are the user's install.
+static bool IsApplicationMountPath(const char* path)
+{
+	const auto normal = std::filesystem::path(path).lexically_normal().generic_string();
+	return normal == "/app0" || normal.rfind("/app0/", 0) == 0;
+}
+
+static bool IsMutatingOpen(uint32_t flags)
+{
+	constexpr uint32_t write_only = 0x0001u;
+	constexpr uint32_t read_write = 0x0002u;
+	constexpr uint32_t append     = 0x0008u;
+	constexpr uint32_t create     = 0x0200u;
+	constexpr uint32_t truncate   = 0x0400u;
+	return (flags & (write_only | read_write | append | create | truncate)) != 0;
+}
+
 static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_t mode, bool kernel_path_policy = true)
 {
 	EXIT_IF(g_mount_points == nullptr || g_files == nullptr);
@@ -1050,6 +1069,11 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 
 	auto       flags_u       = static_cast<uint32_t>(flags);
 	const auto status_flags  = flags_u;
+
+	if (IsMutatingOpen(flags_u) && IsApplicationMountPath(path))
+	{
+		return KERNEL_ERROR_EPERM;
+	}
 
 	KYTY_LOG_DEBUG("\t path = %s\n", path);
 	KYTY_LOG_DEBUG("\t flags = %08" PRIx32 "\n", flags_u);
@@ -1805,13 +1829,26 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 
 	KYTY_LOG_DEBUG("\t KernelStat: %s\n", path);
 
-	String     path_s         = String::FromUtf8(path);
-	const auto mapped         = g_mount_points->GetRealFilename(path_s);
-	auto       real_file_name = ResolveGuestDeviceFilename(path_s, ResolveExistingHostFile(path_s, mapped));
-	auto       real_directory = mapped.IsEmpty() ? String() : mapped.FixDirectorySlash();
+	// A title can stat its package files hundreds of times a second; the full resolve below costs several
+	// host lookups per path component on a slow host filesystem.
+	String   real_file_name;
+	uint64_t package_size = 0;
+	bool     is_dir       = false;
+	bool     is_package   = TryResolvePackageFile(path, &real_file_name, &package_size);
+	bool     is_file      = is_package;
+	if (is_package)
+	{
+		RememberOdHostPath(String::FromUtf8(path), real_file_name);
+	} else
+	{
+		String     path_s         = String::FromUtf8(path);
+		const auto mapped         = g_mount_points->GetRealFilename(path_s);
+		real_file_name            = ResolveGuestDeviceFilename(path_s, ResolveExistingHostFile(path_s, mapped));
+		const auto real_directory = mapped.IsEmpty() ? String() : mapped.FixDirectorySlash();
 
-	bool is_dir  = Core::File::IsDirectoryExisting(real_file_name) || Core::File::IsDirectoryExisting(real_directory);
-	bool is_file = Core::File::IsFileExisting(real_file_name);
+		is_dir  = Core::File::IsDirectoryExisting(real_file_name) || Core::File::IsDirectoryExisting(real_directory);
+		is_file = Core::File::IsFileExisting(real_file_name);
+	}
 
 	if (!is_dir && !is_file)
 	{
@@ -1836,7 +1873,7 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 		sb->st_blocks  = 0;
 	} else
 	{
-		sb->st_size    = static_cast<int64_t>(Core::File::Size(real_file_name));
+		sb->st_size    = static_cast<int64_t>(is_package ? package_size : Core::File::Size(real_file_name));
 		sb->st_blksize = 512;
 		sb->st_blocks  = (sb->st_size + 511) / 512;
 
@@ -1849,6 +1886,26 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 	sb->st_birthtim = sb->st_mtim;
 
 	return OK;
+}
+
+// Paths longer than the kernel's 255-byte limit are refused before any lookup.
+constexpr size_t KERNEL_PATH_NAME_MAX = 255;
+
+// sceKernelCheckReachability — NID uWyW3v98sU4. Whether the path names something the title can reach.
+int KYTY_SYSV_ABI KernelCheckReachability(const char* path)
+{
+	PRINT_NAME();
+
+	if (path == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	if (strnlen(path, KERNEL_PATH_NAME_MAX + 1) > KERNEL_PATH_NAME_MAX)
+	{
+		return KERNEL_ERROR_ENAMETOOLONG;
+	}
+	FileStat sb {};
+	return KernelStat(path, &sb) == OK ? OK : KERNEL_ERROR_ENOENT;
 }
 
 int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
@@ -2093,6 +2150,10 @@ int KYTY_SYSV_ABI KernelUnlink(const char* path)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
+	if (IsApplicationMountPath(path))
+	{
+		return KERNEL_ERROR_EPERM;
+	}
 
 	auto path_s         = String::FromUtf8(path);
 	auto real_file_name = g_mount_points->GetRealFilename(path_s);
@@ -2134,6 +2195,10 @@ int KYTY_SYSV_ABI KernelRename(const char* from, const char* to)
 	if (from == nullptr || to == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
+	}
+	if (IsApplicationMountPath(from) || IsApplicationMountPath(to))
+	{
+		return KERNEL_ERROR_EPERM;
 	}
 
 	const auto from_s = String::FromUtf8(from);
@@ -2262,6 +2327,10 @@ int KYTY_SYSV_ABI KernelMkdir(const char* path, uint16_t mode)
 
 	KYTY_LOG_DEBUG("\t path = %s\n", path);
 	KYTY_LOG_DEBUG("\t mode = %04" PRIx16 "\n", mode);
+	if (IsApplicationMountPath(path))
+	{
+		return KERNEL_ERROR_EPERM;
+	}
 
 	String real_name = g_mount_points->GetRealDirectory(String::FromUtf8(path));
 
@@ -2293,6 +2362,10 @@ int KYTY_SYSV_ABI KernelRmdir(const char* path)
 		return KERNEL_ERROR_EINVAL;
 	}
 	KYTY_LOG_DEBUG("\t path = %s\n", path);
+	if (IsApplicationMountPath(path))
+	{
+		return KERNEL_ERROR_EPERM;
+	}
 	const String real_name = g_mount_points->GetRealDirectory(String::FromUtf8(path));
 	if (!Core::File::IsDirectoryExisting(real_name))
 	{
@@ -2303,6 +2376,35 @@ int KYTY_SYSV_ABI KernelRmdir(const char* path)
 		return KERNEL_ERROR_EIO;
 	}
 	return OK;
+}
+
+int KYTY_SYSV_ABI KernelChmod(const char* path, uint16_t mode)
+{
+	PRINT_NAME();
+	EXIT_IF(g_mount_points == nullptr);
+	if (path == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	KYTY_LOG_DEBUG("\t path = %s\n", path);
+	KYTY_LOG_DEBUG("\t mode = %04" PRIo16 "\n", mode);
+	if (IsApplicationMountPath(path))
+	{
+		return KERNEL_ERROR_EPERM;
+	}
+	const auto path_s    = String::FromUtf8(path);
+	const auto real_file = g_mount_points->GetRealFilename(path_s);
+	const auto real_dir  = g_mount_points->GetRealDirectory(path_s);
+	const bool is_dir    = Core::File::IsDirectoryExisting(real_dir);
+	if (!is_dir && !Core::File::IsFileExisting(real_file))
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	// The host file carries the permission bits, so a later fstat reports the new mode.
+	std::error_code error;
+	std::filesystem::permissions(std::filesystem::u8path((is_dir ? real_dir : real_file).C_Str()),
+	                             static_cast<std::filesystem::perms>(mode & 07777u), error);
+	return error ? KernelErrorFromHost(error.default_error_condition().value()) : OK;
 }
 
 static Core::Mutex                          g_apr_mutex;
@@ -2740,12 +2842,17 @@ static bool TryResolvePackageFile(const char* guest_path, String* host_path, uin
 	const auto host_directory = PackageHostDirectory(guest.substr(0, name_position));
 	if (host_directory.empty()) { return false; }
 
-	const auto      file = std::filesystem::u8path(host_directory) / std::filesystem::u8path(guest.substr(name_position + 1));
+	const auto      name = guest.substr(name_position + 1);
+	const auto      file = std::filesystem::u8path(host_directory) / std::filesystem::u8path(name);
 	std::error_code error;
 	if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(file, error))) { return false; }
+#if defined(_WIN32)
+	// Windows finds the file under any spelling; only the exact one takes this path.
+	if (Path::FindEntryIgnoringCase(host_directory, name) != name) { return false; }
+#endif
 	*size = std::filesystem::file_size(file, error);
 	if (error) { return false; }
-	*host_path = String::FromUtf8(file.u8string().c_str());
+	*host_path = String::FromUtf8(file.generic_u8string().c_str());
 	return true;
 }
 

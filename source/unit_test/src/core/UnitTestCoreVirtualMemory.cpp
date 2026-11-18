@@ -21,6 +21,8 @@
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
 #include <sys/mman.h>
+#elif defined(_WIN32)
+#include <windows.h> // IWYU pragma: keep
 #endif
 
 UT_BEGIN(CoreVirtualMemory);
@@ -171,6 +173,18 @@ bool NativeWritable(uint64_t address)
 	}
 	return false;
 }
+#elif defined(_WIN32)
+// Whether the host page containing `address` is writable, from the kernel's own view.
+bool NativeWritable(uint64_t address)
+{
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(address)), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT)
+	{
+		return false;
+	}
+	constexpr DWORD kWritable = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	return (info.Protect & kWritable) != 0;
+}
 #endif
 
 #if !defined(_WIN32)
@@ -204,6 +218,27 @@ TEST(CoreVirtualMemory, RemoveWriteCapturesAndRestoresMixedProtectionRuns)
 	bytes[page_size * 2u] = 0xc3;
 	EXPECT_TRUE(Free(address));
 }
+
+#if (KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)) || defined(_WIN32)
+// Removing write changes whole host pages, so a range that ends inside a page
+// must be recorded for that whole page too: a later restore of the enclosing
+// range would otherwise read the rest of the page as write-protected guest memory.
+TEST(CoreVirtualMemory, RestoreAfterRemoveWriteReturnsEveryTouchedPage)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size * 3u, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	ProtectionCapture capture;
+	ASSERT_TRUE(RemoveWriteAndCapture(address, page_size + page_size / 2u, &CaptureProtection, &capture).Succeeded());
+	EXPECT_FALSE(NativeWritable(address + page_size));
+	ASSERT_EQ(capture.size, 1u);
+	EXPECT_TRUE(RestoreProtection(address, page_size * 3u, capture.runs[0].restore_token));
+	EXPECT_TRUE(NativeWritable(address));
+	EXPECT_TRUE(NativeWritable(address + page_size));
+	EXPECT_TRUE(NativeWritable(address + page_size * 2u));
+	EXPECT_TRUE(Free(address));
+}
+#endif
 
 TEST(CoreVirtualMemory, UniformLargeRangeUsesOneProtectionTransition)
 {
@@ -1431,7 +1466,7 @@ TEST(CoreVirtualMemory, UnpopulatedSharedBackingSpansAreFoundInOneSweep)
 }
 
 // Page flags follow the backing's populated extents inside the queried
-// interval only, including an extent that starts before it or runs past it.
+// interval only, including an extent that starts before it, runs past it or both.
 TEST(CoreVirtualMemory, PopulatedSharedBackingPagesFollowBackingExtents)
 {
 #if !defined(__linux__)
@@ -1443,7 +1478,7 @@ TEST(CoreVirtualMemory, PopulatedSharedBackingPagesFollowBackingExtents)
 	ASSERT_NE(backing, nullptr);
 	const uint64_t view = MapSharedAligned(backing, 0, 0, size, Mode::ReadWrite, page);
 	ASSERT_NE(view, 0u);
-	for (const uint64_t index: {1u, 2u, 5u, 6u})
+	for (const uint64_t index: {1u, 2u, 5u, 6u, 7u})
 	{
 		reinterpret_cast<volatile uint8_t*>(view)[page * index] = 1;
 	}
@@ -1454,7 +1489,53 @@ TEST(CoreVirtualMemory, PopulatedSharedBackingPagesFollowBackingExtents)
 	std::array<uint8_t, 2> hole {};
 	ASSERT_TRUE(QueryPopulatedSharedBackingPages(backing, page * 3u, page * 2u, hole.data()));
 	EXPECT_EQ(hole, (std::array<uint8_t, 2> {0, 0}));
+	std::array<uint8_t, 1> inside {};
+	ASSERT_TRUE(QueryPopulatedSharedBackingPages(backing, page * 6u, page, inside.data()));
+	EXPECT_EQ(inside, (std::array<uint8_t, 1> {1}));
 	EXPECT_FALSE(QueryPopulatedSharedBackingPages(backing, page * 7u, page * 2u, populated.data()));
+	ASSERT_TRUE(Free(view));
+	DestroySharedBacking(backing);
+#endif
+}
+
+// A large interval mixes full, empty and scattered extents, including one that crosses its midpoint, so the
+// query has to split it; every page flag must still match the pages written.
+TEST(CoreVirtualMemory, PopulatedSharedBackingPagesMatchMixedLargeInterval)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "population is reported by the Linux memfd backing";
+#else
+	const uint64_t page    = GetPageSize();
+	const uint64_t pages   = 256;
+	SharedBacking* backing = CreateSharedBacking(page * pages);
+	ASSERT_NE(backing, nullptr);
+	const uint64_t view = MapSharedAligned(backing, 0, 0, page * pages, Mode::ReadWrite, page);
+	ASSERT_NE(view, 0u);
+	std::vector<uint8_t> written(pages, 0);
+	const auto write_page = [&](uint64_t index)
+	{
+		reinterpret_cast<volatile uint8_t*>(view)[page * index] = 1;
+		written[index]                                           = 1;
+	};
+	for (uint64_t index = 0; index < 64; ++index)
+	{
+		write_page(index);
+	}
+	for (uint64_t index = 120; index < 200; ++index)
+	{
+		write_page(index);
+	}
+	for (const uint64_t index: {100u, 101u, 211u, 255u})
+	{
+		write_page(index);
+	}
+
+	std::vector<uint8_t> populated(pages, 0xff);
+	ASSERT_TRUE(QueryPopulatedSharedBackingPages(backing, 0, page * pages, populated.data()));
+	EXPECT_EQ(populated, written);
+	std::vector<uint8_t> offset_populated(250, 0xff);
+	ASSERT_TRUE(QueryPopulatedSharedBackingPages(backing, page * 3u, page * 250u, offset_populated.data()));
+	EXPECT_EQ(offset_populated, std::vector<uint8_t>(written.begin() + 3, written.begin() + 253));
 	ASSERT_TRUE(Free(view));
 	DestroySharedBacking(backing);
 #endif

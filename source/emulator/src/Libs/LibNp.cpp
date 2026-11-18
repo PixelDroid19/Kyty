@@ -851,6 +851,7 @@ LIB_DEFINE(InitNpManager_1)
 	LIB_FUNC("p-o74CnoNzY", Network::NpManager::NpGetNpId);
 	LIB_FUNC("XDncXQIJUSk", Network::NpManager::NpGetOnlineId);
 	LIB_FUNC("eiqMCt9UshI", Network::NpManager::NpCreateAsyncRequest);
+	LIB_FUNC("GpLQDNKICac", Network::NpManager::NpCreateRequest);
 	LIB_FUNC("S7QTn72PrDw", Network::NpManager::NpDeleteRequest);
 	LIB_FUNC("2rsFmlGWleQ", Network::NpManager::NpCheckNpAvailability);
 	LIB_FUNC("uqcPJLWL08M", Network::NpManager::NpPollAsync);

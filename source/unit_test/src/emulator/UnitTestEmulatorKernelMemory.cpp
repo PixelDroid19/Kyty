@@ -4,6 +4,7 @@
 #include "Emulator/Kernel/GpuMappingLifecycle.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/RetiringRanges.h"
 #include "Emulator/Kernel/SyncOnAddress.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -243,6 +244,13 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortForwardsReleaseCompletionInAda
 	callbacks.register_range   = GpuMappingLifecycleTestState::RegisterRange;
 	callbacks.invalidate_ranges = GpuMappingLifecycleTestState::InvalidateRanges;
 	callbacks.release_range    = GpuMappingLifecycleTestState::ReleaseRange;
+	callbacks.invalidate_ranges_deferred = [](void* c, const KernelGpuMappingRange* r, size_t n, uint64_t* t)
+	{
+		*t = 0;
+		return GpuMappingLifecycleTestState::InvalidateRanges(c, r, n);
+	};
+	callbacks.ticket_retired = [](void*, uint64_t) { return true; };
+	callbacks.wait_ticket    = [](void*, uint64_t) {};
 	EXPECT_FALSE(lifecycle.Install(callbacks));
 	EXPECT_FALSE(lifecycle.ProtectRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, nullptr));
 	callbacks.protect_range = GpuMappingLifecycleTestState::ProtectRange;
@@ -299,6 +307,13 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortAllowsAdapterReentrancy)
 	callbacks.invalidate_ranges = GpuMappingLifecycleTestState::InvalidateRanges;
 	callbacks.release_range    = GpuMappingLifecycleTestState::ReentrantReleaseRange;
 	callbacks.protect_range    = GpuMappingLifecycleTestState::ProtectRange;
+	callbacks.invalidate_ranges_deferred = [](void* c, const KernelGpuMappingRange* r, size_t n, uint64_t* t)
+	{
+		*t = 0;
+		return GpuMappingLifecycleTestState::InvalidateRanges(c, r, n);
+	};
+	callbacks.ticket_retired = [](void*, uint64_t) { return true; };
+	callbacks.wait_ticket    = [](void*, uint64_t) {};
 	ASSERT_TRUE(lifecycle.Install(callbacks));
 
 	ASSERT_TRUE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, &state));
@@ -371,7 +386,9 @@ int RunProtectUnmapRace()
 {
 	static ProtectUnmapRace            race;
 	const GpuMappingLifecycleCallbacks callbacks {&race, ProtectUnmapRace::RegisterRange, ProtectUnmapRace::InvalidateRanges,
-	                                              ProtectUnmapRace::ReleaseRange, ProtectUnmapRace::ProtectRange};
+	                                              ProtectUnmapRace::ReleaseRange, ProtectUnmapRace::ProtectRange,
+	                                              +[](void* c, const KernelGpuMappingRange* r, size_t n, uint64_t* t) { *t = 0; return ProtectUnmapRace::InvalidateRanges(c, r, n); },
+	                                              +[](void*, uint64_t) { return true; }, +[](void*, uint64_t) {}};
 	if (!GetGpuMappingLifecyclePort().Install(callbacks))
 	{
 		return 2;
@@ -524,7 +541,9 @@ int RunProtectOwnerReuseRace(bool replacement_gpu_owner)
 	race.replacement_gpu_owner = replacement_gpu_owner;
 
 	const GpuMappingLifecycleCallbacks callbacks {&race, ProtectOwnerReuseRace::RegisterRange, ProtectOwnerReuseRace::InvalidateRanges,
-	                                              ProtectOwnerReuseRace::ReleaseRange, ProtectOwnerReuseRace::ProtectRange};
+	                                              ProtectOwnerReuseRace::ReleaseRange, ProtectOwnerReuseRace::ProtectRange,
+	                                              +[](void* c, const KernelGpuMappingRange* r, size_t n, uint64_t* t) { *t = 0; return ProtectOwnerReuseRace::InvalidateRanges(c, r, n); },
+	                                              +[](void*, uint64_t) { return true; }, +[](void*, uint64_t) {}};
 	if (!GetGpuMappingLifecyclePort().Install(callbacks))
 	{
 		return 2;
@@ -641,6 +660,27 @@ TEST(EmulatorKernelMemory, AutomaticDirectMapUsesPs5UserAddressRange)
 		EXPECT_LT(address, kGuestUserEnd);
 		EXPECT_EQ(KernelMunmap(address, kSize), OK);
 	}
+
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
+	Config::SetNextGen(false);
+}
+
+TEST(EmulatorKernelMemory, MunmapRoundsLengthUpToGuestPage)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr size_t kSize     = 0x10000;
+	constexpr size_t kPageSize = 0x4000;
+	int64_t          physical_address = 0;
+	ASSERT_EQ(KernelAllocateMainDirectMemory(kSize, kSize, 12, &physical_address), OK);
+	void* mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&mapping, kSize, 0x02, 0, physical_address, kSize), OK);
+	const auto address = reinterpret_cast<uint64_t>(mapping);
+
+	EXPECT_EQ(KernelMunmap(address, kSize - kPageSize + 0xa0), OK);
+	// The last page went with the rounded range, so nothing is left to unmap there.
+	EXPECT_NE(KernelMunmap(address + kSize - kPageSize, kPageSize), OK);
 
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
 	Config::SetNextGen(false);
@@ -1243,7 +1283,7 @@ TEST(EmulatorKernelMemory, InternalNamedFlexibleMemoryNidUsesOutPointerAbi)
 	auto**                             out_addr = reinterpret_cast<void**>(out_storage.data());
 	*out_addr                                  = nullptr;
 
-	using map_named_flexible_internal_fn_t = int (*)(void**, size_t, int, int, const char*);
+	using map_named_flexible_internal_fn_t = int(KYTY_SYSV_ABI*)(void**, size_t, int, int, const char*);
 	auto* map_named_flexible_internal = reinterpret_cast<map_named_flexible_internal_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(map_named_flexible_internal, nullptr);
 
@@ -1631,7 +1671,7 @@ TEST(EmulatorKernelMemory, AmprMeasureCommandSizesMatchRecordLayout)
 		query.type                 = Loader::SymbolType::Func;
 		const auto* rec            = symbols.Find(query);
 		ASSERT_NE(rec, nullptr) << c.nid;
-		using measure_fn_t = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+		using measure_fn_t = uint64_t(KYTY_SYSV_ABI*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 		auto* fn           = reinterpret_cast<measure_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 		ASSERT_NE(fn, nullptr);
 		EXPECT_EQ(fn(0, 0x100000, 0x1000, 0, 0, 0), c.size) << c.nid;
@@ -1647,7 +1687,7 @@ TEST(EmulatorKernelMemory, AmprMeasureCommandSizesMatchRecordLayout)
 	read_query.type                 = Loader::SymbolType::Func;
 	const auto* read_rec            = symbols.Find(read_query);
 	ASSERT_NE(read_rec, nullptr);
-	using read_measure_fn_t = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t);
+	using read_measure_fn_t = uint64_t(KYTY_SYSV_ABI*)(uint64_t, uint64_t, uint64_t, uint64_t);
 	auto* read_measure      = reinterpret_cast<read_measure_fn_t>(static_cast<uintptr_t>(read_rec->vaddr));
 	EXPECT_EQ(read_measure(0, 0x100000, 0x1000, UINT64_C(0x100000000)), 0x18u);
 }
@@ -1676,8 +1716,8 @@ TEST(EmulatorKernelMemory, AmprCommandBufferLifecycleUsesCompactHeader)
 	const auto* set_buffer_rec = symbols.Find(query);
 	ASSERT_NE(set_buffer_rec, nullptr);
 
-	using ctor_fn_t       = int (*)(void*);
-	using set_buffer_fn_t = int (*)(void*, void*, uint32_t);
+	using ctor_fn_t       = int(KYTY_SYSV_ABI*)(void*);
+	using set_buffer_fn_t = int(KYTY_SYSV_ABI*)(void*, void*, uint32_t);
 	auto* ctor            = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(ctor_rec->vaddr));
 	auto* set_buffer      = reinterpret_cast<set_buffer_fn_t>(static_cast<uintptr_t>(set_buffer_rec->vaddr));
 
@@ -1742,7 +1782,7 @@ TEST(EmulatorKernelMemory, ResolvesKernelNanosleepExport)
 	const auto* rec = symbols.Find(query);
 	ASSERT_NE(rec, nullptr);
 
-	using nanosleep_fn_t = int (*)(const Kernel::KernelTimespec*, Kernel::KernelTimespec*);
+	using nanosleep_fn_t = int(KYTY_SYSV_ABI*)(const Kernel::KernelTimespec*, Kernel::KernelTimespec*);
 	auto* nanosleep      = reinterpret_cast<nanosleep_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 	ASSERT_NE(nanosleep, nullptr);
 	EXPECT_EQ(nanosleep(nullptr, nullptr), LibKernel::KERNEL_ERROR_EFAULT);
@@ -1789,14 +1829,14 @@ TEST(EmulatorKernelMemory, ResolvesAudioOut2ContextLifecycle)
 	init_q.type                 = Loader::SymbolType::Func;
 	const auto* init_rec        = symbols.Find(init_q);
 	ASSERT_NE(init_rec, nullptr);
-	using init_fn_t = int (*)();
+	using init_fn_t = int(KYTY_SYSV_ABI*)();
 	EXPECT_EQ(reinterpret_cast<init_fn_t>(static_cast<uintptr_t>(init_rec->vaddr))(), 0);
 
 	Loader::SymbolResolve qmem_q = init_q;
 	qmem_q.name                  = U"pDmme7Bgm6E";
 	const auto* qmem_rec         = symbols.Find(qmem_q);
 	ASSERT_NE(qmem_rec, nullptr);
-	using qmem_fn_t = int (*)(const void*, uint64_t*);
+	using qmem_fn_t = int(KYTY_SYSV_ABI*)(const void*, uint64_t*);
 	GuestWritableBlock size_block(sizeof(uint64_t));
 	ASSERT_TRUE(size_block.IsValid());
 	auto* size = size_block.Data<uint64_t>();
@@ -1809,7 +1849,7 @@ TEST(EmulatorKernelMemory, ResolvesAudioOut2ContextLifecycle)
 	create_q.name                  = U"0x6o1VVAYSY";
 	const auto* create_rec         = symbols.Find(create_q);
 	ASSERT_NE(create_rec, nullptr);
-	using create_fn_t = int (*)(const void*, void*, uint64_t, int32_t*);
+	using create_fn_t = int(KYTY_SYSV_ABI*)(const void*, void*, uint64_t, int32_t*);
 	GuestWritableBlock workspace(64);
 	GuestWritableBlock handle_block(sizeof(int32_t));
 	ASSERT_TRUE(workspace.IsValid());
@@ -1862,7 +1902,7 @@ TEST(EmulatorKernelMemory, ResolvesLibcSincosfWithFloatResults)
 	const auto* record         = symbols.Find(query);
 	ASSERT_NE(record, nullptr);
 
-	using sincosf_fn_t = void (*)(float, float*, float*);
+	using sincosf_fn_t = void(KYTY_SYSV_ABI*)(float, float*, float*);
 	float sine          = 0.0f;
 	float cosine        = 0.0f;
 	reinterpret_cast<sincosf_fn_t>(static_cast<uintptr_t>(record->vaddr))(0.0f, &sine, &cosine);
@@ -1886,7 +1926,7 @@ TEST(EmulatorKernelMemory, ResolvesLibcExpfWithFloatResult)
 	const auto* record         = symbols.Find(query);
 	ASSERT_NE(record, nullptr);
 
-	using expf_fn_t = float (*)(float);
+	using expf_fn_t = float(KYTY_SYSV_ABI*)(float);
 	EXPECT_FLOAT_EQ(reinterpret_cast<expf_fn_t>(static_cast<uintptr_t>(record->vaddr))(0.0f), 1.0f);
 }
 
@@ -1940,6 +1980,21 @@ TEST(EmulatorKernelMemory, SyncOnAddressRejectsUnsupportedFlagsAndUnalignedAddre
 	uint32_t timeout = 0;
 	EXPECT_EQ(KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value), 0, &timeout, 1), LibKernel::KERNEL_ERROR_EINVAL);
 	EXPECT_EQ(KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value) + 1u, 0, &timeout, 0), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+TEST(EmulatorKernelMemory, SyncOnAddressWait64ComparesTheWholeAlignedValue)
+{
+	using namespace Kernel::SyncOnAddress;
+	EnsureMemorySubsystemInitialized();
+
+	alignas(8) uint64_t values[2] = {0x1'00000000ull, 0};
+	const auto          address   = reinterpret_cast<uint64_t>(&values[0]);
+	uint32_t            timeout   = 0;
+	// Only the high word differs from the expected value, so the wait returns at once.
+	EXPECT_EQ(KernelSyncOnAddressWait64(address, 0, &timeout), OK);
+	EXPECT_EQ(KernelSyncOnAddressWait64(address, 0x1'00000000ull, &timeout), LibKernel::KERNEL_ERROR_ETIMEDOUT);
+	EXPECT_EQ(KernelSyncOnAddressWait64(address + 4u, 0, &timeout), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelSyncOnAddressWait32(address + 4u, 1, &timeout), LibKernel::KERNEL_ERROR_ETIMEDOUT);
 }
 
 TEST(EmulatorKernelMemory, SyncOnAddressWakeReleasesMatchingWaiter)
@@ -2065,6 +2120,63 @@ TEST(EmulatorKernelMemory, QueryMappedRangeAcceptsContainedSmemSpanAndRejectsDec
 	EXPECT_FALSE(KernelQueryMappedRange(base + kSpanOffset, kDeclaredVsharp, &declared));
 
 	EXPECT_EQ(KernelMunmap(base, kMappingSize), OK);
+}
+
+// A range released under a ticket stays out of the allocator until the GPU work in flight at release time
+// finishes, and only then does its backing drop.
+TEST(EmulatorKernelMemory, RetiringRangesBlockReuseUntilTheirTicketRetires)
+{
+	RetiringRanges retiring;
+	retiring.Add({0x20000, 0x10000, 2, true});
+	retiring.Add({0x00000, 0x10000, 1, false});
+
+	uint64_t end = 0;
+	EXPECT_TRUE(retiring.FindOverlap(0x08000, 0x1000, &end));
+	EXPECT_EQ(end, 0x10000u);
+	EXPECT_TRUE(retiring.FindOverlap(0x1f000, 0x2000, &end));
+	EXPECT_EQ(end, 0x30000u);
+	EXPECT_FALSE(retiring.FindOverlap(0x10000, 0x10000, &end));
+
+	// Nothing has retired: no entry is handed back.
+	EXPECT_TRUE(retiring.Collect([](uint64_t) { return false; }).empty());
+	EXPECT_EQ(retiring.Size(), 2u);
+
+	// A retired entry keeps its range occupied until it is removed, so it can be checked first.
+	const auto retired = retiring.Collect([](uint64_t ticket) { return ticket <= 1; });
+	ASSERT_EQ(retired.size(), 1u);
+	EXPECT_EQ(retired[0].start, 0u);
+	EXPECT_FALSE(retired[0].discard_backing);
+	EXPECT_TRUE(retiring.FindOverlap(0x08000, 0x1000, &end));
+	retiring.Remove(retired[0].start);
+	EXPECT_FALSE(retiring.FindOverlap(0x08000, 0x1000, &end));
+	EXPECT_TRUE(retiring.FindOverlap(0x20000, 0x1000, &end));
+}
+
+TEST(EmulatorKernelMemory, RetiringRangesWaitOnlyForTicketsInsideTheSearchWindow)
+{
+	RetiringRanges retiring;
+	retiring.Add({0x10000, 0x10000, 5, true});
+	retiring.Add({0x40000, 0x10000, 3, true});
+
+	uint64_t ticket = 0;
+	EXPECT_TRUE(retiring.OldestTicketIn(0, 0x30000, &ticket));
+	EXPECT_EQ(ticket, 5u);
+	EXPECT_TRUE(retiring.OldestTicketIn(0, UINT64_MAX, &ticket));
+	EXPECT_EQ(ticket, 3u);
+	EXPECT_FALSE(retiring.OldestTicketIn(0x20000, 0x40000, &ticket));
+}
+
+TEST(EmulatorKernelMemory, RetiringRangesReportWhenTheyAreFull)
+{
+	RetiringRanges retiring;
+	for (uint64_t i = 0; i < RetiringRanges::kCapacity; ++i)
+	{
+		EXPECT_FALSE(retiring.IsFull());
+		retiring.Add({i * 0x10000, 0x10000, i + 1, false});
+	}
+	EXPECT_TRUE(retiring.IsFull());
+	retiring.Remove(0);
+	EXPECT_FALSE(retiring.IsFull());
 }
 
 UT_END();

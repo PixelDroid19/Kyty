@@ -19,6 +19,7 @@
 // linked depth parent through the ordinary parent walk.
 
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/GpuMemoryHostResultPages.h"
 
 #include "Kyty/Core/Database.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -28,6 +29,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Graphics/GpuDeferredDeletionQueue.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GpuMemoryMaterializationCache.h"
 #include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -48,6 +50,7 @@ namespace Kyty::Libs::Graphics {
 
 // Changes when a device-address read may have new storage work; see StorageScanMemo.
 extern std::atomic<uint64_t> g_storage_scan_generation;
+
 
 struct StorageTextureRawRenderSource;
 
@@ -74,6 +77,25 @@ constexpr uint64_t ObjectsRelation(GpuMemoryObjectType b, OverlapType relation, 
 	return static_cast<uint64_t>(a) * static_cast<uint64_t>(GpuMemoryObjectType::Max) * static_cast<uint64_t>(OverlapType::Max) +
 	       static_cast<uint64_t>(b) * static_cast<uint64_t>(OverlapType::Max) + static_cast<uint64_t>(relation);
 }
+
+// Hashes of a storage range's bytes on its partly covered first and last pages,
+// taken when the object last matched guest memory (a write-back re-baseline, a guest
+// upload or creation from guest bytes). They stand for the guest bytes there while the
+// object's content sequence is the one they were taken at and, unless they cover the
+// whole range, its generation too.
+struct GpuMemoryStorageEdges
+{
+	uint64_t head_hash        = 0;
+	uint64_t tail_hash        = 0;
+	uint64_t generation       = 0;
+	uint64_t content_sequence = 0;
+	bool     valid            = false;
+};
+
+// Takes the edges of [vaddr, vaddr + size) as guest memory holds them now; valid only if
+// the range stayed unchanged since `read` began.
+GpuMemoryStorageEdges GpuMemoryTakeStorageEdges(GpuMemoryObjectType type, uint64_t vaddr, uint64_t size,
+                                                const GpuDirtyReadObservation& read);
 
 // Content hash / wall-clock helpers shared by Create, Update, WriteBack.
 uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_t size);
@@ -106,7 +128,14 @@ public:
 		}
 	}
 
-	[[nodiscard]] Vector<int> FindAll(uint64_t vaddr) const { return m_map.Get(vaddr); }
+	// Callers read the ids without changing the map. A returned copy allocated
+	// on every lookup and was copied again when the caller iterated it.
+	[[nodiscard]] const Vector<int>& FindAll(uint64_t vaddr) const
+	{
+		static const Vector<int> kNoIds;
+		const auto*              ids = m_map.Find(vaddr);
+		return ids != nullptr ? *ids : kNoIds;
+	}
 
 	[[nodiscard]] bool IsEmpty() const
 	{
@@ -158,13 +187,20 @@ public:
 	}
 
 	// Ids of the blocks overlapping [vaddr, vaddr + size), each once.
-	[[nodiscard]] Vector<int> FindAll(uint64_t vaddr, uint64_t size) const { return FindAll(&vaddr, &size, 1); }
+	[[nodiscard]] Vector<int> FindAll(uint64_t vaddr, uint64_t size) const
+	{
+		Vector<int> ret;
+		FindAll(&vaddr, &size, 1, &ret);
+		return ret;
+	}
 
-	[[nodiscard]] Vector<int> FindAll(const uint64_t* vaddr, const uint64_t* size, int vaddr_num) const
+	// The same into `ret`, which is cleared first; per-lookup callers reuse its capacity.
+	void FindAll(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, Vector<int>* ret) const
 	{
 		EXIT_IF(vaddr == nullptr);
 		EXIT_IF(size == nullptr);
-		Vector<int>             ret;
+		EXIT_IF(ret == nullptr);
+		ret->Clear();
 		std::unordered_set<int> seen;
 		for (int i = 0; i < vaddr_num; i++)
 		{
@@ -182,12 +218,11 @@ public:
 				{
 					if (block->vaddr + block->size > vaddr[i])
 					{
-						AddUnique(&ret, &seen, block->id);
+						AddUnique(ret, &seen, block->id);
 					}
 				}
 			}
 		}
-		return ret;
 	}
 
 	[[nodiscard]] bool IsEmpty() const
@@ -276,9 +311,12 @@ public:
 	void  FrameDone(GraphicContext* ctx);
 
 	[[nodiscard]] uint64_t ObjectGraphGeneration() const { return m_object_graph_generation.load(std::memory_order_acquire); }
+	void                   StampCachedUseCapture(GpuMemoryCachedUseCapture* capture, bool end);
+	[[nodiscard]] bool     RepeatCachedUses(uint64_t submit_id, CommandBuffer* buffer, const GpuMemoryCachedUseCapture& capture);
 
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first, const SubmissionId* submission = nullptr);
+	Vector<GpuMemoryObject> FindIntersectingObjects(uint64_t vaddr, uint64_t size, const SubmissionId& submission);
 	Vector<GpuMemoryObject> FindEqualObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission);
 	Vector<GpuMemoryObject> FindObjectsWithRange(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission);
 	bool                    QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
@@ -286,6 +324,7 @@ public:
 	void                    LinkDepthMetaStorage(uint64_t depth_vaddr, uint64_t depth_size, uint64_t htile_addr, uint64_t htile_size);
 	bool                    DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
 	bool                    CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission);
+	[[nodiscard]] bool      RangeHoldsGuestBytes(uint64_t vaddr, uint64_t size);
 	bool                    CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns,
 	                                                      uint64_t* copy_ns, GpuMemorySnapshotAdmission admission);
 	bool                    CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot, bool* matches,
@@ -295,17 +334,19 @@ public:
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 	void WriteBackAllCompleted(GraphicContext* ctx);
-	void               WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer);
+	[[nodiscard]] bool WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges,
+	                                          GpuQueueId consumer, SubmissionId* dependency);
 	[[nodiscard]] bool PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
 	                                           const std::vector<SubmissionId>&          device_awaited,
 	                                           std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
 	[[nodiscard]] bool WriteBackStorageForGuestSeed(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuQueueId consumer,
 	                                                SubmissionId* dependency);
 	void CollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, SubmissionId reader, std::vector<GpuMemoryStorageSeedSource>* sources);
-	[[nodiscard]] bool PendingStorageHasAliases();
+	void DeferPendingStorageAliases();
 	[[nodiscard]] bool PendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges);
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
 	[[nodiscard]] bool FindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
+	[[nodiscard]] bool FindVertexContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size);
 	void               MarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId consumer);
 	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
 	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
@@ -351,6 +392,7 @@ private:
 		bool                         dirty_registered                   = false;
 		bool                         depth_meta_bound                   = false;
 		uint64_t                     dirty_generation[VADDR_BLOCKS_MAX] = {};
+		GpuMemoryStorageEdges        storage_edges;
 		// Tracker page generations at the last upload of a storage buffer; the
 		// next upload copies only the pages whose generation moved since.
 		std::vector<uint64_t>        page_generations;
@@ -400,9 +442,8 @@ private:
 	};
 
 	using MaterializationCache = GpuMemoryMaterializationCache<Materialization, 2048>;
-	using AllocatedValidationCache = GpuMemoryRangeQueryCache<GpuMemoryRangeValidationStatus, 4096>;
 	using AllocatedPrefixCache     = GpuMemoryRangeQueryCache<uint64_t, 4096>;
-	using OverlapSnapshotCache     = GpuMemoryRangeQueryCache<GpuMemoryOverlapSnapshot, 4096>;
+	using OverlapSnapshotCache     = GpuMemoryRangeQueryCache<GpuMemoryOverlapSnapshot, 16384>;
 
 	struct Block
 	{
@@ -418,6 +459,7 @@ private:
 		Vector<OverlappedBlock> others;
 		GpuMemoryScenario       scenario     = GpuMemoryScenario::Common;
 		bool                    free         = true;
+		bool                    host_result_counted = false; // its pages are in m_host_result_pages
 		int                     next_free_id = -1;
 	};
 
@@ -449,8 +491,11 @@ private:
 	void RetireBuffersUnderPressureLocked(Vector<Destructor>* destructors);
 	void WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors,
 	                           const SubmissionId* publishing_submission = nullptr);
+	void PublishStorageSnapshotsLocked(SubmissionId submission);
+	void PublishStorageSnapshotLocked(const GpuMemoryStorageSnapshot& snapshot);
 	void RecordUse(ObjectInfo* object, SubmissionId submission);
 	void RecordUse(ObjectInfo* object, CommandBuffer* buffer);
+	void RecordCachedReuse(int heap_id, int object_id, bool read_only, uint64_t check_hash, CommandBuffer* buffer);
 	void ScheduleDestructors(GraphicContext* ctx, Vector<Destructor>* destructors);
 	void ScheduleDestructorsOutsideMutationLocks(GraphicContext* ctx, Vector<Destructor>* destructors);
 	void VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vector<Destructor>* destructors,
@@ -461,6 +506,8 @@ private:
 	               int* id);
 	Block CreateBlock(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, int heap_id, int obj_id);
 	void  DeleteBlock(Block* b, int heap_id, int obj_id);
+	// Keeps m_host_result_pages equal to the live objects that may hold a host result.
+	void  SetHostResultPagesCounted(Object* object, bool counted);
 	void  Link(int heap_id, int id1, int id2, OverlapType rel, GpuMemoryScenario scenario);
 	[[nodiscard]] uint64_t NextContentSequence();
 	[[nodiscard]] DebugStatsGpuMemoryLinkedTopology ClassifyLinkedStorageTopology(
@@ -475,9 +522,10 @@ private:
 	// `ranges` answers whether a block meets one of the queried guest ranges.
 	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const;
 	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorageIn(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool                             StorageContentTracked(int heap_id, const Object& object) const;
 	[[nodiscard]] bool StorageIsWholeGuestContent(int heap_id, const Object& object) const;
-	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
-	                                                            const GpuMemoryRangeQueryKey& query);
+	bool                                           ConfirmStorageEdgesUnchanged(int heap_id, int object_id);
+	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size) const;
 	bool TransientReadOnlyOverlapsAllowedLocked(uint64_t vaddr, uint64_t size, const GpuMemoryRangeQueryKey& query,
 	                                            GpuMemorySnapshotAdmission admission);
 	// Whether a writable storage buffer whose GPU writes are not yet published covers part of the range.
@@ -522,7 +570,8 @@ private:
 	Vector<Heap> m_heaps;
 	// [begin, end) address spans, sorted and disjoint, each naming the lowest heap
 	// index that covers it: GetHeapId's first-match answer by binary search.
-	// Every covering heap, ascending, is m_heap_index_open[open_first, +open_count).
+	// Every covering heap, ascending, is m_heap_index_open[open_first, +open_count);
+	// max_end is the furthest end among them.
 	struct HeapSpan
 	{
 		uint64_t begin      = 0;
@@ -530,6 +579,7 @@ private:
 		int      heap_id    = -1;
 		uint32_t open_first = 0;
 		uint32_t open_count = 0;
+		uint64_t max_end    = 0;
 	};
 	std::vector<HeapSpan> m_heap_index;
 	std::vector<int>      m_heap_index_open;
@@ -564,10 +614,64 @@ private:
 	// of every heap on each completion.
 	std::set<std::pair<int, int>> m_pending_write_back;
 	void                          SyncWriteBackIndexes(int heap_id, int object_id);
+	// The m_writable_storage members a consolidated wait left with aliases
+	// (DeferPendingStorageAliases); they leave with the write-back.
+	std::set<std::pair<int, int>> m_deferred_alias_storage;
+	[[nodiscard]] bool            DeferredAliasUseConflicts(int heap_id, const Vector<OverlappedBlock>& links, GpuMemoryObjectType type,
+	                                                        const uint64_t* params);
+
+	// The last few cached hits of CreateObject, answered without hashing the key or finding the heap.
+	struct RecentMaterialization
+	{
+		GpuMemoryMaterializationKey key;
+		Materialization             value;
+		uint64_t                    graph_generation = 0;
+		uint64_t                    heap_generation  = 0;
+		uint64_t                    cache_removals   = 0;
+	};
+	// Direct-mapped: a draw samples several textures, so a short ring evicts them before the next draw.
+	static constexpr size_t                                    RECENT_MATERIALIZATIONS = 256;
+	std::array<RecentMaterialization, RECENT_MATERIALIZATIONS> m_recent_materializations {};
+	[[nodiscard]] const RecentMaterialization*                 FindRecentMaterialization(const GpuMemoryMaterializationKey& key) const;
+	void RememberRecentMaterialization(const GpuMemoryMaterializationKey& key, const Materialization& value);
+	static size_t RecentMaterializationSlot(const GpuMemoryMaterializationKey& key)
+	{
+		return static_cast<size_t>(key.QuickHash()) & (RECENT_MATERIALIZATIONS - 1u);
+	}
+
+	// The last few targets ResetHash found by exact range: a draw invalidates the same
+	// colour and depth objects again and again while the object graph is unchanged.
+	struct ResetHashFind
+	{
+		uint64_t            vaddr[VADDR_BLOCKS_MAX] {};
+		uint64_t            size[VADDR_BLOCKS_MAX] {};
+		int                 vaddr_num        = 0;
+		GpuMemoryObjectType type             = GpuMemoryObjectType::Invalid;
+		int                 heap_id          = -1;
+		int                 object_id        = -1;
+		uint64_t            graph_generation = 0;
+		uint64_t            heap_generation  = 0;
+	};
+	static constexpr size_t                     RESET_HASH_FINDS = 4;
+	std::array<ResetHashFind, RESET_HASH_FINDS> m_reset_hash_finds {};
+	size_t                                      m_reset_hash_find_next = 0;
+	[[nodiscard]] const ResetHashFind*          FindResetHashTarget(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
+	                                                                GpuMemoryObjectType type) const;
+	void RememberResetHashTarget(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, int heap_id,
+	                             int object_id);
 
 	// Advances whenever an object block enters or leaves a heap. Lookup results
 	// over the object graph stay valid while it is unchanged.
 	std::atomic<uint64_t> m_object_graph_generation {1};
+	// Odd while the heap index or the host-result pages change, even otherwise:
+	// RangeHoldsGuestBytes answers from a per-thread window while it is unchanged.
+	// Each instance starts apart so a window never outlives the memory it proved.
+	static uint64_t       FirstGuestBytesGeneration()
+	{
+		static std::atomic<uint64_t> next {0};
+		return next.fetch_add(uint64_t {1} << 40u, std::memory_order_relaxed);
+	}
+	std::atomic<uint64_t> m_guest_bytes_generation {FirstGuestBytesGeneration()};
 
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;
@@ -577,9 +681,11 @@ private:
 	uint32_t m_retirement_object_cursor          = 0;
 
 	MaterializationCache m_materialization_cache;
-	AllocatedValidationCache m_allocated_validation_cache;
 	AllocatedPrefixCache     m_allocated_prefix_cache;
 	OverlapSnapshotCache     m_overlap_snapshot_cache;
+	GpuMemoryHostResultPages m_host_result_pages;
+	// FindBlocks' candidate ids; reused under m_mutex so a lookup does not allocate them.
+	Vector<int> m_find_blocks_candidates;
 
 	GpuDeferredDeletionQueue m_deferred_deletions;
 

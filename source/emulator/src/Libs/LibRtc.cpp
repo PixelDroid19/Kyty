@@ -6,6 +6,7 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <cinttypes>
+#include <cstdio>
 #include <ctime>
 
 #ifdef KYTY_EMU_ENABLED
@@ -19,6 +20,7 @@ namespace Rtc {
 constexpr int RTC_ERROR_INVALID_POINTER   = static_cast<int>(0x80b50002);
 constexpr int RTC_ERROR_INVALID_ARGUMENT  = static_cast<int>(0x80b50003);
 constexpr int RTC_ERROR_INVALID_DATE      = static_cast<int>(0x80b50004);
+constexpr int RTC_ERROR_BAD_PARSE         = static_cast<int>(0x80b50007);
 constexpr int RTC_ERROR_INVALID_YEAR      = static_cast<int>(0x80b50008);
 constexpr int RTC_ERROR_INVALID_MONTH     = static_cast<int>(0x80b50009);
 constexpr int RTC_ERROR_INVALID_DAY       = static_cast<int>(0x80b5000a);
@@ -206,7 +208,7 @@ static bool TickToRtcDateTime(uint64_t tick, RtcDateTime* out)
 	}
 
 	const uint64_t time_of_day = tick % MICROSECONDS_PER_DAY;
-	uint64_t       z           = tick / MICROSECONDS_PER_DAY + 307ULL;
+	uint64_t       z           = tick / MICROSECONDS_PER_DAY + 306ULL; // tick 0 is 0001-01-01, 306 days after 0000-03-01
 
 	const int64_t  era = static_cast<int64_t>((z >= 0 ? z : z - 146096ULL) / 146097ULL);
 	const uint32_t doe = static_cast<uint32_t>(z - static_cast<uint64_t>(era) * 146097ULL);
@@ -856,6 +858,124 @@ static int KYTY_SYSV_ABI RtcTickAddYears(uint64_t* destination, const uint64_t* 
 	return AddCalendarDelta(destination, source, delta, false);
 }
 
+// The RFC 3339 form the library writes: centiseconds, then "Z" for UTC or a signed "+hh:mm" offset.
+static int KYTY_SYSV_ABI RtcFormatRFC3339(char* date_time, const uint64_t* utc, int time_zone_minutes)
+{
+	PRINT_NAME();
+	if (date_time == nullptr)
+	{
+		return RTC_ERROR_INVALID_POINTER;
+	}
+	if (time_zone_minutes < -1439 || time_zone_minutes > 1439)
+	{
+		return RTC_ERROR_INVALID_ARGUMENT;
+	}
+	uint64_t tick = 0;
+	if (utc != nullptr)
+	{
+		tick = *utc;
+	} else if (const int result = RtcGetCurrentTick(&tick); result != OK)
+	{
+		return result;
+	}
+	const int64_t shift = static_cast<int64_t>(time_zone_minutes) * static_cast<int64_t>(MICROSECONDS_PER_MINUTE);
+	if (shift < 0 && tick < static_cast<uint64_t>(-shift))
+	{
+		return RTC_ERROR_INVALID_ARGUMENT;
+	}
+	RtcDateTime time {};
+	TickToRtcDateTime(tick + static_cast<uint64_t>(shift), &time);
+	if (time.year < 1 || time.year > 9999)
+	{
+		return RTC_ERROR_INVALID_YEAR;
+	}
+	const int  offset = time_zone_minutes < 0 ? -time_zone_minutes : time_zone_minutes;
+	const auto unit   = [](uint16_t value) { return static_cast<unsigned>(value); };
+	char       zone[8] = "Z";
+	if (time_zone_minutes != 0)
+	{
+		std::snprintf(zone, sizeof(zone), "%c%02d:%02d", time_zone_minutes < 0 ? '-' : '+', offset / 60, offset % 60);
+	}
+	// At most 29 bytes with the terminator: the guest buffer is the library's fixed 32-byte date string.
+	std::snprintf(date_time, 32, "%04u-%02u-%02uT%02u:%02u:%02u.%02u%s", unit(time.year), unit(time.month), unit(time.day),
+	              unit(time.hour), unit(time.minute), unit(time.second), time.microsecond / 10000, zone);
+	return OK;
+}
+
+static bool ParseDigits(const char** cursor, int count, int* value)
+{
+	*value = 0;
+	for (int index = 0; index < count; ++index, ++*cursor)
+	{
+		if (**cursor < '0' || **cursor > '9')
+		{
+			return false;
+		}
+		*value = *value * 10 + (**cursor - '0');
+	}
+	return true;
+}
+
+static bool ParseSeparated(const char** cursor, char separator, int count, int* value)
+{
+	return *(*cursor)++ == separator && ParseDigits(cursor, count, value);
+}
+
+// Reads "yyyy-mm-ddThh:mm:ss[.f...]" then "Z" or "+hh:mm"/"-hh:mm"; text after the zone is ignored.
+static int KYTY_SYSV_ABI RtcParseRFC3339(uint64_t* utc, const char* date_time)
+{
+	PRINT_NAME();
+	if (utc == nullptr || date_time == nullptr)
+	{
+		return RTC_ERROR_INVALID_POINTER;
+	}
+	const char* cursor = date_time;
+	int         year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+	if (!ParseDigits(&cursor, 4, &year) || !ParseSeparated(&cursor, '-', 2, &month) || !ParseSeparated(&cursor, '-', 2, &day) ||
+	    (*cursor != 'T' && *cursor != 't'))
+	{
+		return RTC_ERROR_BAD_PARSE;
+	}
+	++cursor;
+	if (!ParseDigits(&cursor, 2, &hour) || !ParseSeparated(&cursor, ':', 2, &minute) || !ParseSeparated(&cursor, ':', 2, &second))
+	{
+		return RTC_ERROR_BAD_PARSE;
+	}
+	uint32_t microsecond = 0;
+	if (*cursor == '.')
+	{
+		// Digits past the sixth are read and dropped.
+		for (uint32_t scale = 100000; *++cursor >= '0' && *cursor <= '9'; scale /= 10)
+		{
+			microsecond += static_cast<uint32_t>(*cursor - '0') * scale;
+		}
+	}
+	int offset_minutes = 0;
+	if (*cursor == '+' || *cursor == '-')
+	{
+		const int sign         = *cursor++ == '-' ? -1 : 1;
+		int       offset_hours = 0, offset_minute = 0;
+		if (!ParseDigits(&cursor, 2, &offset_hours) || !ParseSeparated(&cursor, ':', 2, &offset_minute))
+		{
+			return RTC_ERROR_BAD_PARSE;
+		}
+		offset_minutes = sign * (offset_hours * 60 + offset_minute);
+	} else if (*cursor != 'Z' && *cursor != 'z')
+	{
+		return RTC_ERROR_BAD_PARSE;
+	}
+	const auto        field = [](int value) { return static_cast<uint16_t>(value); };
+	const RtcDateTime time {field(year), field(month), field(day), field(hour), field(minute), field(second), microsecond};
+	if (const int result = ValidateRtcDateTime(time); result != OK)
+	{
+		return result;
+	}
+	uint64_t tick = 0;
+	RtcDateTimeToTick(time, &tick);
+	*utc = tick - static_cast<uint64_t>(static_cast<int64_t>(offset_minutes) * static_cast<int64_t>(MICROSECONDS_PER_MINUTE));
+	return OK;
+}
+
 } // namespace Rtc
 
 LIB_DEFINE(InitRtc_1)
@@ -894,6 +1014,8 @@ LIB_DEFINE(InitRtc_1)
 	LIB_FUNC("aYPCd1cChyg", Rtc::RtcSetDosTime);
 	LIB_FUNC("bDEVVP4bTjQ", Rtc::RtcSetTimeT);
 	LIB_FUNC("n5JiAJXsbcs", Rtc::RtcSetWin32FileTime);
+	LIB_FUNC("WJ3rqFwymew", Rtc::RtcFormatRFC3339);
+	LIB_FUNC("99bMGglFW3I", Rtc::RtcParseRFC3339);
 }
 
 } // namespace Kyty::Libs

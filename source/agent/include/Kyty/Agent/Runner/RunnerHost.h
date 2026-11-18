@@ -62,8 +62,10 @@ public:
 	[[nodiscard]] virtual bool Launch(const LaunchSpec& spec, std::string* error) = 0;
 	[[nodiscard]] virtual int64_t ChildPid() const = 0;
 	// Exit code once the child is gone; a signal death is the negative signal number.
+	// A Windows exit is the process exit code, an NTSTATUS for a crash.
 	[[nodiscard]] virtual std::optional<int> PollChild() = 0;
 	// SIGTERM to the child's process group, then SIGKILL after 5 s; records the outcome in notes.
+	// Windows has no SIGTERM: the child's job is terminated and noted as "killed_sigkill".
 	virtual void TerminateChild(std::vector<std::string>* notes) = 0;
 
 	// One line-delimited agent request. A non-positive timeout is a transport failure.
@@ -71,10 +73,14 @@ public:
 	                                           double timeout_s) = 0;
 };
 
-// Real host for POSIX systems; nullptr where runner sessions are unsupported.
+// Real host for POSIX and Windows systems.
 [[nodiscard]] std::unique_ptr<RunnerHost> CreateSystemRunnerHost();
 
-// Removes a socket path that no live listener backs; records the outcome.
+// Agent endpoint of a run: a unix socket path on POSIX, a named pipe on Windows.
+[[nodiscard]] std::string LocalAgentEndpoint(const std::string& name);
+
+// Removes a socket path that no live listener backs; records the outcome. Named pipes
+// vanish with their server, so this does nothing on Windows.
 void RemoveStaleUnixSocket(const std::string& path, std::vector<std::string>* notes);
 
 } // namespace Kyty::Agent::Runner

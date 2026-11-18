@@ -288,7 +288,13 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x29:
 			if (next_gen)
 			{
-				KYTY_UNKNOWN_OP();
+				inst.type        = ShaderInstructionType::VSubCoCiU32;
+				inst.format      = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2;
+				inst.src[2].type = ShaderOperandType::VccLo;
+				inst.src[2].size = 2;
+				inst.src_num     = 3;
+				inst.dst2.type   = ShaderOperandType::VccLo;
+				inst.dst2.size   = 2;
 			} else
 			{
 				KYTY_NI("v_subb_u32");

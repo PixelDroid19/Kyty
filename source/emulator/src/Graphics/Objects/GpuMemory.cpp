@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -205,7 +206,6 @@ void GpuMemory::SetAllocatedRange(uint64_t vaddr, uint64_t size)
 
 	m_heaps.Add(h);
 	RebuildHeapIndex();
-	m_allocated_validation_cache.Invalidate();
 	m_allocated_prefix_cache.Invalidate();
 	m_overlap_snapshot_cache.Invalidate();
 }
@@ -230,37 +230,19 @@ GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRange(uint64_t vaddr,
 	}
 
 	Core::LockGuard lock(m_mutex);
-	const uint64_t query_size = size;
-	const auto     query      = GpuMemoryRangeQueryKey::Create(&vaddr, &query_size, 1, false);
-	return ValidateAllocatedRangeLocked(vaddr, size, query);
+	return ValidateAllocatedRangeLocked(vaddr, size);
 }
 
-GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
-	                                                                    const GpuMemoryRangeQueryKey& query)
+GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size) const
 {
-	GpuMemoryRangeValidationStatus cached {};
-	if (m_allocated_validation_cache.Lookup(query, &cached))
-	{
-		return cached;
-	}
-	// Any heap that covers vaddr may hold the whole range.
+	// Every heap open over vaddr starts at or before it, so the furthest end
+	// among them decides whether one heap holds the whole range.
 	const auto after = std::upper_bound(m_heap_index.begin(), m_heap_index.end(), vaddr,
 	                                    [](uint64_t value, const HeapSpan& span) { return value < span.begin; });
-	if (after != m_heap_index.begin() && vaddr < std::prev(after)->end)
+	if (after != m_heap_index.begin() && vaddr < std::prev(after)->end && size <= std::prev(after)->max_end - vaddr)
 	{
-		const auto& span = *std::prev(after);
-		for (uint32_t i = 0; i < span.open_count; i++)
-		{
-			const auto&    heap   = m_heaps[m_heap_index_open[span.open_first + i]];
-			const uint64_t offset = vaddr - heap.range.vaddr;
-			if (size <= heap.range.size - offset)
-			{
-				m_allocated_validation_cache.Store(query, GpuMemoryRangeValidationStatus::Valid);
-				return GpuMemoryRangeValidationStatus::Valid;
-			}
-		}
+		return GpuMemoryRangeValidationStatus::Valid;
 	}
-	m_allocated_validation_cache.Store(query, GpuMemoryRangeValidationStatus::Unallocated);
 	return GpuMemoryRangeValidationStatus::Unallocated;
 }
 
@@ -334,6 +316,7 @@ void GpuMemory::ForgetHeapStorageObjects(int removed_heap_id)
 	m_storage_objects    = shift(m_storage_objects);
 	m_writable_storage   = shift(m_writable_storage);
 	m_pending_write_back = shift(m_pending_write_back);
+	m_deferred_alias_storage = shift(m_deferred_alias_storage);
 	m_storage_scan_changes.clear();
 	GpuMemoryInvalidateStorageScans();
 }
@@ -374,7 +357,11 @@ void GpuMemoryInvalidateStorageScans()
 void GpuMemory::SyncWriteBackIndexes(int heap_id, int object_id)
 {
 	const std::pair<int, int> key {heap_id, object_id};
-	const auto&               object = m_heaps[heap_id].objects[object_id];
+	auto&                     object = m_heaps[heap_id].objects[object_id];
+	const auto&               info   = object.info;
+	const bool                result = GpuMemoryObjectMayHoldHostResult(info.object.type, info.read_only,
+	                                                                    info.in_use);
+	SetHostResultPagesCounted(&object, !object.free && result);
 	const bool                pending =
 	    !object.free && object.info.in_use && !object.info.read_only && object.info.write_back_func != nullptr;
 	if (pending)
@@ -391,6 +378,7 @@ void GpuMemory::SyncWriteBackIndexes(int heap_id, int object_id)
 	} else
 	{
 		m_writable_storage.erase(key);
+		m_deferred_alias_storage.erase(key);
 	}
 }
 
@@ -398,6 +386,7 @@ void GpuMemory::SyncWriteBackIndexes(int heap_id, int object_id)
 // heap index open over it, so overlapping heaps resolve as a linear scan would.
 void GpuMemory::RebuildHeapIndex()
 {
+	m_guest_bytes_generation.fetch_add(1, std::memory_order_acq_rel);
 	struct Edge
 	{
 		uint64_t address = 0;
@@ -444,11 +433,17 @@ void GpuMemory::RebuildHeapIndex()
 			m_heap_index.back().end = edges[index].address;
 			continue;
 		}
+		uint64_t max_end = 0;
+		for (const int heap_id: open)
+		{
+			max_end = std::max(max_end, heaps[heap_id].range.vaddr + heaps[heap_id].range.size);
+		}
 		HeapSpan span {begin, edges[index].address, *open.begin(), static_cast<uint32_t>(m_heap_index_open.size()),
-		               static_cast<uint32_t>(open.size())};
+		               static_cast<uint32_t>(open.size()), max_end};
 		m_heap_index_open.insert(m_heap_index_open.end(), open.begin(), open.end());
 		m_heap_index.push_back(span);
 	}
+	m_guest_bytes_generation.fetch_add(1, std::memory_order_release);
 }
 
 // Every heap that intersects any of the ranges, ascending: the heaps a
@@ -547,6 +542,10 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuMemo
 				if (!a.objects_map1->IsEmpty()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !a.objects_map1->IsEmpty() condition ignored (continuing)\n"); }
 				if (!a.objects_map2->IsEmpty()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !a.objects_map2->IsEmpty() condition ignored (continuing)\n"); }
 
+				for (auto& object: a.objects)
+				{
+					SetHostResultPagesCounted(&object, false);
+				}
 				delete a.objects_map1;
 				delete a.objects_map2;
 				delete a.overlap_cache;
@@ -554,7 +553,6 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuMemo
 				m_heaps.RemoveAt(index);
 				RebuildHeapIndex();
 				ForgetHeapStorageObjects(index);
-				m_allocated_validation_cache.Invalidate();
 				m_allocated_prefix_cache.Invalidate();
 				m_overlap_snapshot_cache.Invalidate();
 				break;
@@ -701,9 +699,11 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 	m_storage_objects.erase({heap_id, object_id});
 	m_writable_storage.erase({heap_id, object_id});
 	m_pending_write_back.erase({heap_id, object_id});
+	m_deferred_alias_storage.erase({heap_id, object_id});
 	h.free             = true;
 	h.next_free_id     = heap.first_free_id;
 	heap.first_free_id = object_id;
+	SetHostResultPagesCounted(&h, false);
 	DeleteBlock(&h.block, heap_id, object_id);
 
 	return ret;
@@ -762,6 +762,11 @@ uint64_t GpuMemoryGetMappedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
 		covered += prefix;
 	}
 	return covered;
+}
+
+bool GpuMemoryRangeHoldsGuestBytes(uint64_t vaddr, uint64_t size)
+{
+	return g_gpu_memory != nullptr && g_gpu_memory->RangeHoldsGuestBytes(vaddr, size);
 }
 
 bool GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission)
@@ -842,6 +847,13 @@ Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64
 	return g_gpu_memory->FindObjects(vaddr, size, vaddr_num, type, exact, only_first);
 }
 
+bool GpuMemoryRepeatCachedUses(uint64_t submit_id, CommandBuffer* buffer, const GpuMemoryCachedUseCapture& capture)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+
+	return g_gpu_memory->RepeatCachedUses(submit_id, buffer, capture);
+}
+
 uint64_t GpuMemoryObjectGraphGeneration()
 {
 	EXIT_IF(g_gpu_memory == nullptr);
@@ -855,6 +867,12 @@ Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submissio
 	EXIT_IF(g_gpu_memory == nullptr);
 
 	return g_gpu_memory->FindObjects(&vaddr, &size, 1, type, exact, only_first, &submission);
+}
+
+Vector<GpuMemoryObject> GpuMemoryFindIntersectingObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	return g_gpu_memory->FindIntersectingObjects(vaddr, size, submission);
 }
 
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, const uint64_t* vaddr, const uint64_t* size,
@@ -997,6 +1015,7 @@ void GpuMemoryFrameDone(GraphicContext* ctx)
 	EXIT_IF(ctx == nullptr);
 
 	g_gpu_memory->FrameDone(ctx);
+	GuestDeviceAddressFrameDone();
 }
 
 void GpuMemoryFrameDone()
@@ -1019,12 +1038,13 @@ void GpuMemoryCompleteSubmission(SubmissionId submission)
 	g_gpu_memory->CompleteSubmission(submission);
 }
 
-void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer)
+bool GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges,
+                                     GpuQueueId consumer, SubmissionId* dependency)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
 	EXIT_IF(ctx == nullptr);
 
-	g_gpu_memory->WriteBackStorageRanges(ctx, ranges, consumer);
+	return g_gpu_memory->WriteBackStorageRanges(ctx, ranges, consumer, dependency);
 }
 
 bool GpuMemoryPendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer, const std::vector<SubmissionId>& device_awaited,
@@ -1049,10 +1069,10 @@ void GpuMemoryCollectStorageForGuestSeed(uint64_t vaddr, uint64_t size, Submissi
 	g_gpu_memory->CollectStorageForGuestSeed(vaddr, size, reader, sources);
 }
 
-bool GpuMemoryPendingStorageHasAliases()
+void GpuMemoryDeferPendingStorageAliases()
 {
 	EXIT_IF(g_gpu_memory == nullptr);
-	return g_gpu_memory->PendingStorageHasAliases();
+	g_gpu_memory->DeferPendingStorageAliases();
 }
 
 bool GpuMemoryPendingWriteBackOutsideStorage(GpuMemoryGuestRangeQuery ranges)
@@ -1069,6 +1089,11 @@ bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryS
 bool GpuMemoryFindStorageContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size)
 {
 	return g_gpu_memory != nullptr && g_gpu_memory->FindStorageContaining(vaddr, size, object_vaddr, object_size);
+}
+
+bool GpuMemoryFindVertexContaining(uint64_t vaddr, uint64_t size, uint64_t* object_vaddr, uint64_t* object_size)
+{
+	return g_gpu_memory != nullptr && g_gpu_memory->FindVertexContaining(vaddr, size, object_vaddr, object_size);
 }
 
 void GpuMemoryMarkInPlaceStorageOrdered(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId consumer)

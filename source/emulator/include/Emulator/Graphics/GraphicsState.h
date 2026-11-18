@@ -207,6 +207,9 @@ struct ColorTargetLayout
 // CB_TARGET_MASK admits a render-target channel and CB_SHADER_MASK admits the
 // corresponding pixel-shader export. Vulkan must receive their intersection.
 [[nodiscard]] uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32_t target_index);
+// The CB routes the N-th color export (SPI_SHADER_COL_FORMAT field N) to the
+// N-th target CB_SHADER_MASK enables. Returns kMaxTargets when none is left.
+[[nodiscard]] uint32_t ResolvePixelExportTarget(uint32_t shader_mask, uint32_t export_index);
 // Only suppress an absent export when its summary came from a parsed program.
 [[nodiscard]] uint8_t ResolveColorWriteAgainstExport(uint8_t channel_mask, uint8_t export_enable, bool summary_available);
 // UINT16 compressed exports only write channels selected by EXP.EN.

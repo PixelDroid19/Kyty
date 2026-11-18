@@ -69,42 +69,42 @@ const DebugStatsClockScale g_debug_stats_clock_scale = CalibrateDebugStatsClock(
 
 namespace {
 
-std::atomic<uint64_t> g_draws {0};
-std::atomic<uint64_t> g_dispatches {0};
-std::atomic<uint64_t> g_alloc_bytes {0};
-std::atomic<uint64_t> g_free_bytes {0};
-std::atomic<uint64_t> g_create_count {0};
-std::atomic<uint64_t> g_free_count {0};
-std::atomic<uint64_t> g_live_objects {0};
-std::atomic<uint64_t> g_flips {0};
-std::atomic<uint64_t> g_buffer_flushes {0};
-std::atomic<uint64_t> g_command_buffers {0};
-std::atomic<uint64_t> g_submits {0};
-std::atomic<uint64_t> g_fence_waits {0};
-std::atomic<uint64_t> g_fence_wait_ns {0};
-std::atomic<uint64_t> g_fence_wait_max_ns {0};
-std::atomic<uint64_t> g_acquires {0};
-std::atomic<uint64_t> g_acquire_ns {0};
-std::atomic<uint64_t> g_acquire_max_ns {0};
-std::atomic<uint64_t> g_presents {0};
-std::atomic<uint64_t> g_present_ns {0};
-std::atomic<uint64_t> g_present_max_ns {0};
-std::atomic<uint64_t> g_wait_reg_mem {0};
-std::atomic<uint64_t> g_wait_reg_mem_ns {0};
-std::atomic<uint64_t> g_wait_reg_mem_max_ns {0};
-std::atomic<uint64_t> g_wait_reg_mem_satisfied {0};
-std::atomic<uint64_t> g_wait_reg_mem_current_producer {0};
-std::atomic<uint64_t> g_wait_reg_mem_queued_producer {0};
-std::atomic<uint64_t> g_wait_reg_mem_producer_mismatch {0};
-std::atomic<uint64_t> g_wait_reg_mem_producer_not_found {0};
-std::atomic<uint64_t> g_wait_reg_mem_suspended {0};
-std::atomic<uint64_t> g_wait_flip_done {0};
-std::atomic<uint64_t> g_wait_flip_done_ns {0};
-std::atomic<uint64_t> g_render_pass_begins {0};
-std::atomic<uint64_t> g_render_pass_continuations {0};
-std::atomic<uint64_t> g_wait_flip_done_max_ns {0};
-std::atomic<uint64_t> g_in_flight_current {0};
-std::atomic<uint64_t> g_in_flight_max {0};
+alignas(64) std::atomic<uint64_t> g_draws {0};
+alignas(64) std::atomic<uint64_t> g_dispatches {0};
+alignas(64) std::atomic<uint64_t> g_alloc_bytes {0};
+alignas(64) std::atomic<uint64_t> g_free_bytes {0};
+alignas(64) std::atomic<uint64_t> g_create_count {0};
+alignas(64) std::atomic<uint64_t> g_free_count {0};
+alignas(64) std::atomic<uint64_t> g_live_objects {0};
+alignas(64) std::atomic<uint64_t> g_flips {0};
+alignas(64) std::atomic<uint64_t> g_buffer_flushes {0};
+alignas(64) std::atomic<uint64_t> g_command_buffers {0};
+alignas(64) std::atomic<uint64_t> g_submits {0};
+alignas(64) std::atomic<uint64_t> g_fence_waits {0};
+alignas(64) std::atomic<uint64_t> g_fence_wait_ns {0};
+alignas(64) std::atomic<uint64_t> g_fence_wait_max_ns {0};
+alignas(64) std::atomic<uint64_t> g_acquires {0};
+alignas(64) std::atomic<uint64_t> g_acquire_ns {0};
+alignas(64) std::atomic<uint64_t> g_acquire_max_ns {0};
+alignas(64) std::atomic<uint64_t> g_presents {0};
+alignas(64) std::atomic<uint64_t> g_present_ns {0};
+alignas(64) std::atomic<uint64_t> g_present_max_ns {0};
+alignas(64) std::atomic<uint64_t> g_wait_reg_mem {0};
+alignas(64) std::atomic<uint64_t> g_wait_reg_mem_ns {0};
+alignas(64) std::atomic<uint64_t> g_wait_reg_mem_max_ns {0};
+alignas(64) std::atomic<uint64_t> g_wait_reg_mem_satisfied {0};
+alignas(64) std::atomic<uint64_t> g_wait_reg_mem_current_producer {0};
+alignas(64) std::atomic<uint64_t> g_wait_reg_mem_queued_producer {0};
+alignas(64) std::atomic<uint64_t> g_wait_reg_mem_producer_mismatch {0};
+alignas(64) std::atomic<uint64_t> g_wait_reg_mem_producer_not_found {0};
+alignas(64) std::atomic<uint64_t> g_wait_reg_mem_suspended {0};
+alignas(64) std::atomic<uint64_t> g_wait_flip_done {0};
+alignas(64) std::atomic<uint64_t> g_wait_flip_done_ns {0};
+alignas(64) std::atomic<uint64_t> g_render_pass_begins {0};
+alignas(64) std::atomic<uint64_t> g_render_pass_continuations {0};
+alignas(64) std::atomic<uint64_t> g_wait_flip_done_max_ns {0};
+alignas(64) std::atomic<uint64_t> g_in_flight_current {0};
+alignas(64) std::atomic<uint64_t> g_in_flight_max {0};
 constexpr size_t      kFrameHistogramMaxMs = 500;
 constexpr size_t      kFrameHistogramBins  = kFrameHistogramMaxMs + 1; // Last bin is >= 500 ms.
 using FrameHistogram                       = std::array<uint64_t, kFrameHistogramBins>;
@@ -130,7 +130,7 @@ std::atomic<uint64_t>                                  g_writeback_bytes {0};
 std::atomic<uint64_t>                                  g_writeback_ns {0};
 std::atomic<uint64_t>                                  g_writeback_max_ns {0};
 
-struct TimedMetric
+struct alignas(64) TimedMetric
 {
 	std::atomic<uint64_t> count {0};
 	std::atomic<uint64_t> total_ns {0};
@@ -143,6 +143,7 @@ TimedMetric g_dispatch_processor;
 TimedMetric g_dispatch_writeback;
 TimedMetric g_guest_address_prepare;
 TimedMetric g_guest_address_residency;
+TimedMetric g_guest_address_population;
 TimedMetric g_guest_address_refresh;
 TimedMetric g_draw_render_lock_wait;
 TimedMetric g_draw_state_setup;
@@ -156,21 +157,21 @@ TimedMetric           g_draw_descriptor_storage;
 TimedMetric           g_draw_descriptor_texture;
 TimedMetric           g_draw_descriptor_sampler;
 TimedMetric           g_draw_descriptor_finalize;
-std::atomic<uint64_t> g_transient_buffer_probes {0};
-std::atomic<uint64_t> g_transient_buffer_hits {0};
-std::atomic<uint64_t> g_transient_buffer_reuses {0};
-std::atomic<uint64_t> g_transient_buffer_validate_ns {0};
-std::atomic<uint64_t> g_transient_buffer_overlap_ns {0};
-std::atomic<uint64_t> g_transient_buffer_compare_ns {0};
-std::atomic<uint64_t> g_transient_buffer_upload_ns {0};
-std::atomic<uint64_t> g_stable_buffer_create_attempts {0};
-std::atomic<uint64_t> g_stable_buffer_create_captures {0};
-std::atomic<uint64_t> g_stable_buffer_create_bytes {0};
-std::atomic<uint64_t> g_stable_buffer_create_fallbacks {0};
-std::atomic<uint64_t> g_stable_buffer_update_attempts {0};
-std::atomic<uint64_t> g_stable_buffer_update_captures {0};
-std::atomic<uint64_t> g_stable_buffer_update_bytes {0};
-std::atomic<uint64_t> g_stable_buffer_update_deferrals {0};
+alignas(64) std::atomic<uint64_t> g_transient_buffer_probes {0};
+alignas(64) std::atomic<uint64_t> g_transient_buffer_hits {0};
+alignas(64) std::atomic<uint64_t> g_transient_buffer_reuses {0};
+alignas(64) std::atomic<uint64_t> g_transient_buffer_validate_ns {0};
+alignas(64) std::atomic<uint64_t> g_transient_buffer_overlap_ns {0};
+alignas(64) std::atomic<uint64_t> g_transient_buffer_compare_ns {0};
+alignas(64) std::atomic<uint64_t> g_transient_buffer_upload_ns {0};
+alignas(64) std::atomic<uint64_t> g_stable_buffer_create_attempts {0};
+alignas(64) std::atomic<uint64_t> g_stable_buffer_create_captures {0};
+alignas(64) std::atomic<uint64_t> g_stable_buffer_create_bytes {0};
+alignas(64) std::atomic<uint64_t> g_stable_buffer_create_fallbacks {0};
+alignas(64) std::atomic<uint64_t> g_stable_buffer_update_attempts {0};
+alignas(64) std::atomic<uint64_t> g_stable_buffer_update_captures {0};
+alignas(64) std::atomic<uint64_t> g_stable_buffer_update_bytes {0};
+alignas(64) std::atomic<uint64_t> g_stable_buffer_update_deferrals {0};
 
 struct LookupMetric
 {
@@ -194,7 +195,7 @@ struct PipelineCacheCheckpointMetric
 
 LookupMetric          g_gfx_pipeline_lookup;
 LookupMetric          g_compute_pipeline_lookup;
-std::atomic<uint64_t> g_pipeline_evictions {0};
+alignas(64) std::atomic<uint64_t> g_pipeline_evictions {0};
 PipelineCacheCheckpointMetric g_pipeline_cache_checkpoint;
 TimedMetric           g_gfx_pipeline_miss;
 TimedMetric           g_compute_pipeline_miss;
@@ -205,15 +206,15 @@ TimedMetric           g_spirv_compile;
 TimedMetric           g_vk_graphics_pipeline_create;
 TimedMetric           g_vk_compute_pipeline_create;
 TimedMetric           g_compute_precompile;
-std::atomic<uint64_t> g_compute_precompile_failed {0};
+alignas(64) std::atomic<uint64_t> g_compute_precompile_failed {0};
 TimedMetric           g_compute_precompile_wait;
-std::atomic<uint64_t> g_compute_precompile_running {0};
+alignas(64) std::atomic<uint64_t> g_compute_precompile_running {0};
 std::mutex            g_compute_precompile_wait_mutex;
 uint64_t              g_compute_precompile_waiters = 0;
 std::chrono::steady_clock::time_point g_compute_precompile_wait_since;
-std::atomic<uint64_t> g_shader_translation_cache_hits {0};
-std::atomic<uint64_t> g_shader_translation_cache_misses {0};
-std::atomic<uint64_t> g_shader_translation_cache_evictions {0};
+alignas(64) std::atomic<uint64_t> g_shader_translation_cache_hits {0};
+alignas(64) std::atomic<uint64_t> g_shader_translation_cache_misses {0};
+alignas(64) std::atomic<uint64_t> g_shader_translation_cache_evictions {0};
 TimedMetric           g_gpu_memory_create;
 
 struct SlowFrameCounters
@@ -309,8 +310,8 @@ std::atomic<uint32_t>                                  g_present_dst_h {0};
 std::atomic<uint32_t>                                  g_present_src_layout {0};
 std::atomic<uint32_t>                                  g_present_src_format {0};
 
-std::atomic<double> g_last_fps {0.0};
-std::atomic<double> g_last_frame_ms {0.0};
+alignas(64) std::atomic<double> g_last_fps {0.0};
+alignas(64) std::atomic<double> g_last_frame_ms {0.0};
 
 double   g_window_start_seconds = -1.0;
 uint64_t g_window_draws         = 0;
@@ -768,6 +769,7 @@ void DebugStatsInit()
 	ResetTimed(&g_dispatch_writeback);
 	ResetTimed(&g_guest_address_prepare);
 	ResetTimed(&g_guest_address_residency);
+	ResetTimed(&g_guest_address_population);
 	ResetTimed(&g_guest_address_refresh);
 	ResetTimed(&g_draw_render_lock_wait);
 	ResetTimed(&g_draw_state_setup);
@@ -1016,6 +1018,11 @@ void DebugStatsRecordGuestAddressPrepare(uint64_t elapsed_ns)
 void DebugStatsRecordGuestAddressResidency(uint64_t elapsed_ns)
 {
 	RecordTimed(&g_guest_address_residency, elapsed_ns);
+}
+
+void DebugStatsRecordGuestAddressPopulation(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_guest_address_population, elapsed_ns);
 }
 
 void DebugStatsRecordGuestAddressRefresh(uint64_t elapsed_ns)
@@ -1687,6 +1694,8 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	take_timed(g_dispatch_writeback, &snapshot.dispatch_writeback_calls, &snapshot.dispatch_writeback_ns, &snapshot.dispatch_writeback_max_ns);
 	take_timed(g_guest_address_prepare, &snapshot.guest_address_prepare_calls, &snapshot.guest_address_prepare_ns, &snapshot.guest_address_prepare_max_ns);
 	take_timed(g_guest_address_residency, &snapshot.guest_address_residency_calls, &snapshot.guest_address_residency_ns, &snapshot.guest_address_residency_max_ns);
+	take_timed(g_guest_address_population, &snapshot.guest_address_population_calls, &snapshot.guest_address_population_ns,
+	           &snapshot.guest_address_population_max_ns);
 	take_timed(g_guest_address_refresh, &snapshot.guest_address_refresh_calls, &snapshot.guest_address_refresh_ns, &snapshot.guest_address_refresh_max_ns);
 	auto take_draw_stage = [&take_timed](TimedMetric& metric, uint64_t* total_ns, uint64_t* max_ns) {
 		uint64_t ignored_count = 0;

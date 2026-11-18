@@ -140,6 +140,7 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 int64_t KYTY_SYSV_ABI KernelWritev(int d, const KernelIovec* iov, int count);
 int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence);
 int KYTY_SYSV_ABI     KernelStat(const char* path, FileStat* sb);
+int KYTY_SYSV_ABI     KernelCheckReachability(const char* path);
 int KYTY_SYSV_ABI     KernelFstat(int d, FileStat* sb);
 int KYTY_SYSV_ABI     KernelFcntl(int d, int command, int64_t argument);
 int KYTY_SYSV_ABI     KernelFtruncate(int d, int64_t length);
@@ -153,6 +154,7 @@ int KYTY_SYSV_ABI     KernelGetdirentries(int fd, char* buf, int nbytes, int64_t
 int KYTY_SYSV_ABI     KernelGetdents(int fd, char* buf, int nbytes);
 int KYTY_SYSV_ABI     KernelMkdir(const char* path, uint16_t mode);
 int KYTY_SYSV_ABI     KernelRmdir(const char* path);
+int KYTY_SYSV_ABI     KernelChmod(const char* path, uint16_t mode);
 int KYTY_SYSV_ABI     KernelDup(int old_d);
 int KYTY_SYSV_ABI     KernelDup2(int old_d, int new_d);
 int KYTY_SYSV_ABI     KernelPoll(struct KernelPollFd* fds, uint32_t count, int /*timeout*/);

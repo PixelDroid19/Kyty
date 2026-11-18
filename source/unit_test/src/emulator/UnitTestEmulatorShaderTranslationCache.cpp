@@ -6,6 +6,7 @@
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -15,6 +16,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 UT_BEGIN(EmulatorShaderTranslationCache);
 
@@ -444,6 +446,110 @@ TEST(EmulatorShaderTranslationCache, CorruptPersistentModuleFallsBackAndIsReplac
 		EXPECT_TRUE(warm.GetOrCompile(key, compiler).hit);
 	}
 	EXPECT_EQ(compiles, 2u);
+}
+
+TEST(EmulatorShaderTranslationCache, WorkingSetServesRecordedModulesFromMemoryAndStillValidatesThem)
+{
+	ScopedShaderModuleCacheDirectory directory;
+	const auto manifest = directory.path / "working-set";
+	const auto intact   = ShaderModuleKey::Create(TestShaderId(5, 6, 7), ShaderModuleStage::Pixel, Config::ShaderOptimizationType::None, true);
+	const auto damaged  = ShaderModuleKey::Create(TestShaderId(8, 9, 10), ShaderModuleStage::Pixel, Config::ShaderOptimizationType::None, true);
+	const Vector<uint32_t> intact_binary {0x07230203u, 0x00010500u, 1u, 4u, 0u};
+	const Vector<uint32_t> damaged_binary {0x07230203u, 0x00010500u, 2u, 4u, 0u};
+	const auto module_files = [&directory]
+	{
+		std::vector<std::filesystem::path> files;
+		for (const auto& entry: std::filesystem::directory_iterator(directory.path))
+		{
+			if (entry.path().extension() == ".spvmod")
+			{
+				files.push_back(entry.path());
+			}
+		}
+		return files;
+	};
+
+	std::filesystem::path damaged_file;
+	{
+		SpirvBinaryCacheStore store(directory.path);
+		ASSERT_EQ(store.StoreModule(intact, false, intact_binary), SpirvBinaryCacheStoreResult::Written);
+		const auto before = module_files();
+		ASSERT_EQ(store.StoreModule(damaged, false, damaged_binary), SpirvBinaryCacheStoreResult::Written);
+		for (const auto& file: module_files())
+		{
+			damaged_file = std::find(before.begin(), before.end(), file) == before.end() ? file : damaged_file;
+		}
+		store.StartWorkingSet(manifest);
+		Vector<uint32_t> binary;
+		EXPECT_EQ(store.LoadModule(intact, false, &binary), SpirvBinaryCacheLoadResult::Hit);
+		EXPECT_EQ(store.LoadModule(damaged, false, &binary), SpirvBinaryCacheLoadResult::Hit);
+	}
+	ASSERT_TRUE(std::filesystem::exists(manifest));
+	ASSERT_FALSE(damaged_file.empty());
+	{
+		// Same size, wrong last word: only the content checks can reject it.
+		std::fstream file(damaged_file, std::ios::binary | std::ios::in | std::ios::out);
+		file.seekp(-1, std::ios::end);
+		file.put('\x7f');
+	}
+
+	SpirvBinaryCacheStore store(directory.path);
+	store.StartWorkingSet(manifest);
+	store.WaitForWorkingSet();
+	for (const auto& file: module_files())
+	{
+		std::filesystem::remove(file);
+	}
+	Vector<uint32_t> binary;
+	EXPECT_EQ(store.LoadModule(intact, false, &binary), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(binary, intact_binary);
+	EXPECT_EQ(store.LoadModule(damaged, false, &binary), SpirvBinaryCacheLoadResult::Corrupt);
+	// The bytes are released on use: the next load goes to the disk, where the file is gone.
+	EXPECT_EQ(store.LoadModule(intact, false, &binary), SpirvBinaryCacheLoadResult::Miss);
+}
+
+TEST(EmulatorShaderTranslationCache, WorkingSetKeepsTheLatestSessionUnderItsCap)
+{
+	ScopedShaderModuleCacheDirectory directory;
+	const auto manifest = directory.path / "working-set";
+	SpirvBinaryCacheLimits limits;
+	limits.max_working_set_entries = 1;
+	const auto earlier = ShaderModuleKey::Create(TestShaderId(11, 12, 13), ShaderModuleStage::Pixel, Config::ShaderOptimizationType::None, true);
+	const auto latest  = ShaderModuleKey::Create(TestShaderId(14, 15, 16), ShaderModuleStage::Pixel, Config::ShaderOptimizationType::None, true);
+	const Vector<uint32_t> binary_words {0x07230203u, 0x00010500u, 3u, 4u, 0u};
+	const auto session = [&](const ShaderModuleKey& key)
+	{
+		SpirvBinaryCacheStore store(directory.path, limits);
+		store.StartWorkingSet(manifest);
+		store.WaitForWorkingSet();
+		Vector<uint32_t> binary;
+		EXPECT_EQ(store.LoadModule(key, false, &binary), SpirvBinaryCacheLoadResult::Hit);
+	};
+	{
+		SpirvBinaryCacheStore store(directory.path, limits);
+		ASSERT_EQ(store.StoreModule(earlier, false, binary_words), SpirvBinaryCacheStoreResult::Written);
+		ASSERT_EQ(store.StoreModule(latest, false, binary_words), SpirvBinaryCacheStoreResult::Written);
+	}
+	session(earlier);
+	session(latest);
+	// Replaying a known set must not rewrite the manifest.
+	const auto written = std::filesystem::last_write_time(manifest);
+	session(latest);
+	EXPECT_EQ(std::filesystem::last_write_time(manifest), written);
+
+	SpirvBinaryCacheStore store(directory.path, limits);
+	store.StartWorkingSet(manifest);
+	store.WaitForWorkingSet();
+	for (const auto& entry: std::filesystem::directory_iterator(directory.path))
+	{
+		if (entry.path().extension() == ".spvmod")
+		{
+			std::filesystem::remove(entry.path());
+		}
+	}
+	Vector<uint32_t> binary;
+	EXPECT_EQ(store.LoadModule(latest, false, &binary), SpirvBinaryCacheLoadResult::Hit);
+	EXPECT_EQ(store.LoadModule(earlier, false, &binary), SpirvBinaryCacheLoadResult::Miss);
 }
 
 TEST(EmulatorShaderTranslationCache, ConcurrentSameKeyDoesNotDuplicateCompilation)

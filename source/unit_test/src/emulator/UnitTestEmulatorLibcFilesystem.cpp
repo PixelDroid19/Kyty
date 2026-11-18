@@ -1,10 +1,13 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "ScopedTestDirectory.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -13,32 +16,68 @@
 
 // HLE bodies live in LibC.cpp; declare the std::filesystem surface under test.
 namespace Kyty::Libs::LibC {
-int      c_fs_stat(const char* path, uint32_t* permissions, int* error);
-int      c_fs_lstat(const char* path, uint32_t* permissions, int* error);
-uint64_t c_fs_file_size(const char* path, int* error);
-int      c_fs_make_dir(const char* path, const char* permissions_source);
-bool     c_fs_remove_dir(const char* path);
-int      c_fs_rename(const char* from, const char* to);
-int      c_fs_unlink(const char* path);
-bool     c_fs_current_get(char* buffer);
-void*    c_fs_open_dir(char* buffer, const char* path, int* error, int* type);
-char*    c_fs_read_dir(char* buffer, void* stream, int* type);
-void     c_fs_close_dir(void* stream);
+KYTY_SYSV_ABI int      c_fs_stat(const char* path, uint32_t* permissions, int* error);
+KYTY_SYSV_ABI int      c_fs_lstat(const char* path, uint32_t* permissions, int* error);
+KYTY_SYSV_ABI uint64_t c_fs_file_size(const char* path, int* error);
+KYTY_SYSV_ABI int      c_fs_make_dir(const char* path, const char* permissions_source);
+KYTY_SYSV_ABI bool     c_fs_remove_dir(const char* path);
+KYTY_SYSV_ABI int      c_fs_rename(const char* from, const char* to);
+KYTY_SYSV_ABI int      c_fs_unlink(const char* path);
+KYTY_SYSV_ABI bool     c_fs_current_get(char* buffer);
+KYTY_SYSV_ABI void*    c_fs_open_dir(char* buffer, const char* path, int* error, int* type);
+KYTY_SYSV_ABI char*    c_fs_read_dir(char* buffer, void* stream, int* type);
+KYTY_SYSV_ABI void     c_fs_close_dir(void* stream);
 } // namespace Kyty::Libs::LibC
 
 UT_BEGIN(EmulatorLibcFilesystem);
 
+// The guest passes guest paths: each test mounts its scratch directory and
+// addresses it through the mount, as a title addresses /app0 or a save mount.
+class GuestMountedDirectory final
+{
+public:
+	explicit GuestMountedDirectory(const char* prefix): m_directory(prefix)
+	{
+		using namespace Kyty;
+		Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		if (!Kernel::FileSystem::IsMounted())
+		{
+			Kernel::FileSystem::FileSystemSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		}
+		static std::atomic_uint64_t serial {0};
+		m_mount = "/fs-test-" + std::to_string(serial.fetch_add(1)) + "/";
+		if (!m_directory.Path().empty())
+		{
+			Kernel::FileSystem::Mount(String::FromUtf8(m_directory.Path().u8string().c_str()), String::FromUtf8(m_mount.c_str()));
+		}
+	}
+	~GuestMountedDirectory()
+	{
+		if (!m_directory.Path().empty())
+		{
+			Kyty::Kernel::FileSystem::Umount(String::FromUtf8(m_mount.c_str()));
+		}
+	}
+	GuestMountedDirectory(const GuestMountedDirectory&)            = delete;
+	GuestMountedDirectory& operator=(const GuestMountedDirectory&) = delete;
+
+	[[nodiscard]] const std::filesystem::path& Host() const { return m_directory.Path(); }
+	[[nodiscard]] std::string                  Guest(const char* name = "") const { return m_mount + name; }
+
+private:
+	ScopedTestDirectory m_directory;
+	std::string         m_mount;
+};
+
 TEST(EmulatorLibcFilesystem, StatReportsGuestTypesPermissionsAndErrors)
 {
-	ScopedTestDirectory directory("kyty-fs-stat");
-	ASSERT_FALSE(directory.Path().empty());
-
-	const auto file_path = directory.Path() / "file.txt";
+	GuestMountedDirectory directory("kyty-fs-stat");
+	ASSERT_FALSE(directory.Host().empty());
 	{
-		std::ofstream file(file_path);
+		std::ofstream file(directory.Host() / "file.txt");
 		file << "hello";
 	}
-	const std::string file = file_path.string();
+	const std::string file = directory.Guest("file.txt");
 
 	uint32_t permissions = 0xffff;
 	int      error       = -1;
@@ -51,14 +90,13 @@ TEST(EmulatorLibcFilesystem, StatReportsGuestTypesPermissionsAndErrors)
 	EXPECT_EQ(Kyty::Libs::LibC::c_fs_file_size(file.c_str(), &size_error), 5u);
 	EXPECT_EQ(size_error, 0);
 
-	const std::string root = directory.Path().string();
+	const std::string root = directory.Guest();
 	permissions            = 0;
 	error                  = -1;
 	EXPECT_EQ(Kyty::Libs::LibC::c_fs_stat(root.c_str(), &permissions, &error), 2);
 	EXPECT_EQ(error, 0);
 
-	const auto missing_path = directory.Path() / "missing";
-	const std::string missing = missing_path.string();
+	const std::string missing = directory.Guest("missing");
 	permissions               = 0xffff;
 	error                     = 0;
 	EXPECT_EQ(Kyty::Libs::LibC::c_fs_stat(missing.c_str(), &permissions, &error), -1);
@@ -68,36 +106,43 @@ TEST(EmulatorLibcFilesystem, StatReportsGuestTypesPermissionsAndErrors)
 	EXPECT_EQ(Kyty::Libs::LibC::c_fs_file_size(missing.c_str(), &size_error), static_cast<uint64_t>(-1));
 	EXPECT_EQ(size_error, static_cast<int>(0x80020002u));
 
-	const auto link_path = directory.Path() / "link";
+	// A host path is not a guest path: it resolves outside every mount.
+	const std::string host = (directory.Host() / "file.txt").string();
+	error                  = 0;
+	EXPECT_EQ(Kyty::Libs::LibC::c_fs_stat(host.c_str(), &permissions, &error), -1);
+	EXPECT_EQ(error, 2);
+
+	// Guest mounts expose no symbolic links, so lstat reports the target like stat.
 	std::error_code link_error;
-	std::filesystem::create_symlink(file_path, link_path, link_error);
+	std::filesystem::create_symlink(directory.Host() / "file.txt", directory.Host() / "link", link_error);
+#if defined(_WIN32)
+	if (link_error)
+	{
+		GTEST_SKIP() << "creating a symlink needs Developer Mode or an elevated process on Windows";
+	}
+#endif
 	ASSERT_FALSE(link_error);
-	const std::string link = link_path.string();
-	permissions            = 0;
+	const std::string link = directory.Guest("link");
 	error                  = -1;
-	EXPECT_EQ(Kyty::Libs::LibC::c_fs_stat(link.c_str(), &permissions, &error), 1);
-	EXPECT_EQ(error, 0);
-	permissions = 0;
-	error       = -1;
-	EXPECT_EQ(Kyty::Libs::LibC::c_fs_lstat(link.c_str(), &permissions, &error), 3);
+	EXPECT_EQ(Kyty::Libs::LibC::c_fs_lstat(link.c_str(), &permissions, &error), 1);
 	EXPECT_EQ(error, 0);
 }
 
 TEST(EmulatorLibcFilesystem, DirectoryIterationSkipsDotsAndReportsNames)
 {
-	ScopedTestDirectory directory("kyty-fs-dir");
-	ASSERT_FALSE(directory.Path().empty());
-
+	GuestMountedDirectory directory("kyty-fs-dir");
+	ASSERT_FALSE(directory.Host().empty());
+	std::filesystem::create_directory(directory.Host() / "list");
 	{
-		std::ofstream alpha(directory.Path() / "alpha.txt");
-		std::ofstream beta(directory.Path() / "beta.txt");
+		std::ofstream alpha(directory.Host() / "list" / "alpha.txt");
+		std::ofstream beta(directory.Host() / "list" / "beta.txt");
 	}
-	const std::string root = directory.Path().string();
+	const std::string list = directory.Guest("list");
 
 	char first_entry[260] = {};
 	int  error            = -1;
 	int  type             = -1;
-	void* stream          = Kyty::Libs::LibC::c_fs_open_dir(first_entry, root.c_str(), &error, &type);
+	void* stream          = Kyty::Libs::LibC::c_fs_open_dir(first_entry, list.c_str(), &error, &type);
 	ASSERT_NE(stream, nullptr);
 	EXPECT_EQ(error, 0);
 	EXPECT_EQ(type, 8);
@@ -122,47 +167,49 @@ TEST(EmulatorLibcFilesystem, DirectoryIterationSkipsDotsAndReportsNames)
 	EXPECT_EQ(names[0], "alpha.txt");
 	EXPECT_EQ(names[1], "beta.txt");
 
-	const auto empty_path = directory.Path() / "empty";
-	std::filesystem::create_directory(empty_path);
+	std::filesystem::create_directory(directory.Host() / "empty");
 	error  = -1;
-	stream = Kyty::Libs::LibC::c_fs_open_dir(first_entry, empty_path.string().c_str(), &error, &type);
+	stream = Kyty::Libs::LibC::c_fs_open_dir(first_entry, directory.Guest("empty").c_str(), &error, &type);
 	EXPECT_EQ(stream, nullptr);
 	EXPECT_EQ(error, 0);
 
-	const auto missing_path = directory.Path() / "missing";
-	error                   = 0;
-	stream = Kyty::Libs::LibC::c_fs_open_dir(first_entry, missing_path.string().c_str(), &error, &type);
+	error  = 0;
+	stream = Kyty::Libs::LibC::c_fs_open_dir(first_entry, directory.Guest("missing").c_str(), &error, &type);
 	EXPECT_EQ(stream, nullptr);
 	EXPECT_EQ(error, 2);
 }
 
 TEST(EmulatorLibcFilesystem, MutationsMatchGuestErrorConventions)
 {
-	ScopedTestDirectory directory("kyty-fs-ops");
-	ASSERT_FALSE(directory.Path().empty());
-	const std::string root = directory.Path().string();
+	GuestMountedDirectory directory("kyty-fs-ops");
+	ASSERT_FALSE(directory.Host().empty());
+	const std::string root = directory.Guest();
 
-	const auto sub_path = directory.Path() / "sub";
-	const auto sub      = sub_path.string();
+	const std::string sub = directory.Guest("sub");
 	EXPECT_EQ(Kyty::Libs::LibC::c_fs_make_dir(sub.c_str(), nullptr), 1);
 	EXPECT_EQ(Kyty::Libs::LibC::c_fs_make_dir(sub.c_str(), nullptr), 0);
+	EXPECT_TRUE(std::filesystem::is_directory(directory.Host() / "sub"));
 
-	const auto inherited_path = directory.Path() / "inherited";
-	EXPECT_EQ(Kyty::Libs::LibC::c_fs_make_dir(inherited_path.string().c_str(), root.c_str()), 1);
+	EXPECT_EQ(Kyty::Libs::LibC::c_fs_make_dir(directory.Guest("inherited").c_str(), root.c_str()), 1);
 
-	const auto file_path = directory.Path() / "file";
 	{
-		std::ofstream file(file_path);
+		std::ofstream file(directory.Host() / "file");
 		file << "x";
 	}
-	const auto renamed_path = directory.Path() / "renamed";
-	EXPECT_EQ(Kyty::Libs::LibC::c_fs_rename(file_path.string().c_str(), renamed_path.string().c_str()), 0);
-	EXPECT_EQ(Kyty::Libs::LibC::c_fs_unlink(renamed_path.string().c_str()), 0);
-	EXPECT_EQ(Kyty::Libs::LibC::c_fs_unlink(renamed_path.string().c_str()), 2);
-	EXPECT_EQ(Kyty::Libs::LibC::c_fs_rename(file_path.string().c_str(), renamed_path.string().c_str()), 2);
+	const std::string file    = directory.Guest("file");
+	const std::string renamed = directory.Guest("renamed");
+	EXPECT_EQ(Kyty::Libs::LibC::c_fs_rename(file.c_str(), renamed.c_str()), 0);
+	EXPECT_TRUE(std::filesystem::exists(directory.Host() / "renamed"));
+	EXPECT_EQ(Kyty::Libs::LibC::c_fs_unlink(renamed.c_str()), 0);
+	EXPECT_EQ(Kyty::Libs::LibC::c_fs_unlink(renamed.c_str()), 2);
+	EXPECT_EQ(Kyty::Libs::LibC::c_fs_rename(file.c_str(), renamed.c_str()), 2);
 
 	EXPECT_TRUE(Kyty::Libs::LibC::c_fs_remove_dir(sub.c_str()));
 	EXPECT_FALSE(Kyty::Libs::LibC::c_fs_remove_dir(sub.c_str()));
+
+	// The application package is read-only to the guest.
+	EXPECT_EQ(Kyty::Libs::LibC::c_fs_unlink("/app0/eboot.bin"), 1 /*EPERM*/);
+	EXPECT_EQ(Kyty::Libs::LibC::c_fs_make_dir("/app0/new", nullptr), -1 /*EPERM*/);
 
 	char cwd[260] = {};
 	EXPECT_TRUE(Kyty::Libs::LibC::c_fs_current_get(cwd));

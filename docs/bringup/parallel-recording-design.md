@@ -1,0 +1,440 @@
+# Parallel draw recording (design, 2026-11-10)
+
+Status: parallel workers and secondaries not built. A single in-order replay thread per command
+pool that records the draw tail on render-pass continuations is built (see
+`performance-architecture-plan.md`); the "Not built" decision below predates it.
+
+## Why
+
+`PPSA17221 - Minecraft` in a world stays at 6-10 fps on the Intel A770 host because the
+command-processor (CP) thread records several thousand draws per frame at about 21 us each
+(`docs/titles/sandbox.md`, "Parallel recording ceiling"). Every draw is recorded on that one
+thread, under the render mutex, into one primary command buffer. This page describes how the
+recording could be split across threads, what bounds the gain and what must hold before any code.
+
+## Current path (code facts)
+
+- `CommandProcessor::DrawIndex` reads the submission id and index state under the CP mutex and
+  releases it. `RetryGuestDeviceAddressDraw` then runs the recording callback, which retakes the CP
+  mutex for each attempt; the host wait between attempts holds neither the CP nor the render mutex
+  (`GraphicsRun.cpp:2475-2530`). `RecordIndexedDraw` (`GraphicsRenderDraw.cpp:1768`) holds the
+  render mutex for the whole draw (`GraphicsRenderDraw.cpp:1800`). Lock order: CP mutex, then
+  render mutex.
+- Inside, in order: geometry and primitive plan, index snapshot
+  (`TryUploadTransientReadOnlyBuffer`), vertex-stream and device-address preparation, target
+  materialization and framebuffer lookup, register state (`CommandBuffer::RecordState`), pipeline
+  lookup (`PipelineCache::CreatePipeline`), render pass begin, vertex binding (creates and
+  registers memory objects), descriptor binding (`DescriptorCache::GetDescriptor`, shared pools),
+  then `vkCmdDraw*` (`GraphicsRenderDraw.cpp:2362-2388`).
+- Shared structures, each behind its own mutex: the guest device-address registry, the transient
+  snapshot pool, the descriptor cache, the pipeline cache, the framebuffer cache.
+- Render passes are `VkRenderPass` begun with `VK_SUBPASS_CONTENTS_INLINE`
+  (`GraphicsRenderCommandBuffer.cpp:3584`). A pass ends on a new framebuffer, on any command
+  recorded outside a pass (`RecordOutsideRenderPass`: copies, barriers, publications), after the
+  vertex-clip probe (it ends a query inside the pass, then closes the pass to read the result,
+  `GraphicsRenderDraw.cpp:2396-2405`), on a geometry segment and at `End`. No secondary command
+  buffers exist.
+- A command buffer slot holds up to 8 chunks and is submitted early when the GPU is idle, after a
+  dispatch, or every 8 operations once 500 us have passed (`GraphicsRun.cpp:544-623`).
+- Measured in the world scene (agent performance samples of two runs without temporary code,
+  samples with at least 3 flips and 10,000 draws): 3,170-3,480 draws, 133-141 render-pass begins and
+  95-111 submissions per frame, so 22-26 draws per pass and 29-37 per submission on average. The
+  command-processor counter reads 77-88 ms of 98-110 ms frames.
+- Per-submission bookkeeping at draw time: memory-object use, descriptor-set use
+  (`RecordSetUse`), pipeline leases, snapshot leases, publication gate.
+
+## Proposed split
+
+Two stages per draw, connected by a draw record.
+
+- **Stage A, CP thread, guest order.** Everything that reads or changes guest memory state or the
+  memory-object registry, or decides command-buffer structure: register snapshot, shader input
+  information (it decides which buffers and textures the draw reads), index snapshot,
+  vertex-stream and device-address preparation with its retry, memory-object creation and use
+  recording, target materialization, framebuffer lookup, render-pass boundaries, every command
+  outside a pass, query indices, submission ids and leases. Output: a draw record with resolved
+  buffer and view handles, offsets, the pipeline key, the descriptor contents, the dynamic state
+  and the draw arguments.
+- **Stage B, worker threads.** Pipeline lookup, descriptor-set lookup or allocation, register state
+  emission and the bind and draw commands, recorded into a secondary command buffer that inherits
+  the current render pass and framebuffer. One secondary per run of draws inside one pass segment.
+- **Stitching.** Stage A begins every pass with `VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS`
+  (core Vulkan, so the same path holds on every host) and, at the segment end, records
+  `vkCmdExecuteCommands` with the segment's secondaries in draw order. A submission waits for its
+  secondaries; stage A continues into the next command buffer meanwhile.
+- **Locks.** Stage B never takes the CP or render mutex. The pipeline cache needs a shared read
+  path with creation serialized. Descriptor allocation moves to stage B only with per-worker pools
+  for misses; otherwise it stays in stage A. Set-use and lease recording become per-worker lists
+  merged at submit.
+
+## What bounds the gain
+
+Counter classes per frame of 105 ms of CP time (world scene, one run with temporary stage timers,
+which slow the CP):
+
+| Class | ms/frame | Stage |
+| --- | --- | --- |
+| Order-dependent (snapshots, write-back check, device-address preparation, binding, targets, waits, dispatches) | 61, of which 12-16 are host waits | A |
+| Shared caches (pipeline setup, descriptor finalization) | 13 | B only with per-worker descriptor pools |
+| Independent (register state, command emission) | 22 | shader input information stays in A; the split of the 22 ms is not measured |
+| Not attributed | 10 | unknown |
+
+- The sandbox record bounds CP time at 1.2x (only the independent work leaves the CP thread) to
+  1.7x (caches and unattributed work leave too). The draw record adds a per-draw copy, and the
+  shader input information that stage A keeps lowers the 1.2x end further; neither is measured.
+- In that run the frame is 131 ms, so about 26 ms per frame lie outside CP processing (21-22 ms in
+  the runs without timers). At the bounds above the frame falls to about 88-113 ms: 9-11 fps.
+- Most of that gap fits the submit contract: a graphics submit returns only after the CP has run its
+  whole batch (`docs/bringup/cross-title.md`, "A graphics submit returns after its batch is decoded"),
+  the title submits one batch per frame, and the CP then waits about 15.6 ms per frame for the next
+  one (`docs/titles/sandbox.md`, "Command-processor idle between batches"). With the split, the
+  submitter can return once stage A has passed the batch's last guest read, so stage B could overlap
+  the guest's next frame. The frame is then at least stage A plus the guest's gap, about 61 + 16 of
+  131 ms, so at most about 1.7x, still under the build gate; whether the guest starts earlier when
+  released is not established (`docs/titles/anime-fighter.md`).
+- Moving work to stage B cannot reduce stage A. Stage A shrinks only by doing less ordered work per
+  draw: the 12-16 ms of waits (1.8-11.8 ms in four runs after `d2ff690bc`; in the one run tagged for it, three quarters were a
+  shared-page tracker false positive, fixed in `443032ed0`; 2.09 ms in one run after it) and the memory-object creation in binding
+  are the two largest parts,
+  and the two measured attempts on them are excluded (`docs/titles/sandbox.md`: staging drain and
+  retry; in-place vertex binds).
+- 30 fps is a 33 ms frame. With 22-26 ms per frame outside CP processing unchanged, stage A would
+  have to fit in 7-11 ms per frame, 2-3 us per draw over 3,500 draws. Stage A at 7 us per draw over
+  3,500 draws, with the gap kept, gives about 20 fps.
+
+## Risks
+
+- Short segments: passes hold 22-26 draws on average, so a secondary per segment is recorded about
+  130-140 times per frame. The per-call cost of `vkCmdExecuteCommands` and of a small secondary on
+  each driver is unmeasured.
+- A secondary inherits no pipeline, descriptor, vertex-buffer or dynamic state, so each one
+  re-emits all of it, and the state deduplication in `RecordState` restarts at every secondary.
+- The vertex-clip probe's query inside the pass must move into the secondary or end the segment.
+- Diagnostics that sample the draw order (`RecordRecentGuestDraw`) stay in stage A.
+- Windows and macOS drivers: secondary command buffers are core, but their cost differs per
+  driver; none is measured.
+
+## Decision
+
+Amended 2026-11-12: the maintainer withdrew the 2x build gate, and this split is workstream C of
+`performance-architecture-plan.md`, built after the release path and the submit overlap. The text
+below is the decision as first recorded.
+
+Not built. The ceiling (1.2-1.7x of CP time, about 9-11 fps in the measured scene) is below the
+2x build gate. Build only after the time outside CP processing (largely the serial submit, see
+above) is cut, and a change brings stage A low enough that stage A plus the remaining off-CP time fit in a 33 ms
+frame on the same route.
+
+Recomputed after `443032ed0` (one world run with a temporary tag, about 389 frames): 90 ms frames,
+68.8 ms of CP processing over 3,653 draws (18.8 us per draw), 2.1 ms of it host waits, and about
+21 ms outside CP processing. Scaling the non-wait classes of the table above by the same factor
+(an estimate; the classes were not timed again) gives stage A about 37 ms, shared caches about 10,
+independent work about 16 and unattributed about 7.
+
+- Parallel recording alone: CP time falls to 37-53 ms, the frame to 58-74 ms: 1.22-1.56x.
+- Submit overlap alone: the submit may return only after the memory the batch references is copied
+  ("A graphics submit returns after its batch is decoded"); without the split all CP processing
+  stays serial, so the frame stays at least 68.8 ms: at most 1.31x.
+- Both: the submitter returns once stage A has passed the batch's last guest read, so the frame is
+  at least stage A plus the gap, about 58 ms: at most 1.56x.
+- Both, with the copy that record prescribes: the submit copies the memory the batch references
+  and returns, so the frame is at least the larger of copy plus gap and stage A. That reaches 2x
+  (45 ms) only if the copy costs at most about 24 ms per frame on the submitting thread, or about
+  8 ms if it runs on the CP thread. Measured (one world run with temporary stage timers and a
+  read-only census, 3,607 draws per frame; the census window held about 5,270 draws per frame, so
+  its costs are taken per draw): the lookups the copy has to repeat cost 17.0 ms per frame (shader
+  input information 7.5, index snapshot and vertex range 5.8, device-address preparation 3.8), the
+  other read-only snapshots 1.7 us per draw or 6.1 ms, and copying the 29-32 MB per frame that the
+  command processor uploads now takes at least 1.3 ms on this host (23 GB/s single-thread memcpy).
+  That is about 24 ms per frame, or about 21 ms if the instruments' share of that run's command
+  processing (80 against 68-72 ms) is taken out evenly. Not counted: vertex binds cost 3.65 us each
+  there (about 13 ms per frame; 2.2 us in a run with one temporary tag) and 94% of them copy guest
+  bytes, but the copy share was not split out; nor are texture bytes, descriptor tables and nested
+  command buffers. Not built: the case sits at the gate, open on the copy share of vertex binds and
+  on what the submitting thread waits for.
+- The gap is mostly guest user time. In the run that counted submits per thread, the thread making
+  them was on a CPU 14.3 ms per frame, 1.3 ms of it in the kernel, and off a CPU about 7 ms of the
+  gap; a thread with the same profile (14.5 and 1.3 ms) ran on `443032ed0`. The CP thread spent
+  3.9 ms per frame in the kernel there (7.3 ms on the older build with temporary counters). What
+  the submitting thread waits on during those 7 ms was not recorded: the temporary trace spent its
+  line budget during loading.
+
+Submit overlap measured (2026-11-11, `docs/titles/sandbox.md`, "Measured, one batch ahead does not
+shrink the gap"): with the guest allowed one batch ahead, the CP still waited 18.9 ms of each frame
+for the next batch. That probe had not engaged. With the early return engaged (same record, "Rechecked
+with the early return engaged"), the guest still took command processing plus its own ~11 ms between
+submits, held by the emulator's own quiesce on the guest's per-frame direct-memory release (same
+record, "What holds it"): an early return pays only with that invalidation ordered on the command processor.
+
+Rechecked against an exclusive per-draw profile (2026-11-11, one full-stack profile, 5,017 draws per
+frame, 74.7 ms of CP processing, every draw-path sample in one row; `docs/titles/sandbox.md`, "The
+path behind the draw entry priced by unit of work"). Where the 66 ms under the draw entry sit,
+mapped onto the classes above (the profile shows where time is spent, not what depends on draw
+order): about 35 ms in the order-dependent classes (storage and index snapshots, vertex and storage
+objects, textures, device-address preparation, vertex uploads, targets, render-pass begins), about
+11-12 ms in the shared pipeline and descriptor-set caches, about 14-15 ms in per-draw work (shader
+input information, command emission, recorder) and about 5 ms unattributed. With about 35 ms serial
+plus the 8.4 ms outside the draw entry, no thread count reaches 2x of CP time (at most about 1.7x).
+The run that skipped the path behind the draw entry shows that path is over 90 % of the submit hold;
+it does not move the order-dependent share, so parallel recording alone stays under the gate.
+
+Combined with that redesign on paper, with four recording threads and the 24-29 ms between submits
+of this frame: with its countable rows at their ceilings the frame is about 51-62 ms (about 1.65-2x
+of 102 ms), with every row at its ceiling about 47-55 ms, and with its firm rows only about 71-83
+ms. Only the 16 ms between submits of the skip run, where the GPU work was removed too, would put
+the countable case at 43-58 ms. Stage A plus the time between submits stays at about 37-58 ms, above
+the 33 ms reopen condition at every ceiling, and no count of the redesign's rows measures that time:
+both stay closed, alone and combined. A bound over the designs priced, not a floor (the 8.4 ms
+outside the draw entry and the remaining order-dependent work were not redesigned): with every row
+at its ceiling, CP processing alone is about 23-26 ms, its serial part about 17-18 ms, already above
+16.7 ms before the time between submits and the GPU, so even complete submit overlap would not reach
+60 fps at this load.
+
+Three cases stay under the 2x gate and the fourth sits at it; neither change is built. 60 fps
+(16.7 ms) needs about 5.4x on this frame: the gap alone exceeds it, so any such path needs the
+overlap, and the CP would have to process a draw in about 4.6 us. No measured lever or design here
+reaches that.
+
+Re-priced 2026-11-12 on the sandbox world (`PPSA17221 - Minecraft`), after the per-draw cuts
+`0be0c39a2` and `7b2b35fd4`: 11.36 us per draw, 2,805 draws a frame, 31.9 ms of command-processor
+time in a 44.8 ms frame. A draw plan is worth about 1.5 us per draw (pixel inputs already use a
+cached analysis; vertex inputs are mostly the descriptor gather). Submit still returns only after
+the batch is decoded, because the title rewrites its descriptor tables after submit, so the
+command processor cannot run behind the guest. Under that contract the plan plus a two-stage
+command processor reach about 31-36 fps at this load (the frame becomes the command processor's
+31.9 ms, or about 28 ms with the plan). The gates above stay closed.
+
+Front/back pipeline inside one submit, priced from source on 2026-11-12 (stage counters above, not
+built). A front thread would take only what needs registers and guest memory: vertex input 1.12,
+pixel input 0.80 and shader ids 0.53 us, about 2.5 us per draw. Everything else stays on the
+thread that owns the command buffer, because it feeds the next draw: guest-address read
+preparation mutates the device-address registry and can retry the draw, index preparation reuses
+the previous draw's transient snapshot, materialization creates or finds host images, the pipeline
+key needs the framebuffer's compatibility, which needs the materialized targets and the live image
+layouts that the previous `BeginRenderPass` changed, binding creates memory objects and descriptor
+sets, and emission resets the hashes of drawn targets that the next draw's materialization reads.
+The back stage stays at about 8.8 us, so the batch goes from 11.36 to about 9 us per draw before
+the hand-off (a multi-KB input record per draw): about 6.7 ms of a 44.8 ms frame at 2,805 draws.
+Dispatches, guest-memory waits and writes, end-of-pipe writes, barriers and flips would drain it.
+Reaching 5-6 us needs binding and the ordered part of state setup rebuilt as functions of a
+versioned snapshot, or recorded on workers as above; neither is designed.
+
+Built 2026-11-12, first stage (`docs/titles/sandbox.md`, "Shader inputs of indexed draws prepared ahead of
+the command processor"): a second thread replays register packets on a shadow command processor and
+prepares the shader input information of direct indexed draws, the per-draw class priced at 7.5 ms per
+frame above. Measured in the world with the paired in-run A/B: 10.54 -> 8.31 us per draw. The submit
+contract is unchanged; the replay restarts every 4.5-15 draws, at the next packet it does not admit.
+Since 2026-11-17 two such threads replay each run and the first to reach a draw prepares it
+(`docs/titles/gothic-action-platformer.md`, "Second draw front").
+
+## Recomputed on `6a6a5818a` (2026-11-14)
+
+`PPSA17221 - Minecraft` world, 100-150 s of one run, 5,300-5,600 draws per frame, 28-33 fps,
+agent stage counters (no temporary timers). The draw tail is already recorded on the replay thread
+(Vulkan driver 3.2 % of the command-processor thread), so command emission here is encoding only.
+
+| Stage | us per draw | Class |
+| --- | --- | --- |
+| State setup (index range, vertex streams, device-address preparation, resolution cohorts) | 1.73 | A |
+| Materialization (colour and depth targets) | 0.44 | A |
+| Resource binding without descriptor finalization | 1.48 | A |
+| Pipeline setup | 0.68 | B with a shared cache |
+| Descriptor finalization | 0.44 | B with per-worker pools |
+| Command emission | 0.39 | B |
+| Rest of the draw processor (render lock, unattributed) | 0.60 | unknown |
+| Draw processor | 5.76 | |
+| Command-processor run | 6.28 | |
+
+- Stage A is about 3.65 us per draw, 4.2 with the unattributed rest. Moving every class-B stage off
+  the thread leaves about 4.3-4.8 us of the 6.28: 1.3-1.45x, about 23-26 ms per frame at 5,400
+  draws. That would reach 38-43 fps in this scene only if the per-segment cost (secondary command
+  buffers and the state each one re-emits, "Risks") stays near zero, which is not measured.
+- The stage classes are read from where each timer sits in `GraphicsRenderDraw.cpp`; the nesting
+  of the memory-object lookups (0.68 us per draw, inside state setup, materialization and binding)
+  was not separated.
+
+
+### Per-segment cost of a secondary command buffer, measured (2026-11-14)
+
+A standalone Vulkan program outside the repository recorded one frame of 135 render-pass segments of
+40 draws each (pipeline, descriptor set, push constants, scissor and a three-vertex draw per draw;
+six dynamic states per segment). Mode P records all of it in one primary command buffer; mode S
+records each segment in its own secondary, re-emitting the dynamic state, and executes it from the
+primary. Single thread, 190 timed frames, two repeats each agree within 1 %.
+
+| Driver | Record, P | Record, S | GPU, P | GPU, S |
+| --- | --- | --- | --- | --- |
+| ANV, Intel Arc A770 | 14.7 us per segment | 19.4 | 1.14 ms per frame | 4.85 |
+| RADV, Ryzen 5 7600 iGPU | 13.4 | 15.0 | 1.13 | 2.09 |
+
+- On ANV each secondary adds about 27 us of GPU time, 3.7 ms per frame at 135 segments; on RADV about
+  7 us. Recording a secondary costs 4.7 us (ANV) or 1.6 us (RADV) more per segment on the worker.
+- `PPSA17221 - Minecraft` world on the A770 keeps the GPU 70 % busy at 31 fps (about 22.6 ms per
+  frame, same run as above). With 3.7 ms more, the GPU frame is about 26 ms, past the 25 ms of 40
+  fps, so per-segment secondaries cannot reach 40 fps in that scene on this GPU; about 38 is the
+  bound.
+- Mode R records each segment into its own primary command buffer and submits all 135 in order in
+  one `vkQueueSubmit`: on ANV 18.4 us per segment to record and 3.49 ms of GPU per frame (+2.4 ms,
+  about 18 us per command buffer); on RADV 14.3 us and 2.24 ms. Per-command-buffer GPU cost is
+  therefore not specific to secondaries on ANV.
+- The same draws in 8 command buffers per frame (8 render passes of 675 draws, as a stand-in for
+  contiguous runs of segments per worker) cost 0.13 ms more GPU per frame than one primary on ANV.
+  Recording contiguous runs of segments, one primary per worker run, submitted in order, keeps the
+  per-buffer cost near 0.1 ms per frame; per-segment secondaries do not. That grouping, not
+  per-segment secondaries, is the shape this design should take on ANV.
+- The same 135 render passes grouped into 8 primaries submitted in order: GPU 1.31 ms per frame
+  against 1.12 for one primary on ANV (+0.19 ms), recording 16.3-16.8 us per segment against 14.7.
+
+### Consequence for the build order (2026-11-14)
+
+The Vulkan calls already run on the replay thread, so the class-B work left on the command-processor
+thread is Kyty's own: pipeline setup (0.68 us per draw) and descriptor finalization (0.44) feed the
+encoded list, and encoding is 0.39. The replay thread spends most of its time polling. Moving the
+first two onto it would need no extra command buffers, so neither per-buffer cost above applies; the
+blockers are the results the command processor reads back on the same draw (for example the
+pipeline's `writes_guest_memory`, which ends the geometry segment in `GraphicsRenderDraw.cpp`).
+Multiple recording threads with grouped primaries are needed only if one replay thread cannot keep
+up.
+
+Results the command processor reads back on the same draw (indexed path, `GraphicsRenderDraw.cpp`):
+
+- From the pipeline: `writes_guest_memory` (ends the geometry segment), `transport` (early return
+  or the fragment-transport draw, which binds inline), the static and dynamic parameters that
+  `SetDynamicParams` encodes, and `pipeline_layout` for the descriptor binds and push constants.
+  The key is built from the context registers at call time, so a deferred lookup needs a copy of
+  every input it reads (see the pipeline memo record in `performance-architecture-plan.md`); the
+  lease is attached to the recording command buffer under the cache mutex.
+- From descriptor finalization: the set handle goes only into the encoded bind, but the same step
+  records storage-image barriers and layout changes on the command buffer and reads GPU-memory
+  state in command-processor order (`GraphicsRenderBind.cpp`, `GraphicsRenderDescriptor.cpp`).
+
+So neither stage moves as is: the pipeline lookup needs its inputs snapshotted and its read-back
+fields resolved earlier (they follow the shader pair and the registers, not the Vulkan object), and
+descriptor finalization keeps ordered side effects. At most about 0.68 us per draw of pipeline
+setup is movable without splitting the descriptor step, about 11 % of the command-processor time.
+
+### Descriptor binding split by order (2026-11-14, code reading)
+
+`BindDescriptors` (22 % of the command-processor thread in the sandbox world) was read step by step
+for what must run in guest-command order:
+
+- Ordered: `PrepareStorageBuffers` (storage-range reports, guest copies, transient uploads,
+  memory-object creation), `PrepareTextures` (memory-object lookups and creation, image copies,
+  content and write stamps read by later draws), the storage-seed check, the sampled- and
+  storage-image barriers with their layout changes, and in `DescriptorCache::GetDescriptor` the set
+  trim, the uncached-set deferral, the layout transitions that run before the cache lookup (also on
+  hits) and the use records.
+- Free of order: building and hashing the descriptor key, the set lookup, filling the writes and
+  `vkUpdateDescriptorSets` on a newly allocated set, sampler-id lookups and the push-constant
+  payload. In the profile that is about the descriptor hash (2.3 %) and part of `GetDescriptor`
+  (6.3 % in all).
+- So stage B within descriptor binding is a few percent of the thread, not the 0.44 us per draw the
+  finalization timer covers, because the layout transitions inside it are ordered.
+
+Together with the pipeline read-backs above, the work that can leave the command-processor thread
+without changing the memory-object model is at most about 10-15 % of it, not the 1.3-1.45x
+estimated from the stage timers. 40 fps in the sandbox world (about 4.6 us per draw) needs the
+ordered work itself to shrink: memory-object lookups and creation inside texture, storage and
+target preparation, and device-address preparation, which together hold about a third of the
+thread.
+
+### Memory-object lookups in the sandbox profile (2026-11-14)
+
+Same profile, 1,765 samples of the command-processor thread, 187 (10.6 %) inside
+`GpuMemory::CreateObject`. Callers: depth-target materialization 40 %, colour targets 28 %, vertex
+buffer binds 15 %, textures 9 %, storage buffers 7.5 %. Inside it: its own code 24 %, the
+materialization key hash 12 %, `SyncWriteBackIndexes` 11 %, `GpuMemory::Update` 10 %, statistics
+10 %, `GetHeapId` 7.5 %. A per-draw memo of the targets would remove at most the target share,
+about 7 % of the thread, and must keep the hit checks the cache already makes (object not freed,
+same logical generation, same submission). No single part of the ordered work is large enough on its
+own for the 30 % cut that 40 fps needs; the sample count is small (10 s at 199 Hz).
+
+### Not detected: switching off the per-draw statistics (2026-11-14)
+
+In the same profile, 6.5 % of the command-processor samples sit in a statistics frame (clock reads,
+create traces, stage recorders). A temporary switch that turned the statistics clock, the timed
+recorders and the create-trace completion into no-ops in alternate 4 s blocks of the sandbox world
+did engage: the command-processor run counter read zero in the off blocks. No change in frame time per draw
+was detected: off minus on +0.10 µs/draw, standard error 0.30, 14 pairs (detection limit about
+0.6 µs/draw, which is above the 0.4 µs/draw the profile share predicts); 30.3 fps off against 30.8
+on. The stage counters cannot split this case because the switch zeroes them. The statistics stay
+always on; a smaller effect is not excluded.
+
+### Priced, not built: reusing the previous draw's materialized targets (2026-11-14)
+
+Per-draw render-target work is about 19 % of the command-processor samples in the sandbox profile:
+materialization 7.4 %, `InvalidateMemoryObject` with `ResetHash` 4.3 %, target description 3.5 %,
+display-resolution cohorts 1.8 %, framebuffer lookup and render-pass begin 2.4 %. A temporary,
+deliberately unsafe switch reused the previous indexed draw's materialized colour and depth
+information, and skipped the end-of-draw target invalidation, when the described targets were
+byte-equal to the previous draw's in the same command buffer and submission. In alternate 4 s blocks
+of the sandbox world it engaged (the share of draws is inferred from stage time, about 80 %, not counted; materialization 0.486 -> 0.098 µs/draw,
+emission 0.368 -> 0.157 µs/draw) and cut command-processor time by 0.53 µs/draw (standard error
+0.14, 14 pairs) and frame time by 0.70 µs/draw (standard error 0.31); 34.6 -> 37.4 fps in a scene of
+about 4,500 draws per frame. That run drew about 4,500 draws per frame in both blocks against 5,400
+in the two runs before it on the same route and world time, unexplained, so its frame rates are not
+comparable to the ~31 fps baseline; only the paired differences are. It is not shipped. Not checked yet: skipping the per-draw `ResetHash` leaves the target's
+GPU update time at the first draw of the run, which is wrong when another object over the same
+memory was used in between, and the reused information holds image pointers that a freed or
+replaced object would leave dangling. A shippable version must keep the update time current and
+must be invalidated by any change to the memory-object graph.
+
+What a repeat materialization of the same targets still does, read from the code (2026-11-14):
+
+- the memory-object hit bumps `use_num`, `use_last_frame` and, for a written target, `write_uses` and
+  `write_time`; `RecordUse` itself is idempotent per submission (one entry per queue, highest
+  sequence);
+- each materialization assigns the image a new `content_stamp`;
+- depth links its meta storage and checks the committed extent (which records a use when the render
+  scope is on);
+- depth meta clears, compute colour fills, DCC and CMASK clears are consumed on materialization:
+  a clear registered between two draws must still be applied by the second;
+- the end-of-draw `ResetHash` gives the target a new `gpu_update_time` and `device_write_time`;
+  at least twelve readers order write-back, alias selection and parent choice by these fields.
+
+The object graph generation is bumped by every block creation and deletion, so it detects a
+replaced target, but not a pending clear or a time-field reader. A safe reuse therefore keeps every
+item above and saves only the lookups (materialization key and hash, cache lookups, `GetHeapId`,
+`FindFast`, the extra lock round trips and statistics traces): an estimated half of the measured
+0.53 µs/draw, not measured.
+
+### Built: remembering the targets `ResetHash` finds, and skipping an unchanged write-back sync (2026-11-14)
+
+`ResetHash` runs at the end of every draw for each colour and depth target and spends most of its
+time finding the same object again (`FindFast` 1.8 %, `GetHeapId` 0.9 % of the command-processor
+samples). It now keeps four remembered exact-range finds, valid while the object graph generation
+and the heap index generation are unchanged. The cached-hit path of `GpuMemory::CreateObject` also
+skips `SyncWriteBackIndexes` when the use left `read_only` unchanged and the object is not a storage
+buffer: a hit keeps `free`, `in_use` and the callbacks, so the indexes cannot change, while storage
+buffers still record their scan change on every writable use.
+
+Shadow checks ran the full find on every remembered hit and compared the write-back, writable
+storage and host-result indexes on every skipped sync, with one deliberately forced mismatch that
+each reported: no other mismatch in the sandbox world (16.5 million hits, 16.8 million skips), the
+robot-platformer dunes (2.3 million hits, 16.8 million skips) and the deck-builder boot (0.5 million
+hits, 1 million skips). Remembered finds answered 98.5 % of the calls in the sandbox world, 47 % on
+the dunes.
+
+In alternate 4 s blocks of the sandbox world, the first 6 s after the world appears left out, the
+pair cut command emission by 0.102 µs/draw (standard error 0.006) and materialization by 0.029
+(standard error 0.004), 12 pairs; the remembered finds alone cut emission by 0.110 (standard error
+0.006, 13 pairs). Total command-processor time moved by 0.23 µs/draw with a standard error of 0.18,
+below the detection limit of the totals (about 0.35 µs/draw); the stage counters resolve it. The
+draws per frame differed between these runs (3,800-5,400) on the same route; whether the scene
+reached differs is not checked.
+`kyty_agent playable-regression` on `PPSA06084 - Superliminal` at `04bafcefa` (60 fps limit): every
+gate passes except the three that have no reviewed input here (visual baseline, scene checkpoint,
+action response); exit status 3, baseline missing.
+
+### Built: repeated memory-object hits answered without hashing the key (2026-11-14)
+
+`GpuMemory::CreateObject` keeps its last eight cached hits with the object graph generation, the
+heap index generation and a new count of entries the materialization cache dropped or replaced.
+While none moved, a repeated key takes the remembered answer instead of hashing the key, finding its
+heap and probing the cache; every hit check (object live, same logical generation, submit, use and
+callbacks) still runs. A shadow check that repeated the heap search and the cache lookup on every
+remembered hit, with one forced mismatch each run reported, found no other mismatch: sandbox world
+13.8 million hits (82 % of calls), robot-platformer dunes 6.0 million, deck-builder boot 0.9 million.
+Paired 4 s blocks in the sandbox world (first 6 s left out, 13 pairs): materialization -0.094
+µs/draw (standard error 0.003); total command-processor time +0.01 (standard error 0.10, below the
+totals' detection limit of about 0.2). Gates 4/4, `kyty_unit_test` 2,662 passed, 11 skipped.

@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/RenderResolutionShaderScale.h"
 #include "Emulator/Graphics/VertexClipProbe.h"
 
+#include <cstring>
 #include <bitset>
 #include <limits>
 #include <memory>
@@ -499,7 +500,7 @@ enum class ShaderInstructionType : uint32_t
 	VMacF32,
 	VMadakF32,
 	VMadF32,
-	VMadF16,
+	VMadU16,
 	VMadI16,
 	VMadmkF32,
 	VMadU32U24,
@@ -657,6 +658,58 @@ enum class ShaderInstructionType : uint32_t
 	VPkSubU16,
 	VPkMaxU16,
 	VPkMinU16,
+	VXor3B32,
+	VAlignbitB32,
+	VPermB32,
+	VMadI32I24,
+	VMadU32U16,
+	VMadI32I16,
+	VLerpU8,
+	// Appended so earlier values keep their numbers. VCmpxLtF64..VCmpxGeU64 write EXEC; the block ends at VCmpTU64.
+	VCmpxLtF64,
+	VCmpxEqF64,
+	VCmpxLeF64,
+	VCmpxGtF64,
+	VCmpxLgF64,
+	VCmpxGeF64,
+	VCmpxOF64,
+	VCmpxUF64,
+	VCmpxNgeF64,
+	VCmpxNlgF64,
+	VCmpxNgtF64,
+	VCmpxNleF64,
+	VCmpxNeqF64,
+	VCmpxNltF64,
+	VCmpxOF16,
+	VCmpxUF16,
+	VCmpxLtI64,
+	VCmpxEqI64,
+	VCmpxLeI64,
+	VCmpxGtI64,
+	VCmpxNeI64,
+	VCmpxGeI64,
+	VCmpxLtU64,
+	VCmpxEqU64,
+	VCmpxLeU64,
+	VCmpxGtU64,
+	VCmpxNeU64,
+	VCmpxGeU64,
+	VCmpLtI64,
+	VCmpEqI64,
+	VCmpLeI64,
+	VCmpGtI64,
+	VCmpNeI64,
+	VCmpGeI64,
+	VCmpFU64,
+	VCmpTU64,
+	// Float class compares other than v_cmp_class_f32; the v_cmpx forms write EXEC.
+	VCmpClassF16,
+	VCmpClassF64,
+	VCmpxClassF16,
+	VCmpxClassF32,
+	VCmpxClassF64,
+	// Gen5 VOP2/VOP3B V_SUB_CO_CI_U32: src0 - src1 - borrow-in.
+	VSubCoCiU32,
 
 	ZMax
 };
@@ -1292,7 +1345,12 @@ struct ShaderId
 	uint32_t         crc32 = 0;
 	Vector<uint32_t> ids;
 
-	bool operator==(const ShaderId& other) const { return hash0 == other.hash0 && crc32 == other.crc32 && ids == other.ids; }
+	bool operator==(const ShaderId& other) const
+	{
+		// Pipeline lookups compare long id vectors on every draw; memcmp vectorizes, the element loop does not.
+		return hash0 == other.hash0 && crc32 == other.crc32 && ids.Size() == other.ids.Size() &&
+		       (ids.Size() == 0 || std::memcmp(ids.GetDataConst(), other.ids.GetDataConst(), ids.Size() * sizeof(uint32_t)) == 0);
+	}
 	bool operator!=(const ShaderId& other) const { return !(*this == other); }
 };
 
@@ -1787,6 +1845,10 @@ struct ShaderStorageUseEvidence
 	bool                raw_tbuffer_use         = false;
 	uint64_t            raw_smem_required_bytes = 0;
 	bool                raw_smem_dynamic_offset = false;
+	// Every instruction that consumes the V# is a raw BUFFER_LOAD_DWORD[x2..x4] or S_BUFFER_LOAD_DWORD[x2..x16].
+	bool dword_loads_only = false;
+	// Every instruction that consumes the V# is a BUFFER_LOAD_FORMAT_*, and no unknown or indirect use can hide another.
+	bool format_loads_only = false;
 };
 
 // Structural evidence for a compute kernel that writes one uniform four-word
@@ -1813,7 +1875,8 @@ struct ShaderComputeUniformBufferFillEvidence
 	bool     value_is_constant          = false;
 	uint32_t constant_value             = 0;
 	// The loaded form stores the first word of the one-descriptor source at
-	// this SGPR, read with s_buffer_load_dword, the same way.
+	// this SGPR, read with s_buffer_load_dword, the same way; with 16-byte
+	// records it stores the first four words, read with s_buffer_load_dwordx4.
 	int      value_buffer_register      = -1;
 };
 
@@ -1949,6 +2012,17 @@ struct ShaderStorageResources
 	// A vertex-stream SSBO that no instruction of the compiled program reads. The
 	// slot stays in the layout; its descriptor gets an empty carrier.
 	bool                       unread_stream[BUFFERS_MAX]           = {};
+	// Every consumer is a raw dword load (ShaderStorageUseEvidence::dword_loads_only).
+	bool dword_loads_only[BUFFERS_MAX] = {};
+	// Every consumer is a format load (ShaderStorageUseEvidence::format_loads_only).
+	bool format_loads_only[BUFFERS_MAX] = {};
+	// Some consumer's V# register keeps word 0 but not words 1-2 on some path,
+	// so its row is not the one bound (ShaderCollectRedefinedBufferDescriptors).
+	bool row_redefined[BUFFERS_MAX] = {};
+	// Read through a device address the CPU writes into the V#'s metadata row
+	// (words 0-1) with the bytes it backs (word 2); the slot holds a carrier.
+	// Set by ShaderCalcBindingIndices (ShaderStorageBufferReadsByAddress).
+	bool by_address[BUFFERS_MAX] = {};
 	int                        slots[BUFFERS_MAX]                   = {0};
 	int                        start_register[BUFFERS_MAX]          = {0};
 	bool                       extended[BUFFERS_MAX]                = {};
@@ -2005,6 +2079,8 @@ struct ShaderZeroDescriptorLoads
 	return stride == 0 ? static_cast<uint64_t>(records) : static_cast<uint64_t>(stride) * records;
 }
 
+// A V# whose every consumer is a format load: the load decodes any table-47 format and the DST_SEL.
+[[nodiscard]] bool ShaderGen5FormatLoadDescriptorSupported(const ShaderBufferResource& resource);
 [[nodiscard]] bool ShaderGen5StorageDescriptorSupported(const ShaderBufferResource& resource, ShaderStorageAccess access);
 [[nodiscard]] bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource);
 // A zero-record raw descriptor is architecturally empty. Such a descriptor
@@ -2033,6 +2109,11 @@ struct ShaderBindResources;
 // indices at s8; negative stream sentinels never identify shader registers.
 [[nodiscard]] bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
                                                        int user_data_register_base = 0);
+// Index of the bound storage buffer whose user-data registers `resource` names, or -1.
+[[nodiscard]] int ShaderStorageBufferBoundIndex(const ShaderBindResources& bind, const ShaderOperand& resource,
+                                                int user_data_register_base = 0);
+// Whether the device can read storage buffers by address; set once at device creation.
+void               ShaderSetStorageAddressReads(bool supported);
 // A vector buffer V# that no discovered resource describes: neither a bound
 // storage buffer register still holding its user data nor the destination of a mapped descriptor S_LOAD
 // that reaches this consumer. It is built at run time (for example from
@@ -2235,6 +2316,11 @@ struct ShaderBindResources
 	// entries, 0} filled at bind time (see GuestDeviceAddress.h).
 	bool     device_address_used      = false;
 	uint32_t device_address_offset_dw = 0;
+	// Some storage buffer is read by address (storage_buffers.by_address).
+	bool storage_address_used = false;
+	// The scalar flow resolved, so redefined_descriptor_consumers and
+	// storage_buffers.row_redefined are complete.
+	bool descriptor_flow_proven = false;
 	// Per-dispatch global thread limits (USE_THREAD_DIMENSIONS), runtime data.
 	bool     thread_limits_used      = false;
 	uint32_t thread_limits_offset_dw = 0;
@@ -2259,6 +2345,10 @@ struct ShaderBindResources
 	// longer holds its user-data value there (redefined, for example from
 	// s_getpc): they read through the runtime V#, never the descriptor slot.
 	Vector<uint32_t> redefined_descriptor_consumers;
+	// The same consumers in a stage with no runtime V# lowering (the vertex
+	// front): they keep the slot path, so their buffer may still be read by
+	// address everywhere else.
+	Vector<uint32_t> slot_only_consumers;
 	Vector<ShaderCopiedImageDescriptor> copied_image_descriptors;
 	Vector<ShaderConstantSampler>       constant_samplers;
 };
@@ -2272,6 +2362,8 @@ struct ShaderBindResources
 [[nodiscard]] bool ShaderHasImageAtomic(const ShaderCode& code);
 [[nodiscard]] bool ShaderImageAtomicSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderImageAtomicResourceSupported(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind);
+// 16, 32 or 64 for a v_cmp(x)_class form, 0 otherwise.
+[[nodiscard]] int  ShaderFloatClassWidth(ShaderInstructionType type);
 [[nodiscard]] bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction);
 [[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
 	                                                int user_data_register_base);
@@ -2660,6 +2752,8 @@ struct ShaderPixelInputInfo
 	uint8_t                target_output_mode[8]     = {};
 	uint8_t                target_output_order[8]    = {};
 	uint8_t                target_output_number[8]   = {};
+	// CB_SHADER_MASK targets when an export ordinal lands past a hole, else 0.
+	uint8_t                routed_color_targets      = 0;
 	RenderHostToGuestScale host_to_guest_scale;
 	bool                   ps_position               = false;
 	bool                   front_face_all_bits       = false;
@@ -2701,6 +2795,18 @@ struct ShaderPixelInputInfo
 	{
 		return (system_input_enable & system_input_address & (1u << 13u)) != 0;
 	}
+};
+// The shader input information of one indexed draw, prepared ahead of its recording.
+struct PreparedDrawInputs
+{
+	ShaderVertexInputInfo vs;
+	ShaderPixelInputInfo  ps {};
+	// The shader ids of `vs` and `ps` as prepared. The recording sets the two pixel fields copied
+	// below after it takes the inputs, so it reuses the ids only while both keep these values.
+	ShaderId               vs_id;
+	ShaderId               ps_id;
+	RenderHostToGuestScale ids_host_to_guest_scale;
+	bool                   ids_dual_source_blend = false;
 };
 
 [[nodiscard]] ShaderFragmentTapConfig ShaderResolveFragmentTapConfig(uint64_t code_id, bool indexed, uint32_t guest_count);
@@ -2892,6 +2998,8 @@ ShaderStorageUsage    ShaderGetDirectStorageUsage(const ShaderCode& code, int st
 bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type);
 void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
                                           const GraphicsGeRawRegister* shader_stages = nullptr);
+// Fills a value-initialized ps_info ({}): callers build a fresh one per draw, and
+// resetting it again builds and frees a whole temporary input info.
 void             ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
                                       uint32_t cb_target_mask, ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
 void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, uint32_t dispatch_mode,

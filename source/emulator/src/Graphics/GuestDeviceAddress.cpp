@@ -7,9 +7,11 @@
 #include "Emulator/Kernel/Memory.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Utils.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cinttypes>
 #include <cstddef>
 #include <cstdio>
@@ -42,6 +44,16 @@ constexpr uint64_t kPhysicalImportBlockBytes = 2ull << 20u;
 constexpr uint64_t kMaxHostImportPaddingBytes = 2ull << 20u;
 // Keep a bounded number of old address tables alive while submissions may reference them.
 constexpr std::size_t kMaxRetiredTables = 32;
+// Overlays (GuestDeviceAddressRecordOverlay) hold results the device may not write
+// to guest memory, all below DeviceMayWriteGuestRange's exact-copy bound.
+constexpr uint64_t kOverlayArenaBytes    = 32ull << 20u;
+// Host-readable copies of overlay sources until write-back completion publishes them.
+constexpr uint64_t kSnapshotStagingBytes = 16ull << 20u;
+constexpr uint64_t kOverlayMaxBytes      = 64ull << 10u;
+constexpr uint64_t kOverlaySlotAlignment = 256;
+// A translated load reads up to 128 bytes past its first dword
+// (ShaderSpirvGuestAddress.cpp); zeros after the result keep it inside the slot.
+constexpr uint64_t kOverlayPadBytes = 128;
 
 struct Chunk
 {
@@ -93,18 +105,44 @@ struct Table
 	uint32_t       entries = 0;
 };
 
-struct TableEntry
-{
-	uint64_t guest  = 0;
-	uint64_t size   = 0;
-	uint64_t device = 0;
-	uint64_t span   = 0;
-};
+using TableEntry = GuestDeviceAddressEntry;
 
 struct Reader
 {
 	SubmissionId submission {};
 	bool         active = false;
+};
+
+// A storage result mapped over its guest range, keyed by guest base.
+struct Overlay
+{
+	uint64_t                      size       = 0;
+	uint64_t                      slot       = 0; // offset in the arena
+	uint64_t                      slot_bytes = 0;
+	uint32_t                      queue      = 0; // the only queue whose readers may observe it
+	GpuMemoryStorageWriteIdentity identity;
+	uint64_t                      guest_generation = 0;
+	uint64_t                      held_since_frame = 0; // flip count when guest memory last held the object
+};
+
+std::atomic<uint64_t> g_flipped_frames {0};
+
+// Counts chunks leaving the registry; a resolved draw input holds while it is unchanged.
+std::atomic<uint64_t> g_chunk_removals {0};
+
+// Snapshots publish within the frame; guest memory may still lag across the one flip after.
+bool OverlayHeldTooLong(const Overlay& overlay)
+{
+	return g_flipped_frames.load(std::memory_order_relaxed) - overlay.held_since_frame > 1u;
+}
+
+struct OverlayArena
+{
+	VkDeviceMemory               memory = nullptr;
+	VkBuffer                     buffer = nullptr;
+	uint64_t                     device = 0;
+	bool                         failed = false;
+	std::map<uint64_t, uint64_t> free; // offset -> bytes, coalesced
 };
 
 struct Registry
@@ -128,6 +166,15 @@ struct Registry
 	// Physical-backing population at the last complete scan of physical ranges.
 	Core::VirtualMemory::SharedBackingPopulation scanned_population;
 	bool                                         population_scanned = false;
+	// Ordering point and host-write epoch read before that scan's query.
+	uint64_t scanned_ordering   = 0;
+	uint64_t scanned_host_write = 0;
+	// Advances on every chunk added or removed. A refresh that found no chunk
+	// changed stays valid while this and the tracker's evidence version hold.
+	uint64_t chunk_version          = 0;
+	uint64_t clean_chunk_version    = 0;
+	uint64_t clean_evidence_version = 0;
+	bool     refresh_clean          = false;
 	Table                     table;
 	std::vector<Table>        retired;
 	std::array<Reader, GraphicContext::QUEUES_NUM> readers {}; // Latest registered reader for each queue.
@@ -135,6 +182,14 @@ struct Registry
 	// step with the chunks so a rebuild after a mapping change copies it
 	// instead of walking thousands of ranges.
 	std::vector<TableEntry> entries;
+	// Disjoint. A dropped overlay's slot is reused only when its readers are done,
+	// like a retired table.
+	std::map<uint64_t, Overlay>                overlays;
+	OverlayArena                               arena;
+	std::vector<std::pair<uint64_t, uint64_t>> retired_slots;
+	OverlayArena                               staging;
+	void*                                      staging_mapped = nullptr;
+	std::vector<GpuMemoryStorageSnapshot>      snapshots; // in recording order
 };
 
 Registry& GetRegistry()
@@ -153,20 +208,8 @@ bool ValidReader(SubmissionId reader)
 	return reader.sequence != 0 && reader.queue.Value() < GraphicContext::QUEUES_NUM;
 }
 
-SubmissionId PendingReaderForSnapshotRefresh(const Registry& registry)
+SubmissionId FirstActiveReader(const Registry& registry)
 {
-	bool changed = false;
-	for (const uint64_t base: registry.tracked)
-	{
-		for (const auto& chunk: registry.ranges.at(base).chunks)
-		{
-			changed = changed || (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.span,
-			                                                                                   chunk.generation));
-			if (changed) { break; }
-		}
-		if (changed) { break; }
-	}
-	if (!changed) { return {}; }
 	for (const auto& reader: registry.readers)
 	{
 		if (reader.active) { return reader.submission; }
@@ -174,11 +217,20 @@ SubmissionId PendingReaderForSnapshotRefresh(const Registry& registry)
 	return {};
 }
 
-SubmissionId FirstActiveReader(const Registry& registry)
+SubmissionId PendingReaderForSnapshotRefresh(const Registry& registry)
 {
-	for (const auto& reader: registry.readers)
+	// Without an active reader no refresh waits: skip the scan of tracked chunks.
+	const SubmissionId reader = FirstActiveReader(registry);
+	if (reader.sequence == 0) { return {}; }
+	for (const uint64_t base: registry.tracked)
 	{
-		if (reader.active) { return reader.submission; }
+		for (const auto& chunk: registry.ranges.at(base).chunks)
+		{
+			if (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.span, chunk.generation))
+			{
+				return reader;
+			}
+		}
 	}
 	return {};
 }
@@ -226,6 +278,7 @@ std::vector<TableEntry>::iterator EntryAtOrAfter(Registry* registry, uint64_t gu
 // Chunks cover disjoint guest bytes, so the guest base identifies an entry.
 void AddTableEntry(Registry* registry, const Chunk& chunk)
 {
+	registry->chunk_version++;
 	const auto at = EntryAtOrAfter(registry, chunk.guest);
 	EXIT_IF(at != registry->entries.end() && at->guest == chunk.guest);
 	registry->entries.insert(at, TableEntry {chunk.guest, chunk.size, chunk.device, chunk.span});
@@ -233,9 +286,11 @@ void AddTableEntry(Registry* registry, const Chunk& chunk)
 
 void RemoveTableEntry(Registry* registry, const Chunk& chunk)
 {
+	registry->chunk_version++;
 	const auto at = EntryAtOrAfter(registry, chunk.guest);
 	EXIT_IF(at == registry->entries.end() || at->guest != chunk.guest);
 	registry->entries.erase(at);
+	g_chunk_removals.fetch_add(1, std::memory_order_release);
 }
 
 void DestroyChunk(VkDevice device, Registry* registry, const Chunk& chunk)
@@ -346,6 +401,73 @@ void DestroyTable(VkDevice device, const Table& table)
 	}
 }
 
+void FreeSlot(OverlayArena* arena, uint64_t offset, uint64_t bytes)
+{
+	auto next = arena->free.lower_bound(offset);
+	if (next != arena->free.end() && offset + bytes == next->first)
+	{
+		bytes += next->second;
+		next = arena->free.erase(next);
+	}
+	if (next != arena->free.begin())
+	{
+		const auto previous = std::prev(next);
+		if (previous->first + previous->second == offset)
+		{
+			previous->second += bytes;
+			return;
+		}
+	}
+	arena->free.emplace(offset, bytes);
+}
+
+bool AllocateSlot(OverlayArena* arena, uint64_t bytes, uint64_t* offset)
+{
+	for (auto it = arena->free.begin(); it != arena->free.end(); ++it)
+	{
+		if (it->second < bytes)
+		{
+			continue;
+		}
+		*offset             = it->first;
+		const uint64_t rest = it->second - bytes;
+		arena->free.erase(it);
+		if (rest != 0)
+		{
+			arena->free.emplace(*offset + bytes, rest);
+		}
+		return true;
+	}
+	return false;
+}
+
+std::map<uint64_t, Overlay>::iterator DropOverlay(Registry* registry, std::map<uint64_t, Overlay>::iterator overlay)
+{
+	registry->retired_slots.emplace_back(overlay->second.slot, overlay->second.slot_bytes);
+	registry->dirty = true;
+	return registry->overlays.erase(overlay);
+}
+
+// GPU memory skips an object while an overlay holds its write, so scans must see each drop.
+void DropOverlaysOverlapping(Registry* registry, uint64_t vaddr, uint64_t size)
+{
+	auto it = registry->overlays.upper_bound(vaddr);
+	if (it != registry->overlays.begin() && std::prev(it)->first + std::prev(it)->second.size > vaddr)
+	{
+		--it;
+	}
+	bool dropped = false;
+	while (it != registry->overlays.end() && it->first < vaddr + size)
+	{
+		it      = DropOverlay(registry, it);
+		dropped = true;
+	}
+	if (dropped)
+	{
+		GpuMemoryInvalidateStorageScans();
+	}
+}
+
 void DestroyRetiredTables(VkDevice device, Registry* registry)
 {
 	for (const auto& table: registry->retired)
@@ -353,6 +475,11 @@ void DestroyRetiredTables(VkDevice device, Registry* registry)
 		DestroyTable(device, table);
 	}
 	registry->retired.clear();
+	for (const auto& [offset, bytes]: registry->retired_slots)
+	{
+		FreeSlot(&registry->arena, offset, bytes);
+	}
+	registry->retired_slots.clear();
 }
 
 // Picks a memory type allowed by type_bits that has all `required` flags.
@@ -482,7 +609,13 @@ struct PreparedHostImport
 			}
 		}
 
-		buffer = CreateAddressBuffer(ctx, size, handle_type);
+		// Draws fetch vertex streams and indexes from the imported guest pages
+		// (GuestDeviceAddressResolveDrawInput).
+		const VkBufferUsageFlags draw_input =
+		    ctx->guest_draw_input_import_supported
+		        ? VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+		        : 0;
+		buffer = CreateAddressBuffer(ctx, size, handle_type, draw_input);
 		if (buffer == VK_NULL_HANDLE)
 		{
 			return false;
@@ -1179,19 +1312,33 @@ bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
 
 // Writes a fresh host-visible table; keep the previous one alive while any
 // registered reader may still reference it.
+std::vector<TableEntry> MergeOverlays(const Registry& registry)
+{
+	std::vector<TableEntry> overlays;
+	overlays.reserve(registry.overlays.size());
+	for (const auto& [guest, overlay]: registry.overlays)
+	{
+		overlays.push_back({guest, overlay.size, registry.arena.device + overlay.slot, overlay.slot_bytes});
+	}
+	return GuestDeviceAddressOverlayEntries(registry.entries, overlays);
+}
+
 bool RebuildTable(GraphicContext* ctx, Registry* registry)
 {
 	// The device lookup binary-searches entries by guest base within one directory region.
 	static_assert(sizeof(TableEntry) == kGuestDeviceAddressEntryDwords * 4u);
-	std::vector<uint64_t> bases(registry->entries.size());
+	const std::vector<TableEntry> entries = MergeOverlays(*registry);
+	std::vector<uint64_t>         bases(entries.size());
 	for (std::size_t i = 0; i < bases.size(); ++i)
 	{
-		bases[i] = registry->entries[i].guest;
+		bases[i] = entries[i].guest;
 	}
 	const auto     directory       = GuestDeviceAddressBuildDirectory(bases.data(), static_cast<uint32_t>(bases.size()));
-	const uint64_t entry_bytes     = registry->entries.size() * sizeof(TableEntry);
+	const uint64_t entry_bytes     = entries.size() * sizeof(TableEntry);
 	const uint64_t directory_bytes = directory.words.size() * sizeof(uint32_t);
-	const uint64_t bytes           = kGuestDeviceAddressNullBytes + entry_bytes + directory_bytes;
+	// The device clamps every entry index to the entry count, so one zeroed entry
+	// past the directory keeps a read at that index inside the table.
+	const uint64_t bytes = kGuestDeviceAddressNullBytes + entry_bytes + directory_bytes + sizeof(TableEntry);
 	Table          table;
 	table.buffer = CreateAddressBuffer(ctx, bytes, 0);
 	VkMemoryRequirements requirements {};
@@ -1231,12 +1378,13 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 	std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressDirectoryHeaderOffset, header, sizeof(header));
 	if (entry_bytes != 0)
 	{
-		std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes, registry->entries.data(), entry_bytes);
+		std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes, entries.data(), entry_bytes);
 	}
 	std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes + entry_bytes, directory.words.data(), directory_bytes);
+	std::memset(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes + entry_bytes + directory_bytes, 0, sizeof(TableEntry));
 	vkUnmapMemory(ctx->device, table.memory);
 	table.device  = BufferDeviceAddress(ctx->device, table.buffer);
-	table.entries = static_cast<uint32_t>(registry->entries.size());
+	table.entries = static_cast<uint32_t>(entries.size());
 	if (registry->table.buffer != nullptr)
 	{
 		registry->retired.push_back(registry->table);
@@ -1278,6 +1426,44 @@ GuestDeviceAddressDirectory GuestDeviceAddressBuildDirectory(const uint64_t* sor
 	}
 	directory.words[regions] = count;
 	return directory;
+}
+
+std::vector<GuestDeviceAddressEntry> GuestDeviceAddressOverlayEntries(const std::vector<GuestDeviceAddressEntry>& entries,
+                                                                     const std::vector<GuestDeviceAddressEntry>& overlays)
+{
+	std::vector<GuestDeviceAddressEntry> merged;
+	merged.reserve(entries.size() + 2u * overlays.size());
+	auto       overlay    = overlays.begin();
+	const auto emit_piece = [&](const GuestDeviceAddressEntry& entry, uint64_t begin, uint64_t end)
+	{
+		const uint64_t offset = begin - entry.guest;
+		merged.push_back({begin, end - begin, entry.device + offset, entry.span - offset});
+	};
+	for (const auto& entry: entries)
+	{
+		const uint64_t end    = entry.guest + entry.size;
+		uint64_t       cursor = entry.guest;
+		while (overlay != overlays.end() && overlay->guest < end)
+		{
+			const uint64_t overlay_end = overlay->guest + overlay->size;
+			if (overlay->guest > cursor)
+			{
+				emit_piece(entry, cursor, overlay->guest);
+			}
+			cursor = std::max(cursor, overlay_end);
+			if (overlay_end > end)
+			{
+				break; // emitted with the entry it ends in
+			}
+			merged.push_back(*overlay++);
+		}
+		if (cursor < end)
+		{
+			emit_piece(entry, cursor, end);
+		}
+	}
+	merged.insert(merged.end(), overlay, overlays.end());
+	return merged;
 }
 
 void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physical_backing)
@@ -1323,6 +1509,7 @@ void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vad
 	{
 		DropChunks(ctx->device, &registry, it->first, &it->second, vaddr, end);
 	}
+	DropOverlaysOverlapping(&registry, vaddr, size);
 	DestroyRetiredTables(ctx->device, &registry);
 }
 
@@ -1369,6 +1556,7 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 		registry.ranges.emplace(base, std::move(range));
 		registry.population_scanned = false;
 	}
+	DropOverlaysOverlapping(&registry, vaddr, size);
 	DestroyRetiredTables(ctx->device, &registry);
 }
 
@@ -1382,6 +1570,11 @@ static bool OverlapsRegisteredRange(uint64_t vaddr, uint64_t size)
 	return it != registry.ranges.end() && it->first < vaddr + size;
 }
 
+bool GuestDeviceAddressOverlapsRegisteredRange(uint64_t vaddr, uint64_t size)
+{
+	return OverlapsRegisteredRange(vaddr, size);
+}
+
 bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, const std::vector<SubmissionId>& device_awaited,
                                         std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency)
 {
@@ -1389,9 +1582,9 @@ bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, const std::vector<S
 	return GpuMemoryPendingStorageWriteBack(OverlapsRegisteredRange, consumer, device_awaited, publishable, dependency);
 }
 
-void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer)
+bool GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer, SubmissionId* dependency)
 {
-	GpuMemoryWriteBackStorageRanges(ctx, OverlapsRegisteredRange, consumer);
+	return GpuMemoryWriteBackStorageRanges(ctx, OverlapsRegisteredRange, consumer, dependency);
 }
 
 bool GuestDeviceAddressPendingWriteBackOutsideStorage()
@@ -1436,6 +1629,65 @@ static bool ResolvePublicationPiecesLocked(const Registry& registry, uint64_t va
 		const uint64_t piece_end = std::min(end, found->guest + found->size);
 		pieces->push_back({found->buffer, cursor - vaddr, found->buffer_offset + (cursor - found->guest), piece_end - cursor});
 		cursor = piece_end;
+	}
+	return true;
+}
+
+uint64_t GuestDeviceAddressChunkRemovals()
+{
+	return g_chunk_removals.load(std::memory_order_acquire);
+}
+
+bool GuestDeviceAddressResolveDrawInput(const GraphicContext* ctx, uint64_t vaddr, uint64_t size,
+                                        VkBuffer_T** buffer, uint64_t* offset, uint64_t* device)
+{
+	EXIT_IF(ctx == nullptr || buffer == nullptr || offset == nullptr);
+	struct Run
+	{
+		uint64_t removals      = UINT64_MAX;
+		uint64_t begin         = 0;
+		uint64_t end           = 0;
+		VkBuffer buffer        = nullptr;
+		uint64_t buffer_offset = 0;
+		uint64_t device        = 0;
+	};
+	// A frame's draws read thousands of ranges out of a few dozen chunks: the chunk last
+	// resolved for each 64 KiB of guest memory answers without the registry lock.
+	constexpr uint64_t                         kRunBytes = 64u * 1024u;
+	constexpr uint64_t                         kRuns     = 4096u;
+	thread_local std::array<Run, kRuns>* const runs      = new std::array<Run, kRuns>;
+	if (size == 0 || vaddr > UINT64_MAX - size || !ctx->guest_device_address_supported ||
+	    !ctx->guest_draw_input_import_supported)
+	{
+		return false;
+	}
+	auto& run = (*runs)[vaddr / kRunBytes % kRuns];
+	if (run.removals != g_chunk_removals.load(std::memory_order_acquire) || vaddr < run.begin ||
+	    vaddr + size > run.end)
+	{
+		auto&                       registry = GetRegistry();
+		std::lock_guard<std::mutex> lock(registry.mutex);
+		const auto                  range = registry.ranges.upper_bound(vaddr);
+		if (range == registry.ranges.begin())
+		{
+			return false;
+		}
+		const auto& chunks   = std::prev(range)->second.chunks;
+		const auto  in_chunk = [vaddr, size](const Chunk& chunk)
+		{ return chunk.physical && chunk.guest <= vaddr && vaddr + size - chunk.guest <= chunk.size; };
+		const auto chunk = std::find_if(chunks.begin(), chunks.end(), in_chunk);
+		if (chunk == chunks.end())
+		{
+			return false;
+		}
+		run = {g_chunk_removals.load(std::memory_order_acquire), chunk->guest, chunk->guest + chunk->size,
+		       chunk->buffer, chunk->buffer_offset, chunk->device};
+	}
+	*buffer = run.buffer;
+	*offset = run.buffer_offset + (vaddr - run.begin);
+	if (device != nullptr)
+	{
+		*device = run.device + (vaddr - run.begin);
 	}
 	return true;
 }
@@ -1552,7 +1804,9 @@ bool GuestDeviceAddressBindInPlace(GraphicContext* ctx, uint64_t vaddr, uint64_t
 		return false;
 	}
 	found->second.users++;
+	DropOverlaysOverlapping(&registry, vaddr, size);
 	out->buffer           = buffer;
+	out->usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT; // CreateAddressBuffer adds it
 	out->descriptor_range = size;
 	out->guest_in_place   = true;
 	out->guest_offset     = guest_offset;
@@ -1580,9 +1834,12 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 	{
 		return false;
 	}
+	auto& registry = GetRegistry();
 	if (source.guest_in_place)
 	{
 		// The device wrote these bytes where the consumer reads them.
+		std::lock_guard<std::mutex> lock(registry.mutex);
+		DropOverlaysOverlapping(&registry, vaddr, size);
 		RecordPublicationBarrierBefore(cmd);
 		RecordPublicationBarrierAfter(cmd);
 		return true;
@@ -1592,12 +1849,12 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 		return false;
 	}
 	std::vector<PublicationPiece> pieces;
-	auto&                         registry = GetRegistry();
 	std::lock_guard<std::mutex>   lock(registry.mutex);
 	if (!ResolvePublicationPiecesLocked(registry, vaddr, size, &pieces))
 	{
 		return false;
 	}
+	DropOverlaysOverlapping(&registry, vaddr, size);
 	RecordPublicationBarrierBefore(cmd);
 	for (const auto& piece: pieces)
 	{
@@ -1631,13 +1888,299 @@ bool GuestDeviceAddressRecordFill(GraphicContext* ctx, VkCommandBuffer_T* cmd, u
 			return false;
 		}
 	}
+	DropOverlaysOverlapping(&registry, vaddr, size);
 	RecordPublicationBarrierBefore(cmd);
 	for (const auto& piece: pieces)
 	{
-		vkCmdFillBuffer(cmd, piece.target, piece.target_offset, piece.size, word);
+		VulkanCmdFillBuffer(cmd, piece.target, piece.target_offset, piece.size, word);
 	}
 	RecordPublicationBarrierAfter(cmd);
 	return true;
+}
+
+static bool CreateOverlayArena(GraphicContext* ctx, OverlayArena* arena)
+{
+	VkMemoryRequirements requirements {};
+	uint32_t             type_index = 0;
+	arena->buffer                   = CreateAddressBuffer(ctx, kOverlayArenaBytes, 0);
+	if (arena->buffer == nullptr)
+	{
+		return false;
+	}
+	vkGetBufferMemoryRequirements(ctx->device, arena->buffer, &requirements);
+	if (!FindMemoryType(ctx->physical_device, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &type_index))
+	{
+		vkDestroyBuffer(ctx->device, arena->buffer, nullptr);
+		*arena = {};
+		return false;
+	}
+	VkMemoryAllocateFlagsInfo flags {};
+	flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+	flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+	VkMemoryAllocateInfo allocate {};
+	allocate.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocate.pNext           = &flags;
+	allocate.allocationSize  = requirements.size;
+	allocate.memoryTypeIndex = type_index;
+	if (vkAllocateMemory(ctx->device, &allocate, nullptr, &arena->memory) != VK_SUCCESS ||
+	    vkBindBufferMemory(ctx->device, arena->buffer, arena->memory, 0) != VK_SUCCESS)
+	{
+		vkDestroyBuffer(ctx->device, arena->buffer, nullptr);
+		if (arena->memory != nullptr)
+		{
+			vkFreeMemory(ctx->device, arena->memory, nullptr);
+		}
+		*arena = {};
+		return false;
+	}
+	arena->device = BufferDeviceAddress(ctx->device, arena->buffer);
+	arena->free   = {{0, kOverlayArenaBytes}};
+	return true;
+}
+
+static bool SameObject(const GpuMemoryStorageWriteIdentity& a, const GpuMemoryStorageWriteIdentity& b)
+{
+	return a.heap_id == b.heap_id && a.object_id == b.object_id && a.logical_generation == b.logical_generation && a.buffer == b.buffer;
+}
+
+static bool SameWrite(const GpuMemoryStorageWriteIdentity& a, const GpuMemoryStorageWriteIdentity& b)
+{
+	return SameObject(a, b) && a.write_uses == b.write_uses;
+}
+
+static uint64_t StagingBytes(uint64_t size)
+{
+	return (size + kOverlaySlotAlignment - 1u) / kOverlaySlotAlignment * kOverlaySlotAlignment;
+}
+
+static bool AllocateStaging(GraphicContext* ctx, Registry* registry, uint64_t size, uint64_t* offset)
+{
+	auto& staging = registry->staging;
+	if (staging.buffer == nullptr && !staging.failed)
+	{
+		Chunk chunk;
+		staging.failed = !AllocateMappedSnapshot(ctx, kSnapshotStagingBytes, &chunk);
+		if (staging.failed)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 1, "WARNING: guest device-address snapshot staging unavailable; results wait for the host\n");
+			return false;
+		}
+		staging.buffer           = chunk.buffer;
+		staging.memory           = chunk.memory;
+		staging.free             = {{0, kSnapshotStagingBytes}};
+		registry->staging_mapped = chunk.copy;
+	}
+	return staging.buffer != nullptr && AllocateSlot(&staging, StagingBytes(size), offset);
+}
+
+// A later copy of the same write holds the same bytes.
+static bool SnapshotPending(const Registry& registry, const GpuMemoryStorageWriteIdentity& identity)
+{
+	return std::any_of(registry.snapshots.begin(), registry.snapshots.end(),
+	                   [&identity](const auto& snapshot) { return !snapshot.cancelled && SameWrite(snapshot.identity, identity); });
+}
+
+bool GuestDeviceAddressRecordOverlay(GraphicContext* ctx, VkCommandBuffer_T* cmd, SubmissionId recording,
+                                     const GpuMemoryStoragePublication& publication)
+{
+	const uint64_t vaddr  = publication.vaddr;
+	const uint64_t size   = publication.size;
+	const auto*    source = publication.identity.buffer;
+	if (ctx == nullptr || cmd == nullptr || source == nullptr || source->buffer == nullptr || source->guest_in_place || size == 0 ||
+	    size > kOverlayMaxBytes || vaddr > UINT64_MAX - size || !ctx->guest_device_address_supported || !ValidReader(recording))
+	{
+		return false;
+	}
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	const uint32_t              queue  = recording.queue.Value();
+	auto                        found  = registry.overlays.find(vaddr);
+	const bool                  reused = found != registry.overlays.end() && found->second.size == size && found->second.queue == queue;
+	if (reused && OverlayHeldTooLong(found->second))
+	{
+		return false;
+	}
+	Overlay created;
+	if (!reused)
+	{
+		if (registry.arena.buffer == nullptr && (registry.arena.failed || !CreateOverlayArena(ctx, &registry.arena)))
+		{
+			if (!registry.arena.failed)
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 1, "WARNING: guest device-address overlay arena unavailable; results wait for the host\n");
+			}
+			registry.arena.failed = true;
+			return false;
+		}
+		created.size             = size;
+		created.slot_bytes       = (size + kOverlayPadBytes + kOverlaySlotAlignment - 1u) / kOverlaySlotAlignment * kOverlaySlotAlignment;
+		created.queue            = queue;
+		created.held_since_frame = g_flipped_frames.load(std::memory_order_relaxed);
+		if (!AllocateSlot(&registry.arena, created.slot_bytes, &created.slot))
+		{
+			return false;
+		}
+	}
+	const bool snapshot = !SnapshotPending(registry, publication.identity);
+	uint64_t   staging  = 0;
+	if (snapshot && !AllocateStaging(ctx, &registry, size, &staging))
+	{
+		if (!reused)
+		{
+			FreeSlot(&registry.arena, created.slot, created.slot_bytes);
+		}
+		return false;
+	}
+	if (!reused)
+	{
+		DropOverlaysOverlapping(&registry, vaddr, size);
+		found          = registry.overlays.emplace(vaddr, created).first;
+		registry.dirty = true;
+	}
+	auto& overlay            = found->second;
+	overlay.identity         = publication.identity;
+	overlay.guest_generation = publication.guest_generation;
+	RecordPublicationBarrierBefore(cmd);
+	if (!reused)
+	{
+		const uint64_t copied = (size + 3u) & ~uint64_t {3u};
+		VulkanCmdFillBuffer(cmd, registry.arena.buffer, overlay.slot + copied, overlay.slot_bytes - copied, 0);
+	}
+	const VkBufferCopy copy {0, overlay.slot, size};
+	vkCmdCopyBuffer(cmd, source->buffer, registry.arena.buffer, 1, &copy);
+	if (snapshot)
+	{
+		const VkBufferCopy to_staging {0, staging, size};
+		vkCmdCopyBuffer(cmd, source->buffer, registry.staging.buffer, 1, &to_staging);
+		GpuMemoryStorageSnapshot taken;
+		taken.identity  = publication.identity;
+		taken.vaddr     = vaddr;
+		taken.size      = size;
+		taken.recording = recording;
+		taken.offset    = staging;
+		taken.data      = static_cast<const uint8_t*>(registry.staging_mapped) + staging;
+		registry.snapshots.push_back(taken);
+	}
+	// Also makes the staging copy visible to the host once the submission completes.
+	RecordPublicationBarrierAfter(cmd);
+	// The copy writes the slot: it retires only after this submission, like a reader.
+	auto& latest_reader = registry.readers[queue];
+	if (!latest_reader.active || recording.sequence >= latest_reader.submission.sequence)
+	{
+		latest_reader = {recording, true};
+	}
+	return true;
+}
+
+bool GuestDeviceAddressOverlayHolds(const GpuMemoryStorageWriteIdentity& identity, uint64_t vaddr, uint64_t size, GpuQueueId consumer)
+{
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	const auto                  found = registry.overlays.find(vaddr);
+	return found != registry.overlays.end() && found->second.size == size && found->second.queue == consumer.Value() &&
+	       SameWrite(found->second.identity, identity) && !OverlayHeldTooLong(found->second);
+}
+
+void GuestDeviceAddressOverlayWrittenBack(const GpuMemoryStorageWriteIdentity& identity, uint64_t vaddr, uint64_t size,
+                                          bool rebaselined, uint64_t guest_generation)
+{
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	// Guest memory holds this write, newer than what earlier snapshots of the object took.
+	for (auto& snapshot: registry.snapshots)
+	{
+		if (SameObject(snapshot.identity, identity) && snapshot.identity.write_uses <= identity.write_uses)
+		{
+			snapshot.cancelled = true;
+		}
+	}
+	const auto found = registry.overlays.find(vaddr);
+	// Any other overlay over the range is dropped as changed by the next validation. A snapshot
+	// publishes an earlier write than the overlay's when later ones were recorded meanwhile.
+	if (found == registry.overlays.end() || found->second.size != size || !SameObject(found->second.identity, identity))
+	{
+		return;
+	}
+	found->second.held_since_frame = g_flipped_frames.load(std::memory_order_relaxed);
+	if (rebaselined)
+	{
+		found->second.guest_generation = guest_generation;
+	}
+}
+
+void GuestDeviceAddressFrameDone()
+{
+	g_flipped_frames.fetch_add(1, std::memory_order_relaxed);
+	// An overlay stops holding its object once it is held too long, which changes
+	// only here: the pending-storage scans that skipped that object must see it again.
+	GpuMemoryInvalidateStorageScans();
+}
+
+std::vector<GpuMemoryStorageSnapshot> GuestDeviceAddressTakeSnapshots(const std::function<bool(SubmissionId)>& complete)
+{
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	auto&                       snapshots = registry.snapshots;
+	const auto done = std::stable_partition(snapshots.begin(), snapshots.end(), [&complete](const auto& snapshot) { return complete(snapshot.recording); });
+	std::vector<GpuMemoryStorageSnapshot> taken(snapshots.begin(), done);
+	snapshots.erase(snapshots.begin(), done);
+	return taken;
+}
+
+void GuestDeviceAddressReleaseSnapshots(const std::vector<GpuMemoryStorageSnapshot>& snapshots)
+{
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	for (const auto& snapshot: snapshots)
+	{
+		FreeSlot(&registry.staging, snapshot.offset, StagingBytes(snapshot.size));
+	}
+}
+
+void GuestDeviceAddressReleaseCancelledSnapshots(const std::function<bool(SubmissionId)>& complete)
+{
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	auto&                       snapshots = registry.snapshots;
+	const auto                  release   = [&registry, &complete](const auto& snapshot)
+	{
+		if (!snapshot.cancelled || !complete(snapshot.recording))
+		{
+			return false;
+		}
+		FreeSlot(&registry.staging, snapshot.offset, StagingBytes(snapshot.size));
+		return true;
+	};
+	snapshots.erase(std::remove_if(snapshots.begin(), snapshots.end(), release), snapshots.end());
+}
+
+void GuestDeviceAddressValidateOverlays(GpuQueueId consumer)
+{
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	const auto&                 tracker = GpuDirtyPageTracker::Instance();
+	bool                        dropped = false;
+	for (auto it = registry.overlays.begin(); it != registry.overlays.end();)
+	{
+		if (it->second.queue == consumer.Value() && !tracker.ChangedSince(it->first, it->second.size, it->second.guest_generation))
+		{
+			++it;
+			continue;
+		}
+		it      = DropOverlay(&registry, it);
+		dropped = true;
+	}
+	if (dropped)
+	{
+		GpuMemoryInvalidateStorageScans();
+	}
+}
+
+static std::atomic<uint64_t> g_ordering_points {0};
+
+void GuestDeviceAddressNoteOrderingPoint() noexcept
+{
+	g_ordering_points.fetch_add(1, std::memory_order_acq_rel);
 }
 
 static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Registry* registry, GuestDeviceAddressTable* table,
@@ -1650,9 +2193,22 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 	}
 	const DebugStatsScopedTimer prepare_timer(DebugStatsRecordGuestAddressPrepare);
 	// Query before scanning: a page populated during the scan changes the next query.
-	Core::VirtualMemory::SharedBackingPopulation population;
-	const bool known    = Kernel::Memory::KernelQueryPhysicalPopulation(&population);
-	const bool physical = !known || !registry->population_scanned || population != registry->scanned_population;
+	// Only partly imported physical ranges can gain pages; without one the backing is
+	// not queried and the scan is left unrecorded, so the next prepare with one scans.
+	const bool partial = !registry->partial.empty();
+	// Read before the query: an ordering point during the scan makes the next preparation query again.
+	const uint64_t ordering   = g_ordering_points.load(std::memory_order_acquire);
+	const uint64_t host_write = GpuDirtyPageTracker::HostWriteEpoch();
+	const bool     unordered  = registry->population_scanned && registry->scanned_ordering == ordering &&
+	                       registry->scanned_host_write == host_write;
+	Core::VirtualMemory::SharedBackingPopulation population = registry->scanned_population;
+	bool                                         known      = partial && unordered;
+	if (partial && !unordered)
+	{
+		const DebugStatsScopedTimer population_timer(DebugStatsRecordGuestAddressPopulation);
+		known = Kernel::Memory::KernelQueryPhysicalPopulation(&population);
+	}
+	const bool physical = partial && (!known || !registry->population_scanned || population != registry->scanned_population);
 	// Ranges number in the thousands for some titles: time each phase once
 	// per preparation, not once per range.
 	{
@@ -1686,7 +2242,15 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 	// Refresh snapshots the CPU wrote since they were taken; the imported
 	// host memory is coherent, so the device sees the refresh directly.
 	const DebugStatsScopedTimer refresh_timer(DebugStatsRecordGuestAddressRefresh);
-	for (const uint64_t base: registry->tracked)
+	// Read the versions before the walk: a change made during it advances them past
+	// what is recorded, so the next preparation walks again.
+	const uint64_t evidence_version = GpuDirtyPageTracker::Instance().EvidenceVersion();
+	const bool     walk             = !registry->refresh_clean || registry->clean_evidence_version != evidence_version ||
+	                    registry->clean_chunk_version != registry->chunk_version;
+	registry->refresh_clean = false;
+	bool refreshed          = false;
+	static const std::set<uint64_t> no_ranges;
+	for (const uint64_t base: walk ? registry->tracked : no_ranges)
 	{
 		for (auto& chunk: registry->ranges.at(base).chunks)
 		{
@@ -1694,6 +2258,7 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 			{
 				continue;
 			}
+			refreshed = true;
 			// A write fault can dirty this snapshot after the whole-registry preflight
 			// above. Check again at the refresh point before replacing bytes that an
 			// in-flight GPU reader may still observe.
@@ -1708,6 +2273,9 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 			}
 		}
 	}
+	registry->refresh_clean          = !refreshed;
+	registry->clean_evidence_version = evidence_version;
+	registry->clean_chunk_version    = registry->chunk_version;
 	if (registry->dirty)
 	{
 		const SubmissionId active_reader       = FirstActiveReader(*registry);
@@ -1729,6 +2297,8 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 	}
 	registry->scanned_population = population;
 	registry->population_scanned = known;
+	registry->scanned_ordering   = ordering;
+	registry->scanned_host_write = host_write;
 	table->address               = registry->table.device;
 	table->entry_count           = registry->table.entries;
 	return GuestDeviceAddressPrepareResult::Ready;

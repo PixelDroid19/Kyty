@@ -16,7 +16,7 @@ constexpr uint32_t kGpuMemoryTransientBufferMaxEntriesPerUsage = 16384u;
 // The command buffers of one command pool share a snapshot pool, so it holds
 // the snapshots of every recording in flight (one per command buffer of the
 // pool), each within the per-recording budget.
-constexpr uint32_t kGpuMemoryTransientSnapshotPoolRecordings = 8u;
+constexpr uint32_t kGpuMemoryTransientSnapshotPoolRecordings = 32u;
 
 static_assert(kGpuMemoryMaxTransientReadOnlyBytes <= kGpuMemoryTransientBufferPoolMaxBytes);
 

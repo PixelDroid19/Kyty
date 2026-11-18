@@ -147,6 +147,8 @@ public:
 
 	static void AddCurrentPhase(DebugStatsGpuMemoryCreatePhase phase, uint64_t elapsed_ns, uint64_t bytes = 0);
 
+	[[nodiscard]] DebugStatsClock::time_point Start() const { return m_start; }
+
 private:
 	DebugStatsGpuMemorySlowCreateRecord* m_previous = nullptr;
 	DebugStatsGpuMemorySlowCreateRecord  m_record {};
@@ -283,6 +285,9 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t guest_address_residency_calls = 0;
 	uint64_t guest_address_residency_ns = 0;
 	uint64_t guest_address_residency_max_ns = 0;
+	uint64_t guest_address_population_calls = 0;
+	uint64_t guest_address_population_ns = 0;
+	uint64_t guest_address_population_max_ns = 0;
 	uint64_t guest_address_refresh_calls = 0;
 	uint64_t guest_address_refresh_ns = 0;
 	uint64_t guest_address_refresh_max_ns = 0;
@@ -486,6 +491,7 @@ void DebugStatsRecordDispatchProcessor(uint64_t elapsed_ns);
 void DebugStatsRecordDispatchWriteBack(uint64_t elapsed_ns);
 void DebugStatsRecordGuestAddressPrepare(uint64_t elapsed_ns);
 void DebugStatsRecordGuestAddressResidency(uint64_t elapsed_ns);
+void DebugStatsRecordGuestAddressPopulation(uint64_t elapsed_ns);
 void DebugStatsRecordGuestAddressRefresh(uint64_t elapsed_ns);
 void DebugStatsRecordDrawRenderLockWait(uint64_t elapsed_ns);
 void DebugStatsRecordDrawStateSetup(uint64_t elapsed_ns);

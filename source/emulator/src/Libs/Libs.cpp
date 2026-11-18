@@ -64,6 +64,7 @@ LIB_DEFINE(InitAmpr_1);
 LIB_DEFINE(InitFiber_1);
 LIB_DEFINE(InitRudp_1);
 LIB_DEFINE(InitJson2_1);
+LIB_DEFINE(InitGameLiveStreaming_1);
 LIB_DEFINE(InitFont_1);
 LIB_DEFINE(InitFontFt_1);
 LIB_DEFINE(InitIme_1);
@@ -123,6 +124,7 @@ bool Init(const String& id, ::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_CHECK(U"libFiber_1", InitFiber_1);
 	LIB_CHECK(U"libRudp_1", InitRudp_1);
 	LIB_CHECK(U"libJson2_1", InitJson2_1);
+	LIB_CHECK(U"libGameLiveStreaming_1", InitGameLiveStreaming_1);
 	LIB_CHECK(U"libVideodec2_1", InitVideodec2_1);
 	LIB_CHECK(U"libFont_1", InitFont_1);
 	LIB_CHECK(U"libFontFt_1", InitFontFt_1);
@@ -180,6 +182,7 @@ void InitAll(::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_LOAD(InitFiber_1);
 	LIB_LOAD(InitRudp_1);
 	LIB_LOAD(InitJson2_1);
+	LIB_LOAD(InitGameLiveStreaming_1);
 	LIB_LOAD(InitFont_1);
 	LIB_LOAD(InitFontFt_1);
 	LIB_LOAD(InitIme_1);

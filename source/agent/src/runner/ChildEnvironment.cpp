@@ -4,6 +4,7 @@
 
 #if defined(_WIN32)
 #include <stdlib.h>
+#include <string.h>
 #else
 extern char** environ; // NOLINT(readability-redundant-declaration)
 #endif
@@ -34,13 +35,44 @@ const std::vector<std::string>& HostEnvironmentKeys()
 	    "MESA_LOADER_DRIVER_OVERRIDE",
 	    "AMD_VULKAN_ICD",
 	    "DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1",
+#if defined(_WIN32)
+	    // System DLLs, Winsock and the driver's shader cache read these on Windows.
+	    "SystemRoot",
+	    "windir",
+	    "SystemDrive",
+	    "TEMP",
+	    "TMP",
+	    "USERPROFILE",
+	    "USERNAME",
+	    "APPDATA",
+	    "LOCALAPPDATA",
+	    "ProgramData",
+	    "ProgramFiles",
+	    "ComSpec",
+	    "PATHEXT",
+	    "NUMBER_OF_PROCESSORS",
+	    "PROCESSOR_ARCHITECTURE",
+#endif
 	};
 	return keys;
 }
 
+#if defined(_WIN32)
+bool SameKey(const std::string& a, const std::string& b)
+{
+	return _stricmp(a.c_str(), b.c_str()) == 0;
+}
+#else
+bool SameKey(const std::string& a, const std::string& b)
+{
+	return a == b;
+}
+#endif
+
+// Windows environment names are case-insensitive, so `Path` answers for `PATH`.
 std::string ValueOf(const Environment& env, const std::string& key)
 {
-	const auto it = env.find(key);
+	const auto it = std::find_if(env.begin(), env.end(), [&key](const auto& entry) { return SameKey(entry.first, key); });
 	return it == env.end() ? std::string() : it->second;
 }
 

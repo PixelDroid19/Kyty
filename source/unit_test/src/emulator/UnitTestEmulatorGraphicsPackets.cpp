@@ -34,6 +34,7 @@
 #include "../../../emulator/src/Graphics/ShaderSpirvInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvScJoin.h"
 #include "../../../emulator/src/Graphics/ShaderStorageAnalysis.h"
+#include "../../../emulator/src/Graphics/GraphicsRunDrawFront.h"
 #include "../../../emulator/src/Graphics/GraphicsRunInternal.h"
 #include "../../../emulator/src/Graphics/GraphicsRunWaitPolicy.h"
 
@@ -1487,6 +1488,84 @@ TEST(EmulatorGraphicsPackets, EvaluatesWaitDeadlinesWithoutClockUnderflow)
 	EXPECT_TRUE(SuspendedWaitDiagnosticDeadlineReached(UINT64_MAX, 1u, UINT64_MAX - 1u));
 }
 
+TEST(EmulatorGraphicsPackets, BatchWaitProducedByEarlierWriteIsSelfContained)
+{
+	// IT_WRITE_DATA of one dword to 0x20000, then R_WAIT_MEM_32 on the same dword.
+	const uint32_t words[] = {0xC0033700u, 0u, 0x20000u, 0u, 1u, 0xC0051028u, 0x20000u, 0u, 0xffffffffu, 1u, 3u, 10u};
+	const auto     scan    = ScanBatchMemoryWaits(words, 12u);
+	EXPECT_EQ(scan.waits, 1u);
+	EXPECT_EQ(scan.own, 1u);
+	EXPECT_TRUE(BatchProducesItsOwnWaits(scan, ScanBatchMemoryWaits(nullptr, 0u)));
+}
+
+TEST(EmulatorGraphicsPackets, BatchWaitProducedByEarlierReleaseIsSelfContained)
+{
+	// IT_RELEASE_MEM storing a 32-bit value to 0x30000, then IT_WAIT_REG_MEM on it.
+	const uint32_t words[] = {0xC0054902u, 0u, 1u << 29u, 0x30000u, 0u, 1u, 0u, 0xC0053C00u, 0u, 0x30000u, 0u, 1u, 0xffffffffu, 10u};
+	const auto     scan    = ScanBatchMemoryWaits(words, 14u);
+	EXPECT_EQ(scan.waits, 1u);
+	EXPECT_EQ(scan.own, 1u);
+	EXPECT_TRUE(BatchProducesItsOwnWaits(scan, scan));
+}
+
+TEST(EmulatorGraphicsPackets, BatchScanListsTopLevelFlipHandles)
+{
+	// R_FLIP for handle 3, a NOP, then R_FLIP for handle 1: a submit that returns before decode counts both as pending.
+	const uint32_t words[] = {0xC004105Cu, 3u, 0u, 1u, 0u, 0u, 0xC0001000u, 0u, 0xC004105Cu, 1u, 2u, 1u, 0u, 0u};
+	const auto     scan    = ScanBatchMemoryWaits(words, 14u);
+	EXPECT_EQ(scan.flip_handles, (std::vector<uint32_t> {3u, 1u}));
+	// A flip packet cut short by the end of the buffer is not a flip.
+	EXPECT_TRUE(ScanBatchMemoryWaits(words, 4u).flip_handles.empty());
+}
+
+TEST(EmulatorGraphicsPackets, BatchWaitWithoutEarlierProducerStaysSerial)
+{
+	const uint32_t no_producer[] = {0xC0051028u, 0x20000u, 0u, 0xffffffffu, 1u, 3u, 10u};
+	EXPECT_FALSE(BatchProducesItsOwnWaits(ScanBatchMemoryWaits(no_producer, 7u), ScanBatchMemoryWaits(nullptr, 0u)));
+
+	// The producer comes after the wait, so it cannot have satisfied it.
+	const uint32_t late_producer[] = {0xC0051028u, 0x20000u, 0u, 0xffffffffu, 1u, 3u, 10u, 0xC0033700u, 0u, 0x20000u, 0u, 1u};
+	EXPECT_FALSE(BatchProducesItsOwnWaits(ScanBatchMemoryWaits(late_producer, 12u), ScanBatchMemoryWaits(nullptr, 0u)));
+
+	// A write to a different address does not produce the awaited one.
+	const uint32_t other_address[] = {0xC0033700u, 0u, 0x40000u, 0u, 1u, 0xC0051028u, 0x20000u, 0u, 0xffffffffu, 1u, 3u, 10u};
+	EXPECT_FALSE(BatchProducesItsOwnWaits(ScanBatchMemoryWaits(other_address, 12u), ScanBatchMemoryWaits(nullptr, 0u)));
+}
+
+TEST(EmulatorGraphicsPackets, BatchWithIndirectBufferStaysSerial)
+{
+	const uint32_t words[] = {0xC0033F00u, 0x1000u, 0u, 0x10u, 0u};
+	const auto     scan    = ScanBatchMemoryWaits(words, 5u);
+	EXPECT_EQ(scan.nested, 1u);
+	EXPECT_EQ(scan.waits, 0u);
+	EXPECT_FALSE(BatchProducesItsOwnWaits(scan, ScanBatchMemoryWaits(nullptr, 0u)));
+}
+
+TEST(EmulatorGraphicsPackets, BatchWaitWithNullAddressUsesPrecedingReleaseDestination)
+{
+	const uint32_t release_then_wait[] = {0xC0051060u, 0u, 2u << 16u, 0x20000u, 0u, 1u, 0u, 0xC0071058u, 0u, 0u, 0xffffffffu, 0xffffffffu, 1u, 0u, 3u, 10u};
+	const auto     own                 = ScanBatchMemoryWaits(release_then_wait, 16u);
+	EXPECT_EQ(own.waits, 1u);
+	EXPECT_EQ(own.own, 1u);
+
+	// Without the release in front, the null address names no producer.
+	const auto alone = ScanBatchMemoryWaits(release_then_wait + 7, 9u);
+	EXPECT_EQ(alone.waits, 1u);
+	EXPECT_EQ(alone.own, 0u);
+}
+
+TEST(EmulatorGraphicsPackets, BatchWithAnUnsizableHeaderStaysSerial)
+{
+	// An impossible COUNT is a 2-dword unit to the decoder; the scan keeps walking after it, but the batch fails closed
+	// even though the wait after it has an earlier producer.
+	const uint32_t words[] = {0xC3FF0000u, 0u, 0xC0033700u, 0u, 0x20000u, 0u, 1u, 0xC0051028u, 0x20000u, 0u, 0xffffffffu, 1u, 3u, 10u};
+	const auto     scan    = ScanBatchMemoryWaits(words, 14u);
+	EXPECT_EQ(scan.unparsed, 1u);
+	EXPECT_EQ(scan.waits, 1u);
+	EXPECT_EQ(scan.own, 1u);
+	EXPECT_FALSE(BatchProducesItsOwnWaits(scan, ScanBatchMemoryWaits(nullptr, 0u)));
+}
+
 TEST(EmulatorGraphicsPackets, RejectsByteMisalignedRawStorage)
 {
 	ShaderBufferResource resource {};
@@ -2306,8 +2385,8 @@ TEST(EmulatorGraphicsPackets, ReusesFourComponentBufferFunctionType)
 	EXPECT_NE(source.FindIndex("%function_tbuffer_load_store_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%function_tbuffer_load_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%function_tbuffer_store_format_xyzw = OpTypeFunction"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpSGreaterThanEqual %bool %tbuf_s_f_xyzw_11 %int_75"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpSLessThanEqual %bool %tbuf_s_f_xyzw_11 %int_77"), Core::STRING8_INVALID_INDEX);
+	// Gen5 format stores encode the descriptor format instead of the legacy store helper.
+	EXPECT_NE(source.FindIndex("%gen5_mubuf_store_2_0 = OpFunctionCall %void %gen5_buffer_store_words"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, StructuresBackwardSBranchAsLoopHeader)
@@ -6492,6 +6571,10 @@ TEST(EmulatorGraphicsPackets, MaterializesImageSampleBWithBias)
 	                              "%image_sample_lod_biased_0 %image_sample_lod_levels_f_0"),
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(lod_source.FindIndex("%fs_tap_value_0 = OpLoad"), Core::STRING8_INVALID_INDEX);
+	const std::string generated = lod_source.c_str();
+	const auto sampled = generated.find("OpStore %fs_tap_3 %float_1_000000");
+	ASSERT_NE(sampled, std::string::npos);
+	EXPECT_EQ(generated.find("OpStore %fs_tap_0 %float_0_000000", sampled), std::string::npos);
 	EXPECT_FALSE(ShaderRecompilePS(code, &lod_input).IsEmpty());
 }
 
@@ -7634,9 +7717,12 @@ TEST(EmulatorGraphicsPackets, Gen5LiveBufferAtomicUsesResolvedStorageSlot)
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%buf_addr_access_size_2_0 = OpSelect %uint %buf_addr_format_known_2_0 %buf_addr_format_bytes_2_0 %uint_8"),
 	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%buf_addr_bytes_enough_3_0_0 = OpUGreaterThanEqual %bool %buf_addr_bytes_3_0_0 %uint_16"),
+	// A format store writes one element of the descriptor's format, like the format loads above.
+	EXPECT_NE(source.FindIndex("%buf_addr_access_size_3_0 = OpSelect %uint %buf_addr_format_known_3_0 %buf_addr_format_bytes_3_0 %uint_16"),
 	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%gen5_mubuf_store_enabled_3_0 = OpLogicalAnd %bool %gen5_mubuf_store_active_3_0 %buf_addr_valid_c_3_0"),
+	EXPECT_NE(source.FindIndex("%buf_addr_access_final_3_0 = OpLogicalAnd %bool %buf_addr_access_enabled_3_0 %buf_addr_valid_c_3_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gen5_mubuf_store_enabled_3_0 = OpLogicalAnd %bool %gen5_mubuf_store_active_3_0 %buf_addr_access_final_3_0"),
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%buf_addr_bytes_enough_4_0_0 = OpUGreaterThanEqual %bool %buf_addr_bytes_4_0_0 %uint_16"),
 	          Core::STRING8_INVALID_INDEX);
@@ -9082,10 +9168,10 @@ TEST(EmulatorGraphicsPackets, VMinMaxF32UseRdna2NanSelection)
 	ShaderPixelInputInfo input {};
 	const auto           source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 	// Values are covered by EmulatorShaderArithmetic.FloatModeClampOutputModifierAndMinMaxContracts;
-	// here only the selection order and the GLSL operation of each instruction are checked.
-	EXPECT_NE(source.FindIndex("%mm_0_quiet = OpSelect %float %mm_0_an %t1_0 %mm_0_ordered"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%mm_0_num = OpExtInst %float %GLSL_std_450 NMin %t0_0 %t1_0"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%mm_1_num = OpExtInst %float %GLSL_std_450 NMax %t0_1 %t1_1"), Core::STRING8_INVALID_INDEX);
+	// here only the selection order and the ordering-key compare of each instruction are checked.
+	EXPECT_NE(source.FindIndex("%mm_0_quiet = OpSelect %uint %mm_0_an %mm_0_b %mm_0_second_nan"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%mm_0_first = OpSLessThan %bool %mm_0_akey %mm_0_bkey"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%mm_1_first = OpSGreaterThan %bool %mm_1_akey %mm_1_bkey"), Core::STRING8_INVALID_INDEX);
 
 	constexpr uint32_t lhs_number = 0x3f800000u;
 	constexpr uint32_t rhs_number = 0x40000000u;
@@ -12042,6 +12128,32 @@ TEST(EmulatorGraphicsPackets, WritesAgcMultiDrawPackets)
 	EXPECT_EQ(instanced[14], 0xc6000000u);
 
 	EXPECT_EQ(Gen5::GraphicsDcbDrawIndirectMulti(nullptr, 0u, 0u, 0u, 0u, 0u, 0u), nullptr);
+}
+
+// The replay ahead of a processor runs only the packets this classification admits, so a packet with
+// any effect beyond its processor's registers must classify as Other.
+TEST(EmulatorGraphicsPackets, DrawFrontAdmitsOnlyRegisterAndIndexedDrawPackets)
+{
+	auto classify = [](std::vector<uint32_t> packet)
+	{ return DrawFrontClassifyPacket(packet.data(), static_cast<uint32_t>(packet.size())); };
+
+	EXPECT_EQ(classify({0x80000000u}), DrawFrontPacket::Padding);
+	EXPECT_EQ(classify({0u, 0u}), DrawFrontPacket::Padding);
+
+	EXPECT_EQ(classify({KYTY_PM4(3, Pm4::IT_SET_CONTEXT_REG, 0u), 0x10u, 1u}), DrawFrontPacket::Registers);
+	EXPECT_EQ(classify({KYTY_PM4(3, Pm4::IT_SET_SH_REG, 0u) | 1u, 0x20cu, 1u}), DrawFrontPacket::Registers);
+	EXPECT_EQ(classify({KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0x6875000du}), DrawFrontPacket::Registers);
+	EXPECT_EQ(classify({KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0x12345678u}), DrawFrontPacket::Registers);
+
+	EXPECT_EQ(classify({KYTY_PM4(6, Pm4::IT_DRAW_INDEX_2, 0u), 3u, 0u, 0u, 3u, 0u}), DrawFrontPacket::IndexedDraw);
+	EXPECT_EQ(classify({KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u), 3u, 0u, 3u, 0u}), DrawFrontPacket::IndexedDraw);
+	EXPECT_EQ(classify({KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX), 3u, 0u, 0u, 0u, 0u, 0u}), DrawFrontPacket::IndexedDraw);
+
+	// A flip marker, an event, an indirect buffer and a packet longer than its run are not register state.
+	EXPECT_EQ(classify({KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0x68750777u}), DrawFrontPacket::Other);
+	EXPECT_EQ(classify({KYTY_PM4(3, Pm4::IT_EVENT_WRITE, 0u), 0u, 0u}), DrawFrontPacket::Other);
+	EXPECT_EQ(classify({KYTY_PM4(4, Pm4::IT_INDIRECT_BUFFER, 0u), 0u, 0u, 0u}), DrawFrontPacket::Other);
+	EXPECT_EQ(classify({KYTY_PM4(4, Pm4::IT_SET_CONTEXT_REG, 0u), 0x10u, 1u}), DrawFrontPacket::Other);
 }
 
 UT_END();

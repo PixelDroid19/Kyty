@@ -2025,13 +2025,13 @@ TEST(EmulatorModuleLoad, Json2ParserUsesBoundedInputAndReleasesParsedValues)
 	ASSERT_NE(cstr_record, nullptr);
 	ASSERT_NE(dtor_record, nullptr);
 
-	using CtorFn  = void* (*)(void*);
-	using ParseFn = int32_t (*)(void*, const char*, size_t);
-	using IndexFn = const void* (*)(const void*, const char*);
-	using TypeFn  = uint32_t (*)(const void*);
-	using CountFn = size_t (*)(const void*);
-	using CStrFn  = const char* (*)(const void*);
-	using DtorFn  = void (*)(void*);
+	using CtorFn  = void*(KYTY_SYSV_ABI*)(void*);
+	using ParseFn = int32_t(KYTY_SYSV_ABI*)(void*, const char*, size_t);
+	using IndexFn = const void*(KYTY_SYSV_ABI*)(const void*, const char*);
+	using TypeFn  = uint32_t(KYTY_SYSV_ABI*)(const void*);
+	using CountFn = size_t(KYTY_SYSV_ABI*)(const void*);
+	using CStrFn  = const char*(KYTY_SYSV_ABI*)(const void*);
+	using DtorFn  = void(KYTY_SYSV_ABI*)(void*);
 	auto ctor  = reinterpret_cast<CtorFn>(ctor_record->vaddr);
 	auto parse = reinterpret_cast<ParseFn>(parse_record->vaddr);
 	auto index = reinterpret_cast<IndexFn>(index_record->vaddr);
@@ -2111,7 +2111,7 @@ TEST(EmulatorModuleLoad, LibcWcsstrUsesGuestUtf16CodeUnits)
 
 	const auto* record = symbols.Find(LibcFunc(u"WDpobjImAb4"));
 	ASSERT_NE(record, nullptr);
-	using Wcsstr = uint16_t* (*)(const uint16_t*, const uint16_t*);
+	using Wcsstr = uint16_t*(KYTY_SYSV_ABI*)(const uint16_t*, const uint16_t*);
 	auto wcsstr = reinterpret_cast<Wcsstr>(record->vaddr);
 
 	uint16_t text[]   = {u'a', u'b', u'c', u'd', 0};
@@ -2132,7 +2132,7 @@ TEST(EmulatorModuleLoad, LibcWcsncmpUsesGuestUtf16CodeUnits)
 
 	const auto* record = symbols.Find(LibcFunc(u"E8wCoUEbfzk"));
 	ASSERT_NE(record, nullptr);
-	using Wcsncmp = int (*)(const uint16_t*, const uint16_t*, size_t);
+	using Wcsncmp = int(KYTY_SYSV_ABI*)(const uint16_t*, const uint16_t*, size_t);
 	auto wcsncmp = reinterpret_cast<Wcsncmp>(record->vaddr);
 
 	uint16_t same[]    = {u'a', u'b', 0};
@@ -2155,7 +2155,7 @@ TEST(EmulatorModuleLoad, LibcWideClassifiesDinkumwareClassesInTheCLocale)
 
 	const auto* record = symbols.Find(LibcFunc(u"CyXs2l-1kNA"));
 	ASSERT_NE(record, nullptr);
-	using Iswctype = int (*)(uint32_t, int);
+	using Iswctype = int(KYTY_SYSV_ABI*)(uint32_t, int);
 	auto iswctype = reinterpret_cast<Iswctype>(record->vaddr);
 
 	EXPECT_EQ(iswctype(u'i', 2), 1);
@@ -2335,7 +2335,7 @@ TEST(EmulatorModuleLoad, LibkernelRegistersDlsym)
 	const auto* record = symbols.Find(query);
 	ASSERT_NE(record, nullptr);
 
-	using DlsymFn = int (*)(int32_t, const char*, void**);
+	using DlsymFn = int(KYTY_SYSV_ABI*)(int32_t, const char*, void**);
 	auto* const preserved = reinterpret_cast<void*>(0x12345678u);
 	void*      address    = preserved;
 	const int  result     = reinterpret_cast<DlsymFn>(record->vaddr)(-1, "missing_symbol", &address);

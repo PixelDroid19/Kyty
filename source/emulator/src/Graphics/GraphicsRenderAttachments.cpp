@@ -43,6 +43,7 @@
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
+#include <array>
 #include <cinttypes>
 #include <cmath>
 #include <cstdlib>
@@ -56,8 +57,80 @@
 namespace Kyty::Libs::Graphics {
 
 static ComputeColorFillEvents g_compute_color_fills;
+// Pending stores of one word at the head of every DCC block of a surface, keyed by the surface range.
+static ComputeColorFillEvents g_color_block_heads;
 // Pending DCC and CMASK metadata clears, keyed by the metadata range the guest filled.
 static ComputeColorFillEvents g_color_meta_clears;
+
+// The last uniform fill transfer of an in-place storage range. Its guest bytes live in
+// host memory, which the device writes over the bus at a few tens of GB/s, so a
+// render-target clear repeated every frame costs about a millisecond per 4K target.
+// A repeat of the same word is a no-op while no writer has touched the bytes since:
+// the storage object kept its identity and only the fill's own dispatch wrote it, no
+// other storage bind or device-address publication covered the range, no writable
+// image was bound, and the CPU did not write it.
+struct InPlaceFill
+{
+	uint64_t                address            = 0;
+	uint64_t                size               = 0;
+	uint32_t                word               = 0;
+	int                     queue              = -1;
+	int                     heap_id            = -1;
+	int                     object_id          = -1;
+	uint64_t                logical_generation = 0;
+	uint64_t                write_uses         = 0;
+	const VulkanBuffer*     buffer             = nullptr;
+	GpuDirtyReadObservation cpu_observation;
+	// Storage binds over the range since the fill, and the serial of the latest one.
+	uint32_t binds     = 0;
+	uint64_t last_bind = 0;
+};
+static std::array<InPlaceFill, 64> g_in_place_fills;
+// Slots are taken in order, so only [0, used) ever held a fill.
+static uint32_t g_in_place_fills_used  = 0;
+static uint32_t g_in_place_fill_next   = 0;
+static uint64_t g_storage_bind_serial = 0;
+
+static bool Overlaps(const InPlaceFill& fill, uint64_t address, uint64_t size)
+{
+	return fill.size != 0 && address < fill.address + fill.size && fill.address < address + size;
+}
+
+static void DiscardInPlaceFills(uint64_t address, uint64_t size)
+{
+	for (uint32_t i = 0; i < g_in_place_fills_used; ++i)
+	{
+		if (Overlaps(g_in_place_fills[i], address, size)) { g_in_place_fills[i] = {}; }
+	}
+}
+
+// Records this fill and returns whether guest memory already holds it.
+static bool RepeatsInPlaceFill(int queue, const GpuMemoryStorageWriteIdentity& identity, uint64_t address, uint64_t size, uint32_t word)
+{
+	InPlaceFill* last = nullptr;
+	for (uint32_t i = 0; i < g_in_place_fills_used; ++i)
+	{
+		auto& fill = g_in_place_fills[i];
+		if (fill.size != 0 && fill.address == address && fill.size == size) { last = &fill; }
+	}
+	// The fill's own dispatch is the latest storage bind and the only one since the last fill.
+	// A writer of another queue recorded before the last fill is ordered by the guest, whose
+	// labels complete with their submissions, as for in-place storage in the write-back scan.
+	const bool repeats = last != nullptr && last->word == word && last->queue == queue && last->heap_id == identity.heap_id &&
+	                     last->object_id == identity.object_id && last->logical_generation == identity.logical_generation &&
+	                     last->buffer == identity.buffer && last->write_uses + 1u == identity.write_uses && last->binds == 1u &&
+	                     last->last_bind == g_storage_bind_serial && last->cpu_observation.tracked &&
+	                     GpuDirtyPageTracker::Instance().ReadObservationIsStable(address, size, last->cpu_observation);
+	if (last == nullptr)
+	{
+		last                 = &g_in_place_fills[g_in_place_fill_next];
+		g_in_place_fill_next  = (g_in_place_fill_next + 1u) % g_in_place_fills.size();
+		g_in_place_fills_used = std::min<uint32_t>(g_in_place_fills_used + 1u, g_in_place_fills.size());
+	}
+	*last = {address,         size, word, queue, identity.heap_id, identity.object_id, identity.logical_generation, identity.write_uses,
+	         identity.buffer, GpuDirtyPageTracker::Instance().BeginRead(address, size)};
+	return repeats;
+}
 
 static void TransitionColorImage(VkCommandBuffer vk_buffer, VulkanImage* image, VkImageLayout new_layout, VkAccessFlags dst_access,
                                  VkPipelineStageFlags dst_stage);
@@ -78,7 +151,9 @@ static bool ComputeColorFillUsesGraphicsQueue(CommandBuffer* buffer)
 // Which images sharing bytes with a filled range a resolved fill tolerates.
 enum class ComputeFillAliases
 {
-	// DCC metadata: any image other than an exact color alias refuses the clear.
+	// Color metadata: any image other than an exact color alias refuses the clear,
+	// except a sampled texture that only partly shares the bytes. It never writes
+	// them, and the clear is applied only to a target whose metadata address it is.
 	ExactOnly,
 	// Uniform color fill: images that only partly share the bytes (transient
 	// pool aliases) are left as they are. The dispatch already wrote the fill to
@@ -107,6 +182,11 @@ static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, Com
 		                         entry.type == GpuMemoryObjectType::Texture;
 		if (aliases == ComputeFillAliases::SkipPartial && entry.relation != GpuMemoryOverlapType::Equals &&
 		    (image_alias || entry.type == GpuMemoryObjectType::StorageTexture || entry.type == GpuMemoryObjectType::DepthStencilBuffer))
+		{
+			continue;
+		}
+		if (aliases == ComputeFillAliases::ExactOnly && entry.type == GpuMemoryObjectType::Texture &&
+		    entry.relation != GpuMemoryOverlapType::Equals)
 		{
 			continue;
 		}
@@ -219,7 +299,27 @@ static bool ApplyComputeColorFillImages(CommandBuffer* buffer, const ComputeColo
 
 void InvalidateComputeColorFills(const ShaderBindResources& bind)
 {
-	if (g_compute_color_fills.Empty() && g_color_meta_clears.Empty())
+	g_storage_bind_serial++;
+	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	{
+		const auto&    resource = bind.storage_buffers.buffers[i];
+		const uint64_t size     = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
+		for (uint32_t f = 0; f < g_in_place_fills_used; ++f)
+		{
+			auto& fill = g_in_place_fills[f];
+			// A range that cannot be bounded counts as covering every fill.
+			if (resource.Base48() > UINT64_MAX - size || Overlaps(fill, resource.Base48(), size))
+			{
+				fill.binds++;
+				fill.last_bind = g_storage_bind_serial;
+			}
+		}
+	}
+	for (int i = 0; i < bind.textures2D.textures_num; ++i)
+	{
+		if (bind.textures2D.desc[i].usage != ShaderTextureUsage::ReadOnly) { DiscardInPlaceFills(0u, UINT64_MAX); }
+	}
+	if (g_compute_color_fills.Empty() && g_color_meta_clears.Empty() && g_color_block_heads.Empty())
 	{
 		return;
 	}
@@ -231,10 +331,12 @@ void InvalidateComputeColorFills(const ShaderBindResources& bind)
 		if (resource.Base48() == 0u || size == 0u || resource.Base48() > UINT64_MAX - size)
 		{
 			g_compute_color_fills.DiscardAll();
+			g_color_block_heads.DiscardAll();
 			g_color_meta_clears.DiscardAll();
 			return;
 		}
 		g_compute_color_fills.DiscardOverlaps(resource.Base48(), size);
+		g_color_block_heads.DiscardOverlaps(resource.Base48(), size);
 		g_color_meta_clears.DiscardOverlaps(resource.Base48(), size);
 	}
 	// A DCC clear survives writable image binds: its consumer re-resolves the
@@ -245,15 +347,17 @@ void InvalidateComputeColorFills(const ShaderBindResources& bind)
 		{
 			// No exact writable-image range proof is available at this seam.
 			g_compute_color_fills.DiscardAll();
+			g_color_block_heads.DiscardAll();
 			return;
 		}
 	}
 }
 
 bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x, uint32_t group_y, uint32_t group_z,
-                                     ComputeUniformBufferFill* fill)
+                                     ComputeUniformBufferFill* fill, ComputeBlockHeadFill* heads)
 {
-	EXIT_IF(fill == nullptr);
+	EXIT_IF(fill == nullptr || heads == nullptr);
+	*heads = {};
 	const auto& proof = input.uniform_buffer_fill;
 	const auto& buffers = input.bind.storage_buffers;
 
@@ -288,14 +392,16 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	// with GPU writes behind it has no stable value here. The bound read-only
 	// view uploads these guest bytes even inside a stale surface of a reused
 	// range, so the dispatch writes the value read here.
-	uint32_t loaded_word = 0;
+	// The 4-byte form loads one word, the 16-byte form one word per component.
+	std::array<uint32_t, 4> loaded_words {};
 	if (loaded_value)
 	{
-		const int   source_index = 1 - destination_index;
-		const auto& source       = buffers.buffers[source_index];
+		const int      source_index = 1 - destination_index;
+		const auto&    source       = buffers.buffers[source_index];
+		const uint32_t loaded_bytes = proof.record_bytes == 16u ? 16u : 4u;
 		if (buffers.start_register[source_index] != proof.value_buffer_register || !binding_is_exact(source_index, true) ||
-		    source.Base48() == 0u || ShaderBufferByteSize(source.Stride(), source.NumRecords()) < sizeof(loaded_word) ||
-		    !GpuMemoryCaptureSnapshotReadOnlyBuffer(source.Base48(), sizeof(loaded_word), &loaded_word, nullptr, nullptr,
+		    source.Base48() == 0u || ShaderBufferByteSize(source.Stride(), source.NumRecords()) < loaded_bytes ||
+		    !GpuMemoryCaptureSnapshotReadOnlyBuffer(source.Base48(), loaded_bytes, loaded_words.data(), nullptr, nullptr,
 		                                            GpuMemorySnapshotAdmission::StorageView))
 		{
 			return false;
@@ -320,15 +426,26 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	std::array<uint32_t, 4> words {};
 	if (proof.record_bytes == 16u)
 	{
-		// BUF_FMT_32_32_32_32_UINT, one record per invocation.
-		if (destination.Stride() != 16u || destination.Format() != 75u || destination.DstSelXYZW() != 0xfacu ||
-		    invocations != destination.NumRecords())
+		// BUF_FMT_32_32_32_32_UINT, one record per invocation. A store-format through
+		// BUF_FMT_32_UINT writes X alone; with a 256-byte stride it writes the first
+		// element of every color DCC block.
+		const bool quads       = destination.Stride() == 16u && destination.Format() == 75u && destination.DstSelXYZW() == 0xfacu;
+		const bool block_heads = destination.Stride() == 256u && destination.Format() == 20u && (destination.DstSelXYZW() & 7u) == 4u;
+		if (!(quads || block_heads) || invocations != destination.NumRecords())
 		{
 			return false;
 		}
-		for (uint32_t component = 0; component < words.size(); ++component)
+		for (uint32_t component = 0; component < words.size() && !loaded_value; ++component)
 		{
 			if (!user_sgpr(proof.value_registers[component], &words[component])) { return false; }
+		}
+		if (loaded_value) { words = loaded_words; }
+		if (block_heads)
+		{
+			heads->address = destination.Base48();
+			heads->size    = ShaderBufferByteSize(destination.Stride(), destination.NumRecords());
+			heads->word    = words[0];
+			return false;
 		}
 	} else if (proof.value_is_constant || loaded_value)
 	{
@@ -340,7 +457,7 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 		{
 			return false;
 		}
-		words.fill(loaded_value ? loaded_word : proof.constant_value);
+		words.fill(loaded_value ? loaded_words[0] : proof.constant_value);
 	} else
 	{
 		// BUF_FMT_32_UINT. A period of 1 repeats the first value; the count must
@@ -374,12 +491,19 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 		return false;
 	}
 	// One repeated word is written in place; copying the storage object would
-	// also read the whole range back.
-	auto*       ctx      = g_render_ctx->GetGraphicCtx();
-	auto*       cmd      = buffer->RecordOutsideRenderPass();
-	const auto& words    = fill.words;
-	const bool  one_word = std::all_of(words.begin(), words.end(), [&](uint32_t word) { return word == words[0]; });
-	if (!(one_word && GuestDeviceAddressRecordFill(ctx, cmd, words[0], fill.address, fill.size)) &&
+	// also read the whole range back. An object bound in place already holds
+	// the fill in guest memory, so its publication only orders it.
+	auto*       ctx       = g_render_ctx->GetGraphicCtx();
+	auto*       cmd       = buffer->RecordOutsideRenderPass();
+	const auto& words     = fill.words;
+	const bool  one_word  = std::all_of(words.begin(), words.end(), [&](uint32_t word) { return word == words[0]; });
+	const bool  fill_copy = one_word && !identity.buffer->guest_in_place;
+	if (!identity.buffer->guest_in_place)
+	{
+		// Both calls below then write guest memory.
+		DiscardInPlaceFills(fill.address, fill.size);
+	}
+	if (!(fill_copy && GuestDeviceAddressRecordFill(ctx, cmd, words[0], fill.address, fill.size)) &&
 	    !GuestDeviceAddressRecordPublication(ctx, cmd, *identity.buffer, fill.address, fill.size))
 	{
 		return false;
@@ -407,7 +531,10 @@ bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUnifor
 	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
-	vkCmdFillBuffer(cmd, identity.buffer->buffer, identity.buffer->guest_offset, fill.size, words[0]);
+	if (!(identity.buffer->guest_in_place && RepeatsInPlaceFill(buffer->GetQueueIndex(), identity, fill.address, fill.size, words[0])))
+	{
+		vkCmdFillBuffer(cmd, identity.buffer->buffer, identity.buffer->guest_offset, fill.size, words[0]);
+	}
 	// Flag every page as the dispatch's stores would, for the write-back.
 	vkCmdFillBuffer(cmd, identity.buffer->write_mask->buffer, 0, VK_WHOLE_SIZE, 1u);
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -422,6 +549,7 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 	EXIT_IF(buffer == nullptr || dependency == nullptr);
 	const GpuQueueId                         consumer(static_cast<uint32_t>(buffer->GetQueueIndex()));
 	std::vector<GpuMemoryStoragePublication> publishable;
+	GuestDeviceAddressValidateOverlays(consumer);
 	if (GuestDeviceAddressPendingWriteBack(consumer, buffer->DeviceAwaitedSubmissions(), &publishable, dependency))
 	{
 		return true;
@@ -430,6 +558,11 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 	EXIT_IF(!buffer->GetSubmissionId(&recording));
 	for (const auto& publication: publishable)
 	{
+		if (!publication.identity.buffer->guest_in_place)
+		{
+			// The publication copies the result over guest memory.
+			DiscardInPlaceFills(publication.vaddr, publication.size);
+		}
 		const bool recorded = GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
 		                                                          *publication.identity.buffer, publication.vaddr, publication.size);
 		if (recorded && publication.identity.buffer->guest_in_place)
@@ -437,11 +570,19 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 			GpuMemoryMarkInPlaceStorageOrdered(publication.identity, consumer);
 			continue;
 		}
-		if (!recorded || !GpuMemoryMarkStorageGuestPublished(publication.identity, recording, nullptr))
+		if (recorded && GpuMemoryMarkStorageGuestPublished(publication.identity, recording, nullptr))
 		{
-			*dependency = publication.dependency;
-			return true;
+			continue;
 		}
+		// The device may not write the result over guest memory: readers on this queue
+		// observe it through an overlay until its write-back.
+		if (!recorded && GuestDeviceAddressRecordOverlay(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(), recording,
+		                                                 publication))
+		{
+			continue;
+		}
+		*dependency = publication.dependency;
+		return true;
 	}
 	return false;
 }
@@ -453,6 +594,7 @@ bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUnifor
 	ComputeColorFillIdentity identity {};
 	if (!ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true, ComputeFillAliases::SkipPartial)) { return false; }
 	g_compute_color_fills.DiscardOverlaps(identity.address, identity.size);
+	g_color_block_heads.DiscardOverlaps(identity.address, identity.size);
 	const auto images = FindComputeColorFillImages(buffer, identity.address, identity.size);
 	if (!images.IsEmpty()) { return ApplyComputeColorFillImages(buffer, identity, words, images); }
 	SubmissionId submission;
@@ -462,6 +604,22 @@ bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUnifor
 	// writes even when there is no subsequent storage rebind or flush.
 	const auto observation = GpuDirtyPageTracker::Instance().BeginRead(identity.address, identity.size);
 	return observation.tracked && g_compute_color_fills.Publish(identity, submission, words, observation);
+}
+
+bool PublishComputeColorBlockHeads(CommandBuffer* buffer, const ComputeBlockHeadFill& heads)
+{
+	ComputeColorFillIdentity identity {};
+	SubmissionId             submission;
+	if (!ComputeColorFillUsesGraphicsQueue(buffer) ||
+	    !ResolveComputeColorFillIdentity(heads.address, heads.size, &identity, true, ComputeFillAliases::SkipPartial) ||
+	    !buffer->GetSubmissionId(&submission))
+	{
+		g_color_block_heads.DiscardOverlaps(heads.address, heads.size);
+		return false;
+	}
+	const auto observation = GpuDirtyPageTracker::Instance().BeginRead(identity.address, identity.size);
+	const std::array<uint32_t, 4> words {heads.word, heads.word, heads.word, heads.word};
+	return observation.tracked && g_color_block_heads.Publish(identity, submission, words, observation);
 }
 
 // Moves every aspect of a depth-stencil image to new_layout after all earlier accesses.
@@ -628,11 +786,13 @@ static void UploadGuestDepthLayer(CommandBuffer* buffer, VkCommandBuffer vk_buff
 }
 
 // The copies that rebuild a depth layer from the depth images whose planes hold its bytes, and a digest of what
-// those images held when planned.
+// those images held when planned. `guest_blocks` is set when some blocks lie in no image's plane: those hold
+// what guest memory holds.
 struct DepthLayerBlockCopies
 {
 	std::vector<std::pair<DepthStencilVulkanImage*, std::vector<VkImageCopy>>> sources;
-	uint64_t                                                                   digest = 0;
+	uint64_t                                                                   digest       = 0;
+	std::vector<std::pair<uint64_t, uint64_t>>                                 guest_blocks; // merged [addr, end) ranges
 };
 
 static uint64_t MixDepthLayerDigest(uint64_t digest, uint64_t value)
@@ -646,7 +806,7 @@ static uint64_t MixDepthLayerDigest(uint64_t digest, uint64_t value)
 // Plans depth layer `layer` (at addr, size bytes, pitch in elements) of a 64 KiB tiled view as the memory the
 // guest reads there: each 64 KiB block of the layer is a block of one image's depth plane, the bytes that image's
 // slice wrote, so the layer's samples are that block's samples translated by the XOR of the two slice patterns.
-// Exits when a block the view reads lies in no image's plane.
+// A block the view reads that lies in no image's plane is left to the guest bytes (`guest_blocks`).
 // Plans the copies only when the layer's sources changed since `stamp`; otherwise returns the digest alone.
 static DepthLayerBlockCopies PlanDepthLayerFromImages(const DepthStencilVulkanImage* array, uint32_t layer, uint64_t addr, uint64_t size,
                                                       uint32_t pitch, uint32_t bytes, const Vector<DepthStencilVulkanImage*>& images,
@@ -694,16 +854,26 @@ static DepthLayerBlockCopies PlanDepthLayerFromImages(const DepthStencilVulkanIm
 			{
 				continue;
 			}
+			if (source != nullptr && source != image)
+			{
+				EXIT("depth array layer %u at 0x%012" PRIx64 " has multiple depth images for block 0x%012" PRIx64 "\n", layer, addr,
+				     block_addr);
+			}
 			const uint64_t index = (block_addr - image->depth_vaddr) / k_block_bytes;
 			source               = image;
 			source_x             = static_cast<uint32_t>(index % (image_pitch / block_width)) * block_width;
 			source_y             = static_cast<uint32_t>(index / (image_pitch / block_width)) * k_block_height;
-			break;
 		}
 		if (source == nullptr)
 		{
-			EXIT("depth array layer %u at 0x%012" PRIx64 " lies partly outside depth images: block=0x%012" PRIx64 "\n", layer, addr,
-			     block_addr);
+			if (!plan.guest_blocks.empty() && plan.guest_blocks.back().second == block_addr)
+			{
+				plan.guest_blocks.back().second += k_block_bytes;
+			} else
+			{
+				plan.guest_blocks.emplace_back(block_addr, block_addr + k_block_bytes);
+			}
+			continue;
 		}
 		const auto source_extent = source->GetGuestExtent();
 		if (source->format != array->format || source->samples != VK_SAMPLE_COUNT_1_BIT || source->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
@@ -774,6 +944,10 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 	EXIT_IF(buffer == nullptr || first == nullptr || slice_size == 0u);
 	auto* slice_array = DepthStencilBufferGetSliceArray(g_render_ctx->GetGraphicCtx(), first, width, height, slice_size, layers);
 	auto* array       = slice_array->image;
+	if (slice_array->store_pending)
+	{
+		EXIT("a draw samples the depth slices its own layered pass renders: addr=0x%012" PRIx64 " layers=%u\n", addr, layers);
+	}
 	VkCommandBuffer vk_buffer = nullptr;
 	const auto      record    = [&]()
 	{
@@ -805,7 +979,25 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 		{
 			// The layer's memory holds what the depth images over it wrote there; when none lies over it, it holds
 			// what guest memory holds, as an unrendered depth surface sampled alone does.
-			const auto images = FindDepthStencil(buffer, slice_addr, slice_size, false);
+			auto images = FindDepthStencil(buffer, slice_addr, slice_size, false);
+			if (images.IsEmpty() && plain_guest_depth)
+			{
+				SubmissionId submission;
+				EXIT_IF(!buffer->GetSubmissionId(&submission));
+				const auto objects = GpuMemoryFindIntersectingObjectsForSubmission(submission, slice_addr, slice_size);
+				bool depth_only = !objects.IsEmpty();
+				for (const auto& object: objects)
+				{
+					depth_only = depth_only && object.type == GpuMemoryObjectType::DepthStencilBuffer && object.obj != nullptr;
+				}
+				if (depth_only)
+				{
+					for (const auto& object: objects)
+					{
+						images.Add(static_cast<DepthStencilVulkanImage*>(object.obj));
+					}
+				}
+			}
 			if (!images.IsEmpty())
 			{
 				if (!plain_guest_depth)
@@ -821,6 +1013,29 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 					continue;
 				}
 				record();
+				if (!plan.guest_blocks.empty())
+				{
+					// The blocks outside every image hold guest memory, so only they must be guest-owned: upload the layer's
+					// guest bytes, then copy the images' blocks over them. The digest does not cover guest bytes, so the
+					// layer is rebuilt on each use.
+					for (const auto& [begin, end]: plan.guest_blocks)
+					{
+						const auto source = GuestDepthLayerSource(begin, end - begin);
+						if (source != GpuMemoryDepthD16Source::Guest)
+						{
+							EXIT("depth array layer %u at 0x%012" PRIx64 " lies partly outside depth images and blocks 0x%012" PRIx64
+							     "-0x%012" PRIx64 " have no guest bytes: source=%u\n",
+							     layer, slice_addr, begin, end, static_cast<uint32_t>(source));
+						}
+					}
+					UploadGuestDepthLayer(buffer, vk_buffer, slice_array, layer, slice_addr, slice_size, fmt, pitch);
+					VkMemoryBarrier barrier {};
+					barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+					barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+					barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+					vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+					                     nullptr);
+				}
 				for (const auto& [source, regions]: plan.sources)
 				{
 					if (!regions.empty())
@@ -828,7 +1043,7 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 						copy_from(source, regions.data(), static_cast<uint32_t>(regions.size()));
 					}
 				}
-				state.stamp = plan.digest;
+				state.stamp = plan.guest_blocks.empty() ? plan.digest : 0u;
 				continue;
 			}
 			const auto source = plain_guest_depth ? GuestDepthLayerSource(slice_addr, slice_size) : GpuMemoryDepthD16Source::Unsupported;
@@ -871,6 +1086,99 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 		TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
 	}
 	return array;
+}
+
+void GraphicsRenderStoreLayeredDepth(VkCommandBuffer vk_buffer, DepthSliceArray* slice_array,
+                                     const std::vector<DepthStencilVulkanImage*>& slices)
+{
+	EXIT_IF(vk_buffer == nullptr || slice_array == nullptr || slices.size() != slice_array->layers.size());
+	auto* array = slice_array->image;
+	TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	for (uint32_t layer = 0; layer < slices.size(); layer++)
+	{
+		auto*      slice  = slices[layer];
+		const auto layout = slice->layout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : slice->layout;
+		TransitionDepthStencilImage(vk_buffer, slice, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		VkImageCopy region {};
+		region.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, layer, 1u};
+		region.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, 0u, 1u};
+		region.extent         = {array->extent.width, array->extent.height, 1u};
+		vkCmdCopyImage(vk_buffer, array->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slice->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u,
+		               &region);
+		TransitionDepthStencilImage(vk_buffer, slice, layout);
+		slice->content_stamp               = VulkanImageNextStamp();
+		slice_array->layers[layer].stamp = slice->content_stamp;
+	}
+	// Samplers of the array expect this layout, and its layers now match the slices.
+	TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	slice_array->store_pending = false;
+}
+
+// A draw that exports a render-target index renders the slices of its depth view in one pass, through the slice
+// array of its first slice: the slices' contents go into the array before the pass and come back when it ends, so the
+// slice images stay what every other bind and sampler reads. Draws that continue the pass render into the array as is.
+static void BindLayeredDepth(uint64_t submit_id, CommandBuffer* buffer, RenderDepthInfo* r, const DepthStencilBufferObject& info)
+{
+	auto* ctx = g_render_ctx->GetGraphicCtx();
+	EXIT_IF(r->vulkan_buffer == nullptr || r->vaddr_num != 1);
+	std::vector<DepthStencilVulkanImage*> slices(r->layers);
+	for (uint32_t layer = 0; layer < r->layers; layer++)
+	{
+		uint64_t vaddr = r->depth_buffer_vaddr + layer * r->depth_buffer_size;
+		uint64_t size  = r->depth_buffer_size;
+		auto*    slice = layer == 0u ? r->vulkan_buffer
+		                             : static_cast<DepthStencilVulkanImage*>(GpuMemoryCreateObject(submit_id, ctx, buffer, &vaddr, &size, 1, info));
+		if (slice == nullptr || slice->format != r->vulkan_buffer->format || slice->extent.width != r->vulkan_buffer->extent.width ||
+		    slice->extent.height != r->vulkan_buffer->extent.height)
+		{
+			EXIT("layered depth slice %u at 0x%012" PRIx64 " has no image matching slice 0\n", layer, vaddr);
+		}
+		slice->depth_slice   = r->slice_start + layer;
+		slice->depth_vaddr   = vaddr;
+		slice->stencil_vaddr = 0u;
+		slices[layer]        = slice;
+	}
+	auto* slice_array = DepthStencilBufferGetSliceArray(ctx, slices[0], slices[0]->extent.width, slices[0]->extent.height,
+	                                                    r->depth_buffer_size, r->layers);
+	auto* array       = slice_array->image;
+	r->vulkan_buffer  = array;
+	if (slice_array->store_pending)
+	{
+		return;
+	}
+	// Closes any other open pass first, so the store below runs at the end of this one.
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
+	TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	for (uint32_t layer = 0; layer < r->layers; layer++)
+	{
+		auto* slice = slices[layer];
+		auto& state = slice_array->layers[layer];
+		if (slice->layout == VK_IMAGE_LAYOUT_UNDEFINED)
+		{
+			// An unused depth image starts cleared to DB_DEPTH_CLEAR (ResolveDepthAttachmentLoadOps).
+			const VkClearDepthStencilValue clear {r->depth_clear_value, 0u};
+			const VkImageSubresourceRange  range {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, 1u, layer, 1u};
+			vkCmdClearDepthStencilImage(vk_buffer, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1u, &range);
+			continue;
+		}
+		if (state.stamp == slice->content_stamp)
+		{
+			continue;
+		}
+		const auto source_layout = slice->layout;
+		TransitionDepthStencilImage(vk_buffer, slice, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		VkImageCopy region {};
+		region.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, 0u, 1u};
+		region.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, layer, 1u};
+		region.extent         = {array->extent.width, array->extent.height, 1u};
+		vkCmdCopyImage(vk_buffer, slice->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u,
+		               &region);
+		TransitionDepthStencilImage(vk_buffer, slice, source_layout);
+		state.stamp = slice->content_stamp;
+	}
+	TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+	slice_array->store_pending = true;
+	buffer->DeferLayeredDepthStore(slice_array, std::move(slices));
 }
 
 void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInfo& depth)
@@ -997,6 +1305,27 @@ static void ClearColorAttachmentToWords(CommandBuffer* buffer, const RenderColor
 	                             });
 }
 
+// Under the single-element key every 256-byte block reads as its first element.
+// When one word was stored at every block head of a 4-byte-element target, that
+// word is every texel.
+static void ConsumeColorBlockHeads(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
+{
+	ComputeColorFillIdentity identity {};
+	ComputeColorFillEvent    event {};
+	SubmissionId             submission;
+	if (g_color_block_heads.Empty() || attachment.bytes_per_element != 4u ||
+	    !ResolveComputeColorFillIdentity(attachment.base_addr, attachment.size, &identity, false, ComputeFillAliases::SkipPartial) ||
+	    !buffer->GetSubmissionId(&submission) || !g_color_block_heads.Consume(identity, submission, &event) ||
+	    !GpuDirtyPageTracker::Instance().ReadObservationIsStable(identity.address, identity.size, event.cpu_observation))
+	{
+		return;
+	}
+	(void)ClearColorImageAliases(buffer, identity.address, identity.size,
+	                             FindComputeColorFillImages(buffer, identity.address, identity.size),
+	                             [&](VkFormat format, VkClearColorValue* clear)
+	                             { return GuestUniformFillTexelBytes(format) == 4u && DecodeGuestUniformFillTexel(event.words, format, clear); });
+}
+
 // A render target bound with DCC reads its pending metadata clear: the clear
 // key, or for the register key the target's clear words, becomes its contents.
 static void ConsumeColorDccClear(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
@@ -1010,6 +1339,11 @@ static void ConsumeColorDccClear(CommandBuffer* buffer, const RenderColorAttachm
 	if (code == ColorDccClearCode::Register)
 	{
 		ClearColorAttachmentToWords(buffer, attachment);
+		return;
+	}
+	if (code == ColorDccClearCode::Single)
+	{
+		ConsumeColorBlockHeads(buffer, attachment);
 		return;
 	}
 	(void)ClearColorImageAliases(
@@ -1060,6 +1394,7 @@ static void ConsumeComputeColorFill(CommandBuffer* buffer, uint64_t address, uin
 	    !buffer->GetSubmissionId(&submission))
 	{
 		g_compute_color_fills.DiscardOverlaps(address, size);
+		g_color_block_heads.DiscardOverlaps(address, size);
 		return;
 	}
 	ComputeColorFillEvent event {};
@@ -1185,16 +1520,7 @@ void GraphicsRenderMemoryBarrier(CommandBuffer* buffer)
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	auto* vk_buffer = buffer->RecordOutsideRenderPass();
-
-	VkMemoryBarrier mem_barrier {};
-	mem_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-	mem_barrier.pNext         = nullptr;
-	mem_barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-	mem_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mem_barrier, 0, nullptr,
-	                     0, nullptr);
+	buffer->FullMemoryBarrier();
 }
 
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* image)
@@ -1482,7 +1808,15 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	{
 		if (layer_export && z.depth_view.slice_max != z.depth_view.slice_start)
 		{
-			EXIT("layered depth rendering is not implemented: slices %u..%u\n", z.depth_view.slice_start, z.depth_view.slice_max);
+			// Only the shape seen so far: whether the exported index counts from SLICE_START is unverified.
+			if (htile || effective_stencil != 0u || z.z_info.num_samples != 0u || z.depth_view.slice_start != 0u ||
+			    z.depth_view.slice_max < z.depth_view.slice_start)
+			{
+				EXIT("layered depth rendering is not implemented: slices %u..%u htile=%u stencil=%u samples=%u\n",
+				     z.depth_view.slice_start, z.depth_view.slice_max, htile ? 1u : 0u, effective_stencil,
+				     static_cast<uint32_t>(z.z_info.num_samples));
+			}
+			r->layers = z.depth_view.slice_max - z.depth_view.slice_start + 1u;
 		}
 		if (!ps5 || z.z_info.num_mip_levels != 0u)
 		{
@@ -1676,6 +2010,11 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
 	if (r->vulkan_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->vulkan_buffer == nullptr condition ignored (continuing)\n"); }
+	if (r->layers > 1u)
+	{
+		BindLayeredDepth(submit_id, buffer, r, vulkan_buffer_info);
+		return;
+	}
 	// Every bind may write the image (draws, clears); sampled copies of it compare this stamp.
 	r->vulkan_buffer->content_stamp = VulkanImageNextStamp();
 	r->vulkan_buffer->depth_slice   = r->slice_start;
@@ -2165,6 +2504,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		if (attachment.type == RenderColorType::DisplayBuffer)
 		{
 			g_compute_color_fills.DiscardOverlaps(attachment.base_addr, attachment.size);
+			g_color_block_heads.DiscardOverlaps(attachment.base_addr, attachment.size);
 			const auto video_image = VideoOut::VideoOutGetImageForSubmission(attachment.base_addr, buffer);
 			if (video_image.image != attachment.existing_video_image) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: video_image.image != attachment.existing_video_image condition ignored (continuing)\n"); }
 			attachment.vulkan_buffer = video_image.image;
@@ -2204,6 +2544,8 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		ConsumeComputeColorFill(buffer, attachment.base_addr, attachment.size);
 		ConsumeColorDccClear(buffer, attachment);
 		ConsumeColorCmaskClear(buffer, attachment);
+		// Block heads stand for the contents only together with the keys this bind consumed.
+		g_color_block_heads.DiscardOverlaps(attachment.base_addr, attachment.size);
 	}
 }
 
@@ -3063,6 +3405,7 @@ void InvalidateMemoryObject(const RenderColorInfo& r)
 		}
 		const auto& attachment = r.attachment[slot];
 		g_compute_color_fills.DiscardOverlaps(attachment.base_addr, attachment.size);
+		g_color_block_heads.DiscardOverlaps(attachment.base_addr, attachment.size);
 		if (attachment.type == RenderColorType::RenderTexture)
 		{
 			GpuMemoryResetHash(&attachment.base_addr, &attachment.size, 1, GpuMemoryObjectType::RenderTexture);
@@ -3082,6 +3425,7 @@ void InvalidateMemoryObject(const RenderDepthInfo& r)
 		for (int i = 0; i < r.vaddr_num; ++i)
 		{
 			g_compute_color_fills.DiscardOverlaps(r.vaddr[i], r.size[i]);
+			g_color_block_heads.DiscardOverlaps(r.vaddr[i], r.size[i]);
 		}
 		GpuMemoryResetHash(r.vaddr, r.size, r.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer);
 	}

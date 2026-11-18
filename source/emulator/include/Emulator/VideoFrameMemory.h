@@ -37,8 +37,8 @@ struct Callbacks
 // Installs a complete callback bundle, or an empty bundle to restore no-op
 // dispatch. Partial bundles are rejected and leave the current bundle intact.
 // Dispatch copies the bundle under its internal lock and invokes it after
-// releasing the lock, so installed function targets must remain valid for the
-// emulator process lifetime.
+// releasing the lock (NotifyHostWrite reads its target without the lock), so
+// installed function targets must remain valid for the emulator process lifetime.
 bool InstallCallbacks(const Callbacks& callbacks);
 
 // Empty callback bundles preserve CPU-only no-consumer behavior and return true.

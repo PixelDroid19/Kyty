@@ -20,6 +20,8 @@
 #include <unordered_map>
 #include <vector>
 #include <windows.h> // IWYU pragma: keep
+// windows.h first: psapi.h needs its types.
+#include <psapi.h>
 
 // IWYU pragma: no_include <basetsd.h>
 // IWYU pragma: no_include <errhandlingapi.h>
@@ -290,6 +292,45 @@ SysWriteLeases& write_leases()
 	return *leases;
 }
 
+// End of the run of resident pages from `cursor` (at most `end`) that share one host protection,
+// stored in `protect`; `cursor` when its page is not resident. VirtualQuery walks every resident page
+// of the region that holds `cursor`, which takes milliseconds over a large guest view, while the
+// working set reports a resident page in constant time with the same protection value.
+uint64_t resident_protection_run_end(uint64_t cursor, uint64_t end, DWORD* protect)
+{
+	static const uint64_t page_size = sys_virtual_get_page_size();
+	constexpr size_t      kBatch    = 64;
+
+	PSAPI_WORKING_SET_EX_INFORMATION pages[kBatch];
+	uint64_t                         run_end = cursor;
+	for (uint64_t page = cursor & ~(page_size - 1); page < end;)
+	{
+		const auto count = static_cast<size_t>(std::min<uint64_t>(kBatch, (end - page + page_size - 1) / page_size));
+		for (size_t i = 0; i < count; i++)
+		{
+			pages[i]                = {};
+			pages[i].VirtualAddress = reinterpret_cast<PVOID>(static_cast<uintptr_t>(page + i * page_size));
+		}
+		if (QueryWorkingSetEx(GetCurrentProcess(), pages, static_cast<DWORD>(count * sizeof(pages[0]))) == 0)
+		{
+			return run_end;
+		}
+		for (size_t i = 0; i < count; i++)
+		{
+			const auto& attributes   = pages[i].VirtualAttributes;
+			const auto  page_protect = static_cast<DWORD>(attributes.Win32Protection);
+			if (attributes.Valid == 0 || (run_end > cursor && page_protect != *protect))
+			{
+				return run_end;
+			}
+			*protect = page_protect;
+			run_end  = std::min(end, page + (i + 1) * page_size);
+		}
+		page += count * page_size;
+	}
+	return run_end;
+}
+
 // Guest protection of the run that starts at `cursor`: a write lease's recorded guest token, otherwise
 // the host protection. The run ends at the next lease boundary, the host region end, or `end`.
 bool guest_protection_run_locked(uint64_t cursor, uint64_t end, DWORD* protect, DWORD* state, uint64_t* run_end)
@@ -302,25 +343,33 @@ bool guest_protection_run_locked(uint64_t cursor, uint64_t end, DWORD* protect, 
 		*run_end = std::min(end, lease.end);
 		return true;
 	}
-	MEMORY_BASIC_INFORMATION info {};
-	if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(cursor)), &info, sizeof(info)) == 0)
+	uint64_t limit = resident_protection_run_end(cursor, end, protect);
+	if (limit > cursor)
 	{
-		return false;
+		*state = MEM_COMMIT;
 	}
-	const uint64_t region_start = reinterpret_cast<uint64_t>(info.BaseAddress);
-	if (info.RegionSize == 0 || region_start > std::numeric_limits<uint64_t>::max() - info.RegionSize)
+	else
 	{
-		return false;
+		MEMORY_BASIC_INFORMATION info {};
+		if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(cursor)), &info, sizeof(info)) == 0)
+		{
+			return false;
+		}
+		const uint64_t region_start = reinterpret_cast<uint64_t>(info.BaseAddress);
+		if (info.RegionSize == 0 || region_start > std::numeric_limits<uint64_t>::max() - info.RegionSize)
+		{
+			return false;
+		}
+		limit    = std::min(end, region_start + info.RegionSize);
+		*protect = info.Protect;
+		*state   = info.State;
 	}
-	uint64_t limit = std::min(end, region_start + info.RegionSize);
 	std::vector<SysWriteLeaseRun> leases;
 	write_leases().Collect(cursor, limit, &leases);
 	if (!leases.empty())
 	{
 		limit = leases.front().address;
 	}
-	*protect = info.Protect;
-	*state   = info.State;
 	*run_end = limit;
 	return limit > cursor;
 }
@@ -613,6 +662,20 @@ static bool try_align_up(uint64_t addr, uint64_t alignment, uint64_t* result)
 	return true;
 }
 
+// Host pages that hold [address, address + size). VirtualProtect changes whole pages, so the runs
+// and write-lease records of a protection change must cover whole pages too: a record that ends
+// inside a page leaves the rest of it to the host protection the change itself replaced.
+static bool host_page_bounds(uint64_t address, uint64_t size, uint64_t* begin, uint64_t* end)
+{
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (size == 0 || page_size == 0 || address > std::numeric_limits<uint64_t>::max() - size)
+	{
+		return false;
+	}
+	*begin = address - address % page_size;
+	return try_align_up(address + size, page_size, end);
+}
+
 uint64_t sys_virtual_alloc_aligned(uint64_t address, uint64_t size, VirtualMemory::Mode mode, uint64_t alignment)
 {
 	if (alignment == 0)
@@ -799,9 +862,44 @@ bool sys_virtual_reserve_fixed(uint64_t address, uint64_t size)
 	return true;
 }
 
+// Commits an uncommitted sub-range of a host reservation root as a private view, which
+// sys_virtual_free decommits again. Requires both the transaction and reservations locks.
+static bool commit_in_reservation_root_locked(uint64_t address, uint64_t size, VirtualMemory::Mode mode)
+{
+	auto* committed = VirtualAlloc(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), static_cast<SIZE_T>(size),
+	                               MEM_COMMIT, get_protection_flag(mode));
+	if (committed != reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)))
+	{
+		return false;
+	}
+
+	const auto [private_it, inserted] = g_private_shared_views.emplace(address, size);
+	if (!inserted)
+	{
+		VirtualFree(committed, static_cast<SIZE_T>(size), MEM_DECOMMIT);
+		return false;
+	}
+	if (!assign_guest_mapping_range_locked(address, size))
+	{
+		g_private_shared_views.erase(private_it);
+		VirtualFree(committed, static_cast<SIZE_T>(size), MEM_DECOMMIT);
+		return false;
+	}
+	return true;
+}
+
 bool sys_virtual_alloc_fixed(uint64_t address, uint64_t size, VirtualMemory::Mode mode)
 {
 	std::scoped_lock transaction(g_protection_transaction_mutex);
+	{
+		// An unmapped sub-range of a host reservation stays reserved on Windows, so a
+		// fixed allocation there commits inside it; reserving it again would fail.
+		std::scoped_lock reservations(g_reservations_mutex);
+		if (find_reservation_root_locked(address, size, nullptr) && range_is_uncommitted(address, size))
+		{
+			return commit_in_reservation_root_locked(address, size, mode);
+		}
+	}
 	auto ptr = reinterpret_cast<uintptr_t>(VirtualAlloc(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size,
 	                                                    static_cast<DWORD>(MEM_COMMIT) | static_cast<DWORD>(MEM_RESERVE),
 	                                                    get_protection_flag(mode)));
@@ -841,27 +939,7 @@ bool sys_virtual_alloc_fixed_replacing_owned_reservation(uint64_t address, uint6
 	{
 		return false;
 	}
-
-	auto* committed = VirtualAlloc(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), static_cast<SIZE_T>(size),
-	                               MEM_COMMIT, get_protection_flag(mode));
-	if (committed != reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)))
-	{
-		return false;
-	}
-
-	const auto [private_it, inserted] = g_private_shared_views.emplace(address, size);
-	if (!inserted)
-	{
-		VirtualFree(committed, static_cast<SIZE_T>(size), MEM_DECOMMIT);
-		return false;
-	}
-	if (!assign_guest_mapping_range_locked(address, size))
-	{
-		g_private_shared_views.erase(private_it);
-		VirtualFree(committed, static_cast<SIZE_T>(size), MEM_DECOMMIT);
-		return false;
-	}
-	return true;
+	return commit_in_reservation_root_locked(address, size, mode);
 }
 
 void* sys_virtual_create_shared_backing(uint64_t size)
@@ -900,17 +978,43 @@ void sys_virtual_destroy_shared_backing(void* backing)
 
 bool sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_offset, uint64_t size)
 {
-	// SEC_RESERVE file mappings do not expose a portable punch-hole path that
-	// reclaims committed pages while other views may still exist. Release/unmap
-	// already drop host commit via UnmapViewOfFile; treat discard as success so
-	// callers share one control flow with Linux.
 	auto* shared = static_cast<SharedBacking*>(backing);
 	if (shared == nullptr || shared->mapping == nullptr || size == 0 || backing_offset > shared->size ||
 	    size > shared->size - backing_offset)
 	{
 		return false;
 	}
-	return true;
+
+	// A pagefile-backed section keeps committed pages while it exists, so the range is
+	// zeroed in place; pages never committed read as zero once they are committed.
+	const uint64_t granularity    = get_allocation_granularity();
+	const uint64_t delta          = backing_offset % granularity;
+	const uint64_t section_offset = backing_offset - delta;
+	auto*          view           = static_cast<uint8_t*>(MapViewOfFile(shared->mapping, FILE_MAP_WRITE, static_cast<DWORD>(section_offset >> 32u),
+	                                                                    static_cast<DWORD>(section_offset & 0xffffffffu),
+	                                                                    static_cast<SIZE_T>(delta + size)));
+	if (view == nullptr)
+	{
+		printf("MapViewOfFile(discard) failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
+		return false;
+	}
+	uint8_t* const end = view + delta + size;
+	for (uint8_t* cursor = view + delta; cursor < end;)
+	{
+		MEMORY_BASIC_INFORMATION info {};
+		if (VirtualQuery(cursor, &info, sizeof(info)) == 0)
+		{
+			UnmapViewOfFile(view);
+			return false;
+		}
+		uint8_t* const run_end = std::min(end, static_cast<uint8_t*>(info.BaseAddress) + info.RegionSize);
+		if (info.State == MEM_COMMIT)
+		{
+			std::memset(cursor, 0, static_cast<size_t>(run_end - cursor));
+		}
+		cursor = run_end;
+	}
+	return UnmapViewOfFile(view) != 0;
 }
 
 bool sys_virtual_next_shared_backing_data([[maybe_unused]] void* backing, [[maybe_unused]] uint64_t backing_offset,
@@ -1044,22 +1148,20 @@ uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t addre
 	return sys_virtual_map_shared_fixed(backing, address, backing_offset, size, mode) ? address : 0;
 }
 
-// Splitting a view or a placeholder reservation is not implemented on Windows;
-// callers keep the whole mapping and report the unmap as unsupported.
-bool sys_virtual_free_range(uint64_t /*address*/, uint64_t /*size*/)
+// Splitting a view or a placeholder reservation is not implemented on Windows, so a
+// range that covers part of a mapping is refused and the caller keeps the whole mapping.
+// Frees the host mapping that starts at `address`. A nonzero `size` must equal that
+// mapping's size: Windows cannot release part of a view or of an allocation.
+static bool free_mapping(uint64_t address, uint64_t size)
 {
-	return false;
-}
-
-bool sys_virtual_free(uint64_t address)
-{
+	const auto size_matches = [size](uint64_t mapping_size) { return size == 0 || size == mapping_size; };
 	std::scoped_lock transaction(g_protection_transaction_mutex);
 	{
 		std::scoped_lock views(g_shared_views_mutex);
 		const auto view = g_shared_views.find(address);
 		if (view != g_shared_views.end())
 		{
-			if (!range_is_guest_owned_locked(address, view->second.visible_size))
+			if (!size_matches(view->second.visible_size) || !range_is_guest_owned_locked(address, view->second.visible_size))
 			{
 				return false;
 			}
@@ -1083,7 +1185,7 @@ bool sys_virtual_free(uint64_t address)
 		if (private_view != g_private_shared_views.end())
 		{
 			const uint64_t private_size = private_view->second;
-			if (!range_is_guest_owned_locked(address, private_size))
+			if (!size_matches(private_size) || !range_is_guest_owned_locked(address, private_size))
 			{
 				return false;
 			}
@@ -1114,7 +1216,7 @@ bool sys_virtual_free(uint64_t address)
 				// independently. Keep the host reservation and release ownership
 				// in Kyty's ReservedMemory bookkeeping. The guest identity still ends.
 				const auto mapping = g_guest_mappings.find(address);
-				if (mapping == g_guest_mappings.end())
+				if (mapping == g_guest_mappings.end() || !size_matches(mapping->second.end - address))
 				{
 					return false;
 				}
@@ -1126,6 +1228,10 @@ bool sys_virtual_free(uint64_t address)
 				return erased;
 			}
 			const ReservationRoot root = *reservation;
+			if (!size_matches(root.size))
+			{
+				return false;
+			}
 			std::vector<SysWriteLeaseRun> leases;
 			write_leases().BeginUnmap(root.address, root.address + root.size, &leases);
 			const bool released = VirtualFree(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), 0, MEM_RELEASE) != 0;
@@ -1141,7 +1247,8 @@ bool sys_virtual_free(uint64_t address)
 		}
 	}
 	const auto mapping = g_guest_mappings.find(address);
-	if (mapping == g_guest_mappings.end() || !range_is_guest_owned_locked(address, mapping->second.end - address))
+	if (mapping == g_guest_mappings.end() || !size_matches(mapping->second.end - address) ||
+	    !range_is_guest_owned_locked(address, mapping->second.end - address))
 	{
 		return false;
 	}
@@ -1157,6 +1264,67 @@ bool sys_virtual_free(uint64_t address)
 	}
 	(void)erase_guest_mapping_at_locked(address);
 	return true;
+}
+
+// Returns a guest-owned part of a private view inside an owned reservation to the reserved state.
+// The prefix and suffix keep their committed pages, and the range stays guest-owned with a new
+// identity. Section views cannot be decommitted in part, so a range inside one is refused.
+bool sys_virtual_decommit_guest_range(uint64_t address, uint64_t size)
+{
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (address == 0 || size == 0 || address > UINT64_MAX - size || address % page_size != 0 || size % page_size != 0)
+	{
+		return false;
+	}
+	std::scoped_lock transaction(g_protection_transaction_mutex);
+	std::scoped_lock reservations(g_reservations_mutex);
+	if (!find_reservation_root_locked(address, size, nullptr) || !range_is_guest_owned_locked(address, size))
+	{
+		return false;
+	}
+	const auto view = std::find_if(g_private_shared_views.begin(), g_private_shared_views.end(),
+	                               [address, size](const auto& candidate)
+	                               { return range_contains(candidate.first, candidate.second, address, size); });
+	if (view == g_private_shared_views.end())
+	{
+		return false;
+	}
+
+	const uint64_t                view_address = view->first;
+	const uint64_t                view_end     = view->first + view->second;
+	const uint64_t                end          = address + size;
+	std::vector<SysWriteLeaseRun> leases;
+	write_leases().BeginUnmap(address, end, &leases);
+	const bool decommitted =
+	    VirtualFree(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), static_cast<SIZE_T>(size), MEM_DECOMMIT) != 0;
+	write_leases().EndUnmap(address, end, leases, decommitted);
+	if (!decommitted)
+	{
+		printf("VirtualFree(decommit guest range) failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
+		return false;
+	}
+
+	g_private_shared_views.erase(view);
+	if (view_address < address)
+	{
+		g_private_shared_views.emplace(view_address, address - view_address);
+	}
+	if (end < view_end)
+	{
+		g_private_shared_views.emplace(end, view_end - end);
+	}
+	EXIT_IF(!assign_guest_mapping_range_locked(address, size));
+	return true;
+}
+
+bool sys_virtual_free_range(uint64_t address, uint64_t size)
+{
+	return size != 0 && free_mapping(address, size);
+}
+
+bool sys_virtual_free(uint64_t address)
+{
+	return free_mapping(address, 0);
 }
 
 static bool protect_range_locked(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode,
@@ -1482,7 +1650,9 @@ VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint6
 {
 	using Status = VirtualMemory::ProtectionChangeStatus;
 	VirtualMemory::ProtectionChangeResult result {};
-	if (visitor == nullptr || size == 0 || address > std::numeric_limits<uint64_t>::max() - size)
+	uint64_t begin = 0;
+	uint64_t end   = 0;
+	if (visitor == nullptr || !host_page_bounds(address, size, &begin, &end))
 	{
 		result.status = Status::InvalidRange;
 		return result;
@@ -1495,9 +1665,8 @@ VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint6
 		DWORD target = PAGE_NOACCESS;
 	};
 	std::vector<NativeRun> runs;
-	const uint64_t end = address + size;
 	std::scoped_lock transaction(g_protection_transaction_mutex);
-	for (uint64_t cursor = address; cursor < end;)
+	for (uint64_t cursor = begin; cursor < end;)
 	{
 		DWORD    original = PAGE_NOACCESS;
 		DWORD    state    = 0;
@@ -1564,15 +1733,17 @@ struct GuestProtectionRun
 	DWORD    protect = PAGE_NOACCESS;
 };
 
-// The guest protection of committed [address, address + size); false when a byte is not committed.
+// The guest protection of the committed host pages that hold [address, address + size); false when
+// one of them is not committed.
 static bool collect_guest_protection_locked(uint64_t address, uint64_t size, std::vector<GuestProtectionRun>* runs)
 {
-	if (size == 0 || address > std::numeric_limits<uint64_t>::max() - size)
+	uint64_t begin = 0;
+	uint64_t end   = 0;
+	if (!host_page_bounds(address, size, &begin, &end))
 	{
 		return false;
 	}
-	const uint64_t end = address + size;
-	for (uint64_t cursor = address; cursor < end;)
+	for (uint64_t cursor = begin; cursor < end;)
 	{
 		DWORD    protect = PAGE_NOACCESS;
 		DWORD    state   = 0;
