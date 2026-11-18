@@ -7495,24 +7495,27 @@ the rock looking up the dune and the base stood back facing the rock:
 Command runs are thread time summed over the block, divided by flips.
 
 - **With the program the GPU sets the frame on both builds.** The added 3.5 ms (HEAD) and 6.2 ms (base) of
-  command work change the frame by less than 0.4 ms (k about 0).
+  command work change the frame by at most 0.4 ms (k about 0).
 - **Without it HEAD is no longer purely command-bound.** The base still pays 0.82 ms of frame per ms added to the
   command thread (36.1 -> 41.1 ms for 6.1 ms), close to the 2026-11-14 k = 1.02. On HEAD the frame moves 1.8 ms
   for 3.5 ms (k about 0.5) with the engine busy 92 % of the frame. The views differ, so this is not attributed to
   a commit.
-- **Same view, both builds.** The base passed through HEAD's view in its first four blocks (341-358 draws, one
-  block per arm, right after the first dispatch): 40 ms frame and 38 ms engine work with the program, 27 ms and
-  23 ms without. HEAD in that view: 41.7 and 36.8 ms, 25.9 and 24.8 ms. No GPU regression shows at matched work;
-  the base sample is one block per arm.
-- **Near the 2026-11-14 draw count.** While walking, the base crossed 766-780 draws a frame (blocks 6-8): 56-58 ms
-  frames with 47-48 ms engine work when the program ran, against 52.6 and 46.6 ms on 2026-11-14 at 752 draws.
+- **Same spot, both builds.** In its first four blocks (341-358 draws, one block per arm, right after the first
+  dispatch, which the 2026-11-14 protocol leaves out) the base stood where HEAD stood; the 197 s captures show the
+  same rock and slope with the base's camera slightly closer. Probe frame times: base 40.2 and 39.5 ms with the
+  program, 27.2 and 30.0 ms without; HEAD's first four blocks 42.3 and 41.3 ms, 26.8 and 27.9 ms, and its medians
+  above. No GPU regression shows at this work; the base sample is one block per arm. Per-block engine work is
+  noisier than the probe's frame times (HEAD reads 30-37 ms in program blocks at the same 42 ms frame).
+- **Near the 2026-11-14 draw count.** While walking, the base crossed 766-780 draws a frame (blocks 6-8): blocks 6 and 8,
+  with the program, ran 56 and 58 ms frames with 47-48 ms engine work, against 52.6 and 46.6 ms on 2026-11-14 at 752 draws.
   HEAD was not measured at that count.
 - **Budget for 30 fps in HEAD's view.** Frame 41.7 ms, engine work 36.8 ms: the GPU is 3.5 ms over 33.3 ms with the
   lighting program and 8.5 ms under it without. The command path (25.9 ms frames without the program) is not the
   limit there.
 
 **Unprobed runs.** One warm run per build of the 225 s route earlier the same day, medians of 165-215 s grouped by
-draws a frame (the scenes differed): in the shared 400-560 band the base ran 43.9 ms frames with 38.6 ms engine
+draws a frame (the scenes differed; the HEAD binary carried the stamp `1d35b0a31` plus the then-uncommitted
+null export fix, with the same runtime source as `253d981a9`): in the shared 400-560 band the base ran 43.9 ms frames with 38.6 ms engine
 work and 67.7 us of command time a draw (436 draws), HEAD 46.0 ms, 44.5 ms and 58.5 us (539 draws). In an earlier
 HEAD run that left the route, one window of 1,150-1,230 draws took 67-73 ms of engine work against 38-40 ms on the
 base at a similar time; that scene was not compared and stays an open lead.
