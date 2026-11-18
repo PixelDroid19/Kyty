@@ -60,53 +60,88 @@ static bool Fp64Fp16OutputModifierActive(const Spirv* spirv, const ShaderInstruc
 	return inst.dst.multiplier != 1.0f && spirv != nullptr && !spirv->IsIeeeModeEnabled() && spirv->Float64Float16OutputDenormalsFlushed();
 }
 
-// V_MIN_F32 / V_MAX_F32 operand selection (ISA 12.7): a NaN first operand returns the
-// second operand, otherwise a NaN second operand returns the first (so two NaNs return
-// the second, as ShaderSelectRdna2MinMaxResultBits records); in IEEE mode a signaling NaN
-// is returned quieted, the first operand first; the minimum of signed zeros is -0 and the
-// maximum +0. Quiet NaNs are never modified. The zero rule is decided on bits: f32 denormal
-// handling is host-defined, and a flushed compare must not merge two distinct subnormals.
-// The result id is %<tag>.
+// Apply source modifiers on the bit pattern so a host that flushes floating-point
+// operations still preserves denormals (and NaN signs) for these instructions.
+static bool LoadFloatWithBitModifiers(Spirv* spirv, ShaderOperand op, const String8& result, const String8& index, String8* load)
+{
+	const bool absolute = op.absolute;
+	const bool negate   = op.negate;
+	if (!absolute && !negate)
+	{
+		return operand_load_float(spirv, op, result, index, load);
+	}
+	op.absolute = false;
+	op.negate   = false;
+	const String8 raw = "unmodified_" + result;
+	if (!operand_load_float(spirv, op, raw, index, load))
+	{
+		return false;
+	}
+	String8 text = "\n%raw_bits_<r> = OpBitcast %uint %<raw>\n";
+	String8 bits = "%raw_bits_<r>";
+	if (absolute)
+	{
+		text += "%abs_bits_<r> = OpBitwiseAnd %uint " + bits + " %uint_0x7fffffff\n";
+		bits = "%abs_bits_<r>";
+	}
+	if (negate)
+	{
+		text += "%neg_bits_<r> = OpBitwiseXor %uint " + bits + " %uint_0x80000000\n";
+		bits = "%neg_bits_<r>";
+	}
+	text += "%<r> = OpBitcast %float " + bits + "\n";
+	*load += text.ReplaceStr("<raw>", raw).ReplaceStr("<r>", result);
+	return true;
+}
+
+static String8 FloatMinMaxInput(const Spirv* spirv, const String8& tag, const String8& operand)
+{
+	const bool flush = spirv->Float32InputDenormalsFlushed();
+	const char* text = flush ? R"(
+        %<t>_raw = OpBitcast %uint %<a>
+        %<t>_mag = OpBitwiseAnd %uint %<t>_raw %uint_0x7fffffff
+        %<t>_tiny = OpULessThan %bool %<t>_mag %uint_0x00800000
+        %<t>_zero = OpBitwiseAnd %uint %<t>_raw %uint_0x80000000
+        %<t> = OpSelect %uint %<t>_tiny %<t>_zero %<t>_raw
+)" : "\n%<t> = OpBitcast %uint %<a>\n";
+	return String8(text).ReplaceStr("<t>", tag).ReplaceStr("<a>", operand);
+}
+
+// Compare signed ordering keys, reversing the magnitude bits for negative operands.
+// This orders -0 before +0 and preserves subnormals even when the host flushes FP.
+// In IEEE mode a signaling NaN is quieted, taking the first one if both signal.
+// Otherwise choose the numeric operand, or the second operand for two NaNs.
 static String8 FloatMinMaxPair(const Spirv* spirv, const String8& tag, const String8& a, const String8& b, bool maximum)
 {
 	static const char* text = R"(
-        %<t>_ab = OpBitcast %uint %<a>
-        %<t>_bb = OpBitcast %uint %<b>
-        %<t>_an = OpIsNan %bool %<a>
-        %<t>_num = OpExtInst %float %GLSL_std_450 <op> %<a> %<b>
-        %<t>_or = OpBitwiseOr %uint %<t>_ab %<t>_bb
-        %<t>_mag = OpBitwiseAnd %uint %<t>_or %uint_0x7fffffff
-        %<t>_equal = OpIEqual %bool %<t>_mag %uint_0
-        %<t>_merged = <zero_op> %uint %<t>_ab %<t>_bb
-        %<t>_tied = OpBitcast %float %<t>_merged
-        %<t>_ordered = OpSelect %float %<t>_equal %<t>_tied %<t>_num
-        %<t>_quiet = OpSelect %float %<t>_an %<b> %<t>_ordered
+        %<t>_am = OpBitwiseAnd %uint %<a> %uint_0x7fffffff
+        %<t>_bm = OpBitwiseAnd %uint %<b> %uint_0x7fffffff
+        %<t>_an = OpUGreaterThan %bool %<t>_am %uint_0x7f800000
+        %<t>_bn = OpUGreaterThan %bool %<t>_bm %uint_0x7f800000
+        %<t>_asign = OpShiftRightArithmetic %uint %<a> %uint_31
+        %<t>_bsign = OpShiftRightArithmetic %uint %<b> %uint_31
+        %<t>_aflip = OpBitwiseAnd %uint %<t>_asign %uint_0x7fffffff
+        %<t>_bflip = OpBitwiseAnd %uint %<t>_bsign %uint_0x7fffffff
+        %<t>_akey = OpBitwiseXor %uint %<a> %<t>_aflip
+        %<t>_bkey = OpBitwiseXor %uint %<b> %<t>_bflip
+        %<t>_first = <compare> %bool %<t>_akey %<t>_bkey
+        %<t>_numeric = OpSelect %uint %<t>_first %<a> %<b>
+        %<t>_second_nan = OpSelect %uint %<t>_bn %<a> %<t>_numeric
+        %<t>_quiet = OpSelect %uint %<t>_an %<b> %<t>_second_nan
 <ieee>)";
 	static const char* ieee = R"(
-        %<t>_ae = OpBitwiseAnd %uint %<t>_ab %uint_0x7fc00000
-        %<t>_be = OpBitwiseAnd %uint %<t>_bb %uint_0x7fc00000
-        %<t>_ap = OpBitwiseAnd %uint %<t>_ab %uint_0x003fffff
-        %<t>_bp = OpBitwiseAnd %uint %<t>_bb %uint_0x003fffff
-        %<t>_ae_s = OpIEqual %bool %<t>_ae %uint_0x7f800000
-        %<t>_be_s = OpIEqual %bool %<t>_be %uint_0x7f800000
-        %<t>_ap_s = OpINotEqual %bool %<t>_ap %uint_0
-        %<t>_bp_s = OpINotEqual %bool %<t>_bp %uint_0
-        %<t>_as = OpLogicalAnd %bool %<t>_ae_s %<t>_ap_s
-        %<t>_bs = OpLogicalAnd %bool %<t>_be_s %<t>_bp_s
-        %<t>_aqb = OpBitwiseOr %uint %<t>_ab %uint_0x00400000
-        %<t>_bqb = OpBitwiseOr %uint %<t>_bb %uint_0x00400000
-        %<t>_aq = OpBitcast %float %<t>_aqb
-        %<t>_bq = OpBitcast %float %<t>_bqb
-        %<t>_second = OpSelect %float %<t>_bs %<t>_bq %<t>_quiet
-        %<t> = OpSelect %float %<t>_as %<t>_aq %<t>_second
-)";
-	static const char* plain = R"(
-        %<t> = OpCopyObject %float %<t>_quiet
+        %<t>_ap = OpULessThan %bool %<t>_am %uint_0x7fc00000
+        %<t>_bp = OpULessThan %bool %<t>_bm %uint_0x7fc00000
+        %<t>_as = OpLogicalAnd %bool %<t>_an %<t>_ap
+        %<t>_bs = OpLogicalAnd %bool %<t>_bn %<t>_bp
+        %<t>_aq = OpBitwiseOr %uint %<a> %uint_0x00400000
+        %<t>_bq = OpBitwiseOr %uint %<b> %uint_0x00400000
+        %<t>_second = OpSelect %uint %<t>_bs %<t>_bq %<t>_quiet
+        %<t> = OpSelect %uint %<t>_as %<t>_aq %<t>_second
 )";
 	return String8(text)
-	    .ReplaceStr("<ieee>", spirv->IsIeeeModeEnabled() ? ieee : plain)
-	    .ReplaceStr("<op>", maximum ? "NMax" : "NMin")
-	    .ReplaceStr("<zero_op>", maximum ? "OpBitwiseAnd" : "OpBitwiseOr")
+	    .ReplaceStr("<ieee>", spirv->IsIeeeModeEnabled() ? ieee : "\n%<t> = OpCopyObject %uint %<t>_quiet\n")
+	    .ReplaceStr("<compare>", maximum ? "OpSGreaterThan" : "OpSLessThan")
 	    .ReplaceStr("<t>", tag)
 	    .ReplaceStr("<a>", a)
 	    .ReplaceStr("<b>", b);
@@ -3076,15 +3111,21 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2)
 
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	const bool min_max = inst.type == ShaderInstructionType::VMin3F32 || inst.type == ShaderInstructionType::VMax3F32 ||
+	                     inst.type == ShaderInstructionType::VMed3F32;
+	const auto load_float = [&](int operand, const char* result, String8* load) {
+		return min_max ? LoadFloatWithBitModifiers(spirv, inst.src[operand], result, index_str, load)
+		               : operand_load_float(spirv, inst.src[operand], result, index_str, load);
+	};
+	if (!load_float(0, "t0_<index>", &load0))
 	{
 		return false;
 	}
-	if (!operand_load_float(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	if (!load_float(1, "t1_<index>", &load1))
 	{
 		return false;
 	}
-	if (!operand_load_float(spirv, inst.src[2], "t2_<index>", index_str, &load2))
+	if (!load_float(2, "t2_<index>", &load2))
 	{
 		return false;
 	}
@@ -5026,8 +5067,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VMinMaxF32_SVdstSVsrc0SVsrc1)
 {
 	const bool    maximum = std::strcmp(param[0], "FMax") == 0;
 	const String8 tag     = String8::FromPrintf("mm_%u", index);
-	const String8 result  = FloatMinMaxPair(spirv, tag, "t0_<index>", "t1_<index>", maximum) +
-	                       "        %t_<index> = OpCopyObject %float %" + tag + "\n";
+	const String8 a       = tag + "_a";
+	const String8 b       = tag + "_b";
+	const String8 result  = FloatMinMaxInput(spirv, a, "t0_<index>") + FloatMinMaxInput(spirv, b, "t1_<index>") +
+	                       FloatMinMaxPair(spirv, tag, a, b, maximum) + "        %t_<index> = OpBitcast %float %" + tag + "\n";
 	const char* const params[4] = {result.c_str(), nullptr, nullptr, nullptr};
 	return Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1(index, code, dst_source, spirv, params, scc_check);
 }
@@ -5038,36 +5081,50 @@ KYTY_RECOMPILER_FUNC(Recompile_VMinMaxF32_SVdstSVsrc0SVsrc1)
 KYTY_RECOMPILER_FUNC(Recompile_VMinMax3F32_VdstVsrc0Vsrc1Vsrc2)
 {
 	const String8 tag = String8::FromPrintf("mm_%u", index);
-	String8       result;
+	const String8 a   = tag + "_a";
+	const String8 b   = tag + "_b";
+	const String8 c   = tag + "_c";
+	String8 result = FloatMinMaxInput(spirv, a, "t0_<index>") + FloatMinMaxInput(spirv, b, "t1_<index>") +
+	                 FloatMinMaxInput(spirv, c, "t2_<index>");
 	if (std::strcmp(param[0], "Med3") == 0)
 	{
-		result += FloatMinMaxPair(spirv, tag + "_lo01", "t0_<index>", "t1_<index>", false);
-		result += FloatMinMaxPair(spirv, tag + "_min3", tag + "_lo01", "t2_<index>", false);
-		result += FloatMinMaxPair(spirv, tag + "_hi01", "t0_<index>", "t1_<index>", true);
-		result += FloatMinMaxPair(spirv, tag + "_max3", tag + "_hi01", "t2_<index>", true);
-		result += FloatMinMaxPair(spirv, tag + "_hi12", "t1_<index>", "t2_<index>", true);
-		result += FloatMinMaxPair(spirv, tag + "_hi02", "t0_<index>", "t2_<index>", true);
+		result += FloatMinMaxPair(spirv, tag + "_lo01", a, b, false);
+		result += FloatMinMaxPair(spirv, tag + "_min3", tag + "_lo01", c, false);
+		result += FloatMinMaxPair(spirv, tag + "_hi01", a, b, true);
+		result += FloatMinMaxPair(spirv, tag + "_max3", tag + "_hi01", c, true);
+		result += FloatMinMaxPair(spirv, tag + "_hi12", b, c, true);
+		result += FloatMinMaxPair(spirv, tag + "_hi02", a, c, true);
 		result += String8(R"(
         %<t>_n0 = OpIsNan %bool %t0_<index>
         %<t>_n1 = OpIsNan %bool %t1_<index>
         %<t>_n2 = OpIsNan %bool %t2_<index>
         %<t>_n01 = OpLogicalOr %bool %<t>_n0 %<t>_n1
         %<t>_nan = OpLogicalOr %bool %<t>_n01 %<t>_n2
-        %<t>_top0 = OpFOrdEqual %bool %<t>_max3 %t0_<index>
-        %<t>_top1 = OpFOrdEqual %bool %<t>_max3 %t1_<index>
-        %<t>_rest = OpSelect %float %<t>_top1 %<t>_hi02 %<t>_hi01
-        %<t>_median = OpSelect %float %<t>_top0 %<t>_hi12 %<t>_rest
-        %t_<index> = OpSelect %float %<t>_nan %<t>_min3 %<t>_median
+        %<t>_max_mag = OpBitwiseAnd %uint %<t>_max3 %uint_0x7fffffff
+        %<t>_median_a_mag = OpBitwiseAnd %uint %<t>_a %uint_0x7fffffff
+        %<t>_median_b_mag = OpBitwiseAnd %uint %<t>_b %uint_0x7fffffff
+        %<t>_max_zero = OpIEqual %bool %<t>_max_mag %uint_0
+        %<t>_median_a_zero = OpIEqual %bool %<t>_median_a_mag %uint_0
+        %<t>_median_b_zero = OpIEqual %bool %<t>_median_b_mag %uint_0
+        %<t>_zero0 = OpLogicalAnd %bool %<t>_max_zero %<t>_median_a_zero
+        %<t>_zero1 = OpLogicalAnd %bool %<t>_max_zero %<t>_median_b_zero
+        %<t>_exact0 = OpIEqual %bool %<t>_max3 %<t>_a
+        %<t>_exact1 = OpIEqual %bool %<t>_max3 %<t>_b
+        %<t>_top0 = OpLogicalOr %bool %<t>_zero0 %<t>_exact0
+        %<t>_top1 = OpLogicalOr %bool %<t>_zero1 %<t>_exact1
+        %<t>_rest = OpSelect %uint %<t>_top1 %<t>_hi02 %<t>_hi01
+        %<t>_median = OpSelect %uint %<t>_top0 %<t>_hi12 %<t>_rest
+        %<t> = OpSelect %uint %<t>_nan %<t>_min3 %<t>_median
 )")
 		              .ReplaceStr("<t>", tag);
 	}
 	else
 	{
 		const bool maximum = std::strcmp(param[0], "FMax") == 0;
-		result += FloatMinMaxPair(spirv, tag + "_p", "t0_<index>", "t1_<index>", maximum);
-		result += FloatMinMaxPair(spirv, tag, tag + "_p", "t2_<index>", maximum);
-		result += "        %t_<index> = OpCopyObject %float %" + tag + "\n";
+		result += FloatMinMaxPair(spirv, tag + "_p", a, b, maximum);
+		result += FloatMinMaxPair(spirv, tag, tag + "_p", c, maximum);
 	}
+	result += "        %t_<index> = OpBitcast %float %" + tag + "\n";
 	const char* const params[4] = {result.c_str(), nullptr, nullptr, nullptr};
 	return Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2(index, code, dst_source, spirv, params, scc_check);
 }
@@ -5089,11 +5146,16 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1)
 
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
-	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	const bool min_max = inst.type == ShaderInstructionType::VMinF32 || inst.type == ShaderInstructionType::VMaxF32;
+	const auto load_float = [&](int operand, const char* result, String8* load) {
+		return min_max ? LoadFloatWithBitModifiers(spirv, inst.src[operand], result, index_str, load)
+		               : operand_load_float(spirv, inst.src[operand], result, index_str, load);
+	};
+	if (!load_float(0, "t0_<index>", &load0))
 	{
 		return false;
 	}
-	if (!operand_load_float(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	if (!load_float(1, "t1_<index>", &load1))
 	{
 		return false;
 	}
@@ -5419,47 +5481,74 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_I32_VdstVsrc0Vsrc1Vsrc2)
 	return true;
 }
 
-/* V_CVT_FLR_I32_F32 and V_CVT_RPI_I32_F32 keep their distinct rounding rules. */
+// RPI and FLR saturate by sign, including signed NaNs, as observed on RDNA2.
 KYTY_RECOMPILER_FUNC(Recompile_VCvt_XXX_F32_SVdstSVsrc0)
 {
 	const auto& inst = code.GetInstructions().At(index);
-
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
-	// integer operation ignores these VOP3 encoding bits.
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+	const bool rpi   = inst.type == ShaderInstructionType::VCvtRpiI32F32;
+	const auto dst   = operand_variable_to_str(inst.dst);
+	const String8 index_str = String8::FromPrintf("%u", index);
 
 	String8 load0;
-
-	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	if (!LoadFloatWithBitModifiers(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
 		return false;
 	}
 
-	// TODO() check VSKIP
-	// TODO() check EXEC
-	// TODO() check SP_DENORM_IN
-
 	static const char* text = R"(
     <load0>
-    <param0>
-    <param1>
-    <param2>
-    %t_<index> = OpBitcast %float %t2_<index>
-    OpStore %<dst> %t_<index>
+        %raw_<index> = OpBitcast %uint %t0_<index>
+        %mag_<index> = OpBitwiseAnd %uint %raw_<index> %uint_0x7fffffff
+        %neg_<index> = OpUGreaterThan %bool %raw_<index> %uint_0x7fffffff
+        %sat_<index> = OpSelect %uint %neg_<index> %uint_0x80000000 %uint_0x7fffffff
+        %out_<index> = OpUGreaterThanEqual %bool %mag_<index> %uint_0x4f000000
+        %safe_<index> = OpSelect %float %out_<index> %float_0_000000 %t0_<index>
+    <round>
+        %result_bits_<index> = OpSelect %uint %out_<index> %sat_<index> %rounded_<index>
+        %result_<index> = OpBitcast %float %result_bits_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %result_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
 )";
+	// Use the exact half-tie residual instead of adding 0.5 to the original float.
+	static const char* nearest_text = R"(
+        %even_<index> = OpExtInst %float %GLSL_std_450 RoundEven %safe_<index>
+        %residual_<index> = OpFSub %float %safe_<index> %even_<index>
+        %tie_<index> = OpFOrdEqual %bool %residual_<index> %float_0_500000
+        %adjust_<index> = OpSelect %uint %tie_<index> %uint_1 %uint_0
+        %integer_<index> = OpConvertFToS %int %even_<index>
+        %integer_bits_<index> = OpBitcast %uint %integer_<index>
+        %rounded_<index> = OpIAdd %uint %integer_bits_<index> %adjust_<index>
+)";
+	// Floor(-subnormal) is -1 if the guest keeps inputs, even on a flushing host.
+	static const char* floor_text = R"(
+        %floor_<index> = OpExtInst %float %GLSL_std_450 Floor %safe_<index>
+        %integer_<index> = OpConvertFToS %int %floor_<index>
+        %integer_bits_<index> = OpBitcast %uint %integer_<index>
+        %tiny_<index> = OpULessThan %bool %mag_<index> %uint_0x00800000
+        <select_tiny>
+        %rounded_<index> = OpSelect %uint %tiny_<index> <tiny_result> %integer_bits_<index>
+)";
+	static const char* preserved_tiny = R"(
+        %nonzero_<index> = OpINotEqual %bool %mag_<index> %uint_0
+        %neg_nonzero_<index> = OpLogicalAnd %bool %neg_<index> %nonzero_<index>
+        %floor_tiny_<index> = OpSelect %uint %neg_nonzero_<index> %uint_0xffffffff %uint_0
+)";
+	String8 round = nearest_text;
+	if (!rpi)
+	{
+		const bool flushed = spirv->Float32InputDenormalsFlushed();
+		round = String8(floor_text)
+		            .ReplaceStr("<select_tiny>", flushed ? "" : preserved_tiny)
+		            .ReplaceStr("<tiny_result>", flushed ? "%uint_0" : "%floor_tiny_<index>");
+	}
 	*dst_source += String8(text)
-	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<dst>", dst.value)
 	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<param0>", param[0])
-	                   .ReplaceStr("<param1>", param[1])
-	                   .ReplaceStr("<param2>", (param[2] == nullptr ? "" : param[2]))
+	                   .ReplaceStr("<round>", round)
 	                   .ReplaceStr("<index>", index_str);
-
 	return true;
 }
 

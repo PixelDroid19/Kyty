@@ -1831,23 +1831,40 @@ void IsNan(uint32_t actual, const char* label)
 		Equal(Evaluate(minimum, kNegZero, 0u), kNegZero, "min of signed zeros is -0 (reversed)");
 		Equal(Evaluate(maximum, kNegZero, 0u), 0u, "max of signed zeros is +0");
 		Equal(Evaluate(maximum, 0u, kNegZero), 0u, "max of signed zeros is +0 (reversed)");
-		Equal(Evaluate(minimum, 0x00000001u, 0x00000002u), 0x00000001u, "min of subnormals selects an operand");
-		Equal(Evaluate(maximum, 0x00000001u, 0x00000002u), 0x00000002u, "max of subnormals selects an operand");
-		Equal(Evaluate(minimum, 0x80000001u, 0u), 0x80000001u, "min of a negative subnormal and +0");
-		Equal(Evaluate(maximum, kNegZero, 0x00000001u), 0x00000001u, "max of -0 and a positive subnormal");
+		for (const uint8_t mode: {0xc0u, 0xd0u, 0xe0u, 0xf0u})
+		{
+			const bool preserve = (mode & 0x10u) != 0u;
+			const auto min_words = ModifiedBinary(kMin, false, 0u);
+			const auto max_words = ModifiedBinary(kMax, false, 0u);
+			const Program min_mode(Emit(Parse(min_words, stage), mode, ieee, true, true).c_str());
+			const Program max_mode(Emit(Parse(max_words, stage), mode, ieee, true, true).c_str());
+			Equal(Evaluate(min_mode, 1u, 2u), preserve ? 1u : 0u, "min applies input denormal mode");
+			Equal(Evaluate(max_mode, 1u, 2u), preserve ? 2u : 0u, "max applies input denormal mode");
+			Equal(Evaluate(min_mode, 0x80000001u, 0u), preserve ? 0x80000001u : kNegZero, "min preserves the input sign");
+			Equal(Evaluate(max_mode, kNegZero, 1u), preserve ? 1u : 0u, "max of -0 and a positive subnormal");
+		}
+		auto neg_min = ModifiedBinary(kMin, false, 0u);
+		neg_min[1] |= 1u << 29u;
+		const Program modified(Emit(Parse(neg_min, stage), 0xd0u, ieee, true, true).c_str());
+		Equal(Evaluate(modified, 1u, 0u), 0x80000001u, "min source negate preserves a subnormal");
 		Equal(Evaluate(minimum, kOne, kTwo), kOne, "ordered min");
 		Equal(Evaluate(maximum, kOne, kTwo), kTwo, "ordered max");
+		Equal(Evaluate(minimum, 0xbf800000u, 0xc0000000u), 0xc0000000u, "min orders negative normals");
+		Equal(Evaluate(maximum, 0xbf800000u, kOne), kOne, "max orders across signs");
+		Equal(Evaluate(minimum, 0xff800000u, kOne), 0xff800000u, "min keeps negative infinity");
 
 		const Program min3 = FloatModeProgram(Ternary(kMin3), 0xc0u, ieee, true);
 		const Program max3 = FloatModeProgram(Ternary(kMax3), 0xc0u, ieee, true);
-		const Program med3 = FloatModeProgram(Ternary(kMed3), 0xc0u, ieee, true);
+		const Program med3 = FloatModeProgram(Ternary(kMed3), 0xd0u, ieee, true);
 		Equal(Evaluate(min3, kOne, kTwo, kThree), kOne, "min3 ordered");
 		Equal(Evaluate(max3, kOne, kTwo, kThree), kThree, "max3 ordered");
 		Equal(Evaluate(med3, kOne, kTwo, kThree), kTwo, "med3 ordered");
 		Equal(Evaluate(med3, kThree, kOne, kTwo), kTwo, "med3 maximum first");
 		Equal(Evaluate(med3, kOne, kThree, kTwo), kTwo, "med3 maximum second");
 		Equal(Evaluate(med3, 0u, 0u, kNegZero), 0u, "med3 of zeros");
-		Equal(Evaluate(med3, 0x00000001u, 0x00000003u, 0x00000002u), 0x00000002u, "med3 of subnormals");
+		Equal(Evaluate(med3, 0x00000001u, 0x00000003u, 0x00000002u), 0x00000002u, "med3 preserves subnormals");
+		const Program med3_flush = FloatModeProgram(Ternary(kMed3), 0xc0u, ieee, true);
+		Equal(Evaluate(med3_flush, 1u, 3u, 2u), 0u, "med3 selects among flushed operands");
 		Equal(Evaluate(min3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : kNegZero, "min3 with a signaling NaN");
 		Equal(Evaluate(max3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : 0u, "max3 with a signaling NaN");
 		Equal(Evaluate(med3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : kNegZero, "med3 with a NaN takes min3");
@@ -1951,13 +1968,30 @@ void IsNan(uint32_t actual, const char* label)
 	Equal(Evaluate(to_signed, 0x7f800001u), 0u, "signed conversion maps signaling NaN to zero");
 	Equal(Evaluate(to_signed, 0x7f800000u, 0u, 0u, 0xdeadbeefu, 0u), 0xdeadbeefu, "inactive signed conversion retains the destination");
 
-	// V_CVT_RPI_I32_F32 is floor(x + 0.5): ties round up, not to even.
+	// RPI rounds half ties toward +infinity. FLR rounds every fraction down.
 	for (const bool e64: {false, true})
 	{
 		const Program to_nearest(Emit(Parse(Unary(0x0cu, e64), stage), 0xc0u, false, false, true).c_str());
-		Equal(Evaluate(to_nearest, Bits(2.5f)), 3u, "round-to-nearest conversion rounds a positive tie up");
-		Equal(Evaluate(to_nearest, Bits(-1.5f)), 0xffffffffu, "round-to-nearest conversion rounds a negative tie up");
-		Equal(Evaluate(to_nearest, Bits(1.4f)), 1u, "round-to-nearest conversion rounds below a tie down");
+		const Program to_floor(Emit(Parse(Unary(0x0du, e64), stage), 0xc0u, false, false, true).c_str());
+		const Program to_floor_preserve(Emit(Parse(Unary(0x0du, e64), stage), 0xd0u, false, false, true).c_str());
+		Equal(Evaluate(to_nearest, Bits(2.5f)), 3u, "RPI rounds a positive tie up");
+		Equal(Evaluate(to_nearest, Bits(-1.5f)), 0xffffffffu, "RPI rounds a negative tie up");
+		Equal(Evaluate(to_nearest, 0x3effffffu), 0u, "RPI just below the positive half tie");
+		Equal(Evaluate(to_nearest, 0xbf000001u), 0xffffffffu, "RPI just below the negative half tie");
+		Equal(Evaluate(to_nearest, 0x4b000001u), 8388609u, "RPI preserves an already integral input");
+		Equal(Evaluate(to_floor, Bits(-1.5f)), 0xfffffffeu, "FLR rounds negative fractions down");
+		Equal(Evaluate(to_floor, 0x80000001u), 0u, "FLR flushes a negative input subnormal");
+		Equal(Evaluate(to_floor_preserve, 0x80000001u), UINT32_MAX, "FLR rounds a preserved negative input subnormal down");
+		for (const Program* conversion: {&to_nearest, &to_floor})
+		{
+			Equal(Evaluate(*conversion, 0x4effffffu), 0x7fffff80u, "rounded conversion keeps largest in-range f32");
+			for (const uint32_t bits: {0x4f000000u, 0x7f800000u, 0x7f800001u, 0x7fc12345u})
+			{
+				Equal(Evaluate(*conversion, bits), 0x7fffffffu, "rounded conversion saturates positive special input");
+				Equal(Evaluate(*conversion, bits | 0x80000000u), 0x80000000u, "rounded conversion saturates negative special input");
+			}
+			Equal(Evaluate(*conversion, 0x7f800000u, 0u, 0u, 0xdeadbeefu, 0u), 0xdeadbeefu, "inactive rounded conversion keeps dst");
+		}
 	}
 
 	// V_CVT_I32_F64 / V_CVT_U32_F64 truncate, saturate out-of-range values and map NaN to zero like FP32.
@@ -1967,10 +2001,10 @@ void IsNan(uint32_t actual, const char* label)
 		std::memcpy(&bits, &value, sizeof(bits));
 		return f64(bits);
 	};
+	for (const bool e64: {false, true})
 	{
-		// The VOP3 forms of these conversions are not decoded yet.
-		const Program to_i32(Emit(Parse(Unary(0x03u, false), stage), 0xc0u, false, false, true).c_str());
-		const Program to_u32(Emit(Parse(Unary(0x15u, false), stage), 0xc0u, false, false, true).c_str());
+		const Program to_i32(Emit(Parse(Unary(0x03u, e64), stage), 0xc0u, false, false, true).c_str());
+		const Program to_u32(Emit(Parse(Unary(0x15u, e64), stage), 0xc0u, false, false, true).c_str());
 		const auto i32 = [&](std::array<uint32_t, 2> words) { return Evaluate(to_i32, words[0], words[1]); };
 		const auto u32 = [&](std::array<uint32_t, 2> words) { return Evaluate(to_u32, words[0], words[1]); };
 		Equal(i32(from_double(-1.9)), 0xffffffffu, "f64 signed conversion truncates");
@@ -1989,6 +2023,12 @@ void IsNan(uint32_t actual, const char* label)
 		Equal(u32(f64(0xfff0000000000000ull)), 0u, "f64 unsigned conversion saturates negative infinity");
 		Equal(u32(f64(0xfff8000000000000ull)), 0u, "f64 unsigned conversion maps NaN to zero");
 	}
+	const Program abs_i32(Emit(Parse(Unary(0x03u, true, 256u, 1u << 8u), stage), 0xc0u, false, false, true).c_str());
+	const Program neg_u32(Emit(Parse(Unary(0x15u, true, 256u, 0u, 1u << 29u), stage), 0xc0u, false, false, true).c_str());
+	const auto negative_double = from_double(-7.75);
+	Equal(Evaluate(abs_i32, negative_double[0], negative_double[1]), 7u, "e64 signed f64 conversion applies abs");
+	Equal(Evaluate(neg_u32, negative_double[0], negative_double[1]), 7u, "e64 unsigned f64 conversion applies neg");
+
 	std::_Exit(0);
 }
 

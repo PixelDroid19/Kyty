@@ -9168,10 +9168,10 @@ TEST(EmulatorGraphicsPackets, VMinMaxF32UseRdna2NanSelection)
 	ShaderPixelInputInfo input {};
 	const auto           source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 	// Values are covered by EmulatorShaderArithmetic.FloatModeClampOutputModifierAndMinMaxContracts;
-	// here only the selection order and the GLSL operation of each instruction are checked.
-	EXPECT_NE(source.FindIndex("%mm_0_quiet = OpSelect %float %mm_0_an %t1_0 %mm_0_ordered"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%mm_0_num = OpExtInst %float %GLSL_std_450 NMin %t0_0 %t1_0"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%mm_1_num = OpExtInst %float %GLSL_std_450 NMax %t0_1 %t1_1"), Core::STRING8_INVALID_INDEX);
+	// here only the selection order and the ordering-key compare of each instruction are checked.
+	EXPECT_NE(source.FindIndex("%mm_0_quiet = OpSelect %uint %mm_0_an %mm_0_b %mm_0_second_nan"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%mm_0_first = OpSLessThan %bool %mm_0_akey %mm_0_bkey"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%mm_1_first = OpSGreaterThan %bool %mm_1_akey %mm_1_bkey"), Core::STRING8_INVALID_INDEX);
 
 	constexpr uint32_t lhs_number = 0x3f800000u;
 	constexpr uint32_t rhs_number = 0x40000000u;

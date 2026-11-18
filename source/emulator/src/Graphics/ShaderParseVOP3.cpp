@@ -1073,7 +1073,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.src_num = 1;
 			inst.dst     = operand_parse(vdst);
 			break;
-		case 0x183: KYTY_NI("v_cvt_i32_f64"); break;
+		case 0x183: inst.type = ShaderInstructionType::VCvtI32F64; inst.src[0].size = 2; break;
 		case 0x184: KYTY_NI("v_cvt_f64_i32"); break;
 		case 0x185: inst.type = ShaderInstructionType::VCvtF32I32; break;
 		case 0x186: inst.type = ShaderInstructionType::VCvtF32U32; break;
@@ -1091,7 +1091,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x192: KYTY_NI("v_cvt_f32_ubyte1"); break;
 		case 0x193: KYTY_NI("v_cvt_f32_ubyte2"); break;
 		case 0x194: KYTY_NI("v_cvt_f32_ubyte3"); break;
-		case 0x195: KYTY_NI("v_cvt_u32_f64"); break;
+		case 0x195: inst.type = ShaderInstructionType::VCvtU32F64; inst.src[0].size = 2; break;
 		case 0x196: KYTY_NI("v_cvt_f64_u32"); break;
 		case 0x197: KYTY_NI("v_trunc_f64"); break;
 		case 0x198: KYTY_NI("v_ceil_f64"); break;

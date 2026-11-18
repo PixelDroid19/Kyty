@@ -3631,8 +3631,9 @@ void Spirv::FindConstants()
 	// Float min/max NaN selection, single-precision output modifiers and float-to-integer
 	// conversion boundaries work on bit patterns. The predecessor f32 values keep SPIR-V
 	// conversion inputs in range where the next f32 would already exceed the integer limit.
-	for (uint32_t value: {0x003fffffu, 0x00400000u, 0x00800000u, 0x01000000u, 0x4effffffu, 0x4f7fffffu, 0x7e800000u, 0x7f000000u,
-	                      0x7f7fffffu, 0x7f800000u, 0x7fc00000u, 0xcf000000u, 0xffffffffu})
+	// Float min/max ordering keys take the sign with a shift by 31.
+	for (uint32_t value: {31u, 0x003fffffu, 0x00400000u, 0x00800000u, 0x01000000u, 0x4effffffu, 0x4f000000u, 0x4f7fffffu, 0x7e800000u,
+	                      0x7f000000u, 0x7f7fffffu, 0x7f800000u, 0x7fc00000u, 0xcf000000u, 0xffffffffu})
 	{
 		AddConstantUint(value);
 	}
