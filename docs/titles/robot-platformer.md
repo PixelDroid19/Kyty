@@ -757,7 +757,7 @@ once a frame in every block.
 - **`0x3666fa39` is 15.7 ms of engine time a frame here** (86 % of 52.6 ms against 74 % of 40.0 ms).
   Without it the frame no longer waits on the GPU (fence waits about 1 ms) and holds 25 fps; the
   causal test above shows the graphics command thread then sets the frame.
-- **`0x874bd13f` frees no engine time.** Leaving it out as well leaves the engine's busy time a frame
+- **`0x874bd13f` frees no engine time (t216, close-up view; amended 2026-11-19 below: about 10 ms at the crash site).** Leaving it out as well leaves the engine's busy time a frame
   at 29.6 ms in both arms and the frame rate unchanged. The about 14 ms that dispatch stamps gave it
   (bill record below) is elapsed time that overlaps other queued work, not exclusive engine time.
 - **What this bounds.** 30 fps in this scene needs both sides at once: the GPU frame under 33 ms,
@@ -7724,5 +7724,31 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   from about 89 to about 205 a frame. A segment per particle draw would have added about one begin per draw. The
   transient's cost is therefore GPU work inside the segments and pull draws, not segment breaks.
 
-Next: test the particle skip on a close shot of the robot (the haze) and during the transient (the cost), then the
-GPU cost of the settled frame, where the lighting program `0x3666fa39` is the largest single item.
+- **Crash site: the sky and cloud program `0x874bd13f` is about 10 ms of GPU time a frame (2026-11-19, t246).**
+  Temporary per-dispatch GPU stamps (not committed), one 171 s run that settled at the crash site at 23.5 fps and
+  about 370 draws per frame, render engine 97 % busy: compute 25 ms a frame, of which `0x874bd13f` (one call of
+  `120x68x1` groups of 64 invocations) 12.3 ms and `0x3666fa39` 5.6 ms. A second build skipped that one dispatch: in
+  the same scene (capture checked) at about 375 draws per frame the frame held 31 to 34 fps, engine 93 to 96 %
+  busy, and the stamped command-buffer time fell from 41.0 to 30.6 ms a frame. One pair of runs. The skip capture
+  shows what the program draws: the sky and clouds, replaced by stale blue bands. Its cost follows how much sky the
+  view shows (same grid and SPIR-V: 1.5 to 2.9 ms in the hub, 5.5 to 8 ms during the transient, 12 ms at the crash
+  site). This amends the 2026-11-14 record above that it freed no engine time (t216, close-up dunes view).
+- **Its width is set by the native wave32 rule, and SIMD32 spills on the A770.** Wave32 programs stay native, pinned to
+  32 lanes, up to 64 guest VGPRs. Offline on ANV the live SPIR-V at 32 lanes is 77,775 instructions with 2,819:9,569
+  spills:fills; the same SPIR-V unpinned compiles at 8 lanes to 11,309 with 14:30. A temporary arm that split every
+  wave32 program into 16-lane parts produced 42,718 instructions and 1,171:4,213 at 16 lanes for this program; an
+  8-lane wave32 split is refused by the native-wave validator (only 16 is accepted). Both runs with the 16-lane arm
+  left the robot at the second rock (27 to 28 fps at about 600 draws per frame, as without it), so its effect at
+  the crash site is not measured.
+- **Bound only: the EXEC guards.** Replacing the program's 3,701 EXEC-guard selects with their new value (not a valid
+  translation) gives 51,711 instructions and 2,388 spills at 32 lanes, 32 % fewer estimated cycles, and still spills.
+  The guards sit across 142 EXEC segments with almost none before the first EXEC change, so a sound "EXEC is full"
+  subset would recover little; parked.
+- **Excluded: 16-lane parts for wave64 programs above 64 VGPRs as a lever on this program.** Its SPIR-V is identical with
+  and without that arm (it is native wave32); the arm's run reached the hub, so nothing else about it was measured.
+- **The cloud program is not the haze.** With it skipped the crashed ship looks as washed as with it. In both crash-site
+  runs the capture at 120 s is a dark frame without a frame-rate dip; whether that is a game fade or the reported
+  black flicker is not decided.
+
+Next: at the second rock (27 to 28 fps) the G-buffer pass (`ps 0x6bcfb82d`, five color targets, about 8.7 ms for 144
+draws a frame) is the largest item; price it. At the crash site, 30 fps needs `0x874bd13f` near 4.5 ms.
