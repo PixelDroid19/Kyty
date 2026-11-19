@@ -7978,7 +7978,13 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   work, before paying to write and re-read the outputs. Output slots cost nothing up to 4 vec4 and about 0.08-0.1
   ns per slot per vertex above that, but they do not explain the per-program prices: the dumped programs emit 8
   slots (`0x0c2ae56d`, about 4.5 ms per M), 4 (`0xa2bb8f2d`, 1.5-1.9), 1 (`0x51485353`, 1.5) and 1 (`0x5c9f3e0a`,
-  0.5-0.8). Not measured: how far vertex invocations exceed unique vertices in these draws.
+  0.5-0.8). The five-target pass at rock 2 runs 0.91-0.98 vertex invocations per primitive; how far that exceeds
+  the unique vertices of these meshes is not measured.
+- **Excluded: host primitive restart as a vertex-reuse lever (2026-11-19, `rst1`).** Turning restart on raises
+  ANV's reuse window and lowered the title's invocations per primitive by 8-12 %, but makes indexed draws several
+  times slower on the A770. The guest enables primitive reset and Kyty ignores it; see `docs/bringup/cross-title.md`,
+  "Guest primitive reset is ignored; host restart is slow on ANV". That run ended in the known guest null-call exit
+  139 while loading `hub_crashsite_tutorial`, after reaching it later than the baseline runs.
 - **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** The lookup kept the last
   matched entry in private variables and returned early on a hit (translator 247, temporary). The dumped
   `vs 0xa2bb8f2d` carries the cache (13 calls to the lookup, a different source hash) yet compiles to the same 1,226

@@ -8517,3 +8517,26 @@ without input.
 - **Open, not checked:** storage views of a mip past the descriptor's last level; batching of blocking GPU readbacks and
   publication of GPU writes to pages the guest reads often; `userfaultfd` write tracking in place of `mprotect`; one
   staging copy per synchronization and release of clean, unused buffers.
+
+## Guest primitive reset is ignored; host restart is slow on ANV (2026-11-19, open)
+
+Worktree commit `e8433b68e` plus temporary diagnostics, Intel Arc A770 (DG2), ANV Mesa 26.2.x, 60 fps limit.
+
+- **Defect (not fixed).** `PPSA21567 - Astro Bot` writes `GE_MULTI_PRIM_IB_RESET_EN = 0x1` (reset on, match-all-bits
+  off) and never writes `VGT_MULTI_PRIM_IB_RESET_INDX` in a 175 s strict run (`rst1`). Kyty drops both registers
+  (`GraphicsRunJmpTables.cpp:450` and `:910`) and builds every pipeline with `primitiveRestartEnable = VK_FALSE`
+  (`GraphicsRenderPipeline.cpp:579`). The index scan of the same run found no indexed draw whose largest index is
+  all-ones for its type, so ignoring the reset changed no primitive in that run. A draw that does carry an all-ones
+  index with reset on is cut on the console and drawn here. What the console uses as the reset index when the guest
+  never writes it is not established.
+- **Host cost on ANV.** A standalone Vulkan test (no emulator; `VK_EXT_primitive_topology_list_restart` enabled,
+  triangle lists, rasterization on, restart as dynamic state) shows that turning restart on lengthens the effective
+  vertex-reuse window from about 16-20 vertices to more than 64. On a 128x128 grid drawn in 32-quad column strips,
+  vertex invocations per primitive fall from 0.766 to 0.520. Yet the same draws run much slower: a 1024x1024 grid
+  with a trivial vertex program takes 7.2-7.6 ms against 4.5 ms, and with 256 or 1,024 dependent FMAs per vertex
+  7.5-7.8 against 1.2-1.4 ms and 22-24 against 3.7-4.5 ms. The RADV iGPU shows no reuse change. In the game run,
+  80-frame windows with host restart on lowered invocations per primitive by 8-12 % (0.71 to 0.645 in the last
+  scene), but the two such windows in the heaviest scene (about 1,170 draws) took 154 ms of render-pass time against
+  36-39 ms in the windows around them.
+- **Direction.** Mirror the guest reset only for draws whose index scan finds an all-ones index, so that the common
+  case keeps restart off on ANV. Do not enable host restart as a reuse lever on Intel.
