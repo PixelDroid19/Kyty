@@ -8005,8 +8005,8 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   passes per frame), about 1.0 ms per frame; the passes themselves remain. The other arms (`vs 0x8e51dd94` with its geometry, `cs 0xff2adfc8`, the compute tail)
   fell after the scene change and are not priced. Two more runs with the same probe (`rank1`, `rank3`) left the
   route before the second rock, so causal ranking there is blocked by route repeatability, not by the probe.
-- **Measured: in a steady scene reached off the route, skipping the small compute dispatches saves about 6 ms
-  (2026-11-19, `rank6`).** Five more runs with the route left it before the dunes level (two stayed in the space hub,
+- **Measured: in a steady scene reached off the route, skipping the small compute dispatches saved about 6 ms
+  once (2026-11-19, `rank6`; not repeated in `rank7`, below).** Five more runs with the route left it before the dunes level (two stayed in the space hub,
   one reached a crowd cinematic); a copy of the route with every input from 79 s delayed by 30 s left it too, so
   the variance starts before the first menu input. The probe was changed to arm on any scene whose requested draws
   stay within 8 % for 30 frames. In a scene of about 565 draws and 83 dispatches per frame, skipping every dispatch
@@ -8017,7 +8017,16 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   dispatches cost 0.14-0.16 ms each in timestamps (`0x5d90f514` 30x17 groups, `0x5546b086` 120x68 groups), and
   dispatch processing on the command-processor thread is about 38 us per dispatch at the second rock. Skipping
   `0x3666fa39` alone saved under 1 ms (the no-skip windows of this run spread by 1 ms). This prices nearly all
-  compute in that scene together; which of the small dispatches carry the cost is not measured.
+  compute in that scene together, including whatever later work reads its results; which of the small dispatches
+  carry the cost is not measured.
+- **Measured: the command-processor thread is not clearly on the critical path (2026-11-19, `rank7`).** In a steady
+  scene of about 300 draws and 86 dispatches per frame, a busy wait of 4 us per draw (about 1.2 ms per frame on the
+  command-processor thread) moved the frame by +1.8 and +0.03 ms in two windows, and 20 us per dispatch (about
+  1.7 ms) by +0.4 ms, against control windows that drift by about 1 ms. Skipping the same compute tail in that scene
+  saved nothing (38.1 ms against 35.4 ms after it), so the 6 ms of `rank6` is not a fixed cost of small dispatches;
+  it most likely includes draws that consume the skipped results. An on-CPU profile on the route's approach
+  (`prof1`, `cycles:u`) shows the command-processor thread flat: `memcmp` about 7 % of its samples, the index range
+  scan about 5 %, nothing else above 3 %.
 - **Measured offline: a switch between 3D and compute work on one queue costs about 7 us on the A770 (2026-11-19).**
   A standalone Vulkan program alternated a one-triangle render pass and an 8-group dispatch: 17.3 us per pair
   against 3.0 us with the same work grouped, about 13 us per pair with 1024x1024 targets, and no difference on the

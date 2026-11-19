@@ -8563,6 +8563,6 @@ Worktree commit `e8433b68e` plus temporary diagnostics, Intel Arc A770 (DG2), AN
   3.6 us per dispatch on the A770.
 - **Bearing on titles.** Kyty records guest dispatches in guest order on one queue, closing any open render pass
   first. At 60-80 alternations per frame (`PPSA21567 - Astro Bot`) the switches cost about 1 ms per frame; that
-  title's small dispatches cost more than this in a skip test (`docs/titles/robot-platformer.md`), so the
-  switches alone are not the lever there. Regrouping dispatches would need proof that no draw in between reads or
+  title's skip tests of its small dispatches gave 6 ms once and nothing in another scene
+  (`docs/titles/robot-platformer.md`), so the switches are not shown to be a lever there. Regrouping dispatches would need proof that no draw in between reads or
   writes what they touch.
