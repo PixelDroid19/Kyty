@@ -26,6 +26,8 @@ constexpr uint32_t kSplitNarrowestLanes = 8u;
 // dwords of registers per lane; a guest allocating more spills there, and its
 // cost outweighs the extra rendezvous of twice as many 8-lane parts.
 constexpr uint32_t kSplitNarrowVgprs = 64u;
+// A 32-lane hardware thread on such a host holds half of that per lane.
+constexpr uint32_t kNativeWave32Vgprs = kSplitNarrowVgprs / 2u;
 constexpr uint32_t kLdsDwordBytes    = 4u;
 
 [[nodiscard]] bool MultiplyU32(uint32_t a, uint32_t b, uint32_t* product) noexcept
@@ -86,8 +88,9 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	}
 	// Wave32 fits one host subgroup; it splits only for the allocation that
 	// spills at that width, on a host with exact width 16.
-	const bool wave32 = (mode & kWave32Enable) != 0;
-	if (wave32 && request.vgprs <= kSplitNarrowVgprs)
+	const bool     wave32        = (mode & kWave32Enable) != 0;
+	const uint32_t wave32_budget = capabilities.min_subgroup_size <= kSplitNarrowestLanes ? kNativeWave32Vgprs : kSplitNarrowVgprs;
+	if (wave32 && request.vgprs <= wave32_budget)
 	{
 		return ShaderComputeWaveLayoutStatus::UnsupportedWidth;
 	}
