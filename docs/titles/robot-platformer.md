@@ -7663,6 +7663,15 @@ size, so these samples can be read as linear.
   program that writes the 1x1, then the pixel shader that reads it. Do this before allowing the upload again.
 - One further sample, a 1x1 RGBA16F at the start of a live 3840x2160 target, also holds non-zero guest bytes. It
   stays zero-filled because nothing shows those bytes are the content.
+- **Excluded (2026-11-19): the buffer content of the covered texels as the haze.** A temporary build copied each
+  zero-filled one-element 2D sample that lies inside a single storage buffer from that buffer on the GPU, in
+  submission order, instead of zero-filling it. It engaged on three texels, all at offset 0 of a 64 KiB storage
+  buffer inside an in-place guest window: two RGBA32F (format 77, guest bytes `(1, -1, 0.5, 0.18)` at record time)
+  and one RGBA16F (format 71) at `0x532830000`. The frame stayed normal, not black as with the guest-byte upload, and
+  the second-rock captures at 120, 140 and 160 s matched the zero-fill baseline (grey mean and deviation 212/29,
+  204/23, 203/25 against 212/28, 204/23, 203/25; one run, plus one crash-site run whose captures look as washed as
+  before). Frame rate was unchanged (27.7 to 28.7 fps). The change is parked outside the tree; what value the GPU
+  holds there at the read was not read back.
 
 **Comment fixed.** `ResolveGen5SampleBacking` said `Unsupported` stops the run. It only logs, and the caller still
 creates a zero-filled Texture object.
