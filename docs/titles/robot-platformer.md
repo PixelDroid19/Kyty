@@ -7846,6 +7846,20 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   (4.9 ms in `qsplit1`), so no ceiling was obtained. For the BVH kernel the fixed mechanics of its rendezvous were
   priced at about 4 % of its time (record of 2026-11-14; the waits between parts were not priced), so this route is
   not expected to give the missing 2.4 ms there either.
+- **Second rock, per-program stamps (2026-11-19, frames from 4,600, 744 to 857 draws a frame).** The five-target pass
+  of `ps 0x6bcfb82d` (1920x1080, 121 draws) 7.2 to 7.3 ms a pass, the BVH kernel 5.7 ms, the 2048x2048 shadow passes of
+  `ps 0x0ff8a6ab` (6 passes, 280 draws) 4.7 ms, a one-target pass of `ps 0x860593d6` (120 draws) 2.4 ms, compute
+  `0xff2adfc8` 1.2 ms. The five-target pass was recorded vertex-bound (2026-10-30 record above).
+- **Bound only: guest-address lookups in the largest five-target vertex program.** The largest dumped vertex module
+  with five colour targets (195k SPIR-V words) compiles at width 8 to 21,430 instructions, 234 sends, 30 loops and
+  376:1,559 spills:fills. 24 of its loops are the in-shader guest-address lookup, inlined once per `S_LOAD_DWORDX8`
+  (12 loads, each with a second lookup when it crosses a page). Their bases are SGPR pairs copied straight from user
+  data, not the EUD pointer, so they get no dynamic scalar-load record: those records cover only EUD loads, and the
+  pointer-table collector is not run for vertex programs. With the lookup body replaced by a plain return
+  (offline, unsound), the module compiles to 17,143 instructions, 165 sends and 266:1,120 spills:fills, with
+  estimated cycles 9 % lower. The one-entry lookup cache measured on the BVH kernel gained under 2 % (record of
+  2026-10-29), and which vertex module the pass spends its time in is not matched, so this lever is not expected
+  to reach 2.4 ms; parked.
 
 Next: with the rule the crash site holds about 29 fps and the second rock 28, both GPU-bound at 95 to 96 % busy; 30
 fps needs about 1.2 ms more at the crash site and 2.4 ms at the second rock. The largest shared item is `0x3666fa39`
