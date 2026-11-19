@@ -8538,5 +8538,17 @@ Worktree commit `e8433b68e` plus temporary diagnostics, Intel Arc A770 (DG2), AN
   80-frame windows with host restart on lowered invocations per primitive by 8-12 % (0.71 to 0.645 in the last
   scene), but the two such windows in the heaviest scene (about 1,170 draws) took 154 ms of render-pass time against
   36-39 ms in the windows around them.
-- **Direction.** Mirror the guest reset only for draws whose index scan finds an all-ones index, so that the common
-  case keeps restart off on ANV. Do not enable host restart as a reuse lever on Intel.
+- **What the cost depends on.** The slowdown follows the index count of one draw, not the index values or the
+  restart topology. With 256 dependent FMAs per vertex, at equal total work: up to about 0.8 M indices per draw,
+  restart on is 10-18 % faster when the work is instanced (draws of 98 k indices are the exception, 17 % slower);
+  at 1.6 M indices it is 1.7 times slower, and at 6.3 M 6.5 times. Repeating a mesh 16 times in one draw is 6.5
+  times slower, while 16 instances of it are 8 % faster; adding 4 M to every index value changes nothing. Strips
+  slow down the same way, and baked and dynamic restart behave the same. Splitting the 6.3 M-index draw into 16 to
+  256 separate draws with restart on removes the slowdown but not the gain: 1.255 ms against 1.175-1.26 ms off,
+  despite 10 % fewer invocations. On Gfx12.5 the driver sets `3DSTATE_VFG.ListCutIndexEnable` from the restart state
+  (`update_vfg_list_cut_index`); a consistent reading, not proven, is that the global vertex fetch then stops
+  splitting a draw into small batches across the geometry slices, which explains both the larger reuse window and
+  the loss of parallelism inside one draw. Vulkan exposes no control over that distribution.
+- **Direction.** No performance lever: restart gains only on instanced draws, not reliably, and RADV shows no reuse
+  change. For correctness, mirror the guest reset only for draws whose index scan finds an all-ones index (and
+  for indirect draws, whose indices are not scanned), so the common case keeps restart off on ANV.
