@@ -7848,7 +7848,8 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   priced at about 4 % of its time (record of 2026-11-14; the waits between parts were not priced), so this route is
   not expected to give the missing 2.4 ms there either.
 - **Second rock, per-program stamps (2026-11-19, frames from 4,600, 744 to 857 draws a frame).** The five-target pass
-  of `ps 0x6bcfb82d` (1920x1080, 121 draws) 7.2 to 7.3 ms a pass, the BVH kernel 5.7 ms, the 2048x2048 shadow passes of
+  (1920x1080, 121 draws; the stamp names a pass by its first draw's programs, here `ps 0x6bcfb82d`, so the time
+  covers every program in the pass) 7.2 to 7.3 ms a pass, the BVH kernel 5.7 ms, the 2048x2048 shadow passes of
   `ps 0x0ff8a6ab` (6 passes, 280 draws) 4.7 ms, a one-target pass of `ps 0x860593d6` (120 draws) 2.4 ms, compute
   `0xff2adfc8` 1.2 ms. The five-target pass was recorded vertex-bound (2026-10-30 record above).
 - **Bound only: guest-address lookups in the largest five-target vertex program.** The largest dumped vertex module
@@ -7860,8 +7861,33 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   (offline, unsound), the module compiles to 17,143 instructions, 165 sends and 266:1,120 spills:fills, with
   estimated cycles 9 % lower. The one-entry lookup cache measured on the BVH kernel gained under 2 % (record of
   2026-10-29), and which vertex module the pass spends its time in is not matched, so this lever is not expected
-  to reach 2.4 ms; parked.
+  to reach 2.4 ms; parked. Correction (2026-11-19): that module (`vs 0x8b21b61c`) is not among the vertex programs
+  that carry the pass's work (bullet below), and its figures are static compiler estimates, not measured time.
+- **The five-target pass is mostly pre-raster work (2026-11-19, `vtx5`).** A temporary build set a 1x1 scissor on
+  every draw with five colour targets (engaged: the captured frame is visibly broken). The pass still took 5.6 to
+  6.8 ms against 6.4 to 7.7 ms at matched draw counts, so about 1 ms of it is rasterization and pixel work and the
+  rest is vertex shading, primitive setup or per-draw work. Counted over the last print window of that run (20,000 five-target draws;
+  index count times instance count, not vertex invocations, raw window totals), five vertex programs carry 96 %:
+
+  | Vertex program | Pixel program | Draws | Index x instance | Share | Width-8 instructions | Cycles (static) | Spills:fills |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | `0xa2bb8f2d` | `0xd4bef057` | 6,653 | 480 M | 39 % | 1,226 | 38,976 | 0:0 |
+  | `0x4ea3083b` | `0x8ca0b9ff` | 6,368 | 231 M | 19 % | 1,880 | 49,993 | 0:0 |
+  | `0x0c2ae56d` | `0x6bcfb82d` | 404 | 222 M | 18 % | 6,951 | 179,955 | 332:232 |
+  | `0x67d7f692` | `0x6bcfb82d` | 2,425 | 135 M | 11 % | 1,811 | 49,365 | 0:0 |
+  | `0x57572d59` | `0xd4bef057` | 671 | 130 M | 10 % | 4,104 | 92,846 | 66:61 |
+
+  `0x0c2ae56d` averages about 550,000 index-instances a draw; weighted by static cycles it is the largest item,
+  but static cycles have tracked measured time poorly on this host, so no program is priced yet.
+- **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** The lookup kept the last
+  matched entry in private variables and returned early on a hit (translator 247, temporary). The dumped
+  `vs 0xa2bb8f2d` carries the cache (13 calls to the lookup, a different source hash) yet compiles to the same 1,226
+  instructions; why ANV's output did not change was not determined, so its vertex-time effect is untested. The BVH kernel
+  `0x3666fa39` grew from 29,954 to 35,938 instructions and 272 to 487 spills at width 8, and its crash-site stamp
+  rose from 5.77 to 10.76 ms (`lkc2`). Reverted. One run of this series (`vtx2`) ended on the known intermittent
+  `DepthStencilBuffer - Crosses - StorageTexture` relation exit (cross-title record).
 
 Next: with the rule the crash site holds about 29 fps and the second rock 28, both GPU-bound at 95 to 96 % busy; 30
 fps needs about 1.2 ms more at the crash site and 2.4 ms at the second rock. The largest shared item is `0x3666fa39`
-(5.5 ms); at the second rock the five-target pass of `ps 0x6bcfb82d` costs about 3 ms in the skip test.
+(5.5 ms); at the second rock the draws of `ps 0x6bcfb82d` cost about 3 ms in the skip test, and the whole five-target
+pass is mostly vertex work spread over five vertex programs, none priced by measurement yet.

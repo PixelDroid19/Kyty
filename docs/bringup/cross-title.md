@@ -8511,6 +8511,9 @@ without input.
   `ChangedSince` reports the object's dirty generation unchanged, and `Rearm` skips blocks already proven armed.
 - **Not applicable as stated: branch-free bounds-checked buffer loads.** The translator's buffer access guard tests for
   a zero-record descriptor, not a per-offset bound, so there is no per-load range branch to replace.
+- **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** Keeping the last matched entry of
+  the in-shader guest-address lookup in private variables regressed the BVH kernel of `PPSA21567 - Astro Bot` from
+  5.77 to 10.76 ms with spills 272 to 487; details in `docs/titles/robot-platformer.md`.
 - **Open, not checked:** storage views of a mip past the descriptor's last level; batching of blocking GPU readbacks and
   publication of GPU writes to pages the guest reads often; `userfaultfd` write tracking in place of `mprotect`; one
   staging copy per synchronization and release of clean, unused buffers.
