@@ -2287,6 +2287,69 @@ TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
 	EXPECT_TRUE(GpuMemoryFindObjects(obj_addr, obj_size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
 }
 
+// A one-level linear storage view of the given format, pitch and extent; params[0] (the format) is also the
+// equality key of TestGpuObject.
+static TestGpuObject LinearStorageTexture(uint64_t format, uint32_t width, uint32_t height, uint32_t levels)
+{
+	TestGpuObject o(GpuMemoryObjectType::StorageTexture);
+	o.params[StorageTextureObject::PARAM_FORMAT]        = format;
+	o.params[StorageTextureObject::PARAM_PITCH]         = width;
+	o.params[StorageTextureObject::PARAM_WIDTH_HEIGHT]  = (static_cast<uint64_t>(width) << 32u) | height;
+	o.params[StorageTextureObject::PARAM_LEVELS]        = levels;
+	o.params[StorageTextureObject::PARAM_TILE]          = 0;
+	o.params[StorageTextureObject::PARAM_NEO]           = 1;
+	o.params[StorageTextureObject::PARAM_SWIZZLE]       = 4012;
+	o.params[StorageTextureObject::PARAM_RESOURCE_TYPE] = 9;
+	o.params[StorageTextureObject::PARAM_DEPTH]         = 1;
+	return o;
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryLinksStorageViewInsideOneDepthPlane)
+{
+	EnsureGpuMemoryForTests();
+
+	// Captured: a linear 416x234 8-byte view 0x1ba0000 bytes into the depth plane of a 3840x2160 D32S8 target whose
+	// depth, stencil and HTILE planes are adjacent ranges of one object.
+	GraphicContext ctx {};
+	const uint64_t base           = 0x0000005a00000000ull;
+	const uint64_t plane_vaddr[3] = {base, base + 0x1fe0000ull, base + 0x2850000ull};
+	const uint64_t plane_size[3]  = {0x1fe0000ull, 0x870000ull, 0xa0000ull};
+	GpuMemorySetAllocatedRange(base, 0x4000000ull);
+
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, plane_vaddr, plane_size, 3, TestGpuObject(GpuMemoryObjectType::DepthStencilBuffer)),
+	          nullptr);
+	const uint64_t view_vaddr = base + 0x1ba0000ull;
+	const uint64_t view_size  = 0xbe200ull;
+	ASSERT_NE(GpuMemoryCreateObject(2, &ctx, nullptr, view_vaddr, view_size, LinearStorageTexture(0x400000ull, 416, 234, 1)), nullptr);
+
+	EXPECT_EQ(GpuMemoryFindObjects(view_vaddr, view_size, GpuMemoryObjectType::StorageTexture, true, false).Size(), 1u);
+	EXPECT_EQ(GpuMemoryFindObjects(plane_vaddr, plane_size, 3, GpuMemoryObjectType::DepthStencilBuffer, true, false).Size(), 1u);
+
+	GpuMemoryFree(&ctx, base, 0x4000000ull);
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryLinksArenaViewAtAnotherBaseOfAChain)
+{
+	EnsureGpuMemoryForTests();
+
+	// Captured: a one-level 1216x684 view 64 KiB into a six-level linear chain of its format (level 0 of the chain
+	// is at offset 0), also crossing a 1216x684 depth target at the chain's base.
+	GraphicContext ctx {};
+	const uint64_t base = 0x0000005b00000000ull;
+	GpuMemorySetAllocatedRange(base, 0x1000000ull);
+
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, base, 0x3c0000ull, TestGpuObject(GpuMemoryObjectType::DepthStencilBuffer)), nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(2, &ctx, nullptr, base, 0x87e900ull, LinearStorageTexture(0x470000ull, 1216, 684, 6)), nullptr);
+	const uint64_t view_vaddr = base + 0x10000ull;
+	const uint64_t view_size  = 0x658800ull;
+	ASSERT_NE(GpuMemoryCreateObject(3, &ctx, nullptr, view_vaddr, view_size, LinearStorageTexture(0x470000ull, 1216, 684, 1)), nullptr);
+
+	EXPECT_EQ(GpuMemoryFindObjects(view_vaddr, view_size, GpuMemoryObjectType::StorageTexture, true, false).Size(), 1u);
+	EXPECT_EQ(GpuMemoryFindObjects(base, 0x87e900ull, GpuMemoryObjectType::StorageTexture, true, false).Size(), 1u);
+
+	GpuMemoryFree(&ctx, base, 0x1000000ull);
+}
+
 TEST(EmulatorGraphicsState, GpuMemoryMappedPrefixSpansAdjacentAllocations)
 {
 	EnsureGpuMemoryForTests();

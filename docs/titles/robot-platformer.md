@@ -7612,7 +7612,7 @@ only the world map, one left the route for the ship crowd cinematic, one stopped
 dunes. The stop was a pixel program on the per-lane fragment path refused at its null export; fixed in
 `253d981a9`, where a null export emits nothing after the valid-mask bit has set which lanes stay alive.
 
-## Open: depth range reused as a storage view at about 87 s (2026-11-18)
+## Fixed: depth and chain ranges reused as storage views at about 87 s (2026-11-18, fixed 2026-11-19)
 
 `PPSA21567 - Astro Bot` exits with code 65 at about 87 s in some dunes-route runs on `4bf5efeb9`
 (two of six runs that day, one of them with temporary diagnostics, plus one on `3268e4c21`); the sample is too
@@ -7629,6 +7629,29 @@ storage view of the plane) and the recycled-range cases (`Contains`), not a view
 multi-range target. Suggested direction: classify the relation per range for multi-range parents, then decide
 whether the guest reuses a released depth range (seed from guest memory, as for sampled textures over depth
 ranges) or views live depth texels.
+
+**Fix (2026-11-19).** The twelve exit-65 runs on this route since 2026-11-18 have two shapes.
+
+- **Five stop at the relation switch.** The 416x234 linear view (8 bytes per texel) lies strictly inside the depth
+  plane, but the parent's three planes (depth, stencil, HTILE) are adjacent ranges of one object and the classifier
+  reports `Crosses` against the set. The storage-over-depth rule now also accepts a view strictly inside one plane.
+  A view of a whole plane is left to the plane rules (the `PPSA07393` stencil-plane view in
+  `docs/bringup/cross-title.md`).
+- **Seven stop at `!create_all_the_same`, every one on the same parent:** a six-level linear chain (1216x684, format
+  0x47, tile 0) of 0x87e900 bytes containing a one-level view of its format and pitch at +0x10000. The view is not a
+  level of the chain: levels 1-5 with rows padded to 256 bytes take exactly 0x226100 bytes, so level 0 sits at offset
+  0 or 0x226100. The multi-parent arena rule now links a storage parent that contains a view of its layout at another
+  base. The view seeds from guest bytes, like the other storage parents of that rule; its coherence against an
+  in-flight write of the chain was not checked.
+
+Both rules only replace the exit with a link; every relation accepted before keeps its outcome.
+
+**Verified:** two regression tests built from the logged ranges and parameters
+(`GpuMemoryLinksStorageViewInsideOneDepthPlane`, `GpuMemoryLinksArenaViewAtAnotherBaseOfAChain`) pass; with the two
+rules disabled they stop with exit 65 at the same two messages as the game. `EmulatorGraphics*`
+(807 tests), the full `kyty_unit_test` (2729 passed, 11 skipped) and the four repository gates pass. Two 150 s dunes
+runs (`exit65a`, `exit65b`) reached the time limit, but neither met either shape (the print did not fire), so the fix
+is not yet observed in the game; their 120 and 140 s captures show the usual dunes.
 
 ## Open: dunes haze and zero-filled single-texel samples (2026-11-18)
 
@@ -8106,5 +8129,5 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
   one pass are inside this spread. A large reduction does reach the frame: skipping `0x874bd13f` (`skip874a`) gave
   30.73 ms per frame with a GPU sum of 28.77 ms in its frames of 340-409 draws, against 34.92 and 33.22 ms in
   `gcap2`, about 0.9 ms of frame per ms of GPU. `pstriv2` and `psfast55` left the route before the window.
-- **Exit 65 from the overlap check** stopped `pstriv`, `rpmix` and `psnull55`; it is the open item "depth range
-  reused as a storage view" above (about 12 of the runs since 2026-11-18 on this route).
+- **Exit 65 from the overlap check** stopped `pstriv`, `rpmix` and `psnull55`; it was the item "depth and chain
+  ranges reused as storage views" above (about 12 of the runs since 2026-11-18 on this route), fixed on 2026-11-19.
