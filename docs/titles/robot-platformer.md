@@ -7124,6 +7124,15 @@ native program spills?
   VGPR count does not predict the case no longer holds for them; it is untested beyond them. `0x874bd13f` measured -8
   % here (end-of-pipe brackets, widths rotated inside one run) and -57 % on t246 (per-dispatch stamps, matched runs);
   the gap is unexplained.
+- **Priced 2026-11-19, not pursued.** With the rule, the three split programs that have per-dispatch numbers cost 2.9
+  ms a frame at the crash site in 16-lane parts (`0x874bd13f` 2.5 ms, `0xe1b1315d` 0.31 ms, `0x2bcba9a2` 74 us). The
+  one measured 16-to-8-lane change in this tree, `0x3666fa39`, fell 34 % (36.9 to 24.4 ms), so 8-lane wave32 parts
+  would save about 1.0 ms, below the 1.2 ms the crash site needs for 30 fps, and nothing at the second rock, where
+  these programs are not the cost. A code read found no 8-lane arithmetic defect in the split emission (part count,
+  mask words, grouped ballots, exchange slots; DPP rows already read through the guest-lane exchange when parts are
+  narrower than 16), so the device loss has no localized cause; no 8-lane dispatch was repeated. The 2026-11-19
+  `w32s8` attempt never reached a dispatch: it stopped at the translator's layout gate. Unchecked: whether the GDS
+  append/consume count, which adds the high EXEC word with no wave32 case, sees a zero high word in wave32.
 
 ## Depth targets no longer wait for deferred storage aliases (2026-11-07)
 
