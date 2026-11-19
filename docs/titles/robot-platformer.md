@@ -7964,6 +7964,8 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   and reshaping the cold branch does not move it. A probe that read zeros for partial rows instead also left the
   route; a run whose native code was identical to the baseline but used the same translation-cache directory left
   it too, so that desync and the probe's one exit 139 are unattributed, not evidence of a guest-visible change.
+  Three later runs on the default cache directory (`rst1`, `rank1`, `rank3`) also left the route, so the shared
+  cache directory is not the common factor.
 - **Excluded: merging the per-word raw loads of the vertex programs into four-word loads (2026-11-19).** Offline
   gate only: with the whole-range path emitting one four-word typed load, ANV's code for `vs 0x0c2ae56d` still
   issued 52 single-dword bound-buffer loads, so the driver does not vectorize them and the change was not run.
@@ -7993,6 +7995,15 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   `0x3666fa39` grew from 29,954 to 35,938 instructions and 272 to 487 spills at width 8, and its crash-site stamp
   rose from 5.77 to 10.76 ms (`lkc2`). Reverted. One run of this series (`vtx2`) ended on the known intermittent
   `DepthStencilBuffer - Crosses - StorageTexture` relation exit (cross-title record).
+- **Measured: skipping the shadow vertex program saves almost nothing at the second rock (2026-11-19, `rank2`).**
+  The second rock (about 730-790 draws per frame) starts near 165 s, after the route's last input at 140.5 s, and
+  the title leaves it by itself near 192 s. A temporary probe armed on 30 frames in that draw band and alternated
+  45-frame windows of control and one skip. With the scene steady (765 draws, 87 dispatches per frame, render engine
+  94-96 % busy), skipping every draw of `vs 0x5033be53` (204 per frame, the 2048x2048 shadow passes) gave 34.42 ms
+  per frame against 34.65 and 34.66 ms in the control windows on either side, 0.24 ms against the 1.81 ms its
+  passes carry in timestamps. The other arms (`vs 0x8e51dd94` with its geometry, `cs 0xff2adfc8`, the compute tail)
+  fell after the scene change and are not priced. Two more runs with the same probe (`rank1`, `rank3`) left the
+  route before the second rock, so causal ranking there is blocked by route repeatability, not by the probe.
 
 Next: with the rule the crash site holds about 29 fps and the second rock 28, both GPU-bound at 95 to 96 % busy; 30
 fps needs about 1.2 ms more at the crash site and 2.4 ms at the second rock. The largest shared item is `0x3666fa39`

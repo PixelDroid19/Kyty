@@ -8537,7 +8537,8 @@ Worktree commit `e8433b68e` plus temporary diagnostics, Intel Arc A770 (DG2), AN
   7.5-7.8 against 1.2-1.4 ms and 22-24 against 3.7-4.5 ms. The RADV iGPU shows no reuse change. In the game run,
   80-frame windows with host restart on lowered invocations per primitive by 8-12 % (0.71 to 0.645 in the last
   scene), but the two such windows in the heaviest scene (about 1,170 draws) took 154 ms of render-pass time against
-  36-39 ms in the windows around them.
+  36-39 ms in the windows around them. The run had left the route and its per-draw index counts were not compared
+  with the bench threshold below, so those two windows are unattributed.
 - **What the cost depends on.** The slowdown follows the index count of one draw, not the index values or the
   restart topology. With 256 dependent FMAs per vertex, at equal total work: up to about 0.8 M indices per draw,
   restart on is 10-18 % faster when the work is instanced (draws of 98 k indices are the exception, 17 % slower);
