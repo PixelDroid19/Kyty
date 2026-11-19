@@ -7837,13 +7837,14 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   exchanges) on the 15 wave32 programs that use wave state on the dunes route. None passed: ten stop at the same
   early instruction with an EXEC write by a plain scalar instruction, `0x874bd13f` (clouds) and `0x2bcba9a2` at an
   operand the proof cannot keep per lane, `0xbf8ee9fc` and `0xe1b1315d` at further EXEC writes. The proof is written
-  for wave64: it refuses 32-bit SAVEEXEC and every EXEC-conditional back edge, and the clouds program runs 31 loops
-  with its ballots inside them, so admitting it would need a wave32 form of the proof that models EXEC-narrowed
-  loops, plus a route from a proven wave32 program to the per-lane mask emitter (the per-lane layout is built for
-  guest wave64 only). A ceiling probe that let the 8x8 split wave32 programs skip the rendezvous wait (ballots kept
+  for wave64: it refuses 32-bit SAVEEXEC and every EXEC-conditional back edge. The clouds program runs 31 loops with
+  its ballots inside them; whether they are EXEC-narrowed is unchecked (it stops at 0xa8, before any back-edge check,
+  and no guest disassembly was taken). Admitting it would need a wave32 form of the proof, plus a route from a proven
+  wave32 program to the per-lane mask emitter (the per-lane layout is built for guest wave64 only). A ceiling probe that let the 8x8 split wave32 programs skip the rendezvous wait (ballots kept
   only their own part's bits) landed at the second rock, where `0x874bd13f` costs 0.17 to 0.20 ms in every build;
-  its only frames before the rock (4.8 ms, frames 3060 and 3100) match the first-frame values of earlier runs
-  (4.9 ms in `qsplit1`), so no ceiling was obtained. For the BVH kernel the fixed mechanics of its rendezvous were
+  in its only frames before the rock (frames 3060 and 3100: 36 to 41 passes, 79 dispatches, the same view as frames
+  3100 to 3140 of the rule runs `rule32a` and `idle-rule`) it took 4.8 ms against 2.56 ms with the rendezvous. The
+  probe changed the program's work (each part saw only its own lanes in every ballot), so no ceiling was obtained. For the BVH kernel the fixed mechanics of its rendezvous were
   priced at about 4 % of its time (record of 2026-11-14; the waits between parts were not priced), so this route is
   not expected to give the missing 2.4 ms there either.
 - **Second rock, per-program stamps (2026-11-19, frames from 4,600, 744 to 857 draws a frame).** The five-target pass
