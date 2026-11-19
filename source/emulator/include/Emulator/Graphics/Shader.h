@@ -2648,6 +2648,10 @@ struct ShaderComputeInputInfo
 	// instructions observe wave state. Generated subgroup operations by
 	// themselves do not establish guest sensitivity.
 	bool                    native_wave_sensitive = false;
+	// Proven wave-width-independent compute program with no cross-lane or
+	// barrier instructions: every lane keeps its own mask state without
+	// subgroup ballots, and EXEC/VCC branches lower to per-lane control flow.
+	bool                    lane_private_masks    = false;
 	uint32_t                required_subgroup_size = 0;
 	// See ShaderComputeWaveDispatchPlan::native_equivalent_layout.
 	bool                    native_equivalent_valid = false;

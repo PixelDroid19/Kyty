@@ -137,6 +137,9 @@ public:
 	// Built by GenerateSource.
 	[[nodiscard]] const ShaderControlFlowGraph& GetControlFlow() const { return m_control_flow; }
 	[[nodiscard]] bool UsesNativeComputeWave() const;
+	// Wave-width-independent compute program with no cross-lane or barrier ops:
+	// masks live as per-lane {0, 0xffffffff} values instead of subgroup ballots.
+	[[nodiscard]] bool UsesLanePrivateMasks() const;
 	// Split wave64 (ShaderSpirvSplitWave.cpp): two or four host subgroups per guest wave on the native per-lane path.
 	[[nodiscard]] bool UsesSplitComputeWave() const;
 	// Split compute wave: a mask producer whose result each lane reads only

@@ -16,7 +16,7 @@ namespace Kyty::Libs::Graphics {
 // where every written VGPR is dead at the region merge and not consumed by a later cross-lane or
 // implicit-derivative operation in that region.
 [[nodiscard]] std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const std::vector<bool>& exec_full,
-                                                                 bool entry_exec_full = false);
+                                                                 bool entry_exec_full = false, bool lane_private_masks = false);
 
 } // namespace Kyty::Libs::Graphics
 

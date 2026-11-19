@@ -765,7 +765,7 @@ bool AnalyzeRegionEntryMaskAndCrossLane(const ShaderCode& code, const std::vecto
 void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlock>& blocks,
                               const std::vector<VectorSet>& cross_reads, const std::vector<VectorSet>& writes,
                               const std::vector<bool>& eligible, const std::vector<bool>& overwrites,
-                              bool entry_exec_full, std::vector<bool>* unguarded)
+                              bool entry_exec_full, bool lane_private_masks, std::vector<bool>* unguarded)
 {
 	const auto&    instructions = code.GetInstructions();
 	const uint32_t n            = instructions.Size();
@@ -835,6 +835,266 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 			    (pre_exec[k] == ExecRel::AtEntry || (pre_epoch[k] == 0u && pre_exec[k] == ExecRel::WidenedWqm)))
 			{
 				(*unguarded)[k] = true;
+			}
+		}
+	}
+
+	if (lane_private_masks)
+	{
+		// With per-lane EXEC branches, every invocation taking the active edge of
+		// S_CBRANCH_EXECZ/EXECNZ is guaranteed to have exec_lane == 1. Track a
+		// 3-value lattice per 64-bit SGPR pair (`Unknown`, `CoversWithExec` where
+		// `pair | exec == 1`, and `AllOnes` where `pair == 1`) so if/else and loop
+		// EXEC restores prove `exec_lane == 1` after the join too.
+		enum class PairMaskState : uint8_t
+		{
+			Unknown        = 0,
+			CoversWithExec = 1,
+			AllOnes        = 2,
+		};
+		constexpr uint32_t kMaxMaskPairs = kVccLoWord + 1u;
+		struct LaneActiveState
+		{
+			bool                                     reached = false;
+			bool                                     active  = false;
+			std::array<PairMaskState, kMaxMaskPairs> pairs {};
+
+			bool Merge(const LaneActiveState& other)
+			{
+				if (!other.reached) { return false; }
+				if (!reached)
+				{
+					*this = other;
+					return true;
+				}
+				const bool prev_active = active;
+				bool       changed     = false;
+				if (active && !other.active)
+				{
+					active  = false;
+					changed = true;
+				}
+				for (uint32_t r = 0; r < kMaxMaskPairs; ++r)
+				{
+					PairMaskState next = PairMaskState::Unknown;
+					if (pairs[r] == PairMaskState::AllOnes && other.pairs[r] == PairMaskState::AllOnes)
+					{
+						next = PairMaskState::AllOnes;
+					} else if ((prev_active || pairs[r] != PairMaskState::Unknown) &&
+					           (other.active || other.pairs[r] != PairMaskState::Unknown))
+					{
+						next = PairMaskState::CoversWithExec;
+					}
+					if (next != pairs[r])
+					{
+						pairs[r] = next;
+						changed  = true;
+					}
+				}
+				return changed;
+			}
+		};
+
+		auto is_exec_op = [](const ShaderOperand& op) { return op.type == Operand::ExecLo || op.type == Operand::ExecHi; };
+		auto is_all_ones_imm = [](const ShaderOperand& op)
+		{
+			return op.type == Operand::IntegerInlineConstant && op.constant.i == -1;
+		};
+		auto pair_state_of = [&](const LaneActiveState& st, const ShaderOperand& op) -> PairMaskState
+		{
+			if (is_all_ones_imm(op)) { return PairMaskState::AllOnes; }
+			if (is_exec_op(op)) { return st.active ? PairMaskState::AllOnes : PairMaskState::Unknown; }
+			unsigned first = 0;
+			unsigned count = 0;
+			if (ScalarRange(op, &first, &count) && count == 2u && first < kMaxMaskPairs) { return st.pairs[first]; }
+			return PairMaskState::Unknown;
+		};
+		auto clear_written_pairs = [&](const ShaderInstruction& inst, LaneActiveState* st)
+		{
+			for (const auto* dst: {&inst.dst, &inst.dst2})
+			{
+				unsigned first = 0;
+				unsigned count = 0;
+				if (!ScalarRange(*dst, &first, &count)) { continue; }
+				if (first > 0u && first - 1u < kMaxMaskPairs) { st->pairs[first - 1u] = PairMaskState::Unknown; }
+				for (unsigned r = first; r < first + count && r < kMaxMaskPairs; ++r)
+				{
+					st->pairs[r] = PairMaskState::Unknown;
+				}
+			}
+		};
+		auto step_state = [&](uint32_t i, LaneActiveState* st)
+		{
+			const auto& inst = instructions.At(i);
+			if (!ShaderInstructionWritesExec(inst))
+			{
+				PairMaskState dst_state = PairMaskState::Unknown;
+				if (inst.dst2.type == Operand::Unknown)
+				{
+					if (inst.type == Type::SMovB64 && inst.src_num == 1)
+					{
+						dst_state = pair_state_of(*st, inst.src[0]);
+					} else if (inst.type == Type::SOrB64 && inst.src_num >= 2)
+					{
+						const auto a = pair_state_of(*st, inst.src[0]);
+						const auto b = pair_state_of(*st, inst.src[1]);
+						if (a == PairMaskState::AllOnes || b == PairMaskState::AllOnes)
+						{
+							dst_state = PairMaskState::AllOnes;
+						} else if (a == PairMaskState::CoversWithExec || b == PairMaskState::CoversWithExec)
+						{
+							dst_state = PairMaskState::CoversWithExec;
+						}
+					} else if (inst.type == Type::SXorB64 && inst.src_num >= 2)
+					{
+						const bool a_exec = is_exec_op(inst.src[0]);
+						const bool b_exec = is_exec_op(inst.src[1]);
+						if ((a_exec && pair_state_of(*st, inst.src[1]) == PairMaskState::AllOnes) ||
+						    (b_exec && pair_state_of(*st, inst.src[0]) == PairMaskState::AllOnes))
+						{
+							dst_state = PairMaskState::CoversWithExec;
+						}
+					} else if (inst.type == Type::SAndn2B64 && inst.src_num >= 2)
+					{
+						if (pair_state_of(*st, inst.src[0]) == PairMaskState::AllOnes && is_exec_op(inst.src[1]))
+						{
+							dst_state = PairMaskState::CoversWithExec;
+						}
+					} else if (inst.type == Type::SNotB64 && inst.src_num >= 1 && is_exec_op(inst.src[0]))
+					{
+						dst_state = PairMaskState::CoversWithExec;
+					}
+				}
+				clear_written_pairs(inst, st);
+				unsigned dfirst = 0;
+				unsigned dcount = 0;
+				if (dst_state != PairMaskState::Unknown && ScalarRange(inst.dst, &dfirst, &dcount) && dcount == 2u &&
+				    dfirst < kMaxMaskPairs)
+				{
+					st->pairs[dfirst] = dst_state;
+				}
+				return;
+			}
+
+			const bool old_active = st->active;
+			bool       next_active = entry_exec_full && post_exec[i] == ExecRel::AtEntry;
+			bool       monotone_or = false;
+			PairMaskState saved_dst_state = PairMaskState::Unknown;
+
+			if (inst.type == Type::SMovB64 && inst.src_num == 1)
+			{
+				next_active = next_active || (pair_state_of(*st, inst.src[0]) == PairMaskState::AllOnes);
+			} else if (inst.type == Type::SOrB64 && inst.src_num >= 2)
+			{
+				const auto a      = pair_state_of(*st, inst.src[0]);
+				const auto b      = pair_state_of(*st, inst.src[1]);
+				const bool a_exec = is_exec_op(inst.src[0]);
+				const bool b_exec = is_exec_op(inst.src[1]);
+				monotone_or       = a_exec || b_exec;
+				if (a == PairMaskState::AllOnes || b == PairMaskState::AllOnes ||
+				    (a_exec && b != PairMaskState::Unknown) || (b_exec && a != PairMaskState::Unknown))
+				{
+					next_active = true;
+				}
+			} else if (inst.type == Type::SOrSaveexecB64 && inst.src_num >= 1)
+			{
+				monotone_or     = true;
+				next_active     = next_active || old_active || pair_state_of(*st, inst.src[0]) != PairMaskState::Unknown;
+				saved_dst_state = old_active ? PairMaskState::AllOnes : PairMaskState::Unknown;
+			} else if (inst.type == Type::SAndn2SaveexecB64 && inst.src_num >= 1)
+			{
+				const auto s0   = pair_state_of(*st, inst.src[0]);
+				saved_dst_state = old_active ? PairMaskState::AllOnes
+				                             : (s0 != PairMaskState::Unknown ? PairMaskState::CoversWithExec
+				                                                             : PairMaskState::Unknown);
+			} else if (inst.type == Type::SXorSaveexecB64 && inst.src_num >= 1)
+			{
+				const auto s0   = pair_state_of(*st, inst.src[0]);
+				saved_dst_state = old_active ? PairMaskState::AllOnes
+				                             : (s0 == PairMaskState::AllOnes ? PairMaskState::CoversWithExec
+				                                                             : PairMaskState::Unknown);
+			} else if (inst.type == Type::SAndSaveexecB64 || inst.type == Type::SAndn1SaveexecB64 ||
+			           inst.type == Type::SNandSaveexecB64 || inst.type == Type::SNorSaveexecB64 ||
+			           inst.type == Type::SOrn2SaveexecB64 || inst.type == Type::SXnorSaveexecB64)
+			{
+				saved_dst_state = old_active ? PairMaskState::AllOnes : PairMaskState::Unknown;
+			}
+
+			if (!monotone_or && !next_active)
+			{
+				for (uint32_t r = 0; r < kMaxMaskPairs; ++r)
+				{
+					if (st->pairs[r] == PairMaskState::CoversWithExec) { st->pairs[r] = PairMaskState::Unknown; }
+				}
+			}
+			if (!WritesExecOnly(inst.type)) { clear_written_pairs(inst, st); }
+			unsigned dfirst = 0;
+			unsigned dcount = 0;
+			if (saved_dst_state != PairMaskState::Unknown && ScalarRange(inst.dst, &dfirst, &dcount) && dcount == 2u &&
+			    dfirst < kMaxMaskPairs)
+			{
+				st->pairs[dfirst] = saved_dst_state;
+			}
+			st->active = next_active;
+		};
+
+		std::vector<LaneActiveState> in_lane(nb);
+		in_lane[0].reached = true;
+		in_lane[0].active  = entry_exec_full;
+		bool changed       = true;
+		uint32_t iters     = 0;
+		const uint32_t max_iters = nb * 8u + 16u;
+		while (changed && iters < max_iters)
+		{
+			changed = false;
+			++iters;
+			for (uint32_t b = 0; b < nb; ++b)
+			{
+				if (!in_lane[b].reached) { continue; }
+				LaneActiveState cur = in_lane[b];
+				for (uint32_t i = blocks[b].begin; i < blocks[b].end; ++i) { step_state(i, &cur); }
+				const auto& last = instructions.At(blocks[b].end - 1u);
+				if ((last.type == Type::SCbranchExecz || last.type == Type::SCbranchExecnz) && blocks[b].succs.size() == 2u)
+				{
+					const uint32_t active_succ   = (last.type == Type::SCbranchExecz) ? blocks[b].succs[1] : blocks[b].succs[0];
+					const uint32_t inactive_succ = (last.type == Type::SCbranchExecz) ? blocks[b].succs[0] : blocks[b].succs[1];
+					LaneActiveState active_edge  = cur;
+					active_edge.active           = true;
+					LaneActiveState inactive_edge = cur;
+					inactive_edge.active          = false;
+					for (uint32_t r = 0; r < kMaxMaskPairs; ++r)
+					{
+						if (inactive_edge.pairs[r] == PairMaskState::CoversWithExec)
+						{
+							inactive_edge.pairs[r] = PairMaskState::AllOnes;
+						}
+					}
+					if (in_lane[active_succ].Merge(active_edge)) { changed = true; }
+					if (in_lane[inactive_succ].Merge(inactive_edge)) { changed = true; }
+				} else
+				{
+					for (const uint32_t s: blocks[b].succs)
+					{
+						if (in_lane[s].Merge(cur)) { changed = true; }
+					}
+				}
+			}
+		}
+		if (!changed)
+		{
+			for (uint32_t b = 0; b < nb; ++b)
+			{
+				if (!in_lane[b].reached) { continue; }
+				LaneActiveState cur = in_lane[b];
+				for (uint32_t i = blocks[b].begin; i < blocks[b].end; ++i)
+				{
+					const auto& inst = instructions.At(i);
+					if (cur.active && !HasExecSourceOperand(inst))
+					{
+						(*unguarded)[i] = true;
+					}
+					step_state(i, &cur);
+				}
 			}
 		}
 	}
@@ -947,7 +1207,8 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 
 } // namespace
 
-std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const std::vector<bool>& exec_full, bool entry_exec_full)
+std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const std::vector<bool>& exec_full, bool entry_exec_full,
+                                                 bool lane_private_masks)
 {
 	const auto& instructions = code.GetInstructions();
 	const auto  n            = instructions.Size();
@@ -991,7 +1252,7 @@ std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const s
 	{
 		if (!exec_full.empty() && exec_full[i] && overwrites[i]) { unguarded[i] = true; }
 	}
-	ApplyMonotonicTailGuards(code, blocks, cross_reads, writes, eligible, overwrites, entry_exec_full, &unguarded);
+	ApplyMonotonicTailGuards(code, blocks, cross_reads, writes, eligible, overwrites, entry_exec_full, lane_private_masks, &unguarded);
 
 	const auto regions = FindSelectionRegions(code, blocks);
 	struct AnalyzedRegion

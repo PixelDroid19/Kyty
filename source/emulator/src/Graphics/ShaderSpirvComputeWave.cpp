@@ -102,6 +102,12 @@ bool Spirv::UsesNativeComputeWave() const
 	        m_cs_input_info->wave_layout.guest_wave_size == kNativeSubgroupSize);
 }
 
+bool Spirv::UsesLanePrivateMasks() const
+{
+	return m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lane_private_masks &&
+	       !UsesNativeComputeWave() && !UsesGeometryCompute();
+}
+
 bool Spirv::NativeComputeWaveLayoutIsValid() const
 {
 	return UsesNativeComputeWave() && NativeComputeWaveInputIsValid(m_cs_input_info);
@@ -244,7 +250,7 @@ bool Spirv::SkipDestinationExecGuard(uint32_t index) const
 				exec_full = FragmentMaskFlow().exec_full;
 			}
 		}
-		m_dead_vgpr_guards = ShaderAnalyzeDeadVgprDstGuards(m_code, exec_full, entry_exec_full);
+		m_dead_vgpr_guards = ShaderAnalyzeDeadVgprDstGuards(m_code, exec_full, entry_exec_full, UsesLanePrivateMasks());
 	}
 	return index < m_dead_vgpr_guards.size() && m_dead_vgpr_guards[index];
 }

@@ -2563,10 +2563,20 @@ void Spirv::WriteLocalVariables()
 	}
 	m_source += "%native_initial_exec = OpLoad %uint %exec_lane_lo\n"
 	            "%native_initial_live = OpINotEqual %bool %native_initial_exec %uint_0\n";
-	m_source += NativeMaskBallot("native_initial_live", "native_initial_ballot");
-	m_source += "%native_initial_lo = OpCompositeExtract %uint %native_initial_ballot 0\n"
-	            "%native_initial_hi = OpCompositeExtract %uint %native_initial_ballot 1\n"
-	            "OpStore %exec_lo %native_initial_lo\nOpStore %exec_hi %native_initial_hi\n";
+	if (UsesLanePrivateMasks())
+	{
+		const auto all_ones = GetConstantUint(0xffffffffu);
+		m_source += String8("%native_initial_mask = OpSelect %uint %native_initial_live %<all_ones> %uint_0\n"
+		                    "OpStore %exec_lo %native_initial_mask\n"
+		                    "OpStore %exec_hi %native_initial_mask\n")
+		                .ReplaceStr("<all_ones>", all_ones);
+	} else
+	{
+		m_source += NativeMaskBallot("native_initial_live", "native_initial_ballot");
+		m_source += "%native_initial_lo = OpCompositeExtract %uint %native_initial_ballot 0\n"
+		            "%native_initial_hi = OpCompositeExtract %uint %native_initial_ballot 1\n"
+		            "OpStore %exec_lo %native_initial_lo\nOpStore %exec_hi %native_initial_hi\n";
+	}
 	// Non-compute waves start with every lane live (`OpStore %exec_lane_lo %uint_1` above),
 	// and whole-wave compute dispatches have every membership bit set.
 	const bool whole_waves = UsesNativeComputeWave() && !(m_bind != nullptr && m_bind->thread_limits_used) &&

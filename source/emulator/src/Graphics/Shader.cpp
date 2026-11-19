@@ -4960,6 +4960,7 @@ struct ComputeProgramAnalysis
 	std::shared_ptr<const ShaderScalarFlow>       scalar_flow;
 	std::shared_ptr<const ShaderCodeResourceMemo> resource_memo;
 	bool                                          uses_native_wave_state           = false;
+	bool                                          has_lane_private_blockers        = false;
 	bool                                          has_getpc                        = false;
 	bool                                          has_unconditional_device_address = false;
 	std::vector<uint32_t>                         descriptor_load_indices;
@@ -5013,6 +5014,8 @@ public:
 		analysis->scalar_flow                      = ShaderScalarFlowOf(*code, guest_wave_size);
 		analysis->resource_memo                    = std::make_shared<ShaderCodeResourceMemo>();
 		analysis->uses_native_wave_state           = ShaderUsesNativeWaveState(*code);
+		analysis->has_lane_private_blockers =
+		    code->HasAnyOf({ShaderInstructionType::VReadfirstlaneB32, ShaderInstructionType::SBarrier});
 		analysis->has_getpc                        = code->HasAnyOf({ShaderInstructionType::SGetpcB64});
 		analysis->has_unconditional_device_address =
 		    ShaderHasGlobalMemoryLoad(*code) || code->HasAnyOf({ShaderInstructionType::ImageBvhIntersectRay});
@@ -5080,6 +5083,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 	info->meta_fill           = {};
 	info->uniform_buffer_fill = {};
 	info->native_wave_sensitive = false;
+	info->lane_private_masks    = false;
 	info->required_subgroup_size = 0;
 	info->threads_num[0] = regs->cs_regs.num_thread_x;
 	info->threads_num[1] = regs->cs_regs.num_thread_y;
@@ -5147,6 +5151,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 				EXIT("wave64 dispatch reads DPP quads across a partial quad: local=%ux%ux%u\n", info->threads_num[0],
 				     info->threads_num[1], info->threads_num[2]);
 			}
+			info->lane_private_masks = !native.reads_quad_lanes && !program->has_lane_private_blockers;
 		} else if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32 && info->wave_layout.guest_wave_size == 64u)
 		{
 			// A program proven wave-width independent runs one guest lane per
@@ -5154,7 +5159,8 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			const auto native = info->native_equivalent_valid ? program->NativeEquivalence() : ShaderComputeWaveAnalysisResult {};
 			if (NativeEquivalenceFitsWorkgroup(native, *info))
 			{
-				info->wave_layout = info->native_equivalent_layout;
+				info->wave_layout        = info->native_equivalent_layout;
+				info->lane_private_masks = !native.reads_quad_lanes && !program->has_lane_private_blockers;
 			} else
 			{
 				info->native_wave_sensitive  = true;
@@ -6827,6 +6833,7 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 	ids.Add(input_info->wave_layout.banks);
 	ids.Add(input_info->wave_layout.waves);
 	ids.Add(static_cast<uint32_t>(input_info->native_wave_sensitive));
+	ids.Add(static_cast<uint32_t>(input_info->lane_private_masks));
 	ids.Add(input_info->required_subgroup_size);
 
 	for (int i = 0; i < 3; i++)
