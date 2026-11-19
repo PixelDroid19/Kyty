@@ -8566,3 +8566,13 @@ Worktree commit `e8433b68e` plus temporary diagnostics, Intel Arc A770 (DG2), AN
   title's skip tests of its small dispatches gave 6 ms once and nothing in another scene
   (`docs/titles/robot-platformer.md`), so the switches are not shown to be a lever there. Regrouping dispatches would need proof that no draw in between reads or
   writes what they touch.
+
+## Unit test that depends on test order (2026-11-19, open)
+
+`EmulatorGraphicsState.GpuMemoryRetiresLinkedReadOnlyBuffers`
+(`source/unit_test/src/emulator/UnitTestEmulatorGraphicsState.cpp:3118`) fails under
+`kyty_unit_test --gtest_filter='EmulatorGraphics*' --gtest_shuffle` with `--gtest_random_seed=22` and `33` and passes
+with seed 11 and in file order. It fails the same way with the two GPU-memory overlap tests added on 2026-11-19
+excluded, so another test leaves global GPU-memory state it depends on. Suggested direction: give it an address range
+no other test maps, or free what it creates, as `GpuMemoryFreeDeletesExactRange` does.
+

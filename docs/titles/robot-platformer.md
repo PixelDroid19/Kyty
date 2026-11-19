@@ -7649,9 +7649,10 @@ Both rules only replace the exit with a link; every relation accepted before kee
 **Verified:** two regression tests built from the logged ranges and parameters
 (`GpuMemoryLinksStorageViewInsideOneDepthPlane`, `GpuMemoryLinksArenaViewAtAnotherBaseOfAChain`) pass; with the two
 rules disabled they stop with exit 65 at the same two messages as the game. `EmulatorGraphics*`
-(807 tests), the full `kyty_unit_test` (2729 passed, 11 skipped) and the four repository gates pass. Two 150 s dunes
-runs (`exit65a`, `exit65b`) reached the time limit, but neither met either shape (the print did not fire), so the fix
-is not yet observed in the game; their 120 and 140 s captures show the usual dunes.
+(807 tests), the full `kyty_unit_test` (2729 passed, 11 skipped) and the four repository gates pass. Three 150 s
+dunes runs reached the time limit: `exit65a` and `exit65b` on a first form of the fix, with a temporary print that
+did not fire, and `exit65c` on the final change. No run is known to have met either shape, so the fix is not yet
+observed in the game; the 120 and 140 s captures show the usual dunes.
 
 ## Open: dunes haze and zero-filled single-texel samples (2026-11-18)
 
@@ -8108,10 +8109,14 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
   a SIMD16 register-allocation failure for `55db270b` (112 live registers at SIMD8), `9aec9d6c` (106) and a copy of
   `55db270b` with every lookup removed (96); a constant writer compiles at SIMD16. The width is set by live values
   in the translated body, not by the lookups. Not priced in the game.
-- **Defect: ANV raises SIGFPE while compiling an edited `c4a8f3bb` in the game.** Both the doubled-walk and the
-  null-walk variants crashed in `libvulkan_intel` under `CreatePipelineInternal` on the second pipeline variant
-  (`psdbl`, `psnull`); the constant writer did not. The same modules compiled offline with 1, 2, 4 and 8 samples and
-  with sample shading. Only `9aec9d6c` and `55db270b` could therefore be priced by replacement.
+- **Fixed: the SIGFPE while compiling an edited `c4a8f3bb` came from the replacement tool.** One pipeline variant
+  of `c4a8f3bb` binds its pixel resources in descriptor set 1 (the translator moves them there when the vertex program
+  owns set 0). The temporary replacement gave every variant the same set-0 module, which does not match that
+  pipeline's layout, and ANV divides by zero (`FPE_INTDIV`) while creating the pipeline from that invalid input. The
+  earlier note that it does not reproduce offline is withdrawn: offline, the original module raises the same SIGFPE at
+  the same driver address with a layout it does not match and compiles with its own. The replacement now takes the
+  original module's set; with it the doubled-walk `c4a8f3bb` compiled for 22 set-1 and 18 set-0 pipelines in a 150 s
+  run (`exit65b`), so `c4a8f3bb` can now be priced by replacement too.
 - **The table and the search loop.** A capped print on every rebuild (`gdashape`) showed about 175 entries, most of
   them 64 MiB chunks (mean span about 58 MB), a 4 MiB directory region (`shift` 22) and 15,260 regions, of which
   about 15,100 hold no entry start, 151 hold one and under 10 hold more. The search loop therefore runs zero or one
