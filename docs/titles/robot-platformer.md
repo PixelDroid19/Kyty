@@ -7962,8 +7962,23 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   cache: the five-target pass sits +0.59 ms (median of 12 frames) above the pipeline-statistics fit, against +0.57 ms
   for the old code at rock 2; at 2.50 M vertex invocations both take 6.7 ms. The hot whole-range path is unchanged
   and reshaping the cold branch does not move it. A probe that read zeros for partial rows instead also left the
-  route; a run whose native code was identical to the baseline but with a cold translation cache left it too, so
-  that desync and the probe's one exit 139 are unattributed, not evidence of a guest-visible change.
+  route; a run whose native code was identical to the baseline but used the same translation-cache directory left
+  it too, so that desync and the probe's one exit 139 are unattributed, not evidence of a guest-visible change.
+- **Excluded: merging the per-word raw loads of the vertex programs into four-word loads (2026-11-19).** Offline
+  gate only: with the whole-range path emitting one four-word typed load, ANV's code for `vs 0x0c2ae56d` still
+  issued 52 single-dword bound-buffer loads, so the driver does not vectorize them and the change was not run.
+  Stripping the EXEC selects from the same program (unsound, ceiling only) cuts its native instructions by 3 %
+  (7,026 to 6,793), too little to reach the 2.4 ms rock 2 needs.
+- **Excluded: the vertex stage is not inherently slower than compute on the A770 (2026-11-19).** A standalone
+  Vulkan test (no emulator) ran one body as a vertex shader with rasterizer discard and as a 64-wide dispatch,
+  2 M invocations each, timestamps around each stage, every invocation's store checked. A chain of dependent loads
+  takes the same time in both stages (ratio 1.0-1.2 for 4 and 64 MiB tables, 8 and 64 steps; separate submits
+  agree), and a pure-ALU body runs 2.1 times slower as a vertex shader, scaling linearly with its length. Moving
+  vertex work to a compute pre-pass would therefore gain at most that factor on ALU and nothing on memory-bound
+  work, before paying to write and re-read the outputs. Output slots cost nothing up to 4 vec4 and about 0.08-0.1
+  ns per slot per vertex above that, but they do not explain the per-program prices: the dumped programs emit 8
+  slots (`0x0c2ae56d`, about 4.5 ms per M), 4 (`0xa2bb8f2d`, 1.5-1.9), 1 (`0x51485353`, 1.5) and 1 (`0x5c9f3e0a`,
+  0.5-0.8). Not measured: how far vertex invocations exceed unique vertices in these draws.
 - **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** The lookup kept the last
   matched entry in private variables and returned early on a hit (translator 247, temporary). The dumped
   `vs 0xa2bb8f2d` carries the cache (13 calls to the lookup, a different source hash) yet compiles to the same 1,226
