@@ -7656,7 +7656,9 @@ the flicker is not shown.
 `vs_0x57572d59` spills rose from 93 to 103 and instructions from 4485 to 4578, and in `vs_0x4e1ef13e` spills rose
 from 52 to 57. It was not kept.
 
-**Not committed.** Translator version 246 sizes scalar buffer loads by `num_records` times the stride, or by bytes
-when the stride is 0. This follows the RDNA2 ISA, where the stride of a scalar buffer load serves only the bounds
-check. It is local: no run showed it engaging, and the haze is unchanged with it.
+**Translator version 246.** Scalar buffer loads by device address are now sized by `num_records` times the stride,
+or by bytes when the stride is 0, as the other scalar buffer path already does. This follows the RDNA2 ISA, where the
+stride of a scalar buffer load serves only the bounds check. No run showed it engaging, and the haze is unchanged with
+it. On 2026-11-19 `PPSA17221 - Minecraft` reached its world with it (the save ends on the death screen) with no
+recorded error, at 60 fps with the present limit.
 
