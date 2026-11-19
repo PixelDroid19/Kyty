@@ -7917,6 +7917,15 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   1,226, 11 and 29 for `0xa2bb8f2d`. Same index volume in 2.35 ms puts a ceiling of about 6 ms, less about 1 ms of
   raster (`vtx5`), on what a cheaper vertex stage could recover; that ceiling includes the guest's own attribute work.
   Vertex reuse of the meshes is unknown.
+- **Where the vertex programs' guest-address lookups come from (2026-11-19, offline).** ANV's final intermediate code
+  keeps uniform and divergent lookup loops of: `0xa2bb8f2d` 3 and 8, `0x4ea3083b` 4 and 9, `0x67d7f692` 4 and 9,
+  `0x57572d59` 3 and 20, `0x0c2ae56d` 5 and 20, and for the one-target pass `0x5c9f3e0a` 2 and 4, `0x51485353` 3 and
+  16 (each module compiled with the pixel module of its pass, or alone where none was dumped). In `0xa2bb8f2d` the
+  divergent ones are buffer loads whose index is built from packed register bits (an 8-bit field, a bit-field
+  extract), not the vertex index, all on one buffer descriptor loaded once; such loads cannot become native vertex
+  attributes, which need a format load indexed by the vertex or instance id from the vertex-buffer table. `0x51485353`
+  keeps 16 divergent lookups and still fits, with `0x5c9f3e0a`, in the 2.35 ms one-target pass at about 3 M
+  index-instances a frame, so the divergent lookup count alone does not explain the five-target programs' cost.
 - **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** The lookup kept the last
   matched entry in private variables and returned early on a hit (translator 247, temporary). The dumped
   `vs 0xa2bb8f2d` carries the cache (13 calls to the lookup, a different source hash) yet compiles to the same 1,226
