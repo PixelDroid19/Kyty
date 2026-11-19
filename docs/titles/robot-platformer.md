@@ -7926,6 +7926,23 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   attributes, which need a format load indexed by the vertex or instance id from the vertex-buffer table. `0x51485353`
   keeps 16 divergent lookups and still fits, with `0x5c9f3e0a`, in the 2.35 ms one-target pass at about 3 M
   index-instances a frame, so the divergent lookup count alone does not explain the five-target programs' cost.
+- **Pipeline statistics per render pass (2026-11-19, `PPSA21567 - Astro Bot`, A770 ANV, diagnostic build).** Vertex-shader,
+  clipping and fragment-shader invocation counts were read per pass beside the timestamps. Over 67 profiled frames of
+  one run the five-target pass fits `ms = 2.27 x M vertex invocations + 0.60 x M fragment invocations + 0.155 x passes`
+  (rms 0.26 ms). With the five targets scissored to one pixel the fragment count reads 0, and 2.19 M vertex invocations
+  still take 5.1-5.6 ms (fit: 5.3 ms), so that pass is bound by vertex work; in a lighter scene (0.75 M) it leaves about
+  0.6 ms the fit does not explain. The one-target pass `ps 0x860593d6` runs 1.6-2.1 M invocations at 1.05-1.35 ms per
+  million with `vs 0x51485353`, a statically larger program than `0xa2bb8f2d` (1906 against 1226 instructions, 42
+  against 29 memory messages), so per-invocation cost follows the pass, not the static program size. Vertex
+  invocations per index are 0.32 in the five-target pass and 0.23 in the one-target pass. The "halving saves about
+  half" result above also halved fragments for `0x4ea3083b` (-0.17 M vertex, -1.0 M fragment invocations); for
+  `0xa2bb8f2d` the fragment count did not move.
+- **The five-target draws are not an equal-depth pass over a prepass (2026-11-19).** All 120 sampled draws of the five
+  programs test depth less-or-equal with depth writes and stencil on, and none shares an index range and vertex offset
+  with a one-target draw, so `0xa2bb8f2d` shading almost no pixels is ordinary occlusion, not a depth mismatch.
+- **Excluded: doubling the vertex programs' guest-address lookups as a price probe (2026-11-19).** A second lookup
+  chained on the first through a runtime zero reached the SPIR-V (13 calls into the wrapper) but ANV compiled
+  `0xa2bb8f2d` to the identical ISA, so this probe cannot price the lookups on this driver.
 - **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** The lookup kept the last
   matched entry in private variables and returned early on a hit (translator 247, temporary). The dumped
   `vs 0xa2bb8f2d` carries the cache (13 calls to the lookup, a different source hash) yet compiles to the same 1,226
