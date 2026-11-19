@@ -7118,6 +7118,12 @@ native program spills?
   16-lane parts, so the product never takes this layout.
 - **Re-read 2026-11-12, parked.** Nothing on HEAD changes the record: `0x874bd13f` still runs native at width 32
   because a wave32 program splits only above 64 VGPRs. No new rule was built or measured.
+- **Amended 2026-11-19.** A width rule is now committed (`11f783e44`, crash-site record below): wave32 splits above 32
+  VGPRs on hosts that go down to width 8. For the five dune wave32 programs in the table above it agrees with the
+  measured sign (`0x874bd13f`, `0xe1b1315d`, `0x2bcba9a2` split; `0xfd1ee59c` stays native), so the remark that the
+  VGPR count does not predict the case no longer holds for them; it is untested beyond them. `0x874bd13f` measured -8
+  % here (end-of-pipe brackets, widths rotated inside one run) and -57 % on t246 (per-dispatch stamps, matched runs);
+  the gap is unexplained.
 
 ## Depth targets no longer wait for deferred storage aliases (2026-11-07)
 
@@ -7733,8 +7739,8 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   shows what the program draws: the sky and clouds, replaced by stale blue bands. Its cost follows how much sky the
   view shows (same grid and SPIR-V: 1.5 to 2.9 ms in the hub, 5.5 to 8 ms during the transient, 12 ms at the crash
   site). This amends the 2026-11-14 record above that it freed no engine time (t216, close-up dunes view).
-- **Its width is set by the native wave32 rule, and SIMD32 spills on the A770.** Wave32 programs stay native, pinned to
-  32 lanes, up to 64 guest VGPRs. Offline on ANV the live SPIR-V at 32 lanes is 77,775 instructions with 2,819:9,569
+- **Its width is set by the native wave32 rule, and SIMD32 spills on the A770.** Before `11f783e44` wave32 programs stayed native,
+  pinned to 32 lanes, up to 64 guest VGPRs. Offline on ANV the live SPIR-V at 32 lanes is 77,775 instructions with 2,819:9,569
   spills:fills; the same SPIR-V unpinned compiles at 8 lanes to 11,309 with 14:30. A temporary arm that split every
   wave32 program into 16-lane parts produced 42,718 instructions and 1,171:4,213 at 16 lanes for this program; an
   8-lane wave32 split is refused by the native-wave validator (only 16 is accepted). Both runs with the 16-lane arm
@@ -7749,12 +7755,26 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
 - **The cloud program is not the haze.** With it skipped the crashed ship looks as washed as with it. In both crash-site
   runs the capture at 120 s is a dark frame without a frame-rate dip; whether that is a game fade or the reported
   black flicker is not decided.
+- **Wave32 above 32 VGPRs now splits on hosts that go down to width 8 (2026-11-19, `11f783e44`).** A 32-lane hardware
+  thread there holds 32 dwords of registers per lane, so the native wave32 budget is 32 guest VGPRs on such hosts and
+  stays 64 elsewhere. In the dunes this splits `0x874bd13f`, `0xe1b1315d`, `0x2bcba9a2` and `0xbf8ee9fc` into 16-lane
+  parts and keeps `0xfd1ee59c` native (SPIR-V compared against the arm that split every wave32 program). Stamped per
+  dispatch, `0x874bd13f` took 2.5 to 2.6 ms split against 5.8 to 5.9 ms native at the second rock (two split runs, one
+  native run, same scene) and 2.5 to 3.3 ms against 5.6 to 6.8 ms in the dunes intro of the idle route (one pair).
+  Frame rate did not move where measured: the idle route's settled view holds 34 fps in both arms (the program is not
+  in that view's per-frame list), and a clean build of the commit at the second rock held 28 fps (171 s, render engine
+  95 to 96 % busy) against 27 to 28. At the crash site, where the program cost 12.3 ms native, the split projects to
+  about 5.4 ms; no run under the rule has landed there, so that is not measured. `0xbf8ee9fc` has no per-dispatch
+  number. `PPSA17221 - Minecraft` reached the world with exit 0 and a clean capture; that run compiled only two
+  fragment modules, so the rule changed none of the compute programs it dispatched.
 
-- **Second rock: no single program holds the frame.** Stamped there (16-lane wave32 arm, which matches the 27 to 28 fps
-  without it): render passes 22 ms, compute 11 ms, geometry passes 4 ms a frame; the largest items are the BVH kernel
+- **Second rock: no single program holds the frame.** Stamped there with the 16-lane wave32 arm (its
+  27 to 28 fps matches the native runs): render passes 22 ms, compute 11 ms, geometry passes 4 ms a frame; the largest items are the BVH kernel
   `0x3666fa39` (5.5 ms) and a five-target pass keyed by `ps 0x6bcfb82d` (8.7 ms over its 144 draws, other programs
-  included). Skipping every draw of `ps 0x6bcfb82d` (temporary build, capture: same rock, props missing) gave 29 to 30
-  fps against 27 to 28 and render passes 18.7 ms against 21.8: about 3 ms.
+  included). Skipping every draw of `ps 0x6bcfb82d` (temporary build at native wave32 width; capture: same rock, props
+  apparently missing, not verified) gave 29 to 30 fps against 27 to 28 and render passes 18.7 ms against 21.8: about
+  3 ms. That run had windows of low engine busy, so its frame rate is indicative only.
 
-Next: at the crash site, 30 fps needs `0x874bd13f` near 4.5 ms; at the second rock the cost is spread over many
-programs, so only a lever that lowers the translated code's cost broadly reaches 30 fps there.
+Next: at the crash site 30 fps needs `0x874bd13f` near 4.5 ms; the rule projects about 5.4 ms there, not yet measured.
+At the second rock the frame is GPU-bound at 28 fps and needs about 2.4 ms more; the largest items are the five-target
+pass of `ps 0x6bcfb82d` (about 3 ms in the skip test) and `0x3666fa39` (5.5 ms).
