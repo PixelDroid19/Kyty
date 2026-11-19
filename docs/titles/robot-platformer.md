@@ -7682,4 +7682,25 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   per frame for 95 s. Three jumps left no extra draws beyond the windows that took a capture, and the dust was gone by
   the capture 10 s later. Sand left in the air was not reproduced in either run.
 
-Next: identify the extra draws with a per-draw trace limited to one frame of each phase, grouped by shader and target.
+- **The extra draws are one particle program.** A temporary per-frame histogram by shader pair (not committed)
+  reproduced the transient in one of the four later runs that sampled from 135 s; the others may have reached it
+  earlier, since they began at 520 to 700 draws per frame and fell from there. At its peak one pair, VS checksum `360038d0f4cfb9a5` with PS
+  `2100361059f866a6`, issued 1167 of 1838 draws in a frame, each a point list of 2 vertices. It fell to 912 and 591
+  draws 100 and 200 presents later, and was absent at about 530 draws per frame once settled. The other top pairs
+  stayed the same in both phases. Hypothesis, not checked: the particles expire after a number of presented frames
+  rather than seconds, so a slower frame rate keeps them longer and they in turn keep the frame rate down.
+- **Profile of the settled phase.** User-space samples of the busiest thread (about 60 to 66 % of one core at 28 fps)
+  are flat: the AVX2 index scan 7 %, `memcmp` 6 %, `GetQueryPoolResults` 4 %, and texture preparation 2 %. At 28 fps
+  that thread is not saturated, so the settled scene is limited elsewhere. Two runs meant to profile the transient
+  did not show it: the robot reached the second rock before sampling began.
+
+- **The particle program is the geometry program `0xf4cfb9a5`.** Its vertex checksum ends in `f4cfb9a5`, the
+  geometry pass of the 2026-11-09 records above: one guest group per point draw, run on this host as SIMD8 with
+  44,571 instructions and 862 spills. A profile from 2026-11-18 timed its passes at about 54 us each, 73 calls in a
+  settled frame. A run sampled from 92 s caught the transient as the route's walking and jumps began: 1150 to 1250 draws
+  per frame at 15 fps from 118 to 142 s, with the render engine 93 % busy (deltas of the engine's busy cycles), and
+  then 600 draws per frame at 24 fps with it 95 % busy. In that run the transient was limited by the GPU; in the
+  first run the command processor was also 91 % busy. Both sides pay per pass.
+
+Next: lower the GPU cost per pass of `0xf4cfb9a5`, starting from the open lead above (parts with no live lane), and
+the command-processor cost of its draws.
