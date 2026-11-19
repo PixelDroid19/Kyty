@@ -7903,10 +7903,25 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   cost a draw of the three light programs suggests a per-draw term, but it is not established: the one-target pass of
   `ps 0x860593d6` (2.4 ms, 120 draws) and the shadow passes (4.7 ms, 280 draws) cost 17 to 20 us a draw. The captures
   (frames 4,722 and 5,298) are at rock 2; in the `0x57572d59` window the robot looks missing.
+- **Second rock: the five-target pass cost is not per draw (2026-11-19, `half1`).** Same window design, halving the
+  index count (rounded down to a multiple of 12) of every draw of one vertex program: none, `0xa2bb8f2d`, none,
+  `0x4ea3083b` (about 3,900 halved draws a window each; engaged: index-instances a draw averaged 0.88 and 0.91 of
+  their `skarm2` values over the run, where one halved window in four predicts 0.875). At 141 to 150 five-target
+  draws the pass summed 8.5 ms unhalved (four frames), 7.3 ms with `0xa2bb8f2d` halved (one frame) and 7.4 to 7.7 ms
+  with `0x4ea3083b` halved (four frames): about half of the 2.2 and 2.1 ms their skips removed, so their cost scales
+  with the work of each draw (vertices, primitives and pixels together). The one-target pass of `ps 0x860593d6` held
+  111 draws and 2.33 to 2.37 ms in the same run, and its draws counted 6.4 G index-instances against 6.0 G for the
+  five-target draws over frames 4,741 to 5,364 (the latter about 0.4 G low, since it includes the halved windows).
+  Its two vertex programs, compiled alone (no pixel module was dumped for it), are `0x5c9f3e0a` (755 instructions,
+  6 loops, 16 sends at width 8; 4.5 G of the index-instances) and `0x51485353` (1,906, 19 and 42; 1.8 G), against
+  1,226, 11 and 29 for `0xa2bb8f2d`. Same index volume in 2.35 ms puts a ceiling of about 6 ms, less about 1 ms of
+  raster (`vtx5`), on what a cheaper vertex stage could recover; that ceiling includes the guest's own attribute work.
+  Vertex reuse of the meshes is unknown.
 - **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** The lookup kept the last
   matched entry in private variables and returned early on a hit (translator 247, temporary). The dumped
   `vs 0xa2bb8f2d` carries the cache (13 calls to the lookup, a different source hash) yet compiles to the same 1,226
-  instructions; why ANV's output did not change was not determined, so its vertex-time effect is untested. The BVH kernel
+  instructions with identical native code; `spirv-opt -O` also drops the four cache variables while keeping all 13
+  lookups, so the cache never ran in that vertex program and its vertex-time effect is untested. The BVH kernel
   `0x3666fa39` grew from 29,954 to 35,938 instructions and 272 to 487 spills at width 8, and its crash-site stamp
   rose from 5.77 to 10.76 ms (`lkc2`). Reverted. One run of this series (`vtx2`) ended on the known intermittent
   `DepthStencilBuffer - Crosses - StorageTexture` relation exit (cross-title record).
