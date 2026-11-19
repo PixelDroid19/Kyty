@@ -7625,8 +7625,10 @@ lets tile-27 samples upload guest bytes only for BC1. Every other format without
 gets a zero-filled Texture object. In the dunes, five 1x1 RGBA32F samples (format 77; one is read by a compute
 program that writes a 1x1 result a later pixel shader reads) hold `(1.0, -1.0, 0.5, 0.18)`. One 1x1 R8 (format 1)
 holds `0xff` and one 1x1 RG8 (format 14) holds `0x8080`. The R8 and RG8 are sampled by draws into a three-target
-1920-wide pass. The bytes stayed the same for the whole run, and no other GPU object overlaps those ranges, so
-nothing on the GPU writes them. Element (0,0) of slice 0 sits at offset 0 in `SW_64KB_R_X` for every element
+1920-wide pass. The bytes stayed the same for the whole run. Each RGBA32F texel lies exactly under a writable 64 KiB
+storage buffer. The provenance query reports that buffer as GPU written back, and the texture as uploaded
+again afterwards. Whether that write-back covers the 16 bytes of the texel was not checked, so it is open
+whether the guest bytes are the content these samples should read. The R8 and RG8 ranges have no other GPU object over them. Element (0,0) of slice 0 sits at offset 0 in `SW_64KB_R_X` for every element
 size, so these samples can be read as linear.
 
 - **Uploading them turns the frame black.** A trial uploaded uncovered one-element 2D tile-27 samples as linear.
