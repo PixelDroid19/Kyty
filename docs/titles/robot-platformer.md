@@ -7705,18 +7705,24 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
 - **Settled passes are batched.** Temporary counters (not committed) on segment placement, one 171 s run that left the
   robot at the crash site at 23 fps and about 380 draws per frame, without the transient. From 104 to 164 s, 46,900
   geometry passes (about 34 per frame) went into 5,942 segments, about 8 passes per segment; 87 % of placements joined
-  an open segment. Of the new segments, 4,474 followed a recording end and 1,468 a command recorded outside a render
-  pass; no guest-memory draw, packet or sampled-image rule split a segment there, and no pass ran inline. Passes in
+  an open segment. Of the new segments, 4,474 followed a recording end and 1,468 had a command recorded outside a
+  render pass as the last hazard before them (the counter kept only the last one, so a packet before that command is
+  not seen); no pass ran inline. Passes in
   a segment overlap (2026-11-09 records), so at that rate the passes are not what holds the settled frame. How the
   transient's passes segment was not measured.
 - **Excluded at the second rock: the particle program as cost or veil.** A temporary build skipped every draw of VS
-  `360038d0f4cfb9a5` in alternate 5 s windows; captures every 3 s. Settled at the second rock, skip windows ran 28.0
+  `360038d0f4cfb9a5` in alternate 5 s windows; captures every 3 s. Settled, that VS draws only 8 to 11 times a frame
+  (with PS `21001960c4a8f3bb` in the histogram run), so the test covers those draws only. At the second rock, skip windows ran 28.0
   and 27.4 fps against 28.2, 27.0 and 27.8 with the draws, and mean hue, saturation and lightness of the captures
   matched within 0.004 between arms. Not tested with the skip: the close shots where the robot looks washed white on the
   ground and blue in the air (crash site and first rock, 2026-11-19 captures), nor the transient.
 - **The dunes white haze shows on close shots of the robot.** At the crash site at 23 fps the robot's face is washed
   white; near the first rock it is washed on the ground and looks normal at the top of a jump. Cause not identified;
   the single-texel lead above is still open.
+- **The transient's passes are batched too.** In the run sampled from 92 s, render pass begins stayed at 42 to 45 a
+  frame through the transient (1150 to 1240 draws a frame), as in the settled phase (40 to 42), and dispatches rose
+  from about 89 to about 205 a frame. A segment per particle draw would have added about one begin per draw. The
+  transient's cost is therefore GPU work inside the segments and pull draws, not segment breaks.
 
 Next: test the particle skip on a close shot of the robot (the haze) and during the transient (the cost), then the
 GPU cost of the settled frame, where the lighting program `0x3666fa39` is the largest single item.
