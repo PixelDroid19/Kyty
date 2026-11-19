@@ -7767,11 +7767,25 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   samples, 376 draws per frame, engine 96 % busy, capture: the crashed ship close-up) against 23.4 fps (21 to 24, 377
   draws per frame) in the stamped native run of the same scene; stamps do not move the frame rate at the second rock
   (27 to 28 fps with and without). That run entered the dunes about 7 s later than the others (60 fps at about 45
-  draws per frame until 99 s, after a stall at 90 to 91 s), which shifted the wall-clock route; no compute pipeline
-  was created in that window, so the cause of the delay is not known. A native run on the same build entered on time
-  and reached the second rock, so the pair is not from one build. `0xbf8ee9fc` has no per-dispatch number. `PPSA17221
-  - Minecraft` reached the world with exit 0 and a clean capture; that run compiled only two fragment modules, so the
+  draws per frame until 99 s, after a stall at 90 to 91 s), which shifted the wall-clock route. Its cache copy lacked
+  the split variants, which were translated at 84 to 85 s, and the stall second at 90 s shows 6 compute pipeline
+  misses, so building them probably caused the delay (not proven). A native run on the same build entered on time and
+  reached the second rock, so the pair is not from one build. `0xbf8ee9fc` has no per-dispatch number. `PPSA17221 -
+  Minecraft` reached the world with exit 0 and a clean capture; that run compiled only two fragment modules, so the
   rule changed none of the compute programs it dispatched.
+
+- - **Still pinned at 32 in the dunes, and cheap.** The rule keeps `0x939e8346`, `0xeb964a28` and `0xfd1ee59c` native;
+  they cost under 0.1 ms a frame (below the per-frame list, or 0.07 ms), so their width is not a lever. `0xfd1ee59c`
+  spills 32:155 at 32 lanes offline.
+- - **Bound only: EXEC guards in the five-target pass.** Replacing the 361 EXEC-guard selects of `ps 0x6bcfb82d` with
+  their new value (not a valid translation) lowers ANV's cycle estimate of its two SIMD16 executables by 27 % (25,415
+  to 18,631) and 18 % (31,607 to 26,022). An earlier record found per-draw time falling far less than such estimates,
+  and the skip test caps this pass at about 3 ms, so a sound subset would recover well under the 2.4 ms needed;
+  parked. The BVH kernel `0x3666fa39` already compiles at 8 lanes (272:928 spills), so its width was not pursued.
+- - **The transient is one geometry program.** In the one-frame windows of a stamped run that crossed the transient
+  (1,064 to 1,572 draws a frame), `0xf4cfb9a5` ran 436 to 1,155 one-group passes a frame and its stamps summed 10.6 to
+  31.7 ms, against 12 to 13 ms for all render passes. The stamps are end-of-pipe timestamps around each pass, which
+  serialize the passes, so the sum overstates their cost when they overlap.
 
 - **Second rock: no single program holds the frame.** Stamped there with the 16-lane wave32 arm (its 27 to 28 fps
   matches the native runs): render passes 22 ms, compute 11 ms, geometry passes 4 ms a frame; the largest items are
