@@ -7124,16 +7124,24 @@ native program spills?
   VGPR count does not predict the case no longer holds for them; it is untested beyond them. `0x874bd13f` measured -8
   % here (end-of-pipe brackets, widths rotated inside one run) and -57 % on t246 (per-dispatch stamps, matched runs);
   the gap is unexplained.
-- **Priced 2026-11-19, not pursued.** With the rule, the three split programs that have per-dispatch numbers cost 2.9
-  ms a frame at the crash site in 16-lane parts (`0x874bd13f` 2.5 ms, `0xe1b1315d` 0.31 ms, `0x2bcba9a2` 74 us; a
-  lower bound, since `0xbf8ee9fc` has no per-dispatch number). The one measured 16-to-8-lane change in this tree,
-  `0x3666fa39`, fell 34 % (36.9 to 24.4 ms), so 8-lane wave32 parts would save about 1.0 ms, below the 1.2 ms the
-  crash site needs for 30 fps, and nothing at the second rock, where these programs are not the cost. A code read
-  found no 8-lane arithmetic defect in the split emission (part count, mask words, grouped ballots, exchange slots;
-  DPP rows already read through the guest-lane exchange when parts are narrower than 16), so the device loss has no
-  localized cause; no 8-lane dispatch was repeated. The 2026-11-19 `w32s8` attempt never reached a dispatch: it
-  stopped at the translator's layout gate. Unchecked: whether the GDS append/consume count, which adds the high EXEC
-  word with no wave32 case, sees a zero high word in wave32.
+- **Priced 2026-11-19, parked.** At the crash site with the rule, per-dispatch stamps give `0x874bd13f` 5.14 ms,
+  `0xbf8ee9fc` 1.88 ms and `0xe1b1315d` 0.17 ms a frame in 16-lane parts (one stamped run; `0x2bcba9a2` is below the
+  per-frame list). The one measured 16-to-8-lane change in this tree, `0x3666fa39`, fell 34 % (36.9 to 24.4 ms), so
+  8-lane wave32 parts would save at most about 2.4 ms there, more than the 1.2 ms the crash site needs for 30 fps,
+  and nothing at the second rock, where these programs are not the cost. It is an upper bound: `0x3666fa39` makes
+  no cross-part lane reads, while `0x874bd13f` in 8-lane parts adds eight. An earlier version of this bullet used the
+  second-rock figures and is superseded.
+- **No localized cause for the device loss (2026-11-19).** Translate-only dumps of `0x874bd13f` and `0x2bcba9a2` in
+  8-lane parts (four parts a guest wave, exit before dispatch) were read offline: local size 64 (two whole guest
+  waves), exchange area 304 dwords (two waves of 152), lane index `part * 8 + lane` (0 to 31), the rendezvous bank
+  toggled once per call and read with the same parity by the lane exchange, ballots merged as four bytes, and the one
+  lane-exchange call site checked sits under a wave-wide EXEC test. Subgroup-scope control barriers also appear in
+  the production 8-lane wave64 modules. `0x874bd13f` reads DPP rows through the guest-lane exchange eight times;
+  `0x2bcba9a2` never does and no production 8-lane module does, so that path is not shared by the programs in the
+  record and the record does not say which of the five lost the device. Neither module has a GDS append or consume.
+  The admission checks stay at 16 lanes for wave32 and no 8-lane dispatch was repeated. Unchecked: the seven other
+  lane-exchange call sites of `0x874bd13f`, and whether one part of a wave can skip a rendezvous (the rendezvous
+  spins up to 2^20 iterations, which fits a device lost about 2 s after the first dispatch).
 
 ## Depth targets no longer wait for deferred storage aliases (2026-11-07)
 
@@ -7803,6 +7811,18 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   other programs included). Skipping every draw of `ps 0x6bcfb82d` (temporary build at native wave32 width; capture:
   same rock, props apparently missing, not verified) gave 29 to 30 fps against 27 to 28 and render passes 18.7 ms
   against 21.8: about 3 ms. That run had windows of low engine busy, so its frame rate is indicative only.
+
+- **Second rock at 960x540 (game patch, diagnostic only).** 32 to 33.6 fps at about 556 draws a frame and 90 % engine
+  busy, against 27 to 28 fps at 530 draws and 96 % at native resolution: pixel-bound work is about 5 to 6 ms of the
+  frame and about 28 ms does not scale with resolution.
+- **Guest compute queues 0 to 7, priced at the crash site.** With the rule, compute dispatches from those queues sum
+  about 2.2 ms a frame in end-of-pipe stamps (their command buffers about 2.6 ms) of 18 ms of compute; the BVH kernel
+  `0x3666fa39` (5.8 ms) comes from the graphics queue. Running them on a separate host compute queue could overlap at
+  most that 2.2 ms and needs depth copies on a compute queue, a recorded exclusion on this host; parked.
+- **The particle transient is not the haze.** In `hist1` the robot looks washed white both in a capture inside the
+  transient and in a settled one. At the crash site the wash varies between captures at the same frame rate, with
+  different framing, so it is not tied to one camera view. The 1x1 exposure chain (format 77, zero-filled) remains
+  the unproven lead.
 
 Next: with the rule the crash site holds about 29 fps and the second rock 28, both GPU-bound at 95 to 96 % busy; 30
 fps needs about 1.2 ms more at the crash site and 2.4 ms at the second rock. The largest shared item is `0x3666fa39`
