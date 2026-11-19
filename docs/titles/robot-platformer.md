@@ -7587,3 +7587,74 @@ Route outcomes on the 225 s route: both base runs reached the dunes; of the HEAD
 only the world map, one left the route for the ship crowd cinematic, one stopped at 140 s and one reached the
 dunes. The stop was a pixel program on the per-lane fragment path refused at its null export; fixed in
 `253d981a9`, where a null export emits nothing after the valid-mask bit has set which lanes stay alive.
+
+## Open: depth range reused as a storage view at about 87 s (2026-11-18)
+
+`PPSA21567 - Astro Bot` exits with code 65 at about 87 s in some dunes-route runs on `4bf5efeb9`
+(two of six runs that day, one of them with temporary diagnostics, plus one on `3268e4c21`); the sample is too
+small for a rate. The stop is
+`unknown relation: DepthStencilBuffer - Crosses - StorageTexture` in `GpuMemoryCreate.cpp` (the relation switch's
+`default`, line 1898 at `4bf5efeb9`): a 778,752-byte storage texture is created 0x1ba0000 bytes into the depth
+plane of a live 3840x2160 D32S8 target that has three ranges (depth, stencil, HTILE). The new range lies inside the depth
+plane; the classifier reports `Crosses` against the three-range parent. The depth target is still `in_use`.
+The same run family once stopped at `!create_all_the_same` at the same point, and three
+diagnostic-build runs on 2026-11-18 stopped there again at about 86 s (`vaddr 0x53d8b0000`, size `0x658800`,
+`StorageTexture`, one parent `Crosses` and one `Equals`). The other runs pass this point, so
+it depends on timing (which object still holds the range). The existing storage-over-depth rules handle `Equals` (a
+storage view of the plane) and the recycled-range cases (`Contains`), not a view inside one plane of a live
+multi-range target. Suggested direction: classify the relation per range for multi-range parents, then decide
+whether the guest reuses a released depth range (seed from guest memory, as for sampled textures over depth
+ranges) or views live depth texels.
+
+## Open: dunes haze and zero-filled single-texel samples (2026-11-18)
+
+`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, Mesa ANV 26.3.0 (git), `4bf5efeb9` plus a local translator change,
+dunes route, 60 fps present limit, warm private caches, 175 s bounds, temporary diagnostics (not committed). It
+continues the open haze item above (a white haze over Astro in the dunes).
+
+**Excluded for the haze.**
+
+- **Fog volume aliasing.** The volumetric fog chain (inject `5d90f514`, temporal filter `e308b341` writing a
+  240x135x64 RGBA16F volume in place, integration, then the apply draw) binds its sampled and storage views to the
+  same live images. The two volumes ping-pong as the guest intends.
+- **Depth input of the apply draw.** It resolves depth-exact to the live depth target.
+- **RenderDoc.** A capture of this scene runs the A770 out of device memory, so no frame was inspected that way.
+
+**Found, not fixed: single texels on `kRenderTarget` (tile 27) are zero-filled.** `Gen5SampleMayGuestUploadTiled`
+lets tile-27 samples upload guest bytes only for BC1. Every other format without a live surface over its range
+gets a zero-filled Texture object. In the dunes, five 1x1 RGBA32F samples (format 77; one is read by a compute
+program that writes a 1x1 result a later pixel shader reads) hold `(1.0, -1.0, 0.5, 0.18)`. One 1x1 R8 (format 1)
+holds `0xff` and one 1x1 RG8 (format 14) holds `0x8080`. The R8 and RG8 are sampled by draws into a three-target
+1920-wide pass. The bytes stayed the same for the whole run, and no other GPU object overlaps those ranges, so
+nothing on the GPU writes them. Element (0,0) of slice 0 sits at offset 0 in `SW_64KB_R_X` for every element
+size, so these samples can be read as linear.
+
+- **Uploading them turns the frame black.** A trial uploaded uncovered one-element 2D tile-27 samples as linear.
+  Every capture at 140, 150 and 160 s was exactly `(0,0,0)`, HUD included, while the GPU stayed about 92 % busy.
+  The frame was black with formats 1 and 14 only, and black with format 77 only. Earlier runs on the same base without the trial show the dunes. A frame of exact zeros with the HUD gone fits a NaN reaching the final blend.
+  The zero fill seems to hide a fault further down. The trial is parked and the zero fill is unchanged.
+- **Suggested direction.** Follow the format-77 chain to the first target that turns non-finite: the compute
+  program that writes the 1x1, then the pixel shader that reads it. Do this before allowing the upload again.
+- One further sample, a 1x1 RGBA16F at the start of a live 3840x2160 target, also holds non-zero guest bytes. It
+  stays zero-filled because nothing shows those bytes are the content.
+
+**Comment fixed.** `ResolveGen5SampleBacking` said `Unsupported` stops the run. It only logs, and the caller still
+creates a zero-filled Texture object.
+
+**Black flicker (user report), not reproduced.** With warm caches the per-second samples show a single graphics
+pipeline miss in the window (279 ms at 135 s, of which 146 ms in pipeline creation) and no cache checkpoint. An
+earlier run with a less warm cache spent 0.6-1.06 s in single misses and 399 ms in one 101 MB driver-cache
+checkpoint. Both run on the thread that records draws, so they freeze frames rather than blacken them. The link to
+the flicker is not shown.
+
+**Other exits seen that day.** One run with temporary diagnostics stopped on a guest call to address 0 (`rcx`
+`0xdeadbeef5533ccaa`). One stopped at 124 s with exit code 0, no error and no captures; its cause was not found.
+
+**Excluded: translator version 245.** It rewrote partially out-of-range scalar loads as straight-line code. In
+`vs_0x57572d59` spills rose from 93 to 103 and instructions from 4485 to 4578, and in `vs_0x4e1ef13e` spills rose
+from 52 to 57. It was not kept.
+
+**Not committed.** Translator version 246 sizes scalar buffer loads by `num_records` times the stride, or by bytes
+when the stride is 0. This follows the RDNA2 ISA, where the stride of a scalar buffer load serves only the bounds
+check. It is local: no run showed it engaging, and the haze is unchanged with it.
+
