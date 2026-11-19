@@ -7662,3 +7662,24 @@ stride of a scalar buffer load serves only the bounds check. No run showed it en
 it. On 2026-11-19 `PPSA17221 - Minecraft` reached its world with it (the save ends on the death screen) with no
 recorded error, at 60 fps with the present limit.
 
+
+## Open: a transient of extra draws in the dunes (2026-11-19, measured)
+
+Setup: `PPSA21567 - Astro Bot`, the dunes route, A770 with ANV, 60 fps present limit, translator version 246, warm
+private caches, two runs of about 200 and 235 s. After the route ends (about 140 s), the agent pad command sends three
+jumps, and native captures are taken right after them and 5, 10 and 20 s later.
+
+- **The route does not leave the robot in one place.** With identical input it ended near the first rock in one run
+  and at the second rock in the next, and earlier runs left it at the crash site. Boot speed shifts every timed input.
+  Per-window fps from different runs therefore compares different scenes; compare draws per frame and the capture.
+- **A transient of extra draws.** Near the first rock one run held 1000 to 2300 draws per frame at 7 to 12 fps for
+  about 40 s. The count then fell smoothly to about 540, and the run held 29 fps. Two earlier runs show the same decay
+  from about 1250 to about 300 draws per frame, ending at 33 to 34 fps. During the slow phase every per-draw stage cost
+  about three times more: about 64 against 24 us per draw on the command processor, with the texture descriptor at 16
+  against 5 us and guest address population at 0.68 against 0.13 calls per draw. The command processor was busy about
+  91 % of each window. No pipeline misses were counted. The extra draws were not identified.
+- **Jumps on settled ground add no lasting draws.** At the second rock the run held 27 to 28 fps at 520 to 700 draws
+  per frame for 95 s. Three jumps left no extra draws beyond the windows that took a capture, and the dust was gone by
+  the capture 10 s later. Sand left in the air was not reproduced in either run.
+
+Next: identify the extra draws with a per-draw trace limited to one frame of each phase, grouped by shader and target.
