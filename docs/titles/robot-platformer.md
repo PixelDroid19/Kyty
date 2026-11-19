@@ -8000,12 +8000,31 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   the title leaves it by itself near 192 s. A temporary probe armed on 30 frames in that draw band and alternated
   45-frame windows of control and one skip. With the scene steady (765 draws, 87 dispatches per frame, render engine
   94-96 % busy), skipping every draw of `vs 0x5033be53` (204 per frame, the 2048x2048 shadow passes) gave 34.42 ms
-  per frame against 34.65 and 34.66 ms in the control windows on either side, 0.24 ms against the 1.81 ms its
-  passes carry in timestamps. The other arms (`vs 0x8e51dd94` with its geometry, `cs 0xff2adfc8`, the compute tail)
+  per frame against 34.65 and 34.66 ms in the control windows on either side, 0.24 ms. In timestamps the skipped
+  draws carried about 0.16 ms per pass (0.29 ms per pass in control frames, 0.13 ms with the skip, six or twelve
+  passes per frame), about 1.0 ms per frame; the passes themselves remain. The other arms (`vs 0x8e51dd94` with its geometry, `cs 0xff2adfc8`, the compute tail)
   fell after the scene change and are not priced. Two more runs with the same probe (`rank1`, `rank3`) left the
   route before the second rock, so causal ranking there is blocked by route repeatability, not by the probe.
+- **Measured: in a steady scene reached off the route, skipping the small compute dispatches saves about 6 ms
+  (2026-11-19, `rank6`).** Five more runs with the route left it before the dunes level (two stayed in the space hub,
+  one reached a crowd cinematic); a copy of the route with every input from 79 s delayed by 30 s left it too, so
+  the variance starts before the first menu input. The probe was changed to arm on any scene whose requested draws
+  stay within 8 % for 30 frames. In a scene of about 565 draws and 83 dispatches per frame, skipping every dispatch
+  except `0x3666fa39`, `0x874bd13f`, `0xbf8ee9fc`, `0xff2adfc8` and `0x108c4737` (80 per frame skipped) gave 23.3 ms
+  per frame against 29.7-30.0 ms in the two control windows after it, with requested draws unchanged. In
+  timestamps that frame's compute fell from 9.8-9.9 to 7.5 ms and the command-buffer sum by 4.4 ms; the number of
+  render passes did not fall (63 against 58-60), so the skipped dispatches did not split passes. The small
+  dispatches cost 0.14-0.16 ms each in timestamps (`0x5d90f514` 30x17 groups, `0x5546b086` 120x68 groups), and
+  dispatch processing on the command-processor thread is about 38 us per dispatch at the second rock. Skipping
+  `0x3666fa39` alone saved under 1 ms (the no-skip windows of this run spread by 1 ms). This prices nearly all
+  compute in that scene together; which of the small dispatches carry the cost is not measured.
+- **Measured offline: a switch between 3D and compute work on one queue costs about 7 us on the A770 (2026-11-19).**
+  A standalone Vulkan program alternated a one-triangle render pass and an 8-group dispatch: 17.3 us per pair
+  against 3.0 us with the same work grouped, about 13 us per pair with 1024x1024 targets, and no difference on the
+  RADV iGPU. At 60-80 alternations per frame that is about 1 ms, not the 6 ms above.
 
 Next: with the rule the crash site holds about 29 fps and the second rock 28, both GPU-bound at 95 to 96 % busy; 30
-fps needs about 1.2 ms more at the crash site and 2.4 ms at the second rock. The largest shared item is `0x3666fa39`
+fps needs about 1.2 ms more at the crash site and about 1.3 ms at the second rock (34.65 ms per frame in the
+steady scene of `rank2`; the earlier 2.4 ms used frames near the scene's entry). The largest shared item is `0x3666fa39`
 (5.5 ms); at the second rock the draws of `ps 0x6bcfb82d` cost about 3 ms in the skip test, and the whole five-target
 pass is mostly vertex work spread over five vertex programs, none priced by measurement yet.

@@ -250,6 +250,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - [Binding over a versioned snapshot](bringup/binding-snapshot-design.md): epochs, by-address storage, texture heap priced on paper at 3.0-5.2 us/draw saved, leaving 6.5-8.5 us; 3 us needs recording off the command-processor thread (2026-11-12, design)
   - [Shader ALU contracts](bringup/shader-alu-contracts.md): scalar min/max SCC, RPI VOP3, f32 min/max zero rule, sin/cos in turns, V_SUB_CO_CI_U32, f64-to-integer saturation fixed; RPI/FLR saturation and rounding, FP32 input denormals and F64 e64 follow-up (2026-11-17)
   - Guest primitive reset ignored (no all-ones index seen); host restart slow on ANV, excluded as a reuse lever (2026-11-19, open)
+  - 3D-to-compute switches cost about 7 us each on ANV, about 1 ms per frame at 60-80 alternations (2026-11-19)
   - Leads from another implementation's change list: event-flag poll back-off excluded; file reads into tracked pages and repeated upload checks already covered (2026-11-10, excluded; open leads)
   - [Temporal upscalers decision](bringup/temporal-upscalers-decision.md): no DLSS/XeSS now; temporal inputs first, FSR 2 before proprietary SDKs (2026-10-29, decided)
   - Street scene of GTA San Andreas DE: recycled-memory links, reloaded V#s, gather4 lanes, wave64 LDS order (dot grid); capture layout race, HUD and Arc device loss open (2026-11-05, fixed; open items)

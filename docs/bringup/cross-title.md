@@ -8553,3 +8553,16 @@ Worktree commit `e8433b68e` plus temporary diagnostics, Intel Arc A770 (DG2), AN
 - **Direction.** No performance lever: restart gains only on instanced draws, not reliably, and RADV shows no reuse
   change. For correctness, mirror the guest reset only for draws whose index scan finds an all-ones index (and
   for indirect draws, whose indices are not scanned), so the common case keeps restart off on ANV.
+
+## 3D-to-compute switches cost about 7 us each on ANV (2026-11-19)
+
+- **Observation.** A standalone Vulkan program on the A770 (ANV, Xe KMD) recorded 60 pairs of a one-triangle
+  render pass and an 8-group compute dispatch in one command buffer. Alternating them took 17.3 us per pair against
+  3.0 us with the passes first and the dispatches after; with 1024x1024 targets the gap is about 13 us per pair.
+  The RADV iGPU shows no gap (0.25-0.27 us per pair either way). A compute-to-compute memory barrier adds about
+  3.6 us per dispatch on the A770.
+- **Bearing on titles.** Kyty records guest dispatches in guest order on one queue, closing any open render pass
+  first. At 60-80 alternations per frame (`PPSA21567 - Astro Bot`) the switches cost about 1 ms per frame; that
+  title's small dispatches cost more than this in a skip test (`docs/titles/robot-platformer.md`), so the
+  switches alone are not the lever there. Regrouping dispatches would need proof that no draw in between reads or
+  writes what they touch.
