@@ -7763,18 +7763,22 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   native run, same scene) and 2.5 to 3.3 ms against 5.6 to 6.8 ms in the dunes intro of the idle route (one pair).
   Frame rate did not move where measured: the idle route's settled view holds 34 fps in both arms (the program is not
   in that view's per-frame list), and a clean build of the commit at the second rock held 28 fps (171 s, render engine
-  95 to 96 % busy) against 27 to 28. At the crash site, where the program cost 12.3 ms native, the split projects to
-  about 5.4 ms; no run under the rule has landed there, so that is not measured. `0xbf8ee9fc` has no per-dispatch
-  number. `PPSA17221 - Minecraft` reached the world with exit 0 and a clean capture; that run compiled only two
-  fragment modules, so the rule changed none of the compute programs it dispatched.
+  95 to 96 % busy) against 27 to 28. At the crash site a clean build of the commit held 28.8 fps (27 to 31, 46
+  samples, 376 draws per frame, engine 96 % busy, capture: the crashed ship close-up) against 23.4 fps (21 to 24, 377
+  draws per frame) in the stamped native run of the same scene; stamps do not move the frame rate at the second rock
+  (27 to 28 fps with and without). That run reached the crash site because compiling the split variants froze the game
+  for about 2 s at 104 s and shifted the wall-clock route; a native run on the same build without that freeze reached
+  the second rock instead, so the pair is not from one build. `0xbf8ee9fc` has no per-dispatch number. `PPSA17221 -
+  Minecraft` reached the world with exit 0 and a clean capture; that run compiled only two fragment modules, so the
+  rule changed none of the compute programs it dispatched.
 
-- **Second rock: no single program holds the frame.** Stamped there with the 16-lane wave32 arm (its
-  27 to 28 fps matches the native runs): render passes 22 ms, compute 11 ms, geometry passes 4 ms a frame; the largest items are the BVH kernel
-  `0x3666fa39` (5.5 ms) and a five-target pass keyed by `ps 0x6bcfb82d` (8.7 ms over its 144 draws, other programs
-  included). Skipping every draw of `ps 0x6bcfb82d` (temporary build at native wave32 width; capture: same rock, props
-  apparently missing, not verified) gave 29 to 30 fps against 27 to 28 and render passes 18.7 ms against 21.8: about
-  3 ms. That run had windows of low engine busy, so its frame rate is indicative only.
+- **Second rock: no single program holds the frame.** Stamped there with the 16-lane wave32 arm (its 27 to 28 fps
+  matches the native runs): render passes 22 ms, compute 11 ms, geometry passes 4 ms a frame; the largest items are
+  the BVH kernel `0x3666fa39` (5.5 ms) and a five-target pass keyed by `ps 0x6bcfb82d` (8.7 ms over its 144 draws,
+  other programs included). Skipping every draw of `ps 0x6bcfb82d` (temporary build at native wave32 width; capture:
+  same rock, props apparently missing, not verified) gave 29 to 30 fps against 27 to 28 and render passes 18.7 ms
+  against 21.8: about 3 ms. That run had windows of low engine busy, so its frame rate is indicative only.
 
-Next: at the crash site 30 fps needs `0x874bd13f` near 4.5 ms; the rule projects about 5.4 ms there, not yet measured.
-At the second rock the frame is GPU-bound at 28 fps and needs about 2.4 ms more; the largest items are the five-target
-pass of `ps 0x6bcfb82d` (about 3 ms in the skip test) and `0x3666fa39` (5.5 ms).
+Next: with the rule the crash site holds about 29 fps and the second rock 28, both GPU-bound at 95 to 96 % busy; 30
+fps needs about 1.2 ms more at the crash site and 2.4 ms at the second rock. The largest shared item is `0x3666fa39`
+(5.5 ms); at the second rock the five-target pass of `ps 0x6bcfb82d` costs about 3 ms in the skip test.
