@@ -515,10 +515,11 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 	//     MayGuestUpload may detile package data
 	//   - ufmt 56 (RGBA8): GuestMemoryTexture; MayGuestUpload always false (skip_guest
 	//     transparent clear — never detile GPU intermediates)
-	//   - ufmt 71 (RGBA16F): requires live RT (Unsupported without alias)
+	//   - other formats: Unsupported without alias
 	// tile 9 (kStandard64KB): ufmt 56/130/71; MayGuestUpload when uncovered
 	//
-	// Unsupported = no Texture object and no live alias → structured EXIT.
+	// Unsupported only logs: the caller still creates a Texture object, zero-filled
+	// unless MayGuestUpload allows the guest bytes.
 	if (tile == 27u)
 	{
 		if (fmt == 56u || ::Kyty::Libs::Graphics::Gen5IsBc1PackageFormat(fmt))
