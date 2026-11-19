@@ -7893,6 +7893,16 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   under 0.25 ms); these are pass times, not frame-rate gains. A capture inside a `0xa2bb8f2d` skip window (frame
   5,235) shows the rocks, sand and props of the unskipped capture at frame 4,711 (the camera moved, so a pixel diff
   is not conclusive); what those 49 draws a frame put on screen in this view is not identified.
+- **Second rock, three more vertex programs by skip windows (2026-11-19, `skarm2`, same design: none, `0x4ea3083b`,
+  `0x67d7f692`, `0x57572d59`).** At matched draw counts the pass summed about 8.3 ms unskipped (142 to 150 draws),
+  6.2 ms with `0x4ea3083b` skipped (about 48 draws a frame removed, 36,000 index-instances a draw), 7.5 ms with
+  `0x67d7f692` skipped (18 draws, 56,000 indexes a draw) and 7.7 ms with `0x57572d59` skipped (two frames at 140 draws;
+  6 draws, 193,000 indexes a draw). With `skarm1`, the five programs cost about 44, 44 and 47 us a draw for the three
+  light ones (`0xa2bb8f2d`, `0x4ea3083b`, `0x67d7f692`, whose indexes a draw differ by 2x), 100 us for `0x57572d59`
+  (two frames only) and 600 us for `0x0c2ae56d`; the five savings sum to about 7.5 of the pass's 8.3 ms. The equal
+  cost a draw of the three light programs suggests a per-draw term, but it is not established: the one-target pass of
+  `ps 0x860593d6` (2.4 ms, 120 draws) and the shadow passes (4.7 ms, 280 draws) cost 17 to 20 us a draw. The captures
+  (frames 4,722 and 5,298) are at rock 2; in the `0x57572d59` window the robot looks missing.
 - **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** The lookup kept the last
   matched entry in private variables and returned early on a hit (translator 247, temporary). The dumped
   `vs 0xa2bb8f2d` carries the cache (13 calls to the lookup, a different source hash) yet compiles to the same 1,226
