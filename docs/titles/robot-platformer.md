@@ -8019,14 +8019,23 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   `0x3666fa39` alone saved under 1 ms (the no-skip windows of this run spread by 1 ms). This prices nearly all
   compute in that scene together, including whatever later work reads its results; which of the small dispatches
   carry the cost is not measured.
-- **Measured: the command-processor thread is not clearly on the critical path (2026-11-19, `rank7`).** In a steady
-  scene of about 300 draws and 86 dispatches per frame, a busy wait of 4 us per draw (about 1.2 ms per frame on the
-  command-processor thread) moved the frame by +1.8 and +0.03 ms in two windows, and 20 us per dispatch (about
-  1.7 ms) by +0.4 ms, against control windows that drift by about 1 ms. Skipping the same compute tail in that scene
+- **Inconclusive: a command-processor delay test (2026-11-19, `rank7`).** In a steady scene of about 300 draws and
+  86 dispatches per frame, a busy wait of 4 us per draw (about 1.2 ms per frame on the command-processor thread)
+  moved the frame by +1.8 and +0.03 ms in two windows, and 20 us per dispatch (about 1.7 ms) by +0.4 and +1.6 ms
+  (the second against the control before it only), slopes of 0 to 1.5. The added delay was no larger than the
+  1 ms drift of the control windows, so the test neither places the thread on the critical path nor removes it. Skipping the same compute tail in that scene
   saved nothing (38.1 ms against 35.4 ms after it), so the 6 ms of `rank6` is not a fixed cost of small dispatches;
   it most likely includes draws that consume the skipped results. An on-CPU profile on the route's approach
   (`prof1`, `cycles:u`) shows the command-processor thread flat: `memcmp` about 7 % of its samples, the index range
   scan about 5 %, nothing else above 3 %.
+- **Measured: the route's approach scene is GPU-bound (2026-11-19, `rank7` and `prof1` samples).** From about 112 to
+  165 s (about 370 draws per frame, 34-37 ms per frame) the render engine is 96-97 % busy at 2400 MHz, and the
+  command-processor thread waits on fences 12-13 ms per frame (about 8 waits per frame, 34 submits). The same frame
+  times with the GPU profiler off (`prof1`) and on (`rank7`) put no measurable cost on the profiler. Timestamps in
+  that scene sum 32-35 ms per frame: compute 17.5-17.9 ms (`0x3666fa39` 5.8 ms, `0x874bd13f` 5.1 ms, `0xbf8ee9fc`
+  1.6 ms, `0xff2adfc8` 1.2 ms), render passes 10.5-12.7 ms and geometry 1.6-2.8 ms. With 12 ms of command-processor
+  slack per frame, 30 fps there needs GPU time, not command-processor time; both large compute programs have
+  recorded exclusions above.
 - **Measured offline: a switch between 3D and compute work on one queue costs about 7 us on the A770 (2026-11-19).**
   A standalone Vulkan program alternated a one-triangle render pass and an 8-group dispatch: 17.3 us per pair
   against 3.0 us with the same work grouped, about 13 us per pair with 1024x1024 targets, and no difference on the
