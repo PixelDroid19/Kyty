@@ -7766,10 +7766,11 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   95 to 96 % busy) against 27 to 28. At the crash site a clean build of the commit held 28.8 fps (27 to 31, 46
   samples, 376 draws per frame, engine 96 % busy, capture: the crashed ship close-up) against 23.4 fps (21 to 24, 377
   draws per frame) in the stamped native run of the same scene; stamps do not move the frame rate at the second rock
-  (27 to 28 fps with and without). That run reached the crash site because compiling the split variants froze the game
-  for about 2 s at 104 s and shifted the wall-clock route; a native run on the same build without that freeze reached
-  the second rock instead, so the pair is not from one build. `0xbf8ee9fc` has no per-dispatch number. `PPSA17221 -
-  Minecraft` reached the world with exit 0 and a clean capture; that run compiled only two fragment modules, so the
+  (27 to 28 fps with and without). That run entered the dunes about 7 s later than the others (60 fps at about 45
+  draws per frame until 99 s, after a stall at 90 to 91 s), which shifted the wall-clock route; no compute pipeline
+  was created in that window, so the cause of the delay is not known. A native run on the same build entered on time
+  and reached the second rock, so the pair is not from one build. `0xbf8ee9fc` has no per-dispatch number. `PPSA17221
+  - Minecraft` reached the world with exit 0 and a clean capture; that run compiled only two fragment modules, so the
   rule changed none of the compute programs it dispatched.
 
 - **Second rock: no single program holds the frame.** Stamped there with the 16-lane wave32 arm (its 27 to 28 fps
