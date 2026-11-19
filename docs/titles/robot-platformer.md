@@ -8154,3 +8154,41 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
   and is not a reachable target. The approach window was 35 ms per frame in both `psdbl55` and `psfastdbl55`.
 - **Exit 65 from the overlap check** stopped `pstriv`, `rpmix` and `psnull55`; it was the item "depth and chain
   ranges reused as storage views" above (about 12 of the runs since 2026-11-18 on this route), fixed on 2026-11-19.
+- **Measured, one run each: what `0x874bd13f` costs with the wave32 register-budget rule, and its width (2026-11-19).**
+  - **Price.** Skipping it in alternate 6 s blocks in the approach window (`sqsky2`, the skip engaged in every odd
+    block) took compute from 17.97 to 12.93 ms a frame. The program's own stamp fell from 4.36 to 0.55 ms. Render
+    passes moved 11.05 to 10.74 ms and `0x3666fa39` 5.89 to 5.68 ms. So the price is the program's own cost, not
+    work it causes downstream; this replaces "not measured" above.
+  - **Width.** The program has at most 64 guest VGPRs, so the rule splits it into 16-lane parts. Offline on ANV, at
+    16 lanes it estimates 79.7M cycles with 1,171:4,213 spills:fills. The same SPIR-V compiled at 8 lanes estimates
+    46.0M cycles with 50:149, and an 8-lane split of the guest wave estimates 48.5M with 50:147. The static cycle
+    model is not a frame predictor: it ranks the native 32-lane module (107.3M) worse than the 16-lane split, yet
+    the measured gain from that split (57 %) is larger than the model gives.
+  - **8-lane split, this program only.** A temporary replacement arm ran this program from an 8-lane split
+    (`sky8a`, `sky8cap`). Neither run lost the device or left the route. The stamp was 0.84 ms against 4.36 ms; the
+    GPU sum was 29.57 ms and the frame median 30.64 ms (max 33.7) against 34.84 ms for `oneskip1`. The 8-lane stamp
+    stayed near 0.82 ms while the 16-lane one rose from 2.6 to 5.3 ms through the window. That flat stamp is close
+    to the skip price, so whether the 8-lane module draws the same image is not verified.
+  - **Same view, both widths in one run (`tog6`, `tog8`).** A temporary toggle ran this program at 8 lanes in odd
+    6 s blocks and at 16 in even ones. In `tog8` the robot stood still in the dunes landing view from 108 to 156 s.
+    The 16-lane stamp was 5.0 to 5.3 ms a frame and the 8-lane one 0.78 to 0.82 ms. The GPU sum was about 33.5
+    against 30.5 ms, and the sampled frame median was 35 against 31 ms (19 one-second samples per arm). In the first
+    blocks of both runs the 16-lane stamp rose (2.5 to 3.1, 3.0 to 5.0 ms) while the 8-lane one fell (1.02 to
+    0.83 ms), so the stamp still does not follow the view. Two capture triplets taken across arm boundaries differ
+    no more across arms than within one arm (RMSE about 0.07 in both, from storm animation), and the sky at 1:1
+    shows no lane-shaped structure. That excludes gross breakage, such as the stale bands of the skip, but does not
+    show the image is the same. A dark cloud mass appears in 2 of 2 16-lane captures and 2 of 4 8-lane ones; six
+    captures cannot separate animation from a difference.
+  - **8-lane split, every wave32 program above 64 VGPRs.** This arm (`vg8a`) lost the device
+    (`vkWaitSemaphores` -4) at 94.7 s, about 2 s after the hub reached state 7. This program kept its 16-lane parts
+    under that arm. `0xbf8ee9fc` went to 8 lanes; it is the only one of the two with guest LDS, 6 workgroup
+    barriers and 1 barrier on group memory. Whether 8-lane parts plus workgroup barriers cause the loss is not
+    tested.
+- **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
+  91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
+  instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
+  timing). Copying the shader cache changes boot time enough to move a run between the two cases. Runs from
+  2026-11-19 drive the inputs after 60 s from the guest's hub events through `kyty_agent pad` instead. The
+  driver reads those events from the guest's stdout, so the run must line-buffer it; that switch is a temporary
+  diagnostic, not part of the runtime. The cinematic skip through the pause menu sometimes misses its "down" and
+  resumes instead (`tog7`), so the driver retries it.
