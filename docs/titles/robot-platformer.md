@@ -7702,5 +7702,21 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   then 600 draws per frame at 24 fps with it 95 % busy. In that run the transient was limited by the GPU; in the
   first run the command processor was also 91 % busy. Both sides pay per pass.
 
-Next: lower the GPU cost per pass of `0xf4cfb9a5`, starting from the open lead above (parts with no live lane), and
-the command-processor cost of its draws.
+- **Settled passes are batched.** Temporary counters (not committed) on segment placement, one 171 s run that left the
+  robot at the crash site at 23 fps and about 380 draws per frame, without the transient. From 104 to 164 s, 46,900
+  geometry passes (about 34 per frame) went into 5,942 segments, about 8 passes per segment; 87 % of placements joined
+  an open segment. Of the new segments, 4,474 followed a recording end and 1,468 a command recorded outside a render
+  pass; no guest-memory draw, packet or sampled-image rule split a segment there, and no pass ran inline. Passes in
+  a segment overlap (2026-11-09 records), so at that rate the passes are not what holds the settled frame. How the
+  transient's passes segment was not measured.
+- **Excluded at the second rock: the particle program as cost or veil.** A temporary build skipped every draw of VS
+  `360038d0f4cfb9a5` in alternate 5 s windows; captures every 3 s. Settled at the second rock, skip windows ran 28.0
+  and 27.4 fps against 28.2, 27.0 and 27.8 with the draws, and mean hue, saturation and lightness of the captures
+  matched within 0.004 between arms. Not tested with the skip: the close shots where the robot looks washed white on the
+  ground and blue in the air (crash site and first rock, 2026-11-19 captures), nor the transient.
+- **The dunes white haze shows on close shots of the robot.** At the crash site at 23 fps the robot's face is washed
+  white; near the first rock it is washed on the ground and looks normal at the top of a jump. Cause not identified;
+  the single-texel lead above is still open.
+
+Next: test the particle skip on a close shot of the robot (the haze) and during the transient (the cost), then the
+GPU cost of the settled frame, where the lighting program `0x3666fa39` is the largest single item.
