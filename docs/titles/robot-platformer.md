@@ -7750,5 +7750,11 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   runs the capture at 120 s is a dark frame without a frame-rate dip; whether that is a game fade or the reported
   black flicker is not decided.
 
-Next: at the second rock (27 to 28 fps) the G-buffer pass (`ps 0x6bcfb82d`, five color targets, about 8.7 ms for 144
-draws a frame) is the largest item; price it. At the crash site, 30 fps needs `0x874bd13f` near 4.5 ms.
+- **Second rock: no single program holds the frame.** Stamped there (16-lane wave32 arm, which matches the 27 to 28 fps
+  without it): render passes 22 ms, compute 11 ms, geometry passes 4 ms a frame; the largest items are the BVH kernel
+  `0x3666fa39` (5.5 ms) and a five-target pass keyed by `ps 0x6bcfb82d` (8.7 ms over its 144 draws, other programs
+  included). Skipping every draw of `ps 0x6bcfb82d` (temporary build, capture: same rock, props missing) gave 29 to 30
+  fps against 27 to 28 and render passes 18.7 ms against 21.8: about 3 ms.
+
+Next: at the crash site, 30 fps needs `0x874bd13f` near 4.5 ms; at the second rock the cost is spread over many
+programs, so only a lever that lowers the translated code's cost broadly reaches 30 fps there.
