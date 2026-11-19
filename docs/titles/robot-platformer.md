@@ -8046,3 +8046,65 @@ fps needs about 1.2 ms more at the crash site and about 1.3 ms at the second roc
 steady scene of `rank2`; the earlier 2.4 ms used frames near the scene's entry). The largest shared item is `0x3666fa39`
 (5.5 ms); at the second rock the draws of `ps 0x6bcfb82d` cost about 3 ms in the skip test, and the whole five-target
 pass is mostly vertex work spread over five vertex programs, none priced by measurement yet.
+
+## Measured: guest address lookups in the particle pixel programs (2026-11-19)
+
+Runs `rpmix`, `psnull55`, `psmemo55`, `psdbl55`, `pstriv` and `psstate` on the dunes route, 150-175 s each, A770
+with ANV, 60 fps present limit, GPU profiler on. A diagnostic replaced one pixel module by checksum with an edited
+copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader invocation of one render pass.
+
+- **The per-pass profiler names a pass by its first pixel program.** Its draws, invocations and time belong to the
+  whole pass. The 1920x1080 pass labelled `0x210016009aec9d6c` holds 12 draws of that program and 9 of
+  `0x55db270b`; the passes labelled `0x21001960c4a8f3bb` hold that program and six others. A replacement of
+  `9aec9d6c` by a pixel program that only writes a constant left the 1080p pass unchanged (0.415 against 0.400-0.411),
+  so that pass is not priced by its label.
+- **Measured: replacing `c4a8f3bb` by a constant writer** took its 960x540 pass from 6.2-6.6 ms to 0.30 ms and its
+  1080p pass from 1.3 to 0.14 ms, with the same invocation count (14.9M against 14.6-14.8M; 2.54M in both). The
+  replacement has no discard while the original ends in `OpKill`, so the end-of-program discard does not defeat the
+  early depth test; the 28 invocations per pixel at 960x540 are the title's own overdraw. Pipeline state of these
+  draws: one sample, no sample shading, depth test without depth write, blending on.
+- **Measured: the cost of the address lookups in `55db270b`.** In the 1080p pass, against 0.400-0.411 ns per
+  invocation (8.1-9.7 ms):
+  - every lookup returning the null region at once: 0.292-0.308 (5.9-7.4 ms). An upper bound only; the shader then
+    reads zeros.
+  - every lookup done twice (the second on the address plus 4, its result kept only if it were all ones, which a lookup never returns): 0.509 (10.6 ms),
+    +0.10 per invocation or about +2.3 ms per frame. The doubled module has 38 loops against 19 in the
+    driver's statistics, so the second walk was not folded away.
+  - the last entry that held a whole access remembered per invocation, checked with the same fit test before a
+    walk: 0.380 (7.8 ms), one run. Each invocation runs about 10 lookups (19 call sites, half of them the second
+    page of a load that crosses one) on 7 base addresses that the program writes into the buffer descriptor before
+    each group of loads; only 3 lookups repeat the previous base. That is consistent with the 30 % recovered;
+    whether those bases fall in different table entries was not measured.
+- **What a lookup costs on the device.** The native code (ANV, SIMD8) runs each lookup as a chain of dependent
+  memory reads: table pointer, directory header, directory pair, 0 to a few search reads, then the entry, and only
+  then the guest load, with branches between lookups. Whether the cost is that read latency or the instructions
+  (about 150 per lookup, 64-bit arithmetic emulated on this GPU) was not separated.
+- **Excluded here:** a native subgroup pin (these modules were not pinned); the EXEC guards as an instruction cost
+  (about 10 % of the instructions); per-sample shading.
+- **Measured offline: the particle programs cannot compile at SIMD16 on ANV.** With SIMD8 disabled the driver reports
+  a SIMD16 register-allocation failure for `55db270b` (112 live registers at SIMD8), `9aec9d6c` (106) and a copy of
+  `55db270b` with every lookup removed (96); a constant writer compiles at SIMD16. The width is set by live values
+  in the translated body, not by the lookups. Not priced in the game.
+- **Defect: ANV raises SIGFPE while compiling an edited `c4a8f3bb` in the game.** Both the doubled-walk and the
+  null-walk variants crashed in `libvulkan_intel` under `CreatePipelineInternal` on the second pipeline variant
+  (`psdbl`, `psnull`); the constant writer did not. The same modules compiled offline with 1, 2, 4 and 8 samples and
+  with sample shading. Only `9aec9d6c` and `55db270b` could therefore be priced by replacement.
+- **The table and the search loop.** A capped print on every rebuild (`gdashape`) showed about 175 entries, most of
+  them 64 MiB chunks (mean span about 58 MB), a 4 MiB directory region (`shift` 22) and 15,260 regions, of which
+  about 15,100 hold no entry start, 151 hold one and under 10 hold more. The search loop therefore runs zero or one
+  time; the cost is the chain of dependent reads, not the loop. This agrees with the earlier exclusion of a direct
+  lookup in the same program (loops 19 to 0, time flat).
+- **Measured, one run: a one-read lookup (`psfast55`).** The table got a per-region device delta for regions that no
+  entry starts inside and whose holding entry covers the region plus 128 bytes (463-778 such regions); the edited
+  `55db270b` read it after the directory header and walked only when it was zero. The 1080p pass gave 0.378, the
+  same as the remembered entry. The capped print covered only boot-time rebuilds (37-62 entries); the count of such
+  regions for the scene's 175 entries and the share of lookups that took the short path were not measured. The part
+  both cheap paths share (header read, variable 64-bit shift) is not priced.
+- **Frame time in the approach scene (110-141 s, 340-400 draws per frame) did not follow these changes.** Controls
+  `kq1`, `rank7` and `gcap2` gave 34.75-34.92 ms per frame; the doubled walk 34.98 ms although its frames with the
+  pass summed about 1 ms more GPU time; the remembered entry 36.29 ms with about 1.5 ms less. Changes of 1-2 ms in
+  one pass are inside this spread. A large reduction does reach the frame: skipping `0x874bd13f` (`skip874a`) gave
+  30.73 ms per frame with a GPU sum of 28.77 ms in its frames of 340-409 draws, against 34.92 and 33.22 ms in
+  `gcap2`, about 0.9 ms of frame per ms of GPU. `pstriv2` and `psfast55` left the route before the window.
+- **Exit 65 from the overlap check** stopped `pstriv`, `rpmix` and `psnull55`; it is the open item "depth range
+  reused as a storage view" above (about 12 of the runs since 2026-11-18 on this route).
