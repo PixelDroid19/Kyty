@@ -7125,14 +7125,15 @@ native program spills?
   % here (end-of-pipe brackets, widths rotated inside one run) and -57 % on t246 (per-dispatch stamps, matched runs);
   the gap is unexplained.
 - **Priced 2026-11-19, not pursued.** With the rule, the three split programs that have per-dispatch numbers cost 2.9
-  ms a frame at the crash site in 16-lane parts (`0x874bd13f` 2.5 ms, `0xe1b1315d` 0.31 ms, `0x2bcba9a2` 74 us). The
-  one measured 16-to-8-lane change in this tree, `0x3666fa39`, fell 34 % (36.9 to 24.4 ms), so 8-lane wave32 parts
-  would save about 1.0 ms, below the 1.2 ms the crash site needs for 30 fps, and nothing at the second rock, where
-  these programs are not the cost. A code read found no 8-lane arithmetic defect in the split emission (part count,
-  mask words, grouped ballots, exchange slots; DPP rows already read through the guest-lane exchange when parts are
-  narrower than 16), so the device loss has no localized cause; no 8-lane dispatch was repeated. The 2026-11-19
-  `w32s8` attempt never reached a dispatch: it stopped at the translator's layout gate. Unchecked: whether the GDS
-  append/consume count, which adds the high EXEC word with no wave32 case, sees a zero high word in wave32.
+  ms a frame at the crash site in 16-lane parts (`0x874bd13f` 2.5 ms, `0xe1b1315d` 0.31 ms, `0x2bcba9a2` 74 us; a
+  lower bound, since `0xbf8ee9fc` has no per-dispatch number). The one measured 16-to-8-lane change in this tree,
+  `0x3666fa39`, fell 34 % (36.9 to 24.4 ms), so 8-lane wave32 parts would save about 1.0 ms, below the 1.2 ms the
+  crash site needs for 30 fps, and nothing at the second rock, where these programs are not the cost. A code read
+  found no 8-lane arithmetic defect in the split emission (part count, mask words, grouped ballots, exchange slots;
+  DPP rows already read through the guest-lane exchange when parts are narrower than 16), so the device loss has no
+  localized cause; no 8-lane dispatch was repeated. The 2026-11-19 `w32s8` attempt never reached a dispatch: it
+  stopped at the translator's layout gate. Unchecked: whether the GDS append/consume count, which adds the high EXEC
+  word with no wave32 case, sees a zero high word in wave32.
 
 ## Depth targets no longer wait for deferred storage aliases (2026-11-07)
 
@@ -7783,15 +7784,15 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   Minecraft` reached the world with exit 0 and a clean capture; that run compiled only two fragment modules, so the
   rule changed none of the compute programs it dispatched.
 
-- - **Still pinned at 32 in the dunes, and cheap.** The rule keeps `0x939e8346`, `0xeb964a28` and `0xfd1ee59c` native;
+- **Still pinned at 32 in the dunes, and cheap.** The rule keeps `0x939e8346`, `0xeb964a28` and `0xfd1ee59c` native;
   they cost under 0.1 ms a frame (below the per-frame list, or 0.07 ms), so their width is not a lever. `0xfd1ee59c`
   spills 32:155 at 32 lanes offline.
-- - **Bound only: EXEC guards in the five-target pass.** Replacing the 361 EXEC-guard selects of `ps 0x6bcfb82d` with
+- **Bound only: EXEC guards in the five-target pass.** Replacing the 361 EXEC-guard selects of `ps 0x6bcfb82d` with
   their new value (not a valid translation) lowers ANV's cycle estimate of its two SIMD16 executables by 27 % (25,415
   to 18,631) and 18 % (31,607 to 26,022). An earlier record found per-draw time falling far less than such estimates,
   and the skip test caps this pass at about 3 ms, so a sound subset would recover well under the 2.4 ms needed;
   parked. The BVH kernel `0x3666fa39` already compiles at 8 lanes (272:928 spills), so its width was not pursued.
-- - **The transient is one geometry program.** In the one-frame windows of a stamped run that crossed the transient
+- **The transient is one geometry program.** In the one-frame windows of a stamped run that crossed the transient
   (1,064 to 1,572 draws a frame), `0xf4cfb9a5` ran 436 to 1,155 one-group passes a frame and its stamps summed 10.6 to
   31.7 ms, against 12 to 13 ms for all render passes. The stamps are end-of-pipe timestamps around each pass, which
   serialize the passes, so the sum overstates their cost when they overlap.
