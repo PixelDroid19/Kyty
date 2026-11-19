@@ -7920,7 +7920,10 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
 - **Where the vertex programs' guest-address lookups come from (2026-11-19, offline).** ANV's final intermediate code
   keeps uniform and divergent lookup loops of: `0xa2bb8f2d` 3 and 8, `0x4ea3083b` 4 and 9, `0x67d7f692` 4 and 9,
   `0x57572d59` 3 and 20, `0x0c2ae56d` 5 and 20, and for the one-target pass `0x5c9f3e0a` 2 and 4, `0x51485353` 3 and
-  16 (each module compiled with the pixel module of its pass, or alone where none was dumped). In `0xa2bb8f2d` the
+  16 (each module compiled with the pixel module of its pass, or alone where none was dumped). Correction, same day:
+  most divergent loops are not lookups but the partial-range branch of by-address row loads of three or more words,
+  a non-unrolled word loop (rewriting it is excluded below); replacing the lookups with stubs offline left
+  the loop count unchanged. In `0xa2bb8f2d` the
   divergent ones are buffer loads whose index is built from packed register bits (an 8-bit field, a bit-field
   extract), not the vertex index, all on one buffer descriptor loaded once; such loads cannot become native vertex
   attributes, which need a format load indexed by the vertex or instance id from the vertex-buffer table. `0x51485353`
@@ -7929,20 +7932,38 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
 - **Pipeline statistics per render pass (2026-11-19, `PPSA21567 - Astro Bot`, A770 ANV, diagnostic build).** Vertex-shader,
   clipping and fragment-shader invocation counts were read per pass beside the timestamps. Over 67 profiled frames of
   one run the five-target pass fits `ms = 2.27 x M vertex invocations + 0.60 x M fragment invocations + 0.155 x passes`
-  (rms 0.26 ms). With the five targets scissored to one pixel the fragment count reads 0, and 2.19 M vertex invocations
+  (rms 0.26 ms). Scenes: at rock 2 the pass runs about 260 draws in 8.3-9.3 ms; the 130-140 draw blocks are the
+  rock-1 area. With the five targets scissored to one pixel the fragment count reads 0, and 2.19 M vertex invocations
   still take 5.1-5.6 ms (fit: 5.3 ms), so that pass is bound by vertex work; in a lighter scene (0.75 M) it leaves about
   0.6 ms the fit does not explain. The one-target pass `ps 0x860593d6` runs 1.6-2.1 M invocations at 1.05-1.35 ms per
   million with `vs 0x51485353`, a statically larger program than `0xa2bb8f2d` (1906 against 1226 instructions, 42
-  against 29 memory messages), so per-invocation cost follows the pass, not the static program size. Vertex
+  against 29 memory messages). Correction, same day: the pass label is its first draw only, `0x5c9f3e0a` carries
+  about 71 % of that pass's index volume, and the per-program halving prices below show cost follows the program. Vertex
   invocations per index are 0.32 in the five-target pass and 0.23 in the one-target pass. The "halving saves about
   half" result above also halved fragments for `0x4ea3083b` (-0.17 M vertex, -1.0 M fragment invocations); for
   `0xa2bb8f2d` the fragment count did not move.
 - **The five-target draws are not an equal-depth pass over a prepass (2026-11-19).** All 120 sampled draws of the five
   programs test depth less-or-equal with depth writes and stencil on, and none shares an index range and vertex offset
-  with a one-target draw, so `0xa2bb8f2d` shading almost no pixels is ordinary occlusion, not a depth mismatch.
+  with a one-target draw. Re-keyed on the index-buffer address alone (296 one-target entries recorded, engaged), no
+  five-target draw reuses a one-target index buffer either. The one-target pass still acts as a depth prepass for
+  the scene: halving `0x5c9f3e0a` raised the five-target fragment invocations from 2.7 to 5.15 M at rock 2.
 - **Excluded: doubling the vertex programs' guest-address lookups as a price probe (2026-11-19).** A second lookup
   chained on the first through a runtime zero reached the SPIR-V (13 calls into the wrapper) but ANV compiled
   `0xa2bb8f2d` to the identical ISA, so this probe cannot price the lookups on this driver.
+- **Per-program vertex prices at rock 2 (2026-11-19, halving arms with pipeline statistics, diagnostic build).** Halving
+  one program's index count per 80-frame window and dividing the pass-time change by the vertex-invocation change,
+  with the fragment term of the fit removed, gives in ms per million vertex invocations: `0x0c2ae56d` about 4.5 (about
+  6 in a lighter scene), `0xa2bb8f2d` 1.5-1.9, `0x51485353` 1.45-1.6, `0x5c9f3e0a` 0.5-0.8. Cost follows the program.
+- **Excluded: straight-line partial-range loads in the vertex programs (2026-11-19).** The partial branch of by-address
+  row loads of three or more words (taken only when the row's last word is past the backed bytes) was rewritten from
+  a non-unrolled word loop into one branch on word 0 plus a select per word, which is equivalent. Offline, ANV's code
+  for the five programs keeps no loops (`0x0c2ae56d` 25 to 0, spills:fills 337:234 to 308:203; `0x57572d59` fills 76 to
+  44) but grows 2-20 % in instructions with about twice the memory messages. Three runs with a private translation
+  cache: the five-target pass sits +0.59 ms (median of 12 frames) above the pipeline-statistics fit, against +0.57 ms
+  for the old code at rock 2; at 2.50 M vertex invocations both take 6.7 ms. The hot whole-range path is unchanged
+  and reshaping the cold branch does not move it. A probe that read zeros for partial rows instead also left the
+  route; a run whose native code was identical to the baseline but with a cold translation cache left it too, so
+  that desync and the probe's one exit 139 are unattributed, not evidence of a guest-visible change.
 - **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** The lookup kept the last
   matched entry in private variables and returned early on a hit (translator 247, temporary). The dumped
   `vs 0xa2bb8f2d` carries the cache (13 calls to the lookup, a different source hash) yet compiles to the same 1,226
