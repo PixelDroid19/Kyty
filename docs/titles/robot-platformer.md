@@ -7879,6 +7879,20 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
 
   `0x0c2ae56d` averages about 550,000 index-instances a draw; weighted by static cycles it is the largest item,
   but static cycles have tracked measured time poorly on this host, so no program is priced yet.
+- **Second rock, two vertex programs priced by skip windows (2026-11-19, `skarm1`).** A temporary build skipped the
+  draws of one vertex program in alternating 80-frame windows of one run (none, `0xa2bb8f2d`, none, `0x0c2ae56d`;
+  each window printed its skipped-draw count: about 3,950 and 240) with no other change. Comparing stamped frames
+  from frame 4,740 (rock 2 in the captures) whose five-target draw counts match the arm, the five-target pass stamps
+  summed 8.3 to 8.7 ms a frame unskipped (143 to 152 draws), 5.7 to 6.3 ms with `0xa2bb8f2d` skipped (96 to 98
+  draws; about 49 draws and 3.5 M indexes a frame removed) and 6.3 to 6.6 ms with `0x0c2ae56d` skipped (140 to 147
+  draws; 3 draws a frame removed, each about 550,000 indexes of one instance). Frames with fewer draws are another
+  view and were left out. So `0xa2bb8f2d` holds about 2.2 ms (0.6 ns an index) and `0x0c2ae56d` about 1.8 ms
+  (1.0 ns an index): a ratio of 1.6 an index against 4.6 in static cycles. Indexes are not vertex invocations and the
+  two meshes' vertex reuse is unknown, so two programs cannot separate a per-vertex floor from shader weight. The
+  stamps serialize the passes and the per-frame print keeps only the 12 largest pass groups (dropped groups are
+  under 0.25 ms); these are pass times, not frame-rate gains. A capture inside a `0xa2bb8f2d` skip window (frame
+  5,235) shows the rocks, sand and props of the unskipped capture at frame 4,711 (the camera moved, so a pixel diff
+  is not conclusive); what those 49 draws a frame put on screen in this view is not identified.
 - **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** The lookup kept the last
   matched entry in private variables and returned early on a hit (translator 247, temporary). The dumped
   `vs 0xa2bb8f2d` carries the cache (13 calls to the lookup, a different source hash) yet compiles to the same 1,226
