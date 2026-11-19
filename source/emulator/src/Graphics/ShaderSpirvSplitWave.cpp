@@ -37,7 +37,7 @@ const ShaderLaneMaskPlan* Spirv::LaneMaskPlan() const
 	if (!m_lane_mask_plan_ready)
 	{
 		m_lane_mask_plan_ready = true;
-		m_lane_mask_plan       = ShaderLaneMaskPlanOf(m_code, split_compute && !NativeWave32());
+		m_lane_mask_plan       = ShaderLaneMaskPlanOf(m_code, split_compute && !NativeWave32(), NativeWave32());
 	}
 	return &m_lane_mask_plan;
 }

@@ -8182,8 +8182,16 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
   - **8-lane split, every wave32 program above 64 VGPRs.** This arm (`vg8a`) lost the device
     (`vkWaitSemaphores` -4) at 94.7 s, about 2 s after the hub reached state 7. This program kept its 16-lane parts
     under that arm. `0xbf8ee9fc` went to 8 lanes; it is the only one of the two with guest LDS, 6 workgroup
-    barriers and 1 barrier on group memory. Whether 8-lane parts plus workgroup barriers cause the loss is not
-    tested.
+    barriers and 1 barrier on group memory. The same toggle on `0xbf8ee9fc` alone (`togbf1`) lost the device at
+    116.8 s, 1.6 s after the hub reached state 7 and inside an 8-lane block, so that program alone is enough
+    (one run). The cause was the split-wave mask plan, fixed on translator t247 (see "Wave32 lane-mask demand" in
+    `docs/bringup/cross-title.md`). The guest sets EXEC from `vcc_hi` after a 64-bit multiply-add whose carry
+    names `vcc`. The plan read that carry as a write of both words, so the compare into `vcc_hi` stayed part-local.
+    The EXECZ branch then tested each part's own bits. A part with no active lane skipped a range that holds
+    rendezvous, and its siblings waited on it until the job timed out. At 16 lanes the same lowering only failed
+    when a whole 16-lane part was inactive. On t247 the same toggle (`togbf2`, warm cache) ran `0xbf8ee9fc` in
+    three 8-lane blocks after the hub (126, 150 and 162 s) and ended cleanly. Its stamp was 0.70-0.90 ms at 8
+    lanes against 1.6-1.9 ms at 16 (one run, 3-4 sampled frames a block).
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third

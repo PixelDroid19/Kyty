@@ -8576,3 +8576,19 @@ with seed 11 and in file order. It fails the same way with the two GPU-memory ov
 excluded, so another test leaves global GPU-memory state it depends on. Suggested direction: give it an address range
 no other test maps, or free what it creates, as `GpuMemoryFreeDeletesExactRange` does.
 
+
+## Wave32 lane-mask demand (2026-11-19, fixed on t247)
+
+The split-wave mask plan (`ShaderLaneMaskPlanOf`, `source/emulator/src/Graphics/ShaderMaskAnalysis.cpp`) decides
+which lane-mask producers may keep only their own part's bits. The decoder names a VALU lane mask as an SGPR pair
+(`vcc`, `s[26:27]`) even in a wave32 program, where it writes only the low word. The plan read it as a write of both
+words, so a mask the guest left in the high word looked dead behind it. In `PPSA21567 - Astro Bot` program
+`0xbf8ee9fc` sets EXEC from `vcc_hi` after a `V_MAD_U64_U32` whose carry names `vcc`. The compare into `vcc_hi` was
+lowered part-local, its EXECZ branch tested each part's own bits, and a part with no active lane skipped a range
+holding rendezvous. The other parts then waited for it until the GPU job timed out. The fix narrows each instruction
+with `ShaderWave32LaneMasks` before the plan reads it, as the scalar liveness already does
+(`ShaderScalarLiveness.cpp`). It applies to every guest wave32 program that has a plan: split wave32 compute and
+wave32 pixel programs. In the Astro dunes run 10 compute and 8 pixel modules changed against a t246 run; two t246
+runs differ in 2-3 pixel modules, `0x6bcfb82d` in both. Regression test:
+`EmulatorShaderMaskAnalysis.Wave32LowMaskWriteKeepsHighWordDemanded`. Not yet run after the fix:
+`PPSA07393 - Gori: Cuddly Carnage`, which splits wave32 compute, and Minecraft.

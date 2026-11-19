@@ -29,6 +29,8 @@ namespace Kyty::Libs::Graphics {
 // the branch needs no complete EXEC. Only set when part-local skips are asked,
 // which takes a wave64 guest: a wave32 compare writes one word of its pair.
 // All false when the CFG cannot be resolved.
+// native_wave32: a VALU lane mask defines only the low word of the pair the
+// decoder names, so a mask left in the high word stays demanded.
 struct ShaderLaneMaskPlan
 {
 	std::vector<bool> local;
@@ -36,7 +38,7 @@ struct ShaderLaneMaskPlan
 	std::vector<bool> part_skipped;
 };
 
-[[nodiscard]] ShaderLaneMaskPlan ShaderLaneMaskPlanOf(const ShaderCode& code, bool part_local_skips = false);
+[[nodiscard]] ShaderLaneMaskPlan ShaderLaneMaskPlanOf(const ShaderCode& code, bool part_local_skips = false, bool native_wave32 = false);
 
 // Successor instruction indices per instruction; false when a branch target
 // cannot be resolved.
