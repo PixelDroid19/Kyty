@@ -3589,8 +3589,9 @@ void Spirv::FindConstants()
 	}
 	if (m_bind != nullptr && m_bind->storage_address_used)
 	{
-		// Loads by device address: address mask and shift, dword alignment, partial-OOB loop and access sizes.
-		for (uint32_t value: {0u, 1u, 2u, 0xffffu, 0xfffffffcu, 32u})
+		// Loads by device address: address mask and shift, dword alignment, scalar stride extent, partial-OOB loop and
+		// access sizes.
+		for (uint32_t value: {0u, 1u, 2u, 0xffffu, 0xfffffffcu, 32u, 16u, 0x3fffu, 0xffffffffu})
 		{
 			AddConstantUint(value);
 		}

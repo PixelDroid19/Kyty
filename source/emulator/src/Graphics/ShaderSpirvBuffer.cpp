@@ -3776,6 +3776,7 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
 
 // S_BUFFER_LOAD through a by-address row (ShaderStorageResources::by_address):
 // SOFFSET + OFFSET (RDNA2 ISA, SMEM) from the device address in words 0-1.
+// The extent is word 2 in units of the stride (bytes when the stride is 0), as for the other scalar buffer path.
 static bool EmitAddressScalarBufferLoad(Spirv* spirv, const ShaderInstruction& inst, uint32_t index, uint32_t components,
                                         String8* dst_source)
 {
@@ -3789,8 +3790,13 @@ static bool EmitAddressScalarBufferLoad(Spirv* spirv, const ShaderInstruction& i
 	const auto align4  = spirv->GetConstantUint(0xfffffffcu);
 	const auto shift32 = spirv->GetConstantUint(32u);
 	const auto shift16 = spirv->GetConstantUint(16u);
+	const auto mask14  = spirv->GetConstantUint(0x3fffu);
+	const auto u0      = spirv->GetConstantUint(0u);
+	const auto u1      = spirv->GetConstantUint(1u);
+	const auto u32max  = spirv->GetConstantUint(0xffffffffu);
 	if (imm == "unknown_uint_constant" || mask16 == "unknown_uint_constant" || align4 == "unknown_uint_constant" ||
-	    shift32 == "unknown_uint_constant" || shift16 == "unknown_uint_constant")
+	    shift32 == "unknown_uint_constant" || shift16 == "unknown_uint_constant" || mask14 == "unknown_uint_constant" ||
+	    u0 == "unknown_uint_constant" || u1 == "unknown_uint_constant" || u32max == "unknown_uint_constant")
 	{
 		return false;
 	}
@@ -3805,7 +3811,19 @@ static bool EmitAddressScalarBufferLoad(Spirv* spirv, const ShaderInstruction& i
 %<t>_off = OpBitwiseAnd %uint %<t>_offset %<align4>
 %<t>_d0 = OpLoad %uint %<d0>
 %<t>_d1 = OpLoad %uint %<d1>
-%<t>_bytes = OpLoad %uint %<d2>
+%<t>_records = OpLoad %uint %<d2>
+%<t>_stride_raw = OpShiftRightLogical %uint %<t>_d1 %<shift16>
+%<t>_stride = OpBitwiseAnd %uint %<t>_stride_raw %<mask14>
+%<t>_raw = OpIEqual %bool %<t>_stride %<u0>
+%<t>_scale = OpSelect %uint %<t>_raw %<u1> %<t>_stride
+%<t>_scale64 = OpUConvert %ulong %<t>_scale
+%<t>_records64 = OpUConvert %ulong %<t>_records
+%<t>_bytes64 = OpIMul %ulong %<t>_scale64 %<t>_records64
+%<t>_bytes_hi64 = OpShiftRightLogical %ulong %<t>_bytes64 %<shift32>
+%<t>_bytes_hi = OpUConvert %uint %<t>_bytes_hi64
+%<t>_bytes_fit = OpIEqual %bool %<t>_bytes_hi %<u0>
+%<t>_bytes_lo = OpUConvert %uint %<t>_bytes64
+%<t>_bytes = OpSelect %uint %<t>_bytes_fit %<t>_bytes_lo %<u32max>
 %<t>_hi = OpBitwiseAnd %uint %<t>_d1 %<mask16>
 %<t>_lo64 = OpUConvert %ulong %<t>_d0
 %<t>_hi64 = OpUConvert %ulong %<t>_hi
@@ -3820,6 +3838,10 @@ static bool EmitAddressScalarBufferLoad(Spirv* spirv, const ShaderInstruction& i
 	              .ReplaceStr("<mask16>", mask16)
 	              .ReplaceStr("<shift32>", shift32)
 	              .ReplaceStr("<shift16>", shift16)
+	              .ReplaceStr("<mask14>", mask14)
+	              .ReplaceStr("<u0>", u0)
+	              .ReplaceStr("<u1>", u1)
+	              .ReplaceStr("<u32max>", u32max)
 	              .ReplaceStr("<d0>", operand_variable_to_str(inst.src[0], 0).value)
 	              .ReplaceStr("<d1>", operand_variable_to_str(inst.src[0], 1).value)
 	              .ReplaceStr("<d2>", operand_variable_to_str(inst.src[0], 2).value);
