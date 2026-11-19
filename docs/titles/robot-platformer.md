@@ -8132,7 +8132,25 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
   `kq1`, `rank7` and `gcap2` gave 34.75-34.92 ms per frame; the doubled walk 34.98 ms although its frames with the
   pass summed about 1 ms more GPU time; the remembered entry 36.29 ms with about 1.5 ms less. Changes of 1-2 ms in
   one pass are inside this spread. A large reduction does reach the frame: skipping `0x874bd13f` (`skip874a`) gave
-  30.73 ms per frame with a GPU sum of 28.77 ms in its frames of 340-409 draws, against 34.92 and 33.22 ms in
-  `gcap2`, about 0.9 ms of frame per ms of GPU. `pstriv2` and `psfast55` left the route before the window.
+  30.73 ms per frame. That run was built before the wave32 register-budget rule, so its controls are the runs of that
+  build (about 43 ms per frame in this window, for example `gpuprof1`), not `gcap2` (34.92 ms, built with the rule);
+  the "0.9 ms of frame per ms of GPU" quoted here before mixed the two builds and is withdrawn. Two skip runs on the
+  rule build (`skip874r`, `skip874s`, 2026-11-19) and a third whose skip started only at 122 s (`skip874g`) all
+  left the route at about 91 s, `skip874g` before its skip began, so the route loss is not caused by the skip; no
+  skip run proved the skip engaged. What the sky program still costs with the rule in this window is not measured. A
+  fourth run skipped it in alternate 6 s blocks from 118 s (`sqsky1`, the skip print fired); the game entered a
+  pause cinematic, the scene changed within the blocks, and the guest executed at address 0 about 8 s after the
+  first skipped dispatch (exit 139). That is the second skip arm here to end in a guest null call (`disc2` was the
+  first), so skipping a dispatch or draw whose output the guest may read back is not a safe pricing instrument; its
+  link to the crash is not proven. In the approach frames of `psfastdbl55` the GPU sum (34.1 ms) is close to the
+  frame (35 ms): render passes 11.0, compute 18.0 (`0x3666fa39` 5.9, `0x874bd13f` 5.1, `0xbf8ee9fc` 1.9), geometry
+  2.2 and 2.8 ms outside them, mostly pipeline barriers (about 390 memory and 220 image barriers a frame). `pstriv2` and `psfast55`
+  left the route before the window.
+- **Measured, one run: the one-read lookup takes the short path for most lookups (`psfastdbl55`).** The same edited
+  module with the remaining walk doubled gave 0.387 in the 1080p pass, against 0.378 for `psfast55` and 0.486 for the
+  doubled walk alone (`psdbl55`); the gap is inside the controls' spread (0.400-0.411), so the share is "most", not a
+  figure. The scene's rebuilds marked about 2,170 of 15,260 regions. Both cheap designs (remembered entry, one read)
+  stop near 0.38, so this lever is about 0.5 ms per pass; the null walk (0.30) also changes which addresses are read
+  and is not a reachable target. The approach window was 35 ms per frame in both `psdbl55` and `psfastdbl55`.
 - **Exit 65 from the overlap check** stopped `pstriv`, `rpmix` and `psnull55`; it was the item "depth and chain
   ranges reused as storage views" above (about 12 of the runs since 2026-11-18 on this route), fixed on 2026-11-19.
