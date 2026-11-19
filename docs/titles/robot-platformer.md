@@ -7832,6 +7832,20 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   transient and in a settled one. At the crash site the wash varies between captures at the same frame rate, with
   different framing, so it is not tied to one camera view. The 1x1 exposure chain (format 77, zero-filled) remains
   the unproven lead.
+- **Per-lane proof for the split wave32 programs: none qualifies; parked (2026-11-19).** A temporary print ran the
+  wave-width independence proof (the one that lets split wave64 programs run one guest lane per invocation without
+  exchanges) on the 15 wave32 programs that use wave state on the dunes route. None passed: ten stop at the same
+  early instruction with an EXEC write by a plain scalar instruction, `0x874bd13f` (clouds) and `0x2bcba9a2` at an
+  operand the proof cannot keep per lane, `0xbf8ee9fc` and `0xe1b1315d` at further EXEC writes. The proof is written
+  for wave64: it refuses 32-bit SAVEEXEC and every EXEC-conditional back edge, and the clouds program runs 31 loops
+  with its ballots inside them, so admitting it would need a wave32 form of the proof that models EXEC-narrowed
+  loops, plus a route from a proven wave32 program to the per-lane mask emitter (the per-lane layout is built for
+  guest wave64 only). A ceiling probe that let the 8x8 split wave32 programs skip the rendezvous wait (ballots kept
+  only their own part's bits) landed at the second rock, where `0x874bd13f` costs 0.17 to 0.20 ms in every build;
+  its only frames before the rock (4.8 ms, frames 3060 and 3100) match the first-frame values of earlier runs
+  (4.9 ms in `qsplit1`), so no ceiling was obtained. For the BVH kernel the fixed mechanics of its rendezvous were
+  priced at about 4 % of its time (record of 2026-11-14; the waits between parts were not priced), so this route is
+  not expected to give the missing 2.4 ms there either.
 
 Next: with the rule the crash site holds about 29 fps and the second rock 28, both GPU-bound at 95 to 96 % busy; 30
 fps needs about 1.2 ms more at the crash site and 2.4 ms at the second rock. The largest shared item is `0x3666fa39`
