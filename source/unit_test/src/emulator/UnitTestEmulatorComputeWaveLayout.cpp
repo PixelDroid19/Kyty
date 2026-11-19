@@ -255,17 +255,19 @@ TEST(EmulatorComputeWaveLayout, RejectsWave32InitiatorBit)
 TEST(EmulatorComputeWaveLayout, SplitsWave32OnlyPastTheRegistersOfAThirtyTwoLaneThread)
 {
 	// A host that goes down to 8 lanes holds 32 dwords per lane at width 32;
-	// one that stops at 16 is budgeted the 64 of its narrowest thread.
-	// Columns: host minimum width, guest VGPRs, expected status.
+	// one that stops at 16 is budgeted the 64 of its narrowest thread. A split
+	// takes the host's narrowest parts.
+	// Columns: host minimum width, guest VGPRs, expected status, part lanes.
 	const struct
 	{
 		uint32_t                      min_subgroup_size;
 		uint32_t                      vgprs;
 		ShaderComputeWaveLayoutStatus status;
-	} cases[] = {{8, 32, ShaderComputeWaveLayoutStatus::UnsupportedWidth},
-	             {8, 40, ShaderComputeWaveLayoutStatus::Supported},
-	             {16, 64, ShaderComputeWaveLayoutStatus::UnsupportedWidth},
-	             {16, 72, ShaderComputeWaveLayoutStatus::Supported}};
+		uint32_t                      part_lanes;
+	} cases[] = {{8, 32, ShaderComputeWaveLayoutStatus::UnsupportedWidth, 0},
+	             {8, 40, ShaderComputeWaveLayoutStatus::Supported, 8},
+	             {16, 64, ShaderComputeWaveLayoutStatus::UnsupportedWidth, 0},
+	             {16, 72, ShaderComputeWaveLayoutStatus::Supported, 16}};
 	for (const auto& test: cases)
 	{
 		auto request = SupportedRequest();
@@ -278,7 +280,7 @@ TEST(EmulatorComputeWaveLayout, SplitsWave32OnlyPastTheRegistersOfAThirtyTwoLane
 		if (test.status == ShaderComputeWaveLayoutStatus::Supported)
 		{
 			EXPECT_EQ(layout.guest_wave_size, 32u);
-			EXPECT_EQ(layout.native_subgroup_size, 16u);
+			EXPECT_EQ(layout.native_subgroup_size, test.part_lanes);
 		}
 	}
 }

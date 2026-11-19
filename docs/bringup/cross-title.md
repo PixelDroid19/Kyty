@@ -8590,5 +8590,25 @@ with `ShaderWave32LaneMasks` before the plan reads it, as the scalar liveness al
 (`ShaderScalarLiveness.cpp`). It applies to every guest wave32 program that has a plan: split wave32 compute and
 wave32 pixel programs. In the Astro dunes run 10 compute and 8 pixel modules changed against a t246 run; two t246
 runs differ in 2-3 pixel modules, `0x6bcfb82d` in both. Regression test:
-`EmulatorShaderMaskAnalysis.Wave32LowMaskWriteKeepsHighWordDemanded`. Not yet run after the fix:
-`PPSA07393 - Gori: Cuddly Carnage`, which splits wave32 compute, and Minecraft.
+`EmulatorShaderMaskAnalysis.Wave32LowMaskWriteKeepsHighWordDemanded`.
+
+With the plan fixed, the layout splits wave32 into 8-lane parts on a host whose subgroups go down to 8 lanes
+(16 elsewhere): a 16-lane part there holds 64 dwords a lane, and a measured wave32 program spilled 1,171 times at 16
+lanes against 50 at 8. On the Intel Arc A770 (ANV) with a 6 s toggle on t247, 8 against 16 lanes measured:
+`PPSA21567 - Astro Bot` dunes 31.56 against 38.81 ms a frame; `PPSA07393 - Gori: Cuddly Carnage` menu 48.29
+against 56.50 ms (`gori2`; four captures, two per arm, byte-identical); `PPSA17221 - Minecraft` world 30.64 against
+29.74 ms (`mcall1`, within noise; no wave32 split was seen there). Under the rule with no toggle, Astro dunes
+measured 30.61 ms (`w8warm3`, one run with GPU profiling on) and the Gori menu 48.19 ms with captures byte-identical
+to `gori2` (`gori8`). The part width is already in the compute shader id (`Shader.cpp`), so the rule needs no
+translator version bump. Against t246, before the plan fix raised the 16-lane cost, the Astro dunes gain is about
+4 ms (`tog8`: 35 against 31 ms). `PPSA17221 - Minecraft` on the rule build measured 33.70 ms in the world at about 5,400
+draws a frame (`mcw8`) and 26.66 ms at about 4,400 (`mcw8b`), against 29.74 ms in the 16-lane arm of `mcall1` at
+about 5,400. `mcw8` ran 29.8-30.7 ms at about 5,430 draws for its first 20 s, matching `mcall1`, then slowed to
+36-38 ms at the same draw count; a fixed layout rule cannot cause a change in the middle of a run. The slow windows
+follow the sampled GPU clock: `mcw8` ran 1,895-1,900 MHz in its fast windows and 1,515-1,720 MHz while slow (38.4 ms
+at 1,515 MHz), and the early slow windows of `mcw8b` ran 1,482-1,555 MHz against 1,847-1,932 MHz later. The process's
+own share of render-engine cycles also fell in those windows (`mcw8` 66-67 % fast against 56-61 % slow; `mcall1` 44 %
+in its 980 MHz window), which a GPU-bound slowdown would not do: the frame slows upstream of the GPU and the clock
+follows. The cause is open; foreign GPU work in those windows was not checked.
+The two rule runs
+spread by 7 ms, and the in-run toggle above bounds the width's effect there to about 1 ms.

@@ -8192,6 +8192,50 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
     when a whole 16-lane part was inactive. On t247 the same toggle (`togbf2`, warm cache) ran `0xbf8ee9fc` in
     three 8-lane blocks after the hub (126, 150 and 162 s) and ended cleanly. Its stamp was 0.70-0.90 ms at 8
     lanes against 1.6-1.9 ms at 16 (one run, 3-4 sampled frames a block).
+  - **Both programs at 8 lanes, then the rule (2026-11-19).** On t247 a toggle ran every wave32 split at 8 lanes in
+    odd 6 s blocks (`togall2`, warm cache). The sampled frame median was 31.56 ms at 8 lanes against 38.81 ms at 16,
+    the GPU sum 29-30 against 36-38 ms, and the sky stamp 0.80-0.87 against 7.2-7.4 ms. The layout now makes
+    8-lane parts the rule for a wave32 split on a host whose subgroups go down to 8 lanes
+    (`ShaderComputeWaveLayout.cpp`). With no toggle and a warm cache (`w8warm3`) the dunes ran at a 30.61 ms median
+    (32.7 fps, 46 one-second samples from 120 s; 30.2-30.6 ms in each 10 s window from 110 to 150 s), and the run
+    ended cleanly; the sky stamp was 0.85 ms in every 6 s block, so the 8-lane parts engaged. That is one run with
+    GPU profiling on, in one view; against t246 (`tog8`, 35 ms) the gain is about 4 ms. A second run without GPU
+    profiling (`w8np`) measured 29.76 ms (33.6 fps, 45 samples from 120 s; 28.9-30.6 ms in each window after 130 s). Two earlier runs did not measure it: `w8warm` lost the route on a pending tap and ended on
+    the title's command-buffer assert (`rip 0x9004a0c3e`), and `w8warm2` compiled 641 new modules in the dunes.
+    These figures cover the landing view (about 370 draws a frame). The sky costs 0.17-0.20 ms at the second rock in
+    every build, so the rule does not move that view: `w8warm3` reached it about 62 s after the hub state 7 (about
+    760 draws) and ran 36 ms a frame there, with render passes 19.2 against 11.2 ms and compute flat at 12 ms
+    (8 profiled frames). On arrival in the dunes both runs also sat at 43-53 ms for 5-10 s (`w8warm3` at 100 s,
+    `w8np` at 115-120 s). Held there without the GPU profiler (`rock2np`, from about 67 s after state 7: a wide shot of the
+    robot lying in the sand beside a half-buried controller), that view ran a 37.41 ms median (26.7 fps, 27
+    one-second samples at 756-772 draws a frame): about 4 ms short of 30 fps.
+    On the event-driven route with its inputs left running (`walk2`, no GPU profiler, captures at 36 and 44 s after
+    hub state 7 show the robot in a close follow camera crawling into the sandstorm while the driver held the stick
+    forward, every input accepted), the 5-second medians from 115 to 155 s ran 30.2-33.6 ms at 359-386 draws a frame
+    (worst one-second sample 34.9 ms, clock 2,400 MHz); arrival windows ran 32.6-45.0 ms with one-second spikes to
+    103 ms. The landing-spot figures above are this played crawl. The wide shot (757 draws) followed at about +67 s,
+    the same time as in `rock2np`, whose inputs stopped at +20 s, so it is not caused by idle input.
+    Whether the 8-lane sky draws the same image is still not shown, because the storm animates. Holding the pause
+    menu in the dunes does not freeze the frame either (`w8pause`): two captures 8 s apart in the same build differ in
+    543 of 921,600 pixels spread over the frame, and the menu darkens the sky.
+- **The vertex programs' translation overhead, timed (2026-11-19, offline and standalone).** Native code for the
+  five programs is 3.8-7.5 times their guest instruction count, but most of that excess is static: the zero-fill
+  arms of range-checked loads sit behind uniform branches and the scalar preamble runs once per 8 lanes. Timed
+  instead with the standalone vertex-shader test (2 M invocations, rasterizer discard, A770 ANV): a float FMA costs
+  about 0.0022 ms per million vertex invocations, a coherent independent load about 0.005, a dependent load about
+  0.04, plus about 0.19 fixed. Pricing each program's guest instructions that way (guest counts from the disassembly
+  logs of an older run, matched by hash; guest scalar instructions priced per lane, which inflates the floor) gives
+  a guest-only floor of 0.84-2.0 ms per million for `0xa2bb8f2d` (measured 1.5-1.9), 2.4-3.8 for `0x0c2ae56d` (4.5),
+  0.45-0.95 for `0x5c9f3e0a` (0.5-0.8) and 0.79-1.9 for `0x51485353` (1.45-1.6), from independent to dependent loads;
+  `0x4ea3083b` and the shadow programs have no measured price. The translation overhead's share is therefore
+  between about 0 and 56 % of each program's time, a ceiling of 0 to about 5 ms on the roughly 10 ms of vertex-bound
+  passes in the wide shot. The bucket is not closed, but removing the overhead that must stay (range checks, EXEC
+  handling) leaves it unlikely to deliver 4 ms alone.
+- **No compute program of the wide shot is left at 16 lanes (2026-11-19, offline).** All 78 compute modules dumped
+  in that view (`spv-w32-idle-rule`, rule build) were compiled with ANV and their statistics read: the 28 that spill
+  50 or more times all already run at 8 lanes (for example `0x3666fa39` 272:928, `0x91aaa78f` 594:1,989,
+  `0x28d8852c` 539:1,941), the narrowest width the host offers. The part-width lever that paid at the landing spot
+  has nothing left to move there.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
