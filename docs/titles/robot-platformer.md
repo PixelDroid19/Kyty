@@ -8361,18 +8361,29 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       vertex, geometry-pass and pixel shader ids. A forced flip of one field reported exactly one mismatch
       (`autocmp1`). With the route driven (`autocmp3`), 758,265 prepared auto draws, 105,265 of them in the fight,
       gave no mismatch. In the fight 46 % of the auto draws were prepared.
-    - Speed (`autolever2` against `pssite1` and `texreuse1`, which ran temporary counters only; one run with the
-      change, fight band t 265-322, about 640 draws per frame in all three):
+    - Speed, fight band t 265-322, route driven to the dunes in every run (`event 6->7` seen). `nolever1` is the
+      base commit with only the stdout line-buffer switch; `autolever2` and `autotake1` carry the change, and
+      `autotake1` also ran temporary take counters. Render busy is the share of wall time the render engine was
+      busy, from the kernel's per-client cycle counters.
 
-      | Run | fps | State setup, us/draw | Draw processor, us/draw | Command thread, ms/frame | Frame p50, ms |
-      | --- | --- | --- | --- | --- | --- |
-      | `pssite1` | 26.6 | 12.7 | 37.0 | 33.2 | 38.6 |
-      | `texreuse1` | 25.9 | 13.2 | 34.8 | 32.9 | 39.4 |
-      | `autolever2` | 28.6 | 7.9 | 29.5 | 29.4 | 35.8 |
+      | Run | fps | Draws/frame | State setup, us/draw | Draw processor, us/draw | Command thread, ms/frame | Frame p50, ms | Render busy |
+      | --- | --- | --- | --- | --- | --- | --- | --- |
+      | `nolever1` | 22.4 | 704 | 16.2 | 41.7 | 40.8 | 47.2 | 75 % |
+      | `autolever2` | 28.6 | 641 | 7.9 | 29.5 | 29.4 | 35.8 | 90 % |
+      | `autotake1` | 28.4 | 749 | 6.9 | 24.8 | 28.8 | 36.0 | 89 % |
 
-      In the heaviest seconds (725-739 draws per frame) the frame rate rose from 24.2-24.3 to 26.4 fps (p50 41.7 to
-      38.3 ms). The frame is still above 33 ms, and the GPU floor recorded above is about 39 ms for the heaviest
-      frames.
+      Heavy seconds (at least 650 draws per frame, t 200-325): `nolever1` 19.4 fps (p50 52.5 ms, command thread
+      47.9 ms/frame, render busy 71 %), `autotake1` 29.2 fps (p50 35.1 ms, 27.2 ms/frame, 92 %). An earlier
+      comparison against `pssite1` (26.6 fps) and `texreuse1` (25.9 fps) understated the gain: both carried
+      temporary counters across many files that slowed the command thread.
+    - What stays unprepared (`autotake1`, fight band): per second about 2,400 draws reach the command thread
+      without a record. About 1,650 arrive while the fronts are idle after a stop (the draw that restarts them),
+      and about 770 are indexed draws the fronts had not reached; about 18,700 draws per second are taken
+      prepared. The fronts stop per second on
+      `R_CONTEXT_STATE` (535), `ACQUIRE_MEM` (422), `RELEASE_MEM` (338), `EVENT_WRITE` (338) and `SET_BASE` (28).
+      Preparing those draws as well would save at most about 1-1.5 ms per frame. With the change the command thread
+      (27-29 ms/frame) is below the frame (35-36 ms) and the render engine is about 90 % busy, so the fight frame is
+      now set by GPU time, not by the command thread.
     - `PPSA17221 - Minecraft` world (`mcauto1`, 12 s of world before the usual zombie death, about 5,100 draws per
       frame): state setup 1.60 and draw processor 5.13 us/draw against 1.56-1.58 and 5.28-5.61 in `mcw8` and
       `mcw8b`; no loss. The death-screen capture rendered normally.
