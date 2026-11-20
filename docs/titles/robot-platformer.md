@@ -8263,11 +8263,13 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
   6.6 us), and they add about 55 render-pass begins a frame. Without them the fight frame drops to about 39 ms with the
   render engine 95 % busy, so 30 fps there needs both the command cost and the GPU work cut.
   Re-read on GPU work per frame (render busy share times frame time; added 2026-11-20, after `cpspin1` showed that
-  measure independent of command-thread time): in the fight band t 280-350, kept 35.3 against skipped 34.8 ms
-  (737 against 589 draws a frame), so these draws and the render-pass breaks they cause cost the GPU about 0.5 ms a
-  frame. In `skipgeom1` the batched pass gave 34.5 kept against 32.6 ms skipped, but the skipped blocks held more
-  draws (716 against 673), so its cost is at most about 2 ms. Hoisting the geometry compute out of the render pass
-  cannot recover more than that, and is not pursued. The resource parse of
+  measure independent of command-thread time; no run yet shows it falling when known GPU work is removed): over the
+  band t 280-350 the skipped blocks lost only about 150 draws a frame (737 against 589), because most blocks
+  skipped 65-260 draws a frame. In the three blocks that skipped 300-460 a frame (t 340-360) the scene changed
+  between neighbouring blocks (GPU work 31.7, 31.3 skipped, 41.9, 34.4 skipped, 25.7 ms), so these draws and the
+  render-pass breaks they cause are not priced by this run. `skipgeom1` gave 34.5 kept against 32.6 ms skipped with
+  more draws in the skipped blocks (716 against 673). A hoist of the geometry compute out of the render pass stays
+  unpriced. The resource parse of
   those programs (2,378-2,873 instructions) compares 65-78 dynamic scalar-load records against 57-74 buffer accesses
   per draw. After about 350 s the skipped run diverged into a lighter scene (330-380 draws, 27-29 ms, GPU-bound).
   Most fight seconds sit at 700-1,200 draws, at 48-51 ms a frame with 41-48 ms of command time (`perfplay1`,
