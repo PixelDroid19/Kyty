@@ -270,6 +270,8 @@ void GpuMemory::VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vec
 	current_info.object.obj      = new_object;
 	current_info.mem             = new_memory;
 	current_info.submission_uses = {};
+	// Lookups that remember backings must find the new one.
+	m_object_graph_generation.fetch_add(1, std::memory_order_release);
 	g_storage_scan_generation.fetch_add(1, std::memory_order_acq_rel);
 	EXIT_IF(current_info.backing_generation == UINT64_MAX);
 	current_info.backing_generation++;

@@ -453,8 +453,8 @@ struct DepthSliceArrayLayer
 struct DepthStencilVulkanImage;
 
 // What the last read of a slice array looked at, when every layer it read came from depth images. A later read of
-// the same view in the same submission and frame, while no object entered or left GPU memory and these images and
-// layer states are unchanged, finds the same images, records the same uses and has nothing to copy.
+// the same view in the same submission and frame, while no object entered, left or re-backed GPU memory and these
+// images and layer states are unchanged, finds the same images, records the same uses and has nothing to copy.
 struct DepthSliceArrayRead
 {
 	struct Source

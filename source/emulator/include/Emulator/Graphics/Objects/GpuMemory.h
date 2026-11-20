@@ -1529,8 +1529,8 @@ bool GpuMemoryWatcherEnabled();
 Vector<GpuMemoryObject> GpuMemoryFindObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, bool exact, bool only_first);
 Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type,
                                              bool exact, bool only_first);
-// Advances whenever an object enters or leaves GPU memory; a lookup that found
-// nothing stays a miss while it is unchanged.
+// Advances whenever an object enters or leaves GPU memory or gets a new backing;
+// a lookup that found nothing stays a miss while it is unchanged.
 [[nodiscard]] uint64_t GpuMemoryObjectGraphGeneration();
 // The frame that lookups stamp as the last use of what they find.
 [[nodiscard]] uint64_t GpuMemoryCurrentFrame();
