@@ -861,6 +861,13 @@ uint64_t GpuMemoryObjectGraphGeneration()
 	return g_gpu_memory->ObjectGraphGeneration();
 }
 
+uint64_t GpuMemoryCurrentFrame()
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+
+	return g_gpu_memory->CurrentFrame();
+}
+
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,
                                                           bool exact, bool only_first)
 {

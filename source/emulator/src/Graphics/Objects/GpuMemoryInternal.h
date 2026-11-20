@@ -311,6 +311,7 @@ public:
 	void  FrameDone(GraphicContext* ctx);
 
 	[[nodiscard]] uint64_t ObjectGraphGeneration() const { return m_object_graph_generation.load(std::memory_order_acquire); }
+	[[nodiscard]] uint64_t CurrentFrame();
 	void                   StampCachedUseCapture(GpuMemoryCachedUseCapture* capture, bool end);
 	[[nodiscard]] bool     RepeatCachedUses(uint64_t submit_id, CommandBuffer* buffer, const GpuMemoryCachedUseCapture& capture);
 

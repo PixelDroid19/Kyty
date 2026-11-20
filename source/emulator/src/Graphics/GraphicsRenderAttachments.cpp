@@ -948,6 +948,27 @@ static DepthLayerBlockCopies PlanDepthLayerFromImages(const DepthStencilVulkanIm
 	return plan;
 }
 
+static bool DepthSliceArrayReadHolds(const DepthSliceArray& slice_array, uint64_t addr, uint64_t slice_size, uint32_t fmt, uint32_t pitch,
+                                     bool plain_guest_depth, const SubmissionId& submission, uint64_t graph_generation, uint64_t frame)
+{
+	const auto& read = slice_array.last_read;
+	if (!read.valid || read.addr != addr || read.slice_size != slice_size || read.fmt != fmt || read.pitch != pitch ||
+	    read.plain_guest_depth != plain_guest_depth || read.submission != submission || read.graph_generation != graph_generation ||
+	    read.frame != frame || read.layer_stamps.size() != slice_array.layers.size())
+	{
+		return false;
+	}
+	for (size_t layer = 0; layer < read.layer_stamps.size(); layer++)
+	{
+		if (read.layer_stamps[layer] != slice_array.layers[layer].stamp)
+		{
+			return false;
+		}
+	}
+	return std::all_of(read.sources.begin(), read.sources.end(), [](const DepthSliceArrayRead::Source& source)
+	                   { return source.image->content_stamp == source.content_stamp && source.image->depth_slice == source.depth_slice; });
+}
+
 VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVulkanImage* first, uint64_t addr, uint64_t slice_size,
                                            uint32_t width, uint32_t height, uint32_t layers, uint32_t fmt, uint32_t pitch,
                                            bool plain_guest_depth)
@@ -959,6 +980,20 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 	{
 		EXIT("a draw samples the depth slices its own layered pass renders: addr=0x%012" PRIx64 " layers=%u\n", addr, layers);
 	}
+	const uint64_t graph_generation = GpuMemoryObjectGraphGeneration();
+	const uint64_t frame            = GpuMemoryCurrentFrame();
+	SubmissionId   submission;
+	const bool     has_submission = buffer->GetSubmissionId(&submission);
+	auto&          last_read      = slice_array->last_read;
+	if (has_submission &&
+	    DepthSliceArrayReadHolds(*slice_array, addr, slice_size, fmt, pitch, plain_guest_depth, submission, graph_generation, frame))
+	{
+		return array;
+	}
+	last_read.valid = false;
+	last_read.sources.clear();
+	// A layer read from guest memory depends on page state the read does not cover.
+	bool            from_images = has_submission;
 	VkCommandBuffer vk_buffer = nullptr;
 	const auto      record    = [&]()
 	{
@@ -993,8 +1028,9 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 			auto images = FindDepthStencil(buffer, slice_addr, slice_size, false);
 			if (images.IsEmpty() && plain_guest_depth)
 			{
-				SubmissionId submission;
-				EXIT_IF(!buffer->GetSubmissionId(&submission));
+				// This lookup records uses of objects of every type, which the read record does not cover.
+				from_images = false;
+				EXIT_IF(!has_submission);
 				const auto objects = GpuMemoryFindIntersectingObjectsForSubmission(submission, slice_addr, slice_size);
 				bool depth_only = !objects.IsEmpty();
 				for (const auto& object: objects)
@@ -1019,6 +1055,11 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 				const auto plan =
 				    PlanDepthLayerFromImages(array, layer, slice_addr, slice_size, pitch, State::Gen5DepthSampleBytesPerElement(fmt), images,
 				                             state.stamp);
+				from_images = from_images && plan.guest_blocks.empty();
+				for (const auto& [source, regions]: plan.sources)
+				{
+					last_read.sources.push_back({source, source->content_stamp, source->depth_slice});
+				}
 				if (state.stamp == plan.digest)
 				{
 					continue;
@@ -1057,6 +1098,7 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 				state.stamp = plan.guest_blocks.empty() ? plan.digest : 0u;
 				continue;
 			}
+			from_images       = false;
 			const auto source = plain_guest_depth ? GuestDepthLayerSource(slice_addr, slice_size) : GpuMemoryDepthD16Source::Unsupported;
 			if (source != GpuMemoryDepthD16Source::Guest)
 			{
@@ -1080,6 +1122,7 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 			     slice_addr, static_cast<uint32_t>(slice->format), static_cast<uint32_t>(array->format), slice->extent.width,
 			     slice->extent.height, array->extent.width, array->extent.height, static_cast<uint32_t>(slice->samples));
 		}
+		last_read.sources.push_back({slice, slice->content_stamp, slice->depth_slice});
 		if (state.stamp == slice->content_stamp)
 		{
 			continue;
@@ -1095,6 +1138,23 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 	if (vk_buffer != nullptr)
 	{
 		TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	}
+	if (from_images)
+	{
+		last_read.addr              = addr;
+		last_read.slice_size        = slice_size;
+		last_read.fmt               = fmt;
+		last_read.pitch             = pitch;
+		last_read.plain_guest_depth = plain_guest_depth;
+		last_read.submission        = submission;
+		last_read.graph_generation  = graph_generation;
+		last_read.frame             = frame;
+		last_read.layer_stamps.clear();
+		for (const auto& state: slice_array->layers)
+		{
+			last_read.layer_stamps.push_back(state.stamp);
+		}
+		last_read.valid = true;
 	}
 	return array;
 }

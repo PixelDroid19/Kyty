@@ -1532,6 +1532,8 @@ Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64
 // Advances whenever an object enters or leaves GPU memory; a lookup that found
 // nothing stays a miss while it is unchanged.
 [[nodiscard]] uint64_t GpuMemoryObjectGraphGeneration();
+// The frame that lookups stamp as the last use of what they find.
+[[nodiscard]] uint64_t GpuMemoryCurrentFrame();
 
 // The cached reuses GpuMemoryCreateObject makes on this thread while a capture is open, so the same
 // requests later in the same submission can repeat them without resolving their objects again.
