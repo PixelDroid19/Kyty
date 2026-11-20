@@ -8410,7 +8410,7 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       stays at 85-90 % busy. GPU work per frame (render busy share times frame time) does not move with the
       wait: 36.4 against 36.2 ms in the fight, 30.1 against 30.4 ms after t 200. The command thread sets at most
       about a third of the frame at the margin (21 seconds per arm, the on blocks about 4 % lighter in draws); GPU
-      work sets the rest. The same measure gives 31.5 ms (`autolever2`), 31.3 ms (`autotake1`) and 33.5 ms
+      work sets the rest in these seconds, but not in seconds with many particle draws (next bullet). The same measure gives 31.5 ms (`autolever2`), 31.3 ms (`autotake1`) and 33.5 ms
       (`nolever1`) in the fight; at the best busy share seen (93-95 %), a 33.3 ms frame holds about 31 ms of GPU
       work. In the heavier fight the command thread itself (34.2 ms/frame at 794 draws) is also over budget.
       This run reached a heavier fight (about 790 draws per frame) than `autotake1` (749) and ran it at
@@ -8418,6 +8418,45 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
     - `PPSA17221 - Minecraft` world (`mcauto1`, 12 s of world before the usual zombie death, about 5,100 draws per
       frame): state setup 1.60 and draw processor 5.13 us/draw against 1.56-1.58 and 5.28-5.61 in `mcw8` and
       `mcw8b`; no loss. The death-screen capture rendered normally.
+  - **Particle draws on the command thread (2026-11-20).** All runs drive the route to the dunes fight
+    (`event 6->7` seen) on the draw-front change above; every counter named here is a temporary diagnostic.
+    - Particle cost (`skipp2`): the particle vertex program (`0xf4cfb9a5`) skipped in alternate 2 s blocks. In
+      seconds with 300-720 particle draws per frame the frame goes from about 23 to about 33 fps when they are
+      skipped; the command thread saves 13-29 ms per frame and GPU work 2-4 ms. Those seconds are bound by the
+      command thread (37-45 ms per frame against 31-32 ms of GPU work). One particle draw costs 33-38 us in the
+      draw processor: resource binding 14-18, texture descriptors 11.5-14, pipeline setup 5-7, state setup 6-8,
+      emission about 4.
+    - Texture-stage replay does not reach them (`partrun1`, `partwhy1`). The geometry-pass compute stage of a
+      particle draw binds the same textures every time, but replaying it saves only about 0.6 us per draw. The
+      pixel stage binds the same textures as the previous particle draw 57-78 % of the time, yet no bind is ever
+      stored for replay, because every one does side work.
+    - Which side work (`partside1`, `parttime1`): every particle pixel bind samples a depth array view (the depth
+      slice array) and a storage alias with CPU-write merging. The texture stage costs 14.9 us per particle pixel
+      bind; 10.0 us of it is the depth slice array read, and the CPU-write merge and the prefix-layer check
+      together take 0.13 us.
+    - The slice array read (`slicearr1`, inner timers): 33,200 reads per second in the fight (up to 50,000), each
+      over 9.5 layers. Per layer the read looks up the depth images over the layer and plans the copies; 99.99 % of
+      the layers are already current, and about 20 reads per second record a copy.
+    - Change: a slice array keeps a record of its last read when every layer came from depth images: the view
+      (address, layer size, format, pitch), the submission, the GPU memory frame, the object graph generation, each
+      source image with its content stamp and depth slice, and each layer's state. A read that matches the record
+      returns the array without the walk. A read that touches guest memory, or that took the lookup over objects of
+      every type, keeps no record.
+    - Equality (`sliceread-check1`, `sliceread-ctrl2`): a temporary check mode ran the full read after each match
+      and counted matches whose read recorded work. Real key: 0 of 2.9 million and 3.5 million matches (97-98 % of
+      the fight reads matched). Positive controls in the same run: a key that keeps only the record's validity, and
+      one that also checks view and layer states but no image stamps, submission, frame or generation, each
+      reported 8,589 matches that would have skipped a copy. The image stamps alone, without submission, frame or
+      generation, reported none.
+    - Speed (`sliceread-ab1`, the record used in alternate 4 s wall-clock blocks, 21 fight seconds per arm, a
+      fight with about 3,000-3,400 particle pixel binds per second): texture stage per particle pixel bind 14.2 ->
+      6.2 us (slice array read 8.7 -> 1.1 us); command thread 44.0 -> 41.9 us per draw. The fight in this run
+      was bound by the GPU (render busy 91 %) and its fps did not move (28.5 against 28.3). In a fight second with
+      12,000 particle pixel binds the same saving is about 4 ms per frame of command-thread time; that is not yet
+      measured as fps.
+    - `PPSA17221 - Minecraft` world (`mcslice1`, 43 world seconds, about 5,300 draws per frame): state setup 1.48
+      and draw processor 4.72 us per draw against 1.56-1.60 and 5.13-5.61 before; no loss. The death screen
+      rendered normally. Unit tests (2,817) and the three repository gates pass.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
