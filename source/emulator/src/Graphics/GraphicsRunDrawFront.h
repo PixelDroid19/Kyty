@@ -27,16 +27,16 @@ enum class DrawFrontPacket : uint8_t
 {
 	Padding,     // a header the processor steps over without a body
 	Registers,   // changes only the registers and the index state of its processor
-	IndexedDraw, // a direct indexed draw
+	Draw,        // a direct indexed or auto draw
 	Other,
 };
 
 // `packet` is followed by `available_dw - 1` more dwords of its run.
 [[nodiscard]] DrawFrontPacket DrawFrontClassifyPacket(const uint32_t* packet, uint32_t available_dw);
 
-// Prepares the shader inputs of indexed draws ahead of a command processor. A second thread replays,
+// Prepares the shader inputs of direct draws ahead of a command processor. A second thread replays,
 // on a shadow processor, the register packets that follow the processor's position and analyses each
-// indexed draw it meets, up to the first packet that is neither. The shadow starts from the registers
+// direct draw it meets, up to the first packet that is neither. The shadow starts from the registers
 // of the processor and runs the same handlers over the same packets, so it holds the processor's
 // registers at each draw. The processor takes the inputs of a draw only when no host write of guest
 // memory was announced since their analysis began. Fronts that share `claimed` replay the same packets,
@@ -60,8 +60,12 @@ public:
 	[[nodiscard]] PreparedDrawInputs* Take(const uint32_t* draw_packet, uint32_t instance_count);
 	void                              Release();
 
-	// Replay thread, from the indexed draw of the shadow processor.
-	void Prepare(const HW::Context& ctx, const HW::UserConfig& ucfg, HW::Shader* sh_ctx, uint32_t index_count, uint32_t instance_count);
+	// Fills the inputs of one draw kind; see GraphicsRenderPrepareIndexedDrawInputs.
+	using Preparation = bool (*)(const HW::Context& ctx, const HW::UserConfig& ucfg, HW::Shader* sh_ctx, uint32_t index_count,
+	                             uint32_t instance_count, PreparedDrawInputs* inputs);
+	// Replay thread, from a draw of the shadow processor.
+	void Prepare(Preparation prepare, const HW::Context& ctx, const HW::UserConfig& ucfg, HW::Shader* sh_ctx, uint32_t index_count,
+	             uint32_t instance_count);
 
 private:
 	struct Record

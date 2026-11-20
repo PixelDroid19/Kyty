@@ -12132,7 +12132,7 @@ TEST(EmulatorGraphicsPackets, WritesAgcMultiDrawPackets)
 
 // The replay ahead of a processor runs only the packets this classification admits, so a packet with
 // any effect beyond its processor's registers must classify as Other.
-TEST(EmulatorGraphicsPackets, DrawFrontAdmitsOnlyRegisterAndIndexedDrawPackets)
+TEST(EmulatorGraphicsPackets, DrawFrontAdmitsOnlyRegisterAndDrawPackets)
 {
 	auto classify = [](std::vector<uint32_t> packet)
 	{ return DrawFrontClassifyPacket(packet.data(), static_cast<uint32_t>(packet.size())); };
@@ -12145,9 +12145,11 @@ TEST(EmulatorGraphicsPackets, DrawFrontAdmitsOnlyRegisterAndIndexedDrawPackets)
 	EXPECT_EQ(classify({KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0x6875000du}), DrawFrontPacket::Registers);
 	EXPECT_EQ(classify({KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0x12345678u}), DrawFrontPacket::Registers);
 
-	EXPECT_EQ(classify({KYTY_PM4(6, Pm4::IT_DRAW_INDEX_2, 0u), 3u, 0u, 0u, 3u, 0u}), DrawFrontPacket::IndexedDraw);
-	EXPECT_EQ(classify({KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u), 3u, 0u, 3u, 0u}), DrawFrontPacket::IndexedDraw);
-	EXPECT_EQ(classify({KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX), 3u, 0u, 0u, 0u, 0u, 0u}), DrawFrontPacket::IndexedDraw);
+	EXPECT_EQ(classify({KYTY_PM4(6, Pm4::IT_DRAW_INDEX_2, 0u), 3u, 0u, 0u, 3u, 0u}), DrawFrontPacket::Draw);
+	EXPECT_EQ(classify({KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u), 3u, 0u, 3u, 0u}), DrawFrontPacket::Draw);
+	EXPECT_EQ(classify({KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX), 3u, 0u, 0u, 0u, 0u, 0u}), DrawFrontPacket::Draw);
+	EXPECT_EQ(classify({KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, 0u), 3u, 2u}), DrawFrontPacket::Draw);
+	EXPECT_EQ(classify({KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_DRAW_INDEX_AUTO), 3u, 0u, 0u, 0u, 0u}), DrawFrontPacket::Draw);
 
 	// A flip marker, an event, an indirect buffer and a packet longer than its run are not register state.
 	EXPECT_EQ(classify({KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0x68750777u}), DrawFrontPacket::Other);

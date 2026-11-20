@@ -104,7 +104,7 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physica
 
 // Marks a point after which guest memory may hold pages the GPU must see: a
 // command-processor run begins or ends, or a packet other than a register write
-// or an indexed draw completed, or the emulator wrote guest memory back. The
+// or a direct draw completed, or the emulator wrote guest memory back. The
 // physical population is queried again only after such a point or an announced
 // host write (GpuDirtyPageTracker::HostWriteEpoch), so a page first touched by
 // the guest is imported by the first preparation after the guest orders it.

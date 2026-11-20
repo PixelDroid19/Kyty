@@ -2800,11 +2800,14 @@ struct ShaderPixelInputInfo
 		return (system_input_enable & system_input_address & (1u << 13u)) != 0;
 	}
 };
-// The shader input information of one indexed draw, prepared ahead of its recording.
+// The shader input information of one direct draw, prepared ahead of its recording.
 struct PreparedDrawInputs
 {
-	ShaderVertexInputInfo vs;
-	ShaderPixelInputInfo  ps {};
+	// For a geometry pass, `vs` is the host vertex stage that draws the pass output and
+	// `geometry_front` the input of the pass itself; otherwise `geometry_front` is null.
+	ShaderVertexInputInfo                  vs;
+	std::unique_ptr<ShaderVertexInputInfo> geometry_front;
+	ShaderPixelInputInfo                   ps {};
 	// The shader ids of `vs` and `ps` as prepared. The recording sets the two pixel fields copied
 	// below after it takes the inputs, so it reuses the ids only while both keep these values.
 	ShaderId               vs_id;

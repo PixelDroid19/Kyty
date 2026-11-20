@@ -2787,7 +2787,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 {
 	if (m_draw_front_shadow)
 	{
-		m_draw_front->Prepare(m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
+		m_draw_front->Prepare(GraphicsRenderPrepareIndexedDrawInputs, m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
 		return;
 	}
 	SubmitRecordedDispatchesBeforeDraw();
@@ -2833,7 +2833,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 {
 	if (m_draw_front_shadow)
 	{
-		m_draw_front->Prepare(m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
+		m_draw_front->Prepare(GraphicsRenderPrepareIndexedDrawInputs, m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
 		return;
 	}
 	SubmitRecordedDispatchesBeforeDraw();
@@ -3314,9 +3314,15 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 
 void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier)
 {
+	if (m_draw_front_shadow)
+	{
+		m_draw_front->Prepare(GraphicsRenderPrepareAutoDrawInputs, m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
+		return;
+	}
 	SubmitRecordedDispatchesBeforeDraw();
 	ResolveNumInstancesLatch();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
+	PreparedDrawInputs*         prepared = TakePreparedDrawInputs();
 	uint64_t submit_id = 0;
 	uint32_t instance_count = 1;
 	{
@@ -3362,9 +3368,11 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifie
 	{
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		// A retry records against registers a wait may have changed, so it analyses them again.
 		GraphicsRenderDrawIndexAuto(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, draw_modifier,
-		                            instance_count, 0, 0, pending);
+		                            instance_count, 0, 0, pending, std::exchange(prepared, nullptr));
 	});
+	ReleaseDrawFronts();
 	SubmitRecordedWorkIfGpuIdle();
 }
 
