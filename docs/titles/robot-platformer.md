@@ -8261,7 +8261,13 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
   4 s blocks (test-only, not a fix). In the fights those draws number about 470-640 a frame and cost about 50 us of
   command time each against 29 us for an ordinary draw (state setup 21 against 10.7 us, texture descriptors 13 against
   6.6 us), and they add about 55 render-pass begins a frame. Without them the fight frame drops to about 39 ms with the
-  render engine 95 % busy, so 30 fps there needs both the command cost and the GPU work cut. The resource parse of
+  render engine 95 % busy, so 30 fps there needs both the command cost and the GPU work cut.
+  Re-read on GPU work per frame (render busy share times frame time; added 2026-11-20, after `cpspin1` showed that
+  measure independent of command-thread time): in the fight band t 280-350, kept 35.3 against skipped 34.8 ms
+  (737 against 589 draws a frame), so these draws and the render-pass breaks they cause cost the GPU about 0.5 ms a
+  frame. In `skipgeom1` the batched pass gave 34.5 kept against 32.6 ms skipped, but the skipped blocks held more
+  draws (716 against 673), so its cost is at most about 2 ms. Hoisting the geometry compute out of the render pass
+  cannot recover more than that, and is not pursued. The resource parse of
   those programs (2,378-2,873 instructions) compares 65-78 dynamic scalar-load records against 57-74 buffer accesses
   per draw. After about 350 s the skipped run diverged into a lighter scene (330-380 draws, 27-29 ms, GPU-bound).
   Most fight seconds sit at 700-1,200 draws, at 48-51 ms a frame with 41-48 ms of command time (`perfplay1`,
@@ -8399,8 +8405,13 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
 
       Before the fight the added command-thread time does not move the frame. In the fight and the band after
       t 200 the frame grows by about 0.3 ms per added millisecond (1.3 of 4.7, 1.7 of 5.2) and the render engine
-      stays at 85-90 % busy. The command thread now sets about a third of the frame at the margin; GPU time sets
-      the rest. This run reached a heavier fight (about 790 draws per frame) than `autotake1` (749) and ran it at
+      stays at 85-90 % busy. GPU work per frame (render busy share times frame time) does not move with the
+      wait: 36.4 against 36.2 ms in the fight, 30.1 against 30.4 ms after t 200. The command thread sets at most
+      about a third of the frame at the margin (21 seconds per arm, the on blocks about 4 % lighter in draws); GPU
+      work sets the rest. The same measure gives 31.5 ms (`autolever2`), 31.3 ms (`autotake1`) and 33.5 ms
+      (`nolever1`) in the fight; at the best busy share seen (93-95 %), a 33.3 ms frame holds about 31 ms of GPU
+      work. In the heavier fight the command thread itself (34.2 ms/frame at 794 draws) is also over budget.
+      This run reached a heavier fight (about 790 draws per frame) than `autotake1` (749) and ran it at
       23.9 fps, so the fight rate still depends on how many objects the scene holds.
     - `PPSA17221 - Minecraft` world (`mcauto1`, 12 s of world before the usual zombie death, about 5,100 draws per
       frame): state setup 1.60 and draw processor 5.13 us/draw against 1.56-1.58 and 5.28-5.61 in `mcw8` and
