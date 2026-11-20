@@ -8457,6 +8457,134 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
     - `PPSA17221 - Minecraft` world (`mcslice1`, 43 world seconds, about 5,300 draws per frame): state setup 1.48
       and draw processor 4.72 us per draw against 1.56-1.60 and 5.13-5.61 before; no loss. The death screen
       rendered normally. Unit tests (2,817) and the three repository gates pass.
+    - After the change (`slicegen1`, clean build, fight 200-322 s): seconds with 600-800 draws per frame take
+      29.1 ms per frame of command-processor time and 34.3 ms of GPU work in a 37.9 ms frame, at 91.5 % render
+      busy (`autolever2`: 31.4, 33.8 and 38.4 ms, 89 %). Two runs with different scenes, so the command-time
+      difference is not a measured saving. The render busy figure is Kyty's own share of the engine, so about
+      2-3.6 ms a frame is unattributed (idle or other clients), while fence waits take 2.6 ms a frame (64 waits a second, up to 4.5 ms each). A temporary counter of fence
+      waits by caller (`fencesite1`, fight 265-322 s) puts 20-80 ms a second of them (19-35 waits of up to 6 ms) on
+      the window thread, in the final wait of `WindowDrawBuffer` for its present blit, and 1-4 ms a second on the
+      command processor (`WaitRegMem64` through `WaitSubmission`). The command processor's own fence waits are too
+      small to explain the unattributed time; whether the window thread's wait delays the guest's next frame (flip
+      completion is published only after that wait) is not measured.
+    - Frame pacing in the fight (`fliphist1`, temporary histogram of flip-completion intervals, 265-322 s, 1,468
+      flips, 29.6 fps fight with mostly 400-600 draws a frame): intervals run 26-40 ms, with peaks at 28-30 and
+      34-36 ms that come and go between 10-second windows (200-270 s peak at 32-34 ms). Both displays run at
+      120 Hz (8.3 ms) and the peaks are not on its multiples, so presentation does not round frames to a host
+      vblank. Kyty's share of the render engine in the window is 94 % from 14 readings; the compositor's
+      counters are not readable, other readable clients use 0 %.
+    - Where the fight's GPU time goes (`gpuprof-fight2`, temporary timestamps around each pass and dispatch, 39
+      profiled frames at 265-322 s). Each stamp serializes the work it brackets, so the frame sums (command buffers
+      45.8 ms) are above the unprofiled 31-34 ms; read them as shares. Render passes 22.9 ms, compute 10.9, geometry
+      compute 8.1, barriers and fills 0.2. Largest items per frame: 1920x1080 five-target pass with pixel program
+      `0x6bcfb82d` 8.0 ms (113-221 draws); particle geometry program `0xf4cfb9a5` 6.9 ms (single-group dispatches,
+      10-245 per frame, batched into segments with no barrier between dispatches, so the per-dispatch stamps
+      inflate it; `skipp2` bounds the particles' real GPU cost at 2-4 ms); lighting compute `0x3666fa39` 5.7 ms;
+      2048x2048 shadow pass 3.7 ms (about 290 draws); 1920x1080 pass with `0x860593d6` 2.6 ms. Barrier and fill
+      time is about 0.2 ms a frame, so it is not where the unattributed engine time comes from.
+    - The unattributed engine time is not resolved by idle residency (`gtidle1`, `fullscr1`, the render tile's
+      idle residency read once a second). In the fight it reads 0.1-0.4 % while Kyty holds 89-95 % of the
+      engine, but it also reads 0.6 % in pre-fight seconds that run at 58 fps under the 60 fps limit and so
+      have slack by construction. Idle residency therefore does not register gaps at frame scale, and the rest
+      (5-23 %) mixes other clients with short idle. Readable other clients: the desktop app about 2 %, the
+      shell 0 %; the compositor is not readable. A fullscreen run (`fullscr1`) moved Kyty's share in the 400-800
+      draw seconds from 92 to 95 %, inside the spread between windowed runs (89-94 %), and nothing in the log
+      confirms that composition stopped: inconclusive.
+    - Price of the ray traversal kernel `0x3666fa39` (`skipcs1`, its dispatch skipped in alternate 4 s blocks
+      of one run from 200 s, 95-180 matched dispatches per block, the frame image wrong in skipped blocks).
+      Seconds with 200-400 draws a frame (28 per arm): GPU work 25.2 -> 20.3 ms a frame, 37.2 -> 43.9 fps,
+      command thread 19.1 -> 18.9 ms. Seconds with 600-800 draws (6 per arm): GPU 35.8 -> 30.5 ms, 25.5 -> 26.8
+      fps, command thread 29.9 -> 32.4 ms. The kernel (the first ray traversal kernel of the earlier records; the profile bullet above calls it lighting compute) costs about 5 ms a frame. In light seconds the frame
+      follows the GPU work, which is the first positive control of the GPU metric; in 600-800 draw seconds
+      the frame stays 3.4-4.9 ms above the larger of command and GPU time; with 6 seconds per arm and draws
+      and command time differing between arms, how much of the GPU saving reaches those seconds is a lead,
+      not a measure.
+    - Where the GPU waits (`gpugap2`, temporary start and end stamps on every command buffer of six
+      consecutive frames, gaps read between the first start of the third frame and the last end of the
+      fourth so that neighbouring frames' work is inside the window; 96 windows). A frame's buffers run
+      over about 2.7 frame periods, interleaved with its neighbours. Inside the window the render queue has
+      no Kyty work 11-12 % of the time in every draw range (600-800 draws: 11.9 ms of a 100.7 ms window,
+      about 4.4 ms a frame): about 5 gaps a frame of 0.2-1.7 ms (0.55 ms on average, about 2.8 ms a frame)
+      and many gaps of about 0.02 ms between buffers. Not all of it is idle: the stamped buffers are 99.2 % of
+      the submits in the same seconds (4,485 of 4,521), yet the engine-busy counter gives Kyty 0.8-2.1 ms a
+      frame more than the stamps cover, unattributed (submits range only 30-38 a frame, so a cost per submit
+      and a cost per load cannot be told apart). The engine is idle 2.2-2.5 ms a frame above 400 draws by that
+      counter, which also includes other clients (the desktop app takes about 2 %, about 0.7 ms), so at most
+      about 1.5 ms a frame is recoverable from timing alone, against about 3.5 ms that 30 fps needs there.
+    - What ends the buffer before each gap (`gapsite1`, the submitting call stack recorded per buffer).
+      Per frame: the split of recorded dispatches before a draw (the Intel draw-after-dispatch workaround)
+      about 2.2 ms; the early submit of recorded work when the queue is idle about 1.7 ms; the flush before
+      a guest wait on memory about 0.85 ms; the end of a guest ring batch about 0.5 ms. In each case the GPU
+      finishes what was submitted before the command thread has recorded the next batch.
+    - Excluded: removing the early-submit floor. With the batch floor (8 operations) and the interval floor
+      (1.5 ms) both off in alternate 4 s blocks of one run (`greedy1`, about 130 early submits per 4 s with
+      the floor, 230-260 without): 400-600 draw seconds 35.5 -> 34.1 fps (23 per arm), 600-800 25.4 -> 25.7
+      (12-15), 800-1000 25.0 -> 21.8 with command time 32.9 -> 43.3 ms (6-8). No frame-rate gain from this
+      switch; the run had the profiler off, so whether the gaps shortened was not measured, and the arm also
+      ran the idle check on every operation, which raised command time.
+    - Excluded in the fight: longer geometry segments. A temporary counter (`geoseg1`, 200-275 s, 33 fps,
+      590 draws a frame) found about 44 geometry passes a frame in about 4 segments: about 2 of one pass and
+      about 2 of 16 or more passes. About 3 segments a frame opened in a command buffer with no segment yet
+      and 1 after recording outside a render pass (the counter does not link either cause to the one-pass
+      segments). No pass went unbatched or hit the chunk limit. Passes of a segment
+      overlap (dunes record above), so joining the two one-pass segments would save at most about two pass
+      latencies, about 0.4 ms a frame.
+    - Excluded in the fight: render-pass breaks. A temporary counter (`rpbrk1`, 200-275 s, a lighter stretch
+      at 37 fps and 334 draws a frame) recorded the call stack of every render-pass end and whether the next
+      begin reopened the same framebuffer: about 56 ends a frame were followed by a begin, of which about 5
+      reopened the same framebuffer (one site about 2.9, another about 1.6); the rest moved to another
+      target, as the guest's passes require. At the 0.04 ms or less per instance of the cheapest stamped
+      pass, removing the reopens bounds the gain near 0.2 ms a frame. The heavier 600-800 draw seconds were
+      not reached in this run.
+    - The fight's five-target pass is vertex-bound at the rock-2 price (`vfsplit1`, the 11-19 pipeline-statistics
+      instrument, 86 profiled frames at 200-322 s). Fit over frames: `ms = 2.23 x M vertex invocations + 0.48 x M
+      fragment invocations + 0.146 x passes + 0.53` (rms 0.40 ms), against 2.27, 0.60 and 0.155 at rock 2. Means
+      a frame: 3.0 M vertex and 3.1 M fragment invocations, 9.2 ms, of which about 6.7 ms is vertex work by
+      the fit (stamped time, no control arm in the fight). In the same frames the shadow pass
+      (`ps 0x0ff8a6ab`) runs 4.0 M vertex invocations in 3.2 ms (0.8 ms a million) and the one-target pass
+      (`ps 0x860593d6`) 2.1 M in 2.35 ms (1.1 ms a million). The price per vertex invocation matches rock 2;
+      the program mix in the fight was not counted.
+    - What the heavy fight seconds add (same runs, profiled frames split at each run's median draw count:
+      about 400 against 700-760 draws a frame). Stamped totals: `gpuprof-fight2` 31.3 -> 44.9 ms, of which
+      geometry passes 2.2 -> 7.0, render passes 16.4 -> 23.3, compute 10.4 -> 10.8, unstamped remainder
+      2.2 -> 3.7; `vfsplit1` 32.6 -> 42.6, geometry 2.1 -> 5.6, render passes 17.5 -> 22.3. The largest
+      increments by program are the particle geometry pass `0xf4cfb9a5` (+3.5 to +4.8 ms), the 2048x2048
+      shadow pass (+2.0 to +2.35) and the five-target pass (+1.2 to +2.1). Stamps serialize what they wrap,
+      so the geometry figures are inflated where passes overlap. In the clean `slicegen1` run the command
+      thread takes 23.8 ms a frame at 400-600 draws and 28.4 at 600-800, below the 36.6 ms frame there; the
+      frame follows about 0.3 of a command-time change (`cpspin1`), so both sides count. Heavy profiled
+      frames carry 87-123 particle geometry passes against 14-16 in light ones.
+    - The fight has two regimes (`skipp2` re-read by route time). That run skipped every indexed and
+      automatic draw of vertex program `0xf4cfb9a5` in alternate 2 s blocks from 200 s; skipped draws leave
+      the draw count, so binning its seconds by draws a frame compares different scenes, and a first read
+      binned that way (no GPU change in the 600-800 bin) is withdrawn. Read block by block against the
+      neighbouring blocks:
+      - Particle bursts (271-275 s and 311-321 s, where the skip arm removes 200-600 draws a frame): base
+        18-26 fps, skip 27-33 fps; engine-busy GPU time 35.5 -> 31.1 ms a frame at 271-275 s and about
+        32.6 -> 29.7 ms at 311-321 s; command time 29-49 -> 20-25 ms. The particle work costs both sides there.
+      - Steady stretch (285-305 s, 650-790 draws a frame): the arms differ by only 40-100 draws a frame;
+        25-29 fps, GPU 33-37 ms and command time 24-30 ms in both. Too few draws are skipped there to price
+        the particles; the gap to 30 fps in this stretch is scene GPU work.
+      Runs without an engaged probe on later builds agree on the 600-800 seconds: `sg16clean1` 27.9 fps,
+      engine 95 % busy, GPU 34.0 ms, command time 26.6 ms (28 seconds); `slicegen1` 27.3 fps, 91 %, 33.6 and
+      29.1 ms (49 seconds). Above 800 draws a frame the reads split by run: `sg16clean1` 25.0 fps, 78 % busy,
+      command time 36.6 ms, GPU 31.5 ms (11 seconds), while `geoseg1` (counting probe) read 24.3 fps, 94 %,
+      31.8 and 38.5 ms (6 seconds); `slicegen1` has no such seconds. Bursts therefore need both sides, about
+      30 ms of command time and 31 ms of GPU time. The GPU clock read 2,400 MHz in every fight second of
+      `sg16clean1` and `geoseg1`; `slicegen1` dipped to 2,160 MHz.
+    - Excluded: pixel programs at 16 lanes. On the A770 the driver may build each pixel program at 8, 16 and 32
+      lanes and drops 16 when it would spill, so a spilling program like `0x6bcfb82d` runs at 8. Vulkan offers no
+      in-spec way to ask for 16: the driver's `requiredSubgroupSizeStages` covers compute, task and mesh only, and
+      Kyty correctly never requests a size for the fragment stage there. A first temporary switch that asked for
+      16 through Kyty's support check never engaged, so its runs (`sg16prof1`, `sg16clean1`) only show scene
+      variance (passes 30 % apart between runs with nothing changed). A second temporary switch built every
+      pixel pipeline twice, the twin with a required size of 16 outside the spec, and swapped them in alternate
+      4-second blocks of one run (`sg16ab3`, warm cache, 401 twins, 47 profiled frames per arm at 683-700 draws a
+      frame): render passes 15.14 -> 15.26 ms, command buffers 32.44 -> 31.77 ms, several passes 0.14-0.30 ms
+      slower. The noise between blocks with no change is about 1.4 ms (`sg16ab1`). The switch did not count how
+      many binds took a twin or confirm that a twin's kernel differed, so the run only says that forcing 16 on
+      every pixel pipeline, spills included, shows no gain; the lever is dropped because it cannot be requested
+      in spec on this driver.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
