@@ -8373,17 +8373,35 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       | `autotake1` | 28.4 | 749 | 6.9 | 24.8 | 28.8 | 36.0 | 89 % |
 
       Heavy seconds (at least 650 draws per frame, t 200-325): `nolever1` 19.4 fps (p50 52.5 ms, command thread
-      47.9 ms/frame, render busy 71 %), `autotake1` 29.2 fps (p50 35.1 ms, 27.2 ms/frame, 92 %). An earlier
-      comparison against `pssite1` (26.6 fps) and `texreuse1` (25.9 fps) understated the gain: both carried
-      temporary counters across many files that slowed the command thread.
+      47.9 ms/frame, render busy 71 %), `autotake1` 29.2 fps (p50 35.1 ms, 27.2 ms/frame, 92 %). The base runs
+      `pssite1` (26.6 fps, 626 draws per frame) and `texreuse1` (25.9 fps, 655) carried temporary counters; per
+      draw they cost the same as `nolever1` at t 100-150 (state setup 14.7-15.1 against 14.6 us), so the gap in the
+      fight band comes from the scene each run reached, not from the counters. Across the three base runs the fight
+      ran 22.4-26.6 fps; with the change it ran 28.2-28.6 fps.
     - What stays unprepared (`autotake1`, fight band): per second about 2,400 draws reach the command thread
       without a record. About 1,650 arrive while the fronts are idle after a stop (the draw that restarts them),
       and about 770 are indexed draws the fronts had not reached; about 18,700 draws per second are taken
       prepared. The fronts stop per second on
       `R_CONTEXT_STATE` (535), `ACQUIRE_MEM` (422), `RELEASE_MEM` (338), `EVENT_WRITE` (338) and `SET_BASE` (28).
-      Preparing those draws as well would save at most about 1-1.5 ms per frame. With the change the command thread
-      (27-29 ms/frame) is below the frame (35-36 ms) and the render engine is about 90 % busy, so the fight frame is
-      now set by GPU time, not by the command thread.
+      Preparing those draws as well would save at most about 1-1.5 ms per frame.
+    - Causal check with the change (`cpspin1`): a temporary busy wait of 6 us after every draw on the command thread,
+      on in alternate 4 s wall-clock blocks, so both arms share the scene. Seconds that cross a block edge are left
+      out.
+
+      | Band | Blocks | Seconds | fps | Draws/frame | Command thread, ms/frame | Frame p50, ms | Render busy |
+      | --- | --- | --- | --- | --- | --- | --- | --- |
+      | t 100-200 | off | 38 | 33.5 | 490 | 22.9 | 30.8 | 93 % |
+      | t 100-200 | on | 35 | 34.3 | 467 | 24.7 | 30.1 | 92 % |
+      | fight, t 265-322 | off | 21 | 23.9 | 794 | 34.2 | 43.3 | 87 % |
+      | fight, t 265-322 | on | 21 | 23.5 | 762 | 38.9 | 44.6 | 85 % |
+      | t 200-325 | off | 46 | 29.9 | 650 | 27.2 | 35.7 | 90 % |
+      | t 200-325 | on | 44 | 28.6 | 645 | 32.4 | 37.4 | 87 % |
+
+      Before the fight the added command-thread time does not move the frame. In the fight and the band after
+      t 200 the frame grows by about 0.3 ms per added millisecond (1.3 of 4.7, 1.7 of 5.2) and the render engine
+      stays at 85-90 % busy. The command thread now sets about a third of the frame at the margin; GPU time sets
+      the rest. This run reached a heavier fight (about 790 draws per frame) than `autotake1` (749) and ran it at
+      23.9 fps, so the fight rate still depends on how many objects the scene holds.
     - `PPSA17221 - Minecraft` world (`mcauto1`, 12 s of world before the usual zombie death, about 5,100 draws per
       frame): state setup 1.60 and draw processor 5.13 us/draw against 1.56-1.58 and 5.28-5.61 in `mcw8` and
       `mcw8b`; no loss. The death-screen capture rendered normally.
