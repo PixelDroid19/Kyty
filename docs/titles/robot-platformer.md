@@ -8236,6 +8236,146 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
   50 or more times all already run at 8 lanes (for example `0x3666fa39` 272:928, `0x91aaa78f` 594:1,989,
   `0x28d8852c` 539:1,941), the narrowest width the host offers. The part-width lever that paid at the landing spot
   has nothing left to move there.
+- **The wide shot is a cinematic; gameplay after it is command-bound (2026-11-19).** The 757-draw wide shot can
+  be skipped from the pause menu (options, down, cross), so it is a cinematic, not play. The user recorded a route
+  in pad-record mode that skips it and plays on (`astro-dunes-play-user2`); replayed from the hub events
+  (`play1`, `skipgeom1`), it reaches the same fights at 280-385 s, 35-170 ms a frame at 366-1,675 draws. With GPU
+  timestamps on (`play1`), the heaviest frames charged up to 43.8 ms to geometry passes, 42.6 ms of it to 638
+  one-group passes of `0xf4cfb9a5`; batching held (15-72 passes per output fill), so that sum counts the
+  timestamps' own serialization. Causal test without timestamps (`skipgeom1`): skipping that program's batched
+  pass in alternate 4 s blocks, keeping the fill and pull draw (prediction before the run: under 10 % gain at high
+  draw counts means an instrument artifact), gave no gain: medians 92.0 kept against 102.2 ms skipped above
+  1,200 draws a frame, 45.9 against 44.9 ms below 800. Per frame in that run, the light frames (about 750 draws,
+  37-40 ms) kept the render engine 88-93 % busy, while the heavy ones (about 1,570 draws, 92 ms) kept it 35-63 %
+  busy, with fence and register waits under 1 ms. There the command processor ran 76 ms a frame, 68 ms of it in
+  draw processing (43 us a draw against 29 us in the light frames): state setup 28.5 ms, texture descriptors
+  17.1 ms, pipeline setup 6.8 ms. By utilisation the heavy gameplay frames wait on recording more than on the GPU,
+  but the GPU still has 32-58 ms of work in them, so both sides must shrink for 30 fps there. A CPU profile of the
+  command processor over 345-385 s (`perfplay1`, flat, no call chains) put about 29 % of that thread in the
+  per-draw resource parse under `ShaderParseUsage2` (`ShaderIsDynamicScalarStorageConsumer` 6.6 %,
+  `ShaderAddDynamicSLoadMapping` 2.9 %, `ShaderFindImageSamplerDescriptor` 2.7 %) and 3.4 % in
+  `GraphicsRenderDepthSliceArray`. The same route point at about 342-345 s holds a one-second stall in both runs:
+  176-220 MB of uploads and 58-70 object creations in that second, one draw spending 828 ms in texture descriptor
+  binding in `perfplay1` (where the profiler also started at that second) and the worst frame at 145 ms in `skipgeom1`.
+  A third run (`skipdraw1`) skipped every draw of the particle geometry program `0xf4cfb9a5` on the CPU in alternate
+  4 s blocks (test-only, not a fix). In the fights those draws number about 470-640 a frame and cost about 50 us of
+  command time each against 29 us for an ordinary draw (state setup 21 against 10.7 us, texture descriptors 13 against
+  6.6 us), and they add about 55 render-pass begins a frame. Without them the fight frame drops to about 39 ms with the
+  render engine 95 % busy, so 30 fps there needs both the command cost and the GPU work cut. The resource parse of
+  those programs (2,378-2,873 instructions) compares 65-78 dynamic scalar-load records against 57-74 buffer accesses
+  per draw. After about 350 s the skipped run diverged into a lighter scene (330-380 draws, 27-29 ms, GPU-bound).
+  Most fight seconds sit at 700-1,200 draws, at 48-51 ms a frame with 41-48 ms of command time (`perfplay1`,
+  `skipgeom1`, `smask2`), so that band is command-bound.
+- **Register filter on the dynamic storage consumer lookup (excluded, 2026-11-19).** A bitset of the destination
+  SGPRs of storage scalar-load records, tested before the record scan in `ShaderIsDynamicScalarStorageConsumer`,
+  hardly rejects anything: the queried loads read through registers that storage records do write, and only the pc
+  range tells them apart. Against `ShaderParseUsage2` self time the function went from 3.0x to 2.8x, the same drift as
+  the untouched `ShaderAddDynamicSLoadMapping` (1.34x to 1.30x) (`smask2` against `perfplay1`). Caching the relation
+  per program does not apply either. Pc, destination register and consumer range are fixed by the code, but whether a
+  record exists, and its `resource_index`, depend on the draw's descriptor words and storage table. Even at zero cost
+  this lookup and the add scan together are about 7 % of the command thread, roughly 5 ms of 85 in a heavy frame.
+- **Where the per-draw resource parse goes (2026-11-19).**
+  - **Gen5 GS-front user-data table: excluded as a lever.** Its 28-dword table repeats (2 distinct contents per 1,000
+    calls at 51-216 addresses). But the call runs with `code == nullptr`, holds 2 loads and costs about 100 calls a
+    frame, so it is not the hot parse.
+  - **The hot parse is the pixel stage.** Pixel parses with at least 40 dynamic records take 150-320 ms of command
+    time per second in the fights, roughly a fifth of the command thread. One program alone runs 2,000-10,000 calls
+    a second at 18-33 us each. All pixel parses run at about 14,500 a second, roughly one per draw, so nothing is
+    duplicated within a draw.
+  - **A memo keyed on the whole EUD cannot hit.** Its contents differ on almost every draw.
+  - **Within one program and one record skeleton, only the base word changes.** In the top program (116-dword EUD)
+    the dwords that differ between draws are 92, 96, 100, 104, 108 and 112. Each is word 0 of a storage V# loaded by
+    a scalar load (records at 92-115). User SGPRs other than the EUD pointer, the sharps and every other EUD dword
+    stay equal.
+  - **This reopens the recipe slice excluded in `docs/bringup/cp-draw-plan.md`.** That slice did not mask
+    dynamically loaded V#s, and those are exactly the words that vary here. The record covers one program before
+    about 210 s; the program with 13-19 skeletons a second and the fight after 277 s are not yet measured.
+  - **Offline check with the resource fold replay.** Six heavy pixel parses (EUDs of 28-188 dwords) replay byte
+    for byte. Each read only the EUD snapshot, as two reads. In the 188-dword capture:
+    - adding to word 0 of a dynamic storage V# changes only that buffer's `fields0`;
+    - changing word 2 changes only `fields2`;
+    - moving the EUD pointer changes only `extended.data0`;
+    - a texture word changes the deduplication instead (`resource_index` and the sampler mask).
+
+    Two consecutive capture pairs are byte-identical: the same draw parsed twice, pointer included.
+  - **Most pixel parses do not run on the command thread.** A per-thread timer on the stage input analyses
+    (temporary diagnostic, fight from 265 s) gives:
+
+    | Thread | Pixel analyses per second | us each | ms per second |
+    | --- | --- | --- | --- |
+    | Command processor | 5,556 | 21.0 | 117 |
+    | Draw front 1 | 6,584 | 13.3 | 88 |
+    | Draw front 2 | 6,704 | 13.1 | 88 |
+
+    - The draw fronts hand over about 12,300 prepared indexed draws a second.
+    - About 820 a second go stale after a host write, and 370 arrive while the fronts are idle.
+    - The rest of the command thread's 5,556, about 4,200 a second, are not prepared by the front. That is a
+      subtraction, not a count. Auto draws, indexed indirect draws and geometry-pass draws all take this path
+      (`docs/bringup/performance-architecture-plan.md`), and their split is not yet counted.
+    - The vertex analysis adds 18 ms a second on the command thread and compute dispatches 14 ms.
+  - **So shader analysis is the smaller part of the particle cost.** The command thread's analysis totals about
+    135 ms a second (pixel 117, vertex 18), roughly 7 ms of a 48 ms frame. The particle draws cost 23-32 ms a frame,
+    so most of their command time is spent after the analysis, including on draws the front prepared.
+    - A pixel template would mostly speed up the front threads.
+    - Neither the template nor more prepared draws can win more than about 5-6 ms a frame in the fight band.
+    - The earlier 150-320 ms a second "of command time" was a sum over all threads.
+  - **Where the fight's command time goes per draw.** Draw-stage timers from the performance snapshot, fight from
+    272 to 322 s, 18,400 draws a second, command processor busy 834 ms a second:
+
+    | Stage | us per draw | ms per second |
+    | --- | --- | --- |
+    | State setup (includes the shader analyses) | 12.6 | 228 |
+    | Resource binding | 13.3 | 242 |
+    | of which texture descriptors | 8.3 | 151 |
+    | of which descriptor finalize, storage descriptors | 2.1, 1.5 | 39, 27 |
+    | Pipeline setup | 2.6 | 47 |
+    | Command emission, materialization | 1.8, 1.4 | 33, 25 |
+    | Dispatches, all stages | | 92 |
+
+    Texture descriptor binding is the largest single stage, at about a seventh of the command thread.
+  - **The texture stage replay barely hits in the fight (excluded as the lever, 2026-11-19).** Temporary counters
+    in the texture stage replay, fight band t 265-322, three runs (`texreuse1`, `texside1`, `texshadow1`):
+    - Of about 16k texture binds/s, the replay hits 660-1,250/s. A hit costs 0.5-0.6 us; a miss costs about 10 us.
+    - About 3.8k binds/s are compute dispatches, which the replay never serves (4.4 us each).
+    - Most entries are never stored. Per second, 4.3-7.9k stores are refused for side work and 2.2-4.1k because a
+      texture create was not a cached reuse; about 940 are stored.
+    - The first side-work mark is mostly the array prefix-layer check (2.3-5.4k/s), then the storage alias
+      choice (1.5-2.0k/s) and the colour DCC clear consume (about 450/s). Arrays without a second layer never
+      reach the registry query, but narrowing the mark to two or more layers changed nothing: these arrays have
+      at least two layers.
+    - Shadow entries that kept refused stores show how many would have hit: about 2.1k/s behind the prefix-layer
+      mark, 1.2k/s behind the storage alias, 1.6k/s behind uncached creates and about 170/s lost to eviction.
+      The object-graph generation was unchanged for all of them; the process-wide image stamp changed every
+      time, so it cannot serve as a replay token.
+    - Serving every would-hit saves at most about 40 ms/s, about 1.7 ms per frame. Removing the whole texture
+      stage would save about 7 ms per frame (48 to about 41 ms), above the recorded GPU floor of about 39 ms.
+      Neither reaches a 33 ms frame.
+  - **Auto draws analysed on the draw front (2026-11-20).** Temporary counters on the command thread's pixel
+    stage parse, fight band t 265-322 (`pssite1`): per second, 3,628 parses for auto draws that run as a geometry
+    pass, 1,101 for other auto draws, 957 for indexed draws the front did not prepare and 53 for indirect draws.
+    Auto draws are 83 % of the parses left on the command thread, because the draw front never prepared them.
+    - Change: the draw front admits `DRAW_INDEX_AUTO` (and its `NOP` form) like an indexed draw and prepares the
+      vertex, geometry-pass and pixel inputs with the same analysis the command thread runs; the shader ids of a
+      geometry pass stay on the command thread, which writes the pass output address into its inputs.
+    - Equality: a temporary compare analysed every prepared auto draw again on the command thread and compared the
+      vertex, geometry-pass and pixel shader ids. A forced flip of one field reported exactly one mismatch
+      (`autocmp1`). With the route driven (`autocmp3`), 758,265 prepared auto draws, 105,265 of them in the fight,
+      gave no mismatch. In the fight 46 % of the auto draws were prepared.
+    - Speed (`autolever2` against `pssite1` and `texreuse1`, which ran temporary counters only; one run with the
+      change, fight band t 265-322, about 640 draws per frame in all three):
+
+      | Run | fps | State setup, us/draw | Draw processor, us/draw | Command thread, ms/frame | Frame p50, ms |
+      | --- | --- | --- | --- | --- | --- |
+      | `pssite1` | 26.6 | 12.7 | 37.0 | 33.2 | 38.6 |
+      | `texreuse1` | 25.9 | 13.2 | 34.8 | 32.9 | 39.4 |
+      | `autolever2` | 28.6 | 7.9 | 29.5 | 29.4 | 35.8 |
+
+      In the heaviest seconds (725-739 draws per frame) the frame rate rose from 24.2-24.3 to 26.4 fps (p50 41.7 to
+      38.3 ms). The frame is still above 33 ms, and the GPU floor recorded above is about 39 ms for the heaviest
+      frames.
+    - `PPSA17221 - Minecraft` world (`mcauto1`, 12 s of world before the usual zombie death, about 5,100 draws per
+      frame): state setup 1.60 and draw processor 5.13 us/draw against 1.56-1.58 and 5.28-5.61 in `mcw8` and
+      `mcw8b`; no loss. The death-screen capture rendered normally.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
