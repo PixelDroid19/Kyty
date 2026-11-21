@@ -3020,7 +3020,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)
 		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* volume_text = R"(
-         %t24_<index> = OpLoad %uint %<src1_value0>
+     %t24_raw_<index> = OpLoad %uint %<src1_value0>
+         %t24_<index> = OpBitwiseAnd %uint %t24_raw_<index> %uint_0x1fffffff
          %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageS3D %textures3D_S %t24_<index>
          %t27_<index> = OpLoad %ImageS3D %t26_<index>
          %t33_<index> = OpLoad %uint %<src2_value0>
