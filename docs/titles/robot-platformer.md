@@ -8675,27 +8675,34 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       engine about 77 %), so they price no GPU lever.
     - Host activity in the fight seconds (2026-11-21, `hs1`, `hs2`; a per-second host sampler of CPU and IO
       pressure, `/proc/vmstat` compaction and THP counters, per-thread CPU and run delay, and other processes).
-      At matched draws a frame (about 820 in `hs1`, 935 in `hs2`, from 140 s), seconds with the kernel
-      compaction thread at 50-99 % of a core ran at a median 20.8 and 21.7 fps (19 and 16 seconds), seconds with
-      no other load at 32.7 and 29.7 (9 and 23), seconds with a foreign parallel build at 8.8 and 9.3, and
-      seconds with an unrelated process using about 1.5 cores at 27.7 and 26.7. In the compaction seconds the
-      command thread kept its CPU share (about 78 %) and run delay while every draw stage slowed about 1.6x and
-      render-lock wait rose 10-20x; the kernel migrated 20k-230k pages a second. This is co-occurrence only:
-      proactive compaction (`vm.compaction_proactiveness` 20 on that host) was not switched off to test it, and
-      the bursts near 150 s overlap an IO-pressure phase and about 17k emulator page faults a second that were
-      not separated. The `head248` dips (155-157, 230-233 s) had no host samples and stay unattributed.
-    - Regimes in seconds with no other load: `hs1` 245-251 s, 800-840 draws: 32.7-33.7 fps, GPU-bound (render
-      engine 96-97 %); `hs2` 172-176 s, 930-975 draws: 29.7-31.7 fps, command-bound (engine about 81 %, fence
-      wait about 0.2 ms a frame); `hs2` 112-143 s, before the fight, 430-830 draws: mostly 27.7-29.7 fps,
-      GPU-bound (engine 98 %, fence wait 4-10 ms a frame). The last stretch is under 30 fps with the host quiet.
+      Every sampled second from 112 s on is the same fight scene by its per-frame signature (about 79-83
+      dispatches, 34-38 submits, 152 label waits, 56-61 render passes, as in `head248` 147-251 s); only the
+      draw count moves (about 600-950). Seconds with the kernel compaction thread at 50-99 % of a core ran at a
+      median 20.8 fps (`hs1`, 19 s) and 21.7 (`hs2`, 16 s). In `hs1` an unrelated game also ran in all of them,
+      and its seconds without compaction ran at 27.7 (62 s), so that is the `hs1` baseline; `hs2` seconds with
+      neither ran at 29.7 (23 s, including 145-151 s with the compaction thread at 48-49 %). Seconds with a
+      foreign parallel build ran at 8.8 and 9.3. In the compaction seconds the command thread kept its CPU share
+      (about 78 %) and run delay while every draw stage slowed about 1.6x and render-lock wait rose 10-20x; the
+      kernel migrated 20k-230k pages a second. Co-occurrence only: proactive compaction
+      (`vm.compaction_proactiveness` 20 on that host) was not switched off to test it. In both runs a burst
+      began within a second of a scene change (148 s, 144 s), with IO pressure and about 17k emulator page
+      faults a second; whether the emulator's own faults start it was not separated. The `head248` dips (155-157,
+      230-233 s) had no host samples and stay unattributed.
+    - Fight regimes in seconds with no other load: `hs2` 112-143 s, 430-830 draws: mostly 27.7-29.7 fps,
+      GPU-bound (render engine 98 %, fence wait 4-10 ms a frame), the same regime as `head248` 147-251 s;
+      `hs2` 172-176 s, 930-975 draws: 29.7-31.7 fps, command-bound (engine about 81 %, fence wait about 0.2 ms
+      a frame); `hs1` 245-251 s (7 s), 800-840 draws: 32.7-33.7 fps, GPU-bound (engine 96-97 %). The light
+      fight stays under 30 fps on a quiet host.
     - Host fence waits by call site (temporary counter `fencesite`, runs `fs1`-`fs6`, reverted). About 1.5 ms a
       frame is the presenter waiting for its own blit, off the command threads. On the command threads the
-      largest site is one compute queue's dispatches waiting for that queue's own submission five back, about
-      33 a second at about 0.65 ms, only in the GPU-bound stretch before the fight (110-165 s); the cause is a
-      guest-memory mutation conflict (guest bytes changed under a write-back-capable backing with pending uses).
-      After 169 s there are none, and indirect-argument writers on the other compute queue are awaited on the
-      device (about 65 a second). With the stretch GPU-bound at 98 %, removing these waits is not expected to
-      raise its frame rate; not attempted.
+      largest site is one compute queue's dispatches waiting for that queue's own submission five back, at
+      about 0.5-1 ms each. They come in scene-dependent bursts, up to about 100 a second (`fs1` 135-151 s and
+      204-252 s, `fs2` 103-165 s), and in the sampled bursts the render engine stayed 87-95 % busy. The return
+      is a guest-memory mutation conflict; which of its two reporters fires (a deferred alias storage or
+      guest bytes changed under a write-back-capable backing with pending uses) was not counted. Writers of
+      indirect arguments on the other compute queue are awaited on the device (about 65 a second). Whether
+      these host waits leave the GPU idle was not measured (the counter's drain check read the host's count
+      of unretired submissions, not the queue); the engine idle bounds the gain at about 0.7-1.4 ms a frame.
     - Excluded: compute queues on the compute engine (`ccs1`, pricing probe, not a valid configuration). The
       compute queues were moved to the compute-only family by skipping the depth copy-on-compute check for D16
       and D32 (the record "Arc compute engine not usable for the compute queues" explains why the check closes
