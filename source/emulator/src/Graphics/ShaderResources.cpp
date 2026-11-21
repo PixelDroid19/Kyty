@@ -582,6 +582,15 @@ static bool ShaderTextureResourcesEqual(const ShaderTextureResource& first, cons
 	return true;
 }
 
+// A loaded T# shares a resource only with one read from the same table words. Merging
+// equal descriptors from different words would make the resource layout, and with it
+// the shader identity, depend on the guest's data instead of its program.
+static bool ShaderTextureBindingMatches(const ShaderTextureDescriptor& descriptor, ShaderTextureUsage usage,
+                                        State::ImageSampleOperation operation, const ShaderTextureResource& resource)
+{
+	return descriptor.usage == usage && descriptor.sample_operation == operation && ShaderTextureResourcesEqual(descriptor.texture, resource);
+}
+
 static bool ShaderSamplerResourcesEqual(const ShaderSamplerResource& first, const ShaderSamplerResource& second)
 {
 	for (int field = 0; field < 4; ++field)
@@ -747,8 +756,9 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 		const auto& descriptor = bind->textures2D.desc[index];
 		const bool  shape_matches = usage != ShaderTextureUsage::ReadOnly || !sampled_shape_known ||
 		                            ShaderResolvedSampledTextureShape(descriptor) == sampled_shape;
-		if (shape_matches && descriptor.usage == usage && descriptor.sample_operation == operation &&
-		    ShaderTextureResourcesEqual(descriptor.texture, resource))
+		// Extended descriptors, static or loaded, name their EUD words by start register.
+		const bool same_words = descriptor.extended && descriptor.start_register == offset_dw + 16;
+		if (shape_matches && same_words && ShaderTextureBindingMatches(descriptor, usage, operation, resource))
 		{
 			texture_index = index;
 			break;
@@ -905,16 +915,18 @@ static bool ShaderTryGetSplitTextureHalf(const ShaderCode& code, uint32_t index,
 	return true;
 }
 
-static int ShaderFindTextureResource(const ShaderBindResources& bind, const ShaderTextureResource& resource, ShaderTextureUsage usage,
-                                     State::ImageSampleOperation operation, ShaderGen5SampledTextureShape shape, bool shape_known)
+static int ShaderFindTextureResource(const ShaderBindResources& bind, const ShaderTextureResource& resource, int slot,
+                                     ShaderTextureUsage usage, State::ImageSampleOperation operation, ShaderGen5SampledTextureShape shape,
+                                     bool shape_known)
 {
 	for (int index = 0; index < bind.textures2D.textures_num; ++index)
 	{
 		const auto& descriptor = bind.textures2D.desc[index];
 		const bool  shape_matches =
 		    usage != ShaderTextureUsage::ReadOnly || !shape_known || ShaderResolvedSampledTextureShape(descriptor) == shape;
-		if (shape_matches && descriptor.usage == usage && descriptor.sample_operation == operation &&
-		    ShaderTextureResourcesEqual(descriptor.texture, resource))
+		const bool  same_words = descriptor.extended ? descriptor.start_register == slot + 16
+		                                             : descriptor.dynamic_sload && descriptor.slot == slot;
+		if (shape_matches && same_words && ShaderTextureBindingMatches(descriptor, usage, operation, resource))
 		{
 			return index;
 		}
@@ -930,7 +942,7 @@ static int ShaderAddSplitTextureResource(ShaderBindResources* bind, const Shader
 	EXIT_IF(added_resource == nullptr);
 	*added_resource    = false;
 	operation          = ShaderTextureSampleOperation(resource, operation);
-	const int existing = ShaderFindTextureResource(*bind, resource, usage, operation, shape, shape_known);
+	const int existing = ShaderFindTextureResource(*bind, resource, slot, usage, operation, shape, shape_known);
 	if (existing >= 0)
 	{
 		return existing;

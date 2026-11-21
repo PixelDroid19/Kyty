@@ -6261,11 +6261,15 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 		// Image type and format determine the SPIR-V image declaration. They
 		// must participate in the module key so a pipeline cannot reuse a
 		// shader specialized for a differently shaped or integer texture.
+		// A sampled Gen5 image is declared by its numeric class alone; keying
+		// its exact format would split one program per bound texture format.
+		// Bit 16 keeps the class apart from every 16-bit format of older keys.
+		const bool storage = bind.textures2D.desc[i].usage == ShaderTextureUsage::ReadWrite;
 		ids->Add(r.Type());
-		ids->Add(r.Format());
+		ids->Add(storage || !Config::IsNextGen() ? r.Format()
+		                                         : 0x10000u | static_cast<uint32_t>(VulkanGen5ImageNumericType(r.Format())));
 		// Storage resinfo admission depends on the resource's mip view.
 		// A module admitted for one mip must not bypass that check on reuse.
-		const bool storage = bind.textures2D.desc[i].usage == ShaderTextureUsage::ReadWrite;
 		ids->Add(storage ? r.BaseLevel() : 0u);
 		ids->Add(storage ? r.LastLevel() : 0u);
 		ids->Add(storage ? r.MaxMip() : 0u);
