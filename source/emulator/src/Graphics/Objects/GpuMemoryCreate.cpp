@@ -2146,6 +2146,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// mip-level rules above did not claim it (captured: a one-level 1216x684 linear view 64 KiB into a
 			// six-level chain of its format, whose level 0 sits at offset 0 or 0x226100). The view seeds from guest
 			// bytes, like the other storage parents of this rule.
+			// A view inside a depth target is linked as the single-parent path links it (captured: a 64 KiB view
+			// 0x290000 bytes into a 1664x936 depth target, equal to a CPU-uploaded buffer, inside render targets).
 			const auto arena_view_at_other_base = [](const Object& h, const OverlappedBlock& obj, uint64_t view_vaddr)
 			{
 				return h.info.object.type == GpuMemoryObjectType::StorageTexture && obj.relation == OverlapType::Contains &&
@@ -2173,6 +2175,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				const bool  compare_layout = obj.relation != OverlapType::Contains;
 				multi_arena_storage_texture =
 				    (GpuMemoryAllowsStorageTextureContainedInRenderTarget(o.object.type, obj.relation, info.type) ||
+				     GpuMemoryAllowsStorageTextureOverDepthRange(o.object.type, obj.relation, info.type) ||
 				     links_cpu_texture(h, obj) ||
 				     ((obj.relation == OverlapType::Crosses || obj.relation == OverlapType::IsContainedWithin) &&
 				      (o.object.type == GpuMemoryObjectType::StorageTexture || o.object.type == GpuMemoryObjectType::RenderTexture ||

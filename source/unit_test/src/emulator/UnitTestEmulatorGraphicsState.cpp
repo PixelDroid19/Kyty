@@ -2350,6 +2350,35 @@ TEST(EmulatorGraphicsState, GpuMemoryLinksArenaViewAtAnotherBaseOfAChain)
 	GpuMemoryFree(&ctx, base, 0x1000000ull);
 }
 
+TEST(EmulatorGraphicsState, GpuMemoryLinksArenaViewInsideADepthTarget)
+{
+	EnsureGpuMemoryForTests();
+
+	// Captured: a 64 KiB storage view 0x290000 bytes into a 1664x936 depth target, also inside a storage view of
+	// another layout at the depth target's base, among render targets and a CPU-uploaded buffer of the arena.
+	GraphicContext ctx {};
+	const uint64_t base = 0x0000005c00000000ull;
+	GpuMemorySetAllocatedRange(base, 0x2000000ull);
+
+	// Created in the captured order: the storage chain, a render target, the depth target, a render target that
+	// encloses them, the CPU-uploaded buffer and a small render target around the view's range.
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, base, 0xfddf00ull, LinearStorageTexture(0x470000ull, 1664, 936, 6)), nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(2, &ctx, nullptr, base + 0xe0000ull, 0x6e0000ull, TestGpuObject(GpuMemoryObjectType::RenderTexture)),
+	          nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(3, &ctx, nullptr, base, 0x680000ull, TestGpuObject(GpuMemoryObjectType::DepthStencilBuffer)), nullptr);
+	const uint64_t view_vaddr = base + 0x290000ull;
+	const uint64_t view_size  = 0x10000ull;
+	ASSERT_NE(GpuMemoryCreateObject(4, &ctx, nullptr, view_vaddr, view_size, TestGpuObject(GpuMemoryObjectType::StorageBuffer)), nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(5, &ctx, nullptr, base + 0x280000ull, 0xc0000ull, TestGpuObject(GpuMemoryObjectType::RenderTexture)),
+	          nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(6, &ctx, nullptr, view_vaddr, view_size, LinearStorageTexture(0x140000ull, 128, 128, 1)), nullptr);
+
+	EXPECT_EQ(GpuMemoryFindObjects(view_vaddr, view_size, GpuMemoryObjectType::StorageTexture, true, false).Size(), 1u);
+	EXPECT_EQ(GpuMemoryFindObjects(base, 0x680000ull, GpuMemoryObjectType::DepthStencilBuffer, true, false).Size(), 1u);
+
+	GpuMemoryFree(&ctx, base, 0x2000000ull);
+}
+
 TEST(EmulatorGraphicsState, GpuMemoryMappedPrefixSpansAdjacentAllocations)
 {
 	EnsureGpuMemoryForTests();
