@@ -182,6 +182,54 @@ void LaneWordsFollowInterpolatorSource()
 	Check(FragmentTransportLaneWords(code, pixel) == base + 16u, "a per-vertex v_interp_mov stores three vertices");
 }
 
+// v_interp_p1/p2 of attr0 channel `channel` from the barycentric pair starting at `bary`.
+void AddInterpolatedChannel(ShaderCode* code, uint32_t destination, uint32_t bary, uint32_t channel)
+{
+	for (auto type: {ShaderInstructionType::VInterpP1F32, ShaderInstructionType::VInterpP2F32})
+	{
+		ShaderInstruction instruction = Interpolation(type, destination, 0, channel);
+		instruction.src[0].register_id = static_cast<int>(bary + (type == ShaderInstructionType::VInterpP2F32 ? 1u : 0u));
+		instruction.pc                 = 4u * static_cast<uint32_t>(code->GetInstructions().Size());
+		code->GetInstructions().Add(instruction);
+	}
+}
+
+void CaptureInterpolatesEachChannelAtItsOwnLocation()
+{
+	ScopedShaderValidation validation;
+
+	// Hardware lets each V_INTERP_P1 pick its barycentrics: one channel at the pixel centre (v0:v1), the others at
+	// the centroid (v2:v3). A third pair at linear centre (v4:v5) changes the perspective mode and stays refused.
+	ShaderPixelInputInfo pixel {};
+	pixel.input_num            = 1;
+	pixel.system_input_enable  = 0x26u;
+	pixel.system_input_address = 0x26u;
+	for (uint32_t field: {1u, 2u, 5u})
+	{
+		pixel.custom_interpolation.barycentric_locations[field] = field;
+	}
+	ShaderFragmentComputeInfo transport {};
+	transport.initial_vgpr_count = 6u;
+	for (uint32_t linear = 0; linear < 2u; ++linear)
+	{
+		ShaderCode code;
+		code.SetType(ShaderType::Pixel);
+		AddInterpolatedChannel(&code, 8u, 2u, 0u);
+		AddInterpolatedChannel(&code, 9u, 2u, 1u);
+		AddInterpolatedChannel(&code, 10u, linear != 0u ? 4u : 0u, 2u);
+		const auto source = FragmentTransport::GenerateCaptureSource(code, pixel, transport);
+		if (linear != 0u)
+		{
+			Check(source.StartsWith("OpKyty"), "a channel in another perspective mode has no capture form");
+			continue;
+		}
+		Check(!source.StartsWith("OpKyty"), source.c_str());
+		Vector<uint32_t> binary;
+		String8          error;
+		Check(ShaderToolchain::Run(source, &binary, &error), error.c_str());
+	}
+}
+
 void LaneWordsPackOnlyObservedForms()
 {
 	ScopedShaderValidation validation;
@@ -227,6 +275,11 @@ TEST(EmulatorFragmentTransport, SplitShadeGdsAppendValidates)
 TEST(EmulatorFragmentTransport, ResolveModuleValidates)
 {
 	ASSERT_EXIT(([] { Initialize(); ResolveModuleValidates(); std::_Exit(0); })(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentTransport, CaptureInterpolatesEachChannelAtItsOwnLocation)
+{
+	ASSERT_EXIT(([] { Initialize(); CaptureInterpolatesEachChannelAtItsOwnLocation(); std::_Exit(0); })(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorFragmentTransport, LaneWordsPackOnlyObservedForms)
