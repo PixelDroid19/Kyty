@@ -1801,7 +1801,9 @@ void IsNan(uint32_t actual, const char* label)
 		Equal(Evaluate(halve, kOne, kOne), kHalf, "div:2 halves");
 		Equal(Evaluate(halve, 0x01000000u, kOne), 0x00800000u, "div:2 reaches the smallest normal");
 		Equal(Evaluate(halve, 0x00800000u, kOne), 0u, "div:2 of the smallest normal flushes to +0");
-		Equal(Evaluate(halve, 0x80800000u, kOne), 0u, "div:2 underflow of a negative result flushes to +0");
+		Equal(Evaluate(halve, 0x80800000u, kOne), kNegZero, "div:2 underflow of a negative result keeps its sign");
+		Equal(Evaluate(halve, 0x80ffffffu, kOne), kNegZero, "div:2 underflow of the largest such result keeps its sign");
+		Equal(Evaluate(halve, 0x80400000u, kOne), 0u, "div:2 flushes a negative denormal result to +0");
 		Equal(Evaluate(FloatModeProgram(mul2, 0xc0u, true, true), kOneAndHalf, kOne), kOneAndHalf, "IEEE mode ignores OMOD");
 		Equal(Evaluate(FloatModeProgram(mul2, 0xf0u, false, true), kOneAndHalf, kOne), kOneAndHalf,
 		      "enabled f32 output denormals ignore OMOD");

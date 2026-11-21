@@ -1764,17 +1764,19 @@ const char OUTPUT_MODIFIER_SCALE[] = R"(
                OpStore %<dst> %om_out_<index>
 )";
 
-// OMOD div:2: a result whose halving leaves the normal range flushes to +0, as zero and
-// denormal results do (ISA 6.2: "-0 is flushed to +0").
+// OMOD div:2: zero and denormal results flush to +0 (ISA 6.2: "-0 is flushed to +0"), but a
+// normal result whose halving leaves the normal range flushes to a zero of its own sign, as
+// measured on RDNA2 hardware (-2^-126 div:2 = -0).
 const char OUTPUT_MODIFIER_HALVE[] = R"(
 		%om_in_<index> = OpLoad %float %<dst>
 		%om_bits_<index> = OpBitcast %uint %om_in_<index>
 		%om_mag_<index> = OpBitwiseAnd %uint %om_bits_<index> %uint_0x7fffffff
+		%om_sign_<index> = OpBitwiseAnd %uint %om_bits_<index> %uint_0x80000000
 		%om_tiny_<index> = OpULessThan %bool %om_mag_<index> %uint_0x00800000
 		%om_special_<index> = OpUGreaterThan %bool %om_mag_<index> %uint_0x7f7fffff
 		%om_underflow_<index> = OpULessThan %bool %om_mag_<index> %uint_0x01000000
 		%om_scaled_<index> = OpISub %uint %om_bits_<index> %uint_0x00800000
-		%om_finite_<index> = OpSelect %uint %om_underflow_<index> %uint_0 %om_scaled_<index>
+		%om_finite_<index> = OpSelect %uint %om_underflow_<index> %om_sign_<index> %om_scaled_<index>
 		%om_flushed_<index> = OpSelect %uint %om_tiny_<index> %uint_0 %om_finite_<index>
 		%om_out_bits_<index> = OpSelect %uint %om_special_<index> %om_bits_<index> %om_flushed_<index>
 		%om_out_<index> = OpBitcast %float %om_out_bits_<index>
