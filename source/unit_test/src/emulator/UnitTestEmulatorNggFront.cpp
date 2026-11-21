@@ -631,6 +631,13 @@ TEST(EmulatorNggFront, AScalarPairCopyDoesNotPromoteAPartialOrOverwrittenMask)
 			for (uint32_t width: {32u, 64u})
 			{
 				const auto front = ShaderProveNggFrontLaneLocal(code, width);
+				// A wave32 EXEC has no high half (ISA: the upper half of EXEC is ignored), so overwriting the high word
+				// of the copied pair leaves the restored lanes whole there.
+				if (!partial && width == 32u)
+				{
+					Check(front.lane_local, "an overwritten high word holds no wave32 lanes");
+					continue;
+				}
 				Check(!front.lane_local && front.rejection == ShaderNggPassthroughRejection::UnsupportedInstruction &&
 				          front.refusal_pc == position_pc,
 				      "a copied partial mask or overwritten half cannot establish the full vertex cohort");
@@ -861,7 +868,7 @@ TEST(EmulatorNggFront, AUniformCompareUnderPartialExecCannotSteerAUniformBranch)
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorNggFront, AUniformLowVccCopyCannotHideAVaryingHighWordFromTheBranch)
+TEST(EmulatorNggFront, AUniformLowVccCopyCannotHideAVaryingHighWordFromAWave64Branch)
 {
 	ASSERT_EXIT(([] {
 		Initialize();
@@ -874,12 +881,12 @@ TEST(EmulatorNggFront, AUniformLowVccCopyCannotHideAVaryingHighWordFromTheBranch
 		}
 
 		const auto low_only = Parse(PrologueThenBody(VccBranchWithOneUniformWordBody(true)));
-		for (uint32_t width: {32u, 64u})
-		{
-			const auto refused = ShaderProveNggFrontLaneLocal(low_only, width);
-			Check(!refused.lane_local && refused.reason.ContainsStr("not wave-uniform"),
-			      "VCC_HI remains varying after a one-word VCC_LO copy");
-		}
+		const auto refused  = ShaderProveNggFrontLaneLocal(low_only, 64u);
+		Check(!refused.lane_local && refused.reason.ContainsStr("not wave-uniform"),
+		      "VCC_HI remains varying after a one-word VCC_LO copy");
+		// Only the lower 32 bits of VCC contribute to VCCZ in a wave32, so a varying VCC_HI cannot split that branch.
+		const auto admitted = ShaderProveNggFrontLaneLocal(low_only, 32u);
+		Check(admitted.lane_local, admitted.reason.IsEmpty() ? "a wave32 VCC branch reads only VCC_LO" : admitted.reason.c_str());
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -1347,6 +1354,72 @@ Words ReadUniformUnderPartialExec()
 
 } // namespace
 
+// EXEC is saved to `save` with s_mov_b32, narrowed by v_cmpx and restored with s_mov_b32; v13 is first written under
+// the restored EXEC and then exported. The one-word copies are the whole lane mask only in a wave32 program. With
+// `write_next`, the scalar word after the copy is overwritten while the copy is live.
+Words OneWordSavedExecBody(uint32_t save, bool write_next)
+{
+	Words body;
+	body.push_back(0xb0000000u | (24u << 16u) | 72u); // s_movk_i32 s24, 72
+	Vop1(body, 5, 12, 24u);                            // v_cvt_f32_i32 v12, s24
+	Sop1(body, 3, save, kExecLoReg);                   // s_mov_b32 <save>, exec_lo
+	if (write_next) { Sop1(body, 3, save + 1u, Inline(7)); } // s_mov_b32 <save + 1>, 7
+	Append(body, Vopc(0xd5, Inline(1), 5u));           // v_cmpx_ne_u32 1, v5
+	Sop1(body, 3, kExecLoReg, save);                   // s_mov_b32 exec_lo, <save>
+	Vop1(body, 1, 13, Inline(3));                      // v_mov_b32 v13, 3 under the restored EXEC
+	Exp(body, 12, 15, true, 13, 13, 13, 13);           // exp pos0 v13 done
+	Sopp(body, 1);                                     // s_endpgm
+	return body;
+}
+
+TEST(EmulatorNggFront, AOneWordExecCopyRestoresTheWholeWave32MaskOnly)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		for (const auto& [save, write_next]: {std::pair {40u, false}, std::pair {kVccReg, false}, std::pair {40u, true}})
+		{
+			const auto code     = Parse(PrologueThenBody(OneWordSavedExecBody(save, write_next)));
+			const auto admitted = ShaderProveNggFrontLaneLocal(code, 32u);
+			Check(admitted.lane_local, admitted.reason.IsEmpty() ? "a wave32 one-word EXEC copy restores every lane" : admitted.reason.c_str());
+			// In a wave64 the copy holds the low 32 lanes only, so the write after the restore leaves lanes undefined.
+			Check(!ShaderProveNggFrontLaneLocal(code, 64u).lane_local, "a wave64 low-word copy does not restore EXEC");
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+// VCC_HI holds a scalar number across a VCC compare; a select picks it and a vector instruction reads it as a number.
+Words ScalarInVccHiAcrossACompareBody()
+{
+	Words body;
+	body.push_back(0xb0000000u | (24u << 16u) | 72u); // s_movk_i32 s24, 72
+	Vop1(body, 5, 12, 24u);                            // v_cvt_f32_i32 v12, s24
+	Sop1(body, 3, kVccReg + 1u, Inline(5));            // s_mov_b32 vcc_hi, 5
+	Append(body, Vopc(0xc5, Inline(1), 5u));           // v_cmp_ne_u32 vcc, 1, v5
+	Append(body, Sopc(6, 24, Inline(0)));              // s_cmp_eq_u32 s24, 0
+	Sop1(body, 3, 7, Inline(3));                       // s_mov_b32 s7, 3
+	Sop2(body, 0x0a, 7, 7, kVccReg + 1u);              // s_cselect_b32 s7, s7, vcc_hi
+	Vop2(body, 3, 12, 7u, 12u);                        // v_add_f32 v12, s7, v12 reads the selected number
+	Exp(body, 12, 15, true, 12, 12, 12, 12);           // exp pos0 v12 done
+	Sopp(body, 1);                                     // s_endpgm
+	return body;
+}
+
+TEST(EmulatorNggFront, AWave32CompareLeavesVccHiAnOrdinaryScalar)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto code = Parse(PrologueThenBody(ScalarInVccHiAcrossACompareBody()));
+		const auto& select = code.GetInstructions().At(InstructionIndex(code, ShaderInstructionType::SCselectB32));
+		Check(select.src[1].type == ShaderOperandType::VccHi, "the fixture selects VCC_HI");
+		const auto admitted = ShaderProveNggFrontLaneLocal(code, 32u);
+		Check(admitted.lane_local, admitted.reason.IsEmpty() ? "a wave32 compare writes VCC_LO only" : admitted.reason.c_str());
+		// A wave64 compare writes the whole pair, so VCC_HI then holds lane bits.
+		Check(!ShaderProveNggFrontLaneLocal(code, 64u).lane_local, "a wave64 compare makes VCC_HI a mask");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorNggFront, AReadfirstlaneUnderPartialExecHoldsForTheLanesOfThatExecOnly)
 {
 	ASSERT_EXIT(([] {
@@ -1552,6 +1625,21 @@ Words UniformLoopBody()
 	return body;
 }
 
+// The same loop closed by its condition: s_cbranch_scc1 back to the header while the counter is nonzero.
+Words UniformConditionalBackEdgeBody()
+{
+	Words body;
+	body.push_back(0xb0000000u | (24u << 16u) | 3u); // s_movk_i32 s24, 3
+	Vop1(body, 1, 13, Inline(0));                     // v_mov_b32 v13, 0
+	Vop2(body, 3, 13, 242, 13);                       // header: v_add_f32 v13, 1.0, v13
+	Sop2(body, 2, 24, 24, Inline(-1));                // s_add_i32 s24, s24, -1
+	Append(body, Sopc(7, 24, Inline(0)));             // s_cmp_lg_u32 s24, 0
+	Sopp(body, 5, 0xfffcu);                           // s_cbranch_scc1 header
+	Exp(body, 12, 15, true, 13, 13, 13, 13);          // exp pos0 v13 done
+	Sopp(body, 1);                                    // s_endpgm
+	return body;
+}
+
 // v12 = float(v5), v13 = 0; each lane adds 1.0 to v13 until it reaches v12, leaving the loop once no lane is left;
 // `narrowed` runs after each iteration's narrowing. EXEC is restored and v<exported> is exported.
 Words LaneExitLoopBody(const Words& narrowed, uint32_t exported)
@@ -1622,6 +1710,7 @@ TEST(EmulatorNggFront, LoopsWithAUniformCounterOrALaneExitAreLaneLocal)
 			Check(front.lane_local, why);
 		};
 		prove(UniformLoopBody(), "every lane runs each iteration of a uniform loop");
+		prove(UniformConditionalBackEdgeBody(), "a uniform SCC back edge leaves with every lane");
 		// Every iteration runs a subset of the lanes that entered, so a VGPR defined before the loop stays defined.
 		prove(LaneExitLoopBody({}, 13u), "lanes leave the loop one by one");
 		std::_Exit(0);
