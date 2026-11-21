@@ -7866,6 +7866,20 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   transient and in a settled one. At the crash site the wash varies between captures at the same frame rate, with
   different framing, so it is not tied to one camera view. The 1x1 exposure chain (format 77, zero-filled) remains
   the unproven lead.
+- **The haze is the volumetric atmosphere chain (2026-11-21).** Same build, same route and the same local game patch
+  set, differing only in a patch that makes the guest turn its volumetric atmosphere off: with the chain off, Astro
+  and the crashed ship at the crash site show full contrast; with it on, the same view is washed white. The white
+  comes from the fog chain, not from the exposure chain or the tone map. Patched runs are not strict runs. Per frame
+  the chain dispatches a 30x17x1 pass that writes one 240x135x64 RGBA16F volume, a 30x17x8 pass that samples the
+  other (previous-frame) volume and rewrites the first in place, and a 1:1 copy into a third volume that a later
+  draw samples. The two 3D fog volumes ping-pong each frame.
+- **Excluded (2026-11-21): W address mode of the fog samplers.** Every sampler created for a 3D view in a strict
+  boot (logged once per sampler) gets the guest's CLAMP_Z: clamp-to-edge or clamp-to-border for the fog samplers,
+  repeat only where the guest asks for it. Scope: samplers created with the R-coordinate flag; a 3D view sampled
+  through a sampler created without it was not checked.
+- **Open (2026-11-21): the guest's non-tiled deferred-lighting renderer draws without direct sunlight.** A local
+  game patch selects it. With it on, the dunes show only ambient light (near black when the guest's GI is also
+  off); with it off, the same route shows sunlit dunes and normal shadows. Not localized.
 - **Per-lane proof for the split wave32 programs: none qualifies; parked (2026-11-19).** A temporary print ran the
   wave-width independence proof (the one that lets split wave64 programs run one guest lane per invocation without
   exchanges) on the 15 wave32 programs that use wave state on the dunes route. None passed: ten stop at the same
