@@ -864,7 +864,7 @@ ShaderStorageImagePlan ShaderPlanStorageImages(const ShaderCode& code, const Sha
 		const auto& inst = code.GetInstructions().At(index);
 		if (ShaderIsImageAtomic(inst.type) && !ShaderImageAtomicResourceSupported(code, index, *bind))
 		{
-			return reject("image atomic requires a proven 2D R32_UINT writable descriptor", -1, 0u, inst.pc);
+			return reject("image atomic requires a proven 1D or 2D R32_UINT writable descriptor", -1, 0u, inst.pc);
 		}
 		if (inst.type == ShaderInstructionType::ImageStoreMip && (has_array || has_volume))
 		{

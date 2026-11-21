@@ -2,6 +2,9 @@
 
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 
+#include "ShaderLaneFlow.h"
+
+#include <algorithm>
 #include <map>
 #include <utility>
 #include <vector>
@@ -71,7 +74,22 @@ bool Reads(const ShaderInstruction& instruction, int reg)
 {
 	for (int source = 0; source < instruction.src_num; ++source)
 	{
-		if (Covers(instruction.src[source], reg))
+		ShaderOperand operand = instruction.src[source];
+		// The parser gives every image_sample a three-word address range; the hardware reads only the words its DIM uses.
+		const bool exact_addresses =
+		    instruction.type == ShaderInstructionType::ImageSample || LaneFlow::IsLaneLocalImageRead(instruction.type);
+		if (source == 0 && exact_addresses && instruction.mimg_address_num == 0)
+		{
+			operand.size = std::min(operand.size, LaneFlow::ImageReadAddressCount(instruction));
+		}
+		if (Covers(operand, reg))
+		{
+			return true;
+		}
+	}
+	for (int address = 0; address < instruction.mimg_address_num; ++address)
+	{
+		if (Covers(instruction.mimg_address[address], reg))
 		{
 			return true;
 		}

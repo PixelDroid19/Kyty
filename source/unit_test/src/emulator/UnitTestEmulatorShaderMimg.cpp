@@ -2182,6 +2182,12 @@ TEST(EmulatorShaderMimg, PreservesAtomicDataSourceWithoutSamplerOperand)
 		    RequireMimgTail(ShaderImageAtomicSupported(nsa_inst) && nsa_inst.mimg_address_num == 2 && nsa_inst.src[0].size == 1 &&
 		                        nsa_inst.mimg_address[0] == TileVgpr(4) && nsa_inst.mimg_address[1] == TileVgpr(0x11),
 		                    "NSA atomic reads its coordinates from the address list");
+		    // DIM 1D: one address VGPR, X only.
+		    const auto line_code = ParseMimgTailInstruction(0x11u, 0u, 0u, 1u, ShaderType::Compute, 0u, 0u);
+		    const auto& line_inst = line_code.GetInstructions().At(0);
+		    RequireMimgTail(ShaderImageAtomicSupported(line_inst) && line_inst.mimg_dimension == 0u && line_inst.src[0].size == 1 &&
+		                        line_inst.src[0] == TileVgpr(4) && !line_inst.mimg_return_old_value,
+		                    "1D atomic reads X from one address VGPR");
 		    std::_Exit(0);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");

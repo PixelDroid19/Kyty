@@ -47,10 +47,10 @@ bool ShaderImageAtomicSupported(const ShaderInstruction& instruction)
 {
 	return ShaderIsImageAtomic(instruction.type) &&
 	       instruction.format == ShaderInstructionFormat::Vdata1Vaddr2StVsrc2Dmask1 && instruction.src_num == 3 &&
-	       instruction.mimg_dimension == 1u && instruction.mimg_dmask == 1u && !instruction.mimg_explicit_lod &&
+	       instruction.mimg_dimension <= 1u && instruction.mimg_dmask == 1u && !instruction.mimg_explicit_lod &&
 	       PlainRegister(instruction.dst, ShaderOperandType::Vgpr, 1, 256) &&
 	       (instruction.mimg_address_num == 0
-	            ? PlainRegister(instruction.src[0], ShaderOperandType::Vgpr, 2, 256)
+	            ? PlainRegister(instruction.src[0], ShaderOperandType::Vgpr, instruction.mimg_dimension == 0u ? 1 : 2, 256)
 	            : instruction.mimg_address_num == 2 && PlainRegister(instruction.src[0], ShaderOperandType::Vgpr, 1, 256) &&
 	                  PlainRegister(instruction.mimg_address[0], ShaderOperandType::Vgpr, 1, 256) &&
 	                  PlainRegister(instruction.mimg_address[1], ShaderOperandType::Vgpr, 1, 256)) &&
@@ -65,7 +65,8 @@ bool ShaderImageAtomicResourceSupported(const ShaderCode& code, uint32_t index, 
 	const int descriptor = ShaderFindImageStorageTextureDescriptor(code, index, bind, 0);
 	if (descriptor < 0) { return false; }
 	const auto& texture = bind.textures2D.desc[descriptor].texture;
-	return texture.Type() == 9u && texture.Format() == 20u;
+	// A 1D resource (type 8) is the one-row 2D image every 1D view resolves to.
+	return (texture.Type() == 8u || texture.Type() == 9u) && texture.Format() == 20u;
 }
 
 } // namespace Kyty::Libs::Graphics

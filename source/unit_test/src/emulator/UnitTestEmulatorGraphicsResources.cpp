@@ -526,6 +526,25 @@ TEST(EmulatorGraphicsResources, PreservesFloatStorageAndR32AtomicAliases)
 	    ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorGraphicsResources, OneDimensionalAtomicAddressesRowZeroOfOneDimensionalResource)
+{
+	ASSERT_EXIT(
+	    {
+		    InitializeImageModuleTest();
+		    auto fixture = MakeAtomicImageModule(false, 20u);
+		    auto& atomic = fixture.code.GetInstructions()[2];
+		    atomic.mimg_dimension = 0;
+		    atomic.src[0].size = 1;
+		    fixture.input.bind.textures2D.desc[2].texture.fields[3] = 8u << 28u;
+		    const auto source = EmitValidatedImageModule(fixture);
+		    RequireImageModule(source.ContainsStr("%image_atomic_y_2 = OpCopyObject %uint %uint_0") &&
+		                           !source.ContainsStr("%image_atomic_y_f_2") && source.ContainsStr("OpAtomicIAdd %uint"),
+		                       "1D atomic on a 1D resource updates row 0 at X");
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorGraphicsResources, ReusesUintSampledTypesForLoadsAndQueriesAcrossShapes)
 {
 	ASSERT_EXIT(

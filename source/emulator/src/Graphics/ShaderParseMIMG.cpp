@@ -205,11 +205,12 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x18:
 		case 0x19:
 		case 0x1A:
-			EXIT_NOT_IMPLEMENTED(!next_gen || dim != 1u || dmask != 1u || nsa > 1u || (buffer[1] & 0x80000000u) != 0);
+			// DIM 1D (0) supplies X only, 2D (1) supplies X and Y; a 1D resource is a one-row 2D image.
+			EXIT_NOT_IMPLEMENTED(!next_gen || dim > 1u || dmask != 1u || nsa > dim || (buffer[1] & 0x80000000u) != 0);
 			inst.type                  = image_atomic;
 			inst.format                = ShaderInstructionFormat::Vdata1Vaddr2StVsrc2Dmask1;
 			inst.dst.size              = 1;
-			inst.src[0].size           = nsa != 0u ? 1 : 2;
+			inst.src[0].size           = nsa != 0u || dim == 0u ? 1 : 2;
 			inst.src[1].size           = 8;
 			inst.src[2]                = inst.dst;
 			inst.src_num               = 3;
