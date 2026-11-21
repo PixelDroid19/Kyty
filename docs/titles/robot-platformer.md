@@ -8981,9 +8981,13 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
     - Fight baseline after the shader-identity fix (`fb1`, `iperf1`, 2026-11-21, measured). Windows of 10 s aligned
       to the hub event 6->7 show that runs of the same pad script reach different stretches: `ck1` holds about
       570 draws a frame at 27.6 ms of render engine a frame (33-35 fps for 80 s), `hs3` about 750 draws at
-      32.7-33.5 ms (28.4-29.3 fps), `fb1` 610-660 draws at 34.3 ms. The 30 fps gap is therefore about 3-4 ms of
-      GPU work in the heavier stretches, not a host effect: a per-client sampler of the DRM render cycles gave
-      every other client 1 % or less of the engine during the fight. `fb1` overlapped a foreign compiler build
+      32.7-33.5 ms (28.4-29.3 fps), `fb1` 610-660 draws at 34.3 ms. The route driver replayed each run
+      differently, so these are not one scene: in `fb1` and `hs3` the cinematic opened on its own and the driver
+      shifted the inputs by -60 and -65 s (51 and 73 recorded inputs dropped), `ck1` skipped it from a probe at
+      -22 s, and `iperf1` found no cinematic (one `probe menu simple`). The flat draw counts of `hs3` (748-766 for
+      80 s) suggest a static view. No window was checked with a capture, so the difference is not attributed to
+      the GPU or to the scene. A per-client sampler of the DRM render cycles gave every other client 1 % or less
+      of the engine during these seconds. `fb1` overlapped a foreign compiler build
       (144-160 s and from 232 s, the build at up to 10 cores, frames at 6-23 fps), so its dips are not counted.
       Command time per draw at matched draw bins stays in the range of the earlier runs (`iperf1` 72.8 and 47.8
       us at about 300 and 600 draws a frame, against 78.3 and 43.5 us in `hs3` and 78.8 and 51.3 us in `ck1`;
