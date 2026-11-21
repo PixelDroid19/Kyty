@@ -181,7 +181,8 @@ cache. The synchronous Vulkan-cache checkpoint was also measured directly:
 0.081 ms cold and 0.341 ms warm in this pair, too small to justify another
 writer solely for frame-time improvement. With a 76.5 MB blob on a slow cache volume
 the first checkpoint of a session took 271-319 ms on the thread that missed
-(2026-11-21, `docs/titles/robot-platformer.md`), dominated by the file write.
+(2026-11-21, `docs/titles/robot-platformer.md`), dominated by the file write;
+it now runs off the recording thread (05afcbc25).
 
 ### Redundant hashes on GPU-owned surfaces
 

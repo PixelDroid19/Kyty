@@ -8713,14 +8713,21 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       which is the proactive path (`vm.compaction_proactiveness`), not reclaim; emulator page faults (about 700
       a second), IO (about 1 MB a second read) and Kyty allocations (about 200-240 MB a second, 120-150 creates)
       were at their quiet level, so no emulator trigger was seen. Not tested with proactive compaction off.
-    - Defect, not fixed: the first Vulkan pipeline-cache checkpoint of a session runs on the thread that missed
+    - Fixed 05afcbc25: the first Vulkan pipeline-cache checkpoint of a session runs on the thread that missed
       (`PipelineCache::SaveDriverCacheIfDue`, `GraphicsRenderPipeline.cpp:1440`). It serializes and writes the
       whole blob even when one pipeline was added; at 76.5 MB on a slow cache volume it took 290 ms (`hs3` 185 s,
       inside a 425 ms frame that also held 5 pipeline misses: 57 ms in pipeline creation, 23 ms in one SPIR-V
       compile). The same checkpoint took 271 ms at 145 s in `head248` and 319 ms at 117 s in `hs1`. Writing the
       same 76.5 MB took about 345 ms on that volume and 13 ms on a local one, so the write dominates there;
-      serialization and hashing on a local volume were not measured. Suggested direction: keep the locked read
-      on the caller and hand the bytes to a writer thread.
+      serialization and hashing on a local volume were not measured. The checkpoint now runs as one background
+      task; the cache lock covers only the driver read, and the next lookup collects the outcome for the write
+      budget and dirty state (a failed write marks the cache dirty again). Verified in run `ck1` (same route):
+      checkpoints of 78.2 MB took 335 and 375 ms in the background, and the 246 s second that held one had no
+      frame over 50 ms with a recording-thread maximum of 14 ms. The 540 ms frame at 215 s in that run is two
+      real pipeline misses (491 ms: SPIR-V source 81, compile 128, pipeline creation 278), not the checkpoint.
+      That run's fight drew about 560 draws a frame and flipped 35 a second, so its frame rate is not comparable
+      with `hs3`. `PPSA17221 - Minecraft` reached the world at 90 s with a clean capture and rewrote its cache;
+      326 graphics-state and pipeline tests and the three CTest gates passed.
     - Excluded: compute queues on the compute engine (`ccs1`, pricing probe, not a valid configuration). The
       compute queues were moved to the compute-only family by skipping the depth copy-on-compute check for D16
       and D32 (the record "Arc compute engine not usable for the compute queues" explains why the check closes
