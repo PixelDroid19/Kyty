@@ -2868,6 +2868,15 @@ strict 60 fps-limited runs, `4305c2080` plus a temporary translator change
     as the offline record of the dune GPU cost predicted from its latency.
     Branching per lane on EXEC, to fold the guards that remain inside
     divergent regions, is not pursued for it.
+  - Re-tested on 2026-11-20 through the driver instead of the translator:
+    Mesa 26.3 skips the 16-lane compile of a fragment program whose quick
+    register-pressure estimate exceeds its threshold, which is why the large
+    pixel programs of the fight compile at SIMD8 only. With the host
+    environment variable that lets ANV try the wider widths anyway, the fight
+    held the same frame rate, and `8ca0b9ff` took 40 us per draw against
+    36 us without it (different scenes, 41 against 107 draws per frame).
+    Cold compiles with that variable stall the boot at about 66 s. Width
+    stays excluded as a lever for this program.
 
 ## Robot platformer: constant loads as uniform buffers excluded, and a guest fault at hub start (2026-10-30)
 
@@ -6739,7 +6748,8 @@ Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whos
   (`55ce09b9`, `adbba919`); what fills the difference is not known.
 - **Open lead, parts with no live lane.** They could leave early, but the guest decides the allocation after its own
   test, so the work before that point stays. At best about 4 ms of the 34 ms per frame, and it changes the program where
-  the hub GPU hang stops. Not built.
+  the hub GPU hang stops. Not built. Superseded bound (2026-11-20): skipping every particle draw in the fight (`skipp2`)
+  saves only 2-4 ms of GPU work for the whole particle path, so this exit is worth well under that; dropped.
 - **Resolved: the "two submit modes" are one stall inside the measured window.** Submits from the command processor
   stay at 31-40 per frame in 24 of the 26 kept 14 s windows (25 with the idle-GPU rule off, 79 in the profile training
   build); what varies is the utility queue, 1 to 94 submits per frame.
@@ -8392,6 +8402,11 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       prepared. The fronts stop per second on
       `R_CONTEXT_STATE` (535), `ACQUIRE_MEM` (422), `RELEASE_MEM` (338), `EVENT_WRITE` (338) and `SET_BASE` (28).
       Preparing those draws as well would save at most about 1-1.5 ms per frame.
+    - Indexed geometry-pass draws are not the gap (2026-11-21, `geoprep2`, temporary per-kind counters, route
+      driven to the fight). Of 2.0M draws reaching the command thread: indexed 907,801 prepared and 150,960 not;
+      indexed geometry passes only 5,451, none prepared; auto geometry passes 699,564 prepared and 100,559 not; other
+      auto draws 135,665, none prepared. Letting the indexed path take prepared geometry-pass inputs (as the auto
+      path does) prepared none of them in `geoprep1`/`geoprep2` and was reverted.
     - Causal check with the change (`cpspin1`): a temporary busy wait of 6 us after every draw on the command thread,
       on in alternate 4 s wall-clock blocks, so both arms share the scene. Seconds that cross a block edge are left
       out.
@@ -8585,6 +8600,295 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       many binds took a twin or confirm that a twin's kernel differed, so the run only says that forcing 16 on
       every pixel pipeline, spills included, shows no gain; the lever is dropped because it cannot be requested
       in spec on this driver.
+    - Remaining command-thread levers in the fight, priced (2026-11-20). Fight seconds below 29.5 fps in
+      `fps16fix` (old route driver, warm cache, no temporary profiler, 6->7 +30..229 s; GPU-bound means render
+      busy at least 90 %, rows with an invalid busy counter dropped): 79 bound by the GPU
+      (27.9 fps, render busy 95 %, 619 draws and 25.7 ms of command time a frame) and 44 bound by the command
+      thread (21.1 fps, 71 %, 1,023 draws, 45.8 ms of command time a frame against about 33.6 ms of GPU work).
+      Bringing the second kind to the GPU floor needs about 12 ms a frame, about 11 us per draw.
+      A call-graph profile of the command thread (`profcg3`, 30 s from 40 s after 6->7, 24.6 fps, 703 draws a
+      frame), samples grouped by the innermost Kyty frame, is flat: the per-draw usage parse 8.8 % (excluded
+      twice as exact memo and per-shader recipe, `docs/bringup/cross-title.md` and
+      `docs/bringup/cp-draw-plan.md`; the recipe was reopened on 2026-11-19 for the dynamically loaded V#
+      words, see "Where the per-draw resource parse goes" above, and is not built), the label write-back page compare 4.4 % (`memcmp` of pages the GPU flagged
+      written, against the snapshot), statistics 3.4 % (switching them off was not detected,
+      `docs/bringup/parallel-recording-design.md`), the end-of-pipe clock mark 3.3 % (1.7 % in the driver's
+      timestamp read), locks 5 % spread over many callers. Inside the auto-draw path (30.2 %): the pixel input
+      analysis of draws the front did not prepare 5.9 % (the front's take rate was already priced at 1-1.5 ms a
+      frame), and the pixel shader id 3.4 %, built on the command thread for every geometry-pass draw because
+      the front builds ids only without a geometry pass. The pass changes only the vertex inputs, so the front
+      could also build the pixel id there: about 0.7 us per draw. What is open and in-contract sums to about
+      2 us per draw against the 11 us needed.
+    - Per-draw decision reuse on particle draws, counted (`reuse1`, temporary counter, 187 fight seconds,
+      about 1,680 geometry-pass auto draws a second, each compared with the previous one): same vertex and
+      pixel pair 92 %, same pipeline 86 %, same framebuffer 93 %, but the pixel and the vertex user SGPRs
+      repeat in 0 % of them, so reusing the input analysis would need the excluded per-shader recipe. Not built.
+    - Built: the draw front now also builds the pixel shader id of a geometry-pass auto draw (the vertex id
+      stays on the command thread, since the pass writes the vertex inputs). Check (`psid1`, temporary,
+      the id rebuilt on the command thread and compared): 491,498 draws, 0 differences; a forged id every
+      1,000 draws gave exactly the 492 expected. Speed (`psidab1`, old and new in alternate 4 s blocks of
+      one run): seconds at 600 or more draws a frame, 48.4 +- 3.0 against 50.6 +- 2.5 us per draw of
+      command time (36.3 against 38.2 ms a frame, 23.9 against 23.8 fps, 20 seconds per arm); other seconds
+      equal. The direction matches the profile share, but the gain is inside the noise.
+    - Excluded: the present path delaying flips in the GPU-bound seconds. In the same 79 seconds the guest waits
+      0.09 ms a frame for flip completion and the present takes 0.03 ms a frame (0.30 and 0.04 ms in the
+      command-bound seconds).
+    - GPU side of the fight, priced (2026-11-20). In the GPU-bound seconds the GPU needs about 34 ms a frame, so
+      steady 30 fps would need about 2.5 ms of GPU work cut. The lighting kernel `0x3666fa39` costs 5.7-5.9 ms a
+      frame (8 lanes, 272:928 spills; leaving it out saves about 5 ms, `skipcs1`). Levers on it measured and
+      excluded or already taken: lane width (16 to 8 taken, 32 renders wrong), rendezvous, relaxed loads,
+      whole-wave masks, per-invocation cache (5.77 to 10.76 ms, reverted), first-lane node broadcast, the
+      address-table lookup (time follows the driver's spill placement, and the per-invocation memo gave no
+      frame-rate change; records of 2026-11-14). The split of recorded dispatches before a draw costs about 2.2
+      ms a frame of gaps, but halving the gap per buffer with `reemit` left the frame rate unchanged and removing
+      the early-submit floor (`greedy1`) gained nothing. Argued only, not measured: dropping LDS ordering
+      barriers (about 0.5 ms) and the compute-after-draw transition before the kernel.
+    - Excluded: compute queues on the compute engine (`ccs1`, pricing probe, not a valid configuration). The
+      compute queues were moved to the compute-only family by skipping the depth copy-on-compute check for D16
+      and D32 (the record "Arc compute engine not usable for the compute queues" explains why the check closes
+      the gate). Over the fight window the compute engine ran 4.6 ms a frame (`ccs` 13 %) with no device loss,
+      against `fps16fix` (one run per arm, same route, no probe; its window holds the pause storm noted
+      below): 28.6 against 27.6 fps, render engine 83 %
+      against 87 % busy. Render plus compute engine stayed at about 96 %, so the moved work ran mostly in series
+      with the render queue instead of beside it. Against the probe runs `psid1` and `reuse1` (568-608 draws a
+      frame, matched), the render engine dropped only about 1.5-2 ms a frame, the flip wait in the command-bound
+      seconds rose from 0.1-0.2 to 2.7 ms a frame, and the seconds at 30 fps or more ran at 32.5 against
+      34.1-34.2 fps. No frame-rate gain; rendering correctness under the probe was not checked.
+    - Not priced on the GPU side: dropping LDS ordering barriers (argued about 0.5 ms) and the compute-after-draw
+      transition before the lighting kernel. In the 600-800 draw seconds leaving the kernel out (`skipcs1`)
+      saved 5.3 ms of GPU work for 25.5 -> 26.8 fps.
+    - The window "+30..229 s after the 6->7 event" is not one scene. `fps16fix` opened the pause menu 19 times
+      between 142.8 and 175.4 s (`ui_pause_simple`, the driver's pause probe); those seconds ran 1,600-1,900
+      draws a frame at 11-14 fps and dominated its command-bound class. The other runs have no such storm.
+      Earlier figures in this record that take `fps16fix` over that window (44 command-bound seconds, 936
+      draws a frame, 12 ms a frame needed) mix the pause menu into the fight.
+    - Regimes re-cut on run time 180-325 s (fight band, no pause storm; existing counters; scripts
+      `flipwait.py`, `regdiff.py` in the session scratchpad, not kept). Sub-30 command-bound seconds:
+      `fps16fix` 20 at 23.8 fps, `psid1` 33 at 21.9, `reuse1` 48 at 23.4, `psetup2` 32 at 21.1. Sub-30
+      GPU-bound seconds: 67, 35, 29 and 31. In `psid1` both classes carry the same work per frame (681 against
+      706 draws, 83 dispatches, 3.4 creates, 27 MB hashed) but the command thread runs 38.4 against 27.0 ms a
+      frame: draw processing +7.8 ms (texture descriptors +3.0, state setup +2.0), uploads +2.0, dispatches
+      +1.1, render-lock wait 0.09 -> 0.48 ms, while fence waits fall by 2.9 ms. `reuse1` gives +9.1 ms on
+      fewer draws (620 against 716), spread over state setup, dispatches and the render lock. This is the
+      pattern of the dunes record of 2026-11-15 ("Command work per draw is not constant": every stage rises in
+      the costly seconds; clock, busy SMT sibling and migrations excluded there), now seen in the fight. The
+      lever is whatever makes the same work 35-40 % slower in those seconds; it is not identified.
+    - Pipeline setup inside the window (`psetup2`, temporary timers, removed): 2.2 ms a frame in the
+      command-bound seconds; the pipeline lookup 2.1 us per indexed draw (1.0 ms a frame), the geometry pass
+      5.6 us per auto draw that records one (0.5 ms), the framebuffer lookup 0.2-0.7 us, no index scans.
+      Pipeline misses and SPIR-V compiles are 0.3-0.5 ms a frame. No single step there is a lever.
+    - Host memory compaction slows the command thread (2026-11-20, `sched1`, `host1`, `host2`; external
+      sampler of `/proc` schedstat, stat, vmstat and interrupts, no emulator change). Runqueue wait of the
+      command thread stays 5-9 ms a second in every class, so waiting for a core is excluded (only that).
+      Host kernel time rises from 0.5 to 1.2 s a second in the command-bound seconds of `sched1`. In
+      `host1` and `host2` the seconds where `kcompactd0` uses more than 100 ms a second carry 0.3-0.9
+      million TLB shootdown interrupts a second (2.4 thousand otherwise; 0.2 thousand on the idle host,
+      where compaction does not run). Pairing the two runs by seconds since the 6->7 event, on seconds
+      whose draws differ by less than 5 %: where only one run compacts, the command thread takes 28.8
+      against 23.4 ms a frame (17 pairs); where neither does, the runs differ by 0.8 ms (71 pairs). The
+      thread's kernel time and faults do not change (about 50 ms a second, 400 minor faults a second);
+      it is user time that grows. Disabling transparent huge pages for the emulator (`host2`, process
+      scoped, confirmed `THP_enabled: 0`) leaves compaction in place, so the emulator's huge pages are
+      not the trigger. Ceiling: compaction seconds were 14-26 of 140 and the rest averaged 28.5-29.2 fps,
+      so removing it alone does not reach a stable 30 on these runs. Fps comparisons on this host need
+      compaction sampled: a single pair such as `reuse1` can carry it. `host3` (vmstat each second, whole
+      run): in the 90 compaction seconds kswapd wakes compaction (`compact_daemon_wake` 2.1 against 0.4 a
+      second, `kswapd_low_wmark_hit_quickly` 6.9 against 0.4, direct-reclaim stalls 11 against 0.6), about
+      27 thousand pages migrate a second, and the shootdowns land on every CPU (27-58 thousand a second each).
+      Free memory runs 0.25-6 GB with 19 GB of page cache and 13 GB of guest memory mapped (7.6 GB
+      resident) on a 31 GB host. So it is reclaim for higher-order allocations, not proactive compaction;
+      which allocation asks for them is not named (the agent's allocation-byte and create counters do not
+      move with it, guest file reads partly do, see `vkc1`/`vkc2` below, and naming the requester needs
+      kernel tracing this host does not allow). In
+      `host3` the busiest emulator thread takes 1,765 minor faults and 128 ms of kernel time a second while
+      compaction runs, against 493 and 46 otherwise (whole run after 60 s, 75 against 176 seconds), which
+      fits its threads faulting on migrated pages; which pages migrate is not observed (the emulator holds
+      only 1.8-2.2 GB of private anonymous memory beside the 7.5-7.7 GB shared guest backing). On the `host3` path (no pause
+      probes) 24 of the 33 command-bound fight seconds coincide with compaction (command thread 39.6 ms a
+      frame at 674 draws, against 25.4 ms at 651 draws in GPU-bound seconds without it); the other 9 run
+      about 980 draws a frame. So on this host compaction accounts for most of the command-bound class; the
+      +5.4 ms of the paired estimate above is its lower figure. `host4` (same path, one cinematics probe)
+      shows that free memory is not the condition: compaction comes in bursts through the whole fight with
+      2-4 GB free, 80 of 137 fight seconds are command-bound and the fight averages 26.1 fps (93 seconds
+      below 29.5). The emulator's GPU memory stays flat through it (about 10 GB in system-memory buffer
+      objects within 100 MB, plus 9 GB of device memory and 7.9 GB of shared guest memory resident).
+      `vkc1`/`vkc2` (external `vkAllocateMemory`/`vkFreeMemory` counter preloaded, open-file and
+      free-page-order samplers; diagnostic runs, not fps runs) refine this. Vulkan allocations do not lead
+      compaction: late bursts of 48 thousand migrations a second come with no reads and at most 128 MiB
+      allocated. Emulator `read()` bytes (`rchar`, any file; the title, the shader cache and the evidence
+      share one FUSE NTFS mount, and the 10 Hz open-file sampler missed most reads, so files are not
+      named) partly do: every second above 50 MB a second is followed by a heavy compaction second within
+      8 s (1.00 in `host3` and `host4`, 0.83 in `vkc1`; circular-shift null median 0.44-0.48, 1-3 % of
+      shifts reach the observed value), but only 26-67 % of heavy seconds have such a read before them, so
+      reads are one trigger and not the only one. The 10 GB of system buffer objects is the guest memory
+      itself: 146 windows of 64 MiB exported from the shared guest backing as dma-bufs (`ImportWindow`),
+      constant at 9.9-10.1 GB from 62 s on while migrations go from 46 thousand a second to none, so the
+      windows are not the trigger. Of the 12-14 GB the host reports as cached, 9 GB is that shared memory,
+      so the reclaimable cache is 3-5 GB. Free blocks of order 9 and 10 stay at zero both while compaction
+      runs and while it does not, so their absence alone does not start it. `vkc2` took a pause detour
+      (100 s at the 60 fps limit) and then had no compaction from 130 s on; its 74 slow seconds after that
+      still ran 22.6 fps command-bound (37 s, 666 draws a frame) and 21.7 fps GPU-bound (37 s, 652
+      draws), close to `host4` command-bound seconds with compaction (21.2 fps at 616 draws). So on these
+      runs compaction is not what keeps the late fight under 30; the late fight is slow without it. Lead
+      not tested: requesting huge shared pages for the guest backing (fewer, larger folios to export and
+      migrate) changes guest memory for every title and needs an A/B under a fixed read injection.
+    - Particle draws late in a profiled run, lead only (`lateprof1`, 2026-11-20, per-pass GPU profile,
+      not a baseline; five `probe menu simple` probes like `vkc1`). From about 120 s after the 6->7 event
+      the particle geometry program `0xf4cfb9a5` went from 63-70 calls a frame (x workgroup count 128,
+      3.0-3.6 ms stamped) to 1,150 calls (x count 1, 52.3-53.5 ms stamped) and stayed there for 160 s,
+      with 1,524 draws a frame against 595 earlier and the frame held at 20.0-20.4 fps. The stamped
+      times overlap (92 ms stamped in a 50 ms frame, render engine under 90 % busy), so they are not GPU
+      cost. What the run shows is command-side: 44.7 ms of command processor a frame at 1,524 draws,
+      22.6 us a draw in the draw processor (resource binding 8.6, texture descriptors 4.6, pipeline
+      setup 3.5). Geometry passes are already joined: 6-7 segment fills a frame both at 77 and at 1,162
+      geometry calls, render-pass barriers about 0.1 ms a frame. Normal fight seconds rarely reach this
+      draw count: 15 of about 1,700 binned seconds exceed 1,400 draws. The flat 1,150 may be a full trail
+      pool; trail retirement is not examined here.
+    - Fight seconds binned by draws a frame (2026-11-20, eight unprofiled runs on the same binary and
+      pad script: `host1`-`host4`, `vkc1`, `vkc2`, `sched1`, `fps16fix`; seconds after 100 s with at least
+      five flips; render-engine busy time per flip from the DRM counters; the agent's command-processor
+      timer per flip). Binning by draws instead of time removes the path differences between runs.
+
+      | draws a frame | seconds | fps | under 29.5 | command ms/frame | render engine ms/frame | draw processor ms/frame |
+      | --- | --- | --- | --- | --- | --- | --- |
+      | 200-399 | 206 | 32.8 | 36 | 25.4 | 26.2 | 11.6 |
+      | 400-599 | 745 | 29.7 | 336 | 25.2 | 31.0 | 16.1 |
+      | 600-799 | 373 | 24.0 | 354 | 35.3 | 37.3 | 21.5 |
+      | 800-999 | 121 | 20.7 | 121 | 42.7 | 41.1 | 26.0 |
+      | 1,000-1,399 | 45 | 20.1 | 45 | 41.7 | 38.9 | 31.4 |
+
+      Every second above 600 draws is under 29.5 fps. The command column is the agent's run timer, which
+      includes its waits, and these bins mix fight seconds with other scenes and with the driver's probe
+      windows, so the table does not say that both sides exceed the frame. Fight seconds only (after the
+      6-to-7 transition, probe windows masked, host sampler joined): at 600-999 draws the command thread
+      uses 27.7-30.2 ms of CPU a frame (running 60-65 % of the time, sleeping or waiting the rest), its
+      waits are 7-9 ms, and the render engine is busy 38.2-42.9 ms of p50 frames of 42.1-47.8 ms, about
+      90 %. At 400-599 draws the thread uses 22.5 ms and the render engine 31.8 ms of a 34.6 ms p50 frame.
+      So in the slow fight seconds the render engine is the nearer limit and the command thread is not
+      saturated. Render passes are not broken per draw there: 73-76 begins a frame, continuations about
+      equal to draws. The render engine grows about 30 us for each added draw across these bins, but
+      the bins mix particle bursts with seconds that are heavy in scene draws: in `lateprof1` frames at
+      106-126 s the GPU sum rises from 30.5-33.0 ms at 401-498 draws to 40-42 ms at 744-811 draws while
+      the particle geometry stays at 27-56 calls and 2.4-3.8 ms, and `skipp2` bounds the whole particle
+      path at 3-4.4 ms of engine time.
+    - Vertex reuse of the five-target pass, lead only (`vreuse1`, temporary CPU count over the guest indexes of
+      direct indexed triangle-list draws, instances not multiplied, removed). The count slowed the run to about 2
+      fps from 140 s (exit 137), so the 217-309 s stretch is not shown to be the fight; over it, 101 M triangles of
+      `ps 0x6bcfb82d` had 0.67 unique vertices a triangle and 0.75 misses a triangle in a 128-entry FIFO (the
+      16- and 32-entry columns of the counter were not real caches of that size). Against the 0.91-0.98
+      invocations a primitive at rock 2 this suggests reuse is lost, but any gain needs reordering guest
+      indexes, which changes primitive order; no lever taken.
+    - Runs on the same binary and pad script do not take the same path: `host1` and `host2` logged 19
+      `probe menu simple` pause-menu probes each, while `sched1`, `psid1`, `psetup2` and `host3` logged one
+      `probe menu cinematics` and no simple probe (play base +0.9 to +18.6 s, not ordered with the GPU time;
+      `host3` without compaction runs 27.7 ms of render engine a frame). `host1`/`host2` spend 74 of 140
+      fight seconds GPU-bound at 33 ms of render engine a frame against 17-31 seconds and 27.8 ms in the
+      earlier runs, on fewer draws (513-530 against 574). Regime mixes are compared only between runs whose
+      driver logs match.
+    - Driver GPU timing of the fight (2026-11-21, `imeas2` batch mode and `imeas3` render-target mode of the
+      Mesa `INTEL_MEASURE` option, enabled from boot; enabling it mid-run through its control fifo crashed
+      the process in the driver, `imeas1`). Command buffers run fully serialized: their busy union equals their
+      summed time, 38-55 of them a frame. At 570 draws a frame the GPU is busy 25.3 ms and idle 4.5 ms of a
+      33.6 fps frame (command thread 23.6 ms); at 836-874 draws it is busy 36.5-38.5 ms and idle 7.6-8.6 ms at
+      22-23 fps, and the 1,044-1,320 draw stretch near the end is busy 56 ms at 14-16 fps. By event type at
+      250-300 s of `imeas3` (31.2 ms a frame): indexed draws 14.0 ms, compute 11.9 ms (one compute program
+      5.7 ms, two more 1.9 and 1.7 ms), the five-target pass 4.4 ms, draws without a pixel stage 4.8 ms, copies
+      0.27 ms and clears about 0.35 ms. Batch mode labels a buffer by its first event, so buffers that begin
+      with a copy or a clear are not copy or clear cost.
+    - Excluded: dropping vertex parameter exports when a draw has no pixel stage (`imeas4`, `imeas5`, temporary
+      code, reverted). ANV links shader stages from the fragment stage back and leaves vertex outputs in place
+      when there is none, which suggested waste in the 4.8 ms above. Over the whole route only six vertex
+      programs draw without a pixel stage; none has a parameter export instruction, and none is a geometry pull
+      stage. They declare one parameter from the export count and never write it, so their cost is position,
+      rasterization and depth. The lower time without a pixel stage in `imeas4` (2.0-2.1 ms against 4.7-5.0 ms)
+      came from a different path through the scene: the run followed `imeas2` at 568 draws and 33 fps.
+    - Driver event coverage against the engine counters (2026-11-21, `imeas3` and `imeas5` rt timing joined to
+      the agent samples by matching frames a second). In the GPU-bound fight seconds the timed events cover
+      86-88 % of wall time and the DRM render counters report 91-95 % busy, so the engine is idle about 5-8 %
+      of the time (about 2 ms a frame); the 6-7 points between the two are time outside the timed events,
+      such as command buffer starts and ends. The timed work stays at 29-33 ms a frame across draw-count bins.
+      The gaps between command buffers of 300 us or more fall inside a frame, not at its end (0.1-0.3 ms a
+      frame of them across a frame change). Their sources match `gapsite1`, so the submit-timing levers stay
+      excluded (`greedy1`).
+    - The heavy seconds are bound by the command thread (`imeas3` 180-200 s, about 1,040 draws a frame, 20
+      fps): DRM busy 54-68 % and timed work 30 ms in a 49.6 ms frame. About 10 command buffers a frame carry
+      only one 18 us fill, after a mean gap of 1.07 ms. The most common sequence (6.4 a frame) is a lone
+      draw, the gap, the fill, then a lone dispatch of the geometry program that grows with draw count. The
+      GPU waits there for the command thread to record the next particle segment, so in these seconds only
+      command-thread work moves the frame.
+    - Particle draw stages priced (`geoarm1`, 2026-11-21, existing temporary counters on vertex program
+      `0xf4cfb9a5` in count-only mode, 20 s windows after 140 s, about 975 draws a frame of which 620-665
+      particle draws, 23-26.6 fps, 32.7-39.3 ms of command time a frame). The pipeline setup stage of an auto
+      draw contains the geometry pass recording, which explains its higher per-draw figure on particle
+      draws: the pass costs 3.2-3.5 us per particle draw (2.0-2.2 ms a frame). The submits forced by a
+      dispatch before a draw run 19.4-20.7 a frame at 40-42 us each (0.8 ms a frame), idle early submits
+      0.2-0.36 ms and publications 0.7-0.8 ms a frame. Pipeline setup and command emission of all draws
+      together take 6.5-7.0 ms a frame. No stage of a particle draw is far above an ordinary draw, so a
+      repeat guard on pipeline or emission has a ceiling of a few milliseconds; the command time is the
+      ordinary per-draw cost times the particle draw count.
+    - Replaying more pixel-stage texture binds (`sidework1`-`sidework7`, `swcheck1`-`swcheck2`, `swab1`, 2026-11-21, temporary counters
+      per side-work site and replay miss reason, in-run A/B alternating every 30 s). On the 1,125-1,730 draws a frame
+      seconds the reuse is refused for about 92 % of pixel-stage binds because every gen5 2D array sampled from layer
+      0 counts as side work for the storage prefix check (4.9 us a bind, about 3.7 ms a frame). That check does copy
+      (1,627-1,773 prefix copies a run, all during boot), so a reuse needs a storage-write generation in its key.
+      With that key the same binds are refused at the next site instead: the depth slice array
+      (`GraphicsRenderDepthSliceArray`) in one scene, the storage CPU-write merge in another; both record nothing
+      while their last read holds and were made repeatable on reuse. With all three relaxed (`sidework7`, burst
+      seconds 140-178 s, 938 against 963 draws a frame) the reuse hits rose from about 500 to 20,000 a second,
+      covering the formerly refused binds; binding fell from 8.6 to 6.5 ms and command time from 42.9 to 40.4 ms a
+      frame (20.2 against 20.9 fps; the relaxed arm covers 12 s only). In the lighter 510-640 draws a frame
+      seconds the A/B arms did not match. Binds whose cached-use capture is incomplete (`uses != creates`: a
+      create that was not a cached reuse, or more than 32 creates) cost 21-24 us each and 2-3 ms a frame and are
+      not replayable; what they resolve is not yet classified. Ceiling of the lever at a 100 % hit rate: about
+      3.8 ms of a 54 ms burst frame. Equality check (`swcheck2`, 1,500 draws a frame): every reuse also ran the
+      full path and compared SGPR words, images and views, and whether the full path still found side work to
+      record; 4.49 million reuses, no difference and no skipped work, with 1,727 prefix copies in the run. The
+      positive control (one in 50 entries of another fingerprint forced through) reported 136 of 136 forced
+      reuses as different. In-run A/B alternating every 10 s (`swab1`, 170-300 s, 1,231 against 1,229 draws a
+      frame): 22.83 to 24.04 fps, binding 11.05 to 8.47 ms and command time 37.2 to 35.6 ms a frame. The
+      `PPSA17221 - Minecraft` world on the same build reached play and held 35.5 fps at 5,447 draws a frame
+      (`mc-swreuse1`; no baseline at a matching draw count).
+    - Deferred command recording excluded as a lever (`rs1`, `nh1`, `sc1`-`sc3`, `mc-sc1`, 2026-11-21, temporary
+      per-second counters around the deferred-list replay and the replay worker, in-run A/B in alternating wall-clock
+      blocks). The binds and draws the command thread encodes cost 5-11 ms a second to record when it replays them
+      itself and 8-20 ms a second on the replay worker, about 0.3 ms a frame either way, so command emission
+      (3.2 us a draw in the bursts) is not driver recording. Keeping every encoded command on the command thread
+      (`nh1`, 2,131 draws a frame, 85 and 76 seconds per arm) moved draw processing from 19.97 to 19.07 us a draw and
+      17.0 to 17.4 fps. The worker's poll read the clock on every pause (about 11 % of all profile samples were its
+      clock reads). Reading the clock every 16 pauses instead (`sc3`, light scene, about 470 draws a frame, one pair)
+      gave about 4-5 % less command time a draw; fps and the bursts are not measured with it. In
+      `PPSA17221 - Minecraft` (`mc-sc1`, 5,500 draws a frame) the two arms ran 4.67 against 4.70 us a draw.
+    - Completion write-back on the draw ring (`cg1`, call-stack profile, light scene): label completion and its
+      page compare and copy (`LabelManager::CompleteSubmission`, `GpuWritebackPageCache::CopyChangedPages`, most of
+      the `memcmp` samples) hold at least 11 % of the draw ring's samples; the agent's write-back timer gives
+      1.0-1.4 ms a frame. Mutex lock and unlock (about 7 % of the thread) are spread over the memory-object
+      lookups of each bind, with no caller above 0.4 % of all samples. Call stacks need `perf record
+      --user-callchains --call-graph dwarf` on this host; plain `-g` is refused.
+    - Graphics label waits on compute queue 7, passed on the device (2026-11-21, built). In the heavy seconds the
+      graphics command thread suspended on label waits whose producer was a later recording on compute queue 7,
+      not a guest CPU write. Split of 647 such waits (`lw5`, temporary per-submission timestamps), mean 5.9 ms
+      each: the compute queue parked on a graphics label 0.7 ms, compute recording 1.7 ms, the compute buffer
+      behind earlier graphics buffers on the shared device queue 0.7 ms, compute GPU time 1.9 ms, tail 0.7 ms.
+      Since every Kyty queue on this host shares one device queue, the compute-only family would remove only the
+      0.7 ms behind graphics, and running there was already excluded (`ccs1` above). Built instead: a graphics
+      wait whose producer is a plain label store (with or without write-back) of another queue is ordered on the
+      device. The next graphics submission waits for the producer's timeline, the command processor passes the
+      wait without the host waiting, and a later store of the batch still waits for the producer first. A
+      suspended wait packet that resumes runs again and finds its producer already awaited, so the recording
+      is not flushed twice. Indirect dispatch arguments written by a submission the recording awaits on the device
+      are read on the device instead of on the host. First version (`devab1`): refusing to replace a pending
+      producer of another queue blocked the same-queue consolidations (16.6 against 30.3 fps, 120 against 34
+      submits a frame), so each queue now keeps its own newest consolidated producer. In-run A/B in alternating
+      8 s blocks (`devab10`, 1,200 draws a frame, 46 against 44 s): 41.0 to 39.1 ms a frame (24.4 to 25.6 fps),
+      graphics thread suspended 124 to 59 ms a second; the pass costs about 50 us and runs about once a frame.
+      Light, GPU-bound seconds are unchanged (`devab9`). Not a 30 fps fix: at 1,300 draws a frame the command
+      thread still spends about 29.6 ms a frame processing draws. `PPSA04220 - JoJo's Bizarre Adventure: All-Star
+      Battle R` reached its first fight (behind a tutorial overlay) with 20-29 dispatches a frame and no error
+      (`fighter-devwait3`; its title screen waits for a button on both this build and a clean 2026-11-19 build).
+      At 200-300 draws a frame it ran 45.7 fps against 43.6 in a run 64 commits older (`sweep-p04220`), with one
+      host fence wait a frame on both and wait handling up from 0.02 to 0.2 ms a frame; whether the device pass
+      engaged there is not shown. `PPSA17221 - Minecraft` reached its world (`mc-devwait1`). Remaining host waits on the graphics queue's own submissions (dispatch, auto and
+      offset draws, about 1.5 ms each, equal on both arms, `devbt2`) are not addressed.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
