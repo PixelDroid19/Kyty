@@ -882,6 +882,7 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	Initialize();
 	const Program  xor3(Emit(Parse(Ternary(0x178u), stage), 0u, false, false, true).c_str());
 	const Program  alignbit(Emit(Parse(Ternary(0x14eu), stage), 0u, false, false, true).c_str());
+	const Program  alignbyte(Emit(Parse(Ternary(0x14fu), stage), 0u, false, false, true).c_str());
 	const Program  perm(Emit(Parse(Ternary(0x344u), stage), 0u, false, false, true).c_str());
 	const Program  mad_i24(Emit(Parse(Ternary(0x142u), stage), 0u, false, false, true).c_str());
 	const Program  mad_u16(Emit(Parse(Ternary(0x373u), stage), 0u, false, false, true).c_str());
@@ -911,6 +912,7 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 			{
 				const uint64_t pair = (uint64_t {a} << 32u) | b;
 				Equal(Evaluate(alignbit, a, b, shift), static_cast<uint32_t>(pair >> (shift & 31u)), "v_alignbit_b32");
+				Equal(Evaluate(alignbyte, a, b, shift), static_cast<uint32_t>(pair >> (8u * (shift & 3u))), "v_alignbyte_b32");
 			}
 			for (uint32_t select = 0; select < 256u; select++)
 			{

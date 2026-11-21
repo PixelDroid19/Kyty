@@ -1006,6 +1006,17 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 	  "%thi_<index> = OpShiftLeftLogical %uint %t0_<index> %tl_<index>\n"
 	  "%to_<index> = OpBitwiseOr %uint %tlo_<index> %thi_<index>",
 	  "%t_<index> = OpSelect %uint %tz_<index> %t1_<index> %to_<index>"}},
+	// v_alignbyte_b32: the same funnel shift by whole bytes, 8 * src2[1:0].
+	{RecompileIntegerTernary32, ShaderInstructionType::VAlignbyteB32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
+	 {"%tb_<index> = OpBitwiseAnd %uint %t2_<index> %uint_3\n"
+	  "%ts_<index> = OpShiftLeftLogical %uint %tb_<index> %uint_3\n"
+	  "%tz_<index> = OpIEqual %bool %ts_<index> %uint_0",
+	  "%tr_<index> = OpISub %uint %uint_32 %ts_<index>\n"
+	  "%tl_<index> = OpBitwiseAnd %uint %tr_<index> %uint_31",
+	  "%tlo_<index> = OpShiftRightLogical %uint %t1_<index> %ts_<index>\n"
+	  "%thi_<index> = OpShiftLeftLogical %uint %t0_<index> %tl_<index>\n"
+	  "%to_<index> = OpBitwiseOr %uint %tlo_<index> %thi_<index>",
+	  "%t_<index> = OpSelect %uint %tz_<index> %t1_<index> %to_<index>"}},
 	{RecompileVPermB32, ShaderInstructionType::VPermB32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {""}},
 	// v_mad_i32_i24: dst = sext(src0[23:0]) * sext(src1[23:0]) + src2, low 32 bits.
 	{RecompileIntegerTernary32, ShaderInstructionType::VMadI32I24, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
