@@ -8995,6 +8995,12 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       gives no counts: slow depth clears for a clear value the depth compression cannot fast-clear, compression
       disabled for an image with atomics and one with auxiliary surfaces disabled; 112 descriptor pool
       exhaustion or fragmentation results at about 250 s. None of them is priced as a lever.
+    - A replay checked with captures (`vs1`, same binary, quiet host, captures at 6->7 +70 s and +125 s) did not
+      reach the fight: the driver found no cinematic (six `probe menu simple`), sent all 117 inputs, and both
+      captures show the robot standing at the same spot in the dunes. That idle view holds 30.1-30.7 fps for 90 s
+      at about 510 draws a frame with the render engine 98-99 % busy (32.2-32.8 ms a frame), so it sits on the GPU
+      edge of 30 fps, not above it. The wall-clock replay of the fight route lands only when its cinematic opens
+      at the recorded time; a fight measurement needs a route keyed to the guest's own events or a fresh recording.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
