@@ -249,7 +249,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
     - First stage built: indexed-draw shader inputs prepared ahead, 10.54 -> 8.31 us per draw (2026-11-12)
     - Admitting more packets to the replay excluded: 86.5 % of draws already taken, at most ~2 ms per frame (2026-11-12)
   - [Binding over a versioned snapshot](bringup/binding-snapshot-design.md): epochs, by-address storage, texture heap priced on paper at 3.0-5.2 us/draw saved, leaving 6.5-8.5 us; 3 us needs recording off the command-processor thread (2026-11-12, design)
-  - [Shader ALU contracts](bringup/shader-alu-contracts.md): scalar min/max SCC, RPI VOP3, f32 min/max zero rule, sin/cos in turns, V_SUB_CO_CI_U32, f64-to-integer saturation fixed; RPI/FLR saturation and rounding, FP32 input denormals and F64 e64 follow-up (2026-11-17)
+  - [Shader ALU contracts](bringup/shader-alu-contracts.md): scalar min/max SCC, RPI VOP3, f32 min/max zero rule, sin/cos in turns, V_SUB_CO_CI_U32, f64-to-integer saturation fixed; RPI/FLR saturation and rounding, FP32 input denormals and F64 e64 follow-up (2026-11-17); OMOD div:2 underflow keeps its sign (2026-11-21)
   - Guest primitive reset ignored (no all-ones index seen); host restart slow on ANV, excluded as a reuse lever (2026-11-19, open)
   - 3D-to-compute switches cost about 7 us each on ANV, about 1 ms per frame at 60-80 alternations (2026-11-19)
   - Wave32 lane-mask demand: a VALU mask read as an SGPR pair hid a live high word; split parts skipped rendezvous and the GPU job timed out (2026-11-19, fixed on t247; 8-lane wave32 parts after it)
