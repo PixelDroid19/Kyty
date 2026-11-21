@@ -22,14 +22,15 @@ bool SameRegister(const ShaderOperand& a, const ShaderOperand& b)
 	       !b.absolute && !a.dpp && !b.dpp;
 }
 
-bool IsSgprPair(const ShaderOperand& op)
+// A lane mask is one word in wave32 (EXEC_LO) and two in wave64.
+bool IsSgprMask(const ShaderOperand& op, int words)
 {
-	return op.type == Operand::Sgpr && op.size == 2;
+	return op.type == Operand::Sgpr && op.size == words;
 }
 
-bool IsExec(const ShaderOperand& op)
+bool IsExec(const ShaderOperand& op, int words)
 {
-	return op.type == Operand::ExecLo && op.size == 2;
+	return op.type == Operand::ExecLo && op.size == words;
 }
 
 bool Covers(const ShaderOperand& op, unsigned word)
@@ -62,6 +63,11 @@ bool Reads(const ShaderInstruction& inst, unsigned word)
 bool Writes(const ShaderInstruction& inst, unsigned word)
 {
 	return Covers(inst.dst, word) || Covers(inst.dst2, word);
+}
+
+bool WritesMask(const ShaderInstruction& inst, unsigned first, int words)
+{
+	return Writes(inst, first) || (words == 2 && Writes(inst, first + 1u));
 }
 
 // V_CMPX and S_*_SAVEEXEC replace EXEC without naming it as their destination.
@@ -157,11 +163,12 @@ struct Waterfall
 	uint32_t moves_end = 0; // first instruction after the relative moves (S_ANDN2)
 	uint32_t branch = 0; // S_CBRANCH_SCC1 back to the head
 	ShaderOperand index;
+	bool wave32 = false; // the masks are one word: the loop means this only in a wave32 program
 };
 
 // A loop that hands each distinct per-lane index to M0 in turn and moves VGPR[base + M0] for the lanes holding it:
 //
-//   s_mov_b64 rest, exec
+//   s_mov_b64 rest, exec            ; or the _b32 forms on EXEC_LO in a wave32 program
 // head:
 //   v_readfirstlane_b32 s, index
 //   v_cmpx_eq_u32 s, index          ; EXEC = remaining lanes with this index
@@ -219,10 +226,12 @@ bool MatchWaterfall(const ShaderCode& code, uint32_t head, Waterfall* out)
 	const auto* andn2  = at(next);
 	const auto* exec   = at(next + 1u);
 	const auto* branch = at(next + 2u);
-	if (next == head + 3u || andn2 == nullptr || exec == nullptr || branch == nullptr || andn2->type != Type::SAndn2B64 ||
-	    andn2->src_num != 2 || !IsSgprPair(andn2->dst) || !SameRegister(andn2->src[0], andn2->dst) || !IsExec(andn2->src[1]) ||
-	    exec->type != Type::SMovB64 || !IsExec(exec->dst) || exec->src_num != 1 || !SameRegister(exec->src[0], andn2->dst) ||
-	    branch->type != Type::SCbranchScc1)
+	const int   words  = andn2 != nullptr && andn2->type == Type::SAndn2B32 ? 1 : 2;
+	const auto  mov    = words == 1 ? Type::SMovB32 : Type::SMovB64;
+	if (next == head + 3u || andn2 == nullptr || exec == nullptr || branch == nullptr ||
+	    (andn2->type != Type::SAndn2B64 && andn2->type != Type::SAndn2B32) || andn2->src_num != 2 || !IsSgprMask(andn2->dst, words) ||
+	    !SameRegister(andn2->src[0], andn2->dst) || !IsExec(andn2->src[1], words) || exec->type != mov || !IsExec(exec->dst, words) ||
+	    exec->src_num != 1 || !SameRegister(exec->src[0], andn2->dst) || branch->type != Type::SCbranchScc1)
 	{
 		return false;
 	}
@@ -249,21 +258,21 @@ bool MatchWaterfall(const ShaderCode& code, uint32_t head, Waterfall* out)
 	{
 		const auto& prev = instructions.At(index_before);
 		if (IsBranch(prev.type) || LabelInRange(code, prev.pc + 4u, first->pc, branch->pc)) { break; }
-		const bool copy = prev.type == Type::SMovB64 && prev.src_num == 1;
+		const bool copy = prev.type == mov && prev.src_num == 1;
 		if (source != nullptr)
 		{
 			unsigned source_first = 0;
 			unsigned source_count = 0;
 			ScalarRange(*source, &source_first, &source_count);
-			entry_ok = copy && IsExec(prev.dst) && SameRegister(prev.src[0], *source);
-			if (entry_ok || WritesExec(prev) || Writes(prev, source_first) || Writes(prev, source_first + 1u)) { break; }
+			entry_ok = copy && IsExec(prev.dst, words) && SameRegister(prev.src[0], *source);
+			if (entry_ok || WritesExec(prev) || WritesMask(prev, source_first, words)) { break; }
 			continue;
 		}
 		if (WritesExec(prev)) { break; }
-		if (Writes(prev, rest_first) || Writes(prev, rest_first + 1u))
+		if (WritesMask(prev, rest_first, words))
 		{
-			if (!copy || !SameRegister(prev.dst, rest) || (!IsExec(prev.src[0]) && !IsSgprPair(prev.src[0]))) { break; }
-			entry_ok = IsExec(prev.src[0]);
+			if (!copy || !SameRegister(prev.dst, rest) || (!IsExec(prev.src[0], words) && !IsSgprMask(prev.src[0], words))) { break; }
+			entry_ok = IsExec(prev.src[0], words);
 			if (entry_ok) { break; }
 			source = &prev.src[0];
 		}
@@ -279,6 +288,7 @@ bool MatchWaterfall(const ShaderCode& code, uint32_t head, Waterfall* out)
 	out->moves_end = next;
 	out->branch    = next + 2u;
 	out->index     = index;
+	out->wave32    = words == 1;
 	return true;
 }
 
@@ -310,6 +320,7 @@ void ShaderLowerWaterfallMoves(ShaderCode* code)
 		}
 		instructions.RemoveAt(loop.branch);
 		instructions.RemoveAt(loop.head, 3u);
+		if (loop.wave32) { code->SetWave32Masks(); }
 	}
 }
 

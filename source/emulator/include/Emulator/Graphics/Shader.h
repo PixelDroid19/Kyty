@@ -1278,6 +1278,9 @@ public:
 	void                   SetVsEmbedded(bool embedded) { this->m_vs_embedded = embedded; }
 	[[nodiscard]] uint32_t GetVsEmbeddedId() const { return m_vs_embedded_id; }
 	void                   SetVsEmbeddedId(uint32_t embedded_id) { m_vs_embedded_id = embedded_id; }
+	// A lowered wave32 mask idiom (ShaderLowerWaterfallMoves) holds only while the guest runs the program as wave32.
+	[[nodiscard]] bool     UsesWave32Masks() const { return m_wave32_masks; }
+	void                   SetWave32Masks() { m_wave32_masks = true; }
 	[[nodiscard]] bool     IsPsEmbedded() const { return m_ps_embedded; }
 	void                   SetPsEmbedded(bool embedded) { this->m_ps_embedded = embedded; }
 	[[nodiscard]] uint32_t GetPsEmbeddedId() const { return m_ps_embedded_id; }
@@ -1331,6 +1334,7 @@ private:
 	uint32_t                  m_ps_embedded_id = 0;
 	bool                      m_vs_embedded    = false;
 	bool                      m_ps_embedded    = false;
+	bool                      m_wave32_masks   = false;
 };
 
 // Returns true when a scalar VCC branch can be evaluated once per invocation

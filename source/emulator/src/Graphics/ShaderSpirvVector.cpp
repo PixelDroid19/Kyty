@@ -1159,7 +1159,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_F32_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -1210,7 +1210,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_I32_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -1261,7 +1261,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U32_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -1714,7 +1714,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -1726,8 +1726,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1)
 }
 
 // The tail that stores lane bit %t3_<index>. A v_cmpx writes EXEC only; the others write VCC, VCC_HI or an SGPR pair
-// with the high word cleared.
-static bool CompareMaskStore(const ShaderInstruction& inst, String8* store)
+// with the high word cleared; a wave32 compare writes the low word only and the adjacent scalar word keeps its value.
+static bool CompareMaskStore(const ShaderInstruction& inst, bool wave32, String8* store)
 {
 	if (ShaderInstructionTypeStartsWith(inst.type, "VCmpx"))
 	{
@@ -1740,7 +1740,7 @@ static bool CompareMaskStore(const ShaderInstruction& inst, String8* store)
 	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
 	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
 	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || wave32 ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*store = String8("OpStore %<dst0> %t3_<index>\n").ReplaceStr("<dst0>", dst_value0.value) + clear_high;
 	return true;
 }
@@ -1759,7 +1759,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_XXX_SmaskVsrc0Vsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	String8 store;
-	if (!CompareMaskStore(inst, &store)) { return false; }
+	if (!CompareMaskStore(inst, spirv->NativeWave32(), &store)) { return false; }
 
 	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
@@ -2605,7 +2605,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpI16_XXX_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -2653,7 +2653,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpU16_XXX_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -2896,7 +2896,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_Special_SmaskVsrc0Vsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	String8 store;
-	if (!CompareMaskStore(inst, &store)) { return false; }
+	if (!CompareMaskStore(inst, spirv->NativeWave32(), &store)) { return false; }
 
 	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
@@ -2940,7 +2940,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_Special_SmaskVsrc0Vsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	String8 store;
-	if (!CompareMaskStore(inst, &store)) { return false; }
+	if (!CompareMaskStore(inst, spirv->NativeWave32(), &store)) { return false; }
 
 	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{

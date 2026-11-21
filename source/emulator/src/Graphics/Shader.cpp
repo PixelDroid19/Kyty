@@ -1121,6 +1121,11 @@ ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t gu
 		info.refusal_reason = "guest wave width is not established by stage control";
 		return info;
 	}
+	if (code.UsesWave32Masks() && guest_wave_size != 32u)
+	{
+		EXIT("wave32 lane-mask loop lowered in a wave%u program (hash0 = 0x%08" PRIx32 ", crc32 = 0x%08" PRIx32 ")\n", guest_wave_size,
+		     code.GetHash0(), code.GetCrc32());
+	}
 	for (const auto& inst: code.GetInstructions())
 	{
 		if (!ShaderInstructionPerLaneLoweringPreconditions(inst))

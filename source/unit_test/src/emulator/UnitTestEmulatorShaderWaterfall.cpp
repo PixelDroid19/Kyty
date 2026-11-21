@@ -16,6 +16,12 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 UT_BEGIN(EmulatorShaderWaterfall);
 
 using namespace Libs::Graphics;
@@ -553,7 +559,91 @@ static WaterfallFixture WaterfallInsideOuterLoop(const ShaderOperand& first_sour
 	return fixture;
 }
 
+// The same loop as a wave32 program writes it: one-word masks on EXEC_LO.
+static WaterfallFixture ValidWave32Waterfall()
+{
+	auto fixture = ValidWaterfall();
+	for (auto& inst: fixture.code.GetInstructions())
+	{
+		if (inst.type == ShaderInstructionType::SMovB64) { inst.type = ShaderInstructionType::SMovB32; }
+		if (inst.type == ShaderInstructionType::SAndn2B64) { inst.type = ShaderInstructionType::SAndn2B32; }
+		for (auto* op: {&inst.dst, &inst.src[0], &inst.src[1]})
+		{
+			if (op->size == 2 && (op->type == ShaderOperandType::Sgpr || op->type == ShaderOperandType::ExecLo)) { op->size = 1; }
+		}
+	}
+	return fixture;
+}
+
 } // namespace
+
+TEST(EmulatorShaderWaterfall, LowersWave32MaskLoopsAndTiesThemToWave32)
+{
+	auto fixture = ValidWave32Waterfall();
+	EXPECT_FALSE(fixture.code.UsesWave32Masks());
+	ShaderLowerWaterfallMoves(&fixture.code);
+	ASSERT_EQ(fixture.code.GetInstructions().Size(), 5u);
+	EXPECT_FALSE(HasType(fixture.code, ShaderInstructionType::SCbranchScc1));
+	EXPECT_EQ(fixture.code.GetInstructions().At(1).src[1].register_id, static_cast<int>(fixture.index_register));
+	const auto* mask_update = AtPc(fixture.code, fixture.andn2_pc);
+	ASSERT_NE(mask_update, nullptr);
+	EXPECT_EQ(mask_update->type, ShaderInstructionType::SAndn2B32);
+	EXPECT_TRUE(fixture.code.UsesWave32Masks());
+
+	// A wave64 loop does not tie the program to wave32.
+	auto wave64 = ValidWaterfall();
+	ShaderLowerWaterfallMoves(&wave64.code);
+	EXPECT_FALSE(HasType(wave64.code, ShaderInstructionType::SCbranchScc1));
+	EXPECT_FALSE(wave64.code.UsesWave32Masks());
+}
+
+TEST(EmulatorShaderWaterfall, RefusesLoopsThatMixMaskWidths)
+{
+	// One-word REST update but a two-word EXEC copy: EXEC_HI keeps lanes the loop never visits.
+	auto fixture = ValidWave32Waterfall();
+	auto* restore = AtPc(fixture.code, fixture.exec_pc);
+	restore->type        = ShaderInstructionType::SMovB64;
+	restore->dst.size    = 2;
+	restore->src[0].size = 2;
+	ShaderLowerWaterfallMoves(&fixture.code);
+	EXPECT_EQ(fixture.code.GetInstructions().Size(), fixture.original_instruction_count);
+	EXPECT_FALSE(fixture.code.UsesWave32Masks());
+
+	// REST copied from a two-word EXEC ahead of a one-word loop.
+	auto entry = ValidWave32Waterfall();
+	auto* copy = AtPc(entry.code, 0u);
+	copy->type        = ShaderInstructionType::SMovB64;
+	copy->dst.size    = 2;
+	copy->src[0].size = 2;
+	ShaderLowerWaterfallMoves(&entry.code);
+	EXPECT_EQ(entry.code.GetInstructions().Size(), entry.original_instruction_count);
+}
+
+TEST(EmulatorShaderWaterfall, Wave32MaskLoopInAWave64ProgramFailsExplicitly)
+{
+	auto fixture = ValidWave32Waterfall();
+	ShaderLowerWaterfallMoves(&fixture.code);
+	ASSERT_TRUE(fixture.code.UsesWave32Masks());
+	EXPECT_EQ(ShaderAnalyzeNativeWave(fixture.code, 32u).guest_wave_size, 32u);
+#if defined(_WIN32)
+	constexpr int kExitCode = 321;
+#else
+	constexpr int kExitCode = 65;
+#endif
+	ASSERT_EXIT(
+	    ([&] {
+		    // Core EXIT writes to stdout; the matcher reads stderr.
+		    std::fflush(stdout);
+#if defined(_WIN32)
+		    ::_dup2(::_fileno(stderr), ::_fileno(stdout));
+#else
+		    ::dup2(::fileno(stderr), ::fileno(stdout));
+#endif
+		    (void)ShaderAnalyzeNativeWave(fixture.code, 64u);
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(kExitCode), "wave32 lane-mask loop");
+}
 
 TEST(EmulatorShaderWaterfall, RewritesLaneIndicesAndKeepsMaskUpdates)
 {
