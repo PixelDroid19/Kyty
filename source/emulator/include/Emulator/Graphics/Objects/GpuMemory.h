@@ -1493,8 +1493,8 @@ enum class GpuMemoryGdsSourceStatus : uint8_t
 {
 	// No GPU writer owns the range: the guest bytes are the source.
 	GuestBytesCurrent,
-	// One writable storage buffer, written only on the recording queue, holds the
-	// range; earlier commands on that queue precede the copy in submission order.
+	// One writable storage buffer, written only on the recording queue or by submissions the
+	// recording awaits on the device, holds the range; those writes precede the copy.
 	DeviceBuffer,
 	// The recording owns the range in another form: submit and wait, then retry.
 	ProcessorWriteBackRequired,

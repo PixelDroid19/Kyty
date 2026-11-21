@@ -923,6 +923,63 @@ bool CommandProcessor::SubmitForDeviceWait(SubmissionId submission, VkSemaphore*
 	return m_buffer[slot]->GetTimeline(&device, timeline, value);
 }
 
+// A label store pending on this queue is ordered before everything recorded after it. One pending
+// on another queue is ordered on the device: the next submission of this queue waits for the
+// producer's timeline. Either way the CP passes the wait without the host waiting for the GPU,
+// and a later store of this batch retires the producer first (RetireBeforeStore).
+bool CommandProcessor::ConsolidateWaitProducer(const SubmissionDependency& dependency)
+{
+	const bool same_queue = OwnsSubmissionQueue(dependency.producer);
+	const auto effects    = static_cast<uint8_t>(dependency.effects);
+	if (m_queue != GraphicContext::QUEUE_GFX || !GraphicsWaitRegMemCanConsolidateProducer(effects))
+	{
+		return false;
+	}
+	bool awaited = same_queue;
+	if (!same_queue)
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		awaited = m_buffer[m_current_buffer]->AwaitsSubmissionOnDevice(dependency.producer);
+	}
+	if (!awaited)
+	{
+		// Work recorded before the wait is submitted first so that it does not wait too. A
+		// resumed wait packet runs again and finds its producer already awaited.
+		BufferFlushForGpuWait();
+		(void)AwaitOnDevice(dependency.producer);
+	}
+	if ((effects & 2u) != 0u)
+	{
+		GpuMemoryDeferPendingStorageAliases();
+	}
+	MemoryBarrier();
+	m_consolidated_plain_wait = true;
+	// A newer producer of a queue covers its older ones.
+	for (auto& producer: m_consolidated_producers)
+	{
+		if (producer.queue == dependency.producer.queue)
+		{
+			producer.sequence = std::max(producer.sequence, dependency.producer.sequence);
+			return true;
+		}
+	}
+	m_consolidated_producers.push_back(dependency.producer);
+	return true;
+}
+
+bool CommandProcessor::PassSuspendedWaitOnDevice(const SuspendedRun& suspended)
+{
+	if (m_queue != GraphicContext::QUEUE_GFX)
+	{
+		return false;
+	}
+	SubmissionDependency dependency;
+	return FindSuspendedWaitProducer(suspended.address, suspended.size, suspended.reference, suspended.mask, &dependency) ==
+	           GpuSubmissionResult::Success &&
+	       !OwnsSubmissionQueue(dependency.producer) && ConsolidateWaitProducer(dependency);
+}
+
 bool CommandProcessor::AwaitOnDevice(SubmissionId submission)
 {
 	if (OwnsSubmissionQueue(submission))
@@ -1247,18 +1304,8 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	// recorded after it, and it is published when its fence completes either
 	// way. A full barrier keeps its memory effects visible without splitting
 	// the submission.
-	const auto effects                = static_cast<uint8_t>(dependency.effects);
-	const bool producer_on_this_queue = producer == GpuSubmissionResult::Success && OwnsSubmissionQueue(dependency.producer);
-	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_on_this_queue, effects))
+	if (producer == GpuSubmissionResult::Success && ConsolidateWaitProducer(dependency))
 	{
-		if ((effects & 2u) != 0u)
-		{
-			GpuMemoryDeferPendingStorageAliases();
-		}
-		MemoryBarrier();
-		m_consolidated_plain_wait = true;
-		m_consolidated_producer   = dependency.producer;
 		return;
 	}
 	BufferFlushForGpuWait();
@@ -1335,18 +1382,8 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	// recorded after it, and it is published when its fence completes either
 	// way. A full barrier keeps its memory effects visible without splitting
 	// the submission.
-	const auto effects                = static_cast<uint8_t>(dependency.effects);
-	const bool producer_on_this_queue = producer == GpuSubmissionResult::Success && OwnsSubmissionQueue(dependency.producer);
-	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_on_this_queue, effects))
+	if (producer == GpuSubmissionResult::Success && ConsolidateWaitProducer(dependency))
 	{
-		if ((effects & 2u) != 0u)
-		{
-			GpuMemoryDeferPendingStorageAliases();
-		}
-		MemoryBarrier();
-		m_consolidated_plain_wait = true;
-		m_consolidated_producer   = dependency.producer;
 		return;
 	}
 	BufferFlushForGpuWait();
@@ -1488,7 +1525,11 @@ void CommandProcessor::RetireBeforeStore(uint64_t dst, uint32_t size_bytes)
 {
 	if (m_consolidated_plain_wait)
 	{
-		WaitProducer(m_consolidated_producer);
+		for (const auto& producer: m_consolidated_producers)
+		{
+			WaitProducer(producer);
+		}
+		m_consolidated_producers.clear();
 		m_consolidated_plain_wait = false;
 	}
 	if (size_bytes != 4u && size_bytes != 8u)
@@ -1924,6 +1965,15 @@ static void WaitForSuspendedRuns(CommandProcessor* cp, CommandProcessor::Suspend
 		// produce the watched label.
 		cp->RunLock();
 		(void)cp->PumpCompletedSubmissions();
+		for (auto* suspended: {first, second})
+		{
+			if (suspended != nullptr && cp->PassSuspendedWaitOnDevice(*suspended))
+			{
+				suspended->passed_on_device = true;
+				cp->RunUnlock();
+				return;
+			}
+		}
 		cp->RunUnlock();
 		Core::Thread::SleepMicro(SUSPENDED_WAIT_POLL_MICROS);
 	}
@@ -2091,7 +2141,7 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				}
 				if (stream->blocked)
 				{
-					if (!SuspendedRunReady(stream->suspended))
+					if (!stream->suspended.passed_on_device && !SuspendedRunReady(stream->suspended))
 					{
 						return false;
 					}
@@ -3224,12 +3274,17 @@ bool CommandProcessor::RecordDispatch(uint32_t thread_group_x, uint32_t thread_g
 			processor_writeback_complete = true;
 			continue;
 		}
-		// Waiting can submit another processor's recording buffer and publish
-		// its resources; neither processor nor render recording locks may be held.
-		g_gpu->WaitSubmission(pending);
 		EXIT_IF(result != ComputeDispatchResult::SubmissionCompletionRequired &&
 		        result != ComputeDispatchResult::ReaderCompletionRequired);
 		++attempt;
+		// A writer on another queue is ordered on the device first, as for a draw.
+		if (result == ComputeDispatchResult::SubmissionCompletionRequired && AwaitOnDevice(pending))
+		{
+			continue;
+		}
+		// Waiting can submit another processor's recording buffer and publish
+		// its resources; neither processor nor render recording locks may be held.
+		g_gpu->WaitSubmission(pending);
 	}
 	EXIT("device-address dispatch preparation did not stabilize: queue=%u sequence=%" PRIu64 "\n",
 	     pending.queue.Value(), pending.sequence);

@@ -1021,19 +1021,16 @@ enum class LabelForceCompleteKind : uint8_t
 	return completion_callback_issued;
 }
 
-[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool same_queue, uint8_t producer_effects)
+[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateProducer(uint8_t producer_effects)
 {
-	// A label store relies on same-queue GPU ordering until its submission's
-	// fence publishes it. A write-back may join it: guest-side readers (memory
-	// reads, device-address views) already wait for pending storage themselves,
-	// and GPU aliases of pending storage wait at their next use
-	// (GpuMemoryDeferPendingStorageAliases). Notification callbacks stay synchronous.
+	// A label store is ordered before the waiting recording by queue order, or by
+	// a device wait on its queue, until its submission's fence publishes it. A
+	// write-back may join it: guest-side readers (memory reads, device-address
+	// views) already wait for pending storage themselves, and GPU aliases of
+	// pending storage wait at their next use (GpuMemoryDeferPendingStorageAliases).
+	// Notification callbacks stay synchronous.
 	constexpr uint8_t guest_store = 1u;
 	constexpr uint8_t write_back  = 2u;
-	if (!same_queue)
-	{
-		return false;
-	}
 	return producer_effects == guest_store || producer_effects == (guest_store | write_back);
 }
 

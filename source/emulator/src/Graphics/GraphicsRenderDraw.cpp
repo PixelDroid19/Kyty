@@ -4318,6 +4318,12 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	if (indirect)
 	{
 		indirect_source = GpuMemoryAcquireGdsSource(g_render_ctx->GetGraphicCtx(), buffer, indirect_args_address, 3u * sizeof(uint32_t));
+		// Arguments another queue still writes are read on the device once the recording awaits it.
+		if (indirect_source.status == GpuMemoryGdsSourceStatus::SubmissionCompletionRequired)
+		{
+			*pending_submission = indirect_source.dependency;
+			return ComputeDispatchResult::SubmissionCompletionRequired;
+		}
 		if (indirect_source.status != GpuMemoryGdsSourceStatus::DeviceBuffer)
 		{
 			return ComputeDispatchResult::IndirectArgumentsOnHost;

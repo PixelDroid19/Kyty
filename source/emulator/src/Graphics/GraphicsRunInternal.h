@@ -295,6 +295,7 @@ public:
 	// Orders the recording after another queue's submission on the device; false when the
 	// dependency is this queue's, already awaited, or complete, so it is waited for on the host.
 	[[nodiscard]] bool AwaitOnDevice(SubmissionId submission);
+	[[nodiscard]] bool ConsolidateWaitProducer(const SubmissionDependency& dependency);
 	[[nodiscard]] bool OwnsSubmissionQueue(SubmissionId submission) const
 	{
 		return submission.queue == GpuQueueId(static_cast<uint32_t>(m_queue));
@@ -388,8 +389,11 @@ public:
 		uint32_t    function         = 0;
 		uint32_t    size             = 0;
 		uint64_t    blocked_since_ns = 0;
+		// Ordered on the device behind a producer of another queue (PassSuspendedWaitOnDevice).
+		bool passed_on_device = false;
 	};
 
+	[[nodiscard]] bool PassSuspendedWaitOnDevice(const SuspendedRun& suspended);
 	void WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll);
 	void WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll);
 	[[nodiscard]] bool BranchCompare(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask);
@@ -428,12 +432,13 @@ public:
 	[[nodiscard]] bool    FlipIssued() const { return m_flip_issued; }
 	[[nodiscard]] bool    CompletionCallbackIssued() const { return m_completion_callback_sources != 0u; }
 	[[nodiscard]] uint8_t CompletionCallbackSources() const { return m_completion_callback_sources; }
-	// A wait on a plain label store of a submission of this queue was answered
-	// by queue order; the batch still retires that submission before it ends.
+	// A wait on a plain label store was answered by queue order or by a device wait on the
+	// producer's queue; the batch still retires that submission before it ends.
 	[[nodiscard]] bool TakeConsolidatedPlainWait()
 	{
 		const bool pending        = m_consolidated_plain_wait;
 		m_consolidated_plain_wait = false;
+		m_consolidated_producers.clear();
 		return pending;
 	}
 
@@ -512,7 +517,8 @@ private:
 	// Which completion callbacks the batch recorded (GraphicsBatchCanDeferSubmissionCompletion bits).
 	uint8_t  m_completion_callback_sources = 0u;
 	bool     m_consolidated_plain_wait     = false;
-	SubmissionId m_consolidated_producer;
+	// The newest consolidated producer of each queue.
+	std::vector<SubmissionId> m_consolidated_producers;
 	// Draws and dispatches recorded since this processor's last submission.
 	uint32_t        m_operations_since_submit     = 0;
 	// When this processor last submitted a command buffer.
