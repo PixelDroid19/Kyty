@@ -8978,6 +8978,19 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       host fence wait a frame on both and wait handling up from 0.02 to 0.2 ms a frame; whether the device pass
       engaged there is not shown. `PPSA17221 - Minecraft` reached its world (`mc-devwait1`). Remaining host waits on the graphics queue's own submissions (dispatch, auto and
       offset draws, about 1.5 ms each, equal on both arms, `devbt2`) are not addressed.
+    - Fight baseline after the shader-identity fix (`fb1`, `iperf1`, 2026-11-21, measured). Windows of 10 s aligned
+      to the hub event 6->7 show that runs of the same pad script reach different stretches: `ck1` holds about
+      570 draws a frame at 27.6 ms of render engine a frame (33-35 fps for 80 s), `hs3` about 750 draws at
+      32.7-33.5 ms (28.4-29.3 fps), `fb1` 610-660 draws at 34.3 ms. The 30 fps gap is therefore about 3-4 ms of
+      GPU work in the heavier stretches, not a host effect: a per-client sampler of the DRM render cycles gave
+      every other client 1 % or less of the engine during the fight. `fb1` overlapped a foreign compiler build
+      (144-160 s and from 232 s, the build at up to 10 cores, frames at 6-23 fps), so its dips are not counted.
+      Command time per draw at matched draw bins stays in the range of the earlier runs (`iperf1` 72.8 and 47.8
+      us at about 300 and 600 draws a frame, against 78.3 and 43.5 us in `hs3` and 78.8 and 51.3 us in `ck1`;
+      the seconds mix regimes). A run with Mesa perf warnings on (`iperf1`) reports each warning site once, so it
+      gives no counts: slow depth clears for a clear value the depth compression cannot fast-clear, compression
+      disabled for an image with atomics and one with auxiliary surfaces disabled; 112 descriptor pool
+      exhaustion or fragmentation results at about 250 s. None of them is priced as a lever.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
