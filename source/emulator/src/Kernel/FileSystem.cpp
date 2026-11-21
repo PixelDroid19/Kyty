@@ -668,6 +668,17 @@ void FileDescriptors::Detach(const StreamEntry& stream)
 	}
 }
 
+// KYTY_GUEST_STDOUT_LINE_BUFFERED=1 flushes guest stdout per line so a tool that follows the run's console
+// output (a scripted input route) sees each line as it is written. Off by default: only timing changes.
+static bool GuestStdoutLineBuffered()
+{
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_GUEST_STDOUT_LINE_BUFFERED");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
 FILE* FileDescriptors::StandardStream(int descriptor)
 {
 	Core::LockGuard lock(m_mutex);
@@ -685,6 +696,7 @@ FILE* FileDescriptors::StandardStream(int descriptor)
 	// Guest setvbuf must never install storage into a host diagnostics FILE.
 	// Match stderr's unbuffered default and stdout's native terminal policy.
 	if (descriptor == 2) { std::setvbuf(stream, nullptr, _IONBF, 0); }
+	if (descriptor == 1 && GuestStdoutLineBuffered()) { std::setvbuf(stream, nullptr, _IOLBF, 0); }
 	file->opened = true;
 	file->directory = false;
 	file->status_flags.store(descriptor == 0 ? 0u : 1u, std::memory_order_release);
@@ -1384,6 +1396,7 @@ int SetStreamBuffer(FILE* stream, char* buffer, int host_mode, size_t size)
 	if (state == nullptr) { errno = EBADF; return -1; }
 	const StreamUse use(state);
 	if (!use.IsValid()) { return -1; }
+	if (GuestStdoutLineBuffered() && host_mode == _IOFBF && buffer == nullptr) { host_mode = _IOLBF; }
 	const int result = std::setvbuf(stream, buffer, host_mode, size);
 	if (result == 0)
 	{
