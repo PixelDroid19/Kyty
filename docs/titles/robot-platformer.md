@@ -8728,6 +8728,10 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       That run's fight drew about 560 draws a frame and flipped 35 a second, so its frame rate is not comparable
       with `hs3`. `PPSA17221 - Minecraft` reached the world at 90 s with a clean capture and rewrote its cache;
       326 graphics-state and pipeline tests and the three CTest gates passed.
+    - Fixed (record "Shader identity followed the guest's texture data" in `docs/bringup/cross-title.md`): warm
+      runs kept compiling because two guest programs split into 96 and 69 modules by texture data. After the
+      fix, run `sl8` compiled no module for them and counted no graphics pipeline miss from 150 to 248 s. Its
+      route reached the dunes branch at about 570 draws a frame, so its frame rate is not compared with `hs3`.
     - Excluded: compute queues on the compute engine (`ccs1`, pricing probe, not a valid configuration). The
       compute queues were moved to the compute-only family by skipping the depth copy-on-compute check for D16
       and D32 (the record "Arc compute engine not usable for the compute queues" explains why the check closes

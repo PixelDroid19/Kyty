@@ -8612,3 +8612,44 @@ in its 980 MHz window), which a GPU-bound slowdown would not do: the frame slows
 follows. The cause is open; foreign GPU work in those windows was not checked.
 The two rule runs
 spread by 7 ms, and the in-run toggle above bounds the width's effect there to about 1 ms.
+
+## Shader identity followed the guest's texture data (2026-11-21, fixed)
+
+**Observed.** On the `PPSA21567 - Astro Bot` fight route, warm runs still compiled new pipelines (0.5-1.3 s
+of graphics pipeline misses a run). One guest program had 96 SPIR-V modules in the private cache, another 69,
+and the modules of one program differed only in constants. The translator merged two loaded T#s into one
+resource whenever their descriptor words were equal (`ShaderResources.cpp`, the dynamic, split and nested
+texture paths). One program reads 39 T#s from 39 distinct table words; by content it bound 10 to 23 resources
+depending on which slots held the same texture in that draw, and the resource indices are part of the shader
+id. The texture part of the id also held each sampled texture's exact `Format()`, so one program split again
+per bound format although a sampled image is declared by its numeric class alone (the translator reads the
+format of a sampled image only through `VulkanGen5ImageNumericType`; DstSel, mip range and storage view type
+are read for storage images, which keep their full id fields).
+
+**Change.**
+- A loaded T# shares a resource only with one read from the same table words. Extended descriptors, static
+  or loaded, name their EUD words by start register; split and nested T#s match their own table slot. Content
+  equality is still required, so no merge binds different descriptors. Static EUD textures were already one
+  per slot.
+- A sampled Gen5 texture adds its numeric class to the id instead of its format; bit 16 keeps those values
+  apart from the 16-bit formats of older keys, so existing caches stay valid without a translator version bump.
+
+**Limits checked.** Over the 1,554 Astro Bot and Minecraft modules, slot keying gives at most 40 loaded
+textures a module (64 is the capacity). A first build that keyed only on the slot of other loads hit the
+capacity at 64 in the Astro world map: the dynamic loads re-read EUD words that the program also reads as
+static textures, which the content merge had folded together. Keying on start register removed it.
+
+**Verified** on Intel Arc A770 (Mesa ANV), strict 60 fps-limited runs, private caches:
+- Astro Bot: after two warm-up runs, run `sl8` compiled 6 new modules (warm-up runs 142-259) and none for the
+  two split programs; no graphics pipeline miss from 150 to 248 s; three cold driver compiles of 0.7-1.6 s at
+  249-252 s were new content. Captures correct. Two of the warm-up runs lost the time-based route after a
+  slow boot (14 s more between the resident and the first level load, both right after a full build and the
+  unit tests); runs after them booted normally.
+- `PPSA17221 - Minecraft`: world at 82.8 s, about 199,700 draws a second at more than 4,000 draws a frame against
+  192,600 before the change (`mcck1`); the first run after the change (world at 132 s) was the cache warm-up.
+- 424 shader and graphics-resource unit tests and the three CTest gates passed.
+
+**Open.** The per-draw cost of binding duplicate slots separately was not measured on Astro Bot (its route
+reached a different phase in the measured run). A third program that split on fields outside the texture
+records was not rechecked (run `sl8` compiled none of its modules); pipeline misses explain a few of the deepest fight dips (2 of 40 sub-29 seconds in `hs3`, 3 of 14 in
+`ck1`), not the 28-29 fps seconds where the GPU is at its limit.
