@@ -9013,6 +9013,12 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       gameplay is GPU-bound below 30 fps above about 600 draws a frame and command-thread bound in the bursts.
       Two consecutive runs (`vs1` after its capture delay, `fight1` without one) missed the cinematic that
       `ck1` and `imeas2` found at the same probe times, so the route does not land reliably on this binary.
+      Across the last ten replays the second cinematic (guest line `Level has started: ui_pause_cinematics`
+      about 49.5 s after 6->7) appeared in three (`imeas2`, `ck1`, `sl8`), on different builds, so the miss is
+      not tied to one build. The landed `imeas2` still ran the heavy fight below 30 fps: 22-23 fps at 836-874
+      draws a frame and 14-16 fps at 1,044-1,320 draws. A stable 30 fps fight therefore needs both a lower
+      command-thread cost per draw (Astro 20-36 us against about 4.7 us on `PPSA17221 - Minecraft`) and less
+      GPU work per frame.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
