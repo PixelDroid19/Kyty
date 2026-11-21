@@ -1052,9 +1052,24 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 					EXIT("depth array layer %u at 0x%012" PRIx64 " lies in another depth image but the view is not plain 64 KiB depth\n",
 					     layer, slice_addr);
 				}
-				const auto plan =
-				    PlanDepthLayerFromImages(array, layer, slice_addr, slice_size, pitch, State::Gen5DepthSampleBytesPerElement(fmt), images,
-				                             state.stamp);
+				const uint32_t bytes = State::Gen5DepthSampleBytesPerElement(fmt);
+				auto plan = PlanDepthLayerFromImages(array, layer, slice_addr, slice_size, pitch, bytes, images, state.stamp);
+				// The layer lookup takes images inside or around the layer; one that crosses the layer's edge also wrote
+				// the blocks it overlaps, so the images over the blocks left to guest memory join the sources.
+				bool crossing = false;
+				for (const auto& [begin, end]: plan.guest_blocks)
+				{
+					for (auto* image: FindDepthStencil(buffer, begin, end - begin, false))
+					{
+						if (images.IndexValid(images.Find(image))) { continue; }
+						images.Add(image);
+						crossing = true;
+					}
+				}
+				if (crossing)
+				{
+					plan = PlanDepthLayerFromImages(array, layer, slice_addr, slice_size, pitch, bytes, images, state.stamp);
+				}
 				from_images = from_images && plan.guest_blocks.empty();
 				for (const auto& [source, regions]: plan.sources)
 				{
