@@ -2,10 +2,12 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/ConfigSource.h"
+#include "Emulator/Graphics/FragmentTransportCapture.h"
 #include "Emulator/Graphics/FragmentTransportResolve.h"
 #include "Emulator/Graphics/FragmentTransportShade.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
 #include "NggPassthroughFixture.h"
 
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
@@ -147,13 +149,16 @@ void ResolveModuleValidates()
 {
 	ScopedShaderValidation validation;
 
-	const auto source = FragmentTransport::GenerateResolveSource(2u, 0x00000033u);
-	Check(!source.StartsWith("OpKyty"), "resolve source is generated");
+	for (bool depth_export: {false, true})
+	{
+		const auto source = FragmentTransport::GenerateResolveSource(2u, 0x00000033u, depth_export);
+		Check(!source.StartsWith("OpKyty"), "resolve source is generated");
 
-	Vector<uint32_t> binary;
-	String8          error;
-	Check(ShaderToolchain::Run(source, &binary, &error), error.c_str());
-	Check(binary.Size() > 8u, "resolve module has code");
+		Vector<uint32_t> binary;
+		String8          error;
+		Check(ShaderToolchain::Run(source, &binary, &error), error.c_str());
+		Check(binary.Size() > 8u, "resolve module has code");
+	}
 }
 
 void LaneWordsFollowInterpolatorSource()

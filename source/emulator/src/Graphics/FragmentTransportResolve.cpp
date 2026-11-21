@@ -1,5 +1,7 @@
 #include "Emulator/Graphics/FragmentTransportResolve.h"
 
+#include "Emulator/Graphics/FragmentTransportLayout.h"
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics::FragmentTransport {
@@ -28,7 +30,7 @@ String8 WriteTarget(uint32_t target)
 
 } // namespace
 
-String8 GenerateResolveSource(uint32_t descriptor_set, uint32_t color_write_mask)
+String8 GenerateResolveSource(uint32_t descriptor_set, uint32_t color_write_mask, bool depth_export)
 {
 	String8 interface;
 	String8 annotations;
@@ -51,12 +53,30 @@ String8 GenerateResolveSource(uint32_t descriptor_set, uint32_t color_write_mask
 		}
 		writer += WriteTarget(target);
 	}
+	if (depth_export)
+	{
+		interface += " %resolve_depth";
+		annotations += "OpDecorate %resolve_depth BuiltIn FragDepth\n";
+		declarations += String8::FromPrintf("%%resolve_ptr_output_float = OpTypePointer Output %%float\n"
+		                                    "%%resolve_depth = OpVariable %%resolve_ptr_output_float Output\n"
+		                                    "%%resolve_depth_offset = OpConstant %%uint %u\n",
+		                                    OUTPUT_LANE_WORDS - 1u);
+		writer += "%resolve_depth_index = OpIAdd %uint %resolve_base %resolve_depth_offset\n"
+		          "%resolve_depth_pointer = OpAccessChain %_ptr_StorageBuffer_uint %result_buffer %int_0 %resolve_depth_index\n"
+		          "%resolve_depth_word = OpLoad %uint %resolve_depth_pointer\n"
+		          "%resolve_depth_float = OpBitcast %float %resolve_depth_word\n"
+		          "OpStore %resolve_depth %resolve_depth_float\n";
+	}
 	writer += "OpReturn\nOpFunctionEnd\n";
 	String8 source(kFragmentResolveCore);
 	source = source.ReplaceStr("<resolve_interface>", interface);
 	source = source.ReplaceStr("<resolve_annotations>", annotations);
 	source = source.ReplaceStr("<resolve_declarations>", declarations);
 	source = source.ReplaceStr("<resolve_writer>", writer);
+	if (depth_export)
+	{
+		source = source.ReplaceStr("OpExecutionMode %main OriginUpperLeft", "OpExecutionMode %main OriginUpperLeft\nOpExecutionMode %main DepthReplacing");
+	}
 	source = source.ReplaceStr("<resolve_mask>", String8::FromPrintf("%u", color_write_mask));
 	for (const char* buffer: {"record_buffer", "control_buffer", "reference_buffer", "result_buffer"})
 	{

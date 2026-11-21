@@ -1626,7 +1626,7 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	{
 		EXIT("fragment transport capture assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());
 	}
-	const auto resolve_source = FragmentTransport::GenerateResolveSource(2u, TransportColorMask(static_params));
+	const auto resolve_source = FragmentTransport::GenerateResolveSource(2u, TransportColorMask(static_params), ShaderHasPixelDepthExport(ps_code));
 	if (!ShaderToolchain::Run(resolve_source, &resolve_binary, &error))
 	{
 		EXIT("fragment transport resolve assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());

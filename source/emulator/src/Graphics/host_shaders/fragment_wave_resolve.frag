@@ -30,7 +30,7 @@ void main() {
     if (control_buffer.control.length() < wave_table_offset() + transport.wave_lookup_capacity ||
         record_buffer.records.length() < transport.quad_capacity * quad_words() ||
         reference_buffer.references.length() < output_reference_offset() + transport.quad_capacity ||
-        result_buffer.results.length() < transport.wave_capacity * 64u * 34u) {
+        result_buffer.results.length() < transport.wave_capacity * 64u * 35u) {
         fail(buffer_error);
         discard;
     }
@@ -62,7 +62,7 @@ void main() {
         fail(reference_error);
         discard;
     }
-    uint base = (wave_lane + lane) * 34u;
+    uint base = (wave_lane + lane) * 35u;
     if (result_buffer.results[base] == 0u) discard;
     if ((result_buffer.results[base+1u] & required_components) != required_components) {
         fail(256u);

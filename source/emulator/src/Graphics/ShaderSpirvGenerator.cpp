@@ -155,7 +155,7 @@ static bool ShaderIsPixelDepthExport(const ShaderInstruction& inst)
 	                                                   inst.format == ShaderInstructionFormat::PixelZVsrc0VmDone);
 }
 
-static bool ShaderCodeHasPixelDepthExport(const ShaderCode& code)
+bool ShaderHasPixelDepthExport(const ShaderCode& code)
 {
 	if (code.GetType() != ShaderType::Pixel)
 	{
@@ -446,7 +446,7 @@ void Spirv::GenerateSource()
 		EXIT("native-wave compute coordinate layout unsupported or inconsistent\n");
 	}
 
-	if (ShaderCodeHasPixelDepthExport(m_code) && !ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
+	if (ShaderHasPixelDepthExport(m_code) && !ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
 		               "WARNING: pixel depth export rejected: control flow cannot prove a FragDepth write before every non-discard exit\n");
@@ -1022,7 +1022,7 @@ void Spirv::WriteHeader()
 				// that can discard.
 				const bool safe_late_input_probe = UsesPixelInput0Probe() && !ShaderPreventsNoopPixelElision(m_code);
 				if (m_ps_input_info->ps_early_z && !m_ps_input_info->ps_pixel_kill_enable && !ShaderCodeCanDiscard(m_code) &&
-				    !ShaderCodeHasPixelDepthExport(m_code) && !safe_late_input_probe)
+				    !ShaderHasPixelDepthExport(m_code) && !safe_late_input_probe)
 				{
 					execution_modes.Add("OpExecutionMode %main EarlyFragmentTests\n");
 				}

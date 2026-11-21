@@ -78,6 +78,8 @@ constexpr ExportCase kPos1Done = {ShaderType::Vertex, 0xf80008d4u, ShaderInstruc
 constexpr ExportCase kPos1X = {ShaderType::Vertex, 0xf80000d1u, ShaderInstructionFormat::Pos1Vsrc0OffOffOff, 1, 1, 0};
 constexpr ExportCase kPixelZ = {ShaderType::Pixel, 0xf8001881u, ShaderInstructionFormat::PixelZVsrc0VmDone, 1, 1, 3};
 constexpr ExportCase kPixelZNoDone = {ShaderType::Pixel, 0xf8001081u, ShaderInstructionFormat::PixelZVsrc0Vm, 1, 1, 1};
+// A non-final depth export may leave the valid mask to the color export after it.
+constexpr ExportCase kPixelZNoValidMask = {ShaderType::Pixel, 0xf8000081u, ShaderInstructionFormat::PixelZVsrc0Vm, 1, 1, 0};
 constexpr ExportCase kNull = {ShaderType::Pixel, 0xf8001890u, ShaderInstructionFormat::NullVmDone, 0, 0, 3};
 constexpr ExportCase kPixelZNull = {ShaderType::Pixel, 0xf8001880u, ShaderInstructionFormat::NullVmDone, 0, 0, 3};
 constexpr ExportCase kPos0 = {ShaderType::Vertex, 0xf80008cfu, ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done, 4, 15, 2};
@@ -776,7 +778,7 @@ TEST(EmulatorShaderExport, ParsesReducedNonColorExportsWithExactEmptyTails)
 	ASSERT_EXIT(
 	    ([] {
 		    Initialize();
-		    for (const auto& test: {kPrim, kPos1, kPos1Done, kPixelZ, kPixelZNoDone, kNull, kPixelZNull}) { (void)Parse(test); }
+		    for (const auto& test: {kPrim, kPos1, kPos1Done, kPixelZ, kPixelZNoDone, kPixelZNoValidMask, kNull, kPixelZNull}) { (void)Parse(test); }
 		    std::_Exit(0);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");

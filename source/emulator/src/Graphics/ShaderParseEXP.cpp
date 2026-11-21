@@ -115,8 +115,9 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 	{
 		// RDNA2 Table 56: target 8 is pixel Z. Only the full-precision depth-only
 		// form is accepted, as the last export or ahead of the color exports;
-		// stencil, sample-mask and alpha channels remain strict.
-		if (compr == 0 && vm != 0 && en == 0x1u)
+		// stencil, sample-mask and alpha channels remain strict. VM may be sent
+		// several times and the last one counts, so only the final export must carry it.
+		if (compr == 0 && (vm != 0 || done == 0) && en == 0x1u)
 		{
 			inst.format  = done != 0 ? ShaderInstructionFormat::PixelZVsrc0VmDone : ShaderInstructionFormat::PixelZVsrc0Vm;
 			inst.src_num = 1;
