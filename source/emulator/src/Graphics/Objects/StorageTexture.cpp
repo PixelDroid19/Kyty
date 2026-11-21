@@ -673,7 +673,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		                                          static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
 		                                          static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels),
 		                                          static_cast<uint32_t>(tile), &volume_layout) ||
-		    base_level != 0u || !Gen5ValidateTextureVolumeUpload(volume_layout, *size))
+		    base_level != 0u || volume_layout.mip_chain || !Gen5ValidateTextureVolumeUpload(volume_layout, *size))
 		{
 			EXIT("unsupported Gen5 storage volume image: format=%u %ux%ux%u pitch=%u levels=%u tile=%u size=%" PRIu64 "\n",
 			     static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(depth),

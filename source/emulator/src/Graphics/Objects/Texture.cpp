@@ -449,6 +449,34 @@ static void upload_thin_volume_levels(GraphicContext* ctx, TextureVulkanImage* i
 	UtilFillImage(ctx, image, linear.data(), linear.size(), regions, vk_layout);
 }
 
+// A slab-chained volume (Gen5GetVolumeTextureLayout) uploads each level from its packed linear range.
+static void upload_volume_mip_chain(GraphicContext* ctx, TextureVulkanImage* image, const Gen5TextureVolumeLayout& layout,
+                                    const void* guest, uint64_t guest_size, uint64_t vk_layout)
+{
+	std::vector<uint8_t> linear(static_cast<size_t>(layout.linear_size));
+	if (!Gen5DetileTextureVolumeLevels(linear.data(), linear.size(), guest, guest_size, layout))
+	{
+		EXIT("Gen5 volume mip chain detile failed: %ux%ux%u levels=%u size=%" PRIu64 "\n", layout.width, layout.height, layout.depth,
+		     layout.levels, guest_size);
+	}
+	Vector<BufferImageCopy> regions;
+	for (uint32_t index = 0; index < layout.levels; ++index)
+	{
+		const auto&     level = layout.level[index];
+		BufferImageCopy region {};
+		region.offset    = static_cast<uint32_t>(level.linear_offset);
+		region.pitch     = level.width;
+		region.width     = level.width;
+		region.height    = level.height;
+		region.depth     = level.depth;
+		region.dst_level = index;
+		region.dst_x     = 0;
+		region.dst_y     = 0;
+		regions.Add(region);
+	}
+	UtilFillImage(ctx, image, linear.data(), linear.size(), regions, vk_layout);
+}
+
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("TextureObject::update_func");
@@ -507,6 +535,11 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			EXIT("unsupported Gen5 volume upload: format=%u %ux%ux%u pitch=%u levels=%u tile=%u size=%" PRIu64 "\n",
 			     static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), depth,
 			     static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), *size);
+		}
+		if (volume_layout.mip_chain)
+		{
+			upload_volume_mip_chain(ctx, vk_obj, volume_layout, reinterpret_cast<const void*>(*vaddr), *size, static_cast<uint64_t>(vk_layout));
+			return;
 		}
 		if (volume_layout.thin && volume_layout.slices.levels > 1u)
 		{

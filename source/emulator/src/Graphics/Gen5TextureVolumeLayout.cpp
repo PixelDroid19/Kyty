@@ -2,6 +2,7 @@
 
 #include "Emulator/Graphics/Shader.h"
 
+#include <algorithm>
 #include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
@@ -92,6 +93,104 @@ bool ThinRenderTargetLayout(uint32_t format, uint32_t width, uint32_t height, ui
 	return true;
 }
 
+// Inverse of the tail's interleave: mipX takes offset bits 9, 11, 13, ... and mipY bits 8, 10, 12, ...
+uint32_t GatherTailBits(uint32_t offset, uint32_t first_bit)
+{
+	uint32_t value = 0;
+	for (uint32_t bit = 0; bit < 6u; ++bit) { value |= ((offset >> (first_bit + 2u * bit)) & 1u) << bit; }
+	return value;
+}
+
+// A SW_64KB_S volume with a mip chain (see Gen5TextureVolumeLayout). Only 4-byte elements: their 64 KiB block is
+// 32x32x16 and their 256-byte block 4x4x4, the case whose tail origins the title confirms.
+bool ThickMipChainLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t depth, uint32_t levels,
+                         Gen5TextureVolumeLayout* layout)
+{
+	constexpr uint32_t kBlockBytes      = 65536u;
+	constexpr uint32_t kMaxTailLevels   = 10u; // 64 KiB thick blocks
+	constexpr uint32_t kTail256Width    = 4u;  // 256-byte 3D block of 4-byte elements
+	constexpr uint32_t kTail256Height   = 4u;
+	if (ShaderGen5TextureIsBlockCompressed(format) || ShaderGen5TextureBytesPerElement(format) != 4u ||
+	    levels > layout->level.size())
+	{
+		return false;
+	}
+	uint32_t block_width = 0, block_height = 0, block_depth = 0;
+	if (!TileGetStandardVolumeBlock(4u, kBlockBytes, &block_width, &block_height, &block_depth)) { return false; }
+	// A level joins the tail when it fits half a block's width and the tail has room for it and every smaller level.
+	uint32_t first_tail = levels;
+	for (uint32_t index = 0; index < levels; ++index)
+	{
+		auto& level  = layout->level[index];
+		level.width  = std::max(1u, width >> index);
+		level.height = std::max(1u, height >> index);
+		level.depth  = std::max(1u, depth >> index);
+		if (first_tail == levels && level.width <= block_width / 2u && level.height <= block_height && levels - index <= kMaxTailLevels)
+		{
+			first_tail = index;
+		}
+	}
+	uint64_t slab_offset = first_tail < levels ? kBlockBytes : 0u;
+	for (uint32_t index = first_tail; index-- > 0u;)
+	{
+		auto& level         = layout->level[index];
+		level.pitch         = (level.width + block_width - 1u) / block_width * block_width;
+		level.padded_height = (level.height + block_height - 1u) / block_height * block_height;
+		level.slab_offset   = slab_offset;
+		slab_offset += static_cast<uint64_t>(level.pitch) * level.padded_height * block_depth * 4u;
+	}
+	for (uint32_t index = first_tail; index < levels; ++index)
+	{
+		auto&          level  = layout->level[index];
+		const uint32_t m      = kMaxTailLevels - 1u - (index - first_tail);
+		const uint32_t offset = m > 6u ? 16u << m : m << 8u;
+		level.pitch           = block_width;
+		level.padded_height   = block_height;
+		level.tail_x          = GatherTailBits(offset, 9u) * kTail256Width;
+		level.tail_y          = GatherTailBits(offset, 8u) * kTail256Height;
+		if (level.tail_x + level.width > block_width || level.tail_y + level.height > block_height) { return false; }
+	}
+	const uint64_t slabs = (depth + block_depth - 1u) / block_depth;
+	const uint64_t total = slab_offset * slabs;
+	if (slab_offset == 0u || total > UINT32_MAX) { return false; }
+	uint64_t linear = 0;
+	for (uint32_t index = 0; index < levels; ++index)
+	{
+		auto& level         = layout->level[index];
+		level.linear_offset = linear;
+		linear += static_cast<uint64_t>(level.width) * level.height * level.depth * 4u;
+	}
+	layout->tiled             = {static_cast<uint32_t>(total), kBlockBytes};
+	layout->linear_size       = linear;
+	layout->bytes_per_element = 4u;
+	layout->pitch             = layout->level[0].width;
+	layout->block_bytes       = kBlockBytes;
+	layout->block_depth       = block_depth;
+	layout->slab_bytes        = slab_offset;
+	layout->levels            = levels;
+	layout->mip_chain         = true;
+	return true;
+}
+
+void DetileVolumeLevel(uint8_t* destination, const uint8_t* source, const Gen5TextureVolumeLayout& layout,
+                       const Gen5TextureVolumeLevel& level)
+{
+	uint64_t out = level.linear_offset;
+	for (uint32_t z = 0; z < level.depth; ++z)
+	{
+		const uint64_t slab = static_cast<uint64_t>(z / layout.block_depth) * layout.slab_bytes + level.slab_offset;
+		for (uint32_t y = 0; y < level.height; ++y)
+		{
+			for (uint32_t x = 0; x < level.width; ++x, out += 4u)
+			{
+				const uint64_t tiled = slab + TileGetStandardVolumeOffset(x + level.tail_x, y + level.tail_y, z % layout.block_depth,
+				                                                          level.pitch, level.padded_height, 4u, layout.block_bytes);
+				std::memcpy(destination + out, source + tiled, 4u);
+			}
+		}
+	}
+}
+
 bool ValidateLinearUpload(const Gen5TextureVolumeLayout& layout, uint64_t source_size)
 {
 	const uint64_t linear_size = LinearVolumeBytes(layout.bytes_per_element, layout.height, layout.depth, layout.pitch);
@@ -107,14 +206,18 @@ bool Gen5GetVolumeTextureLayout(uint32_t format, uint32_t width, uint32_t height
 	if (layout == nullptr) { return false; }
 	*layout = {};
 	if (width == 0u || height == 0u || depth == 0u || pitch < width || levels == 0u ||
-	    (levels != 1u && tile != kSwModeRender64K))
+	    (levels != 1u && tile != kSwModeRender64K && tile != kSwModeStandard64K))
 	{
 		return false;
 	}
 	Gen5TextureVolumeLayout result {};
 	bool                    supported = false;
 	if (tile == kSwModeStandard4K) { supported = StandardLayout(format, width, height, depth, 4096u, &result); }
-	if (tile == kSwModeStandard64K) { supported = StandardLayout(format, width, height, depth, 65536u, &result); }
+	if (tile == kSwModeStandard64K)
+	{
+		supported = levels == 1u ? StandardLayout(format, width, height, depth, 65536u, &result)
+		                         : ThickMipChainLayout(format, width, height, depth, levels, &result);
+	}
 	if (tile == kSwModeRender64K) { supported = ThinRenderTargetLayout(format, width, height, depth, pitch, levels, &result); }
 	if (tile == kSwModeLinear)
 	{
@@ -139,6 +242,11 @@ bool Gen5GetVolumeTextureLayout(uint32_t format, uint32_t width, uint32_t height
 bool Gen5ValidateTextureVolumeUpload(const Gen5TextureVolumeLayout& layout, uint64_t source_size)
 {
 	if (layout.linear) { return ValidateLinearUpload(layout, source_size); }
+	if (layout.mip_chain)
+	{
+		const uint64_t slabs = (layout.depth + layout.block_depth - 1u) / layout.block_depth;
+		return layout.slab_bytes * slabs == layout.tiled.size && source_size >= layout.tiled.size;
+	}
 	if (layout.thin) { return Gen5ValidateTextureArrayUpload(layout.slices, 0u, source_size); }
 	TileSizeAlign tiled {};
 	if (!TileTryGetStandardVolumeSize(layout.width, layout.height, layout.depth, layout.pitch, layout.bytes_per_element,
@@ -163,6 +271,8 @@ bool Gen5DetileTextureVolume(void* destination, uint64_t destination_size, const
 		std::memcpy(destination, source, static_cast<size_t>(layout.linear_size));
 		return true;
 	}
+	// A mip chain has one linear range per level (Gen5DetileTextureVolumeLevels).
+	if (layout.mip_chain) { return false; }
 	if (layout.thin)
 	{
 		// A mip chain has one linear range per level (see the sampled volume upload).
@@ -171,6 +281,21 @@ bool Gen5DetileTextureVolume(void* destination, uint64_t destination_size, const
 	}
 	TileConvertStandardVolumeToLinear(destination, source, layout.width, layout.height, layout.depth, layout.pitch,
 	                                  layout.bytes_per_element, layout.block_bytes);
+	return true;
+}
+
+bool Gen5DetileTextureVolumeLevels(void* destination, uint64_t destination_size, const void* source, uint64_t source_size,
+                                   const Gen5TextureVolumeLayout& layout)
+{
+	if (destination == nullptr || source == nullptr || !layout.mip_chain || !Gen5ValidateTextureVolumeUpload(layout, source_size) ||
+	    destination_size < layout.linear_size)
+	{
+		return false;
+	}
+	for (uint32_t index = 0; index < layout.levels; ++index)
+	{
+		DetileVolumeLevel(static_cast<uint8_t*>(destination), static_cast<const uint8_t*>(source), layout, layout.level[index]);
+	}
 	return true;
 }
 
