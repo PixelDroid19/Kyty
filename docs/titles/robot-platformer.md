@@ -7877,6 +7877,14 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   boot (logged once per sampler) gets the guest's CLAMP_Z: clamp-to-edge or clamp-to-border for the fog samplers,
   repeat only where the guest asks for it. Scope: samplers created with the R-coordinate flag; a 3D view sampled
   through a sampler created without it was not checked.
+- **Measured (2026-11-21, patched run, dunes): the fog volume itself is opaque next to the camera below the
+  horizon.** Read back per slice: transmittance falls from 0.92 (slice 0) to 0.46 (slice 1) and 0.10 (slice 63), and
+  slice 1 is about 0.9 for froxels whose view ray points above the horizon and 0 for every froxel whose ray points
+  below it, with a sharp edge at the horizon. Skipping the temporal filter leaves the same numbers, so the
+  density comes from the inject pass, not from the history path. In the space intro the same volume is clear
+  (slice 0 0.995). Open: the inject's height or ray-direction term.
+- **Not the cause (2026-11-21): the 3D sample-LZ index tag.** That lowering indexed the 3D descriptor array with
+  the unmasked virtual index (fixed), but the haze at the crash site is unchanged after the fix.
 - **Open (2026-11-21): the guest's non-tiled deferred-lighting renderer draws without direct sunlight.** A local
   game patch selects it. With it on, the dunes show only ambient light (near black when the guest's GI is also
   off); with it off, the same route shows sunlit dunes and normal shadows. Not localized.
