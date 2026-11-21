@@ -8667,11 +8667,12 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       bound comes from alignment and the address strides only: a 4-byte stride gives `0xfffffffc + 4`, which
       wraps, so 4-byte words of unknown alignment never merge. Merging would need an alignment the guest does
       not guarantee. No frame was measured; the change was reverted.
-    - Not a fix for the fight: the `Balanced` preset's render scale (`Fixed`, `RenderTargets`, 1440x810;
-      2026-11-21, `rt75`, `rt75b`, another game using about 1.3 cores on the host). In the scene both runs
-      reached (t 120-135, 540-600 draws a frame) it ran 26 fps against 28-32 fps native, with the render
-      engine busy 77 % against about 94 %; the route then diverged from the fight. The compute passes keep
-      the guest extent, so the scale removes little GPU work and adds resampling.
+    - Re-test of the recorded render-target scope exclusion ("Host render-target scaling, unpatched"):
+      `Fixed`, `RenderTargets`, 1440x810 (2026-11-21, `rt75`, `rt75b`), inconclusive. The scope plans only
+      targets of the display extent, so the main passes keep the guest's 1920x1080; no counter was read to show
+      any target scaled. Both runs left the fight route near 150 s (cause unknown: the scale, or another game
+      using about 1.3 cores and, in `rt75`, a foreign build), and their seconds were not GPU-limited (render
+      engine about 77 %), so they price no GPU lever.
     - Excluded: compute queues on the compute engine (`ccs1`, pricing probe, not a valid configuration). The
       compute queues were moved to the compute-only family by skipping the depth copy-on-compute check for D16
       and D32 (the record "Arc compute engine not usable for the compute queues" explains why the check closes
