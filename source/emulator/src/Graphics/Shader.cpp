@@ -5068,7 +5068,9 @@ static ComputeProgramAnalysisCache g_compute_program_analysis_cache(512);
 static bool NativeEquivalenceFitsWorkgroup(const ShaderComputeWaveAnalysisResult& native, const ShaderComputeInputInfo& info)
 {
 	const uint64_t invocations = static_cast<uint64_t>(info.threads_num[0]) * info.threads_num[1] * info.threads_num[2];
-	return native.supported && (!native.reads_quad_lanes || invocations % 4u == 0u);
+	// A host barrier must be reached by every invocation: no lane may be launched with EXEC clear.
+	const bool barriers_reached = native.lds_order_barriers.empty() || !info.thread_limits_used;
+	return native.supported && barriers_reached && (!native.reads_quad_lanes || invocations % 4u == 0u);
 }
 
 void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* /*sh*/, uint32_t dispatch_mode,
@@ -5089,6 +5091,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 	info->uniform_buffer_fill = {};
 	info->native_wave_sensitive = false;
 	info->lane_private_masks    = false;
+	info->lds_order_barriers.clear();
 	info->required_subgroup_size = 0;
 	info->threads_num[0] = regs->cs_regs.num_thread_x;
 	info->threads_num[1] = regs->cs_regs.num_thread_y;
@@ -5153,16 +5156,19 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			}
 			if (!NativeEquivalenceFitsWorkgroup(native, *info))
 			{
-				EXIT("wave64 dispatch reads DPP quads across a partial quad: local=%ux%ux%u\n", info->threads_num[0],
-				     info->threads_num[1], info->threads_num[2]);
+				EXIT("wave64 dispatch reads DPP quads across a partial quad or needs host barriers with thread limits: local=%ux%ux%u\n",
+				     info->threads_num[0], info->threads_num[1], info->threads_num[2]);
 			}
-			info->lane_private_masks = !native.reads_quad_lanes && !program->has_lane_private_blockers;
+			info->lds_order_barriers = native.lds_order_barriers;
+			info->lane_private_masks =
+			    !native.reads_quad_lanes && !program->has_lane_private_blockers && native.lds_order_barriers.empty();
 		} else if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32 && info->wave_layout.guest_wave_size == 64u)
 		{
 			// A program proven wave-width independent runs one guest lane per
 			// invocation without exchanges between the halves of a guest wave.
 			const auto native = info->native_equivalent_valid ? program->NativeEquivalence() : ShaderComputeWaveAnalysisResult {};
-			if (NativeEquivalenceFitsWorkgroup(native, *info))
+			// The split layout already orders the LDS accesses a native layout would need host barriers for.
+			if (NativeEquivalenceFitsWorkgroup(native, *info) && native.lds_order_barriers.empty())
 			{
 				info->wave_layout        = info->native_equivalent_layout;
 				info->lane_private_masks = !native.reads_quad_lanes && !program->has_lane_private_blockers;
@@ -6840,6 +6846,15 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 	ids.Add(static_cast<uint32_t>(input_info->native_wave_sensitive));
 	ids.Add(static_cast<uint32_t>(input_info->lane_private_masks));
 	ids.Add(input_info->required_subgroup_size);
+	// Only programs that need host barriers carry them, so every other program keeps its id.
+	if (!input_info->lds_order_barriers.empty())
+	{
+		ids.Add(static_cast<uint32_t>(input_info->lds_order_barriers.size()));
+		for (const auto index: input_info->lds_order_barriers)
+		{
+			ids.Add(index);
+		}
+	}
 
 	for (int i = 0; i < 3; i++)
 	{

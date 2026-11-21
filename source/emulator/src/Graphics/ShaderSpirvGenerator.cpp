@@ -3151,6 +3151,15 @@ void Spirv::WriteInstructions()
 		if (uses_uint_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: uses_uint_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst) condition ignored (continuing)\n"); }
 
 		WriteLabel(index);
+		if (HasLdsOrderBarriers())
+		{
+			const auto& barriers = m_cs_input_info->lds_order_barriers;
+			if (std::find(barriers.begin(), barriers.end(), static_cast<uint32_t>(index)) != barriers.end() &&
+			    !Recompile_SBarrier_Empty(static_cast<uint32_t>(index), m_code, &m_source, this, nullptr, SccCheck::None))
+			{
+				EXIT("host LDS-order barrier failed: pc=0x%08" PRIx32 "\n", inst.pc);
+			}
+		}
 		if (LaneReductions().IsStep(static_cast<uint32_t>(index)))
 		{
 			m_source += String8::FromPrintf("; reduction step: %s\n", ShaderCode::DbgInstructionToStr(inst).c_str());
@@ -3751,9 +3760,13 @@ void Spirv::FindConstants()
 		AddConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
 	}
 	// The compute barrier emitter picks this value with the same predicate, so both must agree.
-	if (m_code.HasAnyOf({ShaderInstructionType::SBarrier}) && ShaderCodeWritesStorage(m_code))
+	if ((m_code.HasAnyOf({ShaderInstructionType::SBarrier}) || HasLdsOrderBarriers()) && ShaderCodeWritesStorage(m_code))
 	{
 		AddConstantUint(SPIRV_WORKGROUP_STORE_BARRIER_MEMORY);
+	}
+	if (HasLdsOrderBarriers())
+	{
+		AddConstantUint(SPIRV_WORKGROUP_MEMORY_ACQ_REL);
 	}
 	if (UsesVertexLayerExport())
 	{

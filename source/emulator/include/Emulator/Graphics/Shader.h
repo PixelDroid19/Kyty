@@ -2657,6 +2657,8 @@ struct ShaderComputeInputInfo
 	// barrier instructions: every lane keeps its own mask state without
 	// subgroup ballots, and EXEC/VCC branches lower to per-lane control flow.
 	bool                    lane_private_masks    = false;
+	// See ShaderComputeWaveAnalysisResult::lds_order_barriers; empty unless the native-equivalent layout needs them.
+	std::vector<uint32_t>   lds_order_barriers;
 	uint32_t                required_subgroup_size = 0;
 	// See ShaderComputeWaveDispatchPlan::native_equivalent_layout.
 	bool                    native_equivalent_valid = false;

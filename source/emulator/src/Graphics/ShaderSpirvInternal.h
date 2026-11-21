@@ -338,6 +338,8 @@ public:
 
 	void                                        SetCsInputInfo(const ShaderComputeInputInfo* input_info) { m_cs_input_info = input_info; }
 	[[nodiscard]] const ShaderComputeInputInfo* GetCsInputInfo() const { return m_cs_input_info; }
+	// The native-equivalent layout precedes these instructions with a workgroup barrier.
+	[[nodiscard]] bool HasLdsOrderBarriers() const { return m_cs_input_info != nullptr && !m_cs_input_info->lds_order_barriers.empty(); }
 
 	void                                      SetPsInputInfo(const ShaderPixelInputInfo* input_info) { m_ps_input_info = input_info; }
 	[[nodiscard]] const ShaderPixelInputInfo* GetPsInputInfo() const { return m_ps_input_info; }
