@@ -9030,6 +9030,21 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       `burstprof1` ran 20-28 fps at 750-920 draws a frame. `warm2` ran 32-34 fps at 566-590 draws (render engine
       91-94 %, 27.5-29.7 ms a frame) and 23-29 fps at 587-643 draws (83-97 %, 33.8-35.9 ms), so the warm fight
       stays GPU-bound near 30 fps above about 590 draws.
+    - Mixed depth layers are reused while their sources hold (2026-11-21, measured). A depth slice-array layer
+      whose 64 KiB blocks lie partly in depth images and partly in no image was rebuilt on every use, a CPU detile
+      of the whole layer each time. The layer now keeps the digest of its images with the dirty-page generation of
+      its guest read and is rebuilt only when either changes; the guest-ownership check of the uncovered blocks
+      still runs before the reuse test. On the cinematics branch of the route (`slg1`, `slm1`) it avoided 421 of
+      422 rebuilds. The detile was at most about 5.4 % of the command thread's sampled stacks, so no fps change is
+      claimed.
+    - Fixed: a storage view inside a depth target stopped the multi-parent path (2026-11-21). Two runs (`slm1`,
+      `slv1`) stopped on `!create_all_the_same` (GpuMemoryCreate.cpp, the final branch of the overlap policy) about
+      2 s after the world map started: a 64 KiB storage view at 0x53fbf0000 equal to a CPU-uploaded buffer and
+      inside a 1664x936 depth target, a storage chain at the depth target's base and three render targets. The
+      arena rule accepted every parent except the depth target, which the single-parent path already links as a
+      view over a depth range. The arena rule now links it the same way. A unit test with the captured parent set
+      stops on the same exit without the change. The next replay (`slv2`) reached the fight but not the world map
+      within 330 s, so the in-game check of that point is still open.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third

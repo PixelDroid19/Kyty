@@ -441,7 +441,8 @@ struct StorageTextureVulkanImage;
 struct DepthSliceArrayLayer
 {
 	// content_stamp of the slice image last copied into the layer, a digest of the images whose 64 KiB blocks
-	// were last assembled into it, or the marker of a read from guest memory.
+	// were last assembled into it (over guest bytes read at guest_generation when some blocks lie in no image), or
+	// the marker of a read from guest memory.
 	uint64_t stamp = 0;
 	// Guest range registered with the dirty-page tracker by the first read from guest memory (size 0 before it), and
 	// the page generation of the last read.

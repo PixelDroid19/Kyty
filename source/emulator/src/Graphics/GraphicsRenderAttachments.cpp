@@ -1075,27 +1075,31 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 				{
 					last_read.sources.push_back({source, source->content_stamp, source->depth_slice});
 				}
-				if (state.stamp == plan.digest)
+				// The blocks outside every image hold guest memory, so only they must be guest-owned.
+				for (const auto& [begin, end]: plan.guest_blocks)
+				{
+					const auto source = GuestDepthLayerSource(begin, end - begin);
+					if (source != GpuMemoryDepthD16Source::Guest)
+					{
+						EXIT("depth array layer %u at 0x%012" PRIx64 " lies partly outside depth images and blocks 0x%012" PRIx64
+						     "-0x%012" PRIx64 " have no guest bytes: source=%u\n",
+						     layer, slice_addr, begin, end, static_cast<uint32_t>(source));
+					}
+				}
+				// The digest covers the images; blocks outside them also need the guest bytes unchanged since the read.
+				if (state.stamp == plan.digest &&
+				    (plan.guest_blocks.empty() || GpuDirtyPageTracker::Instance().ReadObservationIsStable(
+				                                      slice_addr, slice_size, GpuDirtyReadObservation {state.guest_generation, true})))
 				{
 					continue;
 				}
 				record();
+				bool guest_read_stable = true;
 				if (!plan.guest_blocks.empty())
 				{
-					// The blocks outside every image hold guest memory, so only they must be guest-owned: upload the layer's
-					// guest bytes, then copy the images' blocks over them. The digest does not cover guest bytes, so the
-					// layer is rebuilt on each use.
-					for (const auto& [begin, end]: plan.guest_blocks)
-					{
-						const auto source = GuestDepthLayerSource(begin, end - begin);
-						if (source != GpuMemoryDepthD16Source::Guest)
-						{
-							EXIT("depth array layer %u at 0x%012" PRIx64 " lies partly outside depth images and blocks 0x%012" PRIx64
-							     "-0x%012" PRIx64 " have no guest bytes: source=%u\n",
-							     layer, slice_addr, begin, end, static_cast<uint32_t>(source));
-						}
-					}
+					// Upload the layer's guest bytes, then copy the images' blocks over them.
 					UploadGuestDepthLayer(buffer, vk_buffer, slice_array, layer, slice_addr, slice_size, fmt, pitch);
+					guest_read_stable = state.stamp == kSliceArrayGuestLayer;
 					VkMemoryBarrier barrier {};
 					barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 					barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1110,7 +1114,7 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 						copy_from(source, regions.data(), static_cast<uint32_t>(regions.size()));
 					}
 				}
-				state.stamp = plan.guest_blocks.empty() ? plan.digest : 0u;
+				state.stamp = guest_read_stable ? plan.digest : 0u;
 				continue;
 			}
 			from_images       = false;
