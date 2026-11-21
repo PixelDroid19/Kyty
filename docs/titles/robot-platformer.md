@@ -8654,6 +8654,16 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       ms a frame of gaps, but halving the gap per buffer with `reemit` left the frame rate unchanged and removing
       the early-submit floor (`greedy1`) gained nothing. Argued only, not measured: dropping LDS ordering
       barriers (about 0.5 ms) and the compute-after-draw transition before the kernel.
+    - Excluded: one base for the four words of a raw 4-dword buffer load (2026-11-21, reverted). Driver timing
+      of light fight frames (`imeas5`, frames of 26-38 ms, 29.9 ms of GPU on average): compute 12.3 ms, the
+      lighting kernel 4.7 ms, the five-target pass (`0x6bcfb82d`) 3.3 ms, and the volume kernel `0x94df28b4`
+      (8x8x8 groups, 98,304 invocations) 1.5 ms. That kernel compiles to SIMD16 with 176 sends; 144 of them
+      come from 36 raw 4-dword loads, which the translator emits as four one-word loads, each dividing its
+      own byte offset by 4. Emitting them through the existing four-word helper (one base plus 0..3) left
+      the sends at 176 (`warm249`, compiler statistics): instructions fell from 3,559 to 2,803 and the
+      estimated cycles from 37,306 to 33,234, but the driver did not merge the words into one vector read.
+      Likely cause, not proven: the device enables `robustBufferAccess`, under which the driver merges
+      storage-buffer reads only when it can bound the offset. No frame was measured; the change was reverted.
     - Excluded: compute queues on the compute engine (`ccs1`, pricing probe, not a valid configuration). The
       compute queues were moved to the compute-only family by skipping the depth copy-on-compute check for D16
       and D32 (the record "Arc compute engine not usable for the compute queues" explains why the check closes
