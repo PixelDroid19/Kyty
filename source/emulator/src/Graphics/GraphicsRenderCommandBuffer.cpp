@@ -4259,12 +4259,19 @@ void DeferredReplayWorker::Run()
 	// Draws arrive every few microseconds while a frame records: polling that long keeps a
 	// hand-off from paying a wake-up, and the thread sleeps once the stream pauses.
 	constexpr auto kPollWindow = std::chrono::microseconds(200);
+	// Clock reads were most of the poll's own samples, and the command thread recorded draws
+	// faster with fewer of them; the window only needs to end roughly on time.
+	constexpr uint32_t kPausesPerClockRead = 16;
 	for (;;)
 	{
 		const auto poll_start = std::chrono::steady_clock::now();
-		while (!m_has_pending.load(std::memory_order_acquire) && std::chrono::steady_clock::now() - poll_start < kPollWindow)
+		for (uint32_t pauses = 1; !m_has_pending.load(std::memory_order_acquire); pauses++)
 		{
 			_mm_pause();
+			if (pauses % kPausesPerClockRead == 0 && std::chrono::steady_clock::now() - poll_start >= kPollWindow)
+			{
+				break;
+			}
 		}
 		VkCommandBuffer target = VK_NULL_HANDLE;
 		{
