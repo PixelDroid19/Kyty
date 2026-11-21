@@ -8407,6 +8407,17 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       indexed geometry passes only 5,451, none prepared; auto geometry passes 699,564 prepared and 100,559 not; other
       auto draws 135,665, none prepared. Letting the indexed path take prepared geometry-pass inputs (as the auto
       path does) prepared none of them in `geoprep1`/`geoprep2` and was reverted.
+    - Three more per-draw levers excluded (2026-11-21, `c21ad6e29`):
+      - Merging runs of `DRAW_INDEX_INDIRECT` into one multi-draw: a temporary counter (`indir1`, fight route, 200 s)
+        saw about 65 indexed indirect packets a second (2-3 a frame), none following the previous one at a constant
+        argument stride, and no `DRAW_INDIRECT`. Not measured on other titles.
+      - Moving shader input analysis and ids off the command thread: a draw taken from the draw front already skips
+        `ShaderGetInputInfoVS/PS`, usage parsing and id building; what remains on the command thread for it is the
+        descriptor walk (`BindDescriptors`), the subject of the binding-snapshot design.
+      - Remembering the last synchronization of a written storage range: a repeated writable bind already returns from
+        the same-submit object cache without a tracker call, and across submits `ChangedSince` against the object's
+        per-block `dirty_generation` is that memo; the index update left on each writable reuse is a few set
+        operations.
     - Causal check with the change (`cpspin1`): a temporary busy wait of 6 us after every draw on the command thread,
       on in alternate 4 s wall-clock blocks, so both arms share the scene. Seconds that cross a block edge are left
       out.
