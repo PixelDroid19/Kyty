@@ -9019,6 +9019,16 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       draws a frame and 14-16 fps at 1,044-1,320 draws. A stable 30 fps fight therefore needs both a lower
       command-thread cost per draw (Astro 20-36 us against about 4.7 us on `PPSA17221 - Minecraft`) and less
       GPU work per frame.
+    - First-use driver compiles stall the fight (`burstprof1`, 2026-11-21, measured). The route landed through
+      the passive cinematic (shift -69.6 s). After 6->7 the run spent 33.2 s in `vkCreateGraphicsPipelines` over
+      272 creates, with single creates of 0.9-2.3 s in 23 seconds; those seconds fell to 0-13 fps with the
+      pipeline stage at 150-280 ms a frame. Earlier replays on the same cache spent 0.1-5.1 s. The next replay
+      (`warm2`, same cache after `burstprof1` wrote it) spent 0.0 s over 190 creates, so the stored cache serves
+      these pipelines and the stalls are first-use compiles, not a cache miss on every run. `warm2` reached the
+      fight through another probe time, so its fight seconds are not the same scene. Between the stalls
+      `burstprof1` ran 20-28 fps at 750-920 draws a frame. `warm2` ran 32-34 fps at 566-590 draws (render engine
+      91-94 %, 27.5-29.7 ms a frame) and 23-29 fps at 587-643 draws (83-97 %, 33.8-35.9 ms), so the warm fight
+      stays GPU-bound near 30 fps above about 590 draws.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
