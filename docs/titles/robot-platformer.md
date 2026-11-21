@@ -9045,6 +9045,16 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       view over a depth range. The arena rule now links it the same way. A unit test with the captured parent set
       stops on the same exit without the change. The next replay (`slv2`) reached the fight but not the world map
       within 330 s, so the in-game check of that point is still open.
+    - A local game patch file moves the GPU-bound stretches, not the bursts (2026-11-21, measured, not a strict
+      run). Same binary and route, landed through the cinematics probe, 10 s windows after 6->7. Without a
+      patch (`slv2`): 34.5-35.1 fps at about 567 draws a frame, render engine 27.4 ms a frame. With the mods for
+      the non-tiled deferred renderer, GI probes off, delta time with its fixes, a 60 fps cap and a fixed 1080p
+      render resolution (`pat1`): 43.9-45.1 fps at the same draw count, 21.2 ms. Adding ambient occlusion,
+      screen-space reflections, screen-space shadows and volumetric atmosphere off with half-distance,
+      two-cascade sun shadows (`pat2`): 45.1-46.3 fps at about 520 draws, 19.5 ms, render engine 88-90 % busy.
+      The heavy seconds stay below 30 fps in both: 22.7-28.6 fps at 900-1,500 draws a frame with the engine
+      65-85 % busy, so they are command-thread bound and a GPU cut does not lift them. Captures show flatter,
+      darker lighting with the patch; its image is not checked against the console.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
