@@ -8662,8 +8662,11 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       own byte offset by 4. Emitting them through the existing four-word helper (one base plus 0..3) left
       the sends at 176 (`warm249`, compiler statistics): instructions fell from 3,559 to 2,803 and the
       estimated cycles from 37,306 to 33,234, but the driver did not merge the words into one vector read.
-      Likely cause, not proven: the device enables `robustBufferAccess`, under which the driver merges
-      storage-buffer reads only when it can bound the offset. No frame was measured; the change was reverted.
+      Cause, read in the driver's vectorizer: the device enables `robustBufferAccess`, and for robust modes
+      two reads merge only if the largest possible low offset plus their distance cannot wrap 32 bits. That
+      bound comes from alignment and the address strides only: a 4-byte stride gives `0xfffffffc + 4`, which
+      wraps, so 4-byte words of unknown alignment never merge. Merging would need an alignment the guest does
+      not guarantee. No frame was measured; the change was reverted.
     - Excluded: compute queues on the compute engine (`ccs1`, pricing probe, not a valid configuration). The
       compute queues were moved to the compute-only family by skipping the depth copy-on-compute check for D16
       and D32 (the record "Arc compute engine not usable for the compute queues" explains why the check closes
