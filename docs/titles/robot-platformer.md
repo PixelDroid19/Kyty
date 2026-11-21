@@ -9003,6 +9003,16 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       at about 510 draws a frame with the render engine 98-99 % busy (32.2-32.8 ms a frame), so it sits on the GPU
       edge of 30 fps, not above it. The fight route's inputs run to about +357 s of its recording, so runs that
       end near 260 s (all of `fb1`, `iperf1`, `vs1`) stop before most of it; captures belong after the skip.
+    - A full-length replay (`fight1`, 400 s, captures at 6->7 +150, +230 and +290 s, quiet host) also found no
+      cinematic: 18 probes from +49.6 to +81 s opened the plain pause menu, so the later inputs ran from a
+      different place. The captures show dunes gameplay (the robot running at +150 s, an enemy at the screen edge
+      at +290 s). In 10 s windows after 6->7: +80 to +170 s 34.5-37.8 fps at about 350 draws a frame (render
+      engine 96-99 %, 25.5-28.3 ms a frame); +180 to +230 s 25.6-30.1 fps at 640-800 draws (94-98 %, 31.9-35.2
+      ms); +240 to +270 s 11-20 fps at 700-2,200 draws with the engine 40-86 % busy (command-thread bound);
+      +280 to +300 s 26.2-27.7 fps at 560-750 draws (98-99 %, 35.6-37.2 ms). So on this binary the dunes
+      gameplay is GPU-bound below 30 fps above about 600 draws a frame and command-thread bound in the bursts.
+      Two consecutive runs (`vs1` after its capture delay, `fight1` without one) missed the cinematic that
+      `ck1` and `imeas2` found at the same probe times, so the route does not land reliably on this binary.
 - **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
   91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
   instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
