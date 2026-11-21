@@ -2151,6 +2151,16 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				return h.info.object.type == GpuMemoryObjectType::StorageTexture && obj.relation == OverlapType::Contains &&
 				       h.block.vaddr[0] != view_vaddr;
 			};
+			// A parent the storage alias rule above links, under its conditions, can share the arena with the crossing
+			// views (captured: a 0x280000 view equal to a sampled texture of its own layout and to a CPU-uploaded buffer,
+			// crossing two storage views, one materialized from a surface).
+			const auto arena_published_alias = [&](const ObjectInfo& o, const OverlappedBlock& obj)
+			{
+				return GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type) &&
+				       o.content_origin != GpuMemoryContentOrigin::GpuAliasMaterialization &&
+				       !GpuMemoryHasPendingWritableWriteBack(o.in_use, o.read_only, o.write_back_func != nullptr,
+				                                             m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies()));
+			};
 			bool multi_arena_storage_texture = info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
 			for (const auto& obj: others)
 			{
@@ -2173,7 +2183,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				     (o.object.type == GpuMemoryObjectType::StorageTexture &&
 				      (StorageTextureRedescribesRange(o.params, info.params, compare_layout) ||
 				       o.params[StorageTextureObject::PARAM_PITCH] != info.params[StorageTextureObject::PARAM_PITCH])) ||
-				     arena_view_at_other_base(h, obj, vaddr[0]) ||
+				     arena_view_at_other_base(h, obj, vaddr[0]) || arena_published_alias(o, obj) ||
 				     (o.object.type == GpuMemoryObjectType::Texture && (holds_surface_pixels(o) || o.device_write_time != 0u) &&
 				      StorageTextureRedescribesRange(o.params, info.params, compare_layout)) ||
 				     (o.object.type == GpuMemoryObjectType::RenderTexture &&
