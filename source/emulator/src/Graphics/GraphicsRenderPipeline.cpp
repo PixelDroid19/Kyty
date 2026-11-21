@@ -1439,6 +1439,15 @@ void PipelineCache::AttachPipelineLease(CommandBuffer* recording_buffer, Pipelin
 
 void PipelineCache::SaveDriverCacheIfDue()
 {
+	if (m_driver_cache_checkpoint.valid())
+	{
+		if (m_driver_cache_checkpoint.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+		{
+			return;
+		}
+		FinishDriverCacheCheckpoint(m_driver_cache_checkpoint.get());
+	}
+
 	auto* ctx = g_render_ctx->GetGraphicCtx();
 	if (ctx == nullptr || ctx->physical_device == nullptr || ctx->device == nullptr || ctx->pipeline_cache == nullptr)
 	{
@@ -1460,53 +1469,60 @@ void PipelineCache::SaveDriverCacheIfDue()
 		return;
 	}
 
-	// A background compile may hold the cache for seconds; the checkpoint waits for a later lookup instead.
-	std::unique_lock cache_access(PipelineCacheAccess(), std::try_to_lock);
-	if (!cache_access.owns_lock())
-	{
-		return;
-	}
-
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
 
 	const size_t budget           = PipelineCacheStoreSessionWriteBudgetBytes();
 	const size_t remaining_budget = m_driver_cache_bytes_attempted < budget ? budget - m_driver_cache_bytes_attempted : 0u;
-	size_t       attempted_size   = 0;
-	const auto   save_start       = DebugStatsClock::now();
-	const auto   save_result      = PipelineCacheStoreSave(ctx->device, ctx->pipeline_cache, properties, remaining_budget, &attempted_size);
-	if (save_result == PipelineCacheStoreSaveResult::Unchanged)
+	m_driver_cache_attempted_once = true;
+	m_last_driver_cache_attempt   = now;
+	// Pipelines added while the checkpoint runs mark the cache dirty again.
+	m_driver_cache_dirty = false;
+
+	// Serializing and writing a large blob takes hundreds of milliseconds on a slow volume, so it
+	// never runs on the thread that missed.
+	m_driver_cache_checkpoint = std::async(std::launch::async,
+	                                       [device = ctx->device, cache = ctx->pipeline_cache, properties, remaining_budget]()
+	                                       {
+		                                       DriverCacheCheckpoint checkpoint;
+		                                       const auto            start = DebugStatsClock::now();
+		                                       checkpoint.result =
+		                                           PipelineCacheStoreSave(device, cache, properties, remaining_budget, &checkpoint.attempted_size);
+		                                       checkpoint.elapsed_ns = static_cast<uint64_t>(
+		                                           std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - start).count());
+		                                       return checkpoint;
+	                                       });
+}
+
+void PipelineCache::FinishDriverCacheCheckpoint(const DriverCacheCheckpoint& checkpoint)
+{
+	if (checkpoint.result == PipelineCacheStoreSaveResult::Unchanged)
 	{
-		m_driver_cache_attempted_once = true;
-		m_last_driver_cache_attempt   = now;
-		m_driver_cache_dirty          = false;
 		return;
 	}
-	const auto save_elapsed_ns =
-	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - save_start).count());
-	DebugStatsPipelineCacheCheckpointOutcome checkpoint_outcome = DebugStatsPipelineCacheCheckpointOutcome::Failed;
-	if (save_result == PipelineCacheStoreSaveResult::Written)
+	DebugStatsPipelineCacheCheckpointOutcome outcome = DebugStatsPipelineCacheCheckpointOutcome::Failed;
+	if (checkpoint.result == PipelineCacheStoreSaveResult::Written)
 	{
-		checkpoint_outcome = DebugStatsPipelineCacheCheckpointOutcome::Written;
-	} else if (save_result == PipelineCacheStoreSaveResult::BudgetExceeded)
+		outcome = DebugStatsPipelineCacheCheckpointOutcome::Written;
+	} else if (checkpoint.result == PipelineCacheStoreSaveResult::BudgetExceeded)
 	{
-		checkpoint_outcome = DebugStatsPipelineCacheCheckpointOutcome::BudgetExceeded;
+		outcome = DebugStatsPipelineCacheCheckpointOutcome::BudgetExceeded;
 	}
-	DebugStatsRecordPipelineCacheCheckpoint(checkpoint_outcome, static_cast<uint64_t>(attempted_size), save_elapsed_ns);
-	m_driver_cache_attempted_once         = true;
-	m_last_driver_cache_attempt           = now;
-	m_driver_cache_bytes_attempted        = PipelineCacheStoreAccountWriteAttempt(m_driver_cache_bytes_attempted, attempted_size);
-	m_driver_cache_write_budget_exhausted = m_driver_cache_bytes_attempted >= budget;
-	if (save_result == PipelineCacheStoreSaveResult::Written)
+	DebugStatsRecordPipelineCacheCheckpoint(outcome, static_cast<uint64_t>(checkpoint.attempted_size), checkpoint.elapsed_ns);
+
+	const size_t budget                   = PipelineCacheStoreSessionWriteBudgetBytes();
+	m_driver_cache_bytes_attempted        = PipelineCacheStoreAccountWriteAttempt(m_driver_cache_bytes_attempted, checkpoint.attempted_size);
+	m_driver_cache_write_budget_exhausted = m_driver_cache_bytes_attempted >= budget ||
+	                                        checkpoint.result == PipelineCacheStoreSaveResult::BudgetExceeded;
+	if (checkpoint.result == PipelineCacheStoreSaveResult::Failed)
 	{
-		m_driver_cache_dirty = false;
-		if (Config::GetPrintfDirection() != Log::Direction::Silent)
-		{
-			KYTY_LOG_DEBUG("Saved Vulkan pipeline cache: %zu bytes\n", attempted_size);
-		}
-	} else if (save_result == PipelineCacheStoreSaveResult::BudgetExceeded)
+		// The entries the failed write carried are still only in the driver cache.
+		m_driver_cache_dirty = true;
+		return;
+	}
+	if (checkpoint.result == PipelineCacheStoreSaveResult::Written && Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
-		m_driver_cache_write_budget_exhausted = true;
+		KYTY_LOG_DEBUG("Saved Vulkan pipeline cache: %zu bytes\n", checkpoint.attempted_size);
 	}
 }
 

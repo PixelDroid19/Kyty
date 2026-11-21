@@ -41,6 +41,7 @@
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/RenderResolutionPlanner.h"
 #include "Emulator/Graphics/SampleLocations.h"
 #include "Emulator/Graphics/Shader.h"
@@ -53,6 +54,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -330,8 +332,16 @@ private:
 	[[nodiscard]] uint32_t  FindAvailableSlot();
 	void                    AttachPipelineLease(CommandBuffer* recording_buffer, Pipeline& pipeline);
 
+	struct DriverCacheCheckpoint
+	{
+		PipelineCacheStoreSaveResult result         = PipelineCacheStoreSaveResult::Failed;
+		size_t                       attempted_size = 0;
+		uint64_t                     elapsed_ns     = 0;
+	};
+
 	void DeletePipelineInternal(uint32_t id);
 	void SaveDriverCacheIfDue();
+	void FinishDriverCacheCheckpoint(const DriverCacheCheckpoint& checkpoint);
 
 	void DumpToFile(Core::File* f, const Pipeline& p);
 	void DumpPipeline(const char* action, uint32_t id);
@@ -345,6 +355,8 @@ private:
 	bool                                  m_driver_cache_dirty                  = false;
 	size_t                                m_driver_cache_bytes_attempted        = 0;
 	bool                                  m_driver_cache_write_budget_exhausted = false;
+	// At most one checkpoint runs off the recording thread; the next lookup collects its outcome.
+	std::future<DriverCacheCheckpoint>    m_driver_cache_checkpoint;
 };
 
 struct VulkanDescriptorSet
