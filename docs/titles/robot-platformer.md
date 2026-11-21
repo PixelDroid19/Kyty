@@ -9023,9 +9023,10 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       the passive cinematic (shift -69.6 s). After 6->7 the run spent 33.2 s in `vkCreateGraphicsPipelines` over
       272 creates, with single creates of 0.9-2.3 s in 23 seconds; those seconds fell to 0-13 fps with the
       pipeline stage at 150-280 ms a frame. Earlier replays on the same cache spent 0.1-5.1 s. The next replay
-      (`warm2`, same cache after `burstprof1` wrote it) spent 0.0 s over 190 creates, so the stored cache serves
-      these pipelines and the stalls are first-use compiles, not a cache miss on every run. `warm2` reached the
-      fight through another probe time, so its fight seconds are not the same scene. Between the stalls
+      (`warm2`, same cache after `burstprof1` wrote it) spent 0.0 s over 190 creates, which points to first-use
+      compiles rather than a miss on every run. `warm2` reached the fight through another probe time, so it did
+      not revisit the same scene and does not prove that the stalled pipelines now load from the cache; a later
+      landed run on this cache has to confirm it. Between the stalls
       `burstprof1` ran 20-28 fps at 750-920 draws a frame. `warm2` ran 32-34 fps at 566-590 draws (render engine
       91-94 %, 27.5-29.7 ms a frame) and 23-29 fps at 587-643 draws (83-97 %, 33.8-35.9 ms), so the warm fight
       stays GPU-bound near 30 fps above about 590 draws.
