@@ -23,7 +23,9 @@ void main() {
         atomicOr(control[1], buffer_error);
         return;
     }
-    if (atomicAdd(control[1], 0u) != 0u || control[wave_table_offset() + slot] == 0u) return;
+    // Earlier passes set the failure flags behind a barrier, so a plain load sees
+    // them; an atomic read would serialize every slot on this one word.
+    if (control[wave_table_offset() + slot] == 0u || control[1] != 0u) return;
     uint wave = reserve_wave();
     if (wave != invalid_reference) references[active_reference_offset() + wave] = slot;
 }

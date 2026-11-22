@@ -223,7 +223,7 @@ constexpr const char* kFragmentResolveCore = R"CORE(; SPIR-V
                OpBranch %142
         %142 = OpLabel
         %143 = OpAccessChain %_ptr_StorageBuffer_uint %control_buffer %int_0 %int_1
-        %144 = OpAtomicIAdd %uint %143 %uint_1 %uint_0 %uint_0
+        %144 = OpLoad %uint %143
         %145 = OpINotEqual %bool %144 %uint_0
                OpSelectionMerge %147 None
                OpBranchConditional %145 %146 %147

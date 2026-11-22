@@ -26,7 +26,9 @@ void fail(uint reason) { atomicOr(control_buffer.control[1], reason); }
 void main() {
     if (gl_HelperInvocation) discard;
     if (control_buffer.control.length() < 16u) discard;
-    if (atomicAdd(control_buffer.control[1], 0u) != 0u) discard;
+    // Earlier passes set the failure flags behind a barrier, so a plain load sees
+    // them; an atomic read would serialize every fragment on this one word.
+    if (control_buffer.control[1] != 0u) discard;
     if (control_buffer.control.length() < wave_table_offset() + transport.wave_lookup_capacity ||
         record_buffer.records.length() < transport.quad_capacity * quad_words() ||
         reference_buffer.references.length() < output_reference_offset() + transport.quad_capacity ||

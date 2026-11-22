@@ -19,7 +19,9 @@ void main() {
         atomicOr(control[1], buffer_error);
         return;
     }
-    if (atomicAdd(control[1], 0u) != 0u || wave >= transport.wave_capacity || wave >= control[2]) return;
+    // Earlier passes set the failure flags behind a barrier, so a plain load sees
+    // them; an atomic read would serialize every invocation on this one word.
+    if (control[1] != 0u || wave >= transport.wave_capacity || wave >= control[2]) return;
     uint slot = references[active_reference_offset() + wave];
     if (slot >= transport.wave_lookup_capacity) {
         atomicOr(control[1], reference_error);
