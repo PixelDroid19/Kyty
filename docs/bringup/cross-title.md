@@ -8959,7 +8959,13 @@ the same route as the record before). The dunes run with dust is unchanged: 81-8
 25.6-29.7 fps (was 27.8-29.7) and 94-95 s at about 1,000 draws 21.7-27.7 (was 26.7-27.6), so no frame-rate gain
 is claimed. The stall seconds at 77-78, 94-95 and 111-112 s each coincide with new SPIR-V modules written in
 that second (the route reaches new variants on each run), so they are first-use translations. `PPSA17221 -
-Minecraft` reached the world at 77.7 s with a correct capture.
+Minecraft` reached the world at 77.7 s with a correct capture, on a warm cache that may not hold the new
+translations.
+
+**Caveat.** Neither this change nor the lane-reduction record before it raised the translator version, so a
+cache written by an earlier build kept its old modules under the same keys. The "was" figures above come from
+runs on such a cache (written before the lane-reduction change), so they are not a clean baseline for either
+change. The version is now 254; existing caches are rebuilt on first use.
 
 **Still open.** The dunes run with dust (81-86 s and 94-95 s) stays under 30 and is not ranked yet; the
 lighting programs still keep 273 and 195 own-bit selects; first-use translation stalls remain on every new route
