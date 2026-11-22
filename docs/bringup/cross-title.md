@@ -8814,8 +8814,8 @@ fell from 591 to 319, instructions from 6,943 to 6,756 and live registers under 
 capture correct, about 27-28 fps, so no frame-rate change is claimed. `PPSA17221 - Minecraft` reached the world at
 84 s on the new translation with a correct capture; whether any of its programs took the new path was not counted.
 Unit suite 2,832 passed, 11 skipped; shader-compute integration 3 passed and 1 skipped (`PairedWave64`); the three
-repository gates passed. In that intro run five guest programs (seven modules) changed translation, by 223-439 words
-each. A 170 s run on the same binary: light gameplay at about 550 draws per frame 32.0-32.7 fps, as in the run
+repository gates passed. In the SPIR-V of the two hottest intro pixel programs the EXEC-bit selects fell from 591 to 319
+and from 631 to 347; each removed guard stays as a select on a constant condition, which the driver folds. A 170 s run on the same binary: light gameplay at about 550 draws per frame 32.0-32.7 fps, as in the run
 before the change on the same scene; a short stretch of 530-800 draws ran 21-30 fps for five seconds. The capture
 in the light dunes is correct. One capture landed in the second where the scene cuts (draws and render-engine load
 fall) and is all black; no capture before the change exists at that point, so it is not compared.
@@ -8831,3 +8831,10 @@ fall) and is all black; no capture before the change exists at that point, so it
 - The ceiling with both the EXEC selects and the relative-move select chains folded (6,943 to 5,080 instructions,
   SIMD16 offered, intro 31-32 fps by program replacement) needs two folds that are not sound. One compile of that
   ceiling at 79 live registers (106 at SIMD16) was offered SIMD16; a threshold near 90 is an estimate from it.
+- Treating relative reads as reading no register at all (temporary build): no further guard is freed in this
+  program, so the candidate registers are not what keeps the remaining 319 selects.
+- Folding only the relative-move select chains to the first candidate (program replacement, not sound): instructions
+  6,756 to 5,844 and 6,945 to 6,397, live registers 118 to 107 and 113 to 100, still SIMD8 only, driver cycle estimate
+  down 5.5 % and 3.5 %, memory sends 134 to 131 and 147 to 145. Measured time fell more (7.85 to 5.66 and 6.55 to
+  5.62 ms per frame in the intro under `INTEL_MEASURE`), but the image differed, so that drop is not a price. A sound
+  lowering keeps all eight candidates live and saves less than this bound; not pursued.
