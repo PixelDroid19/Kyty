@@ -7894,7 +7894,8 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   constants and buffers, reproduces the measured alpha at four froxels (an exponential height fog over the
   camera height plus an atmosphere term), so the density next to the camera is the guest's. The full-screen
   apply's own math also matches: from the read-back depth and its constants it predicts transmittance
-  0.91-0.93 at Astro, which held once the sampler fix above landed.
+  0.91-0.93 at Astro. After the sampler fix above the captures show Astro at full contrast; the transmittance
+  itself was not re-measured.
 - **Not the cause (2026-11-21): the 3D sample-LZ index tag.** That lowering indexed the 3D descriptor array with
   the unmasked virtual index (fixed), but the haze at the crash site is unchanged after the fix.
 - **Open (2026-11-21): the guest's non-tiled deferred-lighting renderer draws without direct sunlight.** A local
