@@ -58,10 +58,30 @@ uint reserve_record(bool claimed) {
     return invalid_reference;
 }
 
-void store_quad(uint slot, uint record, uint primitive, uint xy, uint mask) {
-    // One successful record reservation precedes every ordinal increment,
-    // so this counter cannot exceed quad_capacity or wrap in this draw.
-    uint ordinal = atomicAdd(control_buffer.control[17u + primitive * 2u], 1u);
+// Numbers the reserved quads of each primitive with one add per primitive
+// present in the subgroup, from a reserving lane. Only reserved records take
+// an ordinal, so a counter cannot exceed quad_capacity or wrap in this draw.
+uint reserve_ordinal(bool reserved, uint primitive) {
+    uint ordinal = 0u;
+    bool pending = reserved;
+    while (subgroupAdd(pending ? 1u : 0u) != 0u) {
+        uint leader = subgroupMin(pending ? gl_SubgroupInvocationID : 0xffffffffu);
+        uint leader_primitive = subgroupMax(gl_SubgroupInvocationID == leader ? primitive : 0u);
+        uint member = pending && primitive == leader_primitive ? 1u : 0u;
+        uint count = subgroupAdd(member);
+        uint rank = subgroupExclusiveAdd(member);
+        uint first_ordinal = 0u;
+        if (gl_SubgroupInvocationID == leader) first_ordinal = atomicAdd(control_buffer.control[17u + leader_primitive * 2u], count);
+        first_ordinal = subgroupMax(first_ordinal);
+        if (member != 0u) {
+            ordinal = first_ordinal + rank;
+            pending = false;
+        }
+    }
+    return ordinal;
+}
+
+void store_quad(uint slot, uint record, uint ordinal, uint primitive, uint xy, uint mask) {
     uint header = record * quad_words();
     record_buffer.records[header] = mask;
     record_buffer.records[header + 1u] = 1u;
@@ -113,7 +133,8 @@ void main() {
     }
     // Uniform control flow: the reservation is a subgroup operation.
     uint record = reserve_record(slot != invalid_reference);
-    if (record != invalid_reference) store_quad(slot, record, primitive, xy, mask);
+    uint ordinal = reserve_ordinal(record != invalid_reference, primitive);
+    if (record != invalid_reference) store_quad(slot, record, ordinal, primitive, xy, mask);
     record = subgroupQuadBroadcast(record, first);
     for (uint word=0u; word < transport.lane_words; ++word) {
         uint own = read_lane_word(word);
