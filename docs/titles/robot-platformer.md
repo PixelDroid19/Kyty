@@ -7905,9 +7905,12 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   over the guest vertex program's user data (cross-title record "Fragment transport parameters overlapped the
   vertex push constants"). After the fix the patched route shows lit dunes, the robot and sun shadows, matching
   the default renderer, at about 11 fps (10.9 at 160 s on the committed build, 60 fps limit); before the
-  capture-reservation change in the same record it ran at 3 fps, GPU-bound on the capture draw. With GI off only
-  (default renderer) the status samples at 120-160 s read 32-40 fps with a correct image, on a build that still
-  carried gated temporary diagnostics; whether that rate holds was not measured. Earlier candidates for the dark image (the s66 texture mask, the
+  capture-reservation change in the same record it ran at 3 fps, GPU-bound on the capture draw. The shade-width
+  change in the same record then brought this renderer to 25-27 fps in the dunes (GPU-bound). With GI off only
+  (default renderer, `clean-p7`, 40-187 s, per-second samples): median 38.7 fps, 14 of 147 seconds under 30. Of
+  those, seconds 49-67 are the intro at 27.5-29.9 fps (GPU about 88 % busy, command thread about 45 %), four are
+  level-load hitches (85-86, 100, 106, 112 s) and two are one-second dips in the dunes gameplay (144 s at 25.4,
+  177 s at 27.8); the dunes otherwise hold 37-40 fps, GPU-bound. Earlier candidates for the dark image (the s66 texture mask, the
   DREF1 shadow tap, the sun flag in s52, VCMPX writing VCC, export kill handling, G-buffer formats) were each
   checked against this renderer only and are moot: none was the cause. Still open: Astro's cape colour differed
   between this renderer and the default one in one capture pair; not checked after the fix.

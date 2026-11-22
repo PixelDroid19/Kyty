@@ -8720,6 +8720,16 @@ frame's GPU time from about 320 to 63 ms.
 - Not run: `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition`, which also uses fragment
   transport (record of 2026-11-05 above); it is not in the Linux matrix.
 
+**Shade width (perf, 2026-11-22).** The shade stage ran every transported pixel program as a guest wave64 on two
+32-lane host subgroups (`requiredSubgroupSize` 32), the layout guest compute left behind because large programs
+spill at that width (8-lane rule above). The shade now takes its part width from the same register rule
+(`ShaderSplitWavePartLanes` over the pixel program's VGPR count) and pins the shade pipeline to it. Astro Bot
+dunes with the deferred-lighting renderer (`INTEL_MEASURE`, last 30 frames of a warm run): the shade compute went
+from 57.6 to 6.8 ms per frame (8 dispatches, new driver hash), the frame's GPU time from 95.1 to 44.1 ms, and the
+run from about 11 to 25-27 fps in the dunes (GPU 97-99 % busy), image correct. The scan (3.9 ms), capture
+(2.7 ms) and resolve (1.5 ms) stages are now the larger part of the transport cost. 2,830 unit tests (the shade
+module tests build at 8, 16 and 32 lanes) and the gates passed.
+
 **Open.**
 - The transport failure flag is never read on the host. A band that fails for any reason drops its pixels
   silently. Suggested direction: read the flag back at retirement in a bounded diagnostic and count failed bands.
