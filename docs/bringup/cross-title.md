@@ -8975,10 +8975,11 @@ variant.
 ## Split-wave LDS order between fields of one lane slot (2026-11-22, measured)
 
 **Observed.** On `PPSA21567 - Astro Bot` with the deferred-lighting renderer, the dunes run with dust (81-86 s,
-655-693 draws per frame, 25.6-29.7 fps) is GPU-bound (render engine busy 87-98 %). A driver-timed run over frames
-3,500-4,050 (30.5 ms per frame measured) puts the per-draw geometry front first: 11.5 ms per frame over 353
+655-693 draws per frame, 25.6-29.7 fps) is GPU-bound (render engine busy 87-98 %). A driver-timed run at draw granularity over
+frames 3,500-4,050 (30.5 ms per frame measured) puts the per-draw geometry front first: 11.5 ms per frame over 353
 dispatches (86 each of 64, 192, 3,200 and 4,032 threads at 25-31 us, almost flat in size, plus 3 large), then a
-clear at 1.9 ms and two computes at 1.8 and 1.5 ms. This is the program earlier records call `0x0d49d0a9`; the
+clear at 1.9 ms and two computes at 1.8 and 1.5 ms. That 11.5 ms is a serialized upper bound (see the batch
+measurement below). This is the program earlier records call `0x0d49d0a9`; the
 driver hash follows the translated module, so it reads `0xdef7a99c` on translator 254 and `0x15c1621e` on 255.
 Its module (39,300 instructions, 674 spills, 8 lanes) held 79 control barriers: the guest's 5 `S_BARRIER` and 74
 split-wave rendezvous. 55 of the rendezvous sat between consecutive writes of five runs of 12 `DS_WRITE_B128`, each run
@@ -9005,9 +9006,11 @@ from 79 to 24 control barriers (the 55 in-run rendezvous); three other modules, 
 counts. Driver timing of the front on 255 was taken on a different scene than the dust ranking (the route took
 the variant without the dust stretch): the 3,200- and 4,032-thread dispatches measure the same in both runs
 (31.4 and 31.7-32.0 us), while the smaller sizes move both ways with the scene mix, so no per-dispatch gain is
-claimed. A warm strict run on 256 took the dust variant: 80-85 s at 620-677 draws per frame held 28.9-29.7 fps
-(25.6-29.7 before), 94-95 s at about 960 draws per frame 29.7, median 33.7, render engine busy 89-98 % in the
-dust seconds; one run, no frame-rate claim. Captures on 255 and 256 of the travel tunnel, the space map, the
+claimed. A strict run on 256 that took the dust variant (not warm: it wrote 83 new cache files, at 76, 89, 94-95,
+98-100, 113-114 and 124 s): 80-85 s at 620-677 draws per frame, with no module written, held 28.9-29.7 fps with
+the render engine busy 89-98 %; the dips at 94-95 s (busy 74-81 %), 99-100 s (68-94 %) and 113-114 s (11.9 fps,
+busy 34 %) coincide with new modules, so they are first-use translations; median 33.7; one run, no frame-rate
+claim. Captures on 255 and 256 of the travel tunnel, the space map, the
 cinematics, the crash landing, the dunes with dust and the wall with coins are correct; the dark frames at about
 84-95 s of the other route variant also appear in an earlier run of that variant built before this change. The
 crash-landing scene (about 740-770 draws per frame) held 32.6-35.7 fps on 255 with the render engine busy
@@ -9018,10 +9021,23 @@ with a correct capture. `PPSA03524 - Grand Theft Auto: San Andreas – The Defin
 frames 700 and 900 is correct, with no dot grid, on the second run (the first, cold, reached only the intro
 text).
 
-**Excluded.** Split rendezvous as the dust stretch's cost: with 55 fewer of them the 3,200- and 4,032-thread
-front dispatches did not change, and the dust seconds stay at 29-30 fps. A hidden overlap win in the dust
-stretch: the render engine is busy 87-98 % there, so the frames are GPU time.
+**Measured without per-dispatch flushes.** At draw granularity the driver measurement flushes at every event,
+so the front's back-to-back dispatches, which its segment records with no barrier between them, run one after
+another. A run at batch granularity times each command-buffer chunk instead; a front segment's dispatch count
+reads from its chunk size (404 + 156 bytes per dispatch). Against the translator-255 draw-granularity run, same
+module and same segment shapes: one-dispatch segments measure the same (288 vs 290 us, 268 vs 265 us), segments
+of 8, 12, 16 and 18 dispatches take 0.18-0.36 of their serialized sum (1,088 -> 383 us, 380 -> 74, 1,550 -> 280,
+537 -> 192). In the run that reached the dust frames (the 258- and 86-dispatch segments), the front takes 2.5 ms
+per frame there and 2.7 ms in the 30 fps stretch after it, not 11.5. That stretch is GPU-bound at about 29.6 ms
+of GPU work per frame; against the light frames before it (17.9 ms) the added time sits in the render-pass
+chunks (the chunk that opens with the pulled draws 2.3 -> 9.1 ms, the chunks that open with a color clear
+0.75 -> 5.4 ms), not in the front. The frames with the 258-dispatch segment measured 17.9 ms of GPU work in
+24-26 ms of wall time (6-8 ms idle between chunks).
 
-**Still open.** The 3,200- and 4,032-thread dispatches of the geometry front, about 5.4 ms per dust frame
-together, take about 31 us each almost regardless of size; whether that is the path length of a long program
-(674 spills, 8 lanes) or a fixed cost per dispatch is not measured. The dust stretch stays under 30.
+**Excluded.** The geometry front as the dust stretch's main cost: 2.5-2.7 ms per frame without per-dispatch
+flushes. Split rendezvous as that cost, for the same reason. A hidden overlap win in the 30 fps stretch: it is
+GPU work.
+
+**Still open.** Which draws inside the render-pass chunks of the 30 fps stretch take the added 11-12 ms; a
+render-target granularity measurement can split the chunks without serializing every draw. The stretch stays
+at or under 30.
