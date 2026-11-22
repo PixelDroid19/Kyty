@@ -7904,9 +7904,10 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   transport, and every band of them failed with zero records: the transport parameters were pushed at offset 0,
   over the guest vertex program's user data (cross-title record "Fragment transport parameters overlapped the
   vertex push constants"). After the fix the patched route shows lit dunes, the robot and sun shadows, matching
-  the default renderer, at about 11 fps (intro and dunes, 60 fps limit); before the capture-reservation change
-  in the same record it ran at 3 fps, GPU-bound on the capture draw. With GI off only (default renderer) the
-  route holds 32-40 fps with a correct image. Earlier candidates for the dark image (the s66 texture mask, the
+  the default renderer, at about 11 fps (10.9 at 160 s on the committed build, 60 fps limit); before the
+  capture-reservation change in the same record it ran at 3 fps, GPU-bound on the capture draw. With GI off only
+  (default renderer) the status samples at 120-160 s read 32-40 fps with a correct image, on a build that still
+  carried gated temporary diagnostics; whether that rate holds was not measured. Earlier candidates for the dark image (the s66 texture mask, the
   DREF1 shadow tap, the sun flag in s52, VCMPX writing VCC, export kill handling, G-buffer formats) were each
   checked against this renderer only and are moot: none was the cause. Still open: Astro's cape colour differed
   between this renderer and the default one in one capture pair; not checked after the fix.
@@ -9032,8 +9033,8 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       23.6 -> 21.2 us and the cold share 0.19 -> 0.09. These counter runs used the patch profile with the
       deferred-lighting renderer while its transported lighting draws were still dropped (fixed 2026-11-22, above),
       so their frames carried less GPU work than a correct image; the frame rates first quoted for them are void.
-      With GI off only and the transport fixes, the route holds 32-40 fps with a correct image (60 fps limit);
-      the lever's own share of that was not isolated. `PPSA17221 - Minecraft` reached its world at 83.8 s with the
+      With GI off only and the transport fixes, status samples at 120-160 s read 32-40 fps with a correct image
+      (60 fps limit, build with gated temporary diagnostics); the lever's own share was not isolated. `PPSA17221 - Minecraft` reached its world at 83.8 s with the
       lever built in. Still open: the fronts stop on every ordering packet (about 150k stops per minute on this
       route, RELEASE_MEM and EVENT_WRITE first), which leaves 70-100k auto draws cold.
     - Graphics label waits on compute queue 7, passed on the device (2026-11-21, built). In the heavy seconds the

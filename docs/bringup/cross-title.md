@@ -8576,6 +8576,11 @@ with seed 11 and in file order. It fails the same way with the two GPU-memory ov
 excluded, so another test leaves global GPU-memory state it depends on. Suggested direction: give it an address range
 no other test maps, or free what it creates, as `GpuMemoryFreeDeletesExactRange` does.
 
+`EmulatorGraphicsState.StorageTextureArrayDescriptorsAreViewsOfTheLiveArray`
+(`source/unit_test/src/emulator/UnitTestEmulatorGraphicsState.cpp:6565`) has the opposite dependence (seen
+2026-11-22): it fails when run alone with `--gtest_filter` and passes in the full suite, so it relies on state an
+earlier test leaves. Same suggested direction: set up everything it reads itself.
+
 
 ## Wave32 lane-mask demand (2026-11-19, fixed on t247)
 
@@ -8708,8 +8713,8 @@ frame's GPU time from about 320 to 63 ms.
 
 **Verified** on Intel Arc A770 (Mesa ANV), 60 fps-limited runs (patched runs are not strict runs):
 - Astro Bot with the deferred-lighting renderer: lit dunes, robot and sun shadows match the default renderer's
-  captures; about 11 fps (see the title record).
-- Astro Bot with GI off only (default renderer): 32-40 fps, image correct.
+  captures, rechecked on the committed build; about 11 fps (see the title record).
+- Astro Bot with GI off only (default renderer): status samples of 32-40 fps at 120-160 s, image correct.
 - `PPSA17221 - Minecraft`: world at 83.8 s, death screen correct.
 - 2,830 unit tests (resolve module test updated to check the placed member offsets) and the CTest gates passed.
 - Not run: `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition`, which also uses fragment
