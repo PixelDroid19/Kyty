@@ -9000,6 +9000,14 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
         About 2 ms of a 33 ms body in the command-bound fight seconds does not reach 30 fps alone. The burst's
         own excess over the calm seconds is first-use object creation (`GpuMemory::CreateObject`, `FindFast`,
         `TileDetile`, descriptor set indexing), not per-draw work.
+    - Open defect: `unknown relation: StorageTexture - Crosses - StorageTexture` (2026-11-21, once). A patched
+      replay of the dunes route on `6912ceb58` plus temporary draw-front counters (`dclass3`, default patch profile)
+      exited at 111 s, in the landing burst, from the relation switch in `GpuMemoryCreate.cpp:1927`. The new
+      storage texture covers `[0x53de40000, +0x3fc0000)` and crosses a live storage texture at
+      `[0x53d410000, +0x3fc0000)` (id 161, eight parents, origin `GpuAliasMaterialization`). Two earlier
+      replays of the same route and profile on the same build held 185-200 s. The relation has no rule for two
+      writable storage textures that partly overlap. Direction: the arena rules that link storage views to their
+      parents, as for the depth-target case above; the rate and whether unpatched runs hit it are unknown.
     - Graphics label waits on compute queue 7, passed on the device (2026-11-21, built). In the heavy seconds the
       graphics command thread suspended on label waits whose producer was a later recording on compute queue 7,
       not a guest CPU write. Split of 647 such waits (`lw5`, temporary per-submission timestamps), mean 5.9 ms
