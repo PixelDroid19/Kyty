@@ -8786,9 +8786,10 @@ walks only on a miss or when the access does not fit, so every translated addres
 passed, 11 skipped, 0 failed; the integration shader-compute tests and the repository gates passed. Driver
 statistics after the change: 0 spills, 112-124 live registers in the recompiled pixel programs. Astro Bot intro,
 warm cache, no diagnostics: median about 27.4 fps against 25.9 (one run; the seconds after the intro match the
-baseline), capture of the intro correct. A 170 s run on the committed binary: intro about 27.6 fps, the heavier
-stretch (133-142 s in the baseline) 30.4-33.1 fps against 26-29, with one second at 27.2 and the capture second
-lower, light gameplay 32-33 fps; captures of the intro and the heavier scene correct (one run). The compute program
+baseline), capture of the intro correct. A 170 s run on the committed binary: intro about 27.6 fps, light
+gameplay 32-33 fps, captures correct (one run). The heavier stretch, which holds about 750 draws per frame for 10 s
+in the baseline (26-29 fps), lasted one second in this run (691 draws per frame, 26 fps), so its change is not
+measured; seconds compared by wall clock alone were different scenes there. The compute program
 `0x0d49d0a9` (addresses mostly memory-chained, so outside this window) was not re-measured. `PPSA17221 - Minecraft`
 (709 modules) and `PPSA04220 - JoJo's Bizarre Adventure: All-Star Battle R` (121 modules) compiled no program with
 the window, so their clean runs do not exercise it.
