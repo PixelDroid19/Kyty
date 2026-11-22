@@ -8981,7 +8981,7 @@ dispatches (86 each of 64, 192, 3,200 and 4,032 threads at 25-31 us, almost flat
 clear at 1.9 ms and two computes at 1.8 and 1.5 ms. This is the program earlier records call `0x0d49d0a9`; the
 driver hash follows the translated module, so it reads `0xdef7a99c` on translator 254 and `0x15c1621e` on 255.
 Its module (39,300 instructions, 674 spills, 8 lanes) held 79 control barriers: the guest's 5 `S_BARRIER` and 74
-split-wave rendezvous. 60 of the rendezvous sat between the writes of five runs of 12 `DS_WRITE_B128`, each run
+split-wave rendezvous. 55 of the rendezvous sat between consecutive writes of five runs of 12 `DS_WRITE_B128`, each run
 storing one record per lane at offsets 128-304 from an address `v_mul_u32_u24` by 768 or 192 computed in the same
 block. The order analysis knew no address there (the multiply has no program-wide value), so every write in a
 run was ordered against the one before it.
@@ -9000,19 +9000,28 @@ register's last entry-block write used that final value as its own; it now uses 
 the slot, the address rewritten or EXEC set after the multiply, and a factor of 384 with fields 132 bytes apart
 are ordered; an entry-block access before the address's last write is ordered. Full unit suite 2,848 run,
 2,837 passed, 11 skipped; the three repository gates passed. In the translated modules the geometry front drops
-from 79 to 24 control barriers and three other modules from 60 to 34. Driver timing of that program by dispatch
-size: 192 threads 29.5 -> 21.1 us, 576 threads 32.3 -> 29.8 us, 3,200 and 4,032 threads unchanged at 31.4 and
-31.7-32.0 us. With 86 dispatches of 192 threads per dust frame that removes about 0.7 ms of a 30-35 ms frame; no
-frame-rate gain is claimed. The two strict runs on translator 255 took the route variant without the dust
-stretch: captures of the travel tunnel, the space map and the crash-landing dunes are correct, and the dark
-frames at about 84-95 s also appear in an earlier run of that variant (built before this change). The
-crash-landing scene at about 740-770 draws per frame holds 32.6-35.7 fps with one second at 27.7, as in that
-earlier run. `PPSA17221 - Minecraft` reached the world at 82.2 s on a cold cache with a correct capture.
+from 79 to 24 control barriers (the 55 in-run rendezvous); three other modules, not identified, drop from 60 to
+34. On this title every module of translator 256 matches one of 255 by barrier, word, instruction and multiply
+counts. Driver timing of the front on 255 was taken on a different scene than the dust ranking (the route took
+the variant without the dust stretch): the 3,200- and 4,032-thread dispatches measure the same in both runs
+(31.4 and 31.7-32.0 us), while the smaller sizes move both ways with the scene mix, so no per-dispatch gain is
+claimed. A warm strict run on 256 took the dust variant: 80-85 s at 620-677 draws per frame held 28.9-29.7 fps
+(25.6-29.7 before), 94-95 s at about 960 draws per frame 29.7, median 33.7, render engine busy 89-98 % in the
+dust seconds; one run, no frame-rate claim. Captures on 255 and 256 of the travel tunnel, the space map, the
+cinematics, the crash landing, the dunes with dust and the wall with coins are correct; the dark frames at about
+84-95 s of the other route variant also appear in an earlier run of that variant built before this change. The
+crash-landing scene (about 740-770 draws per frame) held 32.6-35.7 fps on 255 with the render engine busy
+91-98 %, as in that earlier run; on 256, in the run right after one that stopped at the save menu, it held
+23.8-30.7 fps with the engine busy only 74-89 %, so those seconds waited on the host, not on the unchanged
+modules; that variant was not re-run warm. `PPSA17221 - Minecraft` reached the world at 82.2 s on a cold cache
+with a correct capture. `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition`: the street at
+frames 700 and 900 is correct, with no dot grid, on the second run (the first, cold, reached only the intro
+text).
 
-**Excluded.** A hidden overlap win in the dust stretch: the render engine is busy 87-98 % there, so the frames
-are GPU time. The 94-95 s seconds of the same run are first-use translations (each coincides with new modules
-written in that second), not steady GPU cost.
+**Excluded.** Split rendezvous as the dust stretch's cost: with 55 fewer of them the 3,200- and 4,032-thread
+front dispatches did not change, and the dust seconds stay at 29-30 fps. A hidden overlap win in the dust
+stretch: the render engine is busy 87-98 % there, so the frames are GPU time.
 
 **Still open.** The 3,200- and 4,032-thread dispatches of the geometry front, about 5.4 ms per dust frame
-together, are unchanged at about 31 us each regardless of size, so their cost is the per-dispatch latency of a
-long program (674 spills, 8 lanes), not the rendezvous. The dust stretch stays under 30.
+together, take about 31 us each almost regardless of size; whether that is the path length of a long program
+(674 spills, 8 lanes) or a fixed cost per dispatch is not measured. The dust stretch stays under 30.
