@@ -45,7 +45,7 @@ VulkanComputeProbe::Result VulkanComputeProbe::DispatchProgramBasePair(
 		metadata->assign(bind.push_constant_size / sizeof(uint32_t), 0u);
 		auto runtime_bind = bind;
 		runtime_bind.program_base = program_base;
-		return ShaderWriteProgramBaseMetadata(runtime_bind, metadata->data(), static_cast<uint32_t>(metadata->size()));
+		return ShaderWriteProgramBaseMetadata(runtime_bind, 0, metadata->data(), static_cast<uint32_t>(metadata->size()));
 	};
 	std::vector<uint32_t> first_metadata;
 	std::vector<uint32_t> second_metadata;

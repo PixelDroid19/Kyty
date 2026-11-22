@@ -6055,14 +6055,22 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		{
 			PrepareDirectSgprs(bind.direct_sgprs, &sgprs_ptr);
 		}
+		// Loads from the program's inline tables translate through the window
+		// resolved here against the same table the device block publishes.
+		uint64_t program_window_device = 0;
+		uint32_t program_window_bytes  = 0;
 		if (bind.device_address_used)
 		{
 			EXIT_IF(device_address_table == nullptr || device_address_table->address == 0);
 			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.device_address_offset_dw);
+			if (bind.program_base_used)
+			{
+				GuestDeviceAddressWindow(*device_address_table, bind.program_base, &program_window_device, &program_window_bytes);
+			}
 			sgprs_ptr[0] = static_cast<uint32_t>(device_address_table->address);
 			sgprs_ptr[1] = static_cast<uint32_t>(device_address_table->address >> 32u);
 			sgprs_ptr[2] = device_address_table->entry_count;
-			sgprs_ptr[3] = 0;
+			sgprs_ptr[3] = program_window_bytes;
 			sgprs_ptr += 4;
 		}
 		if (bind.thread_limits_used)
@@ -6083,7 +6091,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.program_base_used)
 		{
 			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.program_base_offset_dw);
-			EXIT_IF(!ShaderWriteProgramBaseMetadata(bind, sgprs, DescriptorCache::METADATA_DWORDS_MAX));
+			EXIT_IF(!ShaderWriteProgramBaseMetadata(bind, program_window_device, sgprs, DescriptorCache::METADATA_DWORDS_MAX));
 			sgprs_ptr += 4;
 		}
 

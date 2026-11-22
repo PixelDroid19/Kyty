@@ -103,6 +103,7 @@ struct Table
 	VkBuffer       buffer  = nullptr;
 	uint64_t       device  = 0;
 	uint32_t       entries = 0;
+	std::shared_ptr<const std::vector<GuestDeviceAddressEntry>> host_entries;
 };
 
 using TableEntry = GuestDeviceAddressEntry;
@@ -1385,7 +1386,8 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 	vkUnmapMemory(ctx->device, table.memory);
 	table.device  = BufferDeviceAddress(ctx->device, table.buffer);
 	EXIT_IF((table.device & 15ull) != 0ull);
-	table.entries = static_cast<uint32_t>(entries.size());
+	table.entries      = static_cast<uint32_t>(entries.size());
+	table.host_entries = std::make_shared<const std::vector<TableEntry>>(entries);
 	if (registry->table.buffer != nullptr)
 	{
 		registry->retired.push_back(registry->table);
@@ -1396,6 +1398,33 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 }
 
 } // namespace
+
+void GuestDeviceAddressWindow(const GuestDeviceAddressTable& table, uint64_t guest, uint64_t* device, uint32_t* window_bytes)
+{
+	EXIT_IF(device == nullptr || window_bytes == nullptr);
+	*device       = 0;
+	*window_bytes = 0;
+	if (table.entries == nullptr)
+	{
+		return;
+	}
+	const auto& entries = *table.entries;
+	const auto  after   = std::upper_bound(entries.begin(), entries.end(), guest,
+	                                       [](uint64_t address, const GuestDeviceAddressEntry& entry) { return address < entry.guest; });
+	if (after == entries.begin())
+	{
+		return;
+	}
+	const auto&    entry  = *std::prev(after);
+	const uint64_t offset = guest - entry.guest;
+	const uint64_t limit  = std::min(entry.size, entry.span);
+	if (offset >= limit)
+	{
+		return;
+	}
+	*device       = entry.device + offset;
+	*window_bytes = static_cast<uint32_t>(std::min<uint64_t>(limit - offset, std::numeric_limits<uint32_t>::max()));
+}
 
 GuestDeviceAddressDirectory GuestDeviceAddressBuildDirectory(const uint64_t* sorted_bases, uint32_t count)
 {
@@ -2333,6 +2362,7 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 	registry->scanned_host_write = host_write;
 	table->address               = registry->table.device;
 	table->entry_count           = registry->table.entries;
+	table->entries               = registry->table.host_entries;
 	return GuestDeviceAddressPrepareResult::Ready;
 }
 

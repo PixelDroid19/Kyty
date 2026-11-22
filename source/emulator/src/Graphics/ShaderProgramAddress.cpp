@@ -5,7 +5,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-bool ShaderWriteProgramBaseMetadata(const ShaderBindResources& bind, uint32_t* metadata, uint32_t capacity_dw)
+bool ShaderWriteProgramBaseMetadata(const ShaderBindResources& bind, uint64_t window_device, uint32_t* metadata, uint32_t capacity_dw)
 {
 	if (!bind.program_base_used) { return true; }
 	const uint32_t size_dw = bind.push_constant_size / 4u;
@@ -17,8 +17,8 @@ bool ShaderWriteProgramBaseMetadata(const ShaderBindResources& bind, uint32_t* m
 	}
 	metadata[offset]      = static_cast<uint32_t>(bind.program_base);
 	metadata[offset + 1u] = static_cast<uint32_t>(bind.program_base >> 32u);
-	metadata[offset + 2u] = 0;
-	metadata[offset + 3u] = 0;
+	metadata[offset + 2u] = static_cast<uint32_t>(window_device);
+	metadata[offset + 3u] = static_cast<uint32_t>(window_device >> 32u);
 	return true;
 }
 

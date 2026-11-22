@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 struct VkBuffer_T;
@@ -75,7 +76,15 @@ struct GuestDeviceAddressTable
 {
 	uint64_t address     = 0;
 	uint32_t entry_count = 0;
+	// The entries the device table holds, for translations resolved at bind.
+	std::shared_ptr<const std::vector<GuestDeviceAddressEntry>> entries;
 };
+
+// The run of bytes from `guest` that `table` translates contiguously: every
+// access of `bytes` at offset `o` with o + bytes <= *window_bytes translates to
+// *device + o, as the device lookup does. *window_bytes is 0 when no entry
+// holds `guest`, and saturates at the largest 32-bit count.
+void GuestDeviceAddressWindow(const GuestDeviceAddressTable& table, uint64_t guest, uint64_t* device, uint32_t* window_bytes);
 
 enum class GuestDeviceAddressPrepareResult: uint8_t
 {

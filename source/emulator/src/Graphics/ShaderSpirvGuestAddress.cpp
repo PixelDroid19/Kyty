@@ -68,7 +68,7 @@ String8 Spirv::GuestDeviceAddressFunction() const
 %gda_entry = OpLabel
 %gda_lo_v = OpVariable %_ptr_Function_uint_gda Function
 %gda_hi_v = OpVariable %_ptr_Function_uint_gda Function
-%gda_tlo_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %int_0
+<program window>%gda_tlo_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %int_0
 %gda_thi_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %int_1
 %gda_cnt_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %int_2
 %gda_tlo = OpLoad %uint %gda_tlo_p
@@ -186,7 +186,45 @@ OpFunctionEnd
 	};
 	static_assert(kMaxLoadBytes <= kGuestDeviceAddressDirectoryHeaderOffset && kGuestDeviceAddressDirectoryHeaderOffset + 16u <= kGuestDeviceAddressNullBytes,
 	              "a miss must read zeros below the directory header");
+	// An access inside the program-base window (GuestDeviceAddressWindow,
+	// resolved at bind against this table) translates without a table read;
+	// the window holds only bytes the walk translates the same way.
+	static const char* program_window = R"(%gda_pb_lo_p = OpAccessChain %<ptr> %vsharp %int_0 %<program block> %int_0
+%gda_pb_hi_p = OpAccessChain %<ptr> %vsharp %int_0 %<program block> %int_1
+%gda_pd_lo_p = OpAccessChain %<ptr> %vsharp %int_0 %<program block> %int_2
+%gda_pd_hi_p = OpAccessChain %<ptr> %vsharp %int_0 %<program block> %<int 3>
+%gda_pw_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %<int 3>
+%gda_pb_lo = OpLoad %uint %gda_pb_lo_p
+%gda_pb_hi = OpLoad %uint %gda_pb_hi_p
+%gda_pd_lo = OpLoad %uint %gda_pd_lo_p
+%gda_pd_hi = OpLoad %uint %gda_pd_hi_p
+%gda_pw = OpLoad %uint %gda_pw_p
+%gda_pb_lo64 = OpUConvert %ulong %gda_pb_lo
+%gda_pb_hi64 = OpUConvert %ulong %gda_pb_hi
+%gda_pb_his = OpShiftLeftLogical %ulong %gda_pb_hi64 %uint_32
+%gda_pbase = OpBitwiseOr %ulong %gda_pb_his %gda_pb_lo64
+%gda_pd_lo64 = OpUConvert %ulong %gda_pd_lo
+%gda_pd_hi64 = OpUConvert %ulong %gda_pd_hi
+%gda_pd_his = OpShiftLeftLogical %ulong %gda_pd_hi64 %uint_32
+%gda_pdev = OpBitwiseOr %ulong %gda_pd_his %gda_pd_lo64
+%gda_pw64 = OpUConvert %ulong %gda_pw
+%gda_prel = OpISub %ulong %gda_addr %gda_pbase
+%gda_pin = OpULessThan %bool %gda_prel %gda_pw64
+%gda_proom = OpISub %ulong %gda_pw64 %gda_prel
+%gda_pfit = OpUGreaterThanEqual %bool %gda_proom %gda_bytes
+%gda_phit = OpLogicalAnd %bool %gda_pin %gda_pfit
+%gda_pdevice = OpIAdd %ulong %gda_pdev %gda_prel
+OpSelectionMerge %gda_walk None
+OpBranchConditional %gda_phit %gda_program %gda_walk
+%gda_program = OpLabel
+OpReturnValue %gda_pdevice
+%gda_walk = OpLabel
+)";
+	const bool program_base = m_bind->program_base_used;
 	return String8(text)
+	    .ReplaceStr("<program window>", program_base ? program_window : "")
+	    .ReplaceStr("<program block>", program_base ? GetConstantInt(static_cast<int>(m_bind->program_base_offset_dw / 4u)) : String8())
+	    .ReplaceStr("<int 3>", program_base ? GetConstantInt(3) : String8())
 	    .ReplaceStr("<header>", String8::FromPrintf("%u", kGuestDeviceAddressDirectoryHeaderOffset))
 	    .ReplaceStr("<load64 mbase m 0>", load64("mbase", "m", 0))
 	    .ReplaceStr("<load64 base e 0>", load64("base", "e", 0))
