@@ -8838,3 +8838,20 @@ fall) and is all black; no capture before the change exists at that point, so it
   down 5.5 % and 3.5 %, memory sends 134 to 131 and 147 to 145. Measured time fell more (7.85 to 5.66 and 6.55 to
   5.62 ms per frame in the intro under `INTEL_MEASURE`), but the image differed, so that drop is not a price. A sound
   lowering keeps all eight candidates live and saves less than this bound; not pursued.
+- The address walks of the hottest intro program as the remaining cost: its 19 loops under the driver's statistics
+  are the binary search of one translation helper, entered only when the program-base window misses. Every
+  translated site is a buffer load whose address is the descriptor base plus an offset, with a second translation only
+  when the load crosses a page. A temporary replacement that marked any miss in the program's colour output showed
+  no marked pixel in two intro captures except one faint one-pixel row, while a control that marked every
+  invocation tinted visible bands, so the output does reach the screen. Forcing every call to miss cost the intro
+  about 1.5 fps (one run, about 26.5-27 against about 28.2), which is what the window saves. The walks therefore
+  rarely loop in this program; its cost is the guest body. The second hot program (`0x8ae329c2`) was not checked.
+
+**Ranking on the translation of 2026-11-22 (one run under `INTEL_MEASURE`, per-event lines inflated).** In the
+cinematic after the intro (about 600 events per frame) and in the light gameplay scene the largest item is the
+fragment-transport shade kernel at about 5 ms per frame in 4 dispatches (8 lanes, 13,076 instructions, 521 sends,
+94 spills and 286 fills, 185 live registers under the driver's statistics). In the heaviest stretch (about 845
+events per frame) no item leads: draws without a pixel program 5.6 ms over 304 events, pixel program `0x6948ce42`
+3.8 ms, shade 3.0 ms, compute `0x0d49d0a9` 2.4 ms over 13 dispatches. That compute compiles at 8 lanes with
+39,300 instructions, 1,445 sends, 674 spills, 977 fills and 267 live registers. In the intro the shade kernel costs
+0.6 ms per frame.
