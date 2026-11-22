@@ -7934,6 +7934,11 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   that program) still stands. Scalar loads that are constant for the draw would allow resolving them on the host,
   as the vertex binding path does; that their sources are user data and that the pages are not GPU-written before
   the draw is not established.
+  Update (2026-11-22): in `0x8e59fdb1` all translated addresses are the program base plus constants or user data;
+  loads inside the table entry holding the program base now skip the walk (cross-title record "Program-relative
+  loads translated through a window resolved at bind"). The intro moved from about 25.9 to about 27.4 fps
+  (medians, one run each, image correct); it is still under 30, as is the heavier stretch, which was not
+  re-measured.
 - **Per-lane proof for the split wave32 programs: none qualifies; parked (2026-11-19).** A temporary print ran the
   wave-width independence proof (the one that lets split wave64 programs run one guest lane per invocation without
   exchanges) on the 15 wave32 programs that use wave state on the dunes route. None passed: ten stop at the same

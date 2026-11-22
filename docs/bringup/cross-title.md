@@ -8759,3 +8759,33 @@ events rank more reliably. The fit is an estimate from two regimes, not a measur
   expand-to-color fragment parameters at offset 0. If a guest vertex stage with user data and the colour expansion
   meet in one pipeline, the same overlap occurs. Not observed; suggested direction: place the fragment block after
   the vertex range as above.
+
+## Program-relative loads translated through a window resolved at bind (2026-11-22, measured)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the deferred-lighting renderer, the intro runs at about 25.9 fps
+(median of 17 seconds, GPU-bound). Its two hottest pixel programs, `0x8e59fdb1` and `0xa9bf243a`, translate every
+guest load through the device-address directory walk (table header, directory, then a binary search over the
+entries). A flow-approximate slice of the 19 translation calls in `0x8e59fdb1` shows that every address is the
+program base (the block written from the program counter) plus constants or one user-data word; three also add the
+lane index. The calls are straight-line, not inside loops. A temporary build that ran each walk twice gave an
+intro median of 23.2 fps against 25.9 (one pair, aligned on the same scene marks; the seconds after the intro
+stayed within about 1 fps), so one walk set costs roughly 4.5 ms per frame there (linear estimate from one pair).
+The directory itself is shallow (about 37-106 entries, largest region 9 entries); the cost is the dependent chain
+of reads repeated per load.
+
+**Excluded.** A per-invocation memo of the last translated window recovered about 1.3-2 ms per frame but added
+register spills to both programs (2 and 4 spills, 129-131 live registers under the driver's statistics).
+
+**Changed.** The host resolves, at bind and against the same table the device block publishes, the run of bytes
+from the program base that the table entry holding it translates contiguously (bounded by the entry's size and
+span, saturated to 32 bits). The window's device address goes into the program-base block's spare words and its
+length into the device block's spare word. The translation compares the guest address against the window first and
+walks only on a miss or when the access does not fit, so every translated address is the one the walk returns.
+
+**Verified.** Unit test on the window bounds (entry edges, gaps, saturation, empty table); full unit suite 2,831
+passed, 11 skipped, 0 failed; the integration shader-compute tests and the repository gates passed. Driver
+statistics after the change: 0 spills, 112-124 live registers in the recompiled pixel programs. Astro Bot intro,
+warm cache, no diagnostics: median about 27.4 fps against 25.9 (one run; the seconds after the intro match the
+baseline), capture of the intro correct. `PPSA17221 - Minecraft` reached its world and rendered correctly. The
+heavier dunes stretch and the compute program `0x0d49d0a9` (whose addresses are mostly memory-chained, so outside
+this window) were not re-measured.
