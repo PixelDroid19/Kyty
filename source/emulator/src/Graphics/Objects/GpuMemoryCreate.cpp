@@ -1746,6 +1746,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// storage image). Formats differ, so no alias copy can seed it;
 				// link both views and keep the render target live.
 				overlap = true;
+			} else if (GpuMemoryAllowsStorageTextureCrossingRecycledImage(o.object.type, obj.relation, info.type))
+			{
+				// Neither crossing image is a view of the other, so the overlap is recycled memory
+				// (captured: a 3840x2160 storage view shifted 0xa30000 bytes over the same view). Link it;
+				// the new view seeds from guest bytes, as when it also crosses other parents.
+				overlap = true;
 			} else if (GpuMemoryAllowsOverwrittenStorageTextureParent(
 			               o.object.type, obj.relation, info.type,
 			               info.params[StorageTextureObject::PARAM_SKIP_SEED] != 0))
