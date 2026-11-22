@@ -9026,18 +9026,20 @@ so the front's back-to-back dispatches, which its segment records with no barrie
 another. A run at batch granularity times each command-buffer chunk instead; a front segment's dispatch count
 reads from its chunk size (404 + 156 bytes per dispatch). Against the translator-255 draw-granularity run, same
 module and same segment shapes: one-dispatch segments measure the same (288 vs 290 us, 268 vs 265 us), segments
-of 8, 12, 16 and 18 dispatches take 0.18-0.36 of their serialized sum (1,088 -> 383 us, 380 -> 74, 1,550 -> 280,
-537 -> 192). In the run that reached the dust frames (the 258- and 86-dispatch segments), the front takes 2.5 ms
-per frame there and 2.7 ms in the 30 fps stretch after it, not 11.5. That stretch is GPU-bound at about 29.6 ms
-of GPU work per frame; against the light frames before it (17.9 ms) the added time sits in the render-pass
-chunks (the chunk that opens with the pulled draws 2.3 -> 9.1 ms, the chunks that open with a color clear
-0.75 -> 5.4 ms), not in the front. The frames with the 258-dispatch segment measured 17.9 ms of GPU work in
-24-26 ms of wall time (6-8 ms idle between chunks).
+of 2 to 32 dispatches take 0.04-0.65 of their serialized sum (most 0.18-0.52: 1,088 -> 383 us for 8, 380 -> 74
+for 12, 1,550 -> 280 for 16, 537 -> 192 for 18). A second batch-granularity run took the route variant with the
+travel tunnel (captures at frames 4,166 and 4,756). Frames carrying the 258-dispatch segment, which the dust frames of the
+draw-granularity run also carry (scene not captured; about 39 fps), spend 2.5 ms per frame in the front, the 258-dispatch segment 1.6 ms of it, and 17.9 ms of GPU work in 24-26 ms of wall time. The travel tunnel,
+a 30 fps stretch, measured 29.6 ms of GPU work per frame with 2.7 ms in the front; against those frames the added
+time sits in the render-pass chunks (the chunk that opens with the pulled draws 2.3 -> 9.1 ms, the chunks that
+open with a color clear 0.75 -> 5.4 ms). The dust frames themselves were not reached by a batch-granularity run:
+under the driver measurement the route takes the other variant.
 
-**Excluded.** The geometry front as the dust stretch's main cost: 2.5-2.7 ms per frame without per-dispatch
-flushes. Split rendezvous as that cost, for the same reason. A hidden overlap win in the 30 fps stretch: it is
-GPU work.
+**Excluded.** The geometry front as the main cost of the sub-30 stretches: its segments overlap, 2.5-2.7 ms
+per frame in the frames measured without per-dispatch flushes. Split rendezvous as that cost, for the same
+reason. Compute ranked from draw-granularity driver timing: it serializes back-to-back dispatches.
 
-**Still open.** Which draws inside the render-pass chunks of the 30 fps stretch take the added 11-12 ms; a
-render-target granularity measurement can split the chunks without serializing every draw. The stretch stays
-at or under 30.
+**Still open.** A batch- or render-target-granularity ranking of the dust frames themselves (the measured runs
+take the other route variant), and which draws inside the render-pass chunks of the travel tunnel take its added
+11-12 ms. In the dust seconds of the clean run the command processor waits on fences for about 100 ms per second,
+so those seconds are not command-processor-bound. The stretches stay at or under 30.
