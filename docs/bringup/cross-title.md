@@ -8853,5 +8853,10 @@ fragment-transport shade kernel at about 5 ms per frame in 4 dispatches (8 lanes
 94 spills and 286 fills, 185 live registers under the driver's statistics). In the heaviest stretch (about 845
 events per frame) no item leads: draws without a pixel program 5.6 ms over 304 events, pixel program `0x6948ce42`
 3.8 ms, shade 3.0 ms, compute `0x0d49d0a9` 2.4 ms over 13 dispatches. That compute compiles at 8 lanes with
-39,300 instructions, 1,445 sends, 674 spills, 977 fills and 267 live registers. In the intro the shade kernel costs
-0.6 ms per frame.
+39,300 instructions, 1,445 sends, 674 spills, 977 fills and 267 live registers. In the intro two shade modules of the same size (two translations) cost
+about 1.8 ms per frame together.
+
+**Excluded.** Running the dead-guard analysis on programs that go through fragment transport (it is skipped for
+them): the shade module dropped only from 94 to 87 spills and 286 to 250 fills, and the cinematic after the intro
+rendered dark at a scene that is lit on the translation without it (same scene, about 360 draws per frame). The skip
+stays; why the analysis is unsound there was not established.
