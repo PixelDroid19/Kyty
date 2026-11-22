@@ -8899,17 +8899,27 @@ accepted reads themselves. The proof is part of the shader identity, so no trans
 wave with the expected lanes, and an overwrite of a seed register before the reads is still refused. Focused
 suites (native wave, lane reduction, NGG, guest address, fragment transport) 190 passed; full unit suite 2,833
 passed, 11 skipped; the three repository gates passed. One Astro Bot run on
-the fix (60 fps limit, warm cache): median 33.7 fps against 27.7 on the base route before it, the dunes scene at
-33.6-34.7 fps, captures at 65, 120 and 140 s correct (space intro, dunes with coins, shadows, the robot). One run
+the fix (60 fps limit, the first after it, so the changed programs were translated anew): median 33.7 fps against 27.7 on the base route before it, the dunes scene at
+33.6-34.7 fps, captures at 65, 120 and 140 s correct (space intro, dunes with coins, shadows, the robot). On
+static regions of the dunes captures the mean colour of the far dune and the wall face is the same as before the
+fix to one unit; the foreground sand and a shadow differ by 4-8 units, as much as two runs before the fix differ
+from each other. One run
 under the driver measurement on the same binary: no dispatch of the shade over 4,978 frames, against 9,684
-dispatches from frame 1,530 on the build before; its scenes lag the route under the measurement, so the per-frame
-totals of the dunes scene are not compared. `PPSA17221 - Minecraft` reached the world at 79.7 s with a correct
+dispatches from frame 1,530 on the build before. Its scenes lag the route under the measurement and its captures
+show only the intro and cinematics, so the absence is shown there and not in the dunes. The only compute program
+new in that run costs about 0.12 ms per frame. `PPSA17221 - Minecraft` reached the world at 79.7 s with a correct
 capture, median 37.6 fps over the run (no earlier per-second samples on the same route to compare). `PPSA03524 -
 Grand Theft Auto: San Andreas - The Definitive Edition` (the other title with transported draws): the first run
-after the change stalled near frame 490 until about 100 s while new translations compiled, like the earlier
-cold-cache run; the next run reached the street at frame 900 with a correct capture at 6-8 fps, as before.
+after the change stalled near frame 490 until about 100 s, like the earlier cold-cache run (consistent with new
+translations compiling, not shown; whether its transported programs changed admission was not checked); the next run reached the street at frame 900 with a correct capture at 6-8 fps, as before.
 
-**Still open.** The intro dips (one second at 22.7 fps at 60 s) and one-time stalls of 0.25-1 s at first use of
-new pipelines (129-132 s and 154-157 s on the cold-cache run). With a warm cache the 130 s stall is gone; the
-154-157 s scene was not reached in that run because the route is timed by wall clock and desyncs when load times
-change, so that stall is not confirmed closed.
+A second run on the same binary with the translations now cached: median 33.7 fps again, 14 of 123 seconds under
+30. The seconds at 45, 58-59 and 71 s of the first run (GPU 14-53 % busy, 2-22 fps) are gone, so they were
+translation and pipeline compiles of the changed programs. Captures at 85, 95 and 160 s are correct.
+
+**Still open.** The seconds still under 30 on the cached run: the dunes run with dust at 81-85 s (670 draws per
+frame, 27.8-29.7 fps, GPU 91-98 % busy) and 94-96 s (810-1,170 draws, 26.7-27.6 fps, GPU 70-85 %); three intro
+seconds at 29.6-29.7 (GPU 84-88 %); and host stalls at 60-62 s (12.6-15.8 fps) and 160 s (16.7 fps, GPU 47 %),
+not classified. One-time stalls of 0.25-1 s at first use of new pipelines (129-132 s and 154-157 s on an earlier
+cold-cache run) were not seen on the cached runs; the route is timed by wall clock and desyncs when load times
+change, so the scene at 154-157 s may not have been reached.
