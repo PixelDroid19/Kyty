@@ -6,7 +6,9 @@
 #include "ShaderMaskAnalysis.h"
 #include "ShaderStorageAnalysis.h"
 
+#include <algorithm>
 #include <array>
+#include <numeric>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -44,11 +46,26 @@ struct Access
 	int64_t high   = 0;
 	int64_t stride = 0;
 	int64_t bytes  = 0;
+	// Without a range: every lane's address is a multiple of `slot`, and the access touches `bytes` at it + offset.
+	int64_t slot   = 0;
+	int64_t offset = 0;
 };
+
+// Two lanes' slot addresses are equal or at least the common slot apart: fields that are disjoint and fit in
+// one common slot never meet.
+bool SlotsApart(const Access& a, const Access& b)
+{
+	const int64_t slot        = std::gcd(a.slot, b.slot);
+	const int64_t low         = std::min(a.offset, b.offset);
+	const int64_t high        = std::max(a.offset + a.bytes, b.offset + b.bytes);
+	const bool    fields_part = a.offset + a.bytes <= b.offset || b.offset + b.bytes <= a.offset;
+	return fields_part && high - low <= slot;
+}
 
 bool MayConflict(const Access& a, const Access& b)
 {
 	if (!a.write && !b.write) { return false; }
+	if (a.slot != 0 && b.slot != 0) { return !SlotsApart(a, b); }
 	if (!a.ranged || !b.ranged) { return true; }
 	if (a.high <= b.low || b.high <= a.low) { return false; }
 	const bool own_slot = a.stride != 0 && a.stride == b.stride && a.low == b.low && a.bytes <= a.stride && b.bytes <= b.stride;
@@ -210,6 +227,30 @@ Affine BlockConstant(const ShaderCode& code, const std::vector<bool>& is_target,
 	return {};
 }
 
+// A value every lane's `vgpr` is a multiple of, set by a V_MUL_U32_U24 or V_LSHLREV_B32 by a constant in the
+// same straight-line block under the EXEC the access runs with; 0 when none is known. A 24-bit factor up to 256
+// cannot wrap 32 bits, so it divides the product; a larger one only keeps its power of two.
+int64_t BlockSlot(const ShaderCode& code, const std::vector<bool>& is_target, uint32_t access, unsigned vgpr)
+{
+	const auto& instructions = code.GetInstructions();
+	const auto  constant     = [](const ShaderOperand& operand)
+	{ return operand.type == ShaderOperandType::IntegerInlineConstant || operand.type == ShaderOperandType::LiteralConstant; };
+	for (uint32_t at = access; at > 0 && !is_target[at];)
+	{
+		const auto& inst = instructions.At(--at);
+		if (EndsBlock(inst.type) || WritesExec(inst)) { break; }
+		if (!WritesVgpr(inst, vgpr)) { continue; }
+		const bool plain = inst.src_num == 2 && inst.dst.size == 1 && inst.dst2.type == ShaderOperandType::Unknown && !inst.vop_sdwa &&
+		                   inst.vop3_omod == 0u && IsPlain(inst.dst) && IsPlain(inst.src[0]) && IsPlain(inst.src[1]);
+		if (!plain) { return 0; }
+		if (inst.type == Type::VLshlrevB32 && constant(inst.src[0])) { return int64_t {1} << (inst.src[0].constant.u & 31u); }
+		if (inst.type != Type::VMulU32U24 || constant(inst.src[0]) == constant(inst.src[1])) { return 0; }
+		const int64_t factor = (constant(inst.src[0]) ? inst.src[0] : inst.src[1]).constant.u & 0xffffffu;
+		return factor <= 256 ? factor : factor & -factor;
+	}
+	return 0;
+}
+
 // Dwords a one-range access covers at ADDR + ds_offset; 0 for the two-offset and unsupported forms.
 int RangeDwords(const ShaderInstruction& inst)
 {
@@ -267,6 +308,11 @@ std::vector<Access> FindAccesses(const ShaderCode& code, const std::vector<bool>
 			const auto vgpr    = static_cast<unsigned>(inst.src[0].register_id);
 			const auto address = values[vgpr].known ? values[vgpr] : BlockConstant(code, is_target, index, vgpr);
 			SetRange(inst, address, threads, &access);
+			if (!access.ranged)
+			{
+				access.slot   = BlockSlot(code, is_target, index, vgpr);
+				access.offset = inst.ds_offset;
+			}
 		}
 		accesses.push_back(access);
 	}
