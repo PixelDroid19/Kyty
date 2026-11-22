@@ -8679,3 +8679,46 @@ with no instruction pair (loaded through a descriptor table) still checks every 
 - `PPSA17221 - Minecraft`: world at 83.8 s, death screen correct, 61 frames a second with none over 50 ms.
 - 2,830 unit tests (the two sampler-pairing tests updated, one case added for an unpaired 2D load sharing the
   sampler's slot number) and the CTest gates passed.
+
+## Fragment transport parameters overlapped the vertex push constants (2026-11-22, fixed)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the guest's non-tiled deferred-lighting renderer selected by a local
+game patch, the dunes showed only ambient light: no direct sunlight and no sun shadows. The lighting draws go
+through fragment transport (capture draw, scan and pack, shade compute, resolve draw). A bounded read-back of the
+transport control buffer showed every band of those draws failed with zero records written, so the resolve
+discarded every pixel and the lighting target kept its cleared value.
+
+**Cause.** The capture and resolve programs read their kernel parameters (band origin, record and wave
+capacities) from push-constant offset 0, and the draw pushed them at offset 0. The guest vertex program's user data
+is also pushed at offset 0, and that push is recorded after the transport push, so the capture read the vertex
+program's user data as its parameters, flagged the band failed and wrote nothing. No host code reads the failure
+flag (`control[1]`), so the draws were dropped without a message. Every transported draw whose vertex program
+pushes user data was affected, on every title.
+
+**Change.** The capture and resolve parameter blocks are declared at the pixel stage's push-constant offset, the
+slot the normal pixel path already uses after the vertex user data (`Shader.cpp`, push offset rule). The pipeline
+layout's fragment range, the generated SPIR-V member offsets and both `vkCmdPushConstants` calls use that offset,
+and pipeline creation fails explicitly if the block would pass `maxPushConstantsSize`.
+
+**Capture contention (perf).** With the draws working, the capture draw took about 33 ms per band in the intro
+scene (`INTEL_MEASURE`): every covered quad reserved its record with a compare-and-swap loop on one counter. Records
+and waves are now reserved with one atomic add; an add that passes the capacity fails the whole band, as the loop
+did, and readers bound records and waves by their capacities. Capture time fell to about 0.45 ms per band and the
+frame's GPU time from about 320 to 63 ms.
+
+**Verified** on Intel Arc A770 (Mesa ANV), 60 fps-limited runs (patched runs are not strict runs):
+- Astro Bot with the deferred-lighting renderer: lit dunes, robot and sun shadows match the default renderer's
+  captures; about 11 fps (see the title record).
+- Astro Bot with GI off only (default renderer): 32-40 fps, image correct.
+- `PPSA17221 - Minecraft`: world at 83.8 s, death screen correct.
+- 2,830 unit tests (resolve module test updated to check the placed member offsets) and the CTest gates passed.
+- Not run: `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition`, which also uses fragment
+  transport (record of 2026-11-05 above); it is not in the Linux matrix.
+
+**Open.**
+- The transport failure flag is never read on the host. A band that fails for any reason drops its pixels
+  silently. Suggested direction: read the flag back at retirement in a bounded diagnostic and count failed bands.
+- `DepthStencilCopy.cpp` (about line 586) declares the guest vertex range at the vertex bind's push offset and the
+  expand-to-color fragment parameters at offset 0. If a guest vertex stage with user data and the colour expansion
+  meet in one pipeline, the same overlap occurs. Not observed; suggested direction: place the fragment block after
+  the vertex range as above.

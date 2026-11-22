@@ -255,6 +255,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Wave32 lane-mask demand: a VALU mask read as an SGPR pair hid a live high word; split parts skipped rendezvous and the GPU job timed out (2026-11-19, fixed on t247; 8-lane wave32 parts after it)
   - Shader identity followed texture data: loaded T#s merged by content and exact sampled formats split programs into dozens of modules; slot-keyed merge and numeric class (2026-11-21, fixed)
   - Samplers paired with views by slot number: a 2D load sharing the sampler's slot hid the 3D view it samples, so CLAMP_Z became repeat and near fog lookups wrapped to the far slice (2026-11-21, fixed)
+  - Fragment transport parameters overlapped the vertex push constants: every transported draw with vertex user data failed its bands silently; record reservation by one atomic add cut capture from 33 to 0.45 ms per band (2026-11-22, fixed; failure flag never read, depth-copy lead open)
   - Leads from another implementation's change list: event-flag poll back-off excluded; file reads into tracked pages and repeated upload checks already covered (2026-11-10, excluded; open leads)
   - [Temporal upscalers decision](bringup/temporal-upscalers-decision.md): no DLSS/XeSS now; temporal inputs first, FSR 2 before proprietary SDKs (2026-10-29, decided)
   - Street scene of GTA San Andreas DE: recycled-memory links, reloaded V#s, gather4 lanes, wave64 LDS order (dot grid); capture layout race, HUD and Arc device loss open (2026-11-05, fixed; open items)
