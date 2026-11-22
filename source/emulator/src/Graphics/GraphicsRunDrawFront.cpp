@@ -138,6 +138,7 @@ void DrawFront::Stop()
 PreparedDrawInputs* DrawFront::Take(const uint32_t* draw_packet, uint32_t instance_count)
 {
 	EXIT_IF(!m_live);
+	m_took_stale = false;
 	m_processor_packet.store(draw_packet, std::memory_order_relaxed);
 	const uint64_t prepared = m_prepared.load(std::memory_order_acquire);
 	const uint64_t epoch    = GpuDirtyPageTracker::HostWriteEpoch();
@@ -160,7 +161,8 @@ PreparedDrawInputs* DrawFront::Take(const uint32_t* draw_packet, uint32_t instan
 		{
 			continue;
 		}
-		if (!fresh || record.guest_write_epoch != epoch || record.instance_count != instance_count)
+		m_took_stale = !fresh || record.guest_write_epoch != epoch;
+		if (m_took_stale || record.instance_count != instance_count)
 		{
 			return nullptr;
 		}

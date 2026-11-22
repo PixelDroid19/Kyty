@@ -58,6 +58,8 @@ public:
 	void Stop();
 	// The inputs prepared for the draw at `draw_packet`, or null. They stay valid until Release.
 	[[nodiscard]] PreparedDrawInputs* Take(const uint32_t* draw_packet, uint32_t instance_count);
+	// The last Take found the draw prepared before a host write the processor has since seen.
+	[[nodiscard]] bool                TookStale() const { return m_took_stale; }
 	void                              Release();
 
 	// Fills the inputs of one draw kind; see GraphicsRenderPrepareIndexedDrawInputs.
@@ -98,6 +100,7 @@ private:
 	// an earlier record of the same epoch may have read bytes a write was still replacing.
 	uint64_t m_epoch_seen = 0;
 	uint64_t m_fresh_from = 0;
+	bool     m_took_stale = false;
 
 	// Written by Start while the replay is idle.
 	const uint32_t* m_resume = nullptr;

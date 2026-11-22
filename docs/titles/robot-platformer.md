@@ -9021,6 +9021,21 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       no such case. Fix: the single-parent path applies the same rule after the render-alias copy, so a copy
       still wins where one applies, and the new view seeds from guest bytes. Verified: `cross1` (same route and
       profile) held 145 s past the exit point.
+    - Draw fronts restart on a voided record (2026-11-21). Temporary per-path counters on the command thread
+      (`dclass2`, 140-200 s) priced a draw taken from a draw front at 14-16 us and a cold one at 47-60 us (offset)
+      or 47 us (auto). 35,110 draws in that window were cold only because a host write of guest memory (GDS
+      publication, wait return, write-back) had voided the records the fronts prepared ahead; the fronts kept
+      running, but every draw between the processor and their lead fell to the processor. Change: when the
+      processor takes a voided record it stops the fronts and starts them again at the current draw through the
+      existing start path, so they prepare the following draws against current memory. Measured (`restart2`, same
+      window and counters): voided takes 35,110 -> 978; in the heaviest windows (40k+ draws per 2 s) mean draw cost
+      23.6 -> 21.2 us and the cold share 0.19 -> 0.09. These counter runs used the patch profile with the
+      deferred-lighting renderer while its transported lighting draws were still dropped (fixed 2026-11-22, above),
+      so their frames carried less GPU work than a correct image; the frame rates first quoted for them are void.
+      With GI off only and the transport fixes, the route holds 32-40 fps with a correct image (60 fps limit);
+      the lever's own share of that was not isolated. `PPSA17221 - Minecraft` reached its world at 83.8 s with the
+      lever built in. Still open: the fronts stop on every ordering packet (about 150k stops per minute on this
+      route, RELEASE_MEM and EVENT_WRITE first), which leaves 70-100k auto draws cold.
     - Graphics label waits on compute queue 7, passed on the device (2026-11-21, built). In the heavy seconds the
       graphics command thread suspended on label waits whose producer was a later recording on compute queue 7,
       not a guest CPU write. Split of 647 such waits (`lw5`, temporary per-submission timestamps), mean 5.9 ms

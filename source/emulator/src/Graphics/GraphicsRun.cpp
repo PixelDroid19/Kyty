@@ -2975,6 +2975,7 @@ PreparedDrawInputs* CommandProcessor::TakePreparedDrawInputs()
 	{
 		// Every front learns where the processor is; at most one prepared this draw.
 		PreparedDrawInputs* prepared = nullptr;
+		bool                stale    = false;
 		for (auto* front: m_draw_fronts)
 		{
 			if (auto* inputs = front->Take(m_packet, m_num_instances); inputs != nullptr)
@@ -2983,8 +2984,16 @@ PreparedDrawInputs* CommandProcessor::TakePreparedDrawInputs()
 				EXIT_IF(prepared != nullptr);
 				prepared = inputs;
 			}
+			stale = stale || front->TookStale();
 		}
-		return prepared;
+		if (prepared != nullptr || !stale)
+		{
+			return prepared;
+		}
+		// A host write voided the draws the fronts prepared ahead of this one. Replaying again from
+		// here prepares the next draws against current memory instead of leaving all of them to this
+		// processor.
+		StopDrawFronts();
 	}
 	// The replay is idle. It continues from this draw with the registers this processor holds.
 	m_draw_front_claimed.store(m_packet);
