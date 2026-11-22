@@ -1,5 +1,9 @@
 #include "Emulator/Graphics/FragmentTransportCapture.h"
 
+#include "Kyty/Core/DbgAssert.h"
+
+#include "Emulator/Graphics/FragmentTransportLayout.h"
+
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
@@ -13,6 +17,20 @@ namespace Kyty::Libs::Graphics::FragmentTransport {
 namespace {
 
 #include "host_shaders/fragment_wave_capture_asm.inc"
+
+// The kernel declares its parameters at byte zero; they move to the pixel-stage
+// push slot, which follows the guest vertex stage's user data.
+String8 PlaceKernelParameters(String8 source, uint32_t offset)
+{
+	for (uint32_t member = 0; member < KERNEL_PARAMETER_BYTES / 4u; ++member)
+	{
+		const auto declared = String8::FromPrintf("OpMemberDecorate %%TransportParameters %u Offset %u\n", member, member * 4u);
+		EXIT_IF(!source.ContainsStr(declared));
+		source = source.ReplaceStr(declared, String8::FromPrintf("OpMemberDecorate %%TransportParameters %u Offset %u\n", member,
+		                                                         offset + member * 4u));
+	}
+	return source;
+}
 
 struct CaptureSource
 {
@@ -469,7 +487,7 @@ String8 GenerateCaptureSource(const ShaderCode& code, const ShaderPixelInputInfo
 		source = source.ReplaceStr(String8::FromPrintf("OpDecorate %%%s DescriptorSet 0", buffer),
 		                           String8::FromPrintf("OpDecorate %%%s DescriptorSet %u", buffer, transport.descriptor_set));
 	}
-	return source;
+	return PlaceKernelParameters(source, pixel.bind.push_constant_offset);
 }
 
 } // namespace Kyty::Libs::Graphics::FragmentTransport

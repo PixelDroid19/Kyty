@@ -2,12 +2,29 @@
 
 #include "Emulator/Graphics/FragmentTransportLayout.h"
 
+#include "Kyty/Core/DbgAssert.h"
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics::FragmentTransport {
 namespace {
 
 #include "host_shaders/fragment_wave_resolve_asm.inc"
+
+// The kernels declare their parameters at byte zero. The guest vertex stage
+// pushes its user data from byte zero too, so the parameters move to the
+// pixel-stage slot that follows it.
+String8 PlaceKernelParameters(String8 source, uint32_t offset)
+{
+	for (uint32_t member = 0; member < KERNEL_PARAMETER_BYTES / 4u; ++member)
+	{
+		const auto declared = String8::FromPrintf("OpMemberDecorate %%TransportParameters %u Offset %u\n", member, member * 4u);
+		EXIT_IF(!source.ContainsStr(declared));
+		source = source.ReplaceStr(declared, String8::FromPrintf("OpMemberDecorate %%TransportParameters %u Offset %u\n", member,
+		                                                         offset + member * 4u));
+	}
+	return source;
+}
 
 String8 WriteTarget(uint32_t target)
 {
@@ -30,7 +47,7 @@ String8 WriteTarget(uint32_t target)
 
 } // namespace
 
-String8 GenerateResolveSource(uint32_t descriptor_set, uint32_t color_write_mask, bool depth_export)
+String8 GenerateResolveSource(uint32_t descriptor_set, uint32_t parameter_offset, uint32_t color_write_mask, bool depth_export)
 {
 	String8 interface;
 	String8 annotations;
@@ -83,7 +100,7 @@ String8 GenerateResolveSource(uint32_t descriptor_set, uint32_t color_write_mask
 		source = source.ReplaceStr(String8::FromPrintf("OpDecorate %%%s DescriptorSet 0", buffer),
 		                           String8::FromPrintf("OpDecorate %%%s DescriptorSet %u", buffer, descriptor_set));
 	}
-	return source;
+	return PlaceKernelParameters(source, parameter_offset);
 }
 
 } // namespace Kyty::Libs::Graphics::FragmentTransport

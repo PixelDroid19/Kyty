@@ -772,8 +772,10 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		}
 		EXIT_IF(set_layouts_num != 2u);
 		set_layouts[set_layouts_num++] = transport_layout;
+		// The capture and resolve parameters take the pixel-stage slot after the
+		// guest vertex stage's user data, so both blocks stay live in one draw.
 		push_constant_info[push_constant_info_num].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-		push_constant_info[push_constant_info_num].offset     = 0;
+		push_constant_info[push_constant_info_num].offset     = ps_input_info->bind.push_constant_offset;
 		push_constant_info[push_constant_info_num].size       = FragmentTransport::KERNEL_PARAMETER_BYTES;
 		push_constant_info_num++;
 	}
@@ -1594,6 +1596,14 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	{
 		EXIT("fragment transport has no integer color export interface: %s\n", requirement_facts.c_str());
 	}
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
+	if (static_cast<uint64_t>(ps_input.bind.push_constant_offset) + FragmentTransport::KERNEL_PARAMETER_BYTES >
+	    properties.limits.maxPushConstantsSize)
+	{
+		EXIT("fragment transport parameters at push offset %u exceed the push constant limit %u: %s\n", ps_input.bind.push_constant_offset,
+		     properties.limits.maxPushConstantsSize, requirement_facts.c_str());
+	}
 	const VkDescriptorSetLayout transport_layout = FragmentTransportDescriptorSetLayout();
 	if (transport_layout == VK_NULL_HANDLE)
 	{
@@ -1642,7 +1652,8 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	{
 		EXIT("fragment transport capture assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());
 	}
-	const auto resolve_source = FragmentTransport::GenerateResolveSource(2u, TransportColorMask(static_params), ShaderHasPixelDepthExport(ps_code));
+	const auto resolve_source = FragmentTransport::GenerateResolveSource(2u, ps_input.bind.push_constant_offset, TransportColorMask(static_params),
+	                                                                    ShaderHasPixelDepthExport(ps_code));
 	if (!ShaderToolchain::Run(resolve_source, &resolve_binary, &error))
 	{
 		EXIT("fragment transport resolve assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());

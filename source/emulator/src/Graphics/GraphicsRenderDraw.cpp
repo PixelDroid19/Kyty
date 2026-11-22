@@ -1685,8 +1685,8 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
 				SetDynamicParams(buffer, vk, capture);
 				buffer->FlushDeferredState();
 				vkCmdSetScissor(vk, 0, 1, &band);
-				vkCmdPushConstants(vk, capture->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters),
-				                   &kernel_parameters);
+				vkCmdPushConstants(vk, capture->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, ps_input_info.bind.push_constant_offset,
+				                   sizeof(kernel_parameters), &kernel_parameters);
 				vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
 				bind_index_buffer(vk);
 				BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_first, vertex_records, geometry.indices_snapshotted,
@@ -1709,8 +1709,8 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
 				SetDynamicParams(buffer, vk, resolve);
 				buffer->FlushDeferredState();
 				vkCmdSetScissor(vk, 0, 1, &band);
-				vkCmdPushConstants(vk, resolve->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters),
-				                   &kernel_parameters);
+				vkCmdPushConstants(vk, resolve->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, ps_input_info.bind.push_constant_offset,
+				                   sizeof(kernel_parameters), &kernel_parameters);
 				vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
 				bind_index_buffer(vk);
 				BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_first, vertex_records, geometry.indices_snapshotted,

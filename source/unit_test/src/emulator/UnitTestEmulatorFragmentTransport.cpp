@@ -151,8 +151,12 @@ void ResolveModuleValidates()
 
 	for (bool depth_export: {false, true})
 	{
-		const auto source = FragmentTransport::GenerateResolveSource(2u, 0x00000033u, depth_export);
+		// The parameters follow the guest vertex stage's push data in the shared block.
+		const auto source = FragmentTransport::GenerateResolveSource(2u, 64u, 0x00000033u, depth_export);
 		Check(!source.StartsWith("OpKyty"), "resolve source is generated");
+		Check(source.ContainsStr("OpMemberDecorate %TransportParameters 0 Offset 64\n") &&
+		          source.ContainsStr("OpMemberDecorate %TransportParameters 6 Offset 88\n"),
+		      "resolve parameters start at the requested push offset");
 
 		Vector<uint32_t> binary;
 		String8          error;

@@ -377,7 +377,8 @@ FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, co
 	                             user_sgpr_count);
 	facts += Capacities(lane_words, 0u, limits);
 	facts += Assembled("capture", FragmentTransport::GenerateCaptureSource(code, resolved, info));
-	facts += Assembled("resolve", FragmentTransport::GenerateResolveSource(kTransportDescriptorSet, ColorWriteMask(state), ShaderHasPixelDepthExport(code)));
+	facts += Assembled("resolve", FragmentTransport::GenerateResolveSource(kTransportDescriptorSet, pixel.bind.push_constant_offset, ColorWriteMask(state),
+	                                                                         ShaderHasPixelDepthExport(code)));
 	requirement.facts = facts;
 	return requirement;
 }
