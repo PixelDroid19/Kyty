@@ -4832,6 +4832,29 @@ static bool MovrelOperandBounds(const ShaderOperand& operand, uint32_t m0, uint6
 	return true;
 }
 
+Vector<int> ShaderMovrelReadVgprs(const ShaderCode& code, uint32_t index)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	const int   base = inst.src[0].register_id;
+	if (inst.type == ShaderInstructionType::VMovrelsB32 && inst.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1)
+	{
+		return MovrelAlignedRegisters(MovrelCandidateRegisters(code, base), base,
+		                              MovrelLaneAlignment(code, index, inst.src[1].register_id));
+	}
+	uint32_t m0  = 0;
+	uint64_t rel = 0;
+	if (MovrelProvenLiteralM0(code, index, &m0))
+	{
+		Vector<int> resolved;
+		if (MovrelOperandBounds(inst.src[0], m0, &rel))
+		{
+			resolved.Add(static_cast<int>(rel));
+		}
+		return resolved;
+	}
+	return MovrelReachableRegisters(code, index, base);
+}
+
 static bool EmitMovrelMove(int index, ShaderOperand dst, ShaderOperand src, String8* dst_source, Spirv* spirv)
 {
 	String8 index_str = String8::FromPrintf("%u", index);

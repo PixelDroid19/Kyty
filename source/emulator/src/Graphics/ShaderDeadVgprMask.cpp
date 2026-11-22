@@ -206,13 +206,19 @@ bool ContainsType(Type type, std::string_view needle)
 	return ShaderInstructionTypeName(type).find(needle) != std::string_view::npos;
 }
 
-bool UsesRelativeIndexing(const ShaderCode& code)
+// A scalar relative move may read or write any SGPR, EXEC included, which the EXEC tracking cannot follow.
+bool UsesScalarRelativeIndexing(const ShaderCode& code)
 {
 	for (const auto& inst: code.GetInstructions())
 	{
-		if (StartsWith(inst.type, "SMovrel") || StartsWith(inst.type, "VMovrel")) { return true; }
+		if (StartsWith(inst.type, "SMovrel")) { return true; }
 	}
 	return false;
+}
+
+bool IsRelativeVgprRead(Type type)
+{
+	return type == Type::VMovrelsB32 || type == Type::VMovrelsdB32;
 }
 
 void AddVgprOp(const ShaderOperand& op, VectorSet* set)
@@ -1212,7 +1218,7 @@ std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const s
 {
 	const auto& instructions = code.GetInstructions();
 	const auto  n            = instructions.Size();
-	if (n == 0 || (!exec_full.empty() && exec_full.size() != n) || UsesRelativeIndexing(code)) { return {}; }
+	if (n == 0 || (!exec_full.empty() && exec_full.size() != n) || UsesScalarRelativeIndexing(code)) { return {}; }
 
 	// A real shader communicates results via exports or memory writes; synthetic instruction
 	// fixtures terminate at S_ENDPGM without either and observe the register file directly.
@@ -1241,6 +1247,21 @@ std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const s
 	{
 		const auto& inst = instructions.At(i);
 		CollectInstructionVgprs(inst, &reads[i], &cross_reads[i], &writes[i]);
+		if (StartsWith(inst.type, "VMovrel"))
+		{
+			// Relative moves keep their guards; a relative read counts every register its lowering may load.
+			if (IsRelativeVgprRead(inst.type))
+			{
+				// An unresolved read set cannot prove any write dead.
+				const auto rel_reads = ShaderMovrelReadVgprs(code, i);
+				if (rel_reads.IsEmpty()) { return {}; }
+				for (const int reg: rel_reads)
+				{
+					if (reg >= 0 && reg < static_cast<int>(kVgprs)) { reads[i].set(static_cast<size_t>(reg)); }
+				}
+			}
+			continue;
+		}
 		eligible[i]   = EligibleForGuardElision(inst) && writes[i].any();
 		overwrites[i] = OverwritesWholeDestination(inst) && writes[i].any();
 	}

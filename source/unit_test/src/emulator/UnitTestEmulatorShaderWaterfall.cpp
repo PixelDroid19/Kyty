@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
+#include "../../../emulator/src/Graphics/ShaderDeadVgprMask.h"
 #include "../../../emulator/src/Graphics/ShaderParseInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 
@@ -916,6 +917,73 @@ TEST(EmulatorShaderWaterfall, FollowsOuterBackEdgesBeforeTheLoop)
 	auto read = WaterfallInsideOuterLoop(Sgpr(kScalarRegister));
 	ShaderLowerWaterfallMoves(&read.code);
 	ExpectWaterfallRetained(read);
+}
+
+TEST(EmulatorShaderWaterfall, RelativeReadKeepsGuardsOnEveryCandidateRegister)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	auto vmov = [](uint32_t pc, uint32_t dst, uint32_t src) {
+		ShaderInstruction inst {};
+		inst.pc      = pc;
+		inst.type    = ShaderInstructionType::VMovB32;
+		inst.format  = ShaderInstructionFormat::SVdstSVsrc0;
+		inst.dst     = Vgpr(dst);
+		inst.src[0]  = Vgpr(src);
+		inst.src_num = 1;
+		return inst;
+	};
+	ShaderInstruction narrow {};
+	narrow.pc      = 0u;
+	narrow.type    = ShaderInstructionType::SAndSaveexecB64;
+	narrow.format  = ShaderInstructionFormat::Sdst2Ssrc02;
+	narrow.dst     = Sgpr(10u, 2u);
+	narrow.src[0]  = Sgpr(12u, 2u);
+	narrow.src_num = 1;
+	code.GetInstructions().Add(narrow);
+	code.GetInstructions().Add(vmov(4u, 1u, 2u)); // below the relative base, never read
+	code.GetInstructions().Add(vmov(8u, 6u, 2u)); // above the base: the relative read may load it on a restored lane
+
+	ShaderInstruction restore {};
+	restore.pc      = 12u;
+	restore.type    = ShaderInstructionType::SMovB64;
+	restore.format  = ShaderInstructionFormat::Sdst2Ssrc02;
+	restore.dst     = ExecPair();
+	restore.src[0]  = Sgpr(10u, 2u);
+	restore.src_num = 1;
+	code.GetInstructions().Add(restore);
+
+	ShaderInstruction set_m0 {};
+	set_m0.pc       = 16u;
+	set_m0.type     = ShaderInstructionType::SMovB32;
+	set_m0.format   = ShaderInstructionFormat::SVdstSVsrc0;
+	set_m0.dst.type = ShaderOperandType::M0;
+	set_m0.dst.size = 1;
+	set_m0.src[0]   = Sgpr(0u);
+	set_m0.src_num  = 1;
+	code.GetInstructions().Add(set_m0);
+
+	ShaderInstruction move {};
+	move.pc      = 20u;
+	move.type    = ShaderInstructionType::VMovrelsB32;
+	move.format  = ShaderInstructionFormat::SVdstSVsrc0;
+	move.dst     = Vgpr(3u);
+	move.src[0]  = Vgpr(4u);
+	move.src_num = 1;
+	code.GetInstructions().Add(move);
+
+	ShaderInstruction exp {};
+	exp.pc      = 24u;
+	exp.type    = ShaderInstructionType::Exp;
+	exp.src[0]  = Vgpr(3u);
+	exp.src_num = 1;
+	code.GetInstructions().Add(exp);
+	code.GetInstructions().Add(EndProgram(28u));
+
+	const auto unguarded = ShaderAnalyzeDeadVgprDstGuards(code, {});
+	ASSERT_EQ(unguarded.size(), static_cast<size_t>(code.GetInstructions().Size()));
+	EXPECT_TRUE(unguarded[1]);
+	EXPECT_FALSE(unguarded[2]);
 }
 
 UT_END();

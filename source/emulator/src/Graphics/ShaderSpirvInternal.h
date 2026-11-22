@@ -675,6 +675,10 @@ bool UsesNativeLaneExchange(const ShaderCode& code);
 // M0-relative moves lower to a named register only when M0 is a proven literal
 // in the same basic block. Returns the literal through m0 on success.
 bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0);
+// VGPRs the lowering of the M0-relative read at `index` (V_MOVRELS, V_MOVRELSD)
+// loads: the resolved register for a proven-literal M0, else every register
+// its select chain may pick.
+Vector<int> ShaderMovrelReadVgprs(const ShaderCode& code, uint32_t index);
 // Gen5 BUFFER_LOAD_FORMAT and BUFFER_STORE_FORMAT lower through shared
 // functions that decode or encode the V#'s format; `bound_buffers` adds the
 // storage-buffer element reader and, for stores, the element writer.
