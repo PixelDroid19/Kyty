@@ -174,9 +174,11 @@ bool EndsBlock(Type type)
 
 // What each VGPR holds in every lane for the whole program: its value when the entry block ends, kept only
 // when nothing writes the register after it. The entry block runs every lane while EXEC is the entry mask or
-// was set to all lanes.
-Vgprs ProgramWideValues(const ShaderCode& code, const std::vector<bool>& is_target, const uint32_t threads[3], int thread_ids)
+// was set to all lanes. `ready` is the first instruction that sees that value: one past its last entry-block write.
+Vgprs ProgramWideValues(const ShaderCode& code, const std::vector<bool>& is_target, const uint32_t threads[3], int thread_ids,
+                        std::array<uint32_t, LaneFlow::kVgprs>* ready)
 {
+	ready->fill(0);
 	const auto& instructions = code.GetInstructions();
 	Vgprs       values {};
 	// A loop back to the entry would run its block again on other inputs.
@@ -196,7 +198,9 @@ Vgprs ProgramWideValues(const ShaderCode& code, const std::vector<bool>& is_targ
 		const auto value = every_lane && inst.dst.size == 1 ? Evaluate(inst, values, threads) : Affine {};
 		for (unsigned vgpr = 0; vgpr < static_cast<unsigned>(LaneFlow::kVgprs); vgpr++)
 		{
-			if (WritesVgpr(inst, vgpr)) { values[vgpr] = inst.dst2.type == ShaderOperandType::Unknown ? value : Affine {}; }
+			if (!WritesVgpr(inst, vgpr)) { continue; }
+			values[vgpr]   = inst.dst2.type == ShaderOperandType::Unknown ? value : Affine {};
+			(*ready)[vgpr] = index + 1;
 		}
 	}
 	for (; index < instructions.Size(); index++)
@@ -293,9 +297,10 @@ void SetRange(const ShaderInstruction& inst, const Affine& address, const uint32
 
 std::vector<Access> FindAccesses(const ShaderCode& code, const std::vector<bool>& is_target, const uint32_t threads[3], int thread_ids)
 {
-	const auto&         instructions = code.GetInstructions();
-	const auto          values       = ProgramWideValues(code, is_target, threads, thread_ids);
-	std::vector<Access> accesses;
+	const auto&                            instructions = code.GetInstructions();
+	std::array<uint32_t, LaneFlow::kVgprs> ready {};
+	const auto                             values = ProgramWideValues(code, is_target, threads, thread_ids, &ready);
+	std::vector<Access>                    accesses;
 	for (uint32_t index = 0; index < instructions.Size(); index++)
 	{
 		const auto& inst = instructions.At(index);
@@ -306,7 +311,9 @@ std::vector<Access> FindAccesses(const ShaderCode& code, const std::vector<bool>
 		if (RangeDwords(inst) != 0)
 		{
 			const auto vgpr    = static_cast<unsigned>(inst.src[0].register_id);
-			const auto address = values[vgpr].known ? values[vgpr] : BlockConstant(code, is_target, index, vgpr);
+			// An entry-block access before the register's last entry-block write reads an earlier value.
+			const bool wide    = values[vgpr].known && ready[vgpr] <= index;
+			const auto address = wide ? values[vgpr] : BlockConstant(code, is_target, index, vgpr);
 			SetRange(inst, address, threads, &access);
 			if (!access.ranged)
 			{

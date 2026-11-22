@@ -99,6 +99,16 @@ TEST(EmulatorShaderSplitLdsOrder, EachLanesOwnSlotNeedsNoOrder)
 	EXPECT_TRUE(ShaderSplitLdsOrderOf(code, partial_wave, 1).before[2]);
 }
 
+TEST(EmulatorShaderSplitLdsOrder, EntryAccessReadsTheAddressOfItsOwnPoint)
+{
+	// Every lane writes dword 0, then v3 becomes the lane's own slot and lane 0 writes dword 0 again.
+	const uint32_t shader[] = {kZeroAddress, WriteWord(0u), WriteRegisters(3u), kSlotAddress, WriteWord(0u), WriteRegisters(3u), kEndpgm};
+	const auto     order    = ShaderSplitLdsOrderOf(ParseShader(shader), kOneLane, 1);
+
+	EXPECT_EQ(Orders(order), 1u);
+	EXPECT_TRUE(order.before[3]);
+}
+
 TEST(EmulatorShaderSplitLdsOrder, SharedBytesAreOrderedOnlyAgainstTheirWriter)
 {
 	// Write dword 0, read dword 2, read dword 0.
