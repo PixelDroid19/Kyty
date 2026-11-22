@@ -184,6 +184,14 @@ String8 Spirv::NativeQuadUniform(const String8& value, const String8& type, cons
 )").ReplaceStr("<v>", value).ReplaceStr("<type>", type).ReplaceStr("<r>", result);
 }
 
+// A lane-local program observes a mask only as its own bit or as "any lane" of a branch: the proof
+// accepts a lane that skips, so one quad's lanes are the whole answer and the wave reduction is not needed.
+bool Spirv::GathersMasksInQuad() const
+{
+	const auto proof = m_ps_input_info != nullptr ? m_ps_input_info->native_wave.proof : ShaderNativeWaveProof::Unclassified;
+	return !UsesFragmentCompute() && (proof == ShaderNativeWaveProof::LaneLocal || proof == ShaderNativeWaveProof::QuadLocal);
+}
+
 String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result) const
 {
 	if (UsesSplitComputeWave())
@@ -214,10 +222,7 @@ String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result)
 %<r>_high_part = OpSelect %uint %<r>_upper %<r>_quad %uint_0
 <wave>
 )").ReplaceStr("<p>", predicate).ReplaceStr("<r>", result);
-	// A lane-local program observes a mask only as its own bit or as "any lane" of a branch: the proof
-	// accepts a lane that skips, so one quad's lanes are the whole answer and the wave reduction is not needed.
-	const auto proof = m_ps_input_info != nullptr ? m_ps_input_info->native_wave.proof : ShaderNativeWaveProof::Unclassified;
-	if (!UsesFragmentCompute() && (proof == ShaderNativeWaveProof::LaneLocal || proof == ShaderNativeWaveProof::QuadLocal))
+	if (GathersMasksInQuad())
 	{
 		return gather.ReplaceStr("<wave>", "%" + result + " = OpCompositeConstruct %v4uint %" + result + "_low_part %" + result +
 		                                       "_high_part %uint_0 %uint_0");

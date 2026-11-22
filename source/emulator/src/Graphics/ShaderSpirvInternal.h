@@ -149,6 +149,8 @@ public:
 	// Split compute wave: pointwise mask algebra that gathers its own result
 	// from the lane-local masks it combines.
 	[[nodiscard]] bool IsLaneMaskGather(uint32_t index) const;
+	// Lane-local fragment program: every mask is gathered over this invocation's quad only.
+	[[nodiscard]] bool GathersMasksInQuad() const;
 	// Split compute wave: the run of V_READLANE instructions that shares one exchange with the one at index, head
 	// first; nullptr when it exchanges alone.
 	[[nodiscard]] const std::vector<uint32_t>* SplitReadGroup(uint32_t index) const;

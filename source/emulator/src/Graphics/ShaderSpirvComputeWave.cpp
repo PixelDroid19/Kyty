@@ -226,6 +226,7 @@ bool Spirv::SkipDestinationExecGuard(uint32_t index) const
 	{
 		m_dead_vgpr_guards_ready = true;
 		std::vector<bool> exec_full;
+		std::vector<bool> quad_mask_gather;
 		bool              entry_exec_full = false;
 		if (HasFusedVertexLanes())
 		{
@@ -249,8 +250,14 @@ bool Spirv::SkipDestinationExecGuard(uint32_t index) const
 			{
 				exec_full = FragmentMaskFlow().exec_full;
 			}
+			if (m_ps_input_info != nullptr && m_ps_input_info->native_wave.refusal_reason == nullptr && GathersMasksInQuad())
+			{
+				quad_mask_gather.resize(m_code.GetInstructions().Size());
+				for (uint32_t i = 0; i < quad_mask_gather.size(); ++i) { quad_mask_gather[i] = IsLaneMaskGather(i); }
+			}
 		}
-		m_dead_vgpr_guards = ShaderAnalyzeDeadVgprDstGuards(m_code, exec_full, entry_exec_full, UsesLanePrivateMasks());
+		m_dead_vgpr_guards =
+		    ShaderAnalyzeDeadVgprDstGuards(m_code, exec_full, entry_exec_full, UsesLanePrivateMasks(), quad_mask_gather);
 	}
 	return index < m_dead_vgpr_guards.size() && m_dead_vgpr_guards[index];
 }

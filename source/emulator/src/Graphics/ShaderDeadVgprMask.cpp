@@ -771,7 +771,8 @@ bool AnalyzeRegionEntryMaskAndCrossLane(const ShaderCode& code, const std::vecto
 void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlock>& blocks,
                               const std::vector<VectorSet>& cross_reads, const std::vector<VectorSet>& writes,
                               const std::vector<bool>& eligible, const std::vector<bool>& overwrites,
-                              bool entry_exec_full, bool lane_private_masks, std::vector<bool>* unguarded)
+                              bool entry_exec_full, bool lane_private_masks, const std::vector<bool>& quad_mask_gather,
+                              std::vector<bool>* unguarded)
 {
 	const auto&    instructions = code.GetInstructions();
 	const uint32_t n            = instructions.Size();
@@ -845,13 +846,17 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 		}
 	}
 
-	if (lane_private_masks)
+	const bool quad_masks = !quad_mask_gather.empty();
+	if (lane_private_masks || quad_masks)
 	{
-		// With per-lane EXEC branches, every invocation taking the active edge of
-		// S_CBRANCH_EXECZ/EXECNZ is guaranteed to have exec_lane == 1. Track a
-		// 3-value lattice per 64-bit SGPR pair (`Unknown`, `CoversWithExec` where
-		// `pair | exec == 1`, and `AllOnes` where `pair == 1`) so if/else and loop
-		// EXEC restores prove `exec_lane == 1` after the join too.
+		// Track whether this invocation's own EXEC bit is set. With per-lane EXEC branches, every
+		// invocation taking the active edge of S_CBRANCH_EXECZ/EXECNZ is guaranteed to have
+		// exec_lane == 1. Track a 3-value lattice per 64-bit SGPR pair (`Unknown`, `CoversWithExec`
+		// where `pair | exec == 1`, and `AllOnes` where `pair == 1`) so if/else and loop EXEC
+		// restores prove `exec_lane == 1` after the join too.
+		// With quad-gathered masks a stored mask holds only this invocation's quad, so an EXEC branch
+		// says nothing about the own bit; instead a gathered pair whose SCC (`pair != 0`) a branch
+		// proved nonzero has a set bit in this quad, and S_WQM of it sets the own bit.
 		enum class PairMaskState : uint8_t
 		{
 			Unknown        = 0,
@@ -864,6 +869,8 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 			bool                                     reached = false;
 			bool                                     active  = false;
 			std::array<PairMaskState, kMaxMaskPairs> pairs {};
+			int32_t                                  scc_pair     = -1; // gathered pair whose `!= 0` SCC holds
+			int32_t                                  nonzero_pair = -1; // gathered pair a branch proved nonzero
 
 			bool Merge(const LaneActiveState& other)
 			{
@@ -897,6 +904,16 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 						changed  = true;
 					}
 				}
+				if (scc_pair >= 0 && scc_pair != other.scc_pair)
+				{
+					scc_pair = -1;
+					changed  = true;
+				}
+				if (nonzero_pair >= 0 && nonzero_pair != other.nonzero_pair)
+				{
+					nonzero_pair = -1;
+					changed      = true;
+				}
 				return changed;
 			}
 		};
@@ -929,7 +946,53 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 				}
 			}
 		};
-		auto step_state = [&](uint32_t i, LaneActiveState* st)
+		auto is_pair = [](const ShaderOperand& op, int32_t pair)
+		{
+			unsigned first = 0;
+			unsigned count = 0;
+			return pair >= 0 && ScalarRange(op, &first, &count) && count == 2u && first == static_cast<unsigned>(pair);
+		};
+		auto overwrites_pair = [](const ShaderInstruction& inst, int32_t pair)
+		{
+			if (pair < 0) { return false; }
+			for (const auto* dst: {&inst.dst, &inst.dst2})
+			{
+				unsigned first = 0;
+				unsigned count = 0;
+				if (ScalarRange(*dst, &first, &count) && first <= static_cast<unsigned>(pair) + 1u &&
+				    first + count > static_cast<unsigned>(pair))
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+		// The pair a quad-gathered pointwise B64 mask op stores; its SCC is `pair != 0`.
+		auto gathered_scc_pair = [&](uint32_t i) -> int32_t
+		{
+			const auto& inst = instructions.At(i);
+			if (!quad_masks || !quad_mask_gather[i] || ShaderInstructionWritesExec(inst) || inst.dst2.type != Operand::Unknown)
+			{
+				return -1;
+			}
+			switch (inst.type)
+			{
+				case Type::SAndB64:
+				case Type::SOrB64:
+				case Type::SXorB64:
+				case Type::SAndn2B64:
+				case Type::SOrn2B64:
+				case Type::SNandB64:
+				case Type::SNorB64:
+				case Type::SXnorB64: break;
+				default: return -1;
+			}
+			unsigned first = 0;
+			unsigned count = 0;
+			if (!ScalarRange(inst.dst, &first, &count) || count != 2u || first >= kMaxMaskPairs) { return -1; }
+			return static_cast<int32_t>(first);
+		};
+		auto step_masks = [&](uint32_t i, LaneActiveState* st)
 		{
 			const auto& inst = instructions.At(i);
 			if (!ShaderInstructionWritesExec(inst))
@@ -1007,6 +1070,11 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 				monotone_or     = true;
 				next_active     = next_active || old_active || pair_state_of(*st, inst.src[0]) != PairMaskState::Unknown;
 				saved_dst_state = old_active ? PairMaskState::AllOnes : PairMaskState::Unknown;
+			} else if (quad_masks && inst.type == Type::SWqmB64 && inst.src_num >= 1)
+			{
+				// WQM sets every lane of a quad that holds a set bit.
+				next_active = next_active || pair_state_of(*st, inst.src[0]) == PairMaskState::AllOnes ||
+				              is_pair(inst.src[0], st->nonzero_pair);
 			} else if (inst.type == Type::SAndn2SaveexecB64 && inst.src_num >= 1)
 			{
 				const auto s0   = pair_state_of(*st, inst.src[0]);
@@ -1043,6 +1111,17 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 			}
 			st->active = next_active;
 		};
+		auto step_state = [&](uint32_t i, LaneActiveState* st)
+		{
+			const auto& inst = instructions.At(i);
+			step_masks(i, st);
+			if (overwrites_pair(inst, st->nonzero_pair)) { st->nonzero_pair = -1; }
+			if (overwrites_pair(inst, st->scc_pair)) { st->scc_pair = -1; }
+			if (StartsWith(inst.type, "S") && WritesScc(inst.type) && !AnyPrefix(inst.type, {"SCbranch", "SBranch"}))
+			{
+				st->scc_pair = gathered_scc_pair(i);
+			}
+		};
 
 		std::vector<LaneActiveState> in_lane(nb);
 		in_lane[0].reached = true;
@@ -1065,7 +1144,7 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 					const uint32_t active_succ   = (last.type == Type::SCbranchExecz) ? blocks[b].succs[1] : blocks[b].succs[0];
 					const uint32_t inactive_succ = (last.type == Type::SCbranchExecz) ? blocks[b].succs[0] : blocks[b].succs[1];
 					LaneActiveState active_edge  = cur;
-					active_edge.active           = true;
+					active_edge.active           = active_edge.active || !quad_masks;
 					LaneActiveState inactive_edge = cur;
 					inactive_edge.active          = false;
 					for (uint32_t r = 0; r < kMaxMaskPairs; ++r)
@@ -1077,6 +1156,14 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 					}
 					if (in_lane[active_succ].Merge(active_edge)) { changed = true; }
 					if (in_lane[inactive_succ].Merge(inactive_edge)) { changed = true; }
+				} else if ((last.type == Type::SCbranchScc0 || last.type == Type::SCbranchScc1) && blocks[b].succs.size() == 2u)
+				{
+					const uint32_t nonzero_succ = (last.type == Type::SCbranchScc0) ? blocks[b].succs[1] : blocks[b].succs[0];
+					const uint32_t zero_succ    = (last.type == Type::SCbranchScc0) ? blocks[b].succs[0] : blocks[b].succs[1];
+					LaneActiveState nonzero_edge = cur;
+					if (cur.scc_pair >= 0) { nonzero_edge.nonzero_pair = cur.scc_pair; }
+					if (in_lane[nonzero_succ].Merge(nonzero_edge)) { changed = true; }
+					if (in_lane[zero_succ].Merge(cur)) { changed = true; }
 				} else
 				{
 					for (const uint32_t s: blocks[b].succs)
@@ -1214,11 +1301,15 @@ void ApplyMonotonicTailGuards(const ShaderCode& code, const std::vector<BasicBlo
 } // namespace
 
 std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const std::vector<bool>& exec_full, bool entry_exec_full,
-                                                 bool lane_private_masks)
+                                                 bool lane_private_masks, const std::vector<bool>& quad_mask_gather)
 {
 	const auto& instructions = code.GetInstructions();
 	const auto  n            = instructions.Size();
-	if (n == 0 || (!exec_full.empty() && exec_full.size() != n) || UsesScalarRelativeIndexing(code)) { return {}; }
+	if (n == 0 || (!exec_full.empty() && exec_full.size() != n) || (!quad_mask_gather.empty() && quad_mask_gather.size() != n) ||
+	    UsesScalarRelativeIndexing(code))
+	{
+		return {};
+	}
 
 	// A real shader communicates results via exports or memory writes; synthetic instruction
 	// fixtures terminate at S_ENDPGM without either and observe the register file directly.
@@ -1273,7 +1364,7 @@ std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const s
 	{
 		if (!exec_full.empty() && exec_full[i] && overwrites[i]) { unguarded[i] = true; }
 	}
-	ApplyMonotonicTailGuards(code, blocks, cross_reads, writes, eligible, overwrites, entry_exec_full, lane_private_masks, &unguarded);
+	ApplyMonotonicTailGuards(code, blocks, cross_reads, writes, eligible, overwrites, entry_exec_full, lane_private_masks, quad_mask_gather, &unguarded);
 
 	const auto regions = FindSelectionRegions(code, blocks);
 	struct AnalyzedRegion

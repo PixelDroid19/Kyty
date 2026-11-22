@@ -15,8 +15,11 @@ namespace Kyty::Libs::Graphics {
 // or the write executes at entry mask inside an acyclic single-entry/single-exit selection region
 // where every written VGPR is dead at the region merge and not consumed by a later cross-lane or
 // implicit-derivative operation in that region.
+// `quad_mask_gather`, when not empty, marks the program as storing every lane mask gathered over one quad
+// and flags (per instruction) the mask ops that gather their own result.
 [[nodiscard]] std::vector<bool> ShaderAnalyzeDeadVgprDstGuards(const ShaderCode& code, const std::vector<bool>& exec_full,
-                                                                 bool entry_exec_full = false, bool lane_private_masks = false);
+                                                                 bool entry_exec_full = false, bool lane_private_masks = false,
+                                                                 const std::vector<bool>& quad_mask_gather = {});
 
 } // namespace Kyty::Libs::Graphics
 

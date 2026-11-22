@@ -986,4 +986,133 @@ TEST(EmulatorShaderWaterfall, RelativeReadKeepsGuardsOnEveryCandidateRegister)
 	EXPECT_FALSE(unguarded[2]);
 }
 
+namespace {
+
+enum class QuadMaskBreak
+{
+	None,
+	NotGathered,
+	PairRewritten,
+	OtherWqmSource,
+	SccRewritten,
+	ExecBranch,
+	ZeroEdge, // S_CBRANCH_SCC1 leaves the body on the edge where the pair is zero
+};
+
+struct QuadMaskProgram
+{
+	ShaderCode        code;
+	std::vector<bool> gather;
+	uint32_t          body = 0; // index of the V_MOV under S_WQM
+};
+
+static ShaderInstruction ScalarMask(uint32_t pc, ShaderInstructionType type, const ShaderOperand& dst, const ShaderOperand& src0,
+                                    const ShaderOperand& src1)
+{
+	ShaderInstruction inst {};
+	inst.pc      = pc;
+	inst.type    = type;
+	inst.format  = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+	inst.dst     = dst;
+	inst.src[0]  = src0;
+	inst.src[1]  = src1;
+	inst.src_num = 2;
+	return inst;
+}
+
+static ShaderInstruction ScalarPairOp(uint32_t pc, ShaderInstructionType type, const ShaderOperand& dst, const ShaderOperand& src)
+{
+	ShaderInstruction inst {};
+	inst.pc      = pc;
+	inst.type    = type;
+	inst.format  = ShaderInstructionFormat::Sdst2Ssrc02;
+	inst.dst     = dst;
+	inst.src[0]  = src;
+	inst.src_num = 1;
+	return inst;
+}
+
+// Narrowed EXEC, a quad-gathered S_AND_B64 into s[4:5], S_CBRANCH_SCC0 to the end, S_WQM EXEC from s[4:5],
+// then a V_MOV whose result is exported after EXEC is restored: a fragment body run on the WQM of a tested mask.
+static QuadMaskProgram BuildQuadMaskProgram(QuadMaskBreak brk)
+{
+	QuadMaskProgram program;
+	program.code.SetType(ShaderType::Pixel);
+	auto&    list = program.code.GetInstructions();
+	uint32_t pc   = 0;
+	auto     add  = [&](ShaderInstruction inst, bool gathered = false)
+	{
+		inst.pc = pc;
+		pc += 4u;
+		list.Add(inst);
+		program.gather.push_back(gathered);
+	};
+	const ShaderOperand vcc {.type = ShaderOperandType::VccLo, .size = 2};
+
+	add(ScalarPairOp(0, ShaderInstructionType::SAndSaveexecB64, Sgpr(10u, 2u), Sgpr(12u, 2u)));
+	add(ScalarMask(0, ShaderInstructionType::SAndB64, Sgpr(4u, 2u), vcc, ExecPair()), brk != QuadMaskBreak::NotGathered);
+	if (brk == QuadMaskBreak::SccRewritten)
+	{
+		add(ScalarMask(0, ShaderInstructionType::SAddU32, Sgpr(30u), Sgpr(31u), Sgpr(32u)));
+	}
+	const uint32_t branch_index = list.Size();
+	const auto branch_type = brk == QuadMaskBreak::ExecBranch ? ShaderInstructionType::SCbranchExecz
+	                         : brk == QuadMaskBreak::ZeroEdge ? ShaderInstructionType::SCbranchScc1
+	                                                          : ShaderInstructionType::SCbranchScc0;
+	add(BranchTo(0, 0, branch_type));
+	if (brk == QuadMaskBreak::PairRewritten)
+	{
+		add(ScalarPairOp(0, ShaderInstructionType::SMovB64, Sgpr(4u, 2u), Sgpr(20u, 2u)));
+	}
+	if (brk != QuadMaskBreak::ExecBranch)
+	{
+		add(ScalarPairOp(0, ShaderInstructionType::SWqmB64, ExecPair(),
+		                 brk == QuadMaskBreak::OtherWqmSource ? Sgpr(8u, 2u) : Sgpr(4u, 2u)));
+	}
+	program.body = list.Size();
+	ShaderInstruction move {};
+	move.type    = ShaderInstructionType::VMovB32;
+	move.format  = ShaderInstructionFormat::SVdstSVsrc0;
+	move.dst     = Vgpr(1u);
+	move.src[0]  = Vgpr(2u);
+	move.src_num = 1;
+	add(move);
+	// Restoring the saved EXEC exposes every lane's V1 to the export, so only the proof can drop the guard.
+	add(ScalarPairOp(0, ShaderInstructionType::SMovB64, ExecPair(), Sgpr(10u, 2u)));
+	ShaderInstruction exp {};
+	exp.type    = ShaderInstructionType::Exp;
+	exp.src[0]  = Vgpr(1u);
+	exp.src_num = 1;
+	add(exp);
+	add(EndProgram(0));
+	auto* branch = AtPc(program.code, branch_index * 4u);
+	*branch      = BranchTo(branch->pc, pc - 4u, branch->type);
+	return program;
+}
+
+static bool QuadMaskBodyUnguarded(const QuadMaskProgram& program, const std::vector<bool>& gather)
+{
+	const auto unguarded = ShaderAnalyzeDeadVgprDstGuards(program.code, {}, true, false, gather);
+	EXPECT_EQ(unguarded.size(), static_cast<size_t>(program.code.GetInstructions().Size()));
+	return program.body < unguarded.size() && unguarded[program.body];
+}
+
+} // namespace
+
+// With quad-gathered masks, S_WQM of a mask that an SCC branch proved nonzero sets this invocation's EXEC bit,
+// so a write under it needs no guard; every broken link of that proof keeps the guard.
+TEST(EmulatorShaderWaterfall, QuadMaskWqmOfTestedPairDropsTheGuard)
+{
+	const auto proven = BuildQuadMaskProgram(QuadMaskBreak::None);
+	EXPECT_TRUE(QuadMaskBodyUnguarded(proven, proven.gather));
+	EXPECT_FALSE(QuadMaskBodyUnguarded(proven, {}));
+
+	for (const auto brk: {QuadMaskBreak::NotGathered, QuadMaskBreak::PairRewritten, QuadMaskBreak::OtherWqmSource,
+	                      QuadMaskBreak::SccRewritten, QuadMaskBreak::ExecBranch, QuadMaskBreak::ZeroEdge})
+	{
+		const auto broken = BuildQuadMaskProgram(brk);
+		EXPECT_FALSE(QuadMaskBodyUnguarded(broken, broken.gather)) << static_cast<int>(brk);
+	}
+}
+
 UT_END();
