@@ -1144,6 +1144,25 @@ TEST(EmulatorNativeWaveAdmission, ReductionReadsMayFollowInstructionsThatNameNoN
 	EXPECT_NE(ShaderAnalyzeNativeWave(Reduction({Clear(9), Clear(10)}, 15, {observes}), 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
 }
 
+TEST(EmulatorNativeWaveAdmission, ReductionReadsMayFollowAnOverwriteOfAnotherNetworkRegister)
+{
+	// The permute temporary is reused for an unrelated value, which is then read, before the reads of the seed.
+	const auto overwrite = Unary(ShaderInstructionType::VMovB32, Operand(ShaderOperandType::Vgpr, 9), Constant(1));
+	const auto reuse     = Vector(ShaderInstructionType::VOrB32, 12, Operand(ShaderOperandType::Vgpr, 9), Operand(ShaderOperandType::Vgpr, 9));
+	const auto code      = Reduction({Clear(10)}, 15, {overwrite, reuse});
+	EXPECT_EQ(ShaderAnalyzeNativeWave(code, 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	const auto reductions = ShaderFindFragmentLaneReductions(code, ShaderAnalyzeFragmentMaskFlow(code, 64u));
+	ASSERT_EQ(reductions.reductions.size(), 1u);
+	uint64_t lanes = 0;
+	ASSERT_NE(reductions.ReadAt(12, &lanes), nullptr);
+	EXPECT_EQ(lanes, 0x00000000ffffffffull);
+	ASSERT_NE(reductions.ReadAt(13, &lanes), nullptr);
+	EXPECT_EQ(lanes, 0xffffffff00000000ull);
+	// Overwriting the register the reads name leaves them reading a value the network never computed.
+	const auto clobber = Unary(ShaderInstructionType::VMovB32, Operand(ShaderOperandType::Vgpr, 10), Constant(1));
+	EXPECT_NE(ShaderAnalyzeNativeWave(Reduction({Clear(9), Clear(10)}, 15, {clobber}), 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+}
+
 TEST(EmulatorNativeWaveAdmission, Wave32OrReductionRunsAsAPartialWave)
 {
 	const auto code = Wave32Reduction({Clear(10)});

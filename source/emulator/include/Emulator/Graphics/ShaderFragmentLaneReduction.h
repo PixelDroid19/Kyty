@@ -80,8 +80,9 @@ struct ShaderLaneReductions
 // The steps from seed_index + 1 to restore, which must all be steps or scalar loads that keep EXEC, and the static
 // reads that follow restore, for a guest wave of guest_wave_size lanes. The op is the one name all folds of the steps
 // share, or the op the caller sets in reduction->op when there is no fold. The seed must be the identity of that op,
-// which a read's lanes outside its set contribute. Proves neither the region nor that the steps are dead; fills op,
-// seed, restore, steps and reads. False without a read.
+// which a read's lanes outside its set contribute. Between the restore and a read, an instruction may overwrite a
+// network register it does not read; that register is not read after it. Proves neither the region nor that the
+// steps are dead; fills op, seed, restore, steps and reads. False without a read.
 [[nodiscard]] bool ShaderProveLaneReductionNetwork(const ShaderCode& code, uint32_t guest_wave_size, uint32_t seed_index, uint32_t restore,
                                                    ShaderLaneReduction* reduction);
 
