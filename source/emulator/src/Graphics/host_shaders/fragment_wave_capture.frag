@@ -20,13 +20,13 @@ uint hash_key(uint primitive, uint xy) {
     return h ^ (h >> 15u);
 }
 
+// One atomic add per quad: a compare-and-swap loop on this single counter
+// serializes every covered quad of the band. The count may pass the capacity
+// only after an overflow, which fails the whole band; readers bound records by
+// quad_capacity.
 uint reserve_record() {
-    uint current = atomicAdd(control_buffer.control[0], 0u);
-    while (current < transport.quad_capacity) {
-        uint observed = atomicCompSwap(control_buffer.control[0], current, current + 1u);
-        if (observed == current) return current;
-        current = observed;
-    }
+    uint record = atomicAdd(control_buffer.control[0], 1u);
+    if (record < transport.quad_capacity) return record;
     atomicOr(control_buffer.control[1], 1u);
     return invalid_reference;
 }

@@ -6,15 +6,11 @@ layout(local_size_x=64) in;
 layout(std430, set=0, binding=1) buffer Control { uint control[]; };
 layout(std430, set=0, binding=2) buffer References { uint references[]; };
 
-// At most wave_lookup_capacity invocations contend for this monotonic,
-// saturating counter. Every failed CAS observes another successful increment.
+// The count may pass the capacity only after an overflow, which fails the
+// whole band; pack and shade bound waves by wave_capacity.
 uint reserve_wave() {
-    uint current = atomicAdd(control[2], 0u);
-    while (current < transport.wave_capacity) {
-        uint observed = atomicCompSwap(control[2], current, current + 1u);
-        if (observed == current) return current;
-        current = observed;
-    }
+    uint wave = atomicAdd(control[2], 1u);
+    if (wave < transport.wave_capacity) return wave;
     atomicOr(control[1], capacity_error);
     return invalid_reference;
 }
