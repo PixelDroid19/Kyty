@@ -7939,6 +7939,9 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   loads translated through a window resolved at bind"). The intro moved from about 25.9 to about 27.5 fps (one run
   each, images correct) and is still under 30. The heavier stretch (about 750 draws per frame) was not reached for
   more than one second in the run after the change, so it is not re-measured.
+  Update (2026-11-22): the guard elision now runs on programs with vector relative reads (cross-title record
+  "Dead-guard elision follows vector relative reads"); the hottest intro program keeps 319 of its 591 EXEC selects
+  and still compiles at SIMD8, so the intro stays at about 27-28 fps.
 - **Per-lane proof for the split wave32 programs: none qualifies; parked (2026-11-19).** A temporary print ran the
   wave-width independence proof (the one that lets split wave64 programs run one guest lane per invocation without
   exchanges) on the 15 wave32 programs that use wave state on the dunes route. None passed: ten stop at the same

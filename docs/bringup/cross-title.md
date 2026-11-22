@@ -8793,3 +8793,36 @@ measured; seconds compared by wall clock alone were different scenes there. The 
 `0x0d49d0a9` (addresses mostly memory-chained, so outside this window) was not re-measured. `PPSA17221 - Minecraft`
 (709 modules) and `PPSA04220 - JoJo's Bizarre Adventure: All-Star Battle R` (121 modules) compiled no program with
 the window, so their clean runs do not exercise it.
+
+## Dead-guard elision follows vector relative reads (2026-11-22, measured statically)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the deferred-lighting renderer, the intro's hottest pixel program
+(module `0x97607c9e`, the translation of `0x8e59fdb1` after the program-base window) kept 591 EXEC-bit selects
+around plain vector writes. The analysis that drops those guards when the old value is never read
+(`ShaderAnalyzeDeadVgprDstGuards`) gave up on the whole program because it contains relative moves: a relative read
+may load any register, so the analysis could not see which writes stay live.
+
+**Changed.** Only scalar relative moves still disable the analysis (they may read or write any SGPR, EXEC
+included). A vector relative read counts as a read of every register its lowering may load: the aligned candidates,
+the one register of a proven literal M0, or the registers reachable from the bounded M0 values. When that set is
+empty the analysis keeps every guard. Relative moves themselves keep their guards.
+
+**Verified.** Focused unit test: a guarded write to a candidate register of a later relative read keeps its guard
+while a write below the base loses it; ignoring relative reads makes the test fail. In the hot program the selects
+fell from 591 to 319, instructions from 6,943 to 6,756 and live registers under the driver's statistics from 124 to
+118; it still compiles at SIMD8 only. One Astro Bot run on the new translation (cold translation cache): intro
+capture correct, about 27-28 fps, so no frame-rate change is claimed. `PPSA17221 - Minecraft` reached the world at
+84 s on the new translation with a correct capture; whether any of its programs took the new path was not counted.
+Unit suite 2,832 passed, 11 skipped; the shader-compute integration tests and the repository gates passed.
+
+**Excluded.**
+- Wrapping each guarded run in a branch on the lane's EXEC bit instead of a select: the old value stays live across
+  the branch as it does across the select, so register pressure does not drop.
+- A variant keyed on the value of M0: in this program M0 is a bit field of a dword that `s_buffer_load_dwordx4`
+  reads from memory, not a user-data word. A variant per value needs proof that nothing writes that dword between
+  bind and draw; not pursued.
+- A temporary build that forced the first M0 candidate ran the intro at 32.6-33.6 fps, but the other candidates then
+  read zero and the capture differed, so it is not a price of the relative moves.
+- The ceiling with both the EXEC selects and the relative-move select chains folded (6,943 to 5,080 instructions,
+  SIMD16 offered, intro 31-32 fps by program replacement) needs two folds that are not sound. On this host the
+  driver offered SIMD16 only below about 90 live registers.
