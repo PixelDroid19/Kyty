@@ -7906,9 +7906,11 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   vertex push constants"). After the fix the patched route shows lit dunes, the robot and sun shadows, matching
   the default renderer, at about 11 fps (10.9 at 160 s on the committed build, 60 fps limit); before the
   capture-reservation change in the same record it ran at 3 fps, GPU-bound on the capture draw. The shade-width
-  change in the same record then brought this renderer to 25-27 fps in the dunes (GPU-bound). With GI off only
+  change in the same record then brought this renderer to 25-27 fps in the dunes (GPU-bound), and the band and
+  counter changes after it to 31-33 fps in light dunes gameplay, 26-29 fps in the heavier stretch and 25-26.5 fps
+  in the intro (median 32.0, GPU-bound; cross-title record "Transport bands and counters"). With GI off only
   (default renderer, `clean-p7`, 40-187 s, per-second samples): median 38.7 fps, 14 of 147 seconds under 30. Of
-  those, seconds 49-67 are the intro at 27.5-29.9 fps (GPU about 88 % busy, command thread about 45 %), four are
+  those, seconds 49-67 are the intro, mostly at 27.5-29.9 fps with one second (67) at 22.9 (GPU about 88 % busy, command thread about 45 %), four are
   level-load hitches (85-86, 100, 106, 112 s) and two are one-second dips in the dunes gameplay (144 s at 25.4,
   177 s at 27.8); the dunes otherwise hold 37-40 fps, GPU-bound. Earlier candidates for the dark image (the s66 texture mask, the
   DREF1 shadow tap, the sun flag in s52, VCMPX writing VCC, export kill handling, G-buffer formats) were each

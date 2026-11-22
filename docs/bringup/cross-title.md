@@ -8726,9 +8726,28 @@ spill at that width (8-lane rule above). The shade now takes its part width from
 (`ShaderSplitWavePartLanes` over the pixel program's VGPR count) and pins the shade pipeline to it. Astro Bot
 dunes with the deferred-lighting renderer (`INTEL_MEASURE`, last 30 frames of a warm run): the shade compute went
 from 57.6 to 6.8 ms per frame (8 dispatches, new driver hash), the frame's GPU time from 95.1 to 44.1 ms, and the
-run from about 11 to 25-27 fps in the dunes (GPU 97-99 % busy), image correct. The scan (3.9 ms), capture
-(2.7 ms) and resolve (1.5 ms) stages are now the larger part of the transport cost. 2,830 unit tests (the shade
-module tests build at 8, 16 and 32 lanes) and the gates passed.
+run from about 11 to 25-27 fps in the dunes (GPU 97-99 % busy), image correct. The capture (2.7 ms) and resolve
+(1.5 ms) stages and the transport compute passes were then the larger part of the transport cost. 2,830 unit
+tests (the shade module tests build at 8, 16 and 32 lanes) and the gates passed. Excluded: forcing 16-lane parts
+on the hot 72-VGPR lighting program raised the shade from 6.8 to 11.6 ms per frame, so 8 lanes stays.
+
+**Transport bands and counters (perf, 2026-11-22).** Four changes, each measured with `INTEL_MEASURE` on the
+same dunes route and its capture checked:
+- The scan, pack and resolve stages read the failure flags with plain loads instead of atomic reads (earlier
+  passes publish them behind a barrier). Frame GPU 44.1 to 41.5 ms.
+- A band that replays a single primitive is planned for its pixel area instead of twice it: one primitive
+  covers each 2x2 tile at most once. The lighting draw (one full-screen primitive at 1920x1080, 10 lane words)
+  went from 8 bands of 138 rows to 4 bands of 278 rows inside the same 128 MiB budget; pack 1.43 to 0.64 ms,
+  fills 1.69 to 1.49 ms, frame 41.5 to 39.6 ms.
+- The capture reserves records with one atomic add per subgroup from a claiming lane (never a helper) instead
+  of one per quad: capture 2.84 to 1.59 ms per frame.
+- The capture numbers each primitive's quads with one add per subgroup and primitive instead of one per quad:
+  capture 1.59 to 1.13 ms, and the shade 7.07 to 5.25 ms, because a guest wave now gathers neighbouring quads.
+Clean run after all four (no driver measurement, 60 fps limit): light dunes gameplay 31-33 fps (was 28-29), the
+heavier stretch at 133-142 s 26-29 fps (was about 25), the intro 25-26.5 fps (was 23-24), median 32.0 over
+99 s, all GPU-bound. Still under 30: the intro and the heavier stretch, whose top costs are guest draws (391
+depth-only draws at 7.0 ms and 108 draws of one pixel program at 5.6 ms per frame under measurement), not
+transport.
 
 **Open.**
 - The transport failure flag is never read on the host. A band that fails for any reason drops its pixels
