@@ -1723,9 +1723,11 @@ struct CubeDrawDepthCoverage
 	return 1u << static_cast<uint32_t>(shape);
 }
 
-// Shapes of the read-only views paired with a sampler slot; every read-only
-// view when none pairs with it.
-[[nodiscard]] inline uint32_t BindSamplerViewShapes(const ShaderTextureResources& textures, int sampler_slot)
+// Shapes of the read-only views the shader's image instructions sample with
+// this sampler; every read-only view when none pairs with it (a sampler loaded
+// through a descriptor table). Texture and sampler slots are separate user-data
+// offsets, so equal slot numbers do not pair a view with a sampler.
+[[nodiscard]] inline uint32_t BindSamplerViewShapes(const ShaderTextureResources& textures, int sampler_index)
 {
 	uint32_t paired = 0;
 	uint32_t all    = 0;
@@ -1738,7 +1740,7 @@ struct CubeDrawDepthCoverage
 		}
 		const uint32_t bit = SamplerViewShapeBit(ShaderResolvedSampledTextureShape(descriptor));
 		all |= bit;
-		if (descriptor.slot == sampler_slot)
+		if ((descriptor.sampler_indices_mask & (1u << static_cast<uint32_t>(sampler_index))) != 0u)
 		{
 			paired |= bit;
 		}
@@ -1746,16 +1748,16 @@ struct CubeDrawDepthCoverage
 	return paired != 0u ? paired : all;
 }
 
-[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_slot)
+[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_index)
 {
-	return (BindSamplerViewShapes(textures, sampler_slot) & ~SamplerViewShapeBit(ShaderGen5SampledTextureShape::TwoDimensional)) == 0u;
+	return (BindSamplerViewShapes(textures, sampler_index) & ~SamplerViewShapeBit(ShaderGen5SampledTextureShape::TwoDimensional)) == 0u;
 }
 
 // The W address mode (S# CLAMP_Z) wraps the R coordinate of 3D views only: 2D
 // views have none, and array and cube views select a layer or face without it.
-[[nodiscard]] inline bool BindSamplerUsesRCoordinate(const ShaderTextureResources& textures, int sampler_slot)
+[[nodiscard]] inline bool BindSamplerUsesRCoordinate(const ShaderTextureResources& textures, int sampler_index)
 {
-	return (BindSamplerViewShapes(textures, sampler_slot) & SamplerViewShapeBit(ShaderGen5SampledTextureShape::ThreeDimensional)) != 0u;
+	return (BindSamplerViewShapes(textures, sampler_index) & SamplerViewShapeBit(ShaderGen5SampledTextureShape::ThreeDimensional)) != 0u;
 }
 
 // Draw-local context for an opt-in, bounded material-binding diagnostic.

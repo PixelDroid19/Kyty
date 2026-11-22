@@ -297,7 +297,7 @@ static void RecordDrawMaterialTraceTexture(DrawMaterialTraceSession* session, in
 	record.sampler_index     = sampler_index;
 	record.sampler_operation = samplers->operations[sampler_index];
 	record.sampler           = samplers->samplers[sampler_index];
-	record.allow_unorm       = textures != nullptr && BindSamplerAllowsUnnormalized(*textures, record.sampler_slot);
+	record.allow_unorm       = textures != nullptr && BindSamplerAllowsUnnormalized(*textures, record.sampler_index);
 }
 
 static void EmitDrawMaterialTraceStorage(FILE* out, uint32_t ordinal, const char* stage, const ShaderStorageResources& storage);
@@ -5469,7 +5469,7 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, const Shader
 	for (int i = 0; i < samplers.samplers_num; i++)
 	{
 		auto       r                 = samplers.samplers[i];
-		const bool allow_unnormalized = BindSamplerAllowsUnnormalized(textures, samplers.slots[i]);
+		const bool allow_unnormalized = BindSamplerAllowsUnnormalized(textures, i);
 
 		// EXIT_NOT_IMPLEMENTED(r.ClampX() != 0);
 		// EXIT_NOT_IMPLEMENTED(r.ClampY() != 0);
@@ -5514,7 +5514,7 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, const Shader
 		const bool comparison_eligible = ShaderSamplerDepthComparisonEligible(textures, samplers, i);
 		const auto sampler_operation = State::ResolveSamplerBindingOperation(samplers.operations[i], comparison_eligible);
 		sampler_ids[i] = g_render_ctx->GetSamplerCache()->GetSamplerId(r, sampler_operation, allow_unnormalized,
-		                                                               BindSamplerUsesRCoordinate(textures, samplers.slots[i]),
+		                                                               BindSamplerUsesRCoordinate(textures, i),
 		                                                               SamplerBorderIsInteger(textures, i));
 
 		r.UpdateIndex(i);

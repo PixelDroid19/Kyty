@@ -2513,13 +2513,13 @@ TEST(EmulatorTileDetile, UnnormalizedSamplerAllowanceIsPerSamplerView)
 	ShaderTextureResources textures {};
 	textures.textures_num = 2;
 	textures.desc[0].usage                           = ShaderTextureUsage::ReadOnly;
-	textures.desc[0].slot                            = 0;
 	textures.desc[0].sampled_shape                   = ShaderGen5SampledTextureShape::TwoDimensionalArray;
 	textures.desc[0].sampled_shape_from_instruction  = true;
+	textures.desc[0].sampler_indices_mask            = 1u << 0u;
 	textures.desc[1].usage                           = ShaderTextureUsage::ReadOnly;
-	textures.desc[1].slot                            = 1;
 	textures.desc[1].sampled_shape                   = ShaderGen5SampledTextureShape::TwoDimensional;
 	textures.desc[1].sampled_shape_from_instruction  = true;
+	textures.desc[1].sampler_indices_mask            = 1u << 1u;
 
 	// A cubemap in the same draw must not disable ForceUnorm on the 2D Dref sampler.
 	EXPECT_FALSE(BindSamplerAllowsUnnormalized(textures, 0));
@@ -2528,20 +2528,20 @@ TEST(EmulatorTileDetile, UnnormalizedSamplerAllowanceIsPerSamplerView)
 	ShaderTextureResources cube_only {};
 	cube_only.textures_num = 1;
 	cube_only.desc[0].usage                          = ShaderTextureUsage::ReadOnly;
-	cube_only.desc[0].slot                           = 0;
 	cube_only.desc[0].sampled_shape                  = ShaderGen5SampledTextureShape::TwoDimensionalArray;
 	cube_only.desc[0].sampled_shape_from_instruction = true;
+	cube_only.desc[0].sampler_indices_mask           = 1u << 0u;
 	EXPECT_FALSE(BindSamplerAllowsUnnormalized(cube_only, 0));
 	EXPECT_FALSE(BindSamplerAllowsUnnormalized(cube_only, 1));
 
 	ShaderTextureResources flat_only {};
 	flat_only.textures_num = 2;
 	flat_only.desc[0].usage                          = ShaderTextureUsage::ReadOnly;
-	flat_only.desc[0].slot                           = 0;
 	flat_only.desc[0].sampled_shape_from_instruction = true;
+	flat_only.desc[0].sampler_indices_mask           = 1u << 0u;
 	flat_only.desc[1].usage                          = ShaderTextureUsage::ReadOnly;
-	flat_only.desc[1].slot                           = 1;
 	flat_only.desc[1].sampled_shape_from_instruction = true;
+	flat_only.desc[1].sampler_indices_mask           = 1u << 1u;
 	EXPECT_TRUE(BindSamplerAllowsUnnormalized(flat_only, 0));
 	EXPECT_TRUE(BindSamplerAllowsUnnormalized(flat_only, 1));
 }
@@ -2551,19 +2551,36 @@ TEST(EmulatorTileDetile, SamplerZClampAppliesOnlyToVolumeViews)
 	ShaderTextureResources textures {};
 	textures.textures_num = 2;
 	textures.desc[0].usage                          = ShaderTextureUsage::ReadOnly;
-	textures.desc[0].slot                           = 0;
 	textures.desc[0].sampled_shape                  = ShaderGen5SampledTextureShape::TwoDimensionalArray;
 	textures.desc[0].sampled_shape_from_instruction = true;
+	textures.desc[0].sampler_indices_mask           = 1u << 0u;
 	textures.desc[1].usage                          = ShaderTextureUsage::ReadOnly;
-	textures.desc[1].slot                           = 1;
 	textures.desc[1].sampled_shape                  = ShaderGen5SampledTextureShape::ThreeDimensional;
 	textures.desc[1].sampled_shape_from_instruction = true;
+	textures.desc[1].sampler_indices_mask           = 1u << 1u;
 
 	// Array layers and 2D views never read CLAMP_Z; a volume view does.
 	EXPECT_FALSE(BindSamplerUsesRCoordinate(textures, 0));
 	EXPECT_TRUE(BindSamplerUsesRCoordinate(textures, 1));
 	// A sampler with no paired view is checked against every sampled view.
 	EXPECT_TRUE(BindSamplerUsesRCoordinate(textures, 2));
+
+	// A full-screen fog apply loads a 2D depth view without a sampler and samples a
+	// volume with sampler 0. The depth view's slot also being 0 must not pair it
+	// with the sampler, or the volume's CLAMP_Z is dropped and its R wraps.
+	ShaderTextureResources fog_apply {};
+	fog_apply.textures_num = 2;
+	fog_apply.desc[0].usage                          = ShaderTextureUsage::ReadOnly;
+	fog_apply.desc[0].slot                           = 0;
+	fog_apply.desc[0].sampled_shape                  = ShaderGen5SampledTextureShape::TwoDimensional;
+	fog_apply.desc[0].sampled_shape_from_instruction = true;
+	fog_apply.desc[1].usage                          = ShaderTextureUsage::ReadOnly;
+	fog_apply.desc[1].slot                           = 67;
+	fog_apply.desc[1].sampled_shape                  = ShaderGen5SampledTextureShape::ThreeDimensional;
+	fog_apply.desc[1].sampled_shape_from_instruction = true;
+	fog_apply.desc[1].sampler_indices_mask           = 1u << 0u;
+	EXPECT_TRUE(BindSamplerUsesRCoordinate(fog_apply, 0));
+	EXPECT_FALSE(BindSamplerAllowsUnnormalized(fog_apply, 0));
 }
 
 TEST(EmulatorTileDetile, ClassifiesBc6hUfloatModeBitsFromPublicSpec)
