@@ -8818,7 +8818,8 @@ repository gates passed. In the SPIR-V of the two hottest intro pixel programs t
 and from 631 to 347; each removed guard stays as a select on a constant condition, which the driver folds. A 170 s run on the same binary: light gameplay at about 550 draws per frame 32.0-32.7 fps, as in the run
 before the change on the same scene; a short stretch of 530-800 draws ran 21-30 fps for five seconds. The capture
 in the light dunes is correct. One capture landed in the second where the scene cuts (draws and render-engine load
-fall) and is all black; no capture before the change exists at that point, so it is not compared.
+fall) and is all black. Two runs on builds from 2026-11-19, before the change, show single-colour captures at the
+same point of the route (frames 3,797-3,892), so the black frame predates the change.
 
 **Excluded.**
 - Wrapping each guarded run in a branch on the lane's EXEC bit instead of a select: the old value stays live across
@@ -8845,7 +8846,21 @@ fall) and is all black; no capture before the change exists at that point, so it
   no marked pixel in two intro captures except one faint one-pixel row, while a control that marked every
   invocation tinted visible bands, so the output does reach the screen. Forcing every call to miss cost the intro
   about 1.5 fps (one run, about 26.5-27 against about 28.2), which is what the window saves. The walks therefore
-  rarely loop in this program; its cost is the guest body. The second hot program (`0x8ae329c2`) was not checked.
+  rarely loop in this program; its cost is the guest body.
+
+**Excluded.** A miss shortcut for the second hot intro program (`0x8ae329c2`). The same marker painted almost every
+pixel of that program in the intro. A three-colour variant showed that the searches do not resolve: the address is
+inside the buffer range of its descriptor but no table entry holds it, and it lies below the directory base. The
+descriptor comes from a 64-bit pointer that the program reads from memory with a scalar buffer load, so these are
+null or small pointers that read the table's zero prefix. Nine of the ten translated sites use that descriptor. A
+translator change that returned the zero prefix for any address below the directory base, before the region
+search, rendered the intro and the dunes correctly. No entry starts below that base, so the result cannot change.
+It gave no measurable gain:
+- Under `INTEL_MEASURE`, in the matching intro scene (about 16 events of the program per frame), the program cost
+  6.68 ms against 6.31 ms before. The whole frame was about 15 % slower in that run, so this is not a saving.
+- Two clean runs held the intro at 27-28 fps.
+
+The change was not kept. The walk is not where this program's time goes.
 
 **Ranking on the translation of 2026-11-22 (one run under `INTEL_MEASURE`, per-event lines inflated).** In the
 cinematic after the intro (about 600 events per frame) and in the light gameplay scene the largest item is the
