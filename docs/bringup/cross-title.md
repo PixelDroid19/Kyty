@@ -8653,3 +8653,29 @@ static textures, which the content merge had folded together. Keying on start re
 reached a different phase in the measured run). A third program that split on fields outside the texture
 records was not rechecked (run `sl8` compiled none of its modules); pipeline misses explain a few of the deepest fight dips (2 of 40 sub-29 seconds in `hs3`, 3 of 14 in
 `ck1`), not the 28-29 fps seconds where the GPU is at its limit.
+
+## Samplers paired with views by slot number (2026-11-21, fixed)
+
+**Observed.** On `PPSA21567 - Astro Bot` (local game patch set, dunes), characters and near terrain were washed
+white by the volumetric fog. The full-screen fog apply loads the 2D scene depth with an image load (no sampler)
+at texture slot 0 and samples the 3D fog volume (slot 67) with sampler 0. The volume coordinate of a pixel 1-1.5 m
+from the camera lies half a slice before slice 0.
+
+**Cause.** Sampler state that depends on the sampled view, the W address mode (CLAMP_Z only applies to 3D views)
+and the ForceUnorm allowance (2D views only), paired a sampler with the read-only views whose texture slot equalled
+the sampler's slot. Texture and sampler slots are separate user-data offsets, so the depth view paired with
+sampler 0 and the volume did not; the sampler was created without the R coordinate and Vulkan's default repeat
+replaced the guest's clamp. Linear filtering wrapped near-plane lookups into the far slice. A bounded log showed
+exactly this pairing (sampler slot 0, CLAMP_Z 2, views 0/2D and 67/3D) on every bind of that draw.
+
+**Change.** `BindSamplerViewShapes` pairs through `sampler_indices_mask`, which the resource parse builds from the
+image-sample instructions and which comparison eligibility and the border-color class already use. A sampler
+with no instruction pair (loaded through a descriptor table) still checks every read-only view.
+
+**Verified** on Intel Arc A770 (Mesa ANV), 60 fps-limited runs:
+- Astro Bot, patched dunes route: Astro, the robots and the sand show full contrast in every capture, matching the
+  run with the fog apply skipped; before the change the same views were washed white. Patched runs are not
+  strict runs.
+- `PPSA17221 - Minecraft`: world at 83.8 s, death screen correct, 61 frames a second with none over 50 ms.
+- 2,830 unit tests (the two sampler-pairing tests updated, one case added for an unpaired 2D load sharing the
+  sampler's slot number) and the CTest gates passed.

@@ -7873,16 +7873,28 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   the chain dispatches a 30x17x1 pass that writes one 240x135x64 RGBA16F volume, a 30x17x8 pass that samples the
   other (previous-frame) volume and rewrites the first in place, and a 1:1 copy into a third volume that a later
   draw samples. The two 3D fog volumes ping-pong each frame.
-- **Excluded (2026-11-21): W address mode of the fog samplers.** Every sampler created for a 3D view in a strict
-  boot (logged once per sampler) gets the guest's CLAMP_Z: clamp-to-edge or clamp-to-border for the fog samplers,
-  repeat only where the guest asks for it. Scope: samplers created with the R-coordinate flag; a 3D view sampled
-  through a sampler created without it was not checked.
+- **Fixed (2026-11-21): the white veil was the fog apply's sampler wrapping in depth.** The full-screen fog apply
+  loads the 2D scene depth at the pixel (no sampler) and samples the 240x135x64 fog volume with sampler 0 at
+  `w = -c1 - c0/(t - c2)` of the linear depth; a pixel 1-1.5 m from the camera lands at `w` about 0.004, half a
+  slice before slice 0. Sampler state that depends on the view (CLAMP_Z, ForceUnorm) paired a sampler with the
+  views whose slot number equalled the sampler's: the depth view's slot was 0, so the sampler counted as 2D-only,
+  was created without the R coordinate and got repeat in W instead of the guest's clamp. Linear filtering then
+  blended about 27 % of slice 63 (transmittance 0.08, bright in-scatter) into every near pixel: Astro, the robots
+  and the near sand were washed white while far terrain was barely touched. Skipping only that draw restored
+  full contrast; skipping the six other draws that sample the volume did not. Sampler state now pairs through
+  the per-instruction sampler mask the resource parse records (cross-title record "Samplers paired with views
+  by slot number"). The earlier exclusion of the fog samplers' W mode covered only samplers created with the R
+  coordinate, which is how this one was missed.
 - **Measured (2026-11-21, patched run, dunes): the fog volume itself is opaque next to the camera below the
   horizon.** Read back per slice: transmittance falls from 0.92 (slice 0) to 0.46 (slice 1) and 0.10 (slice 63), and
   slice 1 is about 0.9 for froxels whose view ray points above the horizon and 0 for every froxel whose ray points
   below it, with a sharp edge at the horizon. Skipping the temporal filter leaves the same numbers, so the
   density comes from the inject pass, not from the history path. In the space intro the same volume is clear
-  (slice 0 0.995). Open: the inject's height or ray-direction term.
+  (slice 0 0.995). **The inject is correct:** an interpreter of the guest's own inject program, fed the dispatch's
+  constants and buffers, reproduces the measured alpha at four froxels (an exponential height fog over the
+  camera height plus an atmosphere term), so the density next to the camera is the guest's. The full-screen
+  apply's own math also matches: from the read-back depth and its constants it predicts transmittance
+  0.91-0.93 at Astro, which held once the sampler fix above landed.
 - **Not the cause (2026-11-21): the 3D sample-LZ index tag.** That lowering indexed the 3D descriptor array with
   the unmasked virtual index (fixed), but the haze at the crash site is unchanged after the fix.
 - **Open (2026-11-21): the guest's non-tiled deferred-lighting renderer draws without direct sunlight.** A local
