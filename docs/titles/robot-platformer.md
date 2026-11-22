@@ -7948,6 +7948,10 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   intro seconds 30.5-32.7; captures correct. A second run with the new translations cached: median 33.7, 14 of 123
   seconds under 30. The steady ones are the dunes run with dust (81-85 s at 670 draws per frame, 27.8-29.7 fps, and
   94-96 s at 810-1,170 draws, 26.7-27.6 fps, GPU-bound); host stalls at 60-62 s and 160 s are not classified.
+  Update (2026-11-22): guards under WQM of a tested quad-gathered mask are dropped (cross-title record "Own EXEC
+  bit under WQM of a quad-gathered tested mask"); two cached runs gave medians 35.6 and 33.7 fps, the dunes run
+  with dust is still 25.6-29.7 fps at 81-86 s and 21.7-27.7 at 94-95 s. The stalls seen in those runs coincide
+  with new translations of route variants.
 - **Per-lane proof for the split wave32 programs: none qualifies; parked (2026-11-19).** A temporary print ran the
   wave-width independence proof (the one that lets split wave64 programs run one guest lane per invocation without
   exchanges) on the 15 wave32 programs that use wave state on the dunes route. None passed: ten stop at the same

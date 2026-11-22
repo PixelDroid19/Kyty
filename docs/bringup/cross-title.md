@@ -8923,3 +8923,44 @@ seconds at 29.6-29.7 (GPU 84-88 %); and host stalls at 60-62 s (12.6-15.8 fps) a
 not classified. One-time stalls of 0.25-1 s at first use of new pipelines (129-132 s and 154-157 s on an earlier
 cold-cache run) were not seen on the cached runs; the route is timed by wall clock and desyncs when load times
 change, so the scene at 154-157 s may not have been reached.
+
+## Own EXEC bit under WQM of a quad-gathered tested mask (2026-11-22, measured)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the deferred-lighting renderer, three hot pixel programs that run
+as native lane-local waves kept most of their destination guards (`OpSelect` on the invocation's own EXEC bit):
+450 of 1,111 selects in the first, 440 of 2,071 and 361 of 1,969 in the two lighting programs. The first runs
+its body under `S_WQM_B64 EXEC, X` after `S_CBRANCH_SCC0` skips to the dead tail when `X` is zero. The guard
+analysis saw that EXEC only as "WQM of a subset of the entry mask" and kept every guard under it; in the
+lighting programs EXEC became unknown at the whole-wave reduction entry (`S_ORN2_SAVEEXEC_B64`) and was never
+recovered. All three compiled at SIMD8 only.
+
+**Changed.** Lane-local fragment programs gather every mask over the invocation's own quad
+(`Spirv::GathersMasksInQuad`, shared with the mask ballot emitter). A gathered pointwise B64 mask operation
+stores only its quad's bits and its SCC is `pair != 0`, read per invocation by the SCC branch. So on the nonzero
+edge of `S_CBRANCH_SCC0/1` that pair has a set bit in this quad, and WQM of it sets the invocation's own EXEC bit.
+The per-invocation lane-active lattice in `ShaderDeadVgprMask.cpp`, used before only for compute programs with
+lane-private masks, now also runs for these programs with that rule, and with WQM of an active EXEC or of an
+all-ones pair. An EXEC branch no longer implies the own bit there, since EXECZ tests the quad. The tested pair
+and SCC fact is dropped by any write to the pair, by any other SCC writer, and at joins that disagree.
+
+**Verified.** Focused unit test: the proven shape drops the guard; with the gate off, an ungathered operation,
+the pair rewritten after the branch, a different WQM source, SCC rewritten before the branch, an EXECZ branch
+instead, or the body on the zero edge of `S_CBRANCH_SCC1`, the guard is kept. The emitter link was read:
+`SCC_NZ_2` loads the stored gathered words, and `S_WQM_B64` is computed per word from the stored pair. Focused
+suites 227 passed; full unit suite 2,845 run, 2,834 passed, 11 skipped, 0 failed; the three repository gates
+passed. In the translations of a fresh-cache run the own-bit selects dropped from 450 to 35-36 (the first
+program's variants), 440 to 273 and 361 to 195; the removed guards stay as selects on a constant. The first
+program and its variants now also compile at SIMD16 (2,682 -> 2,205 instructions, SIMD8 cycles 16,958 ->
+15,649 by the driver's statistics); the lighting programs stay SIMD8 (4,024 -> 4,015 instructions). 179 of
+470 translated modules changed in that run. Captures of the intro, cinematics and the dunes (shadows, dust,
+coins, the robot) are correct. Two cached runs on the base route: median 35.6 fps (13 of 116 seconds under 30;
+a route variant whose heavy scene at about 740 draws per frame held 32.6-36.6 fps) and 33.7 fps (14 of 124,
+the same route as the record before). The dunes run with dust is unchanged: 81-86 s at 655-693 draws per frame
+25.6-29.7 fps (was 27.8-29.7) and 94-95 s at about 1,000 draws 21.7-27.7 (was 26.7-27.6), so no frame-rate gain
+is claimed. The stall seconds at 77-78, 94-95 and 111-112 s each coincide with new SPIR-V modules written in
+that second (the route reaches new variants on each run), so they are first-use translations. `PPSA17221 -
+Minecraft` reached the world at 77.7 s with a correct capture.
+
+**Still open.** The dunes run with dust (81-86 s and 94-95 s) stays under 30 and is not ranked yet; the
+lighting programs still keep 273 and 195 own-bit selects; first-use translation stalls remain on every new route
+variant.
