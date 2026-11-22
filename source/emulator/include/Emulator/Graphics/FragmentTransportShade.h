@@ -14,10 +14,11 @@ namespace Kyty::Libs::Graphics {
 
 // Builds the split-Wave64 compute module that shades captured pixel records.
 // The module reads ShaderFragmentComputeInfo's lane records and writes its
-// 34-word result lane; the caller supplies the guest PS resource SGPR.
+// 34-word result lane; the caller supplies the guest PS resource SGPR and the
+// host subgroup width of each part of the guest wave.
 [[nodiscard]] bool FragmentTransportBuildShadeModule(const ShaderCode& code, const ShaderPixelInputInfo& pixel,
-                                                     uint32_t user_sgpr_count, uint32_t lds_dwords, Vector<uint32_t>* binary,
-                                                     String8* error);
+                                                     uint32_t user_sgpr_count, uint32_t lds_dwords, uint32_t part_lanes,
+                                                     Vector<uint32_t>* binary, String8* error);
 
 // Lane record shape shared by the capture reader and the shade prolog.
 [[nodiscard]] uint32_t FragmentTransportInitialVgprs(const ShaderPixelInputInfo& pixel);
@@ -28,7 +29,7 @@ namespace Kyty::Libs::Graphics {
 // On failure error names the step that failed.
 [[nodiscard]] bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipeline_cache,
                                                         const ShaderBindResources& ps_bind, const Vector<uint32_t>& binary,
-                                                        bool require_subgroup_size, VkDescriptorSetLayout transport_layout,
+                                                        uint32_t part_lanes, VkDescriptorSetLayout transport_layout,
                                                         VkPipelineLayout* layout, VkPipeline* pipeline, String8* error);
 
 } // namespace Kyty::Libs::Graphics

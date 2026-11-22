@@ -1581,7 +1581,7 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
                                                               const Vector<uint32_t>& geometry_shader,
                                                               const PipelineStaticParameters& static_params,
                                                               PipelineDynamicParameters* dynamic_params, uint32_t user_sgprs,
-                                                              uint32_t lds_dwords, const String8& requirement_facts)
+                                                              uint32_t vgprs, uint32_t lds_dwords, const String8& requirement_facts)
 {
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	if (gctx == nullptr)
@@ -1658,7 +1658,10 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	{
 		EXIT("fragment transport resolve assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());
 	}
-	if (!FragmentTransportBuildShadeModule(ps_code, ps_input, user_sgprs, lds_dwords, &shade_binary, &error))
+	// The shade splits the guest wave64 by the same register rule as guest compute: a
+	// part narrower than 32 lanes keeps a large pixel program out of spills.
+	const uint32_t part_lanes = ShaderSplitWavePartLanes(ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state), vgprs);
+	if (!FragmentTransportBuildShadeModule(ps_code, ps_input, user_sgprs, lds_dwords, part_lanes, &shade_binary, &error))
 	{
 		EXIT("fragment transport shade compilation failed: %s %s\n", error.c_str(), requirement_facts.c_str());
 	}
@@ -1688,7 +1691,7 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	{
 		EXIT("fragment transport pipeline creation failed: %s\n", requirement_facts.c_str());
 	}
-	if (!FragmentTransportCreateShadePipeline(gctx->device, gctx->pipeline_cache, ps_input.bind, shade_binary, true, transport_layout,
+	if (!FragmentTransportCreateShadePipeline(gctx->device, gctx->pipeline_cache, ps_input.bind, shade_binary, part_lanes, transport_layout,
 	                                          &passes->shade_layout, &passes->shade, &error))
 	{
 		EXIT("fragment transport split compute pipeline creation failed: %s %s\n", error.c_str(), requirement_facts.c_str());
@@ -2068,6 +2071,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			auto* passes = CreateFragmentTransportPasses(framebuffer, *color, *vs_input_info, vs_translation.binary, *ps_input_info,
 			                                             ps_transport_code, transport_geometry.binary, *p.static_params, p.dynamic_params,
 			                                             static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr),
+			                                             (static_cast<uint32_t>(ps_regs.ps_regs.rsrc1.vgprs) + 1u) * 4u,
 			                                             ps_transport_code.GetPixelExtraLdsDwords(), requirement.facts);
 			const uint32_t transport_slot = FindAvailableSlot();
 			p.pipeline                    = passes->resolve;

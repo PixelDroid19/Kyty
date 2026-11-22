@@ -80,10 +80,13 @@ void SplitShadeModuleValidates()
 	ShaderPixelInputInfo pixel {};
 	pixel.input_num = 1;
 
-	Vector<uint32_t> binary;
-	String8          error;
-	Check(FragmentTransportBuildShadeModule(code, pixel, 0u, 0u, &binary, &error), error.c_str());
-	Check(binary.Size() > 8u, "split shade module has code");
+	for (const uint32_t part_lanes: {8u, 16u, 32u})
+	{
+		Vector<uint32_t> binary;
+		String8          error;
+		Check(FragmentTransportBuildShadeModule(code, pixel, 0u, 0u, part_lanes, &binary, &error), error.c_str());
+		Check(binary.Size() > 8u, "split shade module has code");
+	}
 }
 
 // A compressed export reads each half pair either from the packed-half shadow or
@@ -109,10 +112,13 @@ void SplitShadeCompressedExportValidates()
 	ShaderPixelInputInfo pixel {};
 	pixel.target_output_mode[0] = 4u;
 
-	Vector<uint32_t> binary;
-	String8          error;
-	Check(FragmentTransportBuildShadeModule(code, pixel, 0u, 0u, &binary, &error), error.c_str());
-	Check(binary.Size() > 8u, "split shade module has code");
+	for (const uint32_t part_lanes: {8u, 16u, 32u})
+	{
+		Vector<uint32_t> binary;
+		String8          error;
+		Check(FragmentTransportBuildShadeModule(code, pixel, 0u, 0u, part_lanes, &binary, &error), error.c_str());
+		Check(binary.Size() > 8u, "split shade module has code");
+	}
 }
 
 // A transported pixel ds_append runs under the architectural EXEC of the split
@@ -139,10 +145,13 @@ void SplitShadeGdsAppendValidates()
 	pixel.bind.gds_pointers.start_register[0] = 14;
 	ShaderCalcBindingIndices(&pixel.bind);
 
-	Vector<uint32_t> binary;
-	String8          error;
-	Check(FragmentTransportBuildShadeModule(code, pixel, 0u, 0u, &binary, &error), error.c_str());
-	Check(binary.Size() > 8u, "split shade module has code");
+	for (const uint32_t part_lanes: {8u, 16u, 32u})
+	{
+		Vector<uint32_t> binary;
+		String8          error;
+		Check(FragmentTransportBuildShadeModule(code, pixel, 0u, 0u, part_lanes, &binary, &error), error.c_str());
+		Check(binary.Size() > 8u, "split shade module has code");
+	}
 }
 
 void ResolveModuleValidates()
