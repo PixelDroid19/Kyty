@@ -8813,7 +8813,12 @@ fell from 591 to 319, instructions from 6,943 to 6,756 and live registers under 
 118; it still compiles at SIMD8 only. One Astro Bot run on the new translation (cold translation cache): intro
 capture correct, about 27-28 fps, so no frame-rate change is claimed. `PPSA17221 - Minecraft` reached the world at
 84 s on the new translation with a correct capture; whether any of its programs took the new path was not counted.
-Unit suite 2,832 passed, 11 skipped; the shader-compute integration tests and the repository gates passed.
+Unit suite 2,832 passed, 11 skipped; shader-compute integration 3 passed and 1 skipped (`PairedWave64`); the three
+repository gates passed. In that intro run five guest programs (seven modules) changed translation, by 223-439 words
+each. A 170 s run on the same binary: light gameplay at about 550 draws per frame 32.0-32.7 fps, as in the run
+before the change on the same scene; a short stretch of 530-800 draws ran 21-30 fps for five seconds. The capture
+in the light dunes is correct. One capture landed in the second where the scene cuts (draws and render-engine load
+fall) and is all black; no capture before the change exists at that point, so it is not compared.
 
 **Excluded.**
 - Wrapping each guarded run in a branch on the lane's EXEC bit instead of a select: the old value stays live across
@@ -8824,5 +8829,5 @@ Unit suite 2,832 passed, 11 skipped; the shader-compute integration tests and th
 - A temporary build that forced the first M0 candidate ran the intro at 32.6-33.6 fps, but the other candidates then
   read zero and the capture differed, so it is not a price of the relative moves.
 - The ceiling with both the EXEC selects and the relative-move select chains folded (6,943 to 5,080 instructions,
-  SIMD16 offered, intro 31-32 fps by program replacement) needs two folds that are not sound. On this host the
-  driver offered SIMD16 only below about 90 live registers.
+  SIMD16 offered, intro 31-32 fps by program replacement) needs two folds that are not sound. One compile of that
+  ceiling at 79 live registers (106 at SIMD16) was offered SIMD16; a threshold near 90 is an estimate from it.
