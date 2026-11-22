@@ -8877,3 +8877,39 @@ about 1.8 ms per frame together.
 them): the shade module dropped only from 94 to 87 spills and 286 to 250 fills, and the cinematic after the intro
 rendered dark at a scene that is lit on the translation without it (same scene, about 360 draws per frame). The skip
 stays; why the analysis is unsound there was not established.
+
+## Lane reductions whose temporary is reused before the reads (2026-11-22, fixed)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the deferred-lighting renderer, the steady dunes scene ran at
+26.7-27.7 fps, GPU-bound (render engine about 98 % busy). The top GPU line under the driver measurement was the
+fragment-transport shade (compute `0x2ff63bc1`, about 3.5 ms per frame, plus capture and resolve). Both lighting
+pixel programs of that renderer went through transport only because native admission refused them: each ends
+with a whole-wave reduction (EXEC widened, permute steps, EXEC restored, lane reads), and between the EXEC restore
+and the lane reads the program writes a new value into the register the permute steps used as a temporary. The
+reduction matcher (`ShaderFragmentLaneReduction.cpp`) stopped at the first instruction after the restore that was
+not independent of the network, so the reads after it were never matched and the partial-wave proof failed.
+
+**Changed.** Between the restore and a read, an instruction that keeps EXEC, reads no network register and
+overwrites one now removes that register from the network instead of ending the match; a read of that register
+after it is no longer a network read. The dead-network check starts right after the restore, so an overwrite
+before the reads leaves its register dead or residual by the same rule as any other write, and it skips the
+accepted reads themselves. The proof is part of the shader identity, so no translator version change was needed.
+
+**Verified.** Focused unit test: reads after an overwrite of the permute temporary are admitted as a partial
+wave with the expected lanes, and an overwrite of a seed register before the reads is still refused. Focused
+suites (native wave, lane reduction, NGG, guest address, fragment transport) 190 passed; full unit suite 2,833
+passed, 11 skipped; the three repository gates passed. One Astro Bot run on
+the fix (60 fps limit, warm cache): median 33.7 fps against 27.7 on the base route before it, the dunes scene at
+33.6-34.7 fps, captures at 65, 120 and 140 s correct (space intro, dunes with coins, shadows, the robot). One run
+under the driver measurement on the same binary: no dispatch of the shade over 4,978 frames, against 9,684
+dispatches from frame 1,530 on the build before; its scenes lag the route under the measurement, so the per-frame
+totals of the dunes scene are not compared. `PPSA17221 - Minecraft` reached the world at 79.7 s with a correct
+capture, median 37.6 fps over the run (no earlier per-second samples on the same route to compare). `PPSA03524 -
+Grand Theft Auto: San Andreas - The Definitive Edition` (the other title with transported draws): the first run
+after the change stalled near frame 490 until about 100 s while new translations compiled, like the earlier
+cold-cache run; the next run reached the street at frame 900 with a correct capture at 6-8 fps, as before.
+
+**Still open.** The intro dips (one second at 22.7 fps at 60 s) and one-time stalls of 0.25-1 s at first use of
+new pipelines (129-132 s and 154-157 s on the cold-cache run). With a warm cache the 130 s stall is gone; the
+154-157 s scene was not reached in that run because the route is timed by wall clock and desyncs when load times
+change, so that stall is not confirmed closed.

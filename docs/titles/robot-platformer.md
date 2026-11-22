@@ -7942,6 +7942,11 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   Update (2026-11-22): the guard elision now runs on programs with vector relative reads (cross-title record
   "Dead-guard elision follows vector relative reads"); the hottest intro program keeps 319 of its 591 EXEC selects
   and still compiles at SIMD8, so the intro stays at about 27-28 fps.
+  Update (2026-11-22): the two lighting pixel programs no longer go through fragment transport; native admission
+  now matches their final lane reduction (cross-title record "Lane reductions whose temporary is reused before the
+  reads"). One run on the base route: median 33.7 fps (was 27.7), the dunes scene 33.6-34.7 fps (was 26.7-27.7),
+  intro seconds 30.5-32.7 with one second at 22.7 (60 s) and a load hitch at 45 s; captures correct. The remaining
+  sub-30 seconds are that intro dip, level loads and one-time pipeline compiles of 0.25-1 s at first use.
 - **Per-lane proof for the split wave32 programs: none qualifies; parked (2026-11-19).** A temporary print ran the
   wave-width independence proof (the one that lets split wave64 programs run one guest lane per invocation without
   exchanges) on the 15 wave32 programs that use wave state on the dunes route. None passed: ten stop at the same
