@@ -7921,15 +7921,19 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   pixel programs `0x8e59fdb1` (about 9.4 ms over 5.4 draws a frame) and `0xa9bf243a` (7.7 ms, 21.5 draws) in the
   window taken as the intro (its frames were not placed in time: that run wrote no captures), compute `0x0d49d0a9`
   (3.3-3.5 ms, in both regimes), pixel program `0xf3de2cdd` (3.6-4.0 ms over about 11 draws, heavier stretch only)
-  and compute `0x393dd516` (4 ms, one window). In their SPIR-V, the guest address translation function is called 19
-  times (`0x8e59fdb1`), 20 times (`0xf3de2cdd`) and 145 times (`0x0d49d0a9`) per invocation. Each call
-  translates a V# base plus a per-lane offset. In both pixel programs every call takes its base from one scalar
-  register that the program reloads 31 and 50 times; in `0x0d49d0a9`, 69 of the calls use a base register written
-  once. The compute program's 16 KiB workgroup array is the guest's own LDS size, and its 74 workgroup barriers
-  are the guest's. The earlier pricing of this lookup in another pixel program (record of 2026-11-19: a per-invocation
-  memo and a one-read path each recover about 5 % of that program) still stands. A base that is constant for the
-  draw would allow translating it on the host, as the vertex binding path does; whether these reloaded bases are
-  constant per draw is not established.
+  and compute `0x393dd516` (4 ms, one window). In their SPIR-V the guest address translation function has 19
+  (`0x8e59fdb1`), 20 (`0xf3de2cdd`) and 145 (`0x0d49d0a9`) static call sites: 10, 11 and 90 loads, the rest being
+  each multi-dword load's page-cross second call. A static slice of each load's address shows that 10 of 10, 10 of
+  11 and 75 of 90 addresses depend only on scalar registers (the program's integer register variables; its vector
+  registers are the float ones): scalar descriptor loads, the same for every pixel or lane of a draw. Executed
+  counts per invocation were not measured. In both pixel programs the descriptor base comes from one scalar
+  register that the program rewrites 31 and 50 times, partly as a base register plus a constant. The compute
+  program's 16 KiB workgroup array matches the guest's LDS size register; whether its 79 workgroup barriers are the
+  guest's or the translator's was not checked against the guest program. The earlier pricing of this lookup in
+  another pixel program (record of 2026-11-19: a per-invocation memo and a one-read path each recover about 5 % of
+  that program) still stands. Scalar loads that are constant for the draw would allow resolving them on the host,
+  as the vertex binding path does; that their sources are user data and that the pages are not GPU-written before
+  the draw is not established.
 - **Per-lane proof for the split wave32 programs: none qualifies; parked (2026-11-19).** A temporary print ran the
   wave-width independence proof (the one that lets split wave64 programs run one guest lane per invocation without
   exchanges) on the 15 wave32 programs that use wave state on the dunes route. None passed: ten stop at the same
