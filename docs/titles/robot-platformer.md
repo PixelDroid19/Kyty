@@ -8988,6 +8988,18 @@ copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader i
       1.0-1.4 ms a frame. Mutex lock and unlock (about 7 % of the thread) are spread over the memory-object
       lookups of each bind, with no caller above 0.4 % of all samples. Call stacks need `perf record
       --user-callchains --call-graph dwarf` on this host; plain `-g` is refused.
+      - Priced as a separate completion thread (2026-11-21, not built). A call-stack profile of the landing
+        burst on `2b3f06360` (`burstprof2`, unpatched, 26 s at 350-805 draws a frame; the recorder lost most
+        samples and 71 % of the stacks are truncated, so shares are relative) puts
+        `CommandProcessor::PublishCompletedSubmissions` in 15.2 % of the command thread's samples. 59 % of those
+        run while the thread already waits (`WaitSubmission`, `WaitForSuspendedRuns`, the flush before a GPU
+        wait), where moving them saves no frame time, and a label wait still needs that label's write-back first.
+        The other 41 %, 6.2 % of the thread, run between packets while recording. The write-back
+        (`WriteBackObjectLocked`) holds the same `GpuMemory` mutex that every bind's range lookup
+        (`GpuMemoryGetAllocatedRangePrefix`) takes, so a second thread would contend with the recording thread.
+        About 2 ms of a 33 ms body in the command-bound fight seconds does not reach 30 fps alone. The burst's
+        own excess over the calm seconds is first-use object creation (`GpuMemory::CreateObject`, `FindFast`,
+        `TileDetile`, descriptor set indexing), not per-draw work.
     - Graphics label waits on compute queue 7, passed on the device (2026-11-21, built). In the heavy seconds the
       graphics command thread suspended on label waits whose producer was a later recording on compute queue 7,
       not a guest CPU write. Split of 647 such waits (`lw5`, temporary per-submission timestamps), mean 5.9 ms
