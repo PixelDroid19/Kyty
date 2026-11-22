@@ -168,12 +168,14 @@ FragmentTransport::Limits HostLimits(const GraphicContext& context)
 }
 
 // The capture records one quad per rasterized 2x2 tile and per primitive. A
-// band is planned for twice its pixel area so ordinary overdraw fits; a draw
-// that exceeds the plan reports capacity_error in the control buffer.
-uint32_t BandCapacity(VkExtent2D extent, uint32_t band_height)
+// single primitive covers each tile at most once, so its band needs only its
+// pixel area; a larger chunk is planned for twice that so ordinary overdraw
+// fits. A draw that exceeds the plan reports capacity_error in the control buffer.
+uint32_t BandCapacity(VkExtent2D extent, uint32_t band_height, uint32_t chunk_primitives)
 {
-	const uint64_t quads = static_cast<uint64_t>(extent.width / 2u) * ((static_cast<uint64_t>(band_height) + 1u) / 2u);
-	const uint64_t capacity = quads * 2u + extent.width + 1024u;
+	const uint64_t quads    = static_cast<uint64_t>(extent.width / 2u) * ((static_cast<uint64_t>(band_height) + 1u) / 2u);
+	const uint64_t overdraw = std::min<uint32_t>(chunk_primitives, 2u);
+	const uint64_t capacity = quads * overdraw + extent.width + 1024u;
 	return static_cast<uint32_t>(std::min<uint64_t>(capacity, 0x00ffffffu));
 }
 
@@ -187,7 +189,7 @@ bool PlanBand(VkExtent2D extent, uint32_t primitive_count, uint32_t lane_words, 
 	{
 		const uint32_t middle = low + (high - low) / 2u;
 		FragmentTransport::Layout candidate;
-		const auto request = FragmentTransport::Request {BandCapacity(extent, middle), primitive_count, lane_words, 0u};
+		const auto request = FragmentTransport::Request {BandCapacity(extent, middle, primitive_count), primitive_count, lane_words, 0u};
 		if (FragmentTransport::BuildLayout(request, limits, &candidate).failure == FragmentTransport::Failure::None)
 		{
 			best = middle;
