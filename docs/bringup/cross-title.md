@@ -8869,7 +8869,8 @@ cinematic after the intro (about 600 events per frame) and in the light gameplay
 fragment-transport shade kernel at about 5 ms per frame in 4 dispatches (8 lanes, 13,076 instructions, 521 sends,
 94 spills and 286 fills, 185 live registers under the driver's statistics). In the heaviest stretch (about 845
 events per frame) no item leads: draws without a pixel program 5.6 ms over 304 events, pixel program `0x6948ce42`
-3.8 ms, shade 3.0 ms, compute `0x0d49d0a9` 2.4 ms over 13 dispatches. That compute compiles at 8 lanes with
+3.8 ms, shade 3.0 ms, `0x0d49d0a9` 2.4 ms over 13 dispatches (the per-draw geometry front, run as a compute pass;
+see the split LDS record below). That module compiles at 8 lanes with
 39,300 instructions, 1,445 sends, 674 spills, 977 fills and 267 live registers. In the intro two shade modules of the same size (two translations) cost
 about 1.8 ms per frame together.
 
@@ -8967,6 +8968,51 @@ cache written by an earlier build kept its old modules under the same keys. The 
 runs on such a cache (written before the lane-reduction change), so they are not a clean baseline for either
 change. The version is now 254; existing caches are rebuilt on first use.
 
-**Still open.** The dunes run with dust (81-86 s and 94-95 s) stays under 30 and is not ranked yet; the
-lighting programs still keep 273 and 195 own-bit selects; first-use translation stalls remain on every new route
+**Still open.** The dunes run with dust (81-86 s and 94-95 s) stays under 30 (ranked in the split LDS record
+below); the lighting programs still keep 273 and 195 own-bit selects; first-use translation stalls remain on every new route
 variant.
+
+## Split-wave LDS order between fields of one lane slot (2026-11-22, measured)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the deferred-lighting renderer, the dunes run with dust (81-86 s,
+655-693 draws per frame, 25.6-29.7 fps) is GPU-bound (render engine busy 87-98 %). A driver-timed run over frames
+3,500-4,050 (30.5 ms per frame measured) puts the per-draw geometry front first: 11.5 ms per frame over 353
+dispatches (86 each of 64, 192, 3,200 and 4,032 threads at 25-31 us, almost flat in size, plus 3 large), then a
+clear at 1.9 ms and two computes at 1.8 and 1.5 ms. This is the program earlier records call `0x0d49d0a9`; the
+driver hash follows the translated module, so it reads `0xdef7a99c` on translator 254 and `0x15c1621e` on 255.
+Its module (39,300 instructions, 674 spills, 8 lanes) held 79 control barriers: the guest's 5 `S_BARRIER` and 74
+split-wave rendezvous. 60 of the rendezvous sat between the writes of five runs of 12 `DS_WRITE_B128`, each run
+storing one record per lane at offsets 128-304 from an address `v_mul_u32_u24` by 768 or 192 computed in the same
+block. The order analysis knew no address there (the multiply has no program-wide value), so every write in a
+run was ordered against the one before it.
+
+**Changed.** `ShaderSplitLdsOrder.cpp` now also reads, for an access without a known range, the multiply that
+set its address in the same straight-line block under the same EXEC (`v_mul_u32_u24` or `v_lshlrev_b32` by a
+constant). The product is a multiple of the factor in every lane when the factor is at most 256, since a 24-bit
+operand cannot then wrap 32 bits; a larger factor keeps only its power of two (768 -> 256). Two accesses whose
+addresses are multiples of a common slot, whose fields are disjoint and fit in that slot, cannot touch the same
+bytes from different lanes, so no rendezvous is placed between them. Translator version 255. A second change
+fixes a defect found in the same analysis: an LDS access inside the entry block that comes before the address
+register's last entry-block write used that final value as its own; it now uses the value its own block proves
+(version 256).
+
+**Verified.** Focused unit tests: disjoint fields of one slot need no order; the same field, fields wider than
+the slot, the address rewritten or EXEC set after the multiply, and a factor of 384 with fields 132 bytes apart
+are ordered; an entry-block access before the address's last write is ordered. Full unit suite 2,848 run,
+2,837 passed, 11 skipped; the three repository gates passed. In the translated modules the geometry front drops
+from 79 to 24 control barriers and three other modules from 60 to 34. Driver timing of that program by dispatch
+size: 192 threads 29.5 -> 21.1 us, 576 threads 32.3 -> 29.8 us, 3,200 and 4,032 threads unchanged at 31.4 and
+31.7-32.0 us. With 86 dispatches of 192 threads per dust frame that removes about 0.7 ms of a 30-35 ms frame; no
+frame-rate gain is claimed. The two strict runs on translator 255 took the route variant without the dust
+stretch: captures of the travel tunnel, the space map and the crash-landing dunes are correct, and the dark
+frames at about 84-95 s also appear in an earlier run of that variant (built before this change). The
+crash-landing scene at about 740-770 draws per frame holds 32.6-35.7 fps with one second at 27.7, as in that
+earlier run. `PPSA17221 - Minecraft` reached the world at 82.2 s on a cold cache with a correct capture.
+
+**Excluded.** A hidden overlap win in the dust stretch: the render engine is busy 87-98 % there, so the frames
+are GPU time. The 94-95 s seconds of the same run are first-use translations (each coincides with new modules
+written in that second), not steady GPU cost.
+
+**Still open.** The 3,200- and 4,032-thread dispatches of the geometry front, about 5.4 ms per dust frame
+together, are unchanged at about 31 us each regardless of size, so their cost is the per-dispatch latency of a
+long program (674 spills, 8 lanes), not the rendezvous. The dust stretch stays under 30.
