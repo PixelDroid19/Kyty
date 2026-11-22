@@ -8746,10 +8746,11 @@ same dunes route and its capture checked:
   capture 1.59 to 1.13 ms, and the shade 7.07 to 5.25 ms, because a guest wave now gathers neighbouring quads.
 Clean run after all four (no driver measurement, 60 fps limit): light dunes gameplay 31-33 fps (was 28-29), the
 heavier stretch at 133-142 s 26-29 fps (was about 25), the intro 25-26.5 fps (was 23-24), median 32.0 over
-99 s, all GPU-bound. Still under 30: the intro and the heavier stretch. Their attribution is open: the driver
-measurement adds roughly 12-15 us per event (38.5 ms measured against about 31 ms clean in light gameplay, 52.7
-against about 36 ms in the heavier stretch), so per-event totals such as the 391 depth-only draws per frame are
-inflated and only lines with few events rank reliably.
+99 s, all GPU-bound. Still under 30: the intro and the heavier stretch. Their attribution is open: frames under
+the driver measurement are longer than clean ones (38.5 ms against about 31 ms in light gameplay, 52.7 against
+about 36 ms in the heavier stretch, about 600 and 1,055 events per frame). A two-point fit puts that at roughly
+12-15 us per event, so per-event totals such as the 391 depth-only draws per frame may be inflated; lines with few
+events rank more reliably. The fit is an estimate from two regimes, not a measured overhead.
 
 **Open.**
 - The transport failure flag is never read on the host. A band that fails for any reason drops its pixels

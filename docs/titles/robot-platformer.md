@@ -7916,6 +7916,20 @@ jumps, and native captures are taken right after them and 5, 10 and 20 s later.
   DREF1 shadow tap, the sun flag in s52, VCMPX writing VCC, export kill handling, G-buffer formats) were each
   checked against this renderer only and are moot: none was the cause. Still open: Astro's cape colour differed
   between this renderer and the default one in one capture pair; not checked after the fix.
+- **Open (2026-11-22): what keeps the intro and the heavier dunes stretch under 30 fps with the deferred-lighting
+  renderer.** Under the driver measurement the few-event lines in those windows are guest programs, not transport:
+  pixel programs `0x8e59fdb1` (about 9.4 ms over 5.4 draws a frame) and `0xa9bf243a` (7.7 ms, 21.5 draws) in the
+  window taken as the intro (its frames were not placed in time: that run wrote no captures), compute `0x0d49d0a9`
+  (3.3-3.5 ms, in both regimes), pixel program `0xf3de2cdd` (3.6-4.0 ms over about 11 draws, heavier stretch only)
+  and compute `0x393dd516` (4 ms, one window). In their SPIR-V, the guest address translation function is called 19
+  times (`0x8e59fdb1`), 20 times (`0xf3de2cdd`) and 145 times (`0x0d49d0a9`) per invocation. Each call
+  translates a V# base plus a per-lane offset. In both pixel programs every call takes its base from one scalar
+  register that the program reloads 31 and 50 times; in `0x0d49d0a9`, 69 of the calls use a base register written
+  once. The compute program's 16 KiB workgroup array is the guest's own LDS size, and its 74 workgroup barriers
+  are the guest's. The earlier pricing of this lookup in another pixel program (record of 2026-11-19: a per-invocation
+  memo and a one-read path each recover about 5 % of that program) still stands. A base that is constant for the
+  draw would allow translating it on the host, as the vertex binding path does; whether these reloaded bases are
+  constant per draw is not established.
 - **Per-lane proof for the split wave32 programs: none qualifies; parked (2026-11-19).** A temporary print ran the
   wave-width independence proof (the one that lets split wave64 programs run one guest lane per invocation without
   exchanges) on the 15 wave32 programs that use wave state on the dunes route. None passed: ten stop at the same
