@@ -8737,17 +8737,19 @@ same dunes route and its capture checked:
   passes publish them behind a barrier). Frame GPU 44.1 to 41.5 ms.
 - A band that replays a single primitive is planned for its pixel area instead of twice it: one primitive
   covers each 2x2 tile at most once. The lighting draw (one full-screen primitive at 1920x1080, 10 lane words)
-  went from 8 bands of 138 rows to 4 bands of 278 rows inside the same 128 MiB budget; pack 1.43 to 0.64 ms,
-  fills 1.69 to 1.49 ms, frame 41.5 to 39.6 ms.
+  went from 8 bands of 138 rows to 4 bands of 278 rows inside the same 128 MiB budget; fills 1.69 to 1.49 ms.
+  The transport passes summed did not drop (11.4 to 11.8 ms, pack 0.94 to 1.05 ms), so this change is recorded
+  as halving the band count, not as a measured frame gain.
 - The capture reserves records with one atomic add per subgroup from a claiming lane (never a helper) instead
   of one per quad: capture 2.84 to 1.59 ms per frame.
 - The capture numbers each primitive's quads with one add per subgroup and primitive instead of one per quad:
   capture 1.59 to 1.13 ms, and the shade 7.07 to 5.25 ms, because a guest wave now gathers neighbouring quads.
 Clean run after all four (no driver measurement, 60 fps limit): light dunes gameplay 31-33 fps (was 28-29), the
 heavier stretch at 133-142 s 26-29 fps (was about 25), the intro 25-26.5 fps (was 23-24), median 32.0 over
-99 s, all GPU-bound. Still under 30: the intro and the heavier stretch, whose top costs are guest draws (391
-depth-only draws at 7.0 ms and 108 draws of one pixel program at 5.6 ms per frame under measurement), not
-transport.
+99 s, all GPU-bound. Still under 30: the intro and the heavier stretch. Their attribution is open: the driver
+measurement adds roughly 12-15 us per event (38.5 ms measured against about 31 ms clean in light gameplay, 52.7
+against about 36 ms in the heavier stretch), so per-event totals such as the 391 depth-only draws per frame are
+inflated and only lines with few events rank reliably.
 
 **Open.**
 - The transport failure flag is never read on the host. A band that fails for any reason drops its pixels
