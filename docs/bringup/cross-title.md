@@ -8848,19 +8848,21 @@ same point of the route (frames 3,797-3,892), so the black frame predates the ch
   about 1.5 fps (one run, about 26.5-27 against about 28.2), which is what the window saves. The walks therefore
   rarely loop in this program; its cost is the guest body.
 
-**Excluded.** A miss shortcut for the second hot intro program (`0x8ae329c2`). The same marker painted almost every
-pixel of that program in the intro. A three-colour variant showed that the searches do not resolve: the address is
-inside the buffer range of its descriptor but no table entry holds it, and it lies below the directory base. The
-descriptor comes from a 64-bit pointer that the program reads from memory with a scalar buffer load, so these are
-null or small pointers that read the table's zero prefix. Nine of the ten translated sites use that descriptor. A
-translator change that returned the zero prefix for any address below the directory base, before the region
-search, rendered the intro and the dunes correctly. No entry starts below that base, so the result cannot change.
-It gave no measurable gain:
-- Under `INTEL_MEASURE`, in the matching intro scene (about 16 events of the program per frame), the program cost
-  6.68 ms against 6.31 ms before. The whole frame was about 15 % slower in that run, so this is not a saving.
-- Two clean runs held the intro at 27-28 fps.
+**Miss shortcut below the directory base (2026-11-22, translator 253).** The same marker painted almost every pixel
+of the second hot intro program (`0x8ae329c2`). A three-colour variant showed that the searches do not resolve: the
+address is inside the buffer range of its descriptor but no table entry holds it, and it lies below the directory
+base. The descriptor comes from a 64-bit pointer that the program reads from memory with a scalar buffer load, so
+these are null or small pointers that read the table's zero prefix. Nine of the ten translated sites use that
+descriptor. The lookup now returns the zero prefix for any address below the directory base before the region
+search. No entry starts below that base, so no result changes. The intro and two gameplay captures render correctly.
+Measured under `INTEL_MEASURE` in the matching intro scene (about 16 events of the program per frame), against the
+ranking before the change:
+- Raw: 6.68 ms against 6.31 ms. That run's whole frame was 44.6 against 38.6 ms.
+- Normalized by the whole frame: about 5.8 ms, a saving of about 0.5 ms.
+- Normalized by the hottest intro program (`0x247d14ca`), whose walks almost never miss: the ratio between the two
+  programs went from 0.814 to 0.811, within noise.
 
-The change was not kept. The walk is not where this program's time goes.
+The work removed is real; its frame-time share is too small to separate from noise in one run.
 
 **Ranking on the translation of 2026-11-22 (one run under `INTEL_MEASURE`, per-event lines inflated).** In the
 cinematic after the intro (about 600 events per frame) and in the light gameplay scene the largest item is the

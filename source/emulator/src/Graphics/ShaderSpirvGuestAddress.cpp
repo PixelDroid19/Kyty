@@ -58,7 +58,8 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 // Every table read is bounded by the entry count independently of the loop
 // condition: a compiler may issue a load before the exit test, and a device
 // whose unmapped addresses fault rather than read a scratch page loses itself
-// on one stray read.
+// on one stray read. No entry starts below the directory base, so an address
+// under it (a null or small pointer) misses without searching the last region.
 String8 Spirv::GuestDeviceAddressFunction() const
 {
 	static const char* text = R"(
@@ -95,6 +96,12 @@ String8 Spirv::GuestDeviceAddressFunction() const
 %gda_dbase_hi64 = OpUConvert %ulong %gda_dbase_hi
 %gda_dbase_his = OpShiftLeftLogical %ulong %gda_dbase_hi64 %uint_32
 %gda_dbase = OpBitwiseOr %ulong %gda_dbase_his %gda_dbase_lo64
+%gda_dbelow = OpULessThan %bool %gda_addr %gda_dbase
+OpSelectionMerge %gda_search None
+OpBranchConditional %gda_dbelow %gda_none %gda_search
+%gda_none = OpLabel
+OpReturnValue %gda_table
+%gda_search = OpLabel
 %gda_drel = OpISub %ulong %gda_addr %gda_dbase
 %gda_dregion = OpShiftRightLogical %ulong %gda_drel %gda_dshift
 %gda_dlast64 = OpUConvert %ulong %gda_dlast
