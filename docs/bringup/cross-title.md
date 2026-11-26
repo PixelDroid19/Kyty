@@ -9043,3 +9043,31 @@ reason. Compute ranked from draw-granularity driver timing: it serializes back-t
 take the other route variant), and which draws inside the render-pass chunks of the travel tunnel take its added
 11-12 ms. In the dust seconds of the clean run the command processor waits on fences for about 100 ms per second,
 so those seconds are not command-processor-bound. The stretches stay at or under 30.
+
+## Uniform branch around the swizzled buffer address (2026-11-26, excluded)
+
+`PPSA21567 - Astro Bot`, patch mod 0, Intel Arc A770 on Mesa ANV. The raw buffer address helper computes both the
+linear and the swizzled address on every buffer access and selects one afterwards. The swizzle enable bit and the
+stride come from the buffer descriptor, which is scalar, so a branch on them is uniform. Translator 257 branched
+around the swizzled arithmetic; the generated modules passed `spirv-val` (542 of 542) and the full unit suite.
+
+The driver's static report for the dust particle simulation went from 19,074 to 20,622 instructions, from 61:101
+to 51:77 spills and fills, and its cycle estimate from 1.93 M to 2.12 M; a second spilling dust program went from
+379:647 to 301:474 and 2.83 M to 2.77 M cycles. Driver timing at draw granularity, against a translator-254 run:
+the simulation took 319 us per dispatch at 25,408 elements against 309 us, and 493 us at about 52,000 against
+484 us at about 59,000. A compute program of 8,388,608 elements whose module is the same on both translators
+measured 1,523 against 1,522 us, so the GPU clock matched. Three warm strict runs on 257 ended with exit 0: one
+took the travel tunnel, two reached the dunes while still writing first-use modules (104 and 66), and the dust
+start held 28.7-29.7 fps at 640-700 draws per frame with the render engine busy 96-98 %, against 28.9-29.7 at
+620-677 on translator 256.
+
+**Excluded.** Branching around the swizzled arithmetic: the simulation is 3 % slower at equal element counts and
+slower per element above that. The selected form stays.
+
+**Measured.** The dust frames ranked at draw granularity on 257 (574 frames, 34.8 ms of serialized event time per
+frame): two pixel programs drawn with the same vertex program take 13.5 ms, one of them 7.1 ms in 5.6 draws
+(about 1.26 ms per draw) and the other 6.5 ms in 22.9 draws; compute takes 3.3 ms in 62 dispatches of one program,
+and the single 8,388,608-element dispatch above 1.7 ms.
+
+**Still open.** Why those two pixel programs cost what they do on this driver (dispatch width, spills, samples
+per pixel), and a ranking of the dust frames without per-event flushes.
