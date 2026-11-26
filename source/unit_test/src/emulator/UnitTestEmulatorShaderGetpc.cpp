@@ -298,6 +298,113 @@ TEST(EmulatorShaderGetpc, RuntimeTypedBufferLoadReadsGuestAddress)
 	EXPECT_FALSE(binary.IsEmpty());
 }
 
+enum class ProgramTableCase
+{
+	Idiom,
+	RecordsFromRegister,
+	BaseRedefined,
+};
+
+// s_getpc_b64 s[0:1]; s_add_u32 s0, 0x100, s0; s_addc_u32 s1, 0, s1;
+// s_mov_b32 s2, 40; s_buffer_load_dwordx4 s[4:7], s[0:3], s9 offset:16.
+static String8 ProgramTableLoadSource(ProgramTableCase variant)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	const auto sgpr = [](int reg, int size) { return ShaderOperand {.type = ShaderOperandType::Sgpr, .register_id = reg, .size = size}; };
+	const auto constant = [](ShaderOperandType type, uint32_t value) {
+		ShaderOperand op {};
+		op.type       = type;
+		op.constant.u = value;
+		return op;
+	};
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	uint32_t   pc  = 0;
+	const auto add = [&](ShaderInstruction inst, uint32_t bytes) {
+		inst.pc = pc;
+		pc += bytes;
+		code.GetInstructions().Add(inst);
+	};
+	const auto scalar = [](ShaderInstructionType type, ShaderInstructionFormat::Format format, ShaderOperand dst, ShaderOperand src0,
+	                       ShaderOperand src1, int src_num) {
+		ShaderInstruction inst {};
+		inst.type    = type;
+		inst.format  = format;
+		inst.dst     = dst;
+		inst.src[0]  = src0;
+		inst.src[1]  = src1;
+		inst.src_num = src_num;
+		return inst;
+	};
+	ShaderInstruction getpc {};
+	getpc.type   = ShaderInstructionType::SGetpcB64;
+	getpc.format = ShaderInstructionFormat::Sdst2;
+	getpc.dst    = sgpr(0, 2);
+	add(getpc, 4);
+	add(scalar(ShaderInstructionType::SAddU32, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, sgpr(0, 1),
+	           constant(ShaderOperandType::LiteralConstant, 0x100u), sgpr(0, 1), 2),
+	    8);
+	add(scalar(ShaderInstructionType::SAddcU32, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, sgpr(1, 1),
+	           constant(ShaderOperandType::IntegerInlineConstant, 0u), sgpr(1, 1), 2),
+	    4);
+	add(scalar(ShaderInstructionType::SMovB32, ShaderInstructionFormat::SVdstSVsrc0, sgpr(2, 1),
+	           constant(ShaderOperandType::IntegerInlineConstant, 40u), {}, 1),
+	    4);
+	if (variant == ProgramTableCase::RecordsFromRegister)
+	{
+		add(scalar(ShaderInstructionType::SMovB32, ShaderInstructionFormat::SVdstSVsrc0, sgpr(2, 1), sgpr(9, 1), {}, 1), 4);
+	}
+	if (variant == ProgramTableCase::BaseRedefined)
+	{
+		add(scalar(ShaderInstructionType::SMovB32, ShaderInstructionFormat::SVdstSVsrc0, sgpr(0, 1), sgpr(9, 1), {}, 1), 4);
+	}
+	auto load            = scalar(ShaderInstructionType::SBufferLoadDwordx4, ShaderInstructionFormat::Sdst4SvSoffset, sgpr(4, 4),
+	                              sgpr(0, 4), sgpr(9, 1), 2);
+	load.smem_imm_offset = 16;
+	load.smem_flags      = 0; // No GLC/DLC, no undefined encoding bits.
+	add(load, 8);
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	add(end, 4);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = input.threads_num[1] = input.threads_num[2] = 1;
+	input.bind.program_base_used                 = true;
+	input.bind.device_address_used               = true;
+	ShaderCalcBindingIndices(&input.bind);
+	return SpirvGenerateSource(code, nullptr, nullptr, &input);
+}
+
+TEST(EmulatorShaderGetpc, ProgramTableLoadReadsThroughProgramWindow)
+{
+	const auto source = ProgramTableLoadSource(ProgramTableCase::Idiom);
+	// GETPC yields PC + 4, so the table starts 0x104 bytes past the program base.
+	EXPECT_NE(source.FindIndex("%gsb_4_rel = OpIAdd %uint %gsb_4_off %uint_0x00000104"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gsb_4_table = OpLabel"), Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
+}
+
+TEST(EmulatorShaderGetpc, RedefinedProgramTableDescriptorUsesTablePathOnly)
+{
+	for (const auto variant: {ProgramTableCase::RecordsFromRegister, ProgramTableCase::BaseRedefined})
+	{
+		const auto source = ProgramTableLoadSource(variant);
+		// The extra definition puts the load at index 5.
+		EXPECT_EQ(source.FindIndex("%gsb_5_window = OpLabel"), Core::STRING8_INVALID_INDEX);
+		EXPECT_NE(source.FindIndex("%gsb_5_load_device = OpFunctionCall %ulong %guest_device_address"), Core::STRING8_INVALID_INDEX);
+		Vector<uint32_t> binary;
+		String8 error;
+		EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+	}
+}
+
 TEST(EmulatorShaderGetpc, MappedTypedBufferLoadKeepsBoundLowering)
 {
 	const auto source = GetpcTypedLoadSource(true);

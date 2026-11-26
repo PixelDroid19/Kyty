@@ -3790,6 +3790,25 @@ void Spirv::FindConstants()
 			AddConstantUint(i);
 		}
 	}
+	if (UsesGuestDeviceAddress() && m_bind != nullptr && m_bind->program_base_used)
+	{
+		// Offsets and extents of the loads that read through the program window.
+		for (uint32_t index = 0; index < m_code.GetInstructions().Size(); index++)
+		{
+			ProgramRelativeScalarDescriptor descriptor;
+			if (!ShaderProgramRelativeScalarDescriptor(m_code, index, &descriptor))
+			{
+				continue;
+			}
+			const auto words = static_cast<uint32_t>(m_code.GetInstructions().At(index).dst.size);
+			AddConstantUint(descriptor.offset);
+			AddConstantUint(descriptor.offset + 4u * words);
+			for (uint32_t word = 0; word < words && 4u * word < descriptor.records; word++)
+			{
+				AddConstantUint(descriptor.records - 4u * word);
+			}
+		}
+	}
 	for (const auto& inst: m_code.GetInstructions())
 	{
 		if (UsesVertexClipProbe())

@@ -681,6 +681,23 @@ bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0)
 // loads: the resolved register for a proven-literal M0, else every register
 // its select chain may pick.
 Vector<int> ShaderMovrelReadVgprs(const ShaderCode& code, uint32_t index);
+// Scalar dword units: s0..s105, then 106 = vcc_lo, 107 = vcc_hi, 108 = m0.
+// True when writing `op` changes `unit`.
+bool ScalarOperandWritesUnit(const ShaderOperand& op, int unit);
+// The instruction that runs immediately before `index` on every path: the
+// fallthrough predecessor, or the only forward branch into a label that cannot
+// be reached by falling through.
+bool ScalarUniquePredecessor(const ShaderCode& code, uint32_t index, uint32_t* prev);
+// An S_BUFFER_LOAD whose descriptor is built on every path by
+// s_getpc_b64 s[b:b+1]; s_add_u32 s[b], K, s[b]; s_addc_u32 s[b+1], 0, s[b+1]
+// and a literal s_mov_b32 s[b+2], N. The base lies `offset` bytes past the
+// program base, low two bits cleared as SMEM addresses it; N is `records`.
+struct ProgramRelativeScalarDescriptor
+{
+	uint32_t offset  = 0;
+	uint32_t records = 0;
+};
+bool ShaderProgramRelativeScalarDescriptor(const ShaderCode& code, uint32_t index, ProgramRelativeScalarDescriptor* out);
 // Gen5 BUFFER_LOAD_FORMAT and BUFFER_STORE_FORMAT lower through shared
 // functions that decode or encode the V#'s format; `bound_buffers` adds the
 // storage-buffer element reader and, for stores, the element writer.

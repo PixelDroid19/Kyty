@@ -4310,7 +4310,7 @@ constexpr int kMovrelUnitM0    = 108;
 // Bound on the M0 values one relative access may resolve to.
 constexpr uint32_t kMovrelValueSetMax = 32;
 
-static bool MovrelOperandWritesUnit(const ShaderOperand& op, int unit)
+bool ScalarOperandWritesUnit(const ShaderOperand& op, int unit)
 {
 	const int size = op.size > 0 ? op.size : 1;
 	switch (op.type)
@@ -4355,7 +4355,7 @@ static bool MovrelIsBranchTarget(const ShaderCode& code, uint32_t pc)
 // The instruction that runs immediately before |index| on every path: the
 // fallthrough predecessor, or the only forward branch into a label that cannot
 // be reached by falling through.
-static bool MovrelUniquePredecessor(const ShaderCode& code, uint32_t index, uint32_t* prev)
+bool ScalarUniquePredecessor(const ShaderCode& code, uint32_t index, uint32_t* prev)
 {
 	const auto& insts = code.GetInstructions();
 	const auto  pc    = insts.At(index).pc;
@@ -4537,7 +4537,7 @@ static bool MovrelUnitValueSet(const ShaderCode& code, uint32_t index, int unit,
 	}
 	uint32_t i    = index;
 	uint32_t next = index;
-	for (; MovrelUniquePredecessor(code, next, &i); next = i)
+	for (; ScalarUniquePredecessor(code, next, &i); next = i)
 	{
 		if (MovrelGuardValueSet(code, i, next, unit, values))
 		{
@@ -4548,11 +4548,11 @@ static bool MovrelUnitValueSet(const ShaderCode& code, uint32_t index, int unit,
 		{
 			return false;
 		}
-		if (MovrelOperandWritesUnit(inst.dst2, unit))
+		if (ScalarOperandWritesUnit(inst.dst2, unit))
 		{
 			return false;
 		}
-		if (!MovrelOperandWritesUnit(inst.dst, unit))
+		if (!ScalarOperandWritesUnit(inst.dst, unit))
 		{
 			continue;
 		}
@@ -4616,15 +4616,15 @@ static uint32_t MovrelUnitAlignment(const ShaderCode& code, uint32_t index, int 
 	}
 	uint32_t i    = index;
 	uint32_t next = index;
-	for (; MovrelUniquePredecessor(code, next, &i); next = i)
+	for (; ScalarUniquePredecessor(code, next, &i); next = i)
 	{
 		const auto& inst = code.GetInstructions().At(i);
 		if (inst.type == ShaderInstructionType::SSwappcB64 || inst.type == ShaderInstructionType::SSetpcB64 ||
-		    MovrelOperandWritesUnit(inst.dst2, unit))
+		    ScalarOperandWritesUnit(inst.dst2, unit))
 		{
 			return 0u;
 		}
-		if (MovrelOperandWritesUnit(inst.dst, unit))
+		if (ScalarOperandWritesUnit(inst.dst, unit))
 		{
 			return MovrelDefinitionAlignment(code, i, depth + 1);
 		}
@@ -4643,7 +4643,7 @@ static uint32_t MovrelLaneAlignment(const ShaderCode& code, uint32_t index, int 
 {
 	uint32_t i    = index;
 	uint32_t next = index;
-	for (; MovrelUniquePredecessor(code, next, &i); next = i)
+	for (; ScalarUniquePredecessor(code, next, &i); next = i)
 	{
 		const auto& inst = code.GetInstructions().At(i);
 		if (MovrelOperandWritesVgpr(inst.dst, vgpr))
