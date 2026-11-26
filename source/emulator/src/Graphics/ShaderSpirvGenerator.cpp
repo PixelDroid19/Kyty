@@ -1515,6 +1515,10 @@ void Spirv::WriteAnnotations()
 			}
 		}
 	}
+	if (UsesGuestDeviceAddress() && m_bind != nullptr && m_bind->program_base_used && ShaderProgramWindowRequiredBytes(m_code) > 0u)
+	{
+		m_source += "\n       OpDecorate %gda_pw_covers SpecId 0\n";
+	}
 }
 
 void Spirv::WriteTypes()
@@ -1937,6 +1941,10 @@ void Spirv::WriteConstants()
 	for (const auto& c: m_constants)
 	{
 		m_source += String8::FromPrintf("%%%s = OpConstant %%%s %s\n", c.id.c_str(), c.type_str.c_str(), c.literal_str.c_str());
+	}
+	if (UsesGuestDeviceAddress() && m_bind != nullptr && m_bind->program_base_used && ShaderProgramWindowRequiredBytes(m_code) > 0u)
+	{
+		m_source += "%gda_pw_covers = OpSpecConstantFalse %bool\n";
 	}
 	if (SpirvUsesGen5BufferFormats(m_code))
 	{
@@ -3803,6 +3811,7 @@ void Spirv::FindConstants()
 			const auto words = static_cast<uint32_t>(m_code.GetInstructions().At(index).dst.size);
 			AddConstantUint(descriptor.offset);
 			AddConstantUint(descriptor.offset + 4u * words);
+			AddConstantUint(descriptor.records);
 			for (uint32_t word = 0; word < words && 4u * word < descriptor.records; word++)
 			{
 				AddConstantUint(descriptor.records - 4u * word);

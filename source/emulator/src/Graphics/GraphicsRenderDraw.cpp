@@ -2269,7 +2269,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	                          ps_input_info.dual_source_blend == prepared->ids_dual_source_blend;
 	auto*      pipeline     = g_render_ctx->GetPipelineCache()->CreatePipeline(
 	    buffer, framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx, &ps_input_info, primitive_plan.topology,
-	    sample_locations, prepared_ids ? &prepared->vs_id : nullptr, prepared_ids ? &prepared->ps_id : nullptr);
+	    sample_locations, prepared_ids ? &prepared->vs_id : nullptr, prepared_ids ? &prepared->ps_id : nullptr, &device_address_table);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
 	// Later geometry passes may read what this draw writes.
 	if (pipeline->writes_guest_memory)
@@ -3852,7 +3852,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                          ps_input_info.dual_source_blend == prepared->ids_dual_source_blend;
 	auto*      pipeline     = g_render_ctx->GetPipelineCache()->CreatePipeline(
 	    buffer, framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx, &ps_input_info, primitive_plan.topology,
-	    sample_locations, prepared_ids && !geometry_pass ? &prepared->vs_id : nullptr, prepared_ids ? &prepared->ps_id : nullptr);
+	    sample_locations, prepared_ids && !geometry_pass ? &prepared->vs_id : nullptr, prepared_ids ? &prepared->ps_id : nullptr,
+	    &device_address_table);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
 	// Later geometry passes may read what this draw writes.
 	if (pipeline->writes_guest_memory)

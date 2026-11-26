@@ -2314,9 +2314,12 @@ struct ShaderBindResources
 	bool                       vsharp_uniform_buffer = false;
 	int                        vsharp_binding_index  = -1;
 	// Address values are per-dispatch data, never part of shader identity.
-	bool                       program_base_used      = false;
-	uint32_t                   program_base_offset_dw = 0;
-	uint64_t                   program_base           = 0;
+	bool                       program_base_used             = false;
+	uint32_t                   program_base_offset_dw        = 0;
+	uint64_t                   program_base                  = 0;
+	// Minimum program-base window bytes covering every program-relative scalar
+	// table load in this stage (0 when none). Runtime check, not shader identity.
+	uint64_t                   program_window_required_bytes = 0;
 	// Guest-memory device addressing: a metadata block {table_lo, table_hi,
 	// entries, 0} filled at bind time (see GuestDeviceAddress.h).
 	bool     device_address_used      = false;
@@ -2745,6 +2748,7 @@ struct ShaderImmutablePixelAnalysis
 	ShaderPixelInterpolationUse interpolation;
 	bool uses_native_wave_state = false;
 	bool has_getpc = false;
+	uint64_t program_window_required_bytes = 0;
 	bool has_global_memory_load = false;
 	// Buffer, typed buffer and scalar loads, in instruction order: the only
 	// instructions whose per-draw descriptor checks can require the guest
@@ -2753,6 +2757,9 @@ struct ShaderImmutablePixelAnalysis
 };
 
 [[nodiscard]] ShaderPixelColorExports ShaderSummarizePixelColorExports(const ShaderCode& code);
+// Minimum program-base window size in bytes that covers every in-bounds
+// program-relative scalar buffer load of `code` (0 when none).
+[[nodiscard]] uint64_t ShaderProgramWindowRequiredBytes(const ShaderCode& code);
 
 struct ShaderPixelInputInfo
 {

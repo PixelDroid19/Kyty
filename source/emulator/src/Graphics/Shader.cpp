@@ -1355,8 +1355,9 @@ struct ShaderVertexProgram
 	// Width-neutrality of the fused NGG front, shared by every program with this content.
 	std::shared_ptr<const ShaderNggFrontVerdict> ngg_front;
 	// Scans of front_code that every draw used to repeat.
-	bool                   front_has_getpc              = false;
-	bool                   front_has_global_memory_load = false;
+	bool                   front_has_getpc                       = false;
+	uint64_t               front_program_window_required_bytes   = 0;
+	bool                   front_has_global_memory_load          = false;
 	std::bitset<108>       front_sbuffer_base_sgprs;
 	// Indices of the front_code instructions the per-draw binding checks inspect.
 	std::vector<uint32_t>  front_buffer_loads;
@@ -2126,8 +2127,9 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 		     shader_addr, data.code_size_bytes);
 	}
 	program->front_scalar_flow = ShaderScalarFlowOf(program->front_code);
-	program->front_has_getpc              = program->front_code.HasAnyOf({ShaderInstructionType::SGetpcB64});
-	program->front_has_global_memory_load = ShaderHasGlobalMemoryLoad(program->front_code);
+	program->front_has_getpc                       = program->front_code.HasAnyOf({ShaderInstructionType::SGetpcB64});
+	program->front_program_window_required_bytes   = program->front_has_getpc ? ShaderProgramWindowRequiredBytes(program->front_code) : 0u;
+	program->front_has_global_memory_load          = ShaderHasGlobalMemoryLoad(program->front_code);
 	program->front_sbuffer_base_sgprs     = ShaderScalarBufferBaseSgprs(program->front_code);
 	for (uint32_t index = 0; index < program->front_code.GetInstructions().Size(); ++index)
 	{
@@ -4371,8 +4373,9 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			                                      &info->program->resource_memo);
 			// Constant tables embedded after the code are addressed from GETPC;
 			// the base stays runtime data so a cached pipeline can relocate.
-			info->bind.program_base_used   = info->program->front_has_getpc;
-			info->bind.program_base        = info->bind.program_base_used ? shader_addr : 0u;
+			info->bind.program_base_used             = info->program->front_has_getpc;
+			info->bind.program_base                  = info->bind.program_base_used ? shader_addr : 0u;
+			info->bind.program_window_required_bytes = info->bind.program_base_used ? info->program->front_program_window_required_bytes : 0u;
 			info->bind.device_address_used =
 			    info->program->front_has_global_memory_load || !info->bind.redefined_descriptor_consumers.IsEmpty() ||
 			    VertexFrontReadsGuestMemory(*info->program, info->bind, kGen5GsFrontUserDataBase, static_cast<int>(user_sgpr_num));
@@ -4885,8 +4888,10 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 			    pixel_analysis->color_exports                = ShaderSummarizePixelColorExports(*code);
 			    pixel_analysis->interpolation                = ShaderSummarizePixelInterpolation(*code);
 			    pixel_analysis->uses_native_wave_state      = ShaderUsesNativeWaveState(*code);
-			    pixel_analysis->has_getpc                   = code->HasAnyOf({ShaderInstructionType::SGetpcB64});
-			    pixel_analysis->has_global_memory_load      = ShaderHasGlobalMemoryLoad(*code);
+			    pixel_analysis->has_getpc                     = code->HasAnyOf({ShaderInstructionType::SGetpcB64});
+			    pixel_analysis->program_window_required_bytes =
+			        pixel_analysis->has_getpc ? ShaderProgramWindowRequiredBytes(*code) : 0u;
+			    pixel_analysis->has_global_memory_load        = ShaderHasGlobalMemoryLoad(*code);
 			    pixel_analysis->descriptor_load_indices     = ShaderFindDescriptorLoadIndices(*code);
 			    return RenderResolutionShaderAnalysis {AnalyzeResolutionShaderUsage(*code), code,
 			                                           std::make_shared<ShaderNativeWaveVerdict>(),
@@ -4916,8 +4921,10 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		// GETPC uses runtime metadata so relocated pixel programs keep their
 		// inline tables. A constructed V# must read guest bytes, not index the
 		// descriptor array using its base address.
-		ps_info->bind.program_base_used = analysis.pixel_analysis->has_getpc;
-		ps_info->bind.program_base = ps_info->bind.program_base_used ? regs->ps_regs.data_addr : 0u;
+		ps_info->bind.program_base_used             = analysis.pixel_analysis->has_getpc;
+		ps_info->bind.program_base                  = ps_info->bind.program_base_used ? regs->ps_regs.data_addr : 0u;
+		ps_info->bind.program_window_required_bytes =
+		    ps_info->bind.program_base_used ? analysis.pixel_analysis->program_window_required_bytes : 0u;
 		const auto& instructions = analysis.code->GetInstructions();
 		const auto& loads        = analysis.pixel_analysis->descriptor_load_indices;
 		ps_info->bind.device_address_used =

@@ -447,6 +447,14 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	if (vert_shader_module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vert_shader_module == nullptr condition ignored (continuing)\n"); }
 	if (has_fragment_stage && frag_shader_module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: has_fragment_stage && frag_shader_module == nullptr condition ignored (continuing)\n"); }
 
+	const VkSpecializationMapEntry program_window_spec_map {0u, 0u, sizeof(VkBool32)};
+	const VkBool32                 program_window_spec_true = VK_TRUE;
+	VkSpecializationInfo           program_window_spec_info {};
+	program_window_spec_info.mapEntryCount = 1u;
+	program_window_spec_info.pMapEntries   = &program_window_spec_map;
+	program_window_spec_info.dataSize      = sizeof(program_window_spec_true);
+	program_window_spec_info.pData         = &program_window_spec_true;
+
 	VkPipelineShaderStageCreateInfo vert_shader_stage_info {};
 	vert_shader_stage_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	vert_shader_stage_info.pNext               = nullptr;
@@ -454,7 +462,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	vert_shader_stage_info.stage               = VK_SHADER_STAGE_VERTEX_BIT;
 	vert_shader_stage_info.module              = vert_shader_module;
 	vert_shader_stage_info.pName               = "main";
-	vert_shader_stage_info.pSpecializationInfo = nullptr;
+	vert_shader_stage_info.pSpecializationInfo = static_params->vs_program_window_covers ? &program_window_spec_info : nullptr;
 
 	VkPipelineShaderStageCreateInfo frag_shader_stage_info {};
 	frag_shader_stage_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -463,7 +471,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	frag_shader_stage_info.stage               = VK_SHADER_STAGE_FRAGMENT_BIT;
 	frag_shader_stage_info.module              = frag_shader_module;
 	frag_shader_stage_info.pName               = "main";
-	frag_shader_stage_info.pSpecializationInfo = nullptr;
+	frag_shader_stage_info.pSpecializationInfo =
+	    (has_fragment_stage && !host_pixel_shader && static_params->ps_program_window_covers) ? &program_window_spec_info : nullptr;
 
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT vert_required_subgroup_size {};
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT frag_required_subgroup_size {};
@@ -1731,7 +1740,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
                                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
                                               const VulkanSampleLocationState& sample_locations, ShaderId* prepared_vs_id,
-                                              ShaderId* prepared_ps_id)
+                                              ShaderId* prepared_ps_id, const GuestDeviceAddressTable* device_address_table)
 {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
 
@@ -1811,6 +1820,21 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	    State::ResolveDepthClipState(clip_control, gctx->depth_clip_enable_supported, gctx->depth_clamp_supported);
 	p.static_params->depth_clip_enable  = depth_clip_state.depth_clip_enable;
 	p.static_params->depth_clamp_enable = depth_clip_state.depth_clamp_enable;
+	const auto program_window_covers    = [device_address_table](const ShaderBindResources& bind) -> bool
+	{
+		if (device_address_table == nullptr || !bind.device_address_used || !bind.program_base_used ||
+		    bind.program_window_required_bytes == 0u)
+		{
+			return false;
+		}
+		uint64_t device = 0;
+		uint32_t bytes  = 0;
+		GuestDeviceAddressWindow(*device_address_table, bind.program_base, &device, &bytes);
+		return static_cast<uint64_t>(bytes) >= bind.program_window_required_bytes;
+	};
+	p.static_params->vs_program_window_covers = vs_input_info != nullptr && program_window_covers(vs_input_info->bind);
+	p.static_params->ps_program_window_covers =
+	    ps_input_info != nullptr && ps_input_info->stage_enabled && !ps_regs.ps_embedded && program_window_covers(ps_input_info->bind);
 	p.dynamic_params->scissor_ltrb[0]    = scissor.left;
 	p.dynamic_params->scissor_ltrb[1]    = scissor.top;
 	p.dynamic_params->scissor_ltrb[2]    = scissor.right;

@@ -138,9 +138,11 @@ struct PipelineStaticParameters
 	bool                       separate_alpha_blend[8] = {};
 	bool                       blend_enable[8]         = {};
 	bool                       blend_bypass[8]         = {};
-	bool                       dx_clip_space           = false;
-	bool                       depth_clip_enable       = true;
-	bool                       depth_clamp_enable      = false;
+	bool                       dx_clip_space            = false;
+	bool                       depth_clip_enable        = true;
+	bool                       depth_clamp_enable       = false;
+	bool                       vs_program_window_covers = false;
+	bool                       ps_program_window_covers = false;
 
 	bool operator==(const PipelineStaticParameters& other) const;
 };
@@ -293,7 +295,8 @@ public:
 	                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
 	                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
 	                               const VulkanSampleLocationState& sample_locations, ShaderId* prepared_vs_id = nullptr,
-	                               ShaderId* prepared_ps_id = nullptr);
+	                               ShaderId* prepared_ps_id = nullptr,
+	                               const GuestDeviceAddressTable* device_address_table = nullptr);
 	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, const ShaderComputeInputInfo* input_info,
 	                               const HW::ComputeShaderInfo* cs_regs,
 	                               const HW::ShaderRegisters* sh_regs);

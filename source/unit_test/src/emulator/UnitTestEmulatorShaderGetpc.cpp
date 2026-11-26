@@ -383,7 +383,10 @@ TEST(EmulatorShaderGetpc, ProgramTableLoadReadsThroughProgramWindow)
 {
 	const auto source = ProgramTableLoadSource(ProgramTableCase::Idiom);
 	// GETPC yields PC + 4, so the table starts 0x104 bytes past the program base.
+	EXPECT_NE(source.FindIndex("OpDecorate %gda_pw_covers SpecId 0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gda_pw_covers = OpSpecConstantFalse %bool"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%gsb_4_rel = OpIAdd %uint %gsb_4_off %uint_0x00000104"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gsb_4_direct = OpLogicalOr %bool %gda_pw_covers %gsb_4_hit"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%gsb_4_table = OpLabel"), Core::STRING8_INVALID_INDEX);
 	Vector<uint32_t> binary;
 	String8 error;

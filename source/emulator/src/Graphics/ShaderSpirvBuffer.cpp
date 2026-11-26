@@ -3847,31 +3847,79 @@ bool ShaderProgramRelativeScalarDescriptor(const ShaderCode& code, uint32_t inde
 	return true;
 }
 
+uint64_t ShaderProgramWindowRequiredBytes(const ShaderCode& code)
+{
+	uint64_t    required = 0;
+	const auto& insts    = code.GetInstructions();
+	for (uint32_t index = 0; index < insts.Size(); ++index)
+	{
+		ProgramRelativeScalarDescriptor descriptor;
+		if (!ShaderProgramRelativeScalarDescriptor(code, index, &descriptor) || descriptor.records == 0u)
+		{
+			continue;
+		}
+		const uint32_t components = static_cast<uint32_t>(insts.At(index).dst.size);
+		const uint32_t max_off    = (descriptor.records - 1u) & ~3u;
+		const uint64_t end        = static_cast<uint64_t>(descriptor.offset) + max_off + 4ull * components;
+		if (end > required)
+		{
+			required = end;
+		}
+	}
+	return required;
+}
+
 // A program-relative load that lies in the program-base window (see
 // GuestDeviceAddressWindow) reads its device bytes directly; a load outside
-// the window, or a vector load at a misaligned device address, takes the
-// `table` path. A window hit lies in mapped guest memory inside the 48-bit
-// address space (RDNA2: PC[47:0], V# base[47:0]), so the descriptor's stride
-// field is zero and N records are N bytes. Leaves %<tag>_<w>_word.
+// the window takes the `table` path. An offset at or past `records` yields
+// zero without reading memory, so when the pipeline specializes
+// `%gda_pw_covers` to true (program_window_bytes >= ShaderProgramWindowRequiredBytes)
+// every in-bounds load is guaranteed inside the window and the driver can
+// eliminate the cold `table` fallback. A window hit lies in mapped guest memory
+// inside the 48-bit address space (RDNA2: PC[47:0], V# base[47:0]), so the
+// descriptor's stride field is zero and N records are N bytes. Leaves %<tag>_<w>_word.
 static bool EmitProgramWindowScalarBufferLoad(const Spirv* spirv, const ProgramRelativeScalarDescriptor& descriptor, const String8& tag,
                                               uint32_t components, const String8& table, String8* source)
 {
-	const auto* bind   = spirv->GetBindInfo();
-	const auto  start  = spirv->GetConstantUint(descriptor.offset);
-	const auto  extent = spirv->GetConstantUint(descriptor.offset + 4u * components);
-	if (bind == nullptr || !bind->program_base_used || start == "unknown_uint_constant" || extent == "unknown_uint_constant")
+	const auto* bind = spirv->GetBindInfo();
+	if (bind == nullptr || !bind->program_base_used)
+	{
+		return false;
+	}
+	if (descriptor.records == 0u)
+	{
+		for (uint32_t word = 0; word < components; ++word)
+		{
+			*source += String8::FromPrintf("%%%s_%u_word = OpCopyObject %%uint %%uint_0\n", tag.c_str(), word);
+		}
+		return true;
+	}
+	const auto start   = spirv->GetConstantUint(descriptor.offset);
+	const auto extent  = spirv->GetConstantUint(descriptor.offset + 4u * components);
+	const auto records = spirv->GetConstantUint(descriptor.records);
+	if (start == "unknown_uint_constant" || extent == "unknown_uint_constant" || records == "unknown_uint_constant")
 	{
 		return false;
 	}
 	const bool vectors = components >= 4u;
 	String8    text    = String8(R"(
 %<t>_off = OpBitwiseAnd %uint %<t>_offset %<align>
+%<t>_in_rec = OpULessThan %bool %<t>_off %<records>
+OpSelectionMerge %<t>_rec_end None
+OpBranchConditional %<t>_in_rec %<t>_rec_live %<t>_rec_oob
+%<t>_rec_oob = OpLabel
+OpBranch %<t>_rec_end
+%<t>_rec_live = OpLabel
 %<t>_pw_p = OpAccessChain %<ptr> %vsharp %int_0 %<table block> %int_3
 %<t>_pw = OpLoad %uint %<t>_pw_p
 %<t>_room = OpISub %uint %<t>_pw %<extent>
 %<t>_fits = OpUGreaterThanEqual %bool %<t>_pw %<extent>
 %<t>_below = OpULessThanEqual %bool %<t>_off %<t>_room
 %<t>_hit = OpLogicalAnd %bool %<t>_fits %<t>_below
+%<t>_direct = OpLogicalOr %bool %gda_pw_covers %<t>_hit
+OpSelectionMerge %<t>_end None
+OpBranchConditional %<t>_direct %<t>_window %<t>_table
+%<t>_window = OpLabel
 %<t>_pd_lo_p = OpAccessChain %<ptr> %vsharp %int_0 %<program block> %int_2
 %<t>_pd_hi_p = OpAccessChain %<ptr> %vsharp %int_0 %<program block> %int_3
 %<t>_pd_lo = OpLoad %uint %<t>_pd_lo_p
@@ -3884,17 +3932,6 @@ static bool EmitProgramWindowScalarBufferLoad(const Spirv* spirv, const ProgramR
 %<t>_rel64 = OpUConvert %ulong %<t>_rel
 %<t>_dev = OpIAdd %ulong %<t>_pdev %<t>_rel64
 )");
-	if (vectors)
-	{
-		text += R"(%<t>_misaligned = OpBitwiseAnd %ulong %<t>_dev %gda_u64_vec4_mask
-%<t>_aligned = OpIEqual %bool %<t>_misaligned %gda_u64_0
-%<t>_direct = OpLogicalAnd %bool %<t>_hit %<t>_aligned
-)";
-	} else
-	{
-		text += "%<t>_direct = OpCopyObject %bool %<t>_hit\n";
-	}
-	text += "OpSelectionMerge %<t>_end None\nOpBranchConditional %<t>_direct %<t>_window %<t>_table\n%<t>_window = OpLabel\n";
 	for (uint32_t word = 0; word < components; ++word)
 	{
 		const auto w = String8::FromPrintf("%u", word);
@@ -3902,7 +3939,7 @@ static bool EmitProgramWindowScalarBufferLoad(const Spirv* spirv, const ProgramR
 		{
 			text += String8::FromPrintf("%%<t>_v%u_a = OpIAdd %%ulong %%<t>_dev %%gda_u64_%u\n"
 			                            "%%<t>_v%u_p = OpConvertUToPtr %%_ptr_PhysicalStorageBuffer_v4uint %%<t>_v%u_a\n"
-			                            "%%<t>_v%u = OpLoad %%v4uint %%<t>_v%u_p Aligned 16\n",
+			                            "%%<t>_v%u = OpLoad %%v4uint %%<t>_v%u_p Aligned 4\n",
 			                            word / 4u, word * 4u, word / 4u, word / 4u, word / 4u, word / 4u);
 		}
 		if (vectors)
@@ -3937,8 +3974,13 @@ static bool EmitProgramWindowScalarBufferLoad(const Spirv* spirv, const ProgramR
 	text += "OpBranch %<t>_table_end\n%<t>_table_end = OpLabel\nOpBranch %<t>_end\n%<t>_end = OpLabel\n";
 	for (uint32_t word = 0; word < components; ++word)
 	{
-		text += String8::FromPrintf("%%<t>_%u_word = OpPhi %%uint %%<t>_%u_window_value %%<t>_window %%<t>_%u_value %%<t>_table_end\n", word,
+		text += String8::FromPrintf("%%<t>_%u_live = OpPhi %%uint %%<t>_%u_window_value %%<t>_window %%<t>_%u_value %%<t>_table_end\n", word,
 		                            word, word);
+	}
+	text += "OpBranch %<t>_rec_end\n%<t>_rec_end = OpLabel\n";
+	for (uint32_t word = 0; word < components; ++word)
+	{
+		text += String8::FromPrintf("%%<t>_%u_word = OpPhi %%uint %%<t>_%u_live %%<t>_end %%uint_0 %%<t>_rec_oob\n", word, word);
 	}
 	*source += text.ReplaceStr("<t>", tag)
 	               .ReplaceStr("<align>", spirv->GetConstantUint(0xfffffffcu))
@@ -3946,7 +3988,8 @@ static bool EmitProgramWindowScalarBufferLoad(const Spirv* spirv, const ProgramR
 	               .ReplaceStr("<table block>", spirv->GetConstantInt(static_cast<int>(bind->device_address_offset_dw / 4u)))
 	               .ReplaceStr("<program block>", spirv->GetConstantInt(static_cast<int>(bind->program_base_offset_dw / 4u)))
 	               .ReplaceStr("<extent>", extent)
-	               .ReplaceStr("<start>", start);
+	               .ReplaceStr("<start>", start)
+	               .ReplaceStr("<records>", records);
 	return true;
 }
 
