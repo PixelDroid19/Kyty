@@ -9171,5 +9171,14 @@ times, and remembering one entry recovered only 30 % of the lookup's cost.
 
 **Not yet priced.** How much of the time of `0x15c1621e`, `0x0d882c1c` and `0x393dd516` the lookups take. A sound
 causal price is a module that walks twice and uses one result, measured per dispatch, before a translator change.
-Also open: whether the pointer behind the 69 shared calls could be resolved when the dispatch is recorded, and
-what makes `0x393dd516` take 30.8 ms in one frame.
+Also open: whether the pointer behind the 69 shared calls could be resolved when the dispatch is recorded.
+
+**The worst dust frames are particle pixel work, not compute.** Same run, the 85 frames ranked by serialized time:
+median 45.6 ms, worst quartile 85.6 ms against 44.6 ms for the middle quartile. The two translations of the particle
+pixel program `0x55db270b` (driver ids `0x135359b4` and `0xb979c2ac`) add 9.7 and 8.1 ms per frame to the worst
+quartile. The next differences are `0x15c1621e` (+4.0 ms) and four programs of 2.2-3.0 ms each. The 30.8 ms of
+`0x393dd516` is one dispatch, in three consecutive frames (30.8, 11.5 and 11.0 ms) and in none of the other 82,
+where its median is 0.35 ms per frame. It is a one-off and not the source of the dips. In the SPIR-V of the first
+translation, 444 of its 1,624 selects form 57 chains of 7-8 candidates on one M0 variable (M0 = 0, 5, ..., 35), and
+484 more have constant conditions, which the driver folds. The same chain shape in the hottest intro pixel program
+was priced on 2026-11-22 (above), and its cheap lowerings were excluded there.
