@@ -9071,3 +9071,46 @@ and the single 8,388,608-element dispatch above 1.7 ms.
 
 **Still open.** Why those two pixel programs cost what they do on this driver (dispatch width, spills, samples
 per pixel), and a ranking of the dust frames without per-event flushes.
+
+## Program-relative scalar tables read through the program window (2026-11-26, measured)
+
+`PPSA21567 - Astro Bot`, same setup as the record above (Intel Arc A770 on Mesa ANV, 60 fps present limit).
+
+**Observed.** In the dust particle pixel programs (guest checksums `0xc4a8f3bb` and `0x55db270b`), 18 of the 19
+guest address translations belong to 9 `s_buffer_load_dwordx4` whose descriptor is built by `s_getpc_b64`,
+`s_add_u32`/`s_addc_u32` with a constant and `s_mov_b32` of a record count of 64: one 64-byte constant table
+inside the program, after `s_endpgm`. The second translation of each load is its page-crossing half. These are
+the loads the 2026-11-22 program-base window covers, so the 2026-11-19 lookup prices predate that window and no
+longer describe the current translation. The driver's fragment-shader reports, matched to modules by hash (Mesa's
+`src_hash` is word 1 of the BLAKE3 of the SPIR-V, little-endian; the `INTEL_MEASURE` shader identifier is word 0),
+show the four particle pixel programs compiled SIMD8 only, with 0 spills and 6.6-6.9 k instructions; the nine
+spilling SIMD8 pixel programs of the title do not run in the dust. Per frame the dust issues about 26 compute fills
+of uniform buffers (about 1.1 MB each), 26 write-mask fills, about 13 small GDS fills and 4 geometry-segment zero
+fills. The flip wait on present is about 54 us, so the present path does not explain the frame time.
+
+**Changed.** The translator proves, by walking the unique predecessors of the load, that the descriptor is built
+on every path by that idiom with literal constants. `s_getpc_b64` returns the address of the next instruction, so
+the table starts `pc + 4 + K` bytes past the program base, low two bits cleared as scalar memory addresses it. Such
+a load lies at a constant offset from the program base, and when it fits inside the program-base window it now
+loads the device bytes directly: one bound check, a 64-bit add, and 16-byte vector loads when the device address is
+aligned. Words past the record count still read 0. Loads outside the window, or at a misaligned device address,
+keep the table path. Translator version 258; 257 belongs to the excluded experiment above, and its caches must not
+be reused.
+
+**Verified.** Unit tests: the idiom produces the window load and valid SPIR-V, and a redefined base register keeps
+only the table path; full suite 2,850 run, 2,839 passed, 11 skipped; repository gates passed. A diagnostic run
+(`s258`) printed 63 translated loads on 6 program bases, all four words wide at offsets 4,896-5,664, multiples of
+16. The windows bound for those bases were 5.5-8.4 MB, so every load fits. The direct arm also needs a 16-byte
+aligned device address; it was not counted at run time, but each load's scalar offset is an `s_mul_i32` by 16 in
+the guest code, and a window entry over guest physical memory keeps the guest page offset in its device address,
+so with a 256-byte aligned program base the arm is taken. The driver's static statistics compile both arms and grow (7,200 against 6,670 instructions
+for the particle program), so they cannot measure this change. Clean binary, warm cache, quiet host (`s258d`): the
+dust start held 28.7-30.7 fps at 620-880 draws a frame with the render engine 92-96 % busy, but a later stretch of
+the same run held 25.7-29.7 fps at 655-749 draws, against 28.7-29.7 fps at 620-710 draws and 96-98 % on translators
+256 and 257 (one run each), so no fps change is established. Two runs with a CUDA workload on the host
+(`s258b`, `s258c`) fell to 21-25 fps with the render engine 67-88 % busy and are not comparable. Captures at 110
+and 130 s correct. `PPSA17221 - Minecraft` reached its world on a warm second run with a correct capture; no
+Minecraft program uses the program base (2026-11-22 record), so the path is not exercised there.
+
+**Still open.** Per-draw timing of the particle programs on translator 258 at equal element counts, and the 51
+runtime-M0 relative moves in `0xc4a8f3bb`, still lowered as select chains.
