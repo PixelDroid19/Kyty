@@ -9112,5 +9112,18 @@ the same run held 25.7-29.7 fps at 655-749 draws, against 28.7-29.7 fps at 620-7
 and 130 s correct. `PPSA17221 - Minecraft` reached its world on a warm second run with a correct capture; no
 Minecraft program uses the program base (2026-11-22 record), so the path is not exercised there.
 
-**Still open.** Per-draw timing of the particle programs on translator 258 at equal element counts, and the 51
-runtime-M0 relative moves in `0xc4a8f3bb`, still lowered as select chains.
+**Measured per draw.** Driver timing at draw granularity (`im258` against `im257`, whose particle modules are the
+translator-256 ones): the unchanged 8,388,608-element compute dispatch took a median 1,520.6 against 1,522.9 us, so
+the GPU clock matched. The `0x55db270b` program at 7,200 vertices fell from a median 2,333 to 1,948 us per draw
+(mean 1,698 to 1,434 us, about 3,000 draws each); the main `0xc4a8f3bb` translation fell 11-18 % at matched vertex
+counts (24,576: 74.1 to 64.7 us; 1,536: 33.2 to 27.3 us). A second `0xc4a8f3bb` translation is mixed (8,640
+vertices: median 38.5 to 47.4 us, mean 74.9 to 72.0 us). The draw-mode run slowed the route and reached the dust
+start only at 116 s, before the dust cloud, so the cloud frames are not ranked on 258.
+
+**Not pursued.** Moving the candidate registers of the runtime-M0 relative reads into one function-local array
+indexed by M0: the driver's compiler source (read from a mirror of unknown version) lowers indirect access to local
+arrays of up to 16 elements into if-else trees, sends larger ones to scratch memory and does not handle indirect
+access to local registers, so the array can only match the select chain or lose to it.
+
+**Still open.** The 51 runtime-M0 relative reads in `0xc4a8f3bb`, still lowered as select chains, and a ranking of
+the dust cloud frames on translator 258.
