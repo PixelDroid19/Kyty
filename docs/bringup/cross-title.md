@@ -9129,3 +9129,47 @@ access to local registers, so the array can only match the select chain or lose 
 
 **Still open.** The 51 runtime-M0 relative reads in `0xc4a8f3bb`, still lowered as select chains, and a ranking of
 the dust cloud frames on translator 258.
+
+**Strict boot check (2026-11-26).** The translator 258 build reached `interactive` in a strict `games-matrix` run
+(startup 60 s, present 120 s, total 180 s, stability 25 s) on all eight titles of the playable set:
+`PPSA21567 - ASTRO BOT`, `PPSA17221 - Minecraft`, `PPSA03969 - F.I.S.T.: Forged In Shadow Torch`,
+`PPSA09076 - DREDGE`, `PPSA21402 - Balatro`, `PPSA15552 - Dead Cells`, `PPSA06084 - Superliminal` and
+`PPSA28311 - Absolum`. This is a boot check; `playable-regression` was not run.
+
+## Dust compute programs spill and walk the address table at every scalar load (2026-11-26, measured)
+
+`PPSA21567 - ASTRO BOT`, dunes dust view, translator 258, Intel Arc A770 on Mesa ANV.
+
+**Where compute time goes.** A draw-mode `INTEL_MEASURE` run (events serialized, so every figure is an upper
+bound and small events carry a fixed floor) gave 85 dust frames at 600-950 draws: 52.2 ms per frame, of which
+compute is 15.3 ms. Compute programs by time per frame (driver shader id, the BLAKE3 word 0 of the SPIR-V):
+
+| Program | ms/frame | Worst frame | Native code (SIMD, instructions, loops, spills:fills) |
+| --- | --- | --- | --- |
+| `0x15c1621e` (guest `360038d0_f4cfb9a5`) | 3.47 | 12.0 ms | SIMD8, 39,705, 146, 624:816 |
+| `0xe8e7b548` | 2.24 | 5.6 ms | SIMD16, 2,967, -, 0:0 |
+| `0x0d882c1c` (guest `360043b0_8e51dd94`) | 1.14 | 2.9 ms | SIMD8, 41,491, 146, 630:694 |
+| `0x393dd516` | 0.99 | 30.8 ms | SIMD8, 16,733, -, 379:647 |
+| `0x0cb0deab` | 0.86 | 1.8 ms | SIMD16, 3,466, -, 60:89 |
+| `0x81541bdd` | 0.79 | 2.2 ms | SIMD16, 7,476, -, 67:250 |
+| `0x736d54a9` | 0.50 | 1.4 ms | SIMD8, 19,074, -, 61:101 |
+| `0x156d2129` | 0.39 | 1.4 ms | SIMD16, 4,135, -, 30:118 |
+
+The native statistics come from a run with `INTEL_DEBUG=cs,vs,fs`, the driver's shader cache disabled and an empty
+pipeline cache (a filled pipeline cache loads binaries and prints no compiles). The driver's `src_hash` is BLAKE3
+word 1 of the same SPIR-V. The dust frames' vertex programs and their heaviest pixel programs do not spill.
+
+**The loops are the guest-address lookup.** In `0x15c1621e` the translator calls its guest-address lookup at 145
+sites, one per translated scalar load plus a second one where a load crosses a page. The driver inlines every call,
+which gives the 146 loops. 69 of the calls use one base: a pointer that the program loads from memory (an SGPR pair
+plus 80 bytes) and then reads at many offsets. The lookup's directory step, entry search and entry checks are
+dependent loads. Offline, the same module with the lookup body replaced by a plain return (unsound, statistics
+only) compiles to 22,980 instructions, 767 sends instead of 1,344, one loop and 561:764 spills:fills. The spills
+come mostly from the rest of the program. The driver's cycle estimate falls from 830k to 247k, but that estimate
+assumes loop trip counts and is not time. In the 2026-11-19 pixel program record the table's search loop ran 0-1
+times, and remembering one entry recovered only 30 % of the lookup's cost.
+
+**Not yet priced.** How much of the time of `0x15c1621e`, `0x0d882c1c` and `0x393dd516` the lookups take. A sound
+causal price is a module that walks twice and uses one result, measured per dispatch, before a translator change.
+Also open: whether the pointer behind the 69 shared calls could be resolved when the dispatch is recorded, and
+what makes `0x393dd516` take 30.8 ms in one frame.
