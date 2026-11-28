@@ -1,3 +1,27 @@
+## GPU heap registration re-sorted every heap (2026-11-28, fixed locally)
+
+`GpuMemory::SetAllocatedRange` rebuilt the whole heap index (a sort of every heap edge and a sweep)
+for each new GPU mapping, so registering n heaps cost O(n² log n). `PPSA38500 - Grand Theft Auto VI`
+maps many 64 KiB ranges while loading and spent about 20 s on one host thread there (two of three samples inside the rebuild),
+long enough for its own watchdog to kill it when a 4K output was reported. A heap that overlaps no
+existing span now inserts its own span, which is exactly what the full sweep would produce; a heap
+that overlaps any span still rebuilds. Freeing a heap still rebuilds, because heap ids shift.
+Existing GPU memory tests (adjacent, overlapping and gapped ranges) pass. Evidence:
+`docs/titles/open-world-crime.md`.
+
+## Rect lists outside the procedural three-vertex form (2026-11-28, built)
+
+Primitive types 7 and 17 drawn with vertex buffers, as indexed draws or with more than three vertices
+became a triangle strip, so a three-vertex rect showed as one triangle and longer lists as strips across
+rects. `PPSA38500 - Grand Theft Auto VI` composites its frame through such a rect. These draws are now a
+triangle list through a host geometry stage (`ShaderRectGeometry.cpp`). It emits the screen-space
+bounding box of each rect's three shaded vertices, extends smooth outputs over the triangle's plane and
+keeps flat parameters at the first vertex. The procedural form (three vertices, no vertex buffer,
+vertex id 3) is unchanged. Rects whose vertex stage exports a layer or clip distance, whose pixel shader
+needs interpolation geometry or fragment transport, or on a host without geometry shaders keep the old
+single-triangle draw and log a warning. Evidence, limits and verification:
+`docs/titles/open-world-crime.md`.
+
 ## Soft checks that go on to use a null guest pointer (2026-11-14, one site fixed, pattern open)
 
 `VideoOutGetResolutionStatus` logged a warning when `status` was null or the handle had no session, then
@@ -3833,6 +3857,14 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   role-playing title's GPU hang, which stops in fixed-function state with
   the execution units idle. Direction: translate GLC or DLC word loads as
   device-scope atomic loads with acquire semantics.
+  **Images since done (2026-11-28):** a GLC image load, load_mip, store or
+  store_mip (RDNA2 8.1.10, the globally coherent policy) now parses into
+  `mimg_coherent`, and the translator decorates every storage view of that
+  shader `Coherent`; the views alias one binding, so the decoration is
+  per shader, not per resource. Before, the parser stopped on it. GLC on a
+  sample or gather still stops the run. Buffer loads are unchanged. Trigger:
+  `PPSA38500 - Grand Theft Auto VI` while loading after the legal terms.
+  Test: `GloballyCoherentLoadAndStoreDecorateTheStorageView`.
 - **Defect found, not fixed: barriers in lane-conditional regions of the
   native wave64 route.** The native-equivalence proof refuses scalar
   memory side effects inside a region that `s_cbranch_execz` or
@@ -4764,6 +4796,10 @@ checked against the code; none is hit by a title in the current strict runs.
   in each DMASK component of such a read; the image destination guard
   applies EXEC as for any image result. Gather, resinfo, stores and atomics
   through a zero T# keep refusing.
+- Stores (2026-11-28): an image store through a T# loaded from memory whose
+  eight words are all zero is discarded, and the load writes zero. A buffer
+  type does not qualify for a store. Record: `PPSA38500 - Grand Theft Auto
+  VI`, compute `9be22ee5`.
 - Verified on Intel: the card title passes the stop (120 s, generic route)
   and stops at the next one, `fragment wave transport is required by the
   pixel stage` (a wave64 pixel program writes a scalar under divergent
@@ -7944,6 +7980,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   - Acm (six entries, imported by nine titles including `PPSA17221 - Minecraft` and `PPSA21567 - ASTRO BOT`): no
     reference runs the FFT, reverb or panner; batches complete at once with nothing computed, which would be a
     success placeholder. The context and batch error codes and the job builders' argument lists also differ.
+    **Since done for the entries `PPSA38500 - Grand Theft Auto VI` imports** (see "Acm FFT and convolution
+    reverb" below).
   - PNG and JPEG decoders: the references agree on the header fields, the decode return value and `Delete`, but not
     on the memory size the title must allocate or the handle `Create` writes into it, and they differ on palette
     alpha, the pitch errors and the JPEG pixel formats.
@@ -9182,3 +9220,79 @@ where its median is 0.35 ms per frame. It is a one-off and not the source of the
 translation, 444 of its 1,624 selects form 57 chains of 7-8 candidates on one M0 variable (M0 = 0, 5, ..., 35), and
 484 more have constant conditions, which the driver folds. The same chain shape in the hottest intro pixel program
 was priced on 2026-11-22 (above), and its cheap lowerings were excluded there.
+
+## Acm FFT and convolution reverb (2026-11-28, implemented, run pending)
+
+- **Trigger:** `PPSA38500 - Grand Theft Auto VI` stopped on the unbound `sceAcm_FFT` while loading. Its audio engine
+  imports `sceAcmContextCreate`, `sceAcmContextDestroy`, `sceAcm_FFT`, `sceAcm_ConvReverb_SharedInput`,
+  `sceAcmBatchStartBuffers` and `sceAcmBatchWait`. The firmware dump has no Acm module with code, and the SDK `.prx`
+  is a stub, so the contract comes from the published header and sample code only.
+- **How the title uses it:** a loader copies time-domain IR samples to scratch and transforms up to ten blocks per
+  batch with `sceAcm_FFT(2·B, count, fp32, inputs, IR format, outputs, ZERO_2ND_HALF)` into its own IR block store.
+  Per audio frame it records `ConvReverb_SharedInput` with one input, one IR, gain 1.0 and `iBlockCount` 1, starts
+  the batch, and polls `sceAcmBatchWait` with timeout 0. This is the sample code's pattern; the title was not seen
+  reading the spectra itself.
+- **Change:** the six entries are bound (`LibAcm.cpp`); the transforms live in `AudioAcm.cpp`.
+  - The job builders validate their arguments (sizes 512/1024/2048, block sizes 256/512/1024, formats, 128-byte
+    alignment, 1:N, N:1 and N:N channel layouts, `iBlockCount` 1) and append Kyty's own command words to the batch
+    buffer, never more than the published size macro, or return `BATCHBUFFER_FULL`.
+  - `sceAcmBatchStartBuffers` runs the batch on the calling thread, so the first wait returns 0 and releases it.
+  - Published facts used: the batch info and reverb structure layouts, the error codes, byte offsets in the batch
+    info, the packed spectrum (DC and Nyquist in the first complex value), `ZERO_2ND_HALF`, and that a block
+    transform is `B` samples followed by `B` zeros.
+- **Inferred, not published:** forward transform unscaled and inverse scaled by `1/N` (the sample's FFT, multiply,
+  IFFT path pins only the round trip), the `e^-j` sign, IEEE binary16 for fp16, the history update at record time
+  with the position naming the newest block, overlap-add through `pTemps` with no added latency, `Out.pPcm`
+  overwritten, and `INVALID_BATCH` for a batch already released. While a title builds its IR blocks with
+  `sceAcm_FFT`, the scale and sign stay internal; a title that loads pre-transformed IR blocks would see them.
+- **Stops the run (not modeled):** split FFT flags, truncated IR blocks (`pSizes`), the inline statistics job, a
+  non-null batch error report. IFFT, Panner, Notification, `SharedIr` and the `_2` variants stay unbound.
+- **Tests:** `FftPacksDcAndNyquistIntoTheFirstBinAndZeroPadsOnRequest` and
+  `ConvReverbReproducesTheImpulseResponseAcrossBlocks` (fp32 and fp16 IR and history) drive the bound exports.
+
+## Waterfall moves narrowed by the values of their lane index (2026-11-28, fixed)
+
+- **Trigger:** `PPSA38500 - Grand Theft Auto VI` compiled one compute pipeline from boot without finishing it; from
+  about 70 s the command processor waited on it and the title's own watchdog later wrote to address 0. The module
+  was 3.0 MB of SPIR-V (35.8k `OpSelect`): sixteen guest waterfall loops of the shader were not lowered, so each
+  `v_movreld`/`v_movrels` became a select or store over about 180 candidate VGPRs.
+- **Why they were not lowered:** the guest schedules `s_andn2_b64 rest, rest, exec` between its relative writes, and
+  the matcher required the moves to be contiguous; it also treated any relative write as able to overwrite the
+  index register.
+- **Change (`ShaderWaterfall.cpp`, translator 263):**
+  - The matcher accepts one `s_andn2` among the moves and asks whether a move can reach the index register from
+    the index's values on loop entry.
+  - A forward scan from the last enabled label collects the values a VGPR can hold: literals, `v_bfe_u32` with a
+    literal width, `v_and` with a literal mask below 32, and `v_lshlrev`/`v_lshrrev`/`v_mul_u32_u24`/`v_mul_lo_u32`
+    of known sets, at most 32 values. Each value is tied to the EXEC it was written under: copies keep the EXEC
+    version, `s_and`/`s_andn2`/`v_cmpx`/`s_and_saveexec` narrow it, any other write starts a new one, and a value
+    holds only where the current EXEC descends from its version (both mask words). Relative writes kill the
+    registers they can reach, and calls reset the scan.
+  - `ShaderLaneValuesOnEntry` exposes the set to the SPIR-V emitter, which lowers a move over only the registers
+    `base + value` reaches, falling back to the alignment rule when the set is unknown.
+- **Verification:** all sixteen loops lower; on the title, agent snapshots at 50 to 75 s show no precompile
+  running and no command-processor wait on one. Tests: `LowersStoresAroundTheRestUpdateWhenTheIndexValuesMissTheIndex`,
+  `RefusesStoresAfterOneWhoseIndexValuesReachTheIndex`,
+  `LaneIndexValuesHoldOnlyWhereTheirDefinitionRanAndNoRelativeWriteReaches`. Other titles not yet re-run.
+
+## Resource level counts past the 1x1 level; Standard256B storage chains (2026-11-28, fixed)
+
+- **Level count:** a T#'s `max_mip` is the resource's level count minus one (ISA image resource table), and a
+  title declared 12 levels for a 512x512 32_32_32_32_UINT Standard4KB texture. The standard (4 KiB, 64 KiB) and
+  Standard256B mip layouts refused counts above log2 of the larger side plus one; they now accept up to the
+  field's 16 levels, each level one element at least. A sampled host image still ends at its own 1x1 level
+  (Vulkan's limit, the rule storage chains already used), so the extra guest levels have no host storage. Test:
+  `BlockViewOfCompressedChainSharesTheChainLayout` (a 16-byte block view and the BC7 chain it covers share every
+  level's offsets, tail placement and sizes).
+- **Standard256B storage chains:** a storage descriptor of a tile-1 chain bound at a second base level became a
+  second object over the same range, and object creation stopped. Standard256B joins the tilings whose storage
+  chains keep one host mip per level (`StorageTextureUsesMipBacking`); its level-0 upload is the tile-5 one. The
+  existing test of that rule now lists tile 1.
+
+## Storage-texture equality test depends on test order (2026-11-28, open)
+
+- **Defect:** `EmulatorGraphicsState.StorageTextureArrayDescriptorsAreViewsOfTheLiveArray`
+  (`source/unit_test/src/emulator/UnitTestEmulatorGraphicsState.cpp:6587`) fails when run alone and
+  passes inside the full suite (316/316). `StorageTextureObject::Equal` reads the global Gen5 flag
+  (`GuestIsGen5`), and only earlier tests in the suite call `Config::SetNextGen(true)`.
+- **Direction:** set the guest generation inside the test, as the neighbouring Gen5 tests do.
