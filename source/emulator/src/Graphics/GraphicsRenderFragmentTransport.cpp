@@ -129,7 +129,7 @@ uint32_t FragmentTransportLaneWords(const ShaderCode& code, const ShaderPixelInp
 }
 
 bool FragmentTransportBuildShadeModule(const ShaderCode& code, const ShaderPixelInputInfo& pixel, uint32_t user_sgpr_count,
-                                       uint32_t lds_dwords, Vector<uint32_t>* binary, String8* error)
+                                       uint32_t lds_dwords, uint32_t part_lanes, Vector<uint32_t>* binary, String8* error)
 {
 	EXIT_IF(binary == nullptr || error == nullptr);
 	binary->Clear();
@@ -153,12 +153,12 @@ bool FragmentTransportBuildShadeModule(const ShaderCode& code, const ShaderPixel
 	compute.wave_layout.physical_local[1]    = 1u;
 	compute.wave_layout.physical_local[2]    = 1u;
 	compute.wave_layout.guest_wave_size      = 64u;
-	compute.wave_layout.native_subgroup_size = 32u;
+	compute.wave_layout.native_subgroup_size = part_lanes;
 	compute.wave_layout.banks                = 1u;
 	compute.wave_layout.waves                = 1u;
 	compute.wave_layout.lds_dwords           = lds_dwords;
 	compute.native_wave_sensitive            = true;
-	compute.required_subgroup_size           = 32u;
+	compute.required_subgroup_size           = part_lanes;
 	compute.threads_num[0]                   = 64u;
 	compute.threads_num[1]                   = 1u;
 	compute.threads_num[2]                   = 1u;
@@ -180,7 +180,7 @@ bool FragmentTransportBuildShadeModule(const ShaderCode& code, const ShaderPixel
 }
 
 bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipeline_cache, const ShaderBindResources& ps_bind,
-                                          const Vector<uint32_t>& binary, bool require_subgroup_size,
+                                          const Vector<uint32_t>& binary, uint32_t part_lanes,
                                           VkDescriptorSetLayout transport_layout, VkPipelineLayout* layout, VkPipeline* pipeline,
                                           String8* error)
 {
@@ -262,12 +262,12 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 	{
 		VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required {};
 		required.sType                = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT;
-		required.requiredSubgroupSize = 32;
+		required.requiredSubgroupSize = part_lanes;
 
 		VkPipelineShaderStageCreateInfo stage {};
 		stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		stage.pNext  = require_subgroup_size ? &required : nullptr;
-		stage.flags  = require_subgroup_size ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT : 0;
+		stage.pNext  = &required;
+		stage.flags  = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
 		stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
 		stage.module = module;
 		stage.pName  = "main";
@@ -377,7 +377,8 @@ FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, co
 	                             user_sgpr_count);
 	facts += Capacities(lane_words, 0u, limits);
 	facts += Assembled("capture", FragmentTransport::GenerateCaptureSource(code, resolved, info));
-	facts += Assembled("resolve", FragmentTransport::GenerateResolveSource(kTransportDescriptorSet, ColorWriteMask(state)));
+	facts += Assembled("resolve", FragmentTransport::GenerateResolveSource(kTransportDescriptorSet, pixel.bind.push_constant_offset, ColorWriteMask(state),
+	                                                                         ShaderHasPixelDepthExport(code)));
 	requirement.facts = facts;
 	return requirement;
 }

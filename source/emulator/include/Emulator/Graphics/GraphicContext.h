@@ -5,6 +5,7 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/GpuSubmissionTracker.h"
 #include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/SampleLocations.h"
@@ -440,7 +441,8 @@ struct StorageTextureVulkanImage;
 struct DepthSliceArrayLayer
 {
 	// content_stamp of the slice image last copied into the layer, a digest of the images whose 64 KiB blocks
-	// were last assembled into it, or the marker of a read from guest memory.
+	// were last assembled into it (over guest bytes read at guest_generation when some blocks lie in no image), or
+	// the marker of a read from guest memory.
 	uint64_t stamp = 0;
 	// Guest range registered with the dirty-page tracker by the first read from guest memory (size 0 before it), and
 	// the page generation of the last read.
@@ -451,6 +453,30 @@ struct DepthSliceArrayLayer
 
 struct DepthStencilVulkanImage;
 
+// What the last read of a slice array looked at, when every layer it read came from depth images. A later read of
+// the same view in the same submission and frame, while no object entered, left or re-backed GPU memory and these
+// images and layer states are unchanged, finds the same images, records the same uses and has nothing to copy.
+struct DepthSliceArrayRead
+{
+	struct Source
+	{
+		const DepthStencilVulkanImage* image         = nullptr;
+		uint64_t                       content_stamp = 0;
+		uint32_t                       depth_slice   = 0;
+	};
+	bool                  valid             = false;
+	uint64_t              addr              = 0;
+	uint64_t              slice_size        = 0;
+	uint32_t              fmt               = 0;
+	uint32_t              pitch             = 0;
+	bool                  plain_guest_depth = false;
+	SubmissionId          submission;
+	uint64_t              graph_generation = 0;
+	uint64_t              frame            = 0;
+	std::vector<Source>   sources;
+	std::vector<uint64_t> layer_stamps;
+};
+
 // An array image that a sampled view of the memory starting at a depth image's depth plane reads, and the state
 // of each layer.
 struct DepthSliceArray
@@ -459,7 +485,8 @@ struct DepthSliceArray
 	VulkanMemory                      memory;
 	std::vector<DepthSliceArrayLayer> layers;
 	// A layered pass renders into the array and has not yet copied its layers back to the slice images.
-	bool store_pending = false;
+	bool                store_pending = false;
+	DepthSliceArrayRead last_read;
 };
 
 struct DepthStencilVulkanImage: public VulkanImage

@@ -10,6 +10,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 #include "Emulator/Agent/AgentLifecycle.h"
@@ -296,7 +297,7 @@ static void RecordDrawMaterialTraceTexture(DrawMaterialTraceSession* session, in
 	record.sampler_index     = sampler_index;
 	record.sampler_operation = samplers->operations[sampler_index];
 	record.sampler           = samplers->samplers[sampler_index];
-	record.allow_unorm       = textures != nullptr && BindSamplerAllowsUnnormalized(*textures, record.sampler_slot);
+	record.allow_unorm       = textures != nullptr && BindSamplerAllowsUnnormalized(*textures, record.sampler_index);
 }
 
 static void EmitDrawMaterialTraceStorage(FILE* out, uint32_t ordinal, const char* stage, const ShaderStorageResources& storage);
@@ -3230,7 +3231,9 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 			// BUFFER_STORE_FORMAT encodes 32-bit elements only, so a written typed V# keeps the 32-bit rule.
 			const bool format_loads = storage_buffers.accesses[i] == ShaderStorageAccess::Typed && storage_buffers.format_loads_only[i] &&
 			                          ShaderGen5FormatLoadDescriptorSupported(r);
-			if (!format_loads && !ShaderGen5StorageDescriptorSupported(r, storage_buffers.accesses[i]))
+			const bool raw_zero_stride_by_address =
+			    storage_buffers.by_address[i] && storage_buffers.accesses[i] == ShaderStorageAccess::Raw && r.Stride() == 0u;
+			if (!format_loads && !raw_zero_stride_by_address && !ShaderGen5StorageDescriptorSupported(r, storage_buffers.accesses[i]))
 			{
 				Emulator::Agent::Lifecycle::StorageFrontierContext context {};
 				context.binding         = DescribeStorageBinding(storage_buffers, i);
@@ -3602,6 +3605,10 @@ static bool DepthPlaneStorageViewMatches(const VulkanImage* depth, uint32_t fmt,
 	       VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0u, 0u, static_cast<uint16_t>(fmt)) == plane_format;
 }
 
+// Counts storage-image write stamps. A bind that found no newer storage prefix for an array
+// gets the same answer while this has not moved.
+static std::atomic<uint64_t> g_storage_write_generation {0};
+
 // A dispatch can write the leading layers of a sampled array through a
 // storage image with fewer layers. Storage images are not written back, so the
 // guest upload of the array holds stale bytes for those layers; copy them from
@@ -3810,6 +3817,53 @@ struct TextureStageEffects
 	VulkanImage* reads[ShaderTextureResources::RES_MAX] {};
 	int          reads_num = 0;
 	bool         side_work = false;
+	bool         checks_storage_prefix = false;
+
+	// A depth slice array is assembled from the depth images over its layers. Repeating the
+	// call records nothing while its last read still holds, so a reuse repeats it instead of
+	// counting it as side work.
+	struct DepthSliceArrayRead
+	{
+		DepthStencilVulkanImage* first             = nullptr;
+		uint64_t                 addr              = 0;
+		uint64_t                 slice_size        = 0;
+		uint32_t                 width             = 0;
+		uint32_t                 height            = 0;
+		uint32_t                 layers            = 0;
+		uint32_t                 fmt               = 0;
+		uint32_t                 pitch             = 0;
+		bool                     plain_guest_depth = false;
+		VulkanImage*             array             = nullptr;
+	};
+	static constexpr int SLICE_ARRAYS_MAX = 4;
+	DepthSliceArrayRead  slice_arrays[SLICE_ARRAYS_MAX] {};
+	int                  slice_arrays_num = 0;
+
+	void RecordSliceArray(const DepthSliceArrayRead& read)
+	{
+		if (slice_arrays_num == SLICE_ARRAYS_MAX)
+		{
+			side_work = true;
+			return;
+		}
+		slice_arrays[slice_arrays_num++] = read;
+	}
+
+	// Merging the CPU writes into a storage image records nothing while its guest bytes are
+	// unchanged since the last merge, so a reuse repeats the merge.
+	static constexpr int     CPU_WRITE_MERGES_MAX = 4;
+	StorageTextureVulkanImage* cpu_write_merges[CPU_WRITE_MERGES_MAX] {};
+	int                        cpu_write_merges_num = 0;
+
+	void RecordCpuWriteMerge(StorageTextureVulkanImage* image)
+	{
+		if (cpu_write_merges_num == CPU_WRITE_MERGES_MAX)
+		{
+			side_work = true;
+			return;
+		}
+		cpu_write_merges[cpu_write_merges_num++] = image;
+	}
 
 	void RecordRead(VulkanImage* image)
 	{
@@ -4305,9 +4359,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					// The guest-memory depth sample contract: metadata (HTILE) or MSAA would change what the layer bytes mean.
 					const bool plain_guest_depth = tile == 24u && levels == 1u && !r.MsaaDepth() && r.MetaAddr() == 0u;
 					const auto array_extent = depth_exact ? owner->extent : VkExtent2D {width, height};
-					effects->side_work = true;
 					tex = GraphicsRenderDepthSliceArray(buffer, owner, addr, size.size, array_extent.width, array_extent.height, view_layers,
 					                                    fmt, pitch, plain_guest_depth);
+					effects->RecordSliceArray({owner, addr, size.size, array_extent.width, array_extent.height, view_layers,
+					                           static_cast<uint32_t>(fmt), pitch, plain_guest_depth, tex});
 					materialize = "depth-slice-array";
 				}
 				// Vulkan has no storage depth image: a dispatch addresses the depth plane through the image's colour
@@ -4580,8 +4635,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 							alias_index = static_cast<size_t>(filtered[alias_index]);
 						}
 						tex = stex.At(static_cast<int>(alias_index));
-						effects->side_work = true;
 						StorageTextureMergeCpuWrites(buffer, stex.At(static_cast<int>(alias_index)));
+						effects->RecordCpuWriteMerge(stex.At(static_cast<int>(alias_index)));
 					}
 					// Guest memory is untyped: an image a dispatch wrote as R8_UINT
 					// holds the bytes a later R8_UNORM sample of the same range reads.
@@ -4910,7 +4965,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						materialize        = "st-block-copy";
 					}
 				}
-				effects->side_work |= gen5 && arrayed_2d && base_array == 0u;
+				effects->checks_storage_prefix |= gen5 && arrayed_2d && base_array == 0u;
 				if (gen5 && arrayed_2d && base_array == 0u &&
 				    CopyNewerStoragePrefixLayers(buffer, tex, addr, fmt, width, height, pitch, levels, tile, depth))
 				{
@@ -5077,6 +5132,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			{
 				effects->side_work = true;
 				tex->storage_write_stamp = VulkanImageNextStamp();
+				g_storage_write_generation.fetch_add(1, std::memory_order_relaxed);
 			}
 			const bool storage_array = arrayed_2d && tex != nullptr && tex->type == VulkanImageType::StorageTexture;
 			if (storage_array)
@@ -5415,7 +5471,7 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, const Shader
 	for (int i = 0; i < samplers.samplers_num; i++)
 	{
 		auto       r                 = samplers.samplers[i];
-		const bool allow_unnormalized = BindSamplerAllowsUnnormalized(textures, samplers.slots[i]);
+		const bool allow_unnormalized = BindSamplerAllowsUnnormalized(textures, i);
 
 		// EXIT_NOT_IMPLEMENTED(r.ClampX() != 0);
 		// EXIT_NOT_IMPLEMENTED(r.ClampY() != 0);
@@ -5460,7 +5516,7 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, const Shader
 		const bool comparison_eligible = ShaderSamplerDepthComparisonEligible(textures, samplers, i);
 		const auto sampler_operation = State::ResolveSamplerBindingOperation(samplers.operations[i], comparison_eligible);
 		sampler_ids[i] = g_render_ctx->GetSamplerCache()->GetSamplerId(r, sampler_operation, allow_unnormalized,
-		                                                               BindSamplerUsesRCoordinate(textures, samplers.slots[i]),
+		                                                               BindSamplerUsesRCoordinate(textures, i),
 		                                                               SamplerBorderIsInteger(textures, i));
 
 		r.UpdateIndex(i);
@@ -5631,7 +5687,10 @@ static void RequireScaledImageReads(ScaledImageReadAccess access, const ShaderSa
 // submission gets that bind's images, views and SGPR words, when the earlier bind recorded no side
 // work, every object it resolved was a cached reuse, and since then no object entered or left a
 // heap, no guest byte range changed and the materialization cache dropped nothing.
-// The reuse repeats the cached-object uses and the image reads of the earlier bind.
+// The reuse repeats the cached-object uses and the image reads of the earlier bind, and the depth
+// slice array reads and storage CPU-write merges it made, which record nothing while they still hold.
+// A bind that looked for a newer storage prefix of an array is reused only while no storage image
+// was written since.
 class TextureStageReuse
 {
 public:
@@ -5679,6 +5738,12 @@ private:
 		bool                      has_pass_color = false;
 		bool                      scaled_sampling_refused = false;
 		DescriptorCache::Stage    stage = DescriptorCache::Stage::Vertex;
+		bool                      checks_storage_prefix = false;
+		uint64_t                  storage_write_generation = 0;
+		TextureStageEffects::DepthSliceArrayRead slice_arrays[TextureStageEffects::SLICE_ARRAYS_MAX] {};
+		int                       slice_arrays_num = 0;
+		StorageTextureVulkanImage* cpu_write_merges[TextureStageEffects::CPU_WRITE_MERGES_MAX] {};
+		int                       cpu_write_merges_num = 0;
 		const CommandBuffer*      buffer = nullptr;
 		uint64_t                  submit_id = 0;
 		SubmissionId              submission {};
@@ -5735,9 +5800,30 @@ bool TextureStageReuse::Replay(uint64_t submit_id, CommandBuffer* buffer, const 
 	auto&          e           = m_entries[fingerprint % ENTRIES];
 	SubmissionId   submission {};
 	if (!e.valid || e.fingerprint != fingerprint || e.buffer != buffer || e.submit_id != submit_id ||
-	    !buffer->GetSubmissionId(&submission) || !(submission == e.submission) || !SameInputs(e, bind))
+	    !buffer->GetSubmissionId(&submission) || !(submission == e.submission) || !SameInputs(e, bind) ||
+	    (e.checks_storage_prefix && e.storage_write_generation != g_storage_write_generation.load(std::memory_order_relaxed)))
 	{
 		return false;
+	}
+	// The recorded depth images are only valid while the object graph is unchanged.
+	if ((e.slice_arrays_num > 0 || e.cpu_write_merges_num > 0) && e.capture.graph_generation != GpuMemoryObjectGraphGeneration())
+	{
+		e.valid = false;
+		return false;
+	}
+	for (int i = 0; i < e.cpu_write_merges_num; i++)
+	{
+		StorageTextureMergeCpuWrites(buffer, e.cpu_write_merges[i]);
+	}
+	for (int i = 0; i < e.slice_arrays_num; i++)
+	{
+		const auto& r = e.slice_arrays[i];
+		if (GraphicsRenderDepthSliceArray(buffer, r.first, r.addr, r.slice_size, r.width, r.height, r.layers, r.fmt, r.pitch,
+		                                  r.plain_guest_depth) != r.array)
+		{
+			e.valid = false;
+			return false;
+		}
 	}
 	if (!GpuMemoryRepeatCachedUses(submit_id, buffer, e.capture))
 	{
@@ -5804,6 +5890,12 @@ void TextureStageReuse::Store(uint64_t submit_id, CommandBuffer* buffer, const B
 	}
 	e.scaled_sampling_refused = bind.scaled_sampling_refused;
 	e.stage                   = bind.stage;
+	e.checks_storage_prefix   = effects.checks_storage_prefix;
+	e.storage_write_generation = g_storage_write_generation.load(std::memory_order_relaxed);
+	std::copy(effects.slice_arrays, effects.slice_arrays + effects.slice_arrays_num, e.slice_arrays);
+	e.slice_arrays_num = effects.slice_arrays_num;
+	std::copy(effects.cpu_write_merges, effects.cpu_write_merges + effects.cpu_write_merges_num, e.cpu_write_merges);
+	e.cpu_write_merges_num = effects.cpu_write_merges_num;
 	e.buffer                  = buffer;
 	e.submit_id               = submit_id;
 	e.submission              = submission;
@@ -5965,14 +6057,22 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		{
 			PrepareDirectSgprs(bind.direct_sgprs, &sgprs_ptr);
 		}
+		// Loads from the program's inline tables translate through the window
+		// resolved here against the same table the device block publishes.
+		uint64_t program_window_device = 0;
+		uint32_t program_window_bytes  = 0;
 		if (bind.device_address_used)
 		{
 			EXIT_IF(device_address_table == nullptr || device_address_table->address == 0);
 			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.device_address_offset_dw);
+			if (bind.program_base_used)
+			{
+				GuestDeviceAddressWindow(*device_address_table, bind.program_base, &program_window_device, &program_window_bytes);
+			}
 			sgprs_ptr[0] = static_cast<uint32_t>(device_address_table->address);
 			sgprs_ptr[1] = static_cast<uint32_t>(device_address_table->address >> 32u);
 			sgprs_ptr[2] = device_address_table->entry_count;
-			sgprs_ptr[3] = 0;
+			sgprs_ptr[3] = program_window_bytes;
 			sgprs_ptr += 4;
 		}
 		if (bind.thread_limits_used)
@@ -5993,7 +6093,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.program_base_used)
 		{
 			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.program_base_offset_dw);
-			EXIT_IF(!ShaderWriteProgramBaseMetadata(bind, sgprs, DescriptorCache::METADATA_DWORDS_MAX));
+			EXIT_IF(!ShaderWriteProgramBaseMetadata(bind, program_window_device, sgprs, DescriptorCache::METADATA_DWORDS_MAX));
 			sgprs_ptr += 4;
 		}
 

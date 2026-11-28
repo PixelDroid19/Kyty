@@ -219,8 +219,8 @@ void CheckMappingTable()
 {
 	// Independent expectations for every supported no-owner input, not an oracle
 	// that calls the production mapping helper. High metadata bits must disappear.
-	constexpr std::array<std::array<uint32_t, 2>, 16> cases {{
-	    {1u, 0u}, {2u, 1u}, {3u, 1u}, {4u, 2u}, {5u, 2u}, {6u, 2u}, {7u, 3u}, {10u, 1u},
+	constexpr std::array<std::array<uint32_t, 2>, 17> cases {{
+	    {1u, 0u}, {2u, 1u}, {3u, 1u}, {4u, 2u}, {5u, 2u}, {6u, 2u}, {7u, 3u}, {9u, 2u}, {10u, 1u},
 	    {11u, 1u}, {12u, 2u}, {13u, 2u}, {17u, 4u}, {18u, 1u}, {19u, 2u}, {20u, 2u}, {21u, 2u}}};
 	Fixture f;
 	f.gs_specials.vgt_gs_out_prim_type.value = 0xfffffff4u;
@@ -571,8 +571,6 @@ TEST(EmulatorPrimitiveState, NoneReservedAndUnknownInputsRefuseBeforePublication
 		ExpectRejected(Invalid::GsOwnedInput, input);
 		ExpectRejected(Invalid::HsOwnedInput, input);
 	}
-	ExpectRejected(Invalid::Input, 9u);
-	ExpectRejected(Invalid::GsOwnedInput, 9u);
 }
 
 TEST(EmulatorPrimitiveState, MalformedFixedMetadataCannotPartiallyPublishEitherOutput)

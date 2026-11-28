@@ -996,7 +996,7 @@ void LabelManager::Set(CommandBuffer* buffer, Label* label)
 
 	label->cp = buffer->GetParent();
 
-	auto* vk_buffer = buffer->RecordOutsideRenderPass();
+	auto* vk_buffer = buffer->RecordOutsideRenderPassSync();
 
 	if (vk_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_buffer == nullptr condition ignored (continuing)\n"); }
 

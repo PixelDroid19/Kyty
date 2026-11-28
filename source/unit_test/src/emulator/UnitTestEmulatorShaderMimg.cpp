@@ -2182,6 +2182,12 @@ TEST(EmulatorShaderMimg, PreservesAtomicDataSourceWithoutSamplerOperand)
 		    RequireMimgTail(ShaderImageAtomicSupported(nsa_inst) && nsa_inst.mimg_address_num == 2 && nsa_inst.src[0].size == 1 &&
 		                        nsa_inst.mimg_address[0] == TileVgpr(4) && nsa_inst.mimg_address[1] == TileVgpr(0x11),
 		                    "NSA atomic reads its coordinates from the address list");
+		    // DIM 1D: one address VGPR, X only.
+		    const auto line_code = ParseMimgTailInstruction(0x11u, 0u, 0u, 1u, ShaderType::Compute, 0u, 0u);
+		    const auto& line_inst = line_code.GetInstructions().At(0);
+		    RequireMimgTail(ShaderImageAtomicSupported(line_inst) && line_inst.mimg_dimension == 0u && line_inst.src[0].size == 1 &&
+		                        line_inst.src[0] == TileVgpr(4) && !line_inst.mimg_return_old_value,
+		                    "1D atomic reads X from one address VGPR");
 		    std::_Exit(0);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");
@@ -2361,6 +2367,53 @@ TEST(EmulatorShaderMimg, EmitsAndValidatesOneDimensionalArrayIntegerLoad)
 				    RequireMimgTail(source.ContainsStr(format == 20u ? "OpImageFetch %v4uint" : "OpImageFetch %v4float"),
 				                    "integer formats fetch integer texels");
 				    RequireMimgTail(!source.ContainsStr("%image_load_array_tag_0"), "a 1D array needs no runtime shape selection");
+			    }
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+// A store_mip with a partial DMASK supplies only the enabled components, in consecutive data VGPRs from VDATA (v8);
+// the disabled ones are written as zero, as plain stores do.
+TEST(EmulatorShaderMimg, PartialMaskStoreMipTakesEnabledComponentsFromConsecutiveRegisters)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    const auto code = ParseMimgTailInstruction(0x09u, 0u, 0u, 0x5u, ShaderType::Compute);
+		    const auto& inst = code.GetInstructions().At(0);
+		    RequireMimgTail(inst.type == ShaderInstructionType::ImageStoreMip && inst.format == ShaderInstructionFormat::VdataVaddr4StDmask &&
+		                        inst.dst.size == 2 && inst.src[0].size == 4,
+		                    "two data VGPRs and four address VGPRs");
+		    const auto source = EmitValidatedMimgTailModule(code, true);
+		    RequireMimgTail(source.ContainsStr("%t84_0 = OpLoad %float %v8\n") && source.ContainsStr("%t86_0 = OpLoad %float %v9\n"),
+		                    "x and z come from v8 and v9");
+		    RequireMimgTail(source.ContainsStr("%t85_0 = OpCopyObject %float %float_0_000000\n") &&
+		                        source.ContainsStr("%t87_0 = OpCopyObject %float %float_0_000000\n"),
+		                    "y and w are written as zero");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+// RDNA2 ISA 8.1.10: GLC on an image load or store is the globally coherent policy (a load misses the L0 and reads
+// L2), so the storage view the access goes through is decorated Coherent.
+TEST(EmulatorShaderMimg, GloballyCoherentLoadAndStoreDecorateTheStorageView)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    for (uint32_t opcode: {0x00u, 0x08u})
+		    {
+			    for (uint32_t glc: {0u, 1u})
+			    {
+				    const auto code = ParseMimgTailInstruction(opcode, 0u, 0u, 0xfu, ShaderType::Compute, glc << 13u);
+				    RequireMimgTail(code.GetInstructions().At(0).mimg_coherent == (glc != 0u), "GLC marks the access coherent");
+				    const auto source = EmitValidatedMimgTailModule(code, true);
+				    RequireMimgTail(source.ContainsStr(" Coherent\n") == (glc != 0u), "only a coherent access decorates the storage view");
 			    }
 		    }
 		    std::_Exit(0);

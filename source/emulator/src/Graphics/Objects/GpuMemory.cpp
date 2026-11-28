@@ -205,7 +205,10 @@ void GpuMemory::SetAllocatedRange(uint64_t vaddr, uint64_t size)
 	// heap's objects: a title can register over 12,000 heaps.
 
 	m_heaps.Add(h);
-	RebuildHeapIndex();
+	if (!InsertDisjointHeapSpan(static_cast<int>(m_heaps.Size()) - 1))
+	{
+		RebuildHeapIndex();
+	}
 	m_allocated_prefix_cache.Invalidate();
 	m_overlap_snapshot_cache.Invalidate();
 }
@@ -444,6 +447,26 @@ void GpuMemory::RebuildHeapIndex()
 		m_heap_index.push_back(span);
 	}
 	m_guest_bytes_generation.fetch_add(1, std::memory_order_release);
+}
+
+// A heap that overlaps no span adds one span of its own, which no neighbor can
+// merge with: the index a full sweep would build, without re-sorting every heap.
+bool GpuMemory::InsertDisjointHeapSpan(int heap_id)
+{
+	const auto& range = m_heaps[heap_id].range;
+	EXIT_IF(range.vaddr + range.size < range.vaddr);
+	const uint64_t end   = range.vaddr + range.size;
+	const auto     after = std::upper_bound(m_heap_index.begin(), m_heap_index.end(), range.vaddr,
+	                                        [](uint64_t value, const HeapSpan& span) { return value < span.begin; });
+	if ((after != m_heap_index.begin() && std::prev(after)->end > range.vaddr) || (after != m_heap_index.end() && after->begin < end))
+	{
+		return false;
+	}
+	m_guest_bytes_generation.fetch_add(1, std::memory_order_acq_rel);
+	m_heap_index.insert(after, HeapSpan {range.vaddr, end, heap_id, static_cast<uint32_t>(m_heap_index_open.size()), 1u, end});
+	m_heap_index_open.push_back(heap_id);
+	m_guest_bytes_generation.fetch_add(1, std::memory_order_release);
+	return true;
 }
 
 // Every heap that intersects any of the ranges, ascending: the heaps a
@@ -859,6 +882,13 @@ uint64_t GpuMemoryObjectGraphGeneration()
 	EXIT_IF(g_gpu_memory == nullptr);
 
 	return g_gpu_memory->ObjectGraphGeneration();
+}
+
+uint64_t GpuMemoryCurrentFrame()
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+
+	return g_gpu_memory->CurrentFrame();
 }
 
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(SubmissionId submission, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,

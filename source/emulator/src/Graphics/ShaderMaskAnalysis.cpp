@@ -660,7 +660,7 @@ std::vector<uint32_t> PartLocalSkipTargets(const ShaderCode& code, const std::ve
 
 } // namespace
 
-ShaderLaneMaskPlan ShaderLaneMaskPlanOf(const ShaderCode& code, bool part_local_skips)
+ShaderLaneMaskPlan ShaderLaneMaskPlanOf(const ShaderCode& code, bool part_local_skips, bool native_wave32)
 {
 	const auto&                        instructions = code.GetInstructions();
 	const uint32_t                     count        = instructions.Size();
@@ -676,7 +676,7 @@ ShaderLaneMaskPlan ShaderLaneMaskPlanOf(const ShaderCode& code, bool part_local_
 	std::vector<MaskDemandStep> steps(count);
 	for (uint32_t i = 0; i < count; i++)
 	{
-		steps[i] = MaskDemandOf(instructions.At(i));
+		steps[i] = MaskDemandOf(native_wave32 ? ShaderWave32LaneMasks(instructions.At(i)) : instructions.At(i));
 	}
 	std::vector<std::vector<int64_t>> tree_definitions;
 	MarkGatherCandidates(code, &steps, &tree_definitions);

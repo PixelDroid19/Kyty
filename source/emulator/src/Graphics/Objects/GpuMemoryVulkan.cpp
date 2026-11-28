@@ -546,7 +546,9 @@ GpuMemoryGdsSource GpuMemory::AcquireGdsSource(GraphicContext* ctx, CommandBuffe
 				{
 					continue;
 				}
-				if (!(use.queue == recording.queue))
+				// A writer on another queue that the recording awaits on the device precedes it like an
+				// earlier command of the recording queue.
+				if (!(use.queue == recording.queue) && !buffer->AwaitsSubmissionOnDevice(use))
 				{
 					source.status     = GpuMemoryGdsSourceStatus::SubmissionCompletionRequired;
 					source.dependency = use;

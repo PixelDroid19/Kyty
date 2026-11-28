@@ -648,8 +648,20 @@ public:
 	// Transfers, barriers, dispatches, events and query resets are illegal inside
 	// a render pass instance; this handle ends an open one first. Bindings, push
 	// constants, dynamic state and query scopes are legal in both scopes
+	enum BarrierProducer : uint8_t
+	{
+		BarrierProducerNone     = 0u,
+		BarrierProducerGraphics = 1u << 0u,
+		BarrierProducerCompute  = 1u << 1u,
+		BarrierProducerTransfer = 1u << 2u,
+		BarrierProducerAll      = BarrierProducerGraphics | BarrierProducerCompute | BarrierProducerTransfer,
+	};
+
 	// (RecordState), draws only inside one (RecordInsideRenderPass).
 	[[nodiscard]] VkCommandBuffer RecordOutsideRenderPass();
+	// Same handle when the caller only emits synchronization or queries (never writes memory/images).
+	[[nodiscard]] VkCommandBuffer RecordOutsideRenderPassSync();
+	void                          MarkBarrierProducers(uint8_t producers) const;
 	[[nodiscard]] VkCommandBuffer RecordState();
 	[[nodiscard]] VkCommandBuffer RecordInsideRenderPass() const;
 	// A draw's state binds and dynamic state for `target`, a handle RecordState or StateTarget
@@ -690,7 +702,8 @@ public:
 	void ReadImage(const VulkanImage* image);
 	// Orders every earlier command of the queue before every later one, for all
 	// stages and memory accesses. Guest cache flushes often come several in a row;
-	// when the latest command already is such a barrier, another orders nothing more.
+	// Orders GPU writes by `producers` since the last covering barrier; no-op when clean.
+	void MemoryBarrier(uint8_t producers);
 	void FullMemoryBarrier();
 	// Makes a device write stamped at `device_write_time` visible to the commands recorded next into
 	// `target`, recording at most one full memory barrier per recording. False when the write may
@@ -884,8 +897,8 @@ private:
 	mutable bool                 m_recording = false;
 	bool                         m_resetting = false;
 	std::optional<OpenRenderPass> m_open_render_pass;
-	// The latest command recorded is a full memory barrier. Every recording handle clears it.
-	mutable bool m_latest_full_barrier = false;
+	// GPU producer classes that wrote since the last memory barrier covering each bit.
+	mutable uint8_t m_dirty_barrier_producers = 0;
 	// Encoded draw-tail commands and the command buffer they replay into.
 	mutable DeferredStateCommands m_deferred;
 	VkCommandBuffer               m_deferred_target = VK_NULL_HANDLE;
@@ -930,13 +943,16 @@ private:
 void GraphicsRenderInit();
 void GraphicsRenderCreateContext();
 
-// The vertex and pixel shader input information of one indexed draw, prepared ahead of its recording
+// The vertex and pixel shader input information of one direct draw, prepared ahead of its recording
 // from registers equal to the draw's. The recording takes ownership of the contents.
 struct PreparedDrawInputs;
 // Fills `inputs` and returns true when the recording of an indexed draw with these registers reaches
 // its shader input analysis outside a geometry pass. Reads the registers and guest memory only.
 [[nodiscard]] bool GraphicsRenderPrepareIndexedDrawInputs(const HW::Context& ctx, const HW::UserConfig& ucfg, HW::Shader* sh_ctx,
                                                           uint32_t index_count, uint32_t instance_count, PreparedDrawInputs* inputs);
+// The same for an auto draw, including one that runs as a geometry pass.
+[[nodiscard]] bool GraphicsRenderPrepareAutoDrawInputs(const HW::Context& ctx, const HW::UserConfig& ucfg, HW::Shader* sh_ctx,
+                                                       uint32_t index_count, uint32_t instance_count, PreparedDrawInputs* inputs);
 // `prepared` is null or holds inputs prepared from registers equal to this draw's.
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
@@ -953,9 +969,10 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
                                                        const void* index_base, uint64_t args_address, uint32_t latch_queue,
                                                        uint32_t previous_instances, SubmissionId* pending_submission);
 [[nodiscard]] uint32_t GraphicsRenderReadDrawIndexedIndirectInstances(uint32_t latch_queue);
+// `prepared` is null or holds inputs prepared from registers equal to this draw's.
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
 	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count, int32_t vertex_offset_add,
-	                             uint32_t first_instance, SubmissionId* pending_submission);
+	                             uint32_t first_instance, SubmissionId* pending_submission, PreparedDrawInputs* prepared = nullptr);
 void GraphicsRenderWriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value);
 void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr);
 void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value);
@@ -1000,7 +1017,7 @@ enum class ComputeDispatchResult
     uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, uint64_t indirect_args_address,
     bool processor_writeback_complete, SubmissionId* pending_submission);
-void GraphicsRenderMemoryBarrier(CommandBuffer* buffer);
+void GraphicsRenderMemoryBarrier(CommandBuffer* buffer, uint8_t producers = CommandBuffer::BarrierProducerAll);
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 void GraphicsRenderMemoryFree(uint64_t vaddr, uint64_t size);

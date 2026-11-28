@@ -39,6 +39,8 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: 8-lane wave32 split parts hold the dunes landing view at 29.8-30.6 ms a frame against 38.8 ms with 16-lane parts; the second rock stays at about 36 ms (2026-11-19, measured)
+  - Robot platformer: BVH fetch merge and loop-enclosing selection cut drop 0x3666fa39 from 16.4 to 6.0 ms and lift the dunes cliff to 31.9-33.6 fps (2026-11-18, fixed)
   - Robot platformer: dunes baseline re-measured with the 2026-11-14 probe, GPU-bound with the lighting program on both builds, no GPU regression seen at about 350 draws (one base block per arm) (2026-11-18, measured)
   - Robot platformer: progress writes to save-data memory were dropped (2026-11-16, fixed)
   - Robot platformer: the studio intro video was black, a UNORM target sampled as sRGB (2026-11-16, fixed)
@@ -171,6 +173,8 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Fruit-merge puzzle: frozen on the countdown overlay (2026-11-16, fixed)
 - [Puppy afterlife adventure](titles/puppy-afterlife-adventure.md)
   - Puppy afterlife adventure: washed-out image and pipeline crash (2026-11-16, fixed)
+- [PPSA38500 - Grand Theft Auto VI](titles/open-world-crime.md)
+  - PPSA38500 - Grand Theft Auto VI: strict boot walls (2026-11-27, open, not gameplay)
 - [Puzzle title](titles/puzzle-title.md)
   - Puzzle title on AMD: two causes of the gfx ring timeout (2026-10-17)
 - [Anime fighter](titles/anime-fighter.md)
@@ -247,7 +251,24 @@ spans titles goes in `docs/bringup/cross-title.md`.
     - First stage built: indexed-draw shader inputs prepared ahead, 10.54 -> 8.31 us per draw (2026-11-12)
     - Admitting more packets to the replay excluded: 86.5 % of draws already taken, at most ~2 ms per frame (2026-11-12)
   - [Binding over a versioned snapshot](bringup/binding-snapshot-design.md): epochs, by-address storage, texture heap priced on paper at 3.0-5.2 us/draw saved, leaving 6.5-8.5 us; 3 us needs recording off the command-processor thread (2026-11-12, design)
-  - [Shader ALU contracts](bringup/shader-alu-contracts.md): scalar min/max SCC, RPI VOP3, f32 min/max zero rule, sin/cos in turns, V_SUB_CO_CI_U32, f64-to-integer saturation fixed; RPI/FLR saturation and rounding, FP32 input denormals and F64 e64 follow-up (2026-11-17)
+  - [Shader ALU contracts](bringup/shader-alu-contracts.md): scalar min/max SCC, RPI VOP3, f32 min/max zero rule, sin/cos in turns, V_SUB_CO_CI_U32, f64-to-integer saturation fixed; RPI/FLR saturation and rounding, FP32 input denormals and F64 e64 follow-up (2026-11-17); OMOD div:2 underflow keeps its sign (2026-11-21)
+  - Guest primitive reset ignored (no all-ones index seen); host restart slow on ANV, excluded as a reuse lever (2026-11-19, open)
+  - 3D-to-compute switches cost about 7 us each on ANV, about 1 ms per frame at 60-80 alternations (2026-11-19)
+  - Wave32 lane-mask demand: a VALU mask read as an SGPR pair hid a live high word; split parts skipped rendezvous and the GPU job timed out (2026-11-19, fixed on t247; 8-lane wave32 parts after it)
+  - Shader identity followed texture data: loaded T#s merged by content and exact sampled formats split programs into dozens of modules; slot-keyed merge and numeric class (2026-11-21, fixed)
+  - Samplers paired with views by slot number: a 2D load sharing the sampler's slot hid the 3D view it samples, so CLAMP_Z became repeat and near fog lookups wrapped to the far slice (2026-11-21, fixed)
+  - Fragment transport parameters overlapped the vertex push constants: every transported draw with vertex user data failed its bands silently; record reservation by one atomic add cut capture from 33 to 0.45 ms per band; the shade split by the guest register rule cut 57.6 to 6.8 ms per frame; single-primitive bands and per-subgroup counters brought the patched renderer to 31-33 fps in light gameplay (2026-11-22, fixed; failure flag never read, depth-copy lead open)
+  - Program-relative loads translated through a window resolved at bind: the intro pixel programs skip the address walk for loads inside the table entry holding the program base; intro about 25.9 -> 27.5 fps, heavier stretch not re-measured (2026-11-22, measured)
+  - Dead-guard elision follows vector relative reads: 591 -> 319 EXEC selects and 124 -> 118 live registers in the hottest intro program, still SIMD8; branch wrapping and M0-keyed variants excluded (2026-11-22, measured statically)
+  - Lane reductions whose temporary is reused before the reads: both deferred-lighting pixel programs now run as native partial waves instead of fragment transport; dunes 26.7-27.7 -> 33.6-34.7 fps, median 27.7 -> 33.7 (2026-11-22, fixed)
+  - Own EXEC bit under WQM of a quad-gathered tested mask: own-bit selects 450 -> 35, 440 -> 273, 361 -> 195 in three hot pixel programs, the first now SIMD16-capable; dunes dust seconds unchanged, no fps claim (2026-11-22, measured)
+  - Split-wave LDS order between fields of one lane slot: the per-draw geometry front drops from 79 to 24 barriers; front costs 2.5-2.7 ms per frame without per-dispatch flushes (11.5 ms was a serialized draw-granularity sum); travel-tunnel stretch GPU-bound in render-pass chunks; dust frames not yet ranked without flushes; no fps claim; entry-block address defect fixed (2026-11-22, measured)
+  - Uniform branch around the swizzled buffer address: dust simulation 3 % slower at equal element counts, excluded; dust frames led by two pixel programs (13.5 of 34.8 ms serialized) (2026-11-26, excluded)
+  - Program-relative scalar tables read through the program window: 63 loads on 6 particle programs fit the window and read it directly (alignment inferred from the guest code); the two heaviest particle draws 14-16 % cheaper at equal vertex counts (coverage not controlled); no dust fps change established in one quiet run (2026-11-26, measured)
+  - Dust compute programs: the hottest one inlines its address lookup at 145 call sites (146 loops, 624 spills); compute is 15.3 of 52.2 ms serialized, but the worst dust frames are led by the particle pixel program (+17.8 ms), and the lookup share is not priced (2026-11-26, measured; open)
+  - Acm FFT and convolution reverb: the six entries one title imports are bound and computed on the CPU; transform scale, sign, fp16 and history conventions are inferred and stay internal while IR blocks come from the bound FFT (2026-11-28, implemented)
+  - Waterfall moves narrowed by the values of their lane index: sixteen unlowered loops (the guest's `s_andn2` between the moves) made a 3 MB compute module that never finished compiling; all lower now, no precompile wait through 75 s on that title (2026-11-28, fixed)
+  - Resource level counts past the 1x1 level and Standard256B storage chains: layouts accept the declared `max_mip`, host images stop at 1x1; tile-1 storage chains keep one host mip per level (2026-11-28, fixed)
   - Leads from another implementation's change list: event-flag poll back-off excluded; file reads into tracked pages and repeated upload checks already covered (2026-11-10, excluded; open leads)
   - [Temporal upscalers decision](bringup/temporal-upscalers-decision.md): no DLSS/XeSS now; temporal inputs first, FSR 2 before proprietary SDKs (2026-10-29, decided)
   - Street scene of GTA San Andreas DE: recycled-memory links, reloaded V#s, gather4 lanes, wave64 LDS order (dot grid); capture layout race, HUD and Arc device loss open (2026-11-05, fixed; open items)
@@ -715,6 +736,20 @@ When switching private fixtures (or adding a second root):
 The latest regression sweeps below are the frontier a strict run must not
 fall below. Per-title state is in the files listed under "Where records
 live".
+
+### Strict boot matrix after the open-world bring-up push (2026-11-28)
+
+- **Setup.** `perf/bvh-liveness` at `a1926b57b` (translator 265), Intel Arc
+  A770, Mesa ANV, `kyty_agent games-matrix --mode strict`, one title at a
+  time, 90 s total deadline, 20 s stability window, 60 fps present limit,
+  no input route.
+- **Result.** All ten reached `interactive` with child exit 0 and 900-1200
+  presents: the card game, the bug platformer, the racing title, the
+  fishing title, the roguelike platformer, the watercolour platformer, the
+  well platformer, the preschool title, the sandbox title and the robot
+  platformer.
+- **Not covered.** No scripted route survives on this host, so gameplay
+  scenes and the robot platformer's dunes frame rate were not re-measured.
 
 ### Regression sweep for the 2026-10-19/20 role-playing changes (2026-10-20)
 

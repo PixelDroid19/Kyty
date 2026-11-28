@@ -51,13 +51,20 @@ uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format, uint32_t tile
 	return bytes;
 }
 
-static uint32_t resolve_host_mip_count(uint16_t fmt, uint32_t width, uint32_t height, uint32_t guest_levels)
+static uint32_t resolve_host_mip_count(uint16_t fmt, uint32_t width, uint32_t height, uint32_t depth, uint32_t guest_levels)
 {
-	if (!ShaderGen5TextureIsBlockCompressed(fmt))
+	if (ShaderGen5TextureIsBlockCompressed(fmt))
 	{
-		return guest_levels;
+		return Gen5CompressedHostMipCount(width, height, guest_levels);
 	}
-	return Gen5CompressedHostMipCount(width, height, guest_levels);
+	// The T# max mip describes the resource and may run past the 1x1 level (a block view of
+	// a compressed chain declares the chain's count); a Vulkan image ends at 1x1.
+	uint32_t full_chain = 1u;
+	for (uint32_t extent = std::max({width, height, depth}); extent > 1u; extent >>= 1u)
+	{
+		full_chain++;
+	}
+	return std::min(guest_levels, full_chain);
 }
 
 // Pitches are in texels. A guest-registered linear row stride (video planes)
@@ -288,7 +295,7 @@ static void upload_array_2d(GraphicContext* ctx, TextureVulkanImage* vk_obj, con
 	                                             std::max(upload_layers, 1u));
 	std::vector<uint8_t> batch(slice_bytes * batch_layers);
 	const uint32_t host_levels = resolve_host_mip_count(static_cast<uint16_t>(fmt), static_cast<uint32_t>(width),
-	                                                       static_cast<uint32_t>(height), static_cast<uint32_t>(levels));
+	                                                       static_cast<uint32_t>(height), 1u, static_cast<uint32_t>(levels));
 	uint32_t             layer_region_count = 0;
 	if (!Gen5FillTextureArrayLayerUploadRegionsForLevels(array_layout, 0u, host_levels, nullptr, 0u, &layer_region_count) ||
 	    layer_region_count == 0u)
@@ -449,6 +456,34 @@ static void upload_thin_volume_levels(GraphicContext* ctx, TextureVulkanImage* i
 	UtilFillImage(ctx, image, linear.data(), linear.size(), regions, vk_layout);
 }
 
+// A slab-chained volume (Gen5GetVolumeTextureLayout) uploads each level from its packed linear range.
+static void upload_volume_mip_chain(GraphicContext* ctx, TextureVulkanImage* image, const Gen5TextureVolumeLayout& layout,
+                                    const void* guest, uint64_t guest_size, uint64_t vk_layout)
+{
+	std::vector<uint8_t> linear(static_cast<size_t>(layout.linear_size));
+	if (!Gen5DetileTextureVolumeLevels(linear.data(), linear.size(), guest, guest_size, layout))
+	{
+		EXIT("Gen5 volume mip chain detile failed: %ux%ux%u levels=%u size=%" PRIu64 "\n", layout.width, layout.height, layout.depth,
+		     layout.levels, guest_size);
+	}
+	Vector<BufferImageCopy> regions;
+	for (uint32_t index = 0; index < layout.levels; ++index)
+	{
+		const auto&     level = layout.level[index];
+		BufferImageCopy region {};
+		region.offset    = static_cast<uint32_t>(level.linear_offset);
+		region.pitch     = level.width;
+		region.width     = level.width;
+		region.height    = level.height;
+		region.depth     = level.depth;
+		region.dst_level = index;
+		region.dst_x     = 0;
+		region.dst_y     = 0;
+		regions.Add(region);
+	}
+	UtilFillImage(ctx, image, linear.data(), linear.size(), regions, vk_layout);
+}
+
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("TextureObject::update_func");
@@ -507,6 +542,11 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			EXIT("unsupported Gen5 volume upload: format=%u %ux%ux%u pitch=%u levels=%u tile=%u size=%" PRIu64 "\n",
 			     static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), depth,
 			     static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), *size);
+		}
+		if (volume_layout.mip_chain)
+		{
+			upload_volume_mip_chain(ctx, vk_obj, volume_layout, reinterpret_cast<const void*>(*vaddr), *size, static_cast<uint64_t>(vk_layout));
+			return;
 		}
 		if (volume_layout.thin && volume_layout.slices.levels > 1u)
 		{
@@ -620,7 +660,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		}
 
 		const uint32_t          host_levels = resolve_host_mip_count(static_cast<uint16_t>(fmt), static_cast<uint32_t>(width),
-		                                                    static_cast<uint32_t>(height), levels);
+		                                                    static_cast<uint32_t>(height), 1u, levels);
 		Vector<BufferImageCopy> regions(static_cast<int>(host_levels));
 		for (uint32_t level = 0; level < host_levels; level++)
 		{
@@ -741,7 +781,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 
 	// The host image holds only the levels create_texture_image allocated.
 	const uint32_t          host_levels = resolve_host_mip_count(static_cast<uint16_t>(fmt), static_cast<uint32_t>(width),
-	                                                             static_cast<uint32_t>(height), static_cast<uint32_t>(levels));
+	                                                             static_cast<uint32_t>(height), 1u, static_cast<uint32_t>(levels));
 	Vector<BufferImageCopy> regions(static_cast<int>(host_levels));
 	for (uint32_t i = 0; i < host_levels; i++)
 	{
@@ -1621,9 +1661,10 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	const auto width         = static_cast<uint32_t>(params[TextureObject::PARAM_WIDTH_HEIGHT] >> 32u);
 	const auto height        = static_cast<uint32_t>(params[TextureObject::PARAM_WIDTH_HEIGHT]);
 	const auto guest_levels  = static_cast<uint32_t>(params[TextureObject::PARAM_LEVELS]);
-	const auto levels        = resolve_host_mip_count(fmt, width, height, guest_levels);
 	const auto resource_info = params[TextureObject::PARAM_RESOURCE_INFO];
 	const auto resource_type = TextureObject::GetResourceType(resource_info);
+	const auto levels        = resolve_host_mip_count(fmt, width, height,
+	                                                  resource_type == 10u ? TextureObject::GetResourceDepth(resource_info) : 1u, guest_levels);
 	const auto force_degamma = params[TextureObject::PARAM_FORCE_DEGAMMA] != 0;
 
 	view_config->base_level        = static_cast<uint32_t>(params[TextureObject::PARAM_LEVELS] >> 32u);

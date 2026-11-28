@@ -1,3 +1,27 @@
+## GPU heap registration re-sorted every heap (2026-11-28, fixed locally)
+
+`GpuMemory::SetAllocatedRange` rebuilt the whole heap index (a sort of every heap edge and a sweep)
+for each new GPU mapping, so registering n heaps cost O(n² log n). `PPSA38500 - Grand Theft Auto VI`
+maps many 64 KiB ranges while loading and spent about 20 s on one host thread there (two of three samples inside the rebuild),
+long enough for its own watchdog to kill it when a 4K output was reported. A heap that overlaps no
+existing span now inserts its own span, which is exactly what the full sweep would produce; a heap
+that overlaps any span still rebuilds. Freeing a heap still rebuilds, because heap ids shift.
+Existing GPU memory tests (adjacent, overlapping and gapped ranges) pass. Evidence:
+`docs/titles/open-world-crime.md`.
+
+## Rect lists outside the procedural three-vertex form (2026-11-28, built)
+
+Primitive types 7 and 17 drawn with vertex buffers, as indexed draws or with more than three vertices
+became a triangle strip, so a three-vertex rect showed as one triangle and longer lists as strips across
+rects. `PPSA38500 - Grand Theft Auto VI` composites its frame through such a rect. These draws are now a
+triangle list through a host geometry stage (`ShaderRectGeometry.cpp`). It emits the screen-space
+bounding box of each rect's three shaded vertices, extends smooth outputs over the triangle's plane and
+keeps flat parameters at the first vertex. The procedural form (three vertices, no vertex buffer,
+vertex id 3) is unchanged. Rects whose vertex stage exports a layer or clip distance, whose pixel shader
+needs interpolation geometry or fragment transport, or on a host without geometry shaders keep the old
+single-triangle draw and log a warning. Evidence, limits and verification:
+`docs/titles/open-world-crime.md`.
+
 ## Soft checks that go on to use a null guest pointer (2026-11-14, one site fixed, pattern open)
 
 `VideoOutGetResolutionStatus` logged a warning when `status` was null or the handle had no session, then
@@ -3833,6 +3857,14 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   role-playing title's GPU hang, which stops in fixed-function state with
   the execution units idle. Direction: translate GLC or DLC word loads as
   device-scope atomic loads with acquire semantics.
+  **Images since done (2026-11-28):** a GLC image load, load_mip, store or
+  store_mip (RDNA2 8.1.10, the globally coherent policy) now parses into
+  `mimg_coherent`, and the translator decorates every storage view of that
+  shader `Coherent`; the views alias one binding, so the decoration is
+  per shader, not per resource. Before, the parser stopped on it. GLC on a
+  sample or gather still stops the run. Buffer loads are unchanged. Trigger:
+  `PPSA38500 - Grand Theft Auto VI` while loading after the legal terms.
+  Test: `GloballyCoherentLoadAndStoreDecorateTheStorageView`.
 - **Defect found, not fixed: barriers in lane-conditional regions of the
   native wave64 route.** The native-equivalence proof refuses scalar
   memory side effects inside a region that `s_cbranch_execz` or
@@ -4762,8 +4794,12 @@ checked against the code; none is hit by a title in the current strict runs.
   shader's entry user SGPRs and all eight dwords are zero
   (`zero_image_resources`, part of the module key). The emitter stores zero
   in each DMASK component of such a read; the image destination guard
-  applies EXEC as for any image result. Gather, resinfo, stores and atomics
-  through a zero T# keep refusing.
+  applies EXEC as for any image result. Gather, resinfo and atomics through
+  a zero T# keep refusing; stores are below.
+- Stores (2026-11-28): an image store through a T# loaded from memory whose
+  eight words are all zero is discarded, and the load writes zero. A buffer
+  type does not qualify for a store. Record: `PPSA38500 - Grand Theft Auto
+  VI`, compute `9be22ee5`.
 - Verified on Intel: the card title passes the stop (120 s, generic route)
   and stops at the next one, `fragment wave transport is required by the
   pixel stage` (a wave64 pixel program writes a scalar under divergent
@@ -7944,6 +7980,8 @@ runs with `KYTY_PRESENT_FPS_LIMIT=60`; the counters were temporary and are not i
   - Acm (six entries, imported by nine titles including `PPSA17221 - Minecraft` and `PPSA21567 - ASTRO BOT`): no
     reference runs the FFT, reverb or panner; batches complete at once with nothing computed, which would be a
     success placeholder. The context and batch error codes and the job builders' argument lists also differ.
+    **Since done for the entries `PPSA38500 - Grand Theft Auto VI` imports** (see "Acm FFT and convolution
+    reverb" below).
   - PNG and JPEG decoders: the references agree on the header fields, the decode return value and `Delete`, but not
     on the memory size the title must allocate or the handle `Create` writes into it, and they differ on palette
     alpha, the pitch errors and the JPEG pixel formats.
@@ -8511,6 +8549,750 @@ without input.
   `ChangedSince` reports the object's dirty generation unchanged, and `Rearm` skips blocks already proven armed.
 - **Not applicable as stated: branch-free bounds-checked buffer loads.** The translator's buffer access guard tests for
   a zero-record descriptor, not a per-offset bound, so there is no per-load range branch to replace.
+- **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** Keeping the last matched entry of
+  the in-shader guest-address lookup in private variables regressed the BVH kernel of `PPSA21567 - Astro Bot` from
+  5.77 to 10.76 ms with spills 272 to 487; details in `docs/titles/robot-platformer.md`.
 - **Open, not checked:** storage views of a mip past the descriptor's last level; batching of blocking GPU readbacks and
   publication of GPU writes to pages the guest reads often; `userfaultfd` write tracking in place of `mprotect`; one
   staging copy per synchronization and release of clean, unused buffers.
+
+## Guest primitive reset is ignored; host restart is slow on ANV (2026-11-19, open)
+
+Worktree commit `e8433b68e` plus temporary diagnostics, Intel Arc A770 (DG2), ANV Mesa 26.2.x, 60 fps limit.
+
+- **Defect (not fixed).** `PPSA21567 - Astro Bot` writes `GE_MULTI_PRIM_IB_RESET_EN = 0x1` (reset on, match-all-bits
+  off) and never writes `VGT_MULTI_PRIM_IB_RESET_INDX` in a 175 s strict run (`rst1`). Kyty drops both registers
+  (`GraphicsRunJmpTables.cpp:450` and `:910`) and builds every pipeline with `primitiveRestartEnable = VK_FALSE`
+  (`GraphicsRenderPipeline.cpp:579`). The index scan of the same run found no indexed draw whose largest index is
+  all-ones for its type, so ignoring the reset changed no primitive in that run. A draw that does carry an all-ones
+  index with reset on is cut on the console and drawn here. What the console uses as the reset index when the guest
+  never writes it is not established.
+- **Host cost on ANV.** A standalone Vulkan test (no emulator; `VK_EXT_primitive_topology_list_restart` enabled,
+  triangle lists, rasterization on, restart as dynamic state) shows that turning restart on lengthens the effective
+  vertex-reuse window from about 16-20 vertices to more than 64. On a 128x128 grid drawn in 32-quad column strips,
+  vertex invocations per primitive fall from 0.766 to 0.520. Yet the same draws run much slower: a 1024x1024 grid
+  with a trivial vertex program takes 7.2-7.6 ms against 4.5 ms, and with 256 or 1,024 dependent FMAs per vertex
+  7.5-7.8 against 1.2-1.4 ms and 22-24 against 3.7-4.5 ms. The RADV iGPU shows no reuse change. In the game run,
+  80-frame windows with host restart on lowered invocations per primitive by 8-12 % (0.71 to 0.645 in the last
+  scene), but the two such windows in the heaviest scene (about 1,170 draws) took 154 ms of render-pass time against
+  36-39 ms in the windows around them. The run had left the route and its per-draw index counts were not compared
+  with the bench threshold below, so those two windows are unattributed.
+- **What the cost depends on.** The slowdown follows the index count of one draw, not the index values or the
+  restart topology. With 256 dependent FMAs per vertex, at equal total work: up to about 0.8 M indices per draw,
+  restart on is 10-18 % faster when the work is instanced (draws of 98 k indices are the exception, 17 % slower);
+  at 1.6 M indices it is 1.7 times slower, and at 6.3 M 6.5 times. Repeating a mesh 16 times in one draw is 6.5
+  times slower, while 16 instances of it are 8 % faster; adding 4 M to every index value changes nothing. Strips
+  slow down the same way, and baked and dynamic restart behave the same. Splitting the 6.3 M-index draw into 16 to
+  256 separate draws with restart on removes the slowdown but not the gain: 1.255 ms against 1.175-1.26 ms off,
+  despite 10 % fewer invocations. On Gfx12.5 the driver sets `3DSTATE_VFG.ListCutIndexEnable` from the restart state
+  (`update_vfg_list_cut_index`); a consistent reading, not proven, is that the global vertex fetch then stops
+  splitting a draw into small batches across the geometry slices, which explains both the larger reuse window and
+  the loss of parallelism inside one draw. Vulkan exposes no control over that distribution.
+- **Direction.** No performance lever: restart gains only on instanced draws, not reliably, and RADV shows no reuse
+  change. For correctness, mirror the guest reset only for draws whose index scan finds an all-ones index (and
+  for indirect draws, whose indices are not scanned), so the common case keeps restart off on ANV.
+
+## 3D-to-compute switches cost about 7 us each on ANV (2026-11-19)
+
+- **Observation.** A standalone Vulkan program on the A770 (ANV, Xe KMD) recorded 60 pairs of a one-triangle
+  render pass and an 8-group compute dispatch in one command buffer. Alternating them took 17.3 us per pair against
+  3.0 us with the passes first and the dispatches after; with 1024x1024 targets the gap is about 13 us per pair.
+  The RADV iGPU shows no gap (0.25-0.27 us per pair either way). A compute-to-compute memory barrier adds about
+  3.6 us per dispatch on the A770.
+- **Bearing on titles.** Kyty records guest dispatches in guest order on one queue, closing any open render pass
+  first. At 60-80 alternations per frame (`PPSA21567 - Astro Bot`) the switches cost about 1 ms per frame; that
+  title's skip tests of its small dispatches gave 6 ms once and nothing in another scene
+  (`docs/titles/robot-platformer.md`), so the switches are not shown to be a lever there. Regrouping dispatches would need proof that no draw in between reads or
+  writes what they touch.
+
+## Unit test that depends on test order (2026-11-19, open)
+
+`EmulatorGraphicsState.GpuMemoryRetiresLinkedReadOnlyBuffers`
+(`source/unit_test/src/emulator/UnitTestEmulatorGraphicsState.cpp:3118`) fails under
+`kyty_unit_test --gtest_filter='EmulatorGraphics*' --gtest_shuffle` with `--gtest_random_seed=22` and `33` and passes
+with seed 11 and in file order. It fails the same way with the two GPU-memory overlap tests added on 2026-11-19
+excluded, so another test leaves global GPU-memory state it depends on. Suggested direction: give it an address range
+no other test maps, or free what it creates, as `GpuMemoryFreeDeletesExactRange` does.
+
+`EmulatorGraphicsState.StorageTextureArrayDescriptorsAreViewsOfTheLiveArray`
+(`source/unit_test/src/emulator/UnitTestEmulatorGraphicsState.cpp:6565`) has the opposite dependence (seen
+2026-11-22): it fails when run alone with `--gtest_filter` and passes in the full suite, so it relies on state an
+earlier test leaves. Same suggested direction: set up everything it reads itself.
+
+
+## Wave32 lane-mask demand (2026-11-19, fixed on t247)
+
+The split-wave mask plan (`ShaderLaneMaskPlanOf`, `source/emulator/src/Graphics/ShaderMaskAnalysis.cpp`) decides
+which lane-mask producers may keep only their own part's bits. The decoder names a VALU lane mask as an SGPR pair
+(`vcc`, `s[26:27]`) even in a wave32 program, where it writes only the low word. The plan read it as a write of both
+words, so a mask the guest left in the high word looked dead behind it. In `PPSA21567 - Astro Bot` program
+`0xbf8ee9fc` sets EXEC from `vcc_hi` after a `V_MAD_U64_U32` whose carry names `vcc`. The compare into `vcc_hi` was
+lowered part-local, its EXECZ branch tested each part's own bits, and a part with no active lane skipped a range
+holding rendezvous. The other parts then waited for it until the GPU job timed out. The fix narrows each instruction
+with `ShaderWave32LaneMasks` before the plan reads it, as the scalar liveness already does
+(`ShaderScalarLiveness.cpp`). It applies to every guest wave32 program that has a plan: split wave32 compute and
+wave32 pixel programs. In the Astro dunes run 10 compute and 8 pixel modules changed against a t246 run; two t246
+runs differ in 2-3 pixel modules, `0x6bcfb82d` in both. Regression test:
+`EmulatorShaderMaskAnalysis.Wave32LowMaskWriteKeepsHighWordDemanded`.
+
+With the plan fixed, the layout splits wave32 into 8-lane parts on a host whose subgroups go down to 8 lanes
+(16 elsewhere): a 16-lane part there holds 64 dwords a lane, and a measured wave32 program spilled 1,171 times at 16
+lanes against 50 at 8. On the Intel Arc A770 (ANV) with a 6 s toggle on t247, 8 against 16 lanes measured:
+`PPSA21567 - Astro Bot` dunes 31.56 against 38.81 ms a frame; `PPSA07393 - Gori: Cuddly Carnage` menu 48.29
+against 56.50 ms (`gori2`; four captures, two per arm, byte-identical); `PPSA17221 - Minecraft` world 30.64 against
+29.74 ms (`mcall1`, within noise; no wave32 split was seen there). Under the rule with no toggle, Astro dunes
+measured 30.61 ms (`w8warm3`, one run with GPU profiling on) and the Gori menu 48.19 ms with captures byte-identical
+to `gori2` (`gori8`). The part width is already in the compute shader id (`Shader.cpp`), so the rule needs no
+translator version bump. Against t246, before the plan fix raised the 16-lane cost, the Astro dunes gain is about
+4 ms (`tog8`: 35 against 31 ms). `PPSA17221 - Minecraft` on the rule build measured 33.70 ms in the world at about 5,400
+draws a frame (`mcw8`) and 26.66 ms at about 4,400 (`mcw8b`), against 29.74 ms in the 16-lane arm of `mcall1` at
+about 5,400. `mcw8` ran 29.8-30.7 ms at about 5,430 draws for its first 20 s, matching `mcall1`, then slowed to
+36-38 ms at the same draw count; a fixed layout rule cannot cause a change in the middle of a run. The slow windows
+follow the sampled GPU clock: `mcw8` ran 1,895-1,900 MHz in its fast windows and 1,515-1,720 MHz while slow (38.4 ms
+at 1,515 MHz), and the early slow windows of `mcw8b` ran 1,482-1,555 MHz against 1,847-1,932 MHz later. The process's
+own share of render-engine cycles also fell in those windows (`mcw8` 66-67 % fast against 56-61 % slow; `mcall1` 44 %
+in its 980 MHz window), which a GPU-bound slowdown would not do: the frame slows upstream of the GPU and the clock
+follows. The cause is open; foreign GPU work in those windows was not checked.
+The two rule runs
+spread by 7 ms, and the in-run toggle above bounds the width's effect there to about 1 ms.
+
+## Shader identity followed the guest's texture data (2026-11-21, fixed)
+
+**Observed.** On the `PPSA21567 - Astro Bot` fight route, warm runs still compiled new pipelines (0.5-1.3 s
+of graphics pipeline misses a run). One guest program had 96 SPIR-V modules in the private cache, another 69,
+and the modules of one program differed only in constants. The translator merged two loaded T#s into one
+resource whenever their descriptor words were equal (`ShaderResources.cpp`, the dynamic, split and nested
+texture paths). One program reads 39 T#s from 39 distinct table words; by content it bound 10 to 23 resources
+depending on which slots held the same texture in that draw, and the resource indices are part of the shader
+id. The texture part of the id also held each sampled texture's exact `Format()`, so one program split again
+per bound format although a sampled image is declared by its numeric class alone (the translator reads the
+format of a sampled image only through `VulkanGen5ImageNumericType`; DstSel, mip range and storage view type
+are read for storage images, which keep their full id fields).
+
+**Change.**
+- A loaded T# shares a resource only with one read from the same table words. Extended descriptors, static
+  or loaded, name their EUD words by start register; split and nested T#s match their own table slot. Content
+  equality is still required, so no merge binds different descriptors. Static EUD textures were already one
+  per slot.
+- A sampled Gen5 texture adds its numeric class to the id instead of its format; bit 16 keeps those values
+  apart from the 16-bit formats of older keys, so existing caches stay valid without a translator version bump.
+
+**Limits checked.** Over the 1,554 Astro Bot and Minecraft modules, slot keying gives at most 40 loaded
+textures a module (64 is the capacity). A first build that keyed only on the slot of other loads hit the
+capacity at 64 in the Astro world map: the dynamic loads re-read EUD words that the program also reads as
+static textures, which the content merge had folded together. Keying on start register removed it.
+
+**Verified** on Intel Arc A770 (Mesa ANV), strict 60 fps-limited runs, private caches:
+- Astro Bot: after two warm-up runs, run `sl8` compiled 6 new modules (warm-up runs 142-259) and none for the
+  two split programs; no graphics pipeline miss from 150 to 248 s; three cold driver compiles of 0.7-1.6 s at
+  249-252 s were new content. Captures correct. Two of the warm-up runs lost the time-based route after a
+  slow boot (14 s more between the resident and the first level load, both right after a full build and the
+  unit tests); runs after them booted normally.
+- `PPSA17221 - Minecraft`: world at 82.8 s, about 199,700 draws a second at more than 4,000 draws a frame against
+  192,600 before the change (`mcck1`); the first run after the change (world at 132 s) was the cache warm-up.
+- 424 shader and graphics-resource unit tests and the three CTest gates passed.
+
+**Open.** The per-draw cost of binding duplicate slots separately was not measured on Astro Bot (its route
+reached a different phase in the measured run). A third program that split on fields outside the texture
+records was not rechecked (run `sl8` compiled none of its modules); pipeline misses explain a few of the deepest fight dips (2 of 40 sub-29 seconds in `hs3`, 3 of 14 in
+`ck1`), not the 28-29 fps seconds where the GPU is at its limit.
+
+## Samplers paired with views by slot number (2026-11-21, fixed)
+
+**Observed.** On `PPSA21567 - Astro Bot` (local game patch set, dunes), characters and near terrain were washed
+white by the volumetric fog. The full-screen fog apply loads the 2D scene depth with an image load (no sampler)
+at texture slot 0 and samples the 3D fog volume (slot 67) with sampler 0. The volume coordinate of a pixel 1-1.5 m
+from the camera lies half a slice before slice 0.
+
+**Cause.** Sampler state that depends on the sampled view, the W address mode (CLAMP_Z only applies to 3D views)
+and the ForceUnorm allowance (2D views only), paired a sampler with the read-only views whose texture slot equalled
+the sampler's slot. Texture and sampler slots are separate user-data offsets, so the depth view paired with
+sampler 0 and the volume did not; the sampler was created without the R coordinate and Vulkan's default repeat
+replaced the guest's clamp. Linear filtering wrapped near-plane lookups into the far slice. A bounded log showed
+exactly this pairing (sampler slot 0, CLAMP_Z 2, views 0/2D and 67/3D) on every bind of that draw.
+
+**Change.** `BindSamplerViewShapes` pairs through `sampler_indices_mask`, which the resource parse builds from the
+image-sample instructions and which comparison eligibility and the border-color class already use. A sampler
+with no instruction pair (loaded through a descriptor table) still checks every read-only view.
+
+**Verified** on Intel Arc A770 (Mesa ANV), 60 fps-limited runs:
+- Astro Bot, patched dunes route: Astro, the robots and the sand show full contrast in every capture, matching the
+  run with the fog apply skipped; before the change the same views were washed white. Patched runs are not
+  strict runs.
+- `PPSA17221 - Minecraft`: world at 83.8 s, death screen correct, 61 frames a second with none over 50 ms.
+- 2,830 unit tests (the two sampler-pairing tests updated, one case added for an unpaired 2D load sharing the
+  sampler's slot number) and the CTest gates passed.
+
+## Fragment transport parameters overlapped the vertex push constants (2026-11-22, fixed)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the guest's non-tiled deferred-lighting renderer selected by a local
+game patch, the dunes showed only ambient light: no direct sunlight and no sun shadows. The lighting draws go
+through fragment transport (capture draw, scan and pack, shade compute, resolve draw). A bounded read-back of the
+transport control buffer showed every band of those draws failed with zero records written, so the resolve
+discarded every pixel and the lighting target kept its cleared value.
+
+**Cause.** The capture and resolve programs read their kernel parameters (band origin, record and wave
+capacities) from push-constant offset 0, and the draw pushed them at offset 0. The guest vertex program's user data
+is also pushed at offset 0, and that push is recorded after the transport push, so the capture read the vertex
+program's user data as its parameters, flagged the band failed and wrote nothing. No host code reads the failure
+flag (`control[1]`), so the draws were dropped without a message. Every transported draw whose vertex program
+pushes user data was affected, on every title.
+
+**Change.** The capture and resolve parameter blocks are declared at the pixel stage's push-constant offset, the
+slot the normal pixel path already uses after the vertex user data (`Shader.cpp`, push offset rule). The pipeline
+layout's fragment range, the generated SPIR-V member offsets and both `vkCmdPushConstants` calls use that offset,
+and pipeline creation fails explicitly if the block would pass `maxPushConstantsSize`.
+
+**Capture contention (perf).** With the draws working, the capture draw took about 33 ms per band in the intro
+scene (`INTEL_MEASURE`): every covered quad reserved its record with a compare-and-swap loop on one counter. Records
+and waves are now reserved with one atomic add; an add that passes the capacity fails the whole band, as the loop
+did, and readers bound records and waves by their capacities. Capture time fell to about 0.45 ms per band and the
+frame's GPU time from about 320 to 63 ms.
+
+**Verified** on Intel Arc A770 (Mesa ANV), 60 fps-limited runs (patched runs are not strict runs):
+- Astro Bot with the deferred-lighting renderer: lit dunes, robot and sun shadows match the default renderer's
+  captures, rechecked on the committed build; about 11 fps (see the title record).
+- Astro Bot with GI off only (default renderer): status samples of 32-40 fps at 120-160 s, image correct.
+- `PPSA17221 - Minecraft`: world at 83.8 s, death screen correct.
+- 2,830 unit tests (resolve module test updated to check the placed member offsets) and the CTest gates passed.
+- Not run: `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition`, which also uses fragment
+  transport (record of 2026-11-05 above); it is not in the Linux matrix.
+
+**Shade width (perf, 2026-11-22).** The shade stage ran every transported pixel program as a guest wave64 on two
+32-lane host subgroups (`requiredSubgroupSize` 32), the layout guest compute left behind because large programs
+spill at that width (8-lane rule above). The shade now takes its part width from the same register rule
+(`ShaderSplitWavePartLanes` over the pixel program's VGPR count) and pins the shade pipeline to it. Astro Bot
+dunes with the deferred-lighting renderer (`INTEL_MEASURE`, last 30 frames of a warm run): the shade compute went
+from 57.6 to 6.8 ms per frame (8 dispatches, new driver hash), the frame's GPU time from 95.1 to 44.1 ms, and the
+run from about 11 to 25-27 fps in the dunes (GPU 97-99 % busy), image correct. The capture (2.7 ms) and resolve
+(1.5 ms) stages and the transport compute passes were then the larger part of the transport cost. 2,830 unit
+tests (the shade module tests build at 8, 16 and 32 lanes) and the gates passed. Excluded: forcing 16-lane parts
+on the hot 72-VGPR lighting program raised the shade from 6.8 to 11.6 ms per frame, so 8 lanes stays.
+
+**Transport bands and counters (perf, 2026-11-22).** Four changes, each measured with `INTEL_MEASURE` on the
+same dunes route and its capture checked:
+- The scan, pack and resolve stages read the failure flags with plain loads instead of atomic reads (earlier
+  passes publish them behind a barrier). Frame GPU 44.1 to 41.5 ms.
+- A band that replays a single primitive is planned for its pixel area instead of twice it: one primitive
+  covers each 2x2 tile at most once. The lighting draw (one full-screen primitive at 1920x1080, 10 lane words)
+  went from 8 bands of 138 rows to 4 bands of 278 rows inside the same 128 MiB budget; fills 1.69 to 1.49 ms.
+  The transport passes summed did not drop (11.4 to 11.8 ms, pack 0.94 to 1.05 ms), so this change is recorded
+  as halving the band count, not as a measured frame gain.
+- The capture reserves records with one atomic add per subgroup from a claiming lane (never a helper) instead
+  of one per quad: capture 2.84 to 1.59 ms per frame.
+- The capture numbers each primitive's quads with one add per subgroup and primitive instead of one per quad:
+  capture 1.59 to 1.13 ms, and the shade 7.07 to 5.25 ms, because a guest wave now gathers neighbouring quads.
+Clean run after all four (no driver measurement, 60 fps limit): light dunes gameplay 31-33 fps (was 28-29), the
+heavier stretch at 133-142 s 26-29 fps (was about 25), the intro 25-26.5 fps (was 23-24), median 32.0 over
+99 s, all GPU-bound. Still under 30: the intro and the heavier stretch. Their attribution is open: frames under
+the driver measurement are longer than clean ones (38.5 ms against about 31 ms in light gameplay, 52.7 against
+about 36 ms in the heavier stretch, about 600 and 1,055 events per frame). A two-point fit puts that at roughly
+12-15 us per event, so per-event totals such as the 391 depth-only draws per frame may be inflated; lines with few
+events rank more reliably. The fit is an estimate from two regimes, not a measured overhead.
+
+**Open.**
+- The transport failure flag is never read on the host. A band that fails for any reason drops its pixels
+  silently. Suggested direction: read the flag back at retirement in a bounded diagnostic and count failed bands.
+- `DepthStencilCopy.cpp` (about line 586) declares the guest vertex range at the vertex bind's push offset and the
+  expand-to-color fragment parameters at offset 0. If a guest vertex stage with user data and the colour expansion
+  meet in one pipeline, the same overlap occurs. Not observed; suggested direction: place the fragment block after
+  the vertex range as above.
+
+## Program-relative loads translated through a window resolved at bind (2026-11-22, measured)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the deferred-lighting renderer, the intro runs at about 25.9 fps
+(median of 17 seconds, GPU-bound). Its two hottest pixel programs, `0x8e59fdb1` and `0xa9bf243a`, translate every
+guest load through the device-address directory walk (table header, directory, then a binary search over the
+entries). A flow-approximate slice of the 19 translation calls in `0x8e59fdb1` shows that every address is the
+program base (the block written from the program counter) plus constants or one user-data word; three also add the
+lane index. The calls are straight-line, not inside loops. A temporary build that ran each walk twice gave an
+intro median of 23.2 fps against 25.9 (one pair, aligned on the same scene marks; the seconds after the intro
+stayed within about 1 fps), so one walk set costs roughly 4.5 ms per frame there (linear estimate from one pair).
+The directory itself is shallow (about 37-106 entries, largest region 9 entries); the cost is the dependent chain
+of reads repeated per load.
+
+**Excluded.** A per-invocation memo of the last translated window recovered about 1.3-2 ms per frame but added
+register spills to both programs (2 and 4 spills, 129-131 live registers under the driver's statistics).
+
+**Changed.** The host resolves, at bind and against the same table the device block publishes, the run of bytes
+from the program base that the table entry holding it translates contiguously (bounded by the entry's size and
+span, saturated to 32 bits). The window's device address goes into the program-base block's spare words and its
+length into the device block's spare word. The translation compares the guest address against the window first and
+walks only on a miss or when the access does not fit, so every translated address is the one the walk returns.
+
+**Verified.** Unit test on the window bounds (entry edges, gaps, saturation, empty table); full unit suite 2,831
+passed, 11 skipped, 0 failed; the integration shader-compute tests and the repository gates passed. Driver
+statistics after the change: 0 spills, 112-124 live registers in the recompiled pixel programs. Astro Bot intro,
+warm cache, no diagnostics: median about 27.4 fps against 25.9 (one run; the seconds after the intro match the
+baseline), capture of the intro correct. A 170 s run on the committed binary: intro about 27.6 fps, light
+gameplay 32-33 fps, captures correct (one run). The heavier stretch, which holds about 750 draws per frame for 10 s
+in the baseline (26-29 fps), lasted one second in this run (691 draws per frame, 26 fps), so its change is not
+measured; seconds compared by wall clock alone were different scenes there. The compute program
+`0x0d49d0a9` (addresses mostly memory-chained, so outside this window) was not re-measured. `PPSA17221 - Minecraft`
+(709 modules) and `PPSA04220 - JoJo's Bizarre Adventure: All-Star Battle R` (121 modules) compiled no program with
+the window, so their clean runs do not exercise it.
+
+## Dead-guard elision follows vector relative reads (2026-11-22, measured statically)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the deferred-lighting renderer, the intro's hottest pixel program
+(module `0x97607c9e`, the translation of `0x8e59fdb1` after the program-base window) kept 591 EXEC-bit selects
+around plain vector writes. The analysis that drops those guards when the old value is never read
+(`ShaderAnalyzeDeadVgprDstGuards`) gave up on the whole program because it contains relative moves: a relative read
+may load any register, so the analysis could not see which writes stay live.
+
+**Changed.** Only scalar relative moves still disable the analysis (they may read or write any SGPR, EXEC
+included). A vector relative read counts as a read of every register its lowering may load: the aligned candidates,
+the one register of a proven literal M0, or the registers reachable from the bounded M0 values. When that set is
+empty the analysis keeps every guard. Relative moves themselves keep their guards.
+
+**Verified.** Focused unit test: a guarded write to a candidate register of a later relative read keeps its guard
+while a write below the base loses it; ignoring relative reads makes the test fail. In the hot program the selects
+fell from 591 to 319, instructions from 6,943 to 6,756 and live registers under the driver's statistics from 124 to
+118; it still compiles at SIMD8 only. One Astro Bot run on the new translation (cold translation cache): intro
+capture correct, about 27-28 fps, so no frame-rate change is claimed. `PPSA17221 - Minecraft` reached the world at
+84 s on the new translation with a correct capture; whether any of its programs took the new path was not counted.
+Unit suite 2,832 passed, 11 skipped; shader-compute integration 3 passed and 1 skipped (`PairedWave64`); the three
+repository gates passed. In the SPIR-V of the two hottest intro pixel programs the EXEC-bit selects fell from 591 to 319
+and from 631 to 347; each removed guard stays as a select on a constant condition, which the driver folds. A 170 s run on the same binary: light gameplay at about 550 draws per frame 32.0-32.7 fps, as in the run
+before the change on the same scene; a short stretch of 530-800 draws ran 21-30 fps for five seconds. The capture
+in the light dunes is correct. One capture landed in the second where the scene cuts (draws and render-engine load
+fall) and is all black. Two runs on builds from 2026-11-19, before the change, show single-colour captures at the
+same point of the route (frames 3,797-3,892), so the black frame predates the change.
+
+**Excluded.**
+- Wrapping each guarded run in a branch on the lane's EXEC bit instead of a select: the old value stays live across
+  the branch as it does across the select, so register pressure does not drop.
+- A variant keyed on the value of M0: in this program M0 is a bit field of a dword that `s_buffer_load_dwordx4`
+  reads from memory, not a user-data word. A variant per value needs proof that nothing writes that dword between
+  bind and draw; not pursued.
+- A temporary build that forced the first M0 candidate ran the intro at 32.6-33.6 fps, but the other candidates then
+  read zero and the capture differed, so it is not a price of the relative moves.
+- The ceiling with both the EXEC selects and the relative-move select chains folded (6,943 to 5,080 instructions,
+  SIMD16 offered, intro 31-32 fps by program replacement) needs two folds that are not sound. One compile of that
+  ceiling at 79 live registers (106 at SIMD16) was offered SIMD16; a threshold near 90 is an estimate from it.
+- Treating relative reads as reading no register at all (temporary build): no further guard is freed in this
+  program, so the candidate registers are not what keeps the remaining 319 selects.
+- Folding only the relative-move select chains to the first candidate (program replacement, not sound): instructions
+  6,756 to 5,844 and 6,945 to 6,397, live registers 118 to 107 and 113 to 100, still SIMD8 only, driver cycle estimate
+  down 5.5 % and 3.5 %, memory sends 134 to 131 and 147 to 145. Measured time fell more (7.85 to 5.66 and 6.55 to
+  5.62 ms per frame in the intro under `INTEL_MEASURE`), but the image differed, so that drop is not a price. A sound
+  lowering keeps all eight candidates live and saves less than this bound; not pursued.
+- The address walks of the hottest intro program as the remaining cost: its 19 loops under the driver's statistics
+  are the binary search of one translation helper, entered only when the program-base window misses. Every
+  translated site is a buffer load whose address is the descriptor base plus an offset, with a second translation only
+  when the load crosses a page. A temporary replacement that marked any miss in the program's colour output showed
+  no marked pixel in two intro captures except one faint one-pixel row, while a control that marked every
+  invocation tinted visible bands, so the output does reach the screen. Forcing every call to miss cost the intro
+  about 1.5 fps (one run, about 26.5-27 against about 28.2), which is what the window saves. The walks therefore
+  rarely loop in this program; its cost is the guest body.
+
+**Miss shortcut below the directory base (2026-11-22, translator 253).** The same marker painted almost every pixel
+of the second hot intro program (`0x8ae329c2`). A three-colour variant showed that the searches do not resolve: the
+address is inside the buffer range of its descriptor but no table entry holds it, and it lies below the directory
+base. The descriptor comes from a 64-bit pointer that the program reads from memory with a scalar buffer load, so
+these are null or small pointers that read the table's zero prefix. Nine of the ten translated sites use that
+descriptor. The lookup now returns the zero prefix for any address below the directory base before the region
+search. No entry starts below that base, so no result changes. The intro and two gameplay captures render correctly.
+Measured under `INTEL_MEASURE` in the matching intro scene (about 16 events of the program per frame), against the
+ranking before the change:
+- Raw: 6.68 ms against 6.31 ms. That run's whole frame was 44.6 against 38.6 ms.
+- Normalized by the whole frame: about 5.8 ms, a saving of about 0.5 ms.
+- Normalized by the hottest intro program (`0x247d14ca`), whose walks almost never miss: the ratio between the two
+  programs went from 0.814 to 0.811, within noise.
+
+The work removed is real; its frame-time share is too small to separate from noise in one run.
+
+**Ranking on the translation of 2026-11-22 (one run under `INTEL_MEASURE`, per-event lines inflated).** In the
+cinematic after the intro (about 600 events per frame) and in the light gameplay scene the largest item is the
+fragment-transport shade kernel at about 5 ms per frame in 4 dispatches (8 lanes, 13,076 instructions, 521 sends,
+94 spills and 286 fills, 185 live registers under the driver's statistics). In the heaviest stretch (about 845
+events per frame) no item leads: draws without a pixel program 5.6 ms over 304 events, pixel program `0x6948ce42`
+3.8 ms, shade 3.0 ms, `0x0d49d0a9` 2.4 ms over 13 dispatches (the per-draw geometry front, run as a compute pass;
+see the split LDS record below). That module compiles at 8 lanes with
+39,300 instructions, 1,445 sends, 674 spills, 977 fills and 267 live registers. In the intro two shade modules of the same size (two translations) cost
+about 1.8 ms per frame together.
+
+**Excluded.** Running the dead-guard analysis on programs that go through fragment transport (it is skipped for
+them): the shade module dropped only from 94 to 87 spills and 286 to 250 fills, and the cinematic after the intro
+rendered dark at a scene that is lit on the translation without it (same scene, about 360 draws per frame). The skip
+stays; why the analysis is unsound there was not established.
+
+## Lane reductions whose temporary is reused before the reads (2026-11-22, fixed)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the deferred-lighting renderer, the steady dunes scene ran at
+26.7-27.7 fps, GPU-bound (render engine about 98 % busy). The top GPU line under the driver measurement was the
+fragment-transport shade (compute `0x2ff63bc1`, about 3.5 ms per frame, plus capture and resolve). Both lighting
+pixel programs of that renderer went through transport only because native admission refused them: each ends
+with a whole-wave reduction (EXEC widened, permute steps, EXEC restored, lane reads), and between the EXEC restore
+and the lane reads the program writes a new value into the register the permute steps used as a temporary. The
+reduction matcher (`ShaderFragmentLaneReduction.cpp`) stopped at the first instruction after the restore that was
+not independent of the network, so the reads after it were never matched and the partial-wave proof failed.
+
+**Changed.** Between the restore and a read, an instruction that keeps EXEC, reads no network register and
+overwrites one now removes that register from the network instead of ending the match; a read of that register
+after it is no longer a network read. The dead-network check starts right after the restore, so an overwrite
+before the reads leaves its register dead or residual by the same rule as any other write, and it skips the
+accepted reads themselves. The proof is part of the shader identity, so no translator version change was needed.
+
+**Verified.** Focused unit test: reads after an overwrite of the permute temporary are admitted as a partial
+wave with the expected lanes, and an overwrite of a seed register before the reads is still refused. Focused
+suites (native wave, lane reduction, NGG, guest address, fragment transport) 190 passed; full unit suite 2,833
+passed, 11 skipped; the three repository gates passed. One Astro Bot run on
+the fix (60 fps limit, the first after it, so the changed programs were translated anew): median 33.7 fps against 27.7 on the base route before it, the dunes scene at
+33.6-34.7 fps, captures at 65, 120 and 140 s correct (space intro, dunes with coins, shadows, the robot). On
+static regions of the dunes captures the mean colour of the far dune and the wall face is the same as before the
+fix to one unit; the foreground sand and a shadow differ by 4-8 units, as much as two runs before the fix differ
+from each other. One run
+under the driver measurement on the same binary: no dispatch of the shade over 4,978 frames, against 9,684
+dispatches from frame 1,530 on the build before. Its scenes lag the route under the measurement and its captures
+show only the intro and cinematics, so the absence is shown there and not in the dunes. The only compute program
+new in that run costs about 0.12 ms per frame. `PPSA17221 - Minecraft` reached the world at 79.7 s with a correct
+capture, median 37.6 fps over the run (no earlier per-second samples on the same route to compare). `PPSA03524 -
+Grand Theft Auto: San Andreas - The Definitive Edition` (the other title with transported draws): the first run
+after the change stalled near frame 490 until about 100 s, like the earlier cold-cache run (consistent with new
+translations compiling, not shown; whether its transported programs changed admission was not checked); the next run reached the street at frame 900 with a correct capture at 6-8 fps, as before.
+
+A second run on the same binary with the translations now cached: median 33.7 fps again, 14 of 123 seconds under
+30. The seconds at 45, 58-59 and 71 s of the first run (GPU 14-53 % busy, 2-22 fps) are gone, so they were
+translation and pipeline compiles of the changed programs. Captures at 85, 95 and 160 s are correct.
+
+**Still open.** The seconds still under 30 on the cached run: the dunes run with dust at 81-85 s (670 draws per
+frame, 27.8-29.7 fps, GPU 91-98 % busy) and 94-96 s (810-1,170 draws, 26.7-27.6 fps, GPU 70-85 %); three intro
+seconds at 29.6-29.7 (GPU 84-88 %); and host stalls at 60-62 s (12.6-15.8 fps) and 160 s (16.7 fps, GPU 47 %),
+not classified. One-time stalls of 0.25-1 s at first use of new pipelines (129-132 s and 154-157 s on an earlier
+cold-cache run) were not seen on the cached runs; the route is timed by wall clock and desyncs when load times
+change, so the scene at 154-157 s may not have been reached.
+
+## Own EXEC bit under WQM of a quad-gathered tested mask (2026-11-22, measured)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the deferred-lighting renderer, three hot pixel programs that run
+as native lane-local waves kept most of their destination guards (`OpSelect` on the invocation's own EXEC bit):
+450 of 1,111 selects in the first, 440 of 2,071 and 361 of 1,969 in the two lighting programs. The first runs
+its body under `S_WQM_B64 EXEC, X` after `S_CBRANCH_SCC0` skips to the dead tail when `X` is zero. The guard
+analysis saw that EXEC only as "WQM of a subset of the entry mask" and kept every guard under it; in the
+lighting programs EXEC became unknown at the whole-wave reduction entry (`S_ORN2_SAVEEXEC_B64`) and was never
+recovered. All three compiled at SIMD8 only.
+
+**Changed.** Lane-local fragment programs gather every mask over the invocation's own quad
+(`Spirv::GathersMasksInQuad`, shared with the mask ballot emitter). A gathered pointwise B64 mask operation
+stores only its quad's bits and its SCC is `pair != 0`, read per invocation by the SCC branch. So on the nonzero
+edge of `S_CBRANCH_SCC0/1` that pair has a set bit in this quad, and WQM of it sets the invocation's own EXEC bit.
+The per-invocation lane-active lattice in `ShaderDeadVgprMask.cpp`, used before only for compute programs with
+lane-private masks, now also runs for these programs with that rule, and with WQM of an active EXEC or of an
+all-ones pair. An EXEC branch no longer implies the own bit there, since EXECZ tests the quad. The tested pair
+and SCC fact is dropped by any write to the pair, by any other SCC writer, and at joins that disagree.
+
+**Verified.** Focused unit test: the proven shape drops the guard; with the gate off, an ungathered operation,
+the pair rewritten after the branch, a different WQM source, SCC rewritten before the branch, an EXECZ branch
+instead, or the body on the zero edge of `S_CBRANCH_SCC1`, the guard is kept. The emitter link was read:
+`SCC_NZ_2` loads the stored gathered words, and `S_WQM_B64` is computed per word from the stored pair. Focused
+suites 227 passed; full unit suite 2,845 run, 2,834 passed, 11 skipped, 0 failed; the three repository gates
+passed. In the translations of a fresh-cache run the own-bit selects dropped from 450 to 35-36 (the first
+program's variants), 440 to 273 and 361 to 195; the removed guards stay as selects on a constant. The first
+program and its variants now also compile at SIMD16 (2,682 -> 2,205 instructions, SIMD8 cycles 16,958 ->
+15,649 by the driver's statistics); the lighting programs stay SIMD8 (4,024 -> 4,015 instructions). 179 of
+470 translated modules changed in that run. Captures of the intro, cinematics and the dunes (shadows, dust,
+coins, the robot) are correct. Two cached runs on the base route: median 35.6 fps (13 of 116 seconds under 30;
+a route variant whose heavy scene at about 740 draws per frame held 32.6-36.6 fps) and 33.7 fps (14 of 124,
+the same route as the record before). The dunes run with dust is unchanged: 81-86 s at 655-693 draws per frame
+25.6-29.7 fps (was 27.8-29.7) and 94-95 s at about 1,000 draws 21.7-27.7 (was 26.7-27.6), so no frame-rate gain
+is claimed. The stall seconds at 77-78, 94-95 and 111-112 s each coincide with new SPIR-V modules written in
+that second (the route reaches new variants on each run), so they are first-use translations. `PPSA17221 -
+Minecraft` reached the world at 77.7 s with a correct capture, on a warm cache that may not hold the new
+translations.
+
+**Caveat.** Neither this change nor the lane-reduction record before it raised the translator version, so a
+cache written by an earlier build kept its old modules under the same keys. The "was" figures above come from
+runs on such a cache (written before the lane-reduction change), so they are not a clean baseline for either
+change. The version is now 254; existing caches are rebuilt on first use.
+
+**Still open.** The dunes run with dust (81-86 s and 94-95 s) stays under 30 (ranked in the split LDS record
+below); the lighting programs still keep 273 and 195 own-bit selects; first-use translation stalls remain on every new route
+variant.
+
+## Split-wave LDS order between fields of one lane slot (2026-11-22, measured)
+
+**Observed.** On `PPSA21567 - Astro Bot` with the deferred-lighting renderer, the dunes run with dust (81-86 s,
+655-693 draws per frame, 25.6-29.7 fps) is GPU-bound (render engine busy 87-98 %). A driver-timed run at draw granularity over
+frames 3,500-4,050 (30.5 ms per frame measured) puts the per-draw geometry front first: 11.5 ms per frame over 353
+dispatches (86 each of 64, 192, 3,200 and 4,032 threads at 25-31 us, almost flat in size, plus 3 large), then a
+clear at 1.9 ms and two computes at 1.8 and 1.5 ms. That 11.5 ms is a serialized upper bound (see the batch
+measurement below). This is the program earlier records call `0x0d49d0a9`; the
+driver hash follows the translated module, so it reads `0xdef7a99c` on translator 254 and `0x15c1621e` on 255.
+Its module (39,300 instructions, 674 spills, 8 lanes) held 79 control barriers: the guest's 5 `S_BARRIER` and 74
+split-wave rendezvous. 55 of the rendezvous sat between consecutive writes of five runs of 12 `DS_WRITE_B128`, each run
+storing one record per lane at offsets 128-304 from an address `v_mul_u32_u24` by 768 or 192 computed in the same
+block. The order analysis knew no address there (the multiply has no program-wide value), so every write in a
+run was ordered against the one before it.
+
+**Changed.** `ShaderSplitLdsOrder.cpp` now also reads, for an access without a known range, the multiply that
+set its address in the same straight-line block under the same EXEC (`v_mul_u32_u24` or `v_lshlrev_b32` by a
+constant). The product is a multiple of the factor in every lane when the factor is at most 256, since a 24-bit
+operand cannot then wrap 32 bits; a larger factor keeps only its power of two (768 -> 256). Two accesses whose
+addresses are multiples of a common slot, whose fields are disjoint and fit in that slot, cannot touch the same
+bytes from different lanes, so no rendezvous is placed between them. Translator version 255. A second change
+fixes a defect found in the same analysis: an LDS access inside the entry block that comes before the address
+register's last entry-block write used that final value as its own; it now uses the value its own block proves
+(version 256).
+
+**Verified.** Focused unit tests: disjoint fields of one slot need no order; the same field, fields wider than
+the slot, the address rewritten or EXEC set after the multiply, and a factor of 384 with fields 132 bytes apart
+are ordered; an entry-block access before the address's last write is ordered. Full unit suite 2,848 run,
+2,837 passed, 11 skipped; the three repository gates passed. In the translated modules the geometry front drops
+from 79 to 24 control barriers (the 55 in-run rendezvous); three other modules, not identified, drop from 60 to
+34. On this title every module of translator 256 matches one of 255 by barrier, word, instruction and multiply
+counts. Driver timing of the front on 255 was taken on a different scene than the dust ranking (the route took
+the variant without the dust stretch): the 3,200- and 4,032-thread dispatches measure the same in both runs
+(31.4 and 31.7-32.0 us), while the smaller sizes move both ways with the scene mix, so no per-dispatch gain is
+claimed. A strict run on 256 that took the dust variant (not warm: it wrote 83 new cache files, at 76, 89, 94-95,
+98-100, 113-114 and 124 s): 80-85 s at 620-677 draws per frame, with no module written, held 28.9-29.7 fps with
+the render engine busy 89-98 %; the dips at 94-95 s (busy 74-81 %), 99-100 s (68-94 %) and 113-114 s (11.9 fps,
+busy 34 %) coincide with new modules, so they are first-use translations; median 33.7; one run, no frame-rate
+claim. Captures on 255 and 256 of the travel tunnel, the space map, the
+cinematics, the crash landing, the dunes with dust and the wall with coins are correct; the dark frames at about
+84-95 s of the other route variant also appear in an earlier run of that variant built before this change. The
+crash-landing scene (about 740-770 draws per frame) held 32.6-35.7 fps on 255 with the render engine busy
+91-98 %, as in that earlier run; on 256, in the run right after one that stopped at the save menu, it held
+23.8-30.7 fps with the engine busy only 74-89 %, so those seconds waited on the host, not on the unchanged
+modules; that variant was not re-run warm. `PPSA17221 - Minecraft` reached the world at 82.2 s on a cold cache
+with a correct capture. `PPSA03524 - Grand Theft Auto: San Andreas – The Definitive Edition`: the street at
+frames 700 and 900 is correct, with no dot grid, on the second run (the first, cold, reached only the intro
+text).
+
+**Measured without per-dispatch flushes.** At draw granularity the driver measurement flushes at every event,
+so the front's back-to-back dispatches, which its segment records with no barrier between them, run one after
+another. A run at batch granularity times each command-buffer chunk instead; a front segment's dispatch count
+reads from its chunk size (404 + 156 bytes per dispatch). Against the translator-255 draw-granularity run, same
+module and same segment shapes: one-dispatch segments measure the same (288 vs 290 us, 268 vs 265 us), segments
+of 2 to 32 dispatches take 0.04-0.65 of their serialized sum (most 0.18-0.52: 1,088 -> 383 us for 8, 380 -> 74
+for 12, 1,550 -> 280 for 16, 537 -> 192 for 18). A second batch-granularity run took the route variant with the
+travel tunnel (captures at frames 4,166 and 4,756). Frames carrying the 258-dispatch segment, which the dust frames of the
+draw-granularity run also carry (scene not captured; about 39 fps), spend 2.5 ms per frame in the front, the 258-dispatch segment 1.6 ms of it, and 17.9 ms of GPU work in 24-26 ms of wall time. The travel tunnel,
+a 30 fps stretch, measured 29.6 ms of GPU work per frame with 2.7 ms in the front; against those frames the added
+time sits in the render-pass chunks (the chunk that opens with the pulled draws 2.3 -> 9.1 ms, the chunks that
+open with a color clear 0.75 -> 5.4 ms). The dust frames themselves were not reached by a batch-granularity run:
+under the driver measurement the route takes the other variant.
+
+**Excluded.** The geometry front as the main cost of the sub-30 stretches: its segments overlap, 2.5-2.7 ms
+per frame in the frames measured without per-dispatch flushes. Split rendezvous as that cost, for the same
+reason. Compute ranked from draw-granularity driver timing: it serializes back-to-back dispatches.
+
+**Still open.** A batch- or render-target-granularity ranking of the dust frames themselves (the measured runs
+take the other route variant), and which draws inside the render-pass chunks of the travel tunnel take its added
+11-12 ms. In the dust seconds of the clean run the command processor waits on fences for about 100 ms per second,
+so those seconds are not command-processor-bound. The stretches stay at or under 30.
+
+## Uniform branch around the swizzled buffer address (2026-11-26, excluded)
+
+`PPSA21567 - Astro Bot`, patch mod 0, Intel Arc A770 on Mesa ANV. The raw buffer address helper computes both the
+linear and the swizzled address on every buffer access and selects one afterwards. The swizzle enable bit and the
+stride come from the buffer descriptor, which is scalar, so a branch on them is uniform. Translator 257 branched
+around the swizzled arithmetic; the generated modules passed `spirv-val` (542 of 542) and the full unit suite.
+
+The driver's static report for the dust particle simulation went from 19,074 to 20,622 instructions, from 61:101
+to 51:77 spills and fills, and its cycle estimate from 1.93 M to 2.12 M; a second spilling dust program went from
+379:647 to 301:474 and 2.83 M to 2.77 M cycles. Driver timing at draw granularity, against a translator-254 run:
+the simulation took 319 us per dispatch at 25,408 elements against 309 us, and 493 us at about 52,000 against
+484 us at about 59,000. A compute program of 8,388,608 elements whose module is the same on both translators
+measured 1,523 against 1,522 us, so the GPU clock matched. Three warm strict runs on 257 ended with exit 0: one
+took the travel tunnel, two reached the dunes while still writing first-use modules (104 and 66), and the dust
+start held 28.7-29.7 fps at 640-700 draws per frame with the render engine busy 96-98 %, against 28.9-29.7 at
+620-677 on translator 256.
+
+**Excluded.** Branching around the swizzled arithmetic: the simulation is 3 % slower at equal element counts and
+slower per element above that. The selected form stays.
+
+**Measured.** The dust frames ranked at draw granularity on 257 (574 frames, 34.8 ms of serialized event time per
+frame): two pixel programs drawn with the same vertex program take 13.5 ms, one of them 7.1 ms in 5.6 draws
+(about 1.26 ms per draw) and the other 6.5 ms in 22.9 draws; compute takes 3.3 ms in 62 dispatches of one program,
+and the single 8,388,608-element dispatch above 1.7 ms.
+
+**Still open.** Why those two pixel programs cost what they do on this driver (dispatch width, spills, samples
+per pixel), and a ranking of the dust frames without per-event flushes.
+
+## Program-relative scalar tables read through the program window (2026-11-26, measured)
+
+`PPSA21567 - Astro Bot`, same setup as the record above (Intel Arc A770 on Mesa ANV, 60 fps present limit).
+
+**Observed.** In the dust particle pixel programs (guest checksums `0xc4a8f3bb` and `0x55db270b`), 18 of the 19
+guest address translations belong to 9 `s_buffer_load_dwordx4` whose descriptor is built by `s_getpc_b64`,
+`s_add_u32`/`s_addc_u32` with a constant and `s_mov_b32` of a record count of 64: one 64-byte constant table
+inside the program, after `s_endpgm`. The second translation of each load is its page-crossing half. These are
+the loads the 2026-11-22 program-base window covers, so the 2026-11-19 lookup prices predate that window and no
+longer describe the current translation. The driver's fragment-shader reports, matched to modules by hash (Mesa's
+`src_hash` is word 1 of the BLAKE3 of the SPIR-V, little-endian; the `INTEL_MEASURE` shader identifier is word 0),
+show the four particle pixel programs compiled SIMD8 only, with 0 spills and 6.6-6.9 k instructions; the nine
+spilling SIMD8 pixel programs of the title do not run in the dust. Per frame the dust issues about 26 compute fills
+of uniform buffers (about 1.1 MB each), 26 write-mask fills, about 13 small GDS fills and 4 geometry-segment zero
+fills. The flip wait on present is about 54 us, so the present path does not explain the frame time.
+
+**Changed.** The translator proves, by walking the unique predecessors of the load, that the descriptor is built
+on every path by that idiom with literal constants. `s_getpc_b64` returns the address of the next instruction, so
+the table starts `pc + 4 + K` bytes past the program base, low two bits cleared as scalar memory addresses it. Such
+a load lies at a constant offset from the program base, and when it fits inside the program-base window it now
+loads the device bytes directly: one bound check, a 64-bit add, and 16-byte vector loads when the device address is
+aligned. Words past the record count still read 0. Loads outside the window, or at a misaligned device address,
+keep the table path. Translator version 258; 257 belongs to the excluded experiment above, and its caches must not
+be reused.
+
+**Verified.** Unit tests: the idiom produces the window load and valid SPIR-V, and a redefined base register keeps
+only the table path; full suite 2,850 run, 2,839 passed, 11 skipped; repository gates passed. A diagnostic run
+(`s258`) printed 63 translated loads on 6 program bases, all four words wide at offsets 4,896-5,664, multiples of
+16. The windows bound for those bases were 5.5-8.4 MB, so every load fits. The direct arm also needs a 16-byte
+aligned device address; it was not counted at run time, but each load's scalar offset is an `s_mul_i32` by 16 in
+the guest code, and a window entry over guest physical memory keeps the guest page offset in its device address,
+so with a 256-byte aligned program base the arm is taken. The driver's static statistics compile both arms and grow (7,200 against 6,670 instructions
+for the particle program), so they cannot measure this change. Clean binary, warm cache, quiet host (`s258d`): the
+dust start held 28.7-30.7 fps at 620-880 draws a frame with the render engine 92-96 % busy, but a later stretch of
+the same run held 25.7-29.7 fps at 655-749 draws, against 28.7-29.7 fps at 620-710 draws and 96-98 % on translators
+256 and 257 (one run each), so no fps change is established. Two runs with a CUDA workload on the host
+(`s258b`, `s258c`) fell to 21-25 fps with the render engine 67-88 % busy and are not comparable. Captures at 110
+and 130 s correct. `PPSA17221 - Minecraft` reached its world on a warm second run with a correct capture; no
+Minecraft program uses the program base (2026-11-22 record), so the path is not exercised there.
+
+**Measured per draw.** Two driver-timing runs at draw granularity, translator 256 against 258, with the GPU clock
+matched (the unchanged 8,388,608-element compute dispatch: median 1,522.9 against 1,520.4 us). The two heaviest
+particle draws got cheaper: the `0x55db270b` module at 7,200 vertices fell from a median 2,333 to 2,008 us per draw
+(mean 1,698 to 1,512 us, about 2,000-3,000 draws each), and its second module at 14,400 vertices from 1,625 to
+1,369 us (mean 1,202 to 1,020 us). The main `0xc4a8f3bb` translation fell 11-13 % at matched vertex counts (24,576:
+74.1 to 64.7 us; 1,536: 33.2 to 28.8 us). Smaller draws are mixed and some medians rose (the second `0x55db270b`
+module at 3,840 vertices: 14.8 to 37.4 us, means 326 and 399 us; the second `0xc4a8f3bb` translation at 14,400:
+45.0 to 82.5 us). Draw mode slows the route, so the two runs reached the scene at different times and equal vertex
+counts do not guarantee equal screen coverage; the per-draw figures are leads, not a measured gain.
+
+**Not pursued.** Moving the candidate registers of the runtime-M0 relative reads into one function-local array
+indexed by M0: the driver's compiler source (read from a mirror of unknown version) lowers indirect access to local
+arrays of up to 16 elements into if-else trees, sends larger ones to scratch memory and does not handle indirect
+access to local registers, so the array can only match the select chain or lose to it.
+
+**Still open.** The 51 runtime-M0 relative reads in `0xc4a8f3bb`, still lowered as select chains, and a ranking of
+the dust cloud frames on translator 258.
+
+**Strict boot check (2026-11-26).** The translator 258 build reached `interactive` in a strict `games-matrix` run
+(startup 60 s, present 120 s, total 180 s, stability 25 s) on all eight titles of the playable set:
+`PPSA21567 - ASTRO BOT`, `PPSA17221 - Minecraft`, `PPSA03969 - F.I.S.T.: Forged In Shadow Torch`,
+`PPSA09076 - DREDGE`, `PPSA21402 - Balatro`, `PPSA15552 - Dead Cells`, `PPSA06084 - Superliminal` and
+`PPSA28311 - Absolum`. This is a boot check; `playable-regression` was not run.
+
+## Dust compute programs spill and walk the address table at every scalar load (2026-11-26, measured)
+
+`PPSA21567 - ASTRO BOT`, dunes dust view, translator 258, Intel Arc A770 on Mesa ANV.
+
+**Where compute time goes.** A draw-mode `INTEL_MEASURE` run (events serialized, so every figure is an upper
+bound and small events carry a fixed floor) gave 85 dust frames at 600-950 draws: 52.2 ms per frame, of which
+compute is 15.3 ms. Compute programs by time per frame (driver shader id, the BLAKE3 word 0 of the SPIR-V):
+
+| Program | ms/frame | Worst frame | Native code (SIMD, instructions, loops, spills:fills) |
+| --- | --- | --- | --- |
+| `0x15c1621e` (guest `360038d0_f4cfb9a5`) | 3.47 | 12.0 ms | SIMD8, 39,705, 146, 624:816 |
+| `0xe8e7b548` | 2.24 | 5.6 ms | SIMD16, 2,967, -, 0:0 |
+| `0x0d882c1c` (guest `360043b0_8e51dd94`) | 1.14 | 2.9 ms | SIMD8, 41,491, 146, 630:694 |
+| `0x393dd516` | 0.99 | 30.8 ms | SIMD8, 16,733, -, 379:647 |
+| `0x0cb0deab` | 0.86 | 1.8 ms | SIMD16, 3,466, -, 60:89 |
+| `0x81541bdd` | 0.79 | 2.2 ms | SIMD16, 7,476, -, 67:250 |
+| `0x736d54a9` | 0.50 | 1.4 ms | SIMD8, 19,074, -, 61:101 |
+| `0x156d2129` | 0.39 | 1.4 ms | SIMD16, 4,135, -, 30:118 |
+
+The native statistics come from a run with `INTEL_DEBUG=cs,vs,fs`, the driver's shader cache disabled and an empty
+pipeline cache (a filled pipeline cache loads binaries and prints no compiles). The driver's `src_hash` is BLAKE3
+word 1 of the same SPIR-V. The dust frames' vertex programs and their heaviest pixel programs do not spill.
+
+**The loops are the guest-address lookup.** In `0x15c1621e` the translator calls its guest-address lookup at 145
+sites, one per translated scalar load plus a second one where a load crosses a page. The driver inlines every call,
+which gives the 146 loops. 69 of the calls use one base: a pointer that the program loads from memory (an SGPR pair
+plus 80 bytes) and then reads at many offsets. The lookup's directory step, entry search and entry checks are
+dependent loads. Offline, the same module with the lookup body replaced by a plain return (unsound, statistics
+only) compiles to 22,980 instructions, 767 sends instead of 1,344, one loop and 561:764 spills:fills. The spills
+come mostly from the rest of the program. The driver's cycle estimate falls from 830k to 247k, but that estimate
+assumes loop trip counts and is not time. In the 2026-11-19 pixel program record the table's search loop ran 0-1
+times, and remembering one entry recovered only 30 % of the lookup's cost.
+
+**Not yet priced.** How much of the time of `0x15c1621e`, `0x0d882c1c` and `0x393dd516` the lookups take. A sound
+causal price is a module that walks twice and uses one result, measured per dispatch, before a translator change.
+Also open: whether the pointer behind the 69 shared calls could be resolved when the dispatch is recorded.
+
+**The worst dust frames are particle pixel work, not compute.** Same run, the 85 frames ranked by serialized time:
+median 45.6 ms, worst quartile 85.6 ms against 44.6 ms for the middle quartile. The two translations of the particle
+pixel program `0x55db270b` (driver ids `0x135359b4` and `0xb979c2ac`) add 9.7 and 8.1 ms per frame to the worst
+quartile. The next differences are `0x15c1621e` (+4.0 ms) and four programs of 2.2-3.0 ms each. The 30.8 ms of
+`0x393dd516` is one dispatch, in three consecutive frames (30.8, 11.5 and 11.0 ms) and in none of the other 82,
+where its median is 0.35 ms per frame. It is a one-off and not the source of the dips. In the SPIR-V of the first
+translation, 444 of its 1,624 selects form 57 chains of 7-8 candidates on one M0 variable (M0 = 0, 5, ..., 35), and
+484 more have constant conditions, which the driver folds. The same chain shape in the hottest intro pixel program
+was priced on 2026-11-22 (above), and its cheap lowerings were excluded there.
+
+## Acm FFT and convolution reverb (2026-11-28, implemented, run pending)
+
+- **Trigger:** `PPSA38500 - Grand Theft Auto VI` stopped on the unbound `sceAcm_FFT` while loading. Its audio engine
+  imports `sceAcmContextCreate`, `sceAcmContextDestroy`, `sceAcm_FFT`, `sceAcm_ConvReverb_SharedInput`,
+  `sceAcmBatchStartBuffers` and `sceAcmBatchWait`. The firmware dump has no Acm module with code, and the SDK `.prx`
+  is a stub, so the contract comes from the published header and sample code only.
+- **How the title uses it:** a loader copies time-domain IR samples to scratch and transforms up to ten blocks per
+  batch with `sceAcm_FFT(2·B, count, fp32, inputs, IR format, outputs, ZERO_2ND_HALF)` into its own IR block store.
+  Per audio frame it records `ConvReverb_SharedInput` with one input, one IR, gain 1.0 and `iBlockCount` 1, starts
+  the batch, and polls `sceAcmBatchWait` with timeout 0. This is the sample code's pattern; the title was not seen
+  reading the spectra itself.
+- **Change:** the six entries are bound (`LibAcm.cpp`); the transforms live in `AudioAcm.cpp`.
+  - The job builders validate their arguments (sizes 512/1024/2048, block sizes 256/512/1024, formats, 128-byte
+    alignment, 1:N, N:1 and N:N channel layouts, `iBlockCount` 1) and append Kyty's own command words to the batch
+    buffer, never more than the published size macro, or return `BATCHBUFFER_FULL`.
+  - `sceAcmBatchStartBuffers` runs the batch on the calling thread, so the first wait returns 0 and releases it.
+  - Published facts used: the batch info and reverb structure layouts, the error codes, byte offsets in the batch
+    info, the packed spectrum (DC and Nyquist in the first complex value), `ZERO_2ND_HALF`, and that a block
+    transform is `B` samples followed by `B` zeros.
+- **Inferred, not published:** forward transform unscaled and inverse scaled by `1/N` (the sample's FFT, multiply,
+  IFFT path pins only the round trip), the `e^-j` sign, IEEE binary16 for fp16, the history update at record time
+  with the position naming the newest block, overlap-add through `pTemps` with no added latency, `Out.pPcm`
+  overwritten, and `INVALID_BATCH` for a batch already released. While a title builds its IR blocks with
+  `sceAcm_FFT`, the scale and sign stay internal; a title that loads pre-transformed IR blocks would see them.
+- **Stops the run (not modeled):** split FFT flags, truncated IR blocks (`pSizes`), the inline statistics job, a
+  non-null batch error report. IFFT, Panner, Notification, `SharedIr` and the `_2` variants stay unbound.
+- **Tests:** `FftPacksDcAndNyquistIntoTheFirstBinAndZeroPadsOnRequest` and
+  `ConvReverbReproducesTheImpulseResponseAcrossBlocks` (fp32 and fp16 IR and history) drive the bound exports.
+
+## Waterfall moves narrowed by the values of their lane index (2026-11-28, fixed)
+
+- **Trigger:** `PPSA38500 - Grand Theft Auto VI` compiled one compute pipeline from boot without finishing it; from
+  about 70 s the command processor waited on it and the title's own watchdog later wrote to address 0. The module
+  was 3.0 MB of SPIR-V (35.8k `OpSelect`): sixteen guest waterfall loops of the shader were not lowered, so each
+  `v_movreld`/`v_movrels` became a select or store over about 180 candidate VGPRs.
+- **Why they were not lowered:** the guest schedules `s_andn2_b64 rest, rest, exec` between its relative writes, and
+  the matcher required the moves to be contiguous; it also treated any relative write as able to overwrite the
+  index register.
+- **Change (`ShaderWaterfall.cpp`, translator 263):**
+  - The matcher accepts one `s_andn2` among the moves and asks whether a move can reach the index register from
+    the index's values on loop entry.
+  - A forward scan from the last enabled label collects the values a VGPR can hold: literals, `v_bfe_u32` with a
+    literal width, `v_and` with a literal mask below 32, and `v_lshlrev`/`v_lshrrev`/`v_mul_u32_u24`/`v_mul_lo_u32`
+    of known sets, at most 32 values. Each value is tied to the EXEC it was written under: copies keep the EXEC
+    version, `s_and`/`s_andn2`/`v_cmpx`/`s_and_saveexec` narrow it, any other write starts a new one, and a value
+    holds only where the current EXEC descends from its version (both mask words). Relative writes kill the
+    registers they can reach, and calls reset the scan.
+  - `ShaderLaneValuesOnEntry` exposes the set to the SPIR-V emitter, which lowers a move over only the registers
+    `base + value` reaches, falling back to the alignment rule when the set is unknown.
+- **Verification:** all sixteen loops lower; on the title, agent snapshots at 50 to 75 s show no precompile
+  running and no command-processor wait on one. Tests: `LowersStoresAroundTheRestUpdateWhenTheIndexValuesMissTheIndex`,
+  `RefusesStoresAfterOneWhoseIndexValuesReachTheIndex`,
+  `LaneIndexValuesHoldOnlyWhereTheirDefinitionRanAndNoRelativeWriteReaches`. Other titles not yet re-run.
+
+## Resource level counts past the 1x1 level; Standard256B storage chains (2026-11-28, fixed)
+
+- **Level count:** a T#'s `max_mip` is the resource's level count minus one (ISA image resource table), and a
+  title declared 12 levels for a 512x512 32_32_32_32_UINT Standard4KB texture. The standard (4 KiB, 64 KiB) and
+  Standard256B mip layouts refused counts above log2 of the larger side plus one; they now accept up to the
+  field's 16 levels, each level one element at least. A sampled host image still ends at its own 1x1 level
+  (Vulkan's limit, the rule storage chains already used), so the extra guest levels have no host storage. Test:
+  `BlockViewOfCompressedChainSharesTheChainLayout` (a 16-byte block view and the BC7 chain it covers share every
+  level's offsets, tail placement and sizes).
+- **Standard256B storage chains:** a storage descriptor of a tile-1 chain bound at a second base level became a
+  second object over the same range, and object creation stopped. Standard256B joins the tilings whose storage
+  chains keep one host mip per level (`StorageTextureUsesMipBacking`); its level-0 upload is the tile-5 one. The
+  existing test of that rule now lists tile 1.
+
+## Storage-texture equality test depends on test order (2026-11-28, open)
+
+- **Defect:** `EmulatorGraphicsState.StorageTextureArrayDescriptorsAreViewsOfTheLiveArray`
+  (`source/unit_test/src/emulator/UnitTestEmulatorGraphicsState.cpp:6587`) fails when run alone and
+  passes inside the full suite (316/316). `StorageTextureObject::Equal` reads the global Gen5 flag
+  (`GuestIsGen5`), and only earlier tests in the suite call `Config::SetNextGen(true)`.
+- **Direction:** set the guest generation inside the test, as the neighbouring Gen5 tests do.

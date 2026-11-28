@@ -732,7 +732,9 @@ struct PublishedDemandRange
 static_assert(std::atomic<uint64_t>::is_always_lock_free,
               "demand-range publication must remain signal-safe on supported 64-bit hosts");
 
-static constexpr size_t kDemandRangeCapacity = 4096;
+// Each direct-memory piece mapped inside a demand range splits it; AMM PRT
+// mappings at a 2 MiB stride exceeded 4096 live ranges.
+static constexpr size_t kDemandRangeCapacity = 65536;
 static std::array<PublishedDemandRange, kDemandRangeCapacity> g_demand_ranges;
 static std::array<DemandRangeValue, kDemandRangeCapacity + 1u> g_demand_current;
 static std::array<DemandRangeValue, kDemandRangeCapacity + 1u> g_demand_updated;

@@ -40,7 +40,8 @@ DrawFrontPacket DrawFrontClassifyPacket(const uint32_t* packet, uint32_t availab
 		case Pm4::IT_INDEX_TYPE:
 		case Pm4::IT_NUM_INSTANCES: return DrawFrontPacket::Registers;
 		case Pm4::IT_DRAW_INDEX_2:
-		case Pm4::IT_DRAW_INDEX_OFFSET_2: return DrawFrontPacket::IndexedDraw;
+		case Pm4::IT_DRAW_INDEX_OFFSET_2:
+		case Pm4::IT_DRAW_INDEX_AUTO: return DrawFrontPacket::Draw;
 		case Pm4::IT_NOP: break;
 		default: return DrawFrontPacket::Other;
 	}
@@ -53,9 +54,9 @@ DrawFrontPacket DrawFrontClassifyPacket(const uint32_t* packet, uint32_t availab
 		const bool     plain  = (packet[1] & 0xffff0000u) != 0x68750000u;
 		return plain || marker == 0x0u || marker == 0x4u || marker == 0xdu ? DrawFrontPacket::Registers : DrawFrontPacket::Other;
 	}
-	if (r == Pm4::R_DRAW_INDEX)
+	if (r == Pm4::R_DRAW_INDEX || r == Pm4::R_DRAW_INDEX_AUTO)
 	{
-		return DrawFrontPacket::IndexedDraw;
+		return DrawFrontPacket::Draw;
 	}
 	const bool register_tables = r == Pm4::R_CX_REGS_INDIRECT || r == Pm4::R_SH_REGS_INDIRECT || r == Pm4::R_UC_REGS_INDIRECT;
 	const bool debug_marker    = r == Pm4::R_PUSH_MARKER || r == Pm4::R_POP_MARKER;
@@ -137,6 +138,7 @@ void DrawFront::Stop()
 PreparedDrawInputs* DrawFront::Take(const uint32_t* draw_packet, uint32_t instance_count)
 {
 	EXIT_IF(!m_live);
+	m_took_stale = false;
 	m_processor_packet.store(draw_packet, std::memory_order_relaxed);
 	const uint64_t prepared = m_prepared.load(std::memory_order_acquire);
 	const uint64_t epoch    = GpuDirtyPageTracker::HostWriteEpoch();
@@ -159,7 +161,8 @@ PreparedDrawInputs* DrawFront::Take(const uint32_t* draw_packet, uint32_t instan
 		{
 			continue;
 		}
-		if (!fresh || record.guest_write_epoch != epoch || record.instance_count != instance_count)
+		m_took_stale = !fresh || record.guest_write_epoch != epoch;
+		if (m_took_stale || record.instance_count != instance_count)
 		{
 			return nullptr;
 		}
@@ -178,7 +181,7 @@ void DrawFront::Release()
 	}
 }
 
-void DrawFront::Prepare(const HW::Context& ctx, const HW::UserConfig& ucfg, HW::Shader* sh_ctx, uint32_t index_count,
+void DrawFront::Prepare(Preparation prepare, const HW::Context& ctx, const HW::UserConfig& ucfg, HW::Shader* sh_ctx, uint32_t index_count,
                         uint32_t instance_count)
 {
 	// The processor analyses the draws it has already reached.
@@ -209,7 +212,7 @@ void DrawFront::Prepare(const HW::Context& ctx, const HW::UserConfig& ucfg, HW::
 	record.packet            = m_replay_packet;
 	record.guest_write_epoch = GpuDirtyPageTracker::HostWriteEpoch();
 	record.instance_count    = instance_count;
-	if (GraphicsRenderPrepareIndexedDrawInputs(ctx, ucfg, sh_ctx, index_count, instance_count, &record.inputs))
+	if (prepare(ctx, ucfg, sh_ctx, index_count, instance_count, &record.inputs))
 	{
 		m_prepared.store(prepared + 1u, std::memory_order_release);
 	}

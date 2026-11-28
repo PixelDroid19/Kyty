@@ -1086,6 +1086,28 @@ static int KYTY_SYSV_ABI KernelIsTrinityMode()
 	return 0;
 }
 
+// sceKernelHasTrinityMode — NID yu17wG8L5FI. A base PS5 returns 0 (measured on a
+// base console), in line with sceKernelIsTrinityMode.
+static int KYTY_SYSV_ABI KernelHasTrinityMode()
+{
+	PRINT_NAME();
+	return 0;
+}
+
+// getargc / getargv — NIDs iKJMWrAumPE / FJmglmTMdr4: the process command line,
+// the same vector the entry received.
+static int KYTY_SYSV_ABI KernelGetArgc()
+{
+	PRINT_NAME();
+	return ::Kyty::Loader::LoaderGuestArgc();
+}
+
+static const char** KYTY_SYSV_ABI KernelGetArgv()
+{
+	PRINT_NAME();
+	return ::Kyty::Loader::LoaderGuestArgv();
+}
+
 // sceKernelGetOperationMode — NID NH6xARDOVv8: (int* mode, int* submode). Callers
 // zero both and act only on submode 1; a base PS5 reports 0 for both.
 static int KYTY_SYSV_ABI KernelGetOperationMode(int* mode, int* submode)
@@ -1715,6 +1737,9 @@ LIB_DEFINE(InitLibKernel_1_FS)
 
 	// Gen5 kernel mode / fd flush.
 	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
+	LIB_FUNC("yu17wG8L5FI", LibKernel::KernelHasTrinityMode);
+	LIB_FUNC("iKJMWrAumPE", LibKernel::KernelGetArgc);
+	LIB_FUNC("FJmglmTMdr4", LibKernel::KernelGetArgv);
 	LIB_FUNC("NH6xARDOVv8", LibKernel::KernelGetOperationMode);
 	LIB_FUNC("fTx66l5iWIA", LibKernel::FsyncFileOrSocket);
 	LIB_FUNC("30Rh4ixbKy4", LibKernel::FsyncFileOrSocket);

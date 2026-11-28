@@ -36,9 +36,14 @@ ShaderModuleKey ShaderModuleKey::Create(const ShaderId& shader_id, ShaderModuleS
 	key.optimization       = optimization;
 	key.next_gen           = next_gen;
 	key.debug_printf_enabled = debug_printf_enabled;
-	key.diagnostic_identity = (stage == ShaderModuleStage::Vertex || stage == ShaderModuleStage::Pixel) ? diagnostic_identity : 0;
+	// The rect stage varies with the parameters the pixel stage reads flat.
+	key.diagnostic_identity = (stage == ShaderModuleStage::Vertex || stage == ShaderModuleStage::Pixel ||
+	                           stage == ShaderModuleStage::RectGeometry)
+	                              ? diagnostic_identity
+	                              : 0;
 	// The persisted store outlives a GPU change, and these modules declare float controls.
-	key.translator_version = (stage == ShaderModuleStage::Geometry || stage == ShaderModuleStage::GeometryForwardingPrimitiveId
+	key.translator_version = (stage == ShaderModuleStage::Geometry || stage == ShaderModuleStage::GeometryForwardingPrimitiveId ||
+	                              stage == ShaderModuleStage::RectGeometry
 	                              ? kShaderGeometryTranslatorVersion
 	                              : kShaderTranslatorVersion) |
 	                         (ShaderNativeHalfConversion() ? 0x80000000u : 0u);

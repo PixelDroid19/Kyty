@@ -4771,6 +4771,8 @@ int KYTY_SYSV_ABI NetCtlGetInfo(int code, NetCtlInfo* info)
 			memset(output.ether_addr.data, 0, sizeof(output.ether_addr.data));
 			output_size = sizeof(output.ether_addr);
 			break;
+		// MTU: the Ethernet payload size of the wired device.
+		case 3: output.mtu = 1500; output_size = sizeof(output.mtu); break;
 		// LINK: connected (1), consistent with the IP-obtained NetCtl state.
 		case 4: output.link = 1; output_size = sizeof(output.link); break;
 		case 11: output.ip_config = 0; output_size = sizeof(output.ip_config); break;

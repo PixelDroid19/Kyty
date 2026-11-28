@@ -780,7 +780,7 @@ void RunIndirectDraw(CommandProcessor* cp, uint64_t args_address)
 	    KYTY_PM4(4, Pm4::IT_SET_BASE, 0u), 1u, static_cast<uint32_t>(args_address & ~uint64_t {7u}),
 	    static_cast<uint32_t>(args_address >> 32u), KYTY_PM4(5, Pm4::IT_DRAW_INDEX_INDIRECT, 0u), 0u, 0u, 0u, 2u,
 	};
-	cp->Run(packet.data(), static_cast<uint32_t>(packet.size()), nullptr);
+	cp->Run(packet.data(), static_cast<uint32_t>(packet.size()), nullptr, nullptr);
 }
 
 // A zero-count record still exercises SET_BASE, packet dispatch, address validation, and the

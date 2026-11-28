@@ -339,17 +339,17 @@ ShaderSamplerOperationEvidence AnalyzeShaderSamplerOperationEvidence(const Shade
 // Analyses run outside the lock: they can be long, and a race only computes
 // the same pure result twice.
 template <typename Value, typename Analyze>
-static Value MemoizedAnalysis(std::mutex* mutex, std::unordered_map<int, Value>* results, int start_register, Analyze analyze)
+static Value MemoizedAnalysis(std::shared_mutex* mutex, std::unordered_map<int, Value>* results, int start_register, Analyze analyze)
 {
 	{
-		std::lock_guard<std::mutex> lock(*mutex);
+		std::shared_lock<std::shared_mutex> lock(*mutex);
 		if (const auto it = results->find(start_register); it != results->end())
 		{
 			return it->second;
 		}
 	}
 	const Value value = analyze();
-	std::lock_guard<std::mutex> lock(*mutex);
+	std::unique_lock<std::shared_mutex> lock(*mutex);
 	results->emplace(start_register, value);
 	return value;
 }
@@ -357,6 +357,12 @@ static Value MemoizedAnalysis(std::mutex* mutex, std::unordered_map<int, Value>*
 ShaderStorageUseEvidence ShaderCodeResourceMemo::StorageUse(const ShaderCode& code, int start_register) const
 {
 	return MemoizedAnalysis(&m_mutex, &m_storage_use, start_register, [&] { return AnalyzeShaderStorageUse(code, start_register); });
+}
+
+ShaderStorageUsage ShaderCodeResourceMemo::DirectStorageUsage(const ShaderCode& code, int start_register) const
+{
+	return MemoizedAnalysis(&m_mutex, &m_direct_storage_usage, start_register,
+	                        [&] { return ShaderGetDirectStorageUsage(code, start_register); });
 }
 
 ShaderDirectImageUse ShaderCodeResourceMemo::DirectImageUse(const ShaderCode& code, int start_register,
@@ -372,27 +378,29 @@ ShaderSamplerOperationEvidence ShaderCodeResourceMemo::SamplerOperation(const Sh
 	                        [&] { return AnalyzeShaderSamplerOperationEvidence(code, start_register); });
 }
 
-std::vector<ShaderImageCopyRead> ShaderCodeResourceMemo::ImageCopyReads(const ShaderCode& code, const ShaderBindResources& bind,
-                                                                        int user_data_register_base) const
+std::shared_ptr<const std::vector<ShaderImageCopyRead>> ShaderCodeResourceMemo::ImageCopyReads(const ShaderCode& code,
+                                                                                               const ShaderBindResources& bind,
+                                                                                               int user_data_register_base) const
 {
 	// A program sees few binding layouts; the bound only guards against churn.
-	constexpr size_t kMaxLayouts = 64;
-	auto             layout      = ShaderImageCopyLayout(bind, user_data_register_base);
+	constexpr size_t                    kMaxLayouts = 64;
+	thread_local std::vector<int32_t>   layout;
+	ShaderImageCopyLayoutInto(bind, user_data_register_base, &layout);
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
+		std::shared_lock<std::shared_mutex> lock(m_mutex);
 		if (const auto it = m_image_copy_reads.find(layout); it != m_image_copy_reads.end())
 		{
 			return it->second;
 		}
 	}
-	auto                        reads = ShaderAnalyzeImageCopyReads(code, bind, user_data_register_base);
-	std::lock_guard<std::mutex> lock(m_mutex);
+	auto reads = std::make_shared<const std::vector<ShaderImageCopyRead>>(
+	    ShaderAnalyzeImageCopyReads(code, bind, user_data_register_base));
+	std::unique_lock<std::shared_mutex> lock(m_mutex);
 	if (m_image_copy_reads.size() >= kMaxLayouts)
 	{
 		m_image_copy_reads.clear();
 	}
-	m_image_copy_reads.emplace(std::move(layout), reads);
-	return reads;
+	return m_image_copy_reads.emplace(layout, std::move(reads)).first->second;
 }
 
 ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int start_register, const ShaderCodeResourceMemo* memo)
@@ -1371,6 +1379,45 @@ ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFill(const ShaderCode& cod
 	return result;
 }
 
+ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFillCode(const ShaderCode& code)
+{
+	if (code.GetType() != ShaderType::Compute)
+	{
+		return {};
+	}
+	const auto& instructions = code.GetInstructions();
+	uint32_t    semantic_indices[k_meta_fill_semantic_instruction_count] = {};
+	uint32_t    semantic_count                                           = 0;
+	for (uint32_t i = 0; i < instructions.Size(); ++i)
+	{
+		const auto& inst = instructions.At(i);
+		if (MetaFillInstructionIsPadding(inst.type))
+		{
+			continue;
+		}
+		if (semantic_count == k_meta_fill_semantic_instruction_count)
+		{
+			return {};
+		}
+		semantic_indices[semantic_count++] = i;
+	}
+	if (semantic_count != k_meta_fill_semantic_instruction_count)
+	{
+		return {};
+	}
+	const auto& param_load = instructions.At(semantic_indices[1]);
+	const auto& src_load   = instructions.At(semantic_indices[6]);
+	const auto& dst_store  = instructions.At(semantic_indices[7]);
+	if (param_load.src_num < 1 || param_load.src[0].type != ShaderOperandType::Sgpr ||
+	    src_load.src_num < 2 || src_load.src[1].type != ShaderOperandType::Sgpr ||
+	    dst_store.src_num < 2 || dst_store.src[1].type != ShaderOperandType::Sgpr)
+	{
+		return {};
+	}
+	return AnalyzeShaderComputeMetaFill(code, src_load.src[1].register_id, dst_store.src[1].register_id,
+	                                    param_load.src[0].register_id);
+}
+
 void ShaderAccumulateScalarBufferLoadSpan(const ShaderInstruction& inst, uint64_t* required_bytes, bool* dynamic_offset)
 {
 	EXIT_IF(required_bytes == nullptr || dynamic_offset == nullptr);
@@ -2174,7 +2221,7 @@ static bool ShaderMetadataOriginScalarLoadOffset(const ShaderInstruction& inst, 
 // metadata. Runtime binding validates the captured origin and bounds values.
 static ShaderStorageImageTileCoverage AnalyzeShaderStorageImageMetadataOriginGridCoverage(
 	const ShaderCode& code, const ShaderBindResources& bind, int texture_index, int workgroup_register, const uint32_t threads[3],
-	bool group_xy_enabled)
+	bool group_xy_enabled, const ShaderScalarFlow* cached_flow)
 {
 	if (code.GetType() != ShaderType::Compute || !group_xy_enabled || threads == nullptr || threads[0] < 2u || threads[0] > 16u ||
 	    threads[1] < 2u || threads[1] > 16u || threads[2] != 1u || (threads[0] & (threads[0] - 1u)) != 0u ||
@@ -2202,8 +2249,6 @@ static ShaderStorageImageTileCoverage AnalyzeShaderStorageImageMetadataOriginGri
 	{
 		return {};
 	}
-	const auto flow = ShaderScalarFlowOf(code);
-	if (flow == nullptr) { return {}; }
 
 	uint32_t branch_index = UINT32_MAX;
 	uint32_t compare_indices[2] = {UINT32_MAX, UINT32_MAX};
@@ -2232,6 +2277,14 @@ static ShaderStorageImageTileCoverage AnalyzeShaderStorageImageMetadataOriginGri
 	{
 		return {};
 	}
+	std::shared_ptr<const ShaderScalarFlow> owned_flow;
+	const ShaderScalarFlow*                 flow = cached_flow;
+	if (flow == nullptr)
+	{
+		owned_flow = ShaderScalarFlowOf(code);
+		flow       = owned_flow.get();
+	}
+	if (flow == nullptr) { return {}; }
 
 	uint32_t shift_x = 0;
 	uint32_t shift_y = 0;
@@ -2907,6 +2960,15 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImagePairedLinearCoverage(con
 	{
 		return {};
 	}
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if ((index > 0 && inst.pc <= instructions.At(index - 1).pc) ||
+		    (!ShaderTileControlFlowIsLinear(inst, index + 1 == instructions.Size()) && !ShaderPairedSplitPlainCompare(inst)))
+		{
+			return {};
+		}
+	}
 	std::array<ShaderTileValue, 256> registers {};
 	registers[0].valid = true;
 	registers[1].valid = true;
@@ -2980,7 +3042,8 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImagePairedLinearCoverage(con
 ShaderStorageImageTileCoverage AnalyzeShaderStorageImagePairedCoverage(const ShaderCode& code,
                                                                        const ShaderBindResources& bind,
                                                                        int texture_index, int workgroup_register,
-                                                                       const uint32_t threads[3], bool group_xy_enabled)
+                                                                       const uint32_t threads[3], bool group_xy_enabled,
+                                                                       const ShaderComputeTileCoverageHints* hints)
 {
 	if (!group_xy_enabled || threads == nullptr || threads[0] == 0 || threads[1] == 0 ||
 	    static_cast<uint64_t>(threads[0]) * threads[1] != 64u || threads[2] != 1u ||
@@ -2990,12 +3053,23 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImagePairedCoverage(const Sha
 	{
 		return {};
 	}
+	if (hints != nullptr && !hints->may_be_paired_split && !hints->may_be_paired_linear)
+	{
+		return {};
+	}
 	const uint8_t full_mask = ShaderBoundedGridFullStoreMask(bind.textures2D.desc[texture_index].texture.Format());
 	if (full_mask == 0u) { return {}; }
-	ShaderPairedSplitFlow flow {};
-	if (ShaderPairedSplitFindFlow(code, bind, texture_index, full_mask, &flow))
+	if (hints == nullptr || hints->may_be_paired_split)
 	{
-		return ShaderPairedSplitCoordinates(code, flow, workgroup_register, threads);
+		ShaderPairedSplitFlow flow {};
+		if (ShaderPairedSplitFindFlow(code, bind, texture_index, full_mask, &flow))
+		{
+			return ShaderPairedSplitCoordinates(code, flow, workgroup_register, threads);
+		}
+	}
+	if (hints != nullptr && !hints->may_be_paired_linear)
+	{
+		return {};
 	}
 	return AnalyzeShaderStorageImagePairedLinearCoverage(code, bind, texture_index, workgroup_register,
 	                                                     threads, full_mask);
@@ -3173,35 +3247,149 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageGridCoverage(const Shade
 
 } // namespace
 
-ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code, const ShaderBindResources& bind,
-                                                                    int texture_index, int workgroup_register,
-                                                                    const uint32_t threads[3], bool native_xy_thread_ids,
-                                                                    bool group_xy_enabled, bool paired_xy_thread_ids)
+ShaderComputeTileCoverageHints AnalyzeShaderComputeTileCoverageHints(const ShaderCode& code)
+{
+	ShaderComputeTileCoverageHints hints {};
+	const auto&                    instructions = code.GetInstructions();
+	const uint32_t                 count        = instructions.Size();
+	if (count == 0u)
+	{
+		return hints;
+	}
+	hints.ends_with_endpgm = instructions.At(count - 1u).type == ShaderInstructionType::SEndpgm;
+
+	bool     all_linear               = true;
+	bool     all_linear_or_plain_cmp  = true;
+	bool     all_paired_split_ops     = true;
+	bool     strictly_increasing_pcs  = true;
+	uint32_t vcmpx_gt_count           = 0;
+	uint32_t vcmpx_gt_idx[2]          = {UINT32_MAX, UINT32_MAX};
+	uint32_t static_branch_count      = 0;
+	uint32_t static_branch_idx        = UINT32_MAX;
+	bool     static_branch_is_execz   = false;
+	uint32_t exec_reset_count         = 0;
+	uint32_t vccz_count               = 0;
+	uint32_t vcmpx_neq_f32_count      = 0;
+	uint32_t execz_count              = 0;
+	uint32_t snot_exec_count          = 0;
+
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		const auto& inst    = instructions.At(i);
+		const bool  is_last = (i + 1u == count);
+		if (i > 0u && inst.pc <= instructions.At(i - 1u).pc)
+		{
+			strictly_increasing_pcs = false;
+		}
+		const bool linear    = ShaderTileControlFlowIsLinear(inst, is_last);
+		const bool plain_cmp = ShaderPairedSplitPlainCompare(inst);
+		all_linear               = all_linear && linear;
+		all_linear_or_plain_cmp  = all_linear_or_plain_cmp && (linear || plain_cmp);
+
+		if (!is_last)
+		{
+			if (inst.type == ShaderInstructionType::VCmpxGtU32)
+			{
+				if (vcmpx_gt_count < 2u) { vcmpx_gt_idx[vcmpx_gt_count] = i; }
+				++vcmpx_gt_count;
+			}
+			if (ShaderInstructionHasStaticBranchTarget(inst.type))
+			{
+				++static_branch_count;
+				static_branch_idx      = i;
+				static_branch_is_execz = (inst.type == ShaderInstructionType::SCbranchExecz);
+			}
+		}
+
+		if (inst.type == ShaderInstructionType::SMovB64 && inst.dst.type == ShaderOperandType::ExecLo && inst.dst.size == 2 &&
+		    inst.src_num == 1 &&
+		    (inst.src[0].type == ShaderOperandType::IntegerInlineConstant || inst.src[0].type == ShaderOperandType::LiteralConstant) &&
+		    inst.src[0].constant.u == UINT32_MAX)
+		{
+			++exec_reset_count;
+		}
+
+		if (inst.type == ShaderInstructionType::SCbranchVccz)
+		{
+			++vccz_count;
+		} else if (inst.type == ShaderInstructionType::VCmpxNeqF32)
+		{
+			++vcmpx_neq_f32_count;
+		} else if (inst.type == ShaderInstructionType::SCbranchExecz)
+		{
+			++execz_count;
+		} else if (inst.type == ShaderInstructionType::SNotB64 && inst.dst.type == ShaderOperandType::ExecLo)
+		{
+			++snot_exec_count;
+		} else if (inst.type == ShaderInstructionType::SEndpgm)
+		{
+			all_paired_split_ops = all_paired_split_ops && is_last;
+		} else if (!linear && !plain_cmp)
+		{
+			all_paired_split_ops = false;
+		}
+	}
+
+	hints.may_be_linear_1d = all_linear;
+	if (!hints.ends_with_endpgm)
+	{
+		return hints;
+	}
+	hints.may_be_metadata_origin_grid = code.GetType() == ShaderType::Compute && count >= 10u && vcmpx_gt_count == 2u &&
+	                                    static_branch_count == 1u && static_branch_is_execz &&
+	                                    vcmpx_gt_idx[0] + 1u == vcmpx_gt_idx[1] && vcmpx_gt_idx[1] + 1u == static_branch_idx &&
+	                                    static_branch_idx + 1u < count;
+	if (count >= 13u)
+	{
+		uint32_t c = instructions.At(0).type == ShaderInstructionType::SInstPrefetch ? 1u : 0u;
+		hints.may_be_bounded_grid = c + 2u < count && instructions.At(c).type == ShaderInstructionType::VLshlAddU32 &&
+		                            instructions.At(c + 1u).type == ShaderInstructionType::VLshlAddU32 &&
+		                            instructions.At(c + 2u).type == ShaderInstructionType::SLoadDwordx4;
+	}
+	hints.may_be_grid_coverage = (exec_reset_count == 1u);
+	hints.may_be_paired_split  = count >= 8u && strictly_increasing_pcs && all_paired_split_ops && vccz_count == 1u &&
+	                             vcmpx_neq_f32_count == 1u && execz_count == 2u && snot_exec_count == 1u;
+	hints.may_be_paired_linear = strictly_increasing_pcs && all_linear_or_plain_cmp;
+	return hints;
+}
+
+ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverageWithContext(
+    const ShaderCode& code, const ShaderBindResources& bind, int texture_index, int workgroup_register, const uint32_t threads[3],
+    bool native_xy_thread_ids, bool group_xy_enabled, bool paired_xy_thread_ids, const ShaderScalarFlow* cached_flow,
+    const ShaderComputeTileCoverageHints* hints)
 {
 	if (paired_xy_thread_ids)
 	{
-		return AnalyzeShaderStorageImagePairedCoverage(code, bind, texture_index, workgroup_register,
-		                                               threads, group_xy_enabled);
+		return AnalyzeShaderStorageImagePairedCoverage(code, bind, texture_index, workgroup_register, threads, group_xy_enabled, hints);
 	}
 	if (threads != nullptr && texture_index >= 0 && texture_index < bind.textures2D.textures_num && workgroup_register >= 0 &&
 	    bind.textures2D.desc[texture_index].textures2d_without_sampler && native_xy_thread_ids)
 	{
-		const auto metadata_origin_coverage = AnalyzeShaderStorageImageMetadataOriginGridCoverage(
-		    code, bind, texture_index, workgroup_register, threads, group_xy_enabled);
-		if (metadata_origin_coverage.width != 0)
+		if (hints == nullptr || hints->may_be_metadata_origin_grid)
 		{
-			return metadata_origin_coverage;
+			const auto metadata_origin_coverage = AnalyzeShaderStorageImageMetadataOriginGridCoverage(
+			    code, bind, texture_index, workgroup_register, threads, group_xy_enabled, cached_flow);
+			if (metadata_origin_coverage.width != 0)
+			{
+				return metadata_origin_coverage;
+			}
 		}
-		const auto bounded_coverage = AnalyzeShaderStorageImageBoundedGridCoverage(code, bind, texture_index,
-		                                                                            workgroup_register, threads, group_xy_enabled);
-		if (bounded_coverage.width != 0)
+		if (hints == nullptr || hints->may_be_bounded_grid)
 		{
-			return bounded_coverage;
+			const auto bounded_coverage = AnalyzeShaderStorageImageBoundedGridCoverage(code, bind, texture_index, workgroup_register,
+			                                                                           threads, group_xy_enabled);
+			if (bounded_coverage.width != 0)
+			{
+				return bounded_coverage;
+			}
 		}
-		const auto grid_coverage = AnalyzeShaderStorageImageGridCoverage(code, bind, texture_index, workgroup_register, threads);
-		if (grid_coverage.width != 0)
+		if (hints == nullptr || hints->may_be_grid_coverage)
 		{
-			return grid_coverage;
+			const auto grid_coverage = AnalyzeShaderStorageImageGridCoverage(code, bind, texture_index, workgroup_register, threads);
+			if (grid_coverage.width != 0)
+			{
+				return grid_coverage;
+			}
 		}
 	}
 	if (threads == nullptr || threads[0] == 0 || threads[0] > k_tile_lanes || threads[1] != 1 || threads[2] != 1 ||
@@ -3209,6 +3397,21 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const Shade
 	    !bind.textures2D.desc[texture_index].textures2d_without_sampler)
 	{
 		return {};
+	}
+	if (hints != nullptr && !hints->may_be_linear_1d)
+	{
+		return {};
+	}
+	const auto& instructions = code.GetInstructions();
+	if (hints == nullptr)
+	{
+		for (uint32_t index = 0; index < instructions.Size(); ++index)
+		{
+			if (!ShaderTileControlFlowIsLinear(instructions.At(index), index + 1 == instructions.Size()))
+			{
+				return {};
+			}
+		}
 	}
 	std::array<ShaderTileValue, 256> registers {};
 	registers[0].valid = true;
@@ -3218,7 +3421,6 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const Shade
 	}
 	ShaderStorageImageTileCoverage coverage {};
 	std::vector<uint8_t> seen;
-	const auto& instructions = code.GetInstructions();
 	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
 		const auto& inst = instructions.At(index);
@@ -3272,6 +3474,16 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const Shade
 		return {};
 	}
 	return coverage;
+}
+
+ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code, const ShaderBindResources& bind,
+                                                                    int texture_index, int workgroup_register,
+                                                                    const uint32_t threads[3], bool native_xy_thread_ids,
+                                                                    bool group_xy_enabled, bool paired_xy_thread_ids)
+{
+	return AnalyzeShaderStorageImageTileCoverageWithContext(code, bind, texture_index, workgroup_register, threads,
+	                                                        native_xy_thread_ids, group_xy_enabled, paired_xy_thread_ids,
+	                                                        nullptr, nullptr);
 }
 
 namespace {
@@ -3365,22 +3577,22 @@ bool EmptyGateWritesExec(const ShaderInstruction& inst)
 
 } // namespace
 
-ShaderComputeEmptyGate AnalyzeShaderComputeEmptyGate(const ShaderCode& code, const ShaderBindResources& bind)
+std::vector<ShaderComputeEmptyGateCandidate> AnalyzeShaderComputeEmptyGateCandidates(const ShaderCode& code)
 {
-	const auto& instructions = code.GetInstructions();
+	std::vector<ShaderComputeEmptyGateCandidate> candidates;
+	const auto&                                  instructions = code.GetInstructions();
 	if (code.GetType() != ShaderType::Compute || instructions.IsEmpty() ||
 	    instructions.At(instructions.Size() - 1u).type != ShaderInstructionType::SEndpgm)
 	{
-		return {};
+		return candidates;
 	}
-	std::unordered_map<uint32_t, uint32_t> instruction_index;
 	std::vector<uint32_t> stores;
 	for (uint32_t i = 0; i < instructions.Size(); ++i)
 	{
 		const auto& inst = instructions.At(i);
-		if (!EmptyGateInstructionAllowed(inst.type) || !instruction_index.emplace(inst.pc, i).second)
+		if (!EmptyGateInstructionAllowed(inst.type))
 		{
-			return {};
+			return candidates;
 		}
 		if (inst.type == ShaderInstructionType::ImageStore)
 		{
@@ -3389,7 +3601,16 @@ ShaderComputeEmptyGate AnalyzeShaderComputeEmptyGate(const ShaderCode& code, con
 	}
 	if (stores.empty())
 	{
-		return {};
+		return candidates;
+	}
+	std::unordered_map<uint32_t, uint32_t> instruction_index;
+	instruction_index.reserve(instructions.Size());
+	for (uint32_t i = 0; i < instructions.Size(); ++i)
+	{
+		if (!instruction_index.emplace(instructions.At(i).pc, i).second)
+		{
+			return candidates;
+		}
 	}
 	for (const auto& inst: instructions)
 	{
@@ -3398,7 +3619,7 @@ ShaderComputeEmptyGate AnalyzeShaderComputeEmptyGate(const ShaderCode& code, con
 			uint32_t destination = 0;
 			if (!ShaderTryGetStaticBranchTarget(instruction_index, inst, &destination))
 			{
-				return {};
+				return candidates;
 			}
 		}
 	}
@@ -3490,23 +3711,38 @@ ShaderComputeEmptyGate AnalyzeShaderComputeEmptyGate(const ShaderCode& code, con
 			{
 				continue;
 			}
-			for (int b = 0; b < bind.storage_buffers.buffers_num; ++b)
+			candidates.push_back({inst.src[0].register_id, inst.src[1].constant.u});
+		}
+	}
+	return candidates;
+}
+
+ShaderComputeEmptyGate ResolveShaderComputeEmptyGate(const std::vector<ShaderComputeEmptyGateCandidate>& candidates,
+                                                     const ShaderBindResources& bind)
+{
+	for (const auto& candidate: candidates)
+	{
+		for (int b = 0; b < bind.storage_buffers.buffers_num; ++b)
+		{
+			const auto source = bind.storage_buffers.sources[b];
+			if (bind.storage_buffers.start_register[b] == candidate.src_register &&
+			    (source == ShaderStorageBindingSource::MetadataSharp ||
+			     source == ShaderStorageBindingSource::DynamicScalarLoad) &&
+			    ShaderStorageUsageIsReadOnly(bind.storage_buffers.usages[b]) &&
+			    bind.storage_buffers.code_available[b] && bind.storage_buffers.exact_matches[b] &&
+			    !bind.storage_buffers.unbased_matches[b] &&
+			    !bind.storage_buffers.decoded_unknown[b] && !bind.storage_buffers.indirect_descriptor_use[b])
 			{
-				const auto source = bind.storage_buffers.sources[b];
-				if (bind.storage_buffers.start_register[b] == inst.src[0].register_id &&
-				    (source == ShaderStorageBindingSource::MetadataSharp ||
-				     source == ShaderStorageBindingSource::DynamicScalarLoad) &&
-				    ShaderStorageUsageIsReadOnly(bind.storage_buffers.usages[b]) &&
-				    bind.storage_buffers.code_available[b] && bind.storage_buffers.exact_matches[b] &&
-				    !bind.storage_buffers.unbased_matches[b] &&
-				    !bind.storage_buffers.decoded_unknown[b] && !bind.storage_buffers.indirect_descriptor_use[b])
-				{
-					return {b, inst.src[1].constant.u};
-				}
+				return {b, candidate.byte_offset};
 			}
 		}
 	}
 	return {};
+}
+
+ShaderComputeEmptyGate AnalyzeShaderComputeEmptyGate(const ShaderCode& code, const ShaderBindResources& bind)
+{
+	return ResolveShaderComputeEmptyGate(AnalyzeShaderComputeEmptyGateCandidates(code), bind);
 }
 
 } // namespace Kyty::Libs::Graphics

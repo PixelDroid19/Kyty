@@ -67,6 +67,10 @@ int KYTY_SYSV_ABI AudioOut2UserDestroy(uintptr_t user);
 int KYTY_SYSV_ABI AudioOut2GetSpeakerInfo(void* info, uint32_t flags);
 // sceAudioOut2Set3DLatency (NID TViD1EZXkNI): (user, latency) for the system user.
 int KYTY_SYSV_ABI AudioOut2Set3DLatency(int32_t user_id, uint32_t latency);
+int KYTY_SYSV_ABI AudioOut2ContextSetAttributes(int32_t context, const void* attrs, uint32_t count);
+size_t KYTY_SYSV_ABI AudioOut2GetSpeakerArrayMemorySize(uint32_t speakers, uint8_t is_3d, uint8_t ambisonics);
+int KYTY_SYSV_ABI AudioOut2SpeakerArrayCreate(uint64_t* handle, const void* vbap, const void* ambisonics);
+int KYTY_SYSV_ABI AudioOut2SpeakerArrayDestroy(uint64_t handle);
 
 // C++-only unit-test seam for host-state regression coverage. It is not a
 // guest export and must not be used to infer an AudioOut2 ContextCreate ABI.
@@ -106,6 +110,7 @@ int KYTY_SYSV_ABI VoiceDeletePort(uint32_t port_id);
 int KYTY_SYSV_ABI VoiceConnectIPortToOPort(uint32_t input_port_id, uint32_t output_port_id);
 int KYTY_SYSV_ABI VoiceReadFromOPort(uint32_t output_port_id, void* data, uint32_t* size);
 int KYTY_SYSV_ABI VoiceGetPortInfo(uint32_t port_id, void* info);
+int KYTY_SYSV_ABI VoiceGetBitRate(uint32_t port_id, uint32_t* bitrate);
 
 } // namespace Voice
 

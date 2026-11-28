@@ -781,7 +781,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x14C: KYTY_NI("v_fma_f64"); break;
 		case 0x14D: inst.type = ShaderInstructionType::VLerpU8; break;
 		case 0x14E: inst.type = ShaderInstructionType::VAlignbitB32; break;
-		case 0x14F: KYTY_NI("v_alignbyte_b32"); break;
+		case 0x14F: inst.type = ShaderInstructionType::VAlignbyteB32; break;
 		case 0x150: KYTY_NI("v_mullit_f32"); break;
 		case 0x151: inst.type = ShaderInstructionType::VMin3F32; break;
 		case 0x152: inst.type = ShaderInstructionType::VMin3I32; break;

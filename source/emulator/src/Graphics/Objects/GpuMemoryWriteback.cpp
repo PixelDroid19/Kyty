@@ -63,6 +63,12 @@ GpuMemoryStorageEdges GpuMemoryTakeStorageEdges(GpuMemoryObjectType type, uint64
 	return edges;
 }
 
+uint64_t GpuMemory::CurrentFrame()
+{
+	Core::LockGuard lock(m_mutex);
+	return m_current_frame;
+}
+
 void GpuMemory::FrameDone(GraphicContext* ctx)
 {
 	EXIT_IF(ctx == nullptr);

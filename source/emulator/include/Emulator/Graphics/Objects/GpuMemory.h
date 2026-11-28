@@ -490,16 +490,16 @@ inline bool GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType ex
 // guest memory (uploaded, written back or invalidated), whose current use can
 // still write and which holds no device write since (captured: a 0x560000
 // view at the base of a 0x1a28000 buffer, a 0xe00000 view around a 0x1c000
-// buffer). The view seeds from guest memory;
-// queue order keeps the buffer's use first and its write-back, if the bytes
-// changed, invalidates the linked view.
+// buffer, a 0x280000 view equal to a buffer in a multi-parent arena). The view
+// seeds from guest memory; queue order keeps the buffer's use first and its
+// write-back, if the bytes changed, invalidates the linked view.
 inline bool GpuMemoryAllowsStorageTextureOverWritableStorageUpload(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                                     GpuMemoryContentOrigin existing_origin, bool existing_has_device_write,
                                                                     GpuMemoryObjectType incoming_type)
 {
 	return existing_type == GpuMemoryObjectType::StorageBuffer &&
-	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
-	        relation == GpuMemoryOverlapType::IsContainedWithin) &&
+	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals ||
+	        relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin) &&
 	       (existing_origin == GpuMemoryContentOrigin::CpuUpload || existing_origin == GpuMemoryContentOrigin::GpuWriteBack ||
 	        existing_origin == GpuMemoryContentOrigin::AliasInvalidation) &&
 	       !existing_has_device_write && incoming_type == GpuMemoryObjectType::StorageTexture;
@@ -1493,8 +1493,8 @@ enum class GpuMemoryGdsSourceStatus : uint8_t
 {
 	// No GPU writer owns the range: the guest bytes are the source.
 	GuestBytesCurrent,
-	// One writable storage buffer, written only on the recording queue, holds the
-	// range; earlier commands on that queue precede the copy in submission order.
+	// One writable storage buffer, written only on the recording queue or by submissions the
+	// recording awaits on the device, holds the range; those writes precede the copy.
 	DeviceBuffer,
 	// The recording owns the range in another form: submit and wait, then retry.
 	ProcessorWriteBackRequired,
@@ -1529,9 +1529,11 @@ bool GpuMemoryWatcherEnabled();
 Vector<GpuMemoryObject> GpuMemoryFindObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, bool exact, bool only_first);
 Vector<GpuMemoryObject> GpuMemoryFindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type,
                                              bool exact, bool only_first);
-// Advances whenever an object enters or leaves GPU memory; a lookup that found
-// nothing stays a miss while it is unchanged.
+// Advances whenever an object enters or leaves GPU memory or gets a new backing;
+// a lookup that found nothing stays a miss while it is unchanged.
 [[nodiscard]] uint64_t GpuMemoryObjectGraphGeneration();
+// The frame that lookups stamp as the last use of what they find.
+[[nodiscard]] uint64_t GpuMemoryCurrentFrame();
 
 // The cached reuses GpuMemoryCreateObject makes on this thread while a capture is open, so the same
 // requests later in the same submission can repeat them without resolving their objects again.

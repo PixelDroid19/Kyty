@@ -23,6 +23,14 @@ constexpr uint32_t kOneLane[3]  = {64u, 1u, 1u};
 constexpr uint32_t kSlotAddress = (0x1au << 25u) | (3u << 17u) | (0u << 9u) | 130u;
 // v_mov_b32 v3, 0.
 constexpr uint32_t kZeroAddress = (0x3fu << 25u) | (3u << 17u) | (1u << 9u) | 128u;
+// v_mul_u32_u24 v3, 8, v0: whatever v0 holds, every lane's address is a multiple of 8.
+constexpr uint32_t kTimesEight  = (0x0bu << 25u) | (3u << 17u) | (0u << 9u) | 136u;
+// v_mul_u32_u24 v3, literal, v0.
+constexpr uint32_t kTimesLiteral = (0x0bu << 25u) | (3u << 17u) | (0u << 9u) | 255u;
+// v_mov_b32 v3, v0.
+constexpr uint32_t kCopyAddress = (0x3fu << 25u) | (3u << 17u) | (1u << 9u) | 256u;
+// s_mov_b64 exec, -1.
+constexpr uint32_t kEveryLane   = (0x17du << 23u) | (126u << 16u) | (4u << 8u) | 193u;
 // s_cbranch_scc1 to the instruction `words` before the one after the branch.
 constexpr uint32_t BranchBack(uint32_t words)
 {
@@ -91,6 +99,16 @@ TEST(EmulatorShaderSplitLdsOrder, EachLanesOwnSlotNeedsNoOrder)
 	EXPECT_TRUE(ShaderSplitLdsOrderOf(code, partial_wave, 1).before[2]);
 }
 
+TEST(EmulatorShaderSplitLdsOrder, EntryAccessReadsTheAddressOfItsOwnPoint)
+{
+	// Every lane writes dword 0, then v3 becomes the lane's own slot and lane 0 writes dword 0 again.
+	const uint32_t shader[] = {kZeroAddress, WriteWord(0u), WriteRegisters(3u), kSlotAddress, WriteWord(0u), WriteRegisters(3u), kEndpgm};
+	const auto     order    = ShaderSplitLdsOrderOf(ParseShader(shader), kOneLane, 1);
+
+	EXPECT_EQ(Orders(order), 1u);
+	EXPECT_TRUE(order.before[3]);
+}
+
 TEST(EmulatorShaderSplitLdsOrder, SharedBytesAreOrderedOnlyAgainstTheirWriter)
 {
 	// Write dword 0, read dword 2, read dword 0.
@@ -129,6 +147,38 @@ TEST(EmulatorShaderSplitLdsOrder, BarrierOrdersTheAccessesAcrossIt)
 
 	EXPECT_EQ(Orders(ShaderSplitLdsOrderOf(ParseShader(barrier), kOneLane, 1)), 0u);
 	EXPECT_EQ(Orders(ShaderSplitLdsOrderOf(ParseShader(hint), kOneLane, 1)), 1u);
+}
+
+TEST(EmulatorShaderSplitLdsOrder, DisjointFieldsOfOneSlotNeedNoOrder)
+{
+	const uint32_t fields[] = {kTimesEight, WriteWord(0u), WriteRegisters(3u), WriteWord(4u), WriteRegisters(3u), kEndpgm};
+	const auto     code     = ParseShader(fields);
+	ASSERT_EQ(code.GetInstructions().Size(), 4u);
+	ASSERT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::VMulU32U24);
+	EXPECT_EQ(Orders(ShaderSplitLdsOrderOf(code, kOneLane, 0)), 0u);
+
+	// The same field, or fields wider than the slot, may meet another lane's.
+	const uint32_t same[] = {kTimesEight, WriteWord(0u), WriteRegisters(3u), WriteWord(0u), WriteRegisters(3u), kEndpgm};
+	const uint32_t wide[] = {kTimesEight, WriteWord(0u), WriteRegisters(3u), WriteWord(8u), WriteRegisters(3u), kEndpgm};
+	EXPECT_EQ(Orders(ShaderSplitLdsOrderOf(ParseShader(same), kOneLane, 0)), 1u);
+	EXPECT_EQ(Orders(ShaderSplitLdsOrderOf(ParseShader(wide), kOneLane, 0)), 1u);
+
+	// The address rewritten, or more lanes enabled, after the multiply: the later access's address is unknown.
+	const uint32_t copied[]  = {kTimesEight, WriteWord(0u), WriteRegisters(3u), kCopyAddress, WriteWord(4u), WriteRegisters(3u), kEndpgm};
+	const uint32_t widened[] = {kTimesEight, WriteWord(0u), WriteRegisters(3u), kEveryLane, WriteWord(4u), WriteRegisters(3u), kEndpgm};
+	EXPECT_TRUE(ShaderSplitLdsOrderOf(ParseShader(copied), kOneLane, 0).before[3]);
+	EXPECT_TRUE(ShaderSplitLdsOrderOf(ParseShader(widened), kOneLane, 0).before[3]);
+}
+
+TEST(EmulatorShaderSplitLdsOrder, FactorThatMayWrapKeepsItsPowerOfTwo)
+{
+	// 384 times a 24-bit value may wrap 32 bits: only 128 divides every product.
+	const uint32_t inside[] = {kTimesLiteral, 384u, WriteWord(0u), WriteRegisters(3u), WriteWord(124u), WriteRegisters(3u), kEndpgm};
+	const uint32_t across[] = {kTimesLiteral, 384u, WriteWord(0u), WriteRegisters(3u), WriteWord(132u), WriteRegisters(3u), kEndpgm};
+	const auto     code     = ParseShader(inside);
+	ASSERT_EQ(code.GetInstructions().Size(), 4u);
+	EXPECT_EQ(Orders(ShaderSplitLdsOrderOf(code, kOneLane, 0)), 0u);
+	EXPECT_EQ(Orders(ShaderSplitLdsOrderOf(ParseShader(across), kOneLane, 0)), 1u);
 }
 
 UT_END();

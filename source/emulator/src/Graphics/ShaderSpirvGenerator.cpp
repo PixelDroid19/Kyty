@@ -9,6 +9,7 @@
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvTemplates.h"
 #include "ShaderNativeWaveInternal.h"
+#include "ShaderSpirvSelectionCut.h"
 #include "ShaderSpirvStorageWriteMask.h"
 #include "ShaderStorageAnalysis.h"
 
@@ -154,7 +155,7 @@ static bool ShaderIsPixelDepthExport(const ShaderInstruction& inst)
 	                                                   inst.format == ShaderInstructionFormat::PixelZVsrc0VmDone);
 }
 
-static bool ShaderCodeHasPixelDepthExport(const ShaderCode& code)
+bool ShaderHasPixelDepthExport(const ShaderCode& code)
 {
 	if (code.GetType() != ShaderType::Pixel)
 	{
@@ -445,7 +446,7 @@ void Spirv::GenerateSource()
 		EXIT("native-wave compute coordinate layout unsupported or inconsistent\n");
 	}
 
-	if (ShaderCodeHasPixelDepthExport(m_code) && !ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
+	if (ShaderHasPixelDepthExport(m_code) && !ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
 		               "WARNING: pixel depth export rejected: control flow cannot prove a FragDepth write before every non-discard exit\n");
@@ -506,12 +507,25 @@ void Spirv::GenerateSource()
 	const uint32_t annotations_end = m_source.Size();
 	WriteTypes();
 	WriteConstants();
+	const uint32_t constants_end = m_source.Size();
 	WriteGlobalVariables();
-	const uint32_t main_begin = m_source.Size();
+	uint32_t main_begin = m_source.Size();
 	WriteMainProlog();
 	WriteLocalVariables();
 	WriteInstructions();
 	WriteMainEpilog();
+	if (m_code.GetType() == ShaderType::Compute && m_bind != nullptr && m_bind->device_address_used && m_bind->push_constant_size > 0)
+	{
+		String8                       lrc_constants;
+		String8                       lrc_body;
+		const SpirvSelectionCutConfig lrc_cfg {m_bind->device_address_offset_dw / 4u, m_bind->vsharp_uniform_buffer};
+		if (SpirvCutSelectionLiveRanges(m_source.Mid(main_begin), lrc_cfg, &lrc_constants, &lrc_body))
+		{
+			m_source   = m_source.Left(constants_end) + lrc_constants +
+			             m_source.Mid(constants_end, main_begin - constants_end) + lrc_body;
+			main_begin += lrc_constants.Size();
+		}
+	}
 	if (UsesSplitComputeWave())
 	{
 		CheckSplitWaveCollectives(m_source.Mid(main_begin));
@@ -624,8 +638,11 @@ static bool spirv_uses_dpp_row(const ShaderCode& code)
 // Gen5 format stores merge partial dwords with atomics, through %buf_uint too.
 static bool spirv_uses_buffer_atomics(const ShaderCode& code)
 {
-	return (Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd,
-	                                            ShaderInstructionType::BufferAtomicUmax})) ||
+	return (Config::IsNextGen() &&
+	        code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd, ShaderInstructionType::BufferAtomicSub, ShaderInstructionType::BufferAtomicSmin,
+	                       ShaderInstructionType::BufferAtomicUmin, ShaderInstructionType::BufferAtomicSmax, ShaderInstructionType::BufferAtomicUmax,
+	                       ShaderInstructionType::BufferAtomicAnd, ShaderInstructionType::BufferAtomicOr, ShaderInstructionType::BufferAtomicXor,
+	                       ShaderInstructionType::BufferAtomicSwap})) ||
 	       SpirvUsesGen5BufferFormatStores(code);
 }
 
@@ -1008,7 +1025,7 @@ void Spirv::WriteHeader()
 				// that can discard.
 				const bool safe_late_input_probe = UsesPixelInput0Probe() && !ShaderPreventsNoopPixelElision(m_code);
 				if (m_ps_input_info->ps_early_z && !m_ps_input_info->ps_pixel_kill_enable && !ShaderCodeCanDiscard(m_code) &&
-				    !ShaderCodeHasPixelDepthExport(m_code) && !safe_late_input_probe)
+				    !ShaderHasPixelDepthExport(m_code) && !safe_late_input_probe)
 				{
 					execution_modes.Add("OpExecutionMode %main EarlyFragmentTests\n");
 				}
@@ -1465,12 +1482,18 @@ void Spirv::WriteAnnotations()
 		}
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
-			// Every view aliases the one storage binding.
+			// Every view aliases the one storage binding, so one globally coherent guest access makes them all coherent.
+			bool coherent = false;
+			for (const auto& inst: m_code.GetInstructions())
+			{
+				coherent = coherent || inst.mimg_coherent;
+			}
 			for (const auto& view: ShaderStorageImageViews(m_code, m_bind))
 			{
 				m_source += String8(textures_annotations_l).ReplaceStr("textures2D_L", view.variable)
 				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 				                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_storage_index));
+				if (coherent) { m_source += String8("       OpDecorate %") + view.variable + " Coherent\n"; }
 			}
 		}
 		if (m_bind->samplers.samplers_num > 0)
@@ -1500,6 +1523,10 @@ void Spirv::WriteAnnotations()
 				                .ReplaceStr("<Offset>", String8::FromPrintf("%u", m_bind->push_constant_offset));
 			}
 		}
+	}
+	if (UsesGuestDeviceAddress() && m_bind != nullptr && m_bind->program_base_used && ShaderProgramWindowRequiredBytes(m_code) > 0u)
+	{
+		m_source += "\n       OpDecorate %gda_pw_covers SpecId 0\n";
 	}
 }
 
@@ -1924,6 +1951,10 @@ void Spirv::WriteConstants()
 	{
 		m_source += String8::FromPrintf("%%%s = OpConstant %%%s %s\n", c.id.c_str(), c.type_str.c_str(), c.literal_str.c_str());
 	}
+	if (UsesGuestDeviceAddress() && m_bind != nullptr && m_bind->program_base_used && ShaderProgramWindowRequiredBytes(m_code) > 0u)
+	{
+		m_source += "%gda_pw_covers = OpSpecConstantFalse %bool\n";
+	}
 	if (SpirvUsesGen5BufferFormats(m_code))
 	{
 		m_source += SpirvGen5BufferFormatTable(*this);
@@ -2202,6 +2233,7 @@ void Spirv::WriteLocalVariables()
 	{
 		m_source += String8::FromPrintf("%%join_skip_%04" PRIx32 " = OpVariable %%_ptr_Function_bool Function %%false\n", skip.branch);
 	}
+	m_source += HeapRecordVariables();
 
 	for (const auto& c: m_variables)
 	{
@@ -2549,17 +2581,33 @@ void Spirv::WriteLocalVariables()
 	}
 	m_source += "%native_initial_exec = OpLoad %uint %exec_lane_lo\n"
 	            "%native_initial_live = OpINotEqual %bool %native_initial_exec %uint_0\n";
-	m_source += NativeMaskBallot("native_initial_live", "native_initial_ballot");
-	m_source += "%native_initial_lo = OpCompositeExtract %uint %native_initial_ballot 0\n"
-	            "%native_initial_hi = OpCompositeExtract %uint %native_initial_ballot 1\n"
-	            "OpStore %exec_lo %native_initial_lo\nOpStore %exec_hi %native_initial_hi\n";
-	// A dispatch of whole waves starts every lane live: the membership test above is always true.
+	if (UsesLanePrivateMasks())
+	{
+		const auto all_ones = GetConstantUint(0xffffffffu);
+		m_source += String8("%native_initial_mask = OpSelect %uint %native_initial_live %<all_ones> %uint_0\n"
+		                    "OpStore %exec_lo %native_initial_mask\n"
+		                    "OpStore %exec_hi %native_initial_mask\n")
+		                .ReplaceStr("<all_ones>", all_ones);
+	} else
+	{
+		m_source += NativeMaskBallot("native_initial_live", "native_initial_ballot");
+		m_source += "%native_initial_lo = OpCompositeExtract %uint %native_initial_ballot 0\n"
+		            "%native_initial_hi = OpCompositeExtract %uint %native_initial_ballot 1\n"
+		            "OpStore %exec_lo %native_initial_lo\nOpStore %exec_hi %native_initial_hi\n";
+	}
+	// Non-compute waves start with every lane live (`OpStore %exec_lane_lo %uint_1` above),
+	// and whole-wave compute dispatches have every membership bit set.
 	const bool whole_waves = UsesNativeComputeWave() && !(m_bind != nullptr && m_bind->thread_limits_used) &&
 	                         (m_cs_input_info->wave_layout.guest_local[0] * m_cs_input_info->wave_layout.guest_local[1] *
 	                          m_cs_input_info->wave_layout.guest_local[2]) %
 	                                 m_cs_input_info->wave_layout.guest_wave_size ==
 	                             0u;
-	m_source += whole_waves || HasFusedVertexLanes() ? NativeExecAllLanes() : NativeExecRefresh("initial");
+	const bool all_lanes_live = whole_waves || HasFusedVertexLanes() ||
+	                            ((m_code.GetType() == ShaderType::Pixel ||
+	                              (m_code.GetType() == ShaderType::Compute && !UsesNativeComputeWave())) &&
+	                             !UsesFragmentCompute() && !UsesGeometryCompute() &&
+	                             !(m_bind != nullptr && m_bind->thread_limits_used));
+	m_source += all_lanes_live ? NativeExecAllLanes() : NativeExecRefresh("initial");
 	if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog && !UsesGeometryCompute())
 	{
 		// One host subgroup is one guest wave (see ShaderNggFront.h): s3 counts every lane
@@ -3121,6 +3169,15 @@ void Spirv::WriteInstructions()
 		if (uses_uint_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: uses_uint_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst) condition ignored (continuing)\n"); }
 
 		WriteLabel(index);
+		if (HasLdsOrderBarriers())
+		{
+			const auto& barriers = m_cs_input_info->lds_order_barriers;
+			if (std::find(barriers.begin(), barriers.end(), static_cast<uint32_t>(index)) != barriers.end() &&
+			    !Recompile_SBarrier_Empty(static_cast<uint32_t>(index), m_code, &m_source, this, nullptr, SccCheck::None))
+			{
+				EXIT("host LDS-order barrier failed: pc=0x%08" PRIx32 "\n", inst.pc);
+			}
+		}
 		if (LaneReductions().IsStep(static_cast<uint32_t>(index)))
 		{
 			m_source += String8::FromPrintf("; reduction step: %s\n", ShaderCode::DbgInstructionToStr(inst).c_str());
@@ -3167,6 +3224,9 @@ void Spirv::WriteInstructions()
 		} else if (m_bind != nullptr && ShaderImageReadsZeroResource(*m_bind, inst))
 		{
 			ok = EmitZeroImageRead(inst, this, &dst);
+		} else if (m_bind != nullptr && ShaderImageStoreTargetsZeroResource(*m_bind, inst))
+		{
+			ok = true;
 		} else if (m_bind != nullptr && ShaderScalarLoadIsZero(*m_bind, inst))
 		{
 			ok = EmitZeroScalarLoad(inst, this, &dst);
@@ -3202,7 +3262,7 @@ void Spirv::WriteInstructions()
 			     sampled_2d, sampled_array, sampled_3d, inst_text, static_cast<unsigned>(inst.sopp_opcode), inst.raw_word,
 			     m_code.GetCrc32(), (ImageBindingSummary(inst) + ExportBindingSummary(inst)).c_str());
 		}
-		if (IsImageInstruction(inst))
+		if (IsImageInstruction(inst) && (fragment_emitted || !SkipDestinationExecGuard(static_cast<uint32_t>(index))))
 		{
 			dst = GuardImageDestinationStores(dst, inst, static_cast<uint32_t>(index));
 		}
@@ -3323,11 +3383,6 @@ void Spirv::WriteFunctions()
 	if (m_code.HasAnyOf({ShaderInstructionType::VSadU32}))
 	{
 		m_source += FUNC_ABS_DIFF;
-	}
-
-	if (m_code.HasAnyOf({ShaderInstructionType::SWqmB32, ShaderInstructionType::SWqmB64}))
-	{
-		m_source += FUNC_WQM;
 	}
 
 	if (m_code.HasAnyOf({ShaderInstructionType::SAddcU32, ShaderInstructionType::VAddCoCiU32}))
@@ -3476,7 +3531,7 @@ void Spirv::FindConstants()
 		}
 	}
 	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU16U32}) || spirv_uses_i16(m_code)) { AddConstantUint(0xffffu); }
-	if (m_code.HasAnyOf({ShaderInstructionType::VAlignbitB32, ShaderInstructionType::VPermB32, ShaderInstructionType::VMadI32I24,
+	if (m_code.HasAnyOf({ShaderInstructionType::VAlignbitB32, ShaderInstructionType::VAlignbyteB32, ShaderInstructionType::VPermB32, ShaderInstructionType::VMadI32I24,
 	                     ShaderInstructionType::VMadU32U16, ShaderInstructionType::VMadI32I16, ShaderInstructionType::VLerpU8}))
 	{
 		for (uint32_t value: {0u, 1u, 2u, 3u, 4u, 8u, 12u, 15u, 16u, 24u, 31u, 32u, 255u, 0xffffu})
@@ -3564,8 +3619,9 @@ void Spirv::FindConstants()
 	}
 	if (m_bind != nullptr && m_bind->storage_address_used)
 	{
-		// Loads by device address: address mask and shift, dword alignment and access sizes.
-		for (uint32_t value: {0xffffu, 0xfffffffcu, 32u})
+		// Loads by device address: address mask and shift, dword alignment, scalar stride extent, partial-OOB loop and
+		// access sizes.
+		for (uint32_t value: {0u, 1u, 2u, 0xffffu, 0xfffffffcu, 32u, 16u, 0x3fffu, 0xffffffffu})
 		{
 			AddConstantUint(value);
 		}
@@ -3644,7 +3700,7 @@ void Spirv::FindConstants()
 	}
 	if (m_code.HasAnyOf({ShaderInstructionType::SWqmB32, ShaderInstructionType::SWqmB64}))
 	{
-		for (uint32_t shift = 0; shift < 32u; shift += 4u) { AddConstantUint(15u << shift); }
+		for (uint32_t value: {1u, 2u, 0x55555555u, 0xaaaaaaaau, 0x33333333u, 0xccccccccu}) { AddConstantUint(value); }
 	}
 	// A runtime-M0 relative move lowers to select chains whose comparisons
 	// name every register-file offset the chain covers.
@@ -3725,9 +3781,13 @@ void Spirv::FindConstants()
 		AddConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
 	}
 	// The compute barrier emitter picks this value with the same predicate, so both must agree.
-	if (m_code.HasAnyOf({ShaderInstructionType::SBarrier}) && ShaderCodeWritesStorage(m_code))
+	if ((m_code.HasAnyOf({ShaderInstructionType::SBarrier}) || HasLdsOrderBarriers()) && ShaderCodeWritesStorage(m_code))
 	{
 		AddConstantUint(SPIRV_WORKGROUP_STORE_BARRIER_MEMORY);
+	}
+	if (HasLdsOrderBarriers())
+	{
+		AddConstantUint(SPIRV_WORKGROUP_MEMORY_ACQ_REL);
 	}
 	if (UsesVertexLayerExport())
 	{
@@ -3749,6 +3809,26 @@ void Spirv::FindConstants()
 		{
 			AddConstantInt(static_cast<int>(i));
 			AddConstantUint(i);
+		}
+	}
+	if (UsesGuestDeviceAddress() && m_bind != nullptr && m_bind->program_base_used)
+	{
+		// Offsets and extents of the loads that read through the program window.
+		for (uint32_t index = 0; index < m_code.GetInstructions().Size(); index++)
+		{
+			ProgramRelativeScalarDescriptor descriptor;
+			if (!ShaderProgramRelativeScalarDescriptor(m_code, index, &descriptor))
+			{
+				continue;
+			}
+			const auto words = static_cast<uint32_t>(m_code.GetInstructions().At(index).dst.size);
+			AddConstantUint(descriptor.offset);
+			AddConstantUint(descriptor.offset + 4u * words);
+			AddConstantUint(descriptor.records);
+			for (uint32_t word = 0; word < words && 4u * word < descriptor.records; word++)
+			{
+				AddConstantUint(descriptor.records - 4u * word);
+			}
 		}
 	}
 	for (const auto& inst: m_code.GetInstructions())

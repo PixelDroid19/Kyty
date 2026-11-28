@@ -37,6 +37,9 @@ struct ColorView
 // 0 and 1. No host format orders channels that way, so the pixel export and the
 // write mask move W into the second channel under this export order value.
 constexpr uint8_t kColorExportOrderTwoChannelAlt = 4u;
+// COMP_SWAP ALT_REV on a one-channel color format stores export W (an alpha-only
+// target). The pixel export, write mask and blend equation move W into channel 0.
+constexpr uint8_t kColorExportOrderOneChannelAlpha = 5u;
 
 struct ColorInfo
 {
@@ -754,8 +757,10 @@ public:
 	{
 		m_render_targets[slot].info          = info;
 		const bool two_channel               = info.format == 0x3u || info.format == 0x5u || info.format == 0xbu;
-		m_sh_regs.target_output_order[slot] =
-		    two_channel && info.channel_order == 1u ? kColorExportOrderTwoChannelAlt : static_cast<uint8_t>(info.channel_order);
+		const bool one_channel               = info.format == 0x1u || info.format == 0x2u || info.format == 0x4u;
+		m_sh_regs.target_output_order[slot]  = two_channel && info.channel_order == 1u   ? kColorExportOrderTwoChannelAlt
+		                                       : one_channel && info.channel_order == 3u ? kColorExportOrderOneChannelAlpha
+		                                                                                 : static_cast<uint8_t>(info.channel_order);
 		m_sh_regs.target_output_number[slot] = static_cast<uint8_t>(info.channel_type);
 	}
 	void SetColorAttrib(uint32_t slot, const ColorAttrib& attrib) { m_render_targets[slot].attrib = attrib; }

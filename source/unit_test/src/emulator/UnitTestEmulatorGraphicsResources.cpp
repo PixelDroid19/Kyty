@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/ShaderBufferFormat.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/ShaderStorageImage.h"
+#include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanBlend.h"
 #include "Emulator/Graphics/VulkanSampler.h"
@@ -20,6 +21,7 @@
 
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -521,6 +523,25 @@ TEST(EmulatorGraphicsResources, PreservesFloatStorageAndR32AtomicAliases)
 			                           !uint_source.ContainsStr("textures2D_LU"),
 			                       "identical storage and atomic views are one view");
 		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsResources, OneDimensionalAtomicAddressesRowZeroOfOneDimensionalResource)
+{
+	ASSERT_EXIT(
+	    {
+		    InitializeImageModuleTest();
+		    auto fixture = MakeAtomicImageModule(false, 20u);
+		    auto& atomic = fixture.code.GetInstructions()[2];
+		    atomic.mimg_dimension = 0;
+		    atomic.src[0].size = 1;
+		    fixture.input.bind.textures2D.desc[2].texture.fields[3] = 8u << 28u;
+		    const auto source = EmitValidatedImageModule(fixture);
+		    RequireImageModule(source.ContainsStr("%image_atomic_y_2 = OpCopyObject %uint %uint_0") &&
+		                           !source.ContainsStr("%image_atomic_y_f_2") && source.ContainsStr("OpAtomicIAdd %uint"),
+		                       "1D atomic on a 1D resource updates row 0 at X");
 		    std::_Exit(0);
 	    },
 	    ::testing::ExitedWithCode(0), "");
@@ -1067,16 +1088,28 @@ TEST(EmulatorGraphicsResources, VolumeAdmissionNeverTurnsRejectedTilingIntoLinea
 					const bool admitted = Gen5GetVolumeTextureLayout(format, 8u, 16u, depth, 8u, levels, tile, &layout);
 					// SW mode 0 (linear) is a byte-for-byte layout and SW modes 5 and 9 the SW_4KB_S and
 					// SW_64KB_S volume patterns of every element size. SW mode 27 is a thin volume whose
-					// slices are 2D-array layers, mip chain included. Any other tile mode, or a mip chain
-					// in another mode, must stay rejected instead of being read as linear.
+					// slices are 2D-array layers, mip chain included. SW mode 9 chains the levels of a
+					// 4-byte volume and SW mode 5 those of a 1-byte volume, in slabs of one block's depth.
+					// Any other tile mode, or a mip chain in another mode or element size, must stay
+					// rejected instead of being read as linear.
 					Gen5TextureArrayLayout slices {};
-					const bool thin = tile == 27u && Gen5GetTextureArrayLayout(format, 8u, 16u, 8u, levels, 27u, depth, &slices);
-					EXPECT_EQ(admitted, thin || (levels == 1u && (tile == 0u || tile == 5u || tile == 9u)));
+					const bool thin  = tile == 27u && Gen5GetTextureArrayLayout(format, 8u, 16u, 8u, levels, 27u, depth, &slices);
+					const bool chain = levels == 2u && ((tile == 9u && format == 56u) || (tile == 5u && format == 1u));
+					EXPECT_EQ(admitted, thin || chain || (levels == 1u && (tile == 0u || tile == 5u || tile == 9u)));
 					if (!admitted)
 					{
 						EXPECT_EQ(layout.tiled.size, 0u);
 						EXPECT_EQ(layout.linear_size, 0u);
 						EXPECT_FALSE(Gen5ValidateTextureVolumeUpload(layout, UINT64_MAX));
+					} else if (chain)
+					{
+						// SW mode 9: both levels fit the tail of one 64 KiB block per 16 slices. SW mode 5:
+						// level 0 is 16 high, over the 16x8 tail, so each 16-slice slab holds the tail block
+						// and one block of level 0.
+						const uint32_t bytes = tile == 9u ? 4u : 1u;
+						EXPECT_TRUE(layout.mip_chain);
+						EXPECT_EQ(layout.tiled.size, tile == 9u ? 65536u : 8192u);
+						EXPECT_EQ(layout.linear_size, (8u * 16u * depth + 4u * 8u * std::max(1u, depth / 2u)) * bytes);
 					} else if (tile == 5u || tile == 9u)
 					{
 						// 4 KiB blocks: 16x16x16 (1 B), 8x16x16 (2 B), 8x16x8 (4 B), 8x8x8 (8 B), 4x8x8 (16 B).
@@ -1108,6 +1141,93 @@ TEST(EmulatorGraphicsResources, VolumeAdmissionNeverTurnsRejectedTilingIntoLinea
 			}
 		}
 	}
+}
+
+TEST(EmulatorGraphicsResources, StandardVolumeMipChainSlabsHoldEveryLevel)
+{
+	// A 128^3 R32 volume with 8 levels (captured descriptor shape). Levels 3..7 fit the 64 KiB tail; levels
+	// 2, 1 and 0 follow it in each 16-slice slab, padded to 32x32x16 blocks.
+	Gen5TextureVolumeLayout layout {};
+	ASSERT_TRUE(Gen5GetVolumeTextureLayout(56u, 128u, 128u, 128u, 128u, 8u, 9u, &layout));
+	ASSERT_TRUE(layout.mip_chain);
+	EXPECT_EQ(layout.slab_bytes, 1441792u);
+	EXPECT_EQ(layout.tiled.size, 0xB00000u);
+	EXPECT_TRUE(Gen5ValidateTextureVolumeUpload(layout, 0xB00000u));
+	EXPECT_FALSE(Gen5ValidateTextureVolumeUpload(layout, 0xB00000u - 1u));
+	EXPECT_EQ(layout.level[2].slab_offset, 65536u);
+	EXPECT_EQ(layout.level[1].slab_offset, 65536u + 32u * 32u * 16u * 4u);
+	EXPECT_EQ(layout.level[0].slab_offset, 65536u + 5u * 32u * 32u * 16u * 4u);
+	const uint32_t tail[5][2] = {{16u, 0u}, {0u, 16u}, {8u, 0u}, {4u, 8u}, {0u, 12u}};
+	for (uint32_t index = 0; index < 5u; ++index)
+	{
+		EXPECT_EQ(layout.level[3u + index].tail_x, tail[index][0]);
+		EXPECT_EQ(layout.level[3u + index].tail_y, tail[index][1]);
+	}
+	// 2- and 8-byte chains move their tail origins and stay refused.
+	EXPECT_FALSE(Gen5GetVolumeTextureLayout(7u, 128u, 128u, 128u, 128u, 8u, 9u, &layout));
+	EXPECT_FALSE(Gen5GetVolumeTextureLayout(71u, 128u, 128u, 128u, 128u, 8u, 9u, &layout));
+}
+
+TEST(EmulatorGraphicsResources, Standard4KVolumeMipChainUsesTheThickTail)
+{
+	// A 32^3 R8 SW_4KB_S volume with 6 levels (captured descriptor shape). The 1-byte 4 KiB block is 16x16x16,
+	// in-block bits X0 X1 Z0 Y0 Z1 Y1 X2 Z2 Y2 X3 Z3 Y3. The tail is 16x8 and holds levels 2..5 at the slab's
+	// start; level 1 follows it, then level 0 as 2x2 blocks, and the chain repeats per 16-slice slab.
+	// One (x, y, z) per address bit, lowest bit first.
+	const uint32_t unit[12][3] = {{1u, 0u, 0u}, {2u, 0u, 0u}, {0u, 0u, 1u}, {0u, 1u, 0u}, {0u, 0u, 2u}, {0u, 2u, 0u},
+	                              {4u, 0u, 0u}, {0u, 0u, 4u}, {0u, 4u, 0u}, {8u, 0u, 0u}, {0u, 0u, 8u}, {0u, 8u, 0u}};
+	for (uint32_t bit = 0; bit < 12u; ++bit)
+	{
+		EXPECT_EQ(TileGetStandardVolumeOffset(unit[bit][0], unit[bit][1], unit[bit][2], 16u, 16u, 1u, 4096u), uint64_t {1u} << bit)
+		    << "bit=" << bit;
+	}
+	Gen5TextureVolumeLayout layout {};
+	ASSERT_TRUE(Gen5GetVolumeTextureLayout(1u, 32u, 32u, 32u, 32u, 6u, 5u, &layout));
+	ASSERT_TRUE(layout.mip_chain);
+	EXPECT_EQ(layout.bytes_per_element, 1u);
+	EXPECT_EQ(layout.block_depth, 16u);
+	EXPECT_EQ(layout.slab_bytes, 24576u);
+	EXPECT_EQ(layout.tiled.size, 49152u);
+	EXPECT_EQ(layout.level[1].slab_offset, 4096u);
+	EXPECT_EQ(layout.level[0].slab_offset, 8192u);
+	const uint32_t tail[4][2] = {{0u, 8u}, {8u, 4u}, {8u, 0u}, {0u, 4u}};
+	for (uint32_t index = 0; index < 4u; ++index)
+	{
+		EXPECT_EQ(layout.level[2u + index].slab_offset, 0u);
+		EXPECT_EQ(layout.level[2u + index].tail_x, tail[index][0]);
+		EXPECT_EQ(layout.level[2u + index].tail_y, tail[index][1]);
+	}
+	EXPECT_TRUE(Gen5ValidateTextureVolumeUpload(layout, 49152u));
+	EXPECT_FALSE(Gen5ValidateTextureVolumeUpload(layout, 49152u - 1u));
+}
+
+TEST(EmulatorGraphicsResources, StandardVolumeMipChainDetilesEachLevelFromItsSlab)
+{
+	// Every guest word holds its own byte offset, so each detiled texel names the address it was read from.
+	Gen5TextureVolumeLayout layout {};
+	ASSERT_TRUE(Gen5GetVolumeTextureLayout(56u, 64u, 64u, 32u, 64u, 3u, 9u, &layout));
+	ASSERT_TRUE(layout.mip_chain);
+	std::vector<uint32_t> guest(layout.tiled.size / 4u);
+	for (uint32_t index = 0; index < guest.size(); ++index) { guest[index] = index * 4u; }
+	std::vector<uint32_t> linear(layout.linear_size / 4u);
+	ASSERT_TRUE(Gen5DetileTextureVolumeLevels(linear.data(), layout.linear_size, guest.data(), layout.tiled.size, layout));
+	EXPECT_FALSE(Gen5DetileTextureVolumeLevels(linear.data(), layout.linear_size, guest.data(), layout.tiled.size - 1u, layout));
+	for (uint32_t index = 0; index < layout.levels; ++index)
+	{
+		const auto& level = layout.level[index];
+		for (uint32_t z: {0u, level.depth - 1u})
+		{
+			const uint32_t x = level.width - 1u, y = level.height - 1u;
+			const uint64_t expected = static_cast<uint64_t>(z / layout.block_depth) * layout.slab_bytes + level.slab_offset +
+			                          TileGetStandardVolumeOffset(x + level.tail_x, y + level.tail_y, z % layout.block_depth,
+			                                                      level.pitch, level.padded_height, 4u, layout.block_bytes);
+			const uint64_t texel = (level.linear_offset / 4u) + (static_cast<uint64_t>(z) * level.height + y) * level.width + x;
+			EXPECT_EQ(linear[texel], expected);
+		}
+	}
+	// A one-level volume still reads the plain SW_64KB_S pattern.
+	ASSERT_TRUE(Gen5GetVolumeTextureLayout(56u, 64u, 64u, 32u, 64u, 1u, 9u, &layout));
+	EXPECT_FALSE(layout.mip_chain);
 }
 
 TEST(EmulatorGraphicsResources, LinearVolumeLayoutIsTightAndAlignedTo256)

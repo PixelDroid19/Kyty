@@ -1,5 +1,9 @@
 #include "Emulator/Graphics/FragmentTransportCapture.h"
 
+#include "Kyty/Core/DbgAssert.h"
+
+#include "Emulator/Graphics/FragmentTransportLayout.h"
+
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
@@ -14,6 +18,20 @@ namespace {
 
 #include "host_shaders/fragment_wave_capture_asm.inc"
 
+// The kernel declares its parameters at byte zero; they move to the pixel-stage
+// push slot, which follows the guest vertex stage's user data.
+String8 PlaceKernelParameters(String8 source, uint32_t offset)
+{
+	for (uint32_t member = 0; member < KERNEL_PARAMETER_BYTES / 4u; ++member)
+	{
+		const auto declared = String8::FromPrintf("OpMemberDecorate %%TransportParameters %u Offset %u\n", member, member * 4u);
+		EXIT_IF(!source.ContainsStr(declared));
+		source = source.ReplaceStr(declared, String8::FromPrintf("OpMemberDecorate %%TransportParameters %u Offset %u\n", member,
+		                                                         offset + member * 4u));
+	}
+	return source;
+}
+
 struct CaptureSource
 {
 	String8 interface;
@@ -22,9 +40,21 @@ struct CaptureSource
 	String8 constants;
 	String8 cases;
 	String8 blocks;
+	bool    reinterpolates = false;
 };
 
-using InterpolationFields = std::array<uint32_t, 32>;
+// The barycentric field each component's V_INTERP_P1 reads. The capture variable carries the first field seen as its
+// decoration; a component that reads the other sample location of the same perspective mode is interpolated again.
+struct InterpolationFields
+{
+	std::array<uint32_t, 32>                declared {};
+	std::array<std::array<uint32_t, 4>, 32> components {};
+};
+
+bool CentroidField(uint32_t field)
+{
+	return field == 2u || field == 6u;
+}
 
 uint32_t InterpolationField(const ShaderPixelInputInfo& pixel, uint32_t reg)
 {
@@ -78,7 +108,11 @@ bool InputsAvailable(const ShaderCode& code, const ShaderPixelInputInfo& pixel, 
 			return false;
 		}
 	}
-	fields->fill(UINT32_MAX);
+	fields->declared.fill(UINT32_MAX);
+	for (auto& components: fields->components)
+	{
+		components.fill(UINT32_MAX);
+	}
 	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
 	{
 		const auto& instruction = code.GetInstructions().At(index);
@@ -114,15 +148,24 @@ bool InputsAvailable(const ShaderCode& code, const ShaderPixelInputInfo& pixel, 
 		const uint32_t canonical = ShaderPixelCanonicalInterpolator(pixel, attribute);
 		// No enabled barycentric field means the draw uses the perspective-center
 		// default, which needs no decoration.
-		if (field != UINT32_MAX && (*fields)[canonical] != UINT32_MAX && (*fields)[canonical] != field)
+		if (field == UINT32_MAX)
+		{
+			continue;
+		}
+		auto& declared = fields->declared[canonical];
+		auto& chosen   = fields->components[canonical][instruction.src[2].constant.u & 3u];
+		// One value is captured per component: a second field for it, or another perspective mode than the
+		// variable's decoration, has no capture form.
+		if ((declared != UINT32_MAX && (declared >= 5u) != (field >= 5u)) || (chosen != UINT32_MAX && chosen != field))
 		{
 			*refusal = "interp_field";
 			return false;
 		}
-		if (field != UINT32_MAX)
+		if (declared == UINT32_MAX)
 		{
-			(*fields)[canonical] = field;
+			declared = field;
 		}
+		chosen = field;
 	}
 	return true;
 }
@@ -154,7 +197,7 @@ void DeclareInputs(const ShaderPixelInputInfo& pixel, const InterpolationFields&
 		{
 			source->annotations += String8::FromPrintf("OpDecorate %%capture_attr%u Flat\n", attribute);
 		}
-		const uint32_t field = fields[attribute];
+		const uint32_t field = fields.declared[attribute];
 		if (field == 5u || field == 6u)
 		{
 			source->annotations += String8::FromPrintf("OpDecorate %%capture_attr%u NoPerspective\n", attribute);
@@ -229,7 +272,19 @@ String8 SystemWord(const ShaderPixelInputInfo& pixel, uint32_t reg, uint32_t wor
 	return String8::FromPrintf("%%capture_value%u = OpCopyObject %%uint %%capture_constant0\n", word);
 }
 
-String8 AttributeWord(const ShaderPixelInputInfo& pixel, uint32_t attribute, uint32_t component, uint32_t word)
+// GLSL.std.450 is imported as %1 by the capture core; interpolating at the centre ignores a Centroid decoration.
+String8 ReinterpolatedWord(uint32_t canonical, uint32_t component, bool centroid, uint32_t word)
+{
+	const auto location = centroid ? String8::FromPrintf("InterpolateAtCentroid %%capture_attr%u", canonical)
+	                               : String8::FromPrintf("InterpolateAtOffset %%capture_attr%u %%capture_center_offset", canonical);
+	return String8::FromPrintf("%%capture_interp%u = OpExtInst %%v4float %%1 %s\n"
+	                           "%%capture_float%u = OpCompositeExtract %%float %%capture_interp%u %u\n"
+	                           "%%capture_value%u = OpBitcast %%uint %%capture_float%u\n",
+	                           word, location.c_str(), word, word, component, word, word);
+}
+
+String8 AttributeWord(const ShaderPixelInputInfo& pixel, const InterpolationFields& fields, uint32_t attribute, uint32_t component,
+                      uint32_t word, CaptureSource* source)
 {
 	if (!ShaderPixelInputActive(pixel, attribute))
 	{
@@ -257,15 +312,22 @@ String8 AttributeWord(const ShaderPixelInputInfo& pixel, uint32_t attribute, uin
 	}
 	if (decoded.source == ShaderPixelInterpolatorSource::Parameter && component < 4u)
 	{
-		return LoadFloat(word, InputPointer(word, "_ptr_Input_float", String8::FromPrintf("capture_attr%u", canonical), component));
+		const uint32_t declared = fields.declared[canonical];
+		const uint32_t chosen   = fields.components[canonical][component];
+		if (declared == UINT32_MAX || chosen == UINT32_MAX || CentroidField(chosen) == CentroidField(declared))
+		{
+			return LoadFloat(word, InputPointer(word, "_ptr_Input_float", String8::FromPrintf("capture_attr%u", canonical), component));
+		}
+		source->reinterpolates = true;
+		return ReinterpolatedWord(canonical, component, CentroidField(chosen), word);
 	}
 	// Admission proves these parameter-cache slots are unobserved. They are
 	// transport padding; they must not become guessed interpolation inputs.
 	return String8::FromPrintf("%%capture_value%u = OpCopyObject %%uint %%capture_constant0\n", word);
 }
 
-String8 ReaderBody(const ShaderPixelInputInfo& pixel, const ShaderFragmentComputeInfo& transport, const LanePacking& packing,
-                   CaptureSource* source)
+String8 ReaderBody(const ShaderPixelInputInfo& pixel, const InterpolationFields& fields, const ShaderFragmentComputeInfo& transport,
+                   const LanePacking& packing, CaptureSource* source)
 {
 	const uint32_t words = 1u + transport.initial_vgpr_count + packing.words;
 	std::vector<int32_t> word_map(packing.words, -1);
@@ -292,6 +354,7 @@ String8 ReaderBody(const ShaderPixelInputInfo& pixel, const ShaderFragmentComput
 		source->constants += String8::FromPrintf("%%capture_constant%u = OpConstant %%uint %u\n", value, value);
 	}
 	source->constants += "%capture_flag_covered = OpConstant %uint 7\n"
+	                     "%capture_center_offset = OpConstantNull %v2float\n"
 	                     "%capture_float_one_bits = OpConstant %uint 1065353216\n";
 	for (uint32_t word = 0; word < words; ++word)
 	{
@@ -309,7 +372,8 @@ String8 ReaderBody(const ShaderPixelInputInfo& pixel, const ShaderFragmentComput
 		{
 			const int32_t encoded = word_map[word - 1u - transport.initial_vgpr_count];
 			load                  = encoded < 0 ? String8::FromPrintf("%%capture_value%u = OpCopyObject %%uint %%capture_constant0\n", word)
-			                                   : AttributeWord(pixel, static_cast<uint32_t>(encoded) / 16u, static_cast<uint32_t>(encoded) % 16u, word);
+			                                   : AttributeWord(pixel, fields, static_cast<uint32_t>(encoded) / 16u,
+			                                                   static_cast<uint32_t>(encoded) % 16u, word, source);
 		}
 		source->blocks += load + String8::FromPrintf("OpReturnValue %%capture_value%u\n", word);
 	}
@@ -408,8 +472,12 @@ String8 GenerateCaptureSource(const ShaderCode& code, const ShaderPixelInputInfo
 	generated.constants += String8::FromPrintf("%%capture_front_bits = OpConstant %%uint %u\n%%capture_back_bits = OpConstant %%uint %u\n",
 	                                           pixel.front_face_all_bits ? 1u : 0x3f800000u, pixel.front_face_all_bits ? 0u : 0xbf800000u);
 	const auto packing = BuildLanePacking(code, pixel);
-	const auto reader = ReaderBody(pixel, transport, packing, &generated);
+	const auto reader = ReaderBody(pixel, fields, transport, packing, &generated);
 	String8    source(kFragmentCaptureCore);
+	if (generated.reinterpolates)
+	{
+		source = source.ReplaceStr("OpCapability Shader\n", "OpCapability Shader\nOpCapability InterpolationFunction\n");
+	}
 	source = source.ReplaceStr("<capture_interface>", generated.interface);
 	source = source.ReplaceStr("<capture_annotations>", generated.annotations);
 	source = source.ReplaceStr("<capture_declarations>", generated.declarations + generated.constants);
@@ -419,7 +487,7 @@ String8 GenerateCaptureSource(const ShaderCode& code, const ShaderPixelInputInfo
 		source = source.ReplaceStr(String8::FromPrintf("OpDecorate %%%s DescriptorSet 0", buffer),
 		                           String8::FromPrintf("OpDecorate %%%s DescriptorSet %u", buffer, transport.descriptor_set));
 	}
-	return source;
+	return PlaceKernelParameters(source, pixel.bind.push_constant_offset);
 }
 
 } // namespace Kyty::Libs::Graphics::FragmentTransport

@@ -204,6 +204,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs);
 KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs);
 KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs);
 KYTY_CP_OP_PARSER(cp_op_nop);
+KYTY_CP_OP_PARSER(cp_op_rewind);
 KYTY_CP_OP_PARSER(cp_op_num_instances);
 KYTY_CP_OP_PARSER(cp_op_set_predication);
 KYTY_CP_OP_PARSER(cp_op_one_reg_write);
@@ -295,6 +296,7 @@ public:
 	// Orders the recording after another queue's submission on the device; false when the
 	// dependency is this queue's, already awaited, or complete, so it is waited for on the host.
 	[[nodiscard]] bool AwaitOnDevice(SubmissionId submission);
+	[[nodiscard]] bool ConsolidateWaitProducer(const SubmissionDependency& dependency);
 	[[nodiscard]] bool OwnsSubmissionQueue(SubmissionId submission) const
 	{
 		return submission.queue == GpuQueueId(static_cast<uint32_t>(m_queue));
@@ -337,7 +339,7 @@ public:
 	void WriteBack();
 	// Copies guest bytes the processor reads at record time once no GPU writer owns newer content.
 	[[nodiscard]] bool ReadCurrentGuestBytes(uint64_t vaddr, void* dst, uint64_t size);
-	void MemoryBarrier();
+	void MemoryBarrier(uint8_t producers = CommandBuffer::BarrierProducerAll);
 	void RenderTextureBarrier(uint64_t vaddr, uint64_t size);
 	void DepthStencilBarrier(uint64_t vaddr, uint64_t size);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
@@ -382,14 +384,21 @@ public:
 	{
 		uint32_t*   data             = nullptr;
 		uint32_t    num_dw           = 0;
+		// Where data lives in guest memory; null when its words have no single guest origin.
+		const uint32_t* guest_data   = nullptr;
 		const void* address          = nullptr;
 		uint64_t    reference        = 0;
 		uint64_t    mask             = 0;
 		uint32_t    function         = 0;
 		uint32_t    size             = 0;
 		uint64_t    blocked_since_ns = 0;
+		// Ordered on the device behind a producer of another queue (PassSuspendedWaitOnDevice).
+		bool passed_on_device = false;
+		// A REWIND, which the guest releases after its submit returns.
+		bool rewind = false;
 	};
 
+	[[nodiscard]] bool PassSuspendedWaitOnDevice(const SuspendedRun& suspended);
 	void WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll);
 	void WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll);
 	[[nodiscard]] bool BranchCompare(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask);
@@ -399,9 +408,14 @@ public:
 	void RetireBeforeStore(uint64_t dst, uint32_t size_bytes);
 	[[nodiscard]] bool DeferImmediateStore(uint64_t dst, uint32_t value);
 
-	void Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data);
+	// guest_data: where data lives in guest memory (data itself for a live run,
+	// the copied buffer for a snapshot), or null when it has no single origin.
+	void Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data, const uint32_t* guest_data);
 	[[nodiscard]] bool TakeSuspendedRun(SuspendedRun* run);
+	[[nodiscard]] bool IsSuspendRunRequested() const { return m_suspend_run_requested; }
+	void               MarkSuspendedWaitRewind() { m_suspended_run.rewind = true; }
 	[[nodiscard]] const uint32_t* GetActiveRunBegin() const { return m_active_run_begin; }
+	[[nodiscard]] const uint32_t* GetActiveRunGuest() const { return m_active_run_guest; }
 	[[nodiscard]] const uint32_t* GetActiveRunEnd() const { return m_active_run_end; }
 
 	[[nodiscard]] const FlipInfo& GetFlip() const { return m_flip; }
@@ -428,12 +442,13 @@ public:
 	[[nodiscard]] bool    FlipIssued() const { return m_flip_issued; }
 	[[nodiscard]] bool    CompletionCallbackIssued() const { return m_completion_callback_sources != 0u; }
 	[[nodiscard]] uint8_t CompletionCallbackSources() const { return m_completion_callback_sources; }
-	// A wait on a plain label store of a submission of this queue was answered
-	// by queue order; the batch still retires that submission before it ends.
+	// A wait on a plain label store was answered by queue order or by a device wait on the
+	// producer's queue; the batch still retires that submission before it ends.
 	[[nodiscard]] bool TakeConsolidatedPlainWait()
 	{
 		const bool pending        = m_consolidated_plain_wait;
 		m_consolidated_plain_wait = false;
+		m_consolidated_producers.clear();
 		return pending;
 	}
 
@@ -512,7 +527,8 @@ private:
 	// Which completion callbacks the batch recorded (GraphicsBatchCanDeferSubmissionCompletion bits).
 	uint8_t  m_completion_callback_sources = 0u;
 	bool     m_consolidated_plain_wait     = false;
-	SubmissionId m_consolidated_producer;
+	// The newest consolidated producer of each queue.
+	std::vector<SubmissionId> m_consolidated_producers;
 	// Draws and dispatches recorded since this processor's last submission.
 	uint32_t        m_operations_since_submit     = 0;
 	// When this processor last submitted a command buffer.
@@ -525,6 +541,7 @@ private:
 	uint32_t m_last_pm4_dw                 = 0;
 	const uint32_t* m_active_run_begin     = nullptr;
 	const uint32_t* m_active_run_end       = nullptr;
+	const uint32_t* m_active_run_guest     = nullptr;
 	// The header of the packet this processor is at.
 	const uint32_t* m_packet               = nullptr;
 	// Prepare the inputs of the indexed draws that follow; their shadow processors only replay registers.

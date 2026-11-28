@@ -118,6 +118,8 @@ void     TileConvertStandard4KBVolumeToLinear(void* dst, const void* src, uint32
                                               uint32_t* depth);
 void               TileConvertStandardVolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
                                                      uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t block_bytes);
+uint64_t           TileGetStandardVolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems, uint32_t height,
+                                               uint32_t bytes_per_element, uint32_t block_bytes);
 [[nodiscard]] bool TileTryGetStandardVolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems,
                                                 uint32_t bytes_per_element, uint32_t block_bytes, TileSizeAlign* size);
 void     TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile,

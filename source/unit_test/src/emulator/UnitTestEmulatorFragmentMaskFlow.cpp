@@ -1906,11 +1906,14 @@ TEST(EmulatorFragmentMaskFlow, PixelExecBranchesTakeTheVoteOfARealFragmentOfTheQ
 		ShaderPixelInputInfo input {};
 		const auto           source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 		Check(!source.IsEmpty(), "complete module");
-		// The packed-EXEC vote goes to cc_vote; every lane, helpers included, then reads cc_any from a real
-		// fragment of its quad, so the quad takes the branch as one.
-		Check(source.FindIndex("%cc_vote_") != Core::STRING8_INVALID_INDEX &&
+		// Packed EXEC masks are already quad-uniform (helpers included) at the mask producer via
+		// NativeMaskBallot/NativeQuadUniform, so the branch tests the packed mask directly without
+		// an undefined non-quad OpGroupNonUniformAny collective or redundant quad rebroadcast.
+		Check(source.FindIndex("OpGroupNonUniformAny") == Core::STRING8_INVALID_INDEX &&
 		          source.FindIndex("_helper = OpLoad %bool %gl_HelperInvocation") != Core::STRING8_INVALID_INDEX &&
-		          source.FindIndex("OpGroupNonUniformQuadBroadcast %bool %uint_3 %cc_vote_") != Core::STRING8_INVALID_INDEX,
+		          source.FindIndex("OpGroupNonUniformQuadBroadcast") != Core::STRING8_INVALID_INDEX &&
+		          source.FindIndex("%branch_mask_lo_") != Core::STRING8_INVALID_INDEX &&
+		          source.FindIndex("%cc_any_") != Core::STRING8_INVALID_INDEX,
 		      "quad-uniform branch vote");
 		Vector<uint32_t> binary;
 		String8          error;

@@ -20,6 +20,11 @@ pressed, as a physical trigger does. Routes are limited to 4096 entries and 24 h
 route is published per process. Set `KYTY_PAD_SCRIPT_LOG=1` to log only state
 transitions.
 
+A tool that times its route from the guest's own console output can set
+`KYTY_GUEST_STDOUT_LINE_BUFFERED=1`: guest stdout is then flushed per line,
+including when the guest asks for a fully buffered stream without supplying
+storage. It is off by default and changes only when the lines appear.
+
 Set `KYTY_PAD_RECORD` to a file to record a route from a manual session. The
 host keyboard and controller input the guest reads is written in the same
 format and on the same clock (seconds from the first pad read), one line per

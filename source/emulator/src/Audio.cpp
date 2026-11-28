@@ -1273,6 +1273,117 @@ int KYTY_SYSV_ABI AudioOut2Set3DLatency(int32_t user_id, uint32_t latency)
 	return OK;
 }
 
+// sceAudioOut2ContextSetAttributes (NID 4dq2rblWlg0): (context, entries, count)
+// with the port attribute entry layout. Ids 1 and 2 are one-byte flags whose
+// effect is not established; the host mixer renders the stereo bed only, so
+// they are accepted without host state. Any other id stops the run.
+int KYTY_SYSV_ABI AudioOut2ContextSetAttributes(int32_t context, const void* attrs, uint32_t count)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t context = %d attrs = 0x%016" PRIx64 " count = %u\n", context, reinterpret_cast<uint64_t>(attrs), count);
+	constexpr uint32_t kMaxContextAttributes = 32;
+	if (attrs == nullptr || count == 0 || count > kMaxContextAttributes)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	std::vector<uint8_t> entries(static_cast<size_t>(count) * kAttributeStride);
+	if (!CopyFromGuest(entries.data(), attrs, entries.size()))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	{
+		std::lock_guard lock(g_audio_out2_mutex);
+		if (context < 1 || context > kMaxContexts || !g_contexts[context - 1].used)
+		{
+			return LibKernel::KERNEL_ERROR_EINVAL;
+		}
+	}
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const uint8_t* entry = entries.data() + static_cast<size_t>(i) * kAttributeStride;
+		uint32_t       id    = 0;
+		uint64_t       value = 0;
+		uint64_t       size  = 0;
+		std::memcpy(&id, entry + 0, sizeof(id));
+		std::memcpy(&value, entry + 8, sizeof(value));
+		std::memcpy(&size, entry + 16, sizeof(size));
+		uint8_t flag = 0;
+		if ((id != 1 && id != 2) || size != 1 || value == 0 ||
+		    !CopyFromGuest(&flag, reinterpret_cast<const void*>(static_cast<uintptr_t>(value)), sizeof(flag)))
+		{
+			EXIT("unsupported sceAudioOut2ContextSetAttributes entry: id=%u size=%" PRIu64 "\n", id, size);
+		}
+		KYTY_LOG_DEBUG("\t attribute %u = %u\n", id, flag);
+	}
+	return OK;
+}
+
+// Speaker arrays: host handles for the guest's speaker layouts. The host mixer
+// renders no object ports, so nothing reads a layout yet.
+constexpr uint32_t kMaxSpeakers      = 32;
+constexpr int32_t  kMaxSpeakerArrays = 32;
+static bool        g_speaker_arrays[kMaxSpeakerArrays] = {};
+
+// sceAudioOut2GetSpeakerArrayMemorySize (NID G1YOKDJYX2Y): (speakers, is_3d,
+// ambisonics) -> bytes. Three secondary implementations agree on a 0x400-byte
+// header, 0x40 bytes per speaker (0x100 with ambisonics) and 0x200 for 3D.
+size_t KYTY_SYSV_ABI AudioOut2GetSpeakerArrayMemorySize(uint32_t speakers, uint8_t is_3d, uint8_t ambisonics)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t speakers = %u is_3d = %u ambisonics = %u\n", speakers, is_3d, ambisonics);
+	// Counts outside one to 32 are clamped by those implementations; unverified.
+	if (speakers < 1 || speakers > kMaxSpeakers)
+	{
+		EXIT("unsupported sceAudioOut2GetSpeakerArrayMemorySize: speakers=%u\n", speakers);
+	}
+	return 0x400u + static_cast<size_t>(speakers) * (ambisonics != 0 ? 0x100u : 0x40u) + (is_3d != 0 ? 0x200u : 0u);
+}
+
+// sceAudioOut2SpeakerArrayCreate (NID +k91hoTuoA8): (handle_out, vbap, ambisonics).
+// The VBAP block carries the positions at +0 and the speaker count at +8.
+int KYTY_SYSV_ABI AudioOut2SpeakerArrayCreate(uint64_t* handle, const void* vbap, const void* ambisonics)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t vbap = 0x%016" PRIx64 " ambisonics = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(vbap),
+	               reinterpret_cast<uint64_t>(ambisonics));
+	uint32_t speakers = 0;
+	if (handle == nullptr || vbap == nullptr ||
+	    !CopyFromGuest(&speakers, static_cast<const uint8_t*>(vbap) + 8, sizeof(speakers)) || speakers < 1 || speakers > kMaxSpeakers)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	std::lock_guard lock(g_audio_out2_mutex);
+	for (int32_t i = 0; i < kMaxSpeakerArrays; i++)
+	{
+		if (!g_speaker_arrays[i])
+		{
+			const auto id = static_cast<uint64_t>(i + 1);
+			if (!CopyToGuest(handle, &id, sizeof(id)))
+			{
+				return LibKernel::KERNEL_ERROR_EINVAL;
+			}
+			g_speaker_arrays[i] = true;
+			return OK;
+		}
+	}
+	EXIT("sceAudioOut2SpeakerArrayCreate: all %d speaker arrays in use\n", kMaxSpeakerArrays);
+	return LibKernel::KERNEL_ERROR_EINVAL;
+}
+
+// sceAudioOut2SpeakerArrayDestroy (NID erCWQR5eKiQ)
+int KYTY_SYSV_ABI AudioOut2SpeakerArrayDestroy(uint64_t handle)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t handle = %" PRIu64 "\n", handle);
+	std::lock_guard lock(g_audio_out2_mutex);
+	if (handle < 1 || handle > static_cast<uint64_t>(kMaxSpeakerArrays) || !g_speaker_arrays[handle - 1])
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	g_speaker_arrays[handle - 1] = false;
+	return OK;
+}
+
 } // namespace AudioOut2
 
 namespace AudioIn {
@@ -1401,6 +1512,13 @@ constexpr int32_t VOICE_PORT_IN_VOICE   = 2;
 constexpr int32_t VOICE_PORT_OUT_VOICE  = 4;
 constexpr int32_t VOICE_PORT_OUT_DEVICE = 5;
 constexpr int32_t VOICE_PORT_STATE_READY = 1;
+
+// The module's guards: no VoiceInit context, a port id above its 64-port range,
+// and a missing argument.
+constexpr int      VOICE_ERROR_NOT_INITIALIZED  = static_cast<int>(0x804e0801u);
+constexpr int      VOICE_ERROR_PORT_INVALID     = static_cast<int>(0x804e0804u);
+constexpr int      VOICE_ERROR_ARGUMENT_INVALID = static_cast<int>(0x804e0805u);
+constexpr uint32_t VOICE_PORT_ID_MAX            = 0x3f;
 // Encoded voice travels in 20 ms frames.
 constexpr uint32_t VOICE_FRAME_MS = 20;
 
@@ -1485,15 +1603,24 @@ int KYTY_SYSV_ABI VoiceInit(const void* param, uint32_t version)
 	return OK;
 }
 
+// The module checks its VoiceInit context before the parameter, whose leading word must be set.
 int KYTY_SYSV_ABI VoiceStart(const void* param)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(param == nullptr);
-
 	auto&            state = GetVoiceState();
 	std::scoped_lock lock(state.mutex);
-	EXIT_NOT_IMPLEMENTED(!state.initialized);
+	if (!state.initialized)
+	{
+		return VOICE_ERROR_NOT_INITIALIZED;
+	}
+	uint64_t leading_word = 0;
+	EXIT_NOT_IMPLEMENTED(param != nullptr &&
+	                     !Core::VirtualMemory::CopyFromGuestOrLent(&leading_word, reinterpret_cast<uint64_t>(param), sizeof(leading_word)));
+	if (leading_word == 0)
+	{
+		return VOICE_ERROR_ARGUMENT_INVALID;
+	}
 	return OK;
 }
 
@@ -1528,6 +1655,14 @@ int KYTY_SYSV_ABI VoiceDeletePort(uint32_t port_id)
 
 	auto&            state = GetVoiceState();
 	std::scoped_lock lock(state.mutex);
+	if (!state.initialized)
+	{
+		return VOICE_ERROR_NOT_INITIALIZED;
+	}
+	if (port_id > VOICE_PORT_ID_MAX)
+	{
+		return VOICE_ERROR_PORT_INVALID;
+	}
 	RequirePort(state, port_id);
 	state.ports.erase(port_id);
 	return OK;
@@ -1576,6 +1711,31 @@ int KYTY_SYSV_ABI VoiceGetPortInfo(uint32_t port_id, void* info)
 	result.state      = VOICE_PORT_STATE_READY;
 	result.frame_size = (port.bitrate * VOICE_FRAME_MS + 7999u) / 8000u;
 	EXIT_NOT_IMPLEMENTED(!Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(info), &result, sizeof(result)));
+	return OK;
+}
+
+// A voice port answers the bitrate it was created with.
+int KYTY_SYSV_ABI VoiceGetBitRate(uint32_t port_id, uint32_t* bitrate)
+{
+	PRINT_NAME();
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	if (!state.initialized)
+	{
+		return VOICE_ERROR_NOT_INITIALIZED;
+	}
+	if (port_id > VOICE_PORT_ID_MAX)
+	{
+		return VOICE_ERROR_PORT_INVALID;
+	}
+	if (bitrate == nullptr)
+	{
+		return VOICE_ERROR_ARGUMENT_INVALID;
+	}
+	const auto& port = RequirePort(state, port_id);
+	EXIT_NOT_IMPLEMENTED(!IsVoicePort(port.type));
+	EXIT_NOT_IMPLEMENTED(!Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(bitrate), &port.bitrate, sizeof(port.bitrate)));
 	return OK;
 }
 

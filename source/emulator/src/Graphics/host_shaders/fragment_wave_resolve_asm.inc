@@ -168,7 +168,7 @@ constexpr const char* kFragmentResolveCore = R"CORE(; SPIR-V
 %_ptr_StorageBuffer_References = OpTypePointer StorageBuffer %References
 %reference_buffer = OpVariable %_ptr_StorageBuffer_References StorageBuffer
     %uint_64 = OpConstant %uint 64
-    %uint_34 = OpConstant %uint 34
+    %uint_35 = OpConstant %uint 35
    %uint_128 = OpConstant %uint 128
      %v2uint = OpTypeVector %uint 2
 %_ptr_Function_v2uint = OpTypePointer Function %v2uint
@@ -223,7 +223,7 @@ constexpr const char* kFragmentResolveCore = R"CORE(; SPIR-V
                OpBranch %142
         %142 = OpLabel
         %143 = OpAccessChain %_ptr_StorageBuffer_uint %control_buffer %int_0 %int_1
-        %144 = OpAtomicIAdd %uint %143 %uint_1 %uint_0 %uint_0
+        %144 = OpLoad %uint %143
         %145 = OpINotEqual %bool %144 %uint_0
                OpSelectionMerge %147 None
                OpBranchConditional %145 %146 %147
@@ -279,7 +279,7 @@ constexpr const char* kFragmentResolveCore = R"CORE(; SPIR-V
         %194 = OpAccessChain %_ptr_PushConstant_uint %transport %int_5
         %195 = OpLoad %uint %194
         %197 = OpIMul %uint %195 %uint_64
-        %199 = OpIMul %uint %197 %uint_34
+        %199 = OpIMul %uint %197 %uint_35
         %200 = OpULessThan %bool %193 %199
                OpBranch %190
         %190 = OpLabel
@@ -525,7 +525,7 @@ constexpr const char* kFragmentResolveCore = R"CORE(; SPIR-V
         %400 = OpLoad %uint %wave_lane
         %401 = OpLoad %uint %lane
         %402 = OpIAdd %uint %400 %401
-        %403 = OpIMul %uint %402 %uint_34
+        %403 = OpIMul %uint %402 %uint_35
                OpStore %base_1 %403
         %404 = OpLoad %uint %base_1
         %405 = OpAccessChain %_ptr_StorageBuffer_uint %result_buffer %int_0 %404

@@ -143,15 +143,17 @@ bool RenderTextureChangesHostExtent(const uint64_t* existing, const uint64_t* in
 
 RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t channel_type, uint32_t channel_order)
 {
-	if (format == 0x1u && channel_type == 0x0u && channel_order == 0x0u)
+	// COMP_SWAP ALT_REV (3) on a one-channel format keeps the memory layout; the pixel
+	// export moves W into the channel (HW::kColorExportOrderOneChannelAlpha).
+	if (format == 0x1u && channel_type == 0x0u && (channel_order == 0x0u || channel_order == 0x3u))
 	{
 		return {RenderTextureFormat::R8Unorm, 1};
 	}
-	if (format == 0x2u && channel_type == 0x7u && channel_order == 0x0u)
+	if (format == 0x2u && channel_type == 0x7u && (channel_order == 0x0u || channel_order == 0x3u))
 	{
 		return {RenderTextureFormat::R16Sfloat, 2};
 	}
-	if (format == 0x2u && channel_type == 0x4u && channel_order == 0x0u)
+	if (format == 0x2u && channel_type == 0x4u && (channel_order == 0x0u || channel_order == 0x3u))
 	{
 		return {RenderTextureFormat::R16Uint, 2};
 	}
@@ -161,11 +163,11 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	{
 		return {RenderTextureFormat::R8G8Unorm, 2};
 	}
-	if (format == 0x4u && channel_type == 0x7u && channel_order == 0x0u)
+	if (format == 0x4u && channel_type == 0x7u && (channel_order == 0x0u || channel_order == 0x3u))
 	{
 		return {RenderTextureFormat::R32Sfloat, 4};
 	}
-	if (format == 0x4u && channel_type == 0x4u && channel_order == 0x0u)
+	if (format == 0x4u && channel_type == 0x4u && (channel_order == 0x0u || channel_order == 0x3u))
 	{
 		return {RenderTextureFormat::R32Uint, 4};
 	}

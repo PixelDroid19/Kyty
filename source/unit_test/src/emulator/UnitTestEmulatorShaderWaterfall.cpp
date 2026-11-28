@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
+#include "../../../emulator/src/Graphics/ShaderDeadVgprMask.h"
 #include "../../../emulator/src/Graphics/ShaderParseInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 
@@ -15,6 +16,12 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 UT_BEGIN(EmulatorShaderWaterfall);
 
@@ -553,7 +560,91 @@ static WaterfallFixture WaterfallInsideOuterLoop(const ShaderOperand& first_sour
 	return fixture;
 }
 
+// The same loop as a wave32 program writes it: one-word masks on EXEC_LO.
+static WaterfallFixture ValidWave32Waterfall()
+{
+	auto fixture = ValidWaterfall();
+	for (auto& inst: fixture.code.GetInstructions())
+	{
+		if (inst.type == ShaderInstructionType::SMovB64) { inst.type = ShaderInstructionType::SMovB32; }
+		if (inst.type == ShaderInstructionType::SAndn2B64) { inst.type = ShaderInstructionType::SAndn2B32; }
+		for (auto* op: {&inst.dst, &inst.src[0], &inst.src[1]})
+		{
+			if (op->size == 2 && (op->type == ShaderOperandType::Sgpr || op->type == ShaderOperandType::ExecLo)) { op->size = 1; }
+		}
+	}
+	return fixture;
+}
+
 } // namespace
+
+TEST(EmulatorShaderWaterfall, LowersWave32MaskLoopsAndTiesThemToWave32)
+{
+	auto fixture = ValidWave32Waterfall();
+	EXPECT_FALSE(fixture.code.UsesWave32Masks());
+	ShaderLowerWaterfallMoves(&fixture.code);
+	ASSERT_EQ(fixture.code.GetInstructions().Size(), 5u);
+	EXPECT_FALSE(HasType(fixture.code, ShaderInstructionType::SCbranchScc1));
+	EXPECT_EQ(fixture.code.GetInstructions().At(1).src[1].register_id, static_cast<int>(fixture.index_register));
+	const auto* mask_update = AtPc(fixture.code, fixture.andn2_pc);
+	ASSERT_NE(mask_update, nullptr);
+	EXPECT_EQ(mask_update->type, ShaderInstructionType::SAndn2B32);
+	EXPECT_TRUE(fixture.code.UsesWave32Masks());
+
+	// A wave64 loop does not tie the program to wave32.
+	auto wave64 = ValidWaterfall();
+	ShaderLowerWaterfallMoves(&wave64.code);
+	EXPECT_FALSE(HasType(wave64.code, ShaderInstructionType::SCbranchScc1));
+	EXPECT_FALSE(wave64.code.UsesWave32Masks());
+}
+
+TEST(EmulatorShaderWaterfall, RefusesLoopsThatMixMaskWidths)
+{
+	// One-word REST update but a two-word EXEC copy: EXEC_HI keeps lanes the loop never visits.
+	auto fixture = ValidWave32Waterfall();
+	auto* restore = AtPc(fixture.code, fixture.exec_pc);
+	restore->type        = ShaderInstructionType::SMovB64;
+	restore->dst.size    = 2;
+	restore->src[0].size = 2;
+	ShaderLowerWaterfallMoves(&fixture.code);
+	EXPECT_EQ(fixture.code.GetInstructions().Size(), fixture.original_instruction_count);
+	EXPECT_FALSE(fixture.code.UsesWave32Masks());
+
+	// REST copied from a two-word EXEC ahead of a one-word loop.
+	auto entry = ValidWave32Waterfall();
+	auto* copy = AtPc(entry.code, 0u);
+	copy->type        = ShaderInstructionType::SMovB64;
+	copy->dst.size    = 2;
+	copy->src[0].size = 2;
+	ShaderLowerWaterfallMoves(&entry.code);
+	EXPECT_EQ(entry.code.GetInstructions().Size(), entry.original_instruction_count);
+}
+
+TEST(EmulatorShaderWaterfall, Wave32MaskLoopInAWave64ProgramFailsExplicitly)
+{
+	auto fixture = ValidWave32Waterfall();
+	ShaderLowerWaterfallMoves(&fixture.code);
+	ASSERT_TRUE(fixture.code.UsesWave32Masks());
+	EXPECT_EQ(ShaderAnalyzeNativeWave(fixture.code, 32u).guest_wave_size, 32u);
+#if defined(_WIN32)
+	constexpr int kExitCode = 321;
+#else
+	constexpr int kExitCode = 65;
+#endif
+	ASSERT_EXIT(
+	    ([&] {
+		    // Core EXIT writes to stdout; the matcher reads stderr.
+		    std::fflush(stdout);
+#if defined(_WIN32)
+		    ::_dup2(::_fileno(stderr), ::_fileno(stdout));
+#else
+		    ::dup2(::fileno(stderr), ::fileno(stdout));
+#endif
+		    (void)ShaderAnalyzeNativeWave(fixture.code, 64u);
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(kExitCode), "wave32 lane-mask loop");
+}
 
 TEST(EmulatorShaderWaterfall, RewritesLaneIndicesAndKeepsMaskUpdates)
 {
@@ -826,6 +917,347 @@ TEST(EmulatorShaderWaterfall, FollowsOuterBackEdgesBeforeTheLoop)
 	auto read = WaterfallInsideOuterLoop(Sgpr(kScalarRegister));
 	ShaderLowerWaterfallMoves(&read.code);
 	ExpectWaterfallRetained(read);
+}
+
+TEST(EmulatorShaderWaterfall, RelativeReadKeepsGuardsOnEveryCandidateRegister)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	auto vmov = [](uint32_t pc, uint32_t dst, uint32_t src) {
+		ShaderInstruction inst {};
+		inst.pc      = pc;
+		inst.type    = ShaderInstructionType::VMovB32;
+		inst.format  = ShaderInstructionFormat::SVdstSVsrc0;
+		inst.dst     = Vgpr(dst);
+		inst.src[0]  = Vgpr(src);
+		inst.src_num = 1;
+		return inst;
+	};
+	ShaderInstruction narrow {};
+	narrow.pc      = 0u;
+	narrow.type    = ShaderInstructionType::SAndSaveexecB64;
+	narrow.format  = ShaderInstructionFormat::Sdst2Ssrc02;
+	narrow.dst     = Sgpr(10u, 2u);
+	narrow.src[0]  = Sgpr(12u, 2u);
+	narrow.src_num = 1;
+	code.GetInstructions().Add(narrow);
+	code.GetInstructions().Add(vmov(4u, 1u, 2u)); // below the relative base, never read
+	code.GetInstructions().Add(vmov(8u, 6u, 2u)); // above the base: the relative read may load it on a restored lane
+
+	ShaderInstruction restore {};
+	restore.pc      = 12u;
+	restore.type    = ShaderInstructionType::SMovB64;
+	restore.format  = ShaderInstructionFormat::Sdst2Ssrc02;
+	restore.dst     = ExecPair();
+	restore.src[0]  = Sgpr(10u, 2u);
+	restore.src_num = 1;
+	code.GetInstructions().Add(restore);
+
+	ShaderInstruction set_m0 {};
+	set_m0.pc       = 16u;
+	set_m0.type     = ShaderInstructionType::SMovB32;
+	set_m0.format   = ShaderInstructionFormat::SVdstSVsrc0;
+	set_m0.dst.type = ShaderOperandType::M0;
+	set_m0.dst.size = 1;
+	set_m0.src[0]   = Sgpr(0u);
+	set_m0.src_num  = 1;
+	code.GetInstructions().Add(set_m0);
+
+	ShaderInstruction move {};
+	move.pc      = 20u;
+	move.type    = ShaderInstructionType::VMovrelsB32;
+	move.format  = ShaderInstructionFormat::SVdstSVsrc0;
+	move.dst     = Vgpr(3u);
+	move.src[0]  = Vgpr(4u);
+	move.src_num = 1;
+	code.GetInstructions().Add(move);
+
+	ShaderInstruction exp {};
+	exp.pc      = 24u;
+	exp.type    = ShaderInstructionType::Exp;
+	exp.src[0]  = Vgpr(3u);
+	exp.src_num = 1;
+	code.GetInstructions().Add(exp);
+	code.GetInstructions().Add(EndProgram(28u));
+
+	const auto unguarded = ShaderAnalyzeDeadVgprDstGuards(code, {});
+	ASSERT_EQ(unguarded.size(), static_cast<size_t>(code.GetInstructions().Size()));
+	EXPECT_TRUE(unguarded[1]);
+	EXPECT_FALSE(unguarded[2]);
+}
+
+namespace {
+
+enum class QuadMaskBreak
+{
+	None,
+	NotGathered,
+	PairRewritten,
+	OtherWqmSource,
+	SccRewritten,
+	ExecBranch,
+	ZeroEdge, // S_CBRANCH_SCC1 leaves the body on the edge where the pair is zero
+};
+
+struct QuadMaskProgram
+{
+	ShaderCode        code;
+	std::vector<bool> gather;
+	uint32_t          body = 0; // index of the V_MOV under S_WQM
+};
+
+static ShaderInstruction ScalarMask(uint32_t pc, ShaderInstructionType type, const ShaderOperand& dst, const ShaderOperand& src0,
+                                    const ShaderOperand& src1)
+{
+	ShaderInstruction inst {};
+	inst.pc      = pc;
+	inst.type    = type;
+	inst.format  = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+	inst.dst     = dst;
+	inst.src[0]  = src0;
+	inst.src[1]  = src1;
+	inst.src_num = 2;
+	return inst;
+}
+
+static ShaderInstruction ScalarPairOp(uint32_t pc, ShaderInstructionType type, const ShaderOperand& dst, const ShaderOperand& src)
+{
+	ShaderInstruction inst {};
+	inst.pc      = pc;
+	inst.type    = type;
+	inst.format  = ShaderInstructionFormat::Sdst2Ssrc02;
+	inst.dst     = dst;
+	inst.src[0]  = src;
+	inst.src_num = 1;
+	return inst;
+}
+
+// Narrowed EXEC, a quad-gathered S_AND_B64 into s[4:5], S_CBRANCH_SCC0 to the end, S_WQM EXEC from s[4:5],
+// then a V_MOV whose result is exported after EXEC is restored: a fragment body run on the WQM of a tested mask.
+static QuadMaskProgram BuildQuadMaskProgram(QuadMaskBreak brk)
+{
+	QuadMaskProgram program;
+	program.code.SetType(ShaderType::Pixel);
+	auto&    list = program.code.GetInstructions();
+	uint32_t pc   = 0;
+	auto     add  = [&](ShaderInstruction inst, bool gathered = false)
+	{
+		inst.pc = pc;
+		pc += 4u;
+		list.Add(inst);
+		program.gather.push_back(gathered);
+	};
+	const ShaderOperand vcc {.type = ShaderOperandType::VccLo, .size = 2};
+
+	add(ScalarPairOp(0, ShaderInstructionType::SAndSaveexecB64, Sgpr(10u, 2u), Sgpr(12u, 2u)));
+	add(ScalarMask(0, ShaderInstructionType::SAndB64, Sgpr(4u, 2u), vcc, ExecPair()), brk != QuadMaskBreak::NotGathered);
+	if (brk == QuadMaskBreak::SccRewritten)
+	{
+		add(ScalarMask(0, ShaderInstructionType::SAddU32, Sgpr(30u), Sgpr(31u), Sgpr(32u)));
+	}
+	const uint32_t branch_index = list.Size();
+	const auto branch_type = brk == QuadMaskBreak::ExecBranch ? ShaderInstructionType::SCbranchExecz
+	                         : brk == QuadMaskBreak::ZeroEdge ? ShaderInstructionType::SCbranchScc1
+	                                                          : ShaderInstructionType::SCbranchScc0;
+	add(BranchTo(0, 0, branch_type));
+	if (brk == QuadMaskBreak::PairRewritten)
+	{
+		add(ScalarPairOp(0, ShaderInstructionType::SMovB64, Sgpr(4u, 2u), Sgpr(20u, 2u)));
+	}
+	if (brk != QuadMaskBreak::ExecBranch)
+	{
+		add(ScalarPairOp(0, ShaderInstructionType::SWqmB64, ExecPair(),
+		                 brk == QuadMaskBreak::OtherWqmSource ? Sgpr(8u, 2u) : Sgpr(4u, 2u)));
+	}
+	program.body = list.Size();
+	ShaderInstruction move {};
+	move.type    = ShaderInstructionType::VMovB32;
+	move.format  = ShaderInstructionFormat::SVdstSVsrc0;
+	move.dst     = Vgpr(1u);
+	move.src[0]  = Vgpr(2u);
+	move.src_num = 1;
+	add(move);
+	// Restoring the saved EXEC exposes every lane's V1 to the export, so only the proof can drop the guard.
+	add(ScalarPairOp(0, ShaderInstructionType::SMovB64, ExecPair(), Sgpr(10u, 2u)));
+	ShaderInstruction exp {};
+	exp.type    = ShaderInstructionType::Exp;
+	exp.src[0]  = Vgpr(1u);
+	exp.src_num = 1;
+	add(exp);
+	add(EndProgram(0));
+	auto* branch = AtPc(program.code, branch_index * 4u);
+	*branch      = BranchTo(branch->pc, pc - 4u, branch->type);
+	return program;
+}
+
+static bool QuadMaskBodyUnguarded(const QuadMaskProgram& program, const std::vector<bool>& gather)
+{
+	const auto unguarded = ShaderAnalyzeDeadVgprDstGuards(program.code, {}, true, false, gather);
+	EXPECT_EQ(unguarded.size(), static_cast<size_t>(program.code.GetInstructions().Size()));
+	return program.body < unguarded.size() && unguarded[program.body];
+}
+
+static ShaderOperand Literal(uint32_t value)
+{
+	ShaderOperand op {};
+	op.type       = ShaderOperandType::IntegerInlineConstant;
+	op.constant.u = value;
+	op.size       = 1;
+	return op;
+}
+
+static ShaderInstruction VectorOp(uint32_t pc, ShaderInstructionType type, uint32_t dst, std::initializer_list<ShaderOperand> sources)
+{
+	ShaderInstruction inst {};
+	inst.pc     = pc;
+	inst.type   = type;
+	inst.format = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+	inst.dst    = Vgpr(dst);
+	for (const auto& source: sources) { inst.src[inst.src_num++] = source; }
+	return inst;
+}
+
+static ShaderInstruction NarrowExec(uint32_t pc)
+{
+	ShaderInstruction inst {};
+	inst.pc      = pc;
+	inst.type    = ShaderInstructionType::VCmpxEqU32;
+	inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	inst.dst     = ExecPair();
+	inst.src[0]  = Sgpr(kScalarRegister);
+	inst.src[1]  = Vgpr(9u);
+	inst.src_num = 2;
+	return inst;
+}
+
+static ShaderInstruction ExecFrom(uint32_t pc, uint32_t source)
+{
+	ShaderInstruction inst {};
+	inst.pc      = pc;
+	inst.type    = ShaderInstructionType::SMovB64;
+	inst.format  = ShaderInstructionFormat::Sdst2Ssrc02;
+	inst.dst     = ExecPair();
+	inst.src[0]  = Sgpr(source, 2u);
+	inst.src_num = 1;
+	return inst;
+}
+
+static ShaderInstruction RelativeStore(uint32_t pc, uint32_t base, uint32_t source)
+{
+	ShaderInstruction inst {};
+	inst.pc      = pc;
+	inst.type    = ShaderInstructionType::VMovreldB32;
+	inst.format  = ShaderInstructionFormat::SVdstSVsrc0;
+	inst.dst     = Vgpr(base);
+	inst.src[0]  = Vgpr(source);
+	inst.src_num = 1;
+	return inst;
+}
+
+// The guest compiler's shape: a 2-bit lane index, and three destination-relative moves with the REST update
+// scheduled after the first.
+static ShaderCode InterleavedStoreLoop(uint32_t first_base)
+{
+	ShaderCode code;
+	auto&      insts = code.GetInstructions();
+	insts.Add(VectorOp(0u, ShaderInstructionType::VBfeU32, kIndexRegister, {Vgpr(1u), Literal(4u), Literal(2u)}));
+	insts.Add(RestFromExec(8u, kRestRegister));
+	WaterfallFixture loop {};
+	loop.head_pc = 12u;
+	AppendWaterfallBody(&loop);
+	for (uint32_t i = 0; i < loop.code.GetInstructions().Size() && loop.code.GetInstructions().At(i).pc < loop.move_pc; ++i)
+	{
+		insts.Add(loop.code.GetInstructions().At(i));
+	}
+	auto andn2 = *AtPc(loop.code, loop.andn2_pc);
+	andn2.pc   = loop.move_pc + 4u;
+	insts.Add(RelativeStore(loop.move_pc, first_base, 30u));
+	insts.Add(andn2);
+	insts.Add(RelativeStore(loop.move_pc + 8u, 3u, 31u));
+	insts.Add(RelativeStore(loop.move_pc + 12u, 4u, 32u));
+	insts.Add(ExecFrom(loop.move_pc + 16u, kRestRegister));
+	const auto branch = BranchTo(loop.move_pc + 20u, loop.head_pc, ShaderInstructionType::SCbranchScc1);
+	insts.Add(branch);
+	code.GetLabels().Add(ShaderLabel(branch));
+	code.GetIndirectLabels().Add(ShaderLabel(branch.pc + 4u, branch.pc));
+	insts.Add(EndProgram(branch.pc + 4u));
+	return code;
+}
+
+} // namespace
+
+// With quad-gathered masks, S_WQM of a mask that an SCC branch proved nonzero sets this invocation's EXEC bit,
+// so a write under it needs no guard; every broken link of that proof keeps the guard.
+TEST(EmulatorShaderWaterfall, QuadMaskWqmOfTestedPairDropsTheGuard)
+{
+	const auto proven = BuildQuadMaskProgram(QuadMaskBreak::None);
+	EXPECT_TRUE(QuadMaskBodyUnguarded(proven, proven.gather));
+	EXPECT_FALSE(QuadMaskBodyUnguarded(proven, {}));
+
+	for (const auto brk: {QuadMaskBreak::NotGathered, QuadMaskBreak::PairRewritten, QuadMaskBreak::OtherWqmSource,
+	                      QuadMaskBreak::SccRewritten, QuadMaskBreak::ExecBranch, QuadMaskBreak::ZeroEdge})
+	{
+		const auto broken = BuildQuadMaskProgram(brk);
+		EXPECT_FALSE(QuadMaskBodyUnguarded(broken, broken.gather)) << static_cast<int>(brk);
+	}
+}
+
+TEST(EmulatorShaderWaterfall, LowersStoresAroundTheRestUpdateWhenTheIndexValuesMissTheIndex)
+{
+	// v2 + {0..3} never reaches the index register v7.
+	auto code = InterleavedStoreLoop(2u);
+	ShaderLowerWaterfallMoves(&code);
+	EXPECT_FALSE(HasType(code, ShaderInstructionType::VReadfirstlaneB32));
+	EXPECT_FALSE(HasType(code, ShaderInstructionType::SCbranchScc1));
+	EXPECT_TRUE(HasType(code, ShaderInstructionType::SAndn2B64));
+	int lowered = 0;
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.type != ShaderInstructionType::VMovreldB32) { continue; }
+		EXPECT_EQ(inst.src_num, 2);
+		EXPECT_EQ(inst.src[1].register_id, static_cast<int>(kIndexRegister));
+		++lowered;
+	}
+	EXPECT_EQ(lowered, 3);
+}
+
+TEST(EmulatorShaderWaterfall, RefusesStoresAfterOneWhoseIndexValuesReachTheIndex)
+{
+	// v5 + 2 is the index register v7, so the later stores could see an index the first one wrote.
+	auto       code  = InterleavedStoreLoop(5u);
+	const auto count = code.GetInstructions().Size();
+	ShaderLowerWaterfallMoves(&code);
+	EXPECT_EQ(code.GetInstructions().Size(), count);
+	EXPECT_TRUE(HasType(code, ShaderInstructionType::VReadfirstlaneB32));
+}
+
+TEST(EmulatorShaderWaterfall, LaneIndexValuesHoldOnlyWhereTheirDefinitionRanAndNoRelativeWriteReaches)
+{
+	const auto bfe = [](uint32_t pc) { return VectorOp(pc, ShaderInstructionType::VBfeU32, kIndexRegister, {Vgpr(1u), Literal(0u), Literal(2u)}); };
+	const auto use = [](uint32_t pc) { return VectorOp(pc, ShaderInstructionType::VMovB32, 8u, {Vgpr(kIndexRegister)}); };
+	Vector<uint32_t> values;
+
+	// Defined under EXEC, used under a narrower EXEC: every active lane ran the definition.
+	ShaderCode narrowed;
+	for (const auto& inst: {RestFromExec(0u, kRestRegister), bfe(4u), NarrowExec(8u), use(12u)}) { narrowed.GetInstructions().Add(inst); }
+	ASSERT_TRUE(ShaderLaneValuesOnEntry(narrowed, 3u, static_cast<int>(kIndexRegister), &values));
+	EXPECT_EQ(values.Size(), 4u);
+	for (uint32_t value = 0; value < 4u; ++value) { EXPECT_TRUE(values.Contains(value)) << value; }
+
+	// Defined under a narrowed EXEC, then EXEC restored: a lane that skipped the definition is active again.
+	ShaderCode widened;
+	for (const auto& inst: {RestFromExec(0u, kRestRegister), NarrowExec(4u), bfe(8u), ExecFrom(12u, kRestRegister), use(16u)})
+	{
+		widened.GetInstructions().Add(inst);
+	}
+	EXPECT_TRUE(ShaderLaneValuesOnEntry(widened, 3u, static_cast<int>(kIndexRegister), &values));
+	EXPECT_FALSE(ShaderLaneValuesOnEntry(widened, 4u, static_cast<int>(kIndexRegister), &values));
+
+	// An M0-relative store from a lower base may write any VGPR above it.
+	ShaderCode stored;
+	for (const auto& inst: {bfe(0u), RelativeStore(8u, 2u, 30u), use(12u)}) { stored.GetInstructions().Add(inst); }
+	EXPECT_TRUE(ShaderLaneValuesOnEntry(stored, 1u, static_cast<int>(kIndexRegister), &values));
+	EXPECT_FALSE(ShaderLaneValuesOnEntry(stored, 2u, static_cast<int>(kIndexRegister), &values));
 }
 
 UT_END();

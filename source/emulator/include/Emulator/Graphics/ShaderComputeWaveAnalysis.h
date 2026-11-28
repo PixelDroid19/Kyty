@@ -4,6 +4,7 @@
 #include "Emulator/Graphics/Shader.h"
 
 #include <cstdint>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -71,6 +72,9 @@ struct ShaderComputeWaveAnalysisResult
 	Kyty::Core::String8 reason;
 	// A supported native-equivalent program reads quad neighbours through DPP.
 	bool reads_quad_lanes = false;
+	// Indices of instructions the host precedes with a workgroup barrier: one guest wave orders its LDS
+	// accesses for all lanes, one invocation per lane orders them only across a barrier.
+	std::vector<uint32_t> lds_order_barriers;
 };
 
 [[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const ShaderInstruction& instruction);

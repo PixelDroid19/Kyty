@@ -16,8 +16,8 @@
 
 namespace Kyty::Libs::Graphics {
 
-inline constexpr uint32_t kShaderTranslatorVersion         = 229;
-inline constexpr uint32_t kShaderGeometryTranslatorVersion = 100;
+inline constexpr uint32_t kShaderTranslatorVersion         = 265;
+inline constexpr uint32_t kShaderGeometryTranslatorVersion = 101;
 
 // Names the on-disk stores that hold translator output, so each translator
 // version keeps its own.
@@ -39,7 +39,8 @@ enum class ShaderModuleStage : uint8_t
 	Pixel,
 	Compute,
 	Geometry,
-	GeometryForwardingPrimitiveId
+	GeometryForwardingPrimitiveId,
+	RectGeometry
 };
 
 struct ShaderModuleKey

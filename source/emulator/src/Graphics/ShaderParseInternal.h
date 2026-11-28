@@ -57,6 +57,10 @@ KYTY_SHADER_PARSER(shader_parse_bvh);
 
 // Rewrites relative-move waterfall loops into per-lane indexed moves (ShaderWaterfall.cpp).
 void ShaderLowerWaterfallMoves(ShaderCode* code);
+
+// Values VGPR |vgpr| can hold in every lane active on entry to instruction |index|, from the straight-line code that
+// reaches it; false when a definition is unknown or EXEC may hold a lane the definition did not run for.
+bool ShaderLaneValuesOnEntry(const ShaderCode& code, uint32_t index, int vgpr, Vector<uint32_t>* values);
 // Removes S_CBRANCH_EXECZ skips whose range another branch enters from outside, when the range is inert under
 // an empty EXEC and defines no scalar word read after the target (ShaderExecSkip.cpp).
 void ShaderRemoveNeutralExecSkips(ShaderCode* code);

@@ -509,6 +509,9 @@ one of its kind in a batch:
   batch ahead of the command processor in the sandbox title, and it never prepares the auto draws
   and dispatches that end the robot platformer's batches. Reads that depend on a host write end
   early in the sandbox title's batches and late in the robot platformer's.
+- **Since 2026-11-20 the draw front prepares auto draws** (geometry passes included); dispatches
+  are still never prepared. The table above predates the change. Equality check and fight timing:
+  `docs/titles/robot-platformer.md`, "Auto draws analysed on the draw front".
 - **Not measured.** The draw front's own time per batch, which is the time a submit would still
   hold the guest once the front is the capture. The replay time per prepared record stands in for it
   in the next subsection.

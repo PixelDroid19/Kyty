@@ -968,6 +968,27 @@ static int KYTY_SYSV_ABI FontRenderCharGlyphImageHorizontal(void* font_handle, u
 	return OK;
 }
 
+// sceFontCharacterGetBidiLevel — NID 6DFUkCwQLa8. The level is a byte of the text
+// character record; without both pointers the module returns an invalid parameter
+// and clears any level it was given.
+static constexpr uint64_t kFontCharacterBidiLevelOffset = 0x3b;
+
+static int KYTY_SYSV_ABI FontCharacterGetBidiLevel(const void* character, int32_t* bidi_level)
+{
+	uint8_t level = 0;
+	int     rc    = FONT_ERROR_INVALID_PARAMETER;
+	if (character != nullptr && bidi_level != nullptr)
+	{
+		level = static_cast<const uint8_t*>(character)[kFontCharacterBidiLevelOffset];
+		rc    = OK;
+	}
+	if (bidi_level != nullptr)
+	{
+		*bidi_level = level;
+	}
+	return rc;
+}
+
 } // namespace Font
 
 LIB_DEFINE(InitFont_1)
@@ -985,6 +1006,7 @@ LIB_DEFINE(InitFont_1)
 	LIB_FUNC("KXUpebrFk1U", Font::FontOpenFontMemory);
 	LIB_FUNC("JzCH3SCFnAU", Font::FontOpenFontInstance);
 	LIB_FUNC("vzHs3C8lWJk", Font::FontCloseFont);
+	LIB_FUNC("6DFUkCwQLa8", Font::FontCharacterGetBidiLevel);
 	LIB_FUNC("WaSFJoRWXaI", Font::FontCreateRendererWithEdition);
 	LIB_FUNC("exAxkyVLt0s", Font::FontDestroyRenderer);
 	LIB_FUNC("3OdRkSjOcog", Font::FontBindRenderer);

@@ -265,6 +265,39 @@ static VkBlendFactor get_blend_factor(uint32_t factor)
 	return VK_BLEND_FACTOR_ZERO;
 }
 
+// An alpha-only target (HW::kColorExportOrderOneChannelAlpha) stores W, which the guest
+// blends with its alpha equation; the host blends the channel with its colour equation.
+// Each factor takes its alpha-equation value: destination alpha is the stored channel (a
+// host format without alpha reads 1), and colour factors read alpha.
+static uint8_t AlphaChannelBlendFactor(uint8_t factor)
+{
+	switch (factor)
+	{
+		case /* DestAlpha */ 0x06: return /* DestColor */ 0x08;
+		case /* OneMinusDestAlpha */ 0x07: return /* OneMinusDestColor */ 0x09;
+		case /* SrcAlphaSaturate */ 0x0a: return /* One */ 0x01;
+		case /* ConstantColor */ 0x0d: return /* ConstantAlpha */ 0x13;
+		case /* OneMinusConstantColor */ 0x0e: return /* OneMinusConstantAlpha */ 0x14;
+		case /* Src1Color */ 0x0f: return /* Src1Alpha */ 0x11;
+		case /* InverseSrc1Color */ 0x10: return /* InverseSrc1Alpha */ 0x12;
+		default: return factor;
+	}
+}
+
+static HW::BlendControl AlphaOnlyTargetBlend(const HW::BlendControl& guest)
+{
+	HW::BlendControl host = guest;
+	if (guest.separate_alpha_blend)
+	{
+		host.color_srcblend  = guest.alpha_srcblend;
+		host.color_comb_fcn  = guest.alpha_comb_fcn;
+		host.color_destblend = guest.alpha_destblend;
+	}
+	host.color_srcblend  = AlphaChannelBlendFactor(host.color_srcblend);
+	host.color_destblend = AlphaChannelBlendFactor(host.color_destblend);
+	return host;
+}
+
 struct BlendFactors
 {
 	VkBlendFactor src;
@@ -447,6 +480,14 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	if (vert_shader_module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vert_shader_module == nullptr condition ignored (continuing)\n"); }
 	if (has_fragment_stage && frag_shader_module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: has_fragment_stage && frag_shader_module == nullptr condition ignored (continuing)\n"); }
 
+	const VkSpecializationMapEntry program_window_spec_map {0u, 0u, sizeof(VkBool32)};
+	const VkBool32                 program_window_spec_true = VK_TRUE;
+	VkSpecializationInfo           program_window_spec_info {};
+	program_window_spec_info.mapEntryCount = 1u;
+	program_window_spec_info.pMapEntries   = &program_window_spec_map;
+	program_window_spec_info.dataSize      = sizeof(program_window_spec_true);
+	program_window_spec_info.pData         = &program_window_spec_true;
+
 	VkPipelineShaderStageCreateInfo vert_shader_stage_info {};
 	vert_shader_stage_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	vert_shader_stage_info.pNext               = nullptr;
@@ -454,7 +495,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	vert_shader_stage_info.stage               = VK_SHADER_STAGE_VERTEX_BIT;
 	vert_shader_stage_info.module              = vert_shader_module;
 	vert_shader_stage_info.pName               = "main";
-	vert_shader_stage_info.pSpecializationInfo = nullptr;
+	vert_shader_stage_info.pSpecializationInfo = static_params->vs_program_window_covers ? &program_window_spec_info : nullptr;
 
 	VkPipelineShaderStageCreateInfo frag_shader_stage_info {};
 	frag_shader_stage_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -463,7 +504,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	frag_shader_stage_info.stage               = VK_SHADER_STAGE_FRAGMENT_BIT;
 	frag_shader_stage_info.module              = frag_shader_module;
 	frag_shader_stage_info.pName               = "main";
-	frag_shader_stage_info.pSpecializationInfo = nullptr;
+	frag_shader_stage_info.pSpecializationInfo =
+	    (has_fragment_stage && !host_pixel_shader && static_params->ps_program_window_covers) ? &program_window_spec_info : nullptr;
 
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT vert_required_subgroup_size {};
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT frag_required_subgroup_size {};
@@ -772,8 +814,10 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		}
 		EXIT_IF(set_layouts_num != 2u);
 		set_layouts[set_layouts_num++] = transport_layout;
+		// The capture and resolve parameters take the pixel-stage slot after the
+		// guest vertex stage's user data, so both blocks stay live in one draw.
 		push_constant_info[push_constant_info_num].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-		push_constant_info[push_constant_info_num].offset     = 0;
+		push_constant_info[push_constant_info_num].offset     = ps_input_info->bind.push_constant_offset;
 		push_constant_info[push_constant_info_num].size       = FragmentTransport::KERNEL_PARAMETER_BYTES;
 		push_constant_info_num++;
 	}
@@ -1439,6 +1483,15 @@ void PipelineCache::AttachPipelineLease(CommandBuffer* recording_buffer, Pipelin
 
 void PipelineCache::SaveDriverCacheIfDue()
 {
+	if (m_driver_cache_checkpoint.valid())
+	{
+		if (m_driver_cache_checkpoint.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+		{
+			return;
+		}
+		FinishDriverCacheCheckpoint(m_driver_cache_checkpoint.get());
+	}
+
 	auto* ctx = g_render_ctx->GetGraphicCtx();
 	if (ctx == nullptr || ctx->physical_device == nullptr || ctx->device == nullptr || ctx->pipeline_cache == nullptr)
 	{
@@ -1460,53 +1513,60 @@ void PipelineCache::SaveDriverCacheIfDue()
 		return;
 	}
 
-	// A background compile may hold the cache for seconds; the checkpoint waits for a later lookup instead.
-	std::unique_lock cache_access(PipelineCacheAccess(), std::try_to_lock);
-	if (!cache_access.owns_lock())
-	{
-		return;
-	}
-
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
 
 	const size_t budget           = PipelineCacheStoreSessionWriteBudgetBytes();
 	const size_t remaining_budget = m_driver_cache_bytes_attempted < budget ? budget - m_driver_cache_bytes_attempted : 0u;
-	size_t       attempted_size   = 0;
-	const auto   save_start       = DebugStatsClock::now();
-	const auto   save_result      = PipelineCacheStoreSave(ctx->device, ctx->pipeline_cache, properties, remaining_budget, &attempted_size);
-	if (save_result == PipelineCacheStoreSaveResult::Unchanged)
+	m_driver_cache_attempted_once = true;
+	m_last_driver_cache_attempt   = now;
+	// Pipelines added while the checkpoint runs mark the cache dirty again.
+	m_driver_cache_dirty = false;
+
+	// Serializing and writing a large blob takes hundreds of milliseconds on a slow volume, so it
+	// never runs on the thread that missed.
+	m_driver_cache_checkpoint = std::async(std::launch::async,
+	                                       [device = ctx->device, cache = ctx->pipeline_cache, properties, remaining_budget]()
+	                                       {
+		                                       DriverCacheCheckpoint checkpoint;
+		                                       const auto            start = DebugStatsClock::now();
+		                                       checkpoint.result =
+		                                           PipelineCacheStoreSave(device, cache, properties, remaining_budget, &checkpoint.attempted_size);
+		                                       checkpoint.elapsed_ns = static_cast<uint64_t>(
+		                                           std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - start).count());
+		                                       return checkpoint;
+	                                       });
+}
+
+void PipelineCache::FinishDriverCacheCheckpoint(const DriverCacheCheckpoint& checkpoint)
+{
+	if (checkpoint.result == PipelineCacheStoreSaveResult::Unchanged)
 	{
-		m_driver_cache_attempted_once = true;
-		m_last_driver_cache_attempt   = now;
-		m_driver_cache_dirty          = false;
 		return;
 	}
-	const auto save_elapsed_ns =
-	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - save_start).count());
-	DebugStatsPipelineCacheCheckpointOutcome checkpoint_outcome = DebugStatsPipelineCacheCheckpointOutcome::Failed;
-	if (save_result == PipelineCacheStoreSaveResult::Written)
+	DebugStatsPipelineCacheCheckpointOutcome outcome = DebugStatsPipelineCacheCheckpointOutcome::Failed;
+	if (checkpoint.result == PipelineCacheStoreSaveResult::Written)
 	{
-		checkpoint_outcome = DebugStatsPipelineCacheCheckpointOutcome::Written;
-	} else if (save_result == PipelineCacheStoreSaveResult::BudgetExceeded)
+		outcome = DebugStatsPipelineCacheCheckpointOutcome::Written;
+	} else if (checkpoint.result == PipelineCacheStoreSaveResult::BudgetExceeded)
 	{
-		checkpoint_outcome = DebugStatsPipelineCacheCheckpointOutcome::BudgetExceeded;
+		outcome = DebugStatsPipelineCacheCheckpointOutcome::BudgetExceeded;
 	}
-	DebugStatsRecordPipelineCacheCheckpoint(checkpoint_outcome, static_cast<uint64_t>(attempted_size), save_elapsed_ns);
-	m_driver_cache_attempted_once         = true;
-	m_last_driver_cache_attempt           = now;
-	m_driver_cache_bytes_attempted        = PipelineCacheStoreAccountWriteAttempt(m_driver_cache_bytes_attempted, attempted_size);
-	m_driver_cache_write_budget_exhausted = m_driver_cache_bytes_attempted >= budget;
-	if (save_result == PipelineCacheStoreSaveResult::Written)
+	DebugStatsRecordPipelineCacheCheckpoint(outcome, static_cast<uint64_t>(checkpoint.attempted_size), checkpoint.elapsed_ns);
+
+	const size_t budget                   = PipelineCacheStoreSessionWriteBudgetBytes();
+	m_driver_cache_bytes_attempted        = PipelineCacheStoreAccountWriteAttempt(m_driver_cache_bytes_attempted, checkpoint.attempted_size);
+	m_driver_cache_write_budget_exhausted = m_driver_cache_bytes_attempted >= budget ||
+	                                        checkpoint.result == PipelineCacheStoreSaveResult::BudgetExceeded;
+	if (checkpoint.result == PipelineCacheStoreSaveResult::Failed)
 	{
-		m_driver_cache_dirty = false;
-		if (Config::GetPrintfDirection() != Log::Direction::Silent)
-		{
-			KYTY_LOG_DEBUG("Saved Vulkan pipeline cache: %zu bytes\n", attempted_size);
-		}
-	} else if (save_result == PipelineCacheStoreSaveResult::BudgetExceeded)
+		// The entries the failed write carried are still only in the driver cache.
+		m_driver_cache_dirty = true;
+		return;
+	}
+	if (checkpoint.result == PipelineCacheStoreSaveResult::Written && Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
-		m_driver_cache_write_budget_exhausted = true;
+		KYTY_LOG_DEBUG("Saved Vulkan pipeline cache: %zu bytes\n", checkpoint.attempted_size);
 	}
 }
 
@@ -1563,7 +1623,7 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
                                                               const Vector<uint32_t>& geometry_shader,
                                                               const PipelineStaticParameters& static_params,
                                                               PipelineDynamicParameters* dynamic_params, uint32_t user_sgprs,
-                                                              uint32_t lds_dwords, const String8& requirement_facts)
+                                                              uint32_t vgprs, uint32_t lds_dwords, const String8& requirement_facts)
 {
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	if (gctx == nullptr)
@@ -1577,6 +1637,14 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	if (!TransportColorTargetsWritable(color))
 	{
 		EXIT("fragment transport has no integer color export interface: %s\n", requirement_facts.c_str());
+	}
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
+	if (static_cast<uint64_t>(ps_input.bind.push_constant_offset) + FragmentTransport::KERNEL_PARAMETER_BYTES >
+	    properties.limits.maxPushConstantsSize)
+	{
+		EXIT("fragment transport parameters at push offset %u exceed the push constant limit %u: %s\n", ps_input.bind.push_constant_offset,
+		     properties.limits.maxPushConstantsSize, requirement_facts.c_str());
 	}
 	const VkDescriptorSetLayout transport_layout = FragmentTransportDescriptorSetLayout();
 	if (transport_layout == VK_NULL_HANDLE)
@@ -1626,12 +1694,16 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	{
 		EXIT("fragment transport capture assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());
 	}
-	const auto resolve_source = FragmentTransport::GenerateResolveSource(2u, TransportColorMask(static_params));
+	const auto resolve_source = FragmentTransport::GenerateResolveSource(2u, ps_input.bind.push_constant_offset, TransportColorMask(static_params),
+	                                                                    ShaderHasPixelDepthExport(ps_code));
 	if (!ShaderToolchain::Run(resolve_source, &resolve_binary, &error))
 	{
 		EXIT("fragment transport resolve assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());
 	}
-	if (!FragmentTransportBuildShadeModule(ps_code, ps_input, user_sgprs, lds_dwords, &shade_binary, &error))
+	// The shade splits the guest wave64 by the same register rule as guest compute: a
+	// part narrower than 32 lanes keeps a large pixel program out of spills.
+	const uint32_t part_lanes = ShaderSplitWavePartLanes(ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state), vgprs);
+	if (!FragmentTransportBuildShadeModule(ps_code, ps_input, user_sgprs, lds_dwords, part_lanes, &shade_binary, &error))
 	{
 		EXIT("fragment transport shade compilation failed: %s %s\n", error.c_str(), requirement_facts.c_str());
 	}
@@ -1661,7 +1733,7 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	{
 		EXIT("fragment transport pipeline creation failed: %s\n", requirement_facts.c_str());
 	}
-	if (!FragmentTransportCreateShadePipeline(gctx->device, gctx->pipeline_cache, ps_input.bind, shade_binary, true, transport_layout,
+	if (!FragmentTransportCreateShadePipeline(gctx->device, gctx->pipeline_cache, ps_input.bind, shade_binary, part_lanes, transport_layout,
 	                                          &passes->shade_layout, &passes->shade, &error))
 	{
 		EXIT("fragment transport split compute pipeline creation failed: %s %s\n", error.c_str(), requirement_facts.c_str());
@@ -1694,14 +1766,51 @@ private:
 	Core::Mutex& m_mutex;
 };
 
+// The rect stage forwards the position and the vertex parameters only, and takes the single
+// geometry slot. Without it the rect is drawn as its first triangle, which is reported.
+bool RectGeometryAvailable(const GraphicContext& gctx, const ShaderVertexInputInfo& vs, const ShaderPixelInputInfo& ps,
+                           uint32_t parameter_count)
+{
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(gctx.physical_device, &properties);
+	const auto&    limits     = properties.limits;
+	const uint32_t components = parameter_count * 4u + 4u;
+	const char*    missing    = nullptr;
+	if (!gctx.geometry_shader_supported) { missing = "no geometry shader support"; }
+	else if (vs.position1_usage != ShaderVertexPosition1Usage::Unknown) { missing = "a layer or clip distance export"; }
+	else if (ps.custom_interpolation.Enabled()) { missing = "the interpolation stage takes the geometry slot"; }
+	else if (components > limits.maxGeometryOutputComponents || components * 4u > limits.maxGeometryTotalOutputComponents ||
+	         limits.maxGeometryOutputVertices < 4u || components > limits.maxGeometryInputComponents)
+	{
+		missing = "geometry limits";
+	}
+	if (missing == nullptr) { return true; }
+	KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rect list drawn as its first triangle: %s (parameters=%u)\n", missing,
+	               parameter_count);
+	return false;
+}
+
+// Vertex parameters the pixel stage reads flat; the rect stage keeps their provoking value.
+uint32_t RectFlatParameters(const ShaderPixelInputInfo& ps)
+{
+	uint32_t flat = 0;
+	for (uint32_t input = 0; input < ps.input_num; ++input)
+	{
+		ShaderPixelInterpolator decoded {};
+		if (!ShaderPixelInputActive(ps, input) || !ShaderDecodePixelInterpolator(ps.interpolator_settings[input], &decoded)) { continue; }
+		if (decoded.source == ShaderPixelInterpolatorSource::Parameter && decoded.flat) { flat |= 1u << decoded.location; }
+	}
+	return flat;
+}
+
 } // namespace
 
 VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color,
                                               RenderDepthInfo* depth,
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
-                                              const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
+                                              const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology, bool expand_rects,
                                               const VulkanSampleLocationState& sample_locations, ShaderId* prepared_vs_id,
-                                              ShaderId* prepared_ps_id)
+                                              ShaderId* prepared_ps_id, const GuestDeviceAddressTable* device_address_table)
 {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
 
@@ -1781,6 +1890,21 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	    State::ResolveDepthClipState(clip_control, gctx->depth_clip_enable_supported, gctx->depth_clamp_supported);
 	p.static_params->depth_clip_enable  = depth_clip_state.depth_clip_enable;
 	p.static_params->depth_clamp_enable = depth_clip_state.depth_clamp_enable;
+	const auto program_window_covers    = [device_address_table](const ShaderBindResources& bind) -> bool
+	{
+		if (device_address_table == nullptr || !bind.device_address_used || !bind.program_base_used ||
+		    bind.program_window_required_bytes == 0u)
+		{
+			return false;
+		}
+		uint64_t device = 0;
+		uint32_t bytes  = 0;
+		GuestDeviceAddressWindow(*device_address_table, bind.program_base, &device, &bytes);
+		return static_cast<uint64_t>(bytes) >= bind.program_window_required_bytes;
+	};
+	p.static_params->vs_program_window_covers = vs_input_info != nullptr && program_window_covers(vs_input_info->bind);
+	p.static_params->ps_program_window_covers =
+	    ps_input_info != nullptr && ps_input_info->stage_enabled && !ps_regs.ps_embedded && program_window_covers(ps_input_info->bind);
 	p.dynamic_params->scissor_ltrb[0]    = scissor.left;
 	p.dynamic_params->scissor_ltrb[1]    = scissor.top;
 	p.dynamic_params->scissor_ltrb[2]    = scissor.right;
@@ -1819,6 +1943,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	p.dynamic_params->scissor_ltrb[2] = framebuffer_scissor.right;
 	p.dynamic_params->scissor_ltrb[3] = framebuffer_scissor.bottom;
 	p.static_params->topology                 = topology;
+	p.static_params->expand_rects             = expand_rects;
 	p.static_params->rasterization_samples    = resolve_render_attachment_sample_count(*color, *depth);
 	p.static_params->sample_locations         = sample_locations;
 	if (p.static_params->sample_locations.sample_count != p.static_params->rasterization_samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.static_params->sample_locations.sample_count != p.static_params->rasterization_samples condition ignored (continuing)\n"); }
@@ -1874,15 +1999,21 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			const bool uint16_mrt_output = ps_input_info->target_output_mode[rt] == 7u &&
 			                               ps_input_info->target_output_number[rt] == 4u &&
 			                               ps_input_info->target_output_order[rt] == 0u;
-			const auto& blend               = ctx->GetBlendControl(rt);
+			const uint8_t output_order   = ps_input_info->target_output_order[rt];
+			const auto    blend          = output_order == HW::kColorExportOrderOneChannelAlpha ? AlphaOnlyTargetBlend(ctx->GetBlendControl(rt))
+			                                                                                    : ctx->GetBlendControl(rt);
 			p.static_params->color_mask[rt] = uint16_mrt_output
 			                                      ? State::ResolveColorWriteAgainstUint16Export(export_admitted_mask, export_enable)
 			                                      : export_admitted_mask;
-			if (ps_input_info->target_output_order[rt] == HW::kColorExportOrderTwoChannelAlt)
+			// The guest mask names export components; the attachment's second, respectively only, channel holds W.
+			const uint8_t mask = p.static_params->color_mask[rt];
+			if (output_order == HW::kColorExportOrderTwoChannelAlt)
 			{
-				// The guest mask names export components; the attachment's second channel holds W.
-				const uint8_t mask              = p.static_params->color_mask[rt];
 				p.static_params->color_mask[rt] = static_cast<uint8_t>((mask & 1u) | ((mask >> 2u) & 2u));
+			}
+			if (output_order == HW::kColorExportOrderOneChannelAlpha)
+			{
+				p.static_params->color_mask[rt] = static_cast<uint8_t>((mask >> 3u) & 1u);
 			}
 			p.static_params->color_srcblend[rt]       = blend.color_srcblend;
 			p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
@@ -2030,6 +2161,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		                                                        framebuffer->extent);
 		if (requirement.required)
 		{
+			if (p.static_params->expand_rects)
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rect list drawn as its first triangle: fragment transport\n");
+			}
 			ShaderTranslationCacheResult transport_geometry;
 			if (ps_input_info->custom_interpolation.Enabled())
 			{
@@ -2041,6 +2176,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			auto* passes = CreateFragmentTransportPasses(framebuffer, *color, *vs_input_info, vs_translation.binary, *ps_input_info,
 			                                             ps_transport_code, transport_geometry.binary, *p.static_params, p.dynamic_params,
 			                                             static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr),
+			                                             (static_cast<uint32_t>(ps_regs.ps_regs.rsrc1.vgprs) + 1u) * 4u,
 			                                             ps_transport_code.GetPixelExtraLdsDwords(), requirement.facts);
 			const uint32_t transport_slot = FindAvailableSlot();
 			p.pipeline                    = passes->resolve;
@@ -2089,6 +2225,18 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info, false); });
 		DebugStatsRecordShaderTranslationCache(geometry_translation.hit, geometry_translation.evicted);
 		EXIT_IF(geometry_translation.binary.IsEmpty());
+	} else if (p.static_params->expand_rects)
+	{
+		const uint32_t parameters = SpirvResolveVertexParameterCount(ShaderParseVS(&vs_regs, &sh_regs, vs_input_info), vs_input_info);
+		if (RectGeometryAvailable(*gctx, *vs_input_info, *ps_input_info, parameters))
+		{
+			const uint32_t flat = RectFlatParameters(*ps_input_info);
+			geometry_translation = translation_cache->GetOrCompile(
+			    ShaderModuleKey::Create(vs_id, ShaderModuleStage::RectGeometry, optimization, next_gen, false, flat),
+			    [&] { return ShaderCompileRectGeometry(parameters, flat); });
+			DebugStatsRecordShaderTranslationCache(geometry_translation.hit, geometry_translation.evicted);
+			EXIT_IF(geometry_translation.binary.IsEmpty());
+		}
 	}
 
 	const uint32_t slot = FindAvailableSlot();

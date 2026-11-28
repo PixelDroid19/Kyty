@@ -2,6 +2,7 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_KHR_shader_subgroup_quad : require
 #extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 #define FRAGMENT_CAPTURE
 #include "fragment_wave_layout.glsl"
 
@@ -20,18 +21,9 @@ uint hash_key(uint primitive, uint xy) {
     return h ^ (h >> 15u);
 }
 
-uint reserve_record() {
-    uint current = atomicAdd(control_buffer.control[0], 0u);
-    while (current < transport.quad_capacity) {
-        uint observed = atomicCompSwap(control_buffer.control[0], current, current + 1u);
-        if (observed == current) return current;
-        current = observed;
-    }
-    atomicOr(control_buffer.control[1], 1u);
-    return invalid_reference;
-}
-
-uint capture_quad(uint primitive, uint xy, uint mask) {
+// Claims a lookup slot for one quad. The record is reserved afterwards for the
+// whole subgroup at once.
+uint claim_slot(uint primitive, uint xy) {
     if (primitive >= transport.primitive_count) {
         atomicOr(control_buffer.control[1], 4u);
         return invalid_reference;
@@ -40,37 +32,78 @@ uint capture_quad(uint primitive, uint xy, uint mask) {
     for (uint probe=0u; probe < min(transport.quad_lookup_capacity, 128u); ++probe) {
         uint slot = (hash + probe) & (transport.quad_lookup_capacity - 1u);
         uint base = 16u + transport.primitive_count * 2u + slot * 4u;
-        if (atomicCompSwap(control_buffer.control[base], 0u, 1u) != 0u) continue;
-        uint record = reserve_record();
-        if (record == invalid_reference) return record;
-        // One successful record reservation precedes every ordinal increment,
-        // so this counter cannot exceed quad_capacity or wrap in this draw.
-        uint ordinal = atomicAdd(control_buffer.control[17u + primitive * 2u], 1u);
-        uint header = record * quad_words();
-        record_buffer.records[header] = mask;
-        record_buffer.records[header + 1u] = 1u;
-        record_buffer.records[header + 2u] = primitive;
-        record_buffer.records[header + 3u] = ordinal;
-        uint key = ((primitive << 16u) | (ordinal / 16u)) + 1u;
-        uint wave_hash = hash_key(primitive, ordinal / 16u);
-        bool found = false;
-        for (uint attempt=0u; attempt < min(transport.wave_lookup_capacity, 128u); ++attempt) {
-            uint wave_slot = (wave_hash + attempt) & (transport.wave_lookup_capacity - 1u);
-            uint previous = atomicCompSwap(control_buffer.control[wave_table_offset() + wave_slot], 0u, key);
-            if (previous != 0u && previous != key) continue;
-            reference_buffer.references[wave_slot * 16u + (ordinal & 15u)] = record;
-            found = true;
-            break;
-        }
-        if (!found) atomicOr(control_buffer.control[1], 64u);
-        control_buffer.control[base + 1u] = primitive;
-        control_buffer.control[base + 2u] = xy;
-        control_buffer.control[base + 3u] = record;
-        atomicExchange(control_buffer.control[base], 2u);
-        return record;
+        if (atomicCompSwap(control_buffer.control[base], 0u, 1u) == 0u) return slot;
     }
     atomicOr(control_buffer.control[1], 2u);
     return invalid_reference;
+}
+
+// One atomic add per subgroup: every covered quad of the band adds to this
+// single counter, so a per-quad add serializes them. The leader is a claiming
+// lane, never a helper, because a helper's atomic has no effect. The count may
+// pass the capacity only after an overflow, which fails the whole band; readers
+// bound records by quad_capacity.
+uint reserve_record(bool claimed) {
+    uint claim = claimed ? 1u : 0u;
+    uint count = subgroupAdd(claim);
+    if (count == 0u) return invalid_reference;
+    uint leader = subgroupMin(claimed ? gl_SubgroupInvocationID : 0xffffffffu);
+    uint first_record = 0u;
+    if (gl_SubgroupInvocationID == leader) first_record = atomicAdd(control_buffer.control[0], count);
+    first_record = subgroupMax(first_record);
+    if (!claimed) return invalid_reference;
+    uint record = first_record + subgroupExclusiveAdd(claim);
+    if (record < transport.quad_capacity) return record;
+    atomicOr(control_buffer.control[1], 1u);
+    return invalid_reference;
+}
+
+// Numbers the reserved quads of each primitive with one add per primitive
+// present in the subgroup, from a reserving lane. Only reserved records take
+// an ordinal, so a counter cannot exceed quad_capacity or wrap in this draw.
+uint reserve_ordinal(bool reserved, uint primitive) {
+    uint ordinal = 0u;
+    bool pending = reserved;
+    while (subgroupAdd(pending ? 1u : 0u) != 0u) {
+        uint leader = subgroupMin(pending ? gl_SubgroupInvocationID : 0xffffffffu);
+        uint leader_primitive = subgroupMax(gl_SubgroupInvocationID == leader ? primitive : 0u);
+        uint member = pending && primitive == leader_primitive ? 1u : 0u;
+        uint count = subgroupAdd(member);
+        uint rank = subgroupExclusiveAdd(member);
+        uint first_ordinal = 0u;
+        if (gl_SubgroupInvocationID == leader) first_ordinal = atomicAdd(control_buffer.control[17u + leader_primitive * 2u], count);
+        first_ordinal = subgroupMax(first_ordinal);
+        if (member != 0u) {
+            ordinal = first_ordinal + rank;
+            pending = false;
+        }
+    }
+    return ordinal;
+}
+
+void store_quad(uint slot, uint record, uint ordinal, uint primitive, uint xy, uint mask) {
+    uint header = record * quad_words();
+    record_buffer.records[header] = mask;
+    record_buffer.records[header + 1u] = 1u;
+    record_buffer.records[header + 2u] = primitive;
+    record_buffer.records[header + 3u] = ordinal;
+    uint key = ((primitive << 16u) | (ordinal / 16u)) + 1u;
+    uint wave_hash = hash_key(primitive, ordinal / 16u);
+    bool found = false;
+    for (uint attempt=0u; attempt < min(transport.wave_lookup_capacity, 128u); ++attempt) {
+        uint wave_slot = (wave_hash + attempt) & (transport.wave_lookup_capacity - 1u);
+        uint previous = atomicCompSwap(control_buffer.control[wave_table_offset() + wave_slot], 0u, key);
+        if (previous != 0u && previous != key) continue;
+        reference_buffer.references[wave_slot * 16u + (ordinal & 15u)] = record;
+        found = true;
+        break;
+    }
+    if (!found) atomicOr(control_buffer.control[1], 64u);
+    uint base = 16u + transport.primitive_count * 2u + slot * 4u;
+    control_buffer.control[base + 1u] = primitive;
+    control_buffer.control[base + 2u] = xy;
+    control_buffer.control[base + 3u] = record;
+    atomicExchange(control_buffer.control[base], 2u);
 }
 
 void main() {
@@ -84,7 +117,9 @@ void main() {
     vec2 origin = subgroupQuadBroadcast(gl_FragCoord.xy, 0u);
     uvec2 quad = uvec2(origin) / 2u;
     bool writer = covered != 0u && lane == first;
-    uint record = invalid_reference;
+    uint primitive = uint(gl_PrimitiveID);
+    uint xy = quad.x | (quad.y << 16u);
+    uint slot = invalid_reference;
     if (writer) {
         if (control_buffer.control.length() < wave_table_offset() + transport.wave_lookup_capacity ||
             record_buffer.records.length() < transport.quad_capacity * quad_words() ||
@@ -93,9 +128,13 @@ void main() {
         } else if (quad.x >= 32768u || quad.y >= 32768u) {
             atomicOr(control_buffer.control[1], 4u);
         } else {
-            record = capture_quad(uint(gl_PrimitiveID), quad.x | (quad.y << 16u), mask);
+            slot = claim_slot(primitive, xy);
         }
     }
+    // Uniform control flow: the reservation is a subgroup operation.
+    uint record = reserve_record(slot != invalid_reference);
+    uint ordinal = reserve_ordinal(record != invalid_reference, primitive);
+    if (record != invalid_reference) store_quad(slot, record, ordinal, primitive, xy, mask);
     record = subgroupQuadBroadcast(record, first);
     for (uint word=0u; word < transport.lane_words; ++word) {
         uint own = read_lane_word(word);

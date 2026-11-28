@@ -2905,6 +2905,24 @@ KYTY_SYSV_ABI int VideoOutSetWindowModeMargins(int handle, int top, int bottom)
 	return Kernel::OK;
 }
 
+KYTY_SYSV_ABI int VideoOutSetGlobalBlendSpace(int handle, uint32_t space, uint32_t option)
+{
+	PRINT_NAME();
+
+	EXIT_IF(g_video_out_context == nullptr);
+
+	auto session = g_video_out_context->AcquireSession(handle);
+	if (!session)
+	{
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+
+	KYTY_LOG_DEBUG("\t space  = %u\n", space);
+	KYTY_LOG_DEBUG("\t option = %u\n", option);
+
+	return Kernel::OK;
+}
+
 KYTY_SYSV_ABI int VideoOutAllowOutputResolutionWqhdDetection(int handle)
 {
 	PRINT_NAME();

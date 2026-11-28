@@ -12,7 +12,8 @@ inline constexpr uint32_t CONTROL_WORDS       = 16;
 inline constexpr uint32_t PRIMITIVE_WORDS     = 2;
 inline constexpr uint32_t QUAD_HEADER_WORDS   = 4;
 inline constexpr uint32_t QUAD_LOOKUP_WORDS   = 4;
-inline constexpr uint32_t OUTPUT_LANE_WORDS   = 34;
+// Per lane: alive, component mask, eight color targets of four words, exported depth.
+inline constexpr uint32_t OUTPUT_LANE_WORDS   = 35;
 inline constexpr uint32_t MAX_LOOKUP_PROBES   = 128;
 inline constexpr uint64_t MAX_TRANSIENT_BYTES = 128ull * 1024 * 1024;
 

@@ -498,6 +498,18 @@ private:
 	[[nodiscard]] bool ExecRestrictedCompare(const ShaderInstruction& inst, CompareMask* mask) const;
 	void MergeShape(ExecShape* into, const ExecShape& other, uint32_t pc) const;
 	int  ExecAfter(const ShaderInstruction& inst) const;
+	// A wave64 lane mask is an aligned scalar pair. A wave32 one is a single word, or the low word of a pair that
+	// _B64 forms combine (EXEC_HI holds no lanes).
+	[[nodiscard]] bool MaskCount(unsigned count) const { return count == 2u || (count == 1u && m_guest_wave_size == 32u); }
+	[[nodiscard]] Type     MaskForm(Type type) const;
+	// A wave32 VALU writes and reads only the low word of a scalar lane-mask pair (ISA: the upper half of VCC is
+	// ignored), so VCC_HI stays an ordinary scalar across compares.
+	[[nodiscard]] ShaderOperand LaneMask(const ShaderOperand& op) const
+	{
+		ShaderOperand word = op;
+		if (m_guest_wave_size == 32u && op.size == 2 && (op.type == Operand::Sgpr || op.type == Operand::VccLo)) { word.size = 1; }
+		return word;
+	}
 	bool FindLoops();
 	bool EnterLoop(uint32_t header);
 	bool CloseLoop(uint32_t header, bool* again);
@@ -538,6 +550,7 @@ private:
 	};
 	std::map<uint32_t, uint32_t> m_back_edges; // header index -> back-edge index
 	std::map<uint32_t, uint32_t> m_loop_ends;  // back-edge index -> header index
+	std::set<uint32_t>           m_scc_back_edges; // back-edge indices that branch on SCC
 	std::map<uint32_t, Loop>     m_loops;
 	std::map<uint32_t, ExecShape> m_pending_shape;
 	std::set<uint32_t>          m_uniform_targets; // joins also reached by an edge every lane takes
@@ -548,6 +561,7 @@ private:
 	std::vector<MaxReduction>              m_reductions;
 	const ShaderCode*       m_code  = nullptr;
 	uint32_t                m_index = 0;
+	uint32_t                m_guest_wave_size = 64;
 };
 
 uint8_t Body::Taint(const ShaderOperand& op) const
@@ -596,7 +610,7 @@ bool Body::IsUniformMask(const ShaderOperand& op) const
 {
 	unsigned first = 0;
 	unsigned count = 0;
-	if (!ScalarRange(op, &first, &count)) { return false; }
+	if (!ScalarRange(LaneMask(op), &first, &count)) { return false; }
 	for (unsigned word = 0; word < count; ++word)
 	{
 		if (!m_state.uniform_mask.test(first + word)) { return false; }
@@ -631,7 +645,7 @@ bool Body::SourcesAreUniformClean(const ShaderInstruction& inst) const
 			continue;
 		}
 		// Every launched lane holds the same bit of a uniform mask.
-		if (IsLaneBit(inst, source) && IsUniformMask(op)) { continue; }
+		if (IsLaneBit(inst, source) && IsUniformMask(LaneMask(op))) { continue; }
 		if (!ScalarRange(op, &first, &count) || (Taint(op) != kClean && !InScope(op))) { return false; }
 	}
 	if (inst.type == Type::VMacF32)
@@ -712,7 +726,8 @@ bool Body::Branch(const ShaderInstruction& inst)
 	{
 		ShaderOperand vcc {};
 		vcc.type = Operand::VccLo;
-		vcc.size = 2;
+		// A wave32 VCCZ reads only VCC_LO; VCC_HI is then an ordinary scalar.
+		vcc.size = m_guest_wave_size == 32u ? 1 : 2;
 		const auto compare = m_shape.compare.find(kVccLoWord);
 		exec_split = !reduction && !IsUniformMask(vcc) && compare != m_shape.compare.end() && compare->second.uniform && m_shape.exec >= 0 &&
 		             m_partition.Descends(m_shape.exec, compare->second.under);
@@ -784,7 +799,8 @@ void Body::OpenRegion(const ShaderInstruction& inst, uint32_t target)
 	}
 }
 
-// Back edges are unconditional branches closing properly nested loops entered only through their header.
+// Back edges are unconditional or SCC branches closing properly nested loops entered only through their header. An
+// SCC back edge falls through when its condition fails; a loop that keeps EXEC is left by every lane at once.
 bool Body::FindLoops()
 {
 	const auto& instructions = m_code->GetInstructions();
@@ -801,9 +817,16 @@ bool Body::FindLoops()
 		if (found == index_of.end()) { return Fail(inst, "branch target is not an instruction"); }
 		branches.emplace_back(index, found->second);
 		if (target > static_cast<int64_t>(inst.pc)) { continue; }
-		if (inst.type != Type::SBranch) { return Fail(inst, "only unconditional back edges are supported"); }
+		const bool scc = inst.type == Type::SCbranchScc0 || inst.type == Type::SCbranchScc1;
+		if (inst.type != Type::SBranch && !scc) { return Fail(inst, "only unconditional and SCC back edges are supported"); }
 		if (!m_back_edges.emplace(found->second, index).second) { return Fail(inst, "loop with several back edges"); }
 		m_loop_ends[index] = found->second;
+		if (!scc) { continue; }
+		for (uint32_t body = found->second; body < index; ++body)
+		{
+			if (ShaderInstructionWritesExec(instructions.At(body))) { return Fail(inst, "SCC back edge of a loop that writes EXEC"); }
+		}
+		m_scc_back_edges.insert(index);
 	}
 	for (const auto& [header, back]: m_back_edges)
 	{
@@ -1006,7 +1029,7 @@ bool Body::ExecWrite(const ShaderInstruction& inst)
 		Define(inst.dst, kMask);
 		unsigned first = 0;
 		unsigned count = 0;
-		if (ScalarRange(inst.dst, &first, &count) && count == 2u && before >= 0) { m_shape.saved[first] = before; }
+		if (ScalarRange(inst.dst, &first, &count) && MaskCount(count) && before >= 0) { m_shape.saved[first] = before; }
 	}
 	m_shape.exec                     = after;
 	m_state.scalar[kExecLoWord]      = kMask;
@@ -1043,7 +1066,9 @@ void Body::ForgetScalarShape(const ShaderOperand& op)
 	if (!ScalarRange(op, &first, &count)) { return; }
 	for (unsigned word = first; word < first + count; ++word)
 	{
-		for (unsigned base: {word, word - 1u})
+		// A wave64 mask pair starting one word lower loses its high half; a wave32 mask lives in its low word only.
+		const unsigned pair_base = m_guest_wave_size == 32u ? word : word - 1u;
+		for (unsigned base: {word, pair_base})
 		{
 			m_shape.saved.erase(base);
 			m_shape.compare.erase(base);
@@ -1078,8 +1103,8 @@ void Body::RestoreCompareWord(const ShaderOperand& op, const std::pair<CompareMa
 	const unsigned pair     = word - half.second;
 	const auto     low      = m_shape.restored_compare.find(pair);
 	const auto     high     = m_shape.restored_compare.find(pair + 1u);
-	const bool     complete = low != m_shape.restored_compare.end() && high != m_shape.restored_compare.end() &&
-	                      low->second == std::make_pair(half.first, 0u) && high->second == std::make_pair(half.first, 1u);
+	const bool     complete = (m_guest_wave_size == 32u && half.second == 0u) || (low != m_shape.restored_compare.end() && high != m_shape.restored_compare.end() &&
+	                                               low->second == std::make_pair(half.first, 0u) && high->second == std::make_pair(half.first, 1u));
 	if (complete) { m_shape.compare[pair] = half.first; }
 }
 
@@ -1113,8 +1138,8 @@ void Body::RestoreSavedWord(const ShaderOperand& op, const std::pair<int, unsign
 	const unsigned pair = word - half.second;
 	const auto     low  = m_shape.restored_saved.find(pair);
 	const auto     high = m_shape.restored_saved.find(pair + 1u);
-	if (low != m_shape.restored_saved.end() && high != m_shape.restored_saved.end() && low->second == std::make_pair(half.first, 0u) &&
-	    high->second == std::make_pair(half.first, 1u))
+	if ((m_guest_wave_size == 32u && half.second == 0u) || (low != m_shape.restored_saved.end() && high != m_shape.restored_saved.end() &&
+	                          low->second == std::make_pair(half.first, 0u) && high->second == std::make_pair(half.first, 1u)))
 	{
 		m_shape.saved[pair] = half.first;
 	}
@@ -1125,12 +1150,12 @@ void Body::RestoreSavedWord(const ShaderOperand& op, const std::pair<int, unsign
 // itself or a saved copy of it.
 bool Body::ExecRestrictedCompare(const ShaderInstruction& inst, CompareMask* mask) const
 {
-	if (inst.type != Type::SAndB64 || inst.src_num != 2 || m_shape.exec < 0) { return false; }
+	if (MaskForm(inst.type) != Type::SAndB64 || inst.src_num != 2 || m_shape.exec < 0) { return false; }
 	const auto is_exec = [this](const ShaderOperand& op) {
 		unsigned first = 0;
 		unsigned count = 0;
 		if (op.type == Operand::ExecLo) { return true; }
-		if (!ScalarRange(op, &first, &count) || count != 2u) { return false; }
+		if (!ScalarRange(op, &first, &count) || !MaskCount(count)) { return false; }
 		const auto saved = m_shape.saved.find(first);
 		return saved != m_shape.saved.end() && saved->second == m_shape.exec;
 	};
@@ -1138,11 +1163,29 @@ bool Body::ExecRestrictedCompare(const ShaderInstruction& inst, CompareMask* mas
 	if (!exec_first && !is_exec(inst.src[1])) { return false; }
 	unsigned first = 0;
 	unsigned count = 0;
-	if (!ScalarRange(exec_first ? inst.src[1] : inst.src[0], &first, &count) || count != 2u) { return false; }
+	if (!ScalarRange(exec_first ? inst.src[1] : inst.src[0], &first, &count) || !MaskCount(count)) { return false; }
 	const auto found = m_shape.compare.find(first);
 	if (found == m_shape.compare.end() || !m_partition.Descends(m_shape.exec, found->second.under)) { return false; }
 	*mask = {found->second.compare, m_shape.exec, found->second.uniform};
 	return true;
+}
+
+// A wave32 program combines its one-word lane masks with the _B32 forms; they compute what the _B64 forms compute on
+// wave64 pairs. In a wave64 program a _B32 form touches half a mask and stays distinct.
+Type Body::MaskForm(Type type) const
+{
+	if (m_guest_wave_size != 32u) { return type; }
+	switch (type)
+	{
+		case Type::SMovB32: return Type::SMovB64;
+		case Type::SAndB32: return Type::SAndB64;
+		case Type::SAndn2B32: return Type::SAndn2B64;
+		case Type::SOrB32: return Type::SOrB64;
+		case Type::SAndSaveexecB32: return Type::SAndSaveexecB64;
+		case Type::SAndn1SaveexecB32: return Type::SAndn1SaveexecB64;
+		case Type::SCselectB32: return Type::SCselectB64;
+		default: return type;
+	}
 }
 
 // EXEC node after a mask-algebra write, or -1 when it is no node of the partition.
@@ -1152,14 +1195,14 @@ int Body::ExecAfter(const ShaderInstruction& inst) const
 		if (op.type == Operand::ExecLo) { return m_shape.exec; }
 		unsigned first = 0;
 		unsigned count = 0;
-		if (!ScalarRange(op, &first, &count) || count != 2u) { return -1; }
+		if (!ScalarRange(op, &first, &count) || !MaskCount(count)) { return -1; }
 		const auto saved = m_shape.saved.find(first);
 		return saved != m_shape.saved.end() ? saved->second : -1;
 	};
 	const auto compare_of = [this](const ShaderOperand& op, CompareMask* mask) {
 		unsigned first = 0;
 		unsigned count = 0;
-		if (!ScalarRange(op, &first, &count) || count != 2u) { return false; }
+		if (!ScalarRange(op, &first, &count) || !MaskCount(count)) { return false; }
 		const auto found = m_shape.compare.find(first);
 		if (found == m_shape.compare.end()) { return false; }
 		*mask = found->second;
@@ -1175,7 +1218,7 @@ int Body::ExecAfter(const ShaderInstruction& inst) const
 		const bool named = compare_of(op, &mask) && m_partition.Descends(exec, mask.under);
 		return const_cast<ExecPartition&>(m_partition).Child(exec, named ? mask.compare : inst.pc, then_side);
 	};
-	switch (inst.type)
+	switch (MaskForm(inst.type))
 	{
 		case Type::SMovB64: return node_of(inst.src[0]);
 		case Type::SAndSaveexecB64: return split(inst.src[0], true);
@@ -1297,18 +1340,19 @@ bool Body::ScalarAlu(const ShaderInstruction& inst)
 	}
 	if (inst.dst.type == Operand::ExecLo || inst.dst.type == Operand::ExecHi) { return ExecWrite(inst); }
 	// Snapshot an exact saved EXEC node before Define invalidates an aliased destination pair.
-	const int  exec_copy    = inst.type == Type::SMovB64 && inst.src_num == 1 ? ExecAfter(inst) : -1;
+	const Type form         = MaskForm(inst.type);
+	const int  exec_copy    = form == Type::SMovB64 && inst.src_num == 1 ? ExecAfter(inst) : -1;
 	const bool uniform_copy = ((inst.type == Type::SMovB64 || inst.type == Type::SMovB32) && inst.src_num == 1 && IsUniformMask(inst.src[0])) ||
 	                          ((inst.type == Type::SAndB64 || inst.type == Type::SAndB32) && inst.src_num == 2 && m_shape.exec == 0 &&
 	                           ((inst.src[0].type == Operand::ExecLo && IsUniformMask(inst.src[1])) ||
 	                            (inst.src[1].type == Operand::ExecLo && IsUniformMask(inst.src[0]))));
 	// Each complete uniform mask holds every launched lane or none, so their intersection or union does too, including
 	// when the destination aliases a source.
-	const bool uniform_and = (inst.type == Type::SAndB64 || inst.type == Type::SOrB64) && inst.src_num == 2 && inst.dst.size == 2 &&
-	                         inst.src[0].size == 2 && inst.src[1].size == 2 &&
+	const bool uniform_and = (form == Type::SAndB64 || form == Type::SOrB64) && inst.src_num == 2 && MaskCount(inst.dst.size) &&
+	                         inst.dst.size == inst.src[0].size && inst.dst.size == inst.src[1].size &&
 	                         IsUniformMask(inst.src[0]) && IsUniformMask(inst.src[1]);
 	// A launch-free SCC picks the launched lanes or none, the same choice for every lane.
-	const bool uniform_select = inst.type == Type::SCselectB64 && inst.src_num == 2 && m_shape.exec == 0 && inst.src[0].type == Operand::ExecLo &&
+	const bool uniform_select = form == Type::SCselectB64 && inst.src_num == 2 && m_shape.exec == 0 && inst.src[0].type == Operand::ExecLo &&
 	                            ZeroConstant(inst.src[1]);
 	const int   scope = (taint & kDiverged) != 0u ? SourceScope(inst) : -1;
 	CompareMask exec_compare {};
@@ -1316,7 +1360,7 @@ bool Body::ScalarAlu(const ShaderInstruction& inst)
 	// A copy of a compare pair holds the same lane bits, so it names the same split.
 	CompareMask copied_compare {};
 	bool        compare_copy = false;
-	if (unsigned first = 0, count = 0; inst.type == Type::SMovB64 && inst.src_num == 1 && ScalarRange(inst.src[0], &first, &count) && count == 2u)
+	if (unsigned first = 0, count = 0; form == Type::SMovB64 && inst.src_num == 1 && ScalarRange(inst.src[0], &first, &count) && MaskCount(count))
 	{
 		const auto found = m_shape.compare.find(first);
 		compare_copy     = found != m_shape.compare.end();
@@ -1331,19 +1375,19 @@ bool Body::ScalarAlu(const ShaderInstruction& inst)
 	{
 		unsigned first = 0;
 		unsigned count = 0;
-		if (ScalarRange(inst.dst, &first, &count) && count == 2u) { m_shape.saved[first] = exec_copy; }
+		if (ScalarRange(inst.dst, &first, &count) && MaskCount(count)) { m_shape.saved[first] = exec_copy; }
 	}
 	if (restricted)
 	{
 		unsigned first = 0;
 		unsigned count = 0;
-		if (ScalarRange(inst.dst, &first, &count) && count == 2u) { m_shape.compare[first] = exec_compare; }
+		if (ScalarRange(inst.dst, &first, &count) && MaskCount(count)) { m_shape.compare[first] = exec_compare; }
 	}
 	if (compare_copy)
 	{
 		unsigned first = 0;
 		unsigned count = 0;
-		if (ScalarRange(inst.dst, &first, &count) && count == 2u) { m_shape.compare[first] = copied_compare; }
+		if (ScalarRange(inst.dst, &first, &count) && MaskCount(count)) { m_shape.compare[first] = copied_compare; }
 	}
 	if (WritesScc(inst.type)) { m_state.scalar[kSccWord] = taint; }
 	return true;
@@ -1369,7 +1413,7 @@ bool Body::VectorSources(const ShaderInstruction& inst)
 			}
 			continue;
 		}
-		const uint8_t taint = Taint(op);
+		const uint8_t taint = Taint(IsLaneBit(inst, source) ? LaneMask(op) : op);
 		if (taint == kClean || (taint == kMask && IsLaneBit(inst, source)) || InScope(op)) { continue; }
 		if (taint == kDiverged) { return Fail(inst, "scalar read from a lane reaches lanes outside the EXEC it was read under"); }
 		return Fail(inst, (taint & kInfo) != 0u ? "launch-dependent scalar reaches a vector instruction" : "mask observed as a number");
@@ -1406,10 +1450,11 @@ bool Body::VectorDestinations(const ShaderInstruction& inst, bool uniform_result
 			continue;
 		}
 		if (dst->type == Operand::ExecLo || dst->type == Operand::ExecHi) { return Fail(inst, "vector instruction writes EXEC"); }
-		Define(*dst, kMask); // compare or carry result: one bit per lane
+		const ShaderOperand mask = LaneMask(*dst);
+		Define(mask, kMask); // compare or carry result: one bit per lane
 		unsigned first_word = 0;
 		unsigned words      = 0;
-		if (StartsWith(inst.type, "VCmp") && ScalarRange(*dst, &first_word, &words) && words == 2u && m_shape.exec >= 0)
+		if (StartsWith(inst.type, "VCmp") && ScalarRange(mask, &first_word, &words) && MaskCount(words) && m_shape.exec >= 0)
 		{
 			m_shape.compare[first_word] = {inst.pc, m_shape.exec, uniform_result};
 		}
@@ -1494,7 +1539,7 @@ bool Body::Vector(const ShaderInstruction& inst)
 	// A relative move reads a register its operands do not name.
 	const bool uniform = pure && !StartsWith(inst.type, "VMovrel") && SourcesAreUniformClean(inst);
 	if (!VectorDestinations(inst, uniform)) { return false; }
-	if (compare) { DefineUniformMask(inst.dst, uniform && m_shape.exec == 0); }
+	if (compare) { DefineUniformMask(LaneMask(inst.dst), uniform && m_shape.exec == 0); }
 	return true;
 }
 
@@ -1717,6 +1762,7 @@ bool Body::Step(const ShaderInstruction& inst)
 ShaderNggFrontBodyProof Body::Run(const ShaderCode& code, uint32_t first_index, uint32_t guest_wave_size, const ShaderNggScalarDependencies& wave_scalars)
 {
 	m_code                   = &code;
+	m_guest_wave_size        = guest_wave_size;
 	const auto& instructions = code.GetInstructions();
 	if (first_index >= instructions.Size() || instructions.At(instructions.Size() - 1u).type != Type::SEndpgm)
 	{
@@ -1752,6 +1798,12 @@ ShaderNggFrontBodyProof Body::Run(const ShaderCode& code, uint32_t first_index, 
 		if (m_back_edges.count(index) != 0u && m_loops.count(index) == 0u && !EnterLoop(index)) { return m_result; }
 		if (const auto end = m_loop_ends.find(index); end != m_loop_ends.end())
 		{
+			const bool scc = m_scc_back_edges.count(index) != 0u;
+			if (scc && m_state.scalar[kSccWord] != kClean)
+			{
+				Fail(inst, "SCC back edge on launch-dependent data");
+				return m_result;
+			}
 			bool again = false;
 			if (!CloseLoop(end->second, &again)) { return m_result; }
 			if (again)
@@ -1759,7 +1811,8 @@ ShaderNggFrontBodyProof Body::Run(const ShaderCode& code, uint32_t first_index, 
 				index = end->second - 1u; // the next iteration of the walk is the header
 				continue;
 			}
-			m_state.reachable = false; // the back edge holds: the joined header state covers it
+			// The back edge holds: the joined header state covers it. A uniform SCC exit leaves with the back edge's state.
+			m_state.reachable = scc;
 			continue;
 		}
 		if (!Step(inst))

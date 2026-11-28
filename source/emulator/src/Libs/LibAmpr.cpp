@@ -1,4 +1,5 @@
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/AmmMemory.h"
 #include "Emulator/Kernel/AmprPort.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/FileSystem.h"
@@ -65,6 +66,9 @@ enum class PendingActionKind: uint8_t
 	ReadFile,
 	WriteAddress,
 	KernelEvent,
+	AmmMapAsPrt,
+	AmmAllocatePaForPrt,
+	AmmUnmapToPrt,
 };
 
 struct PendingAction
@@ -80,6 +84,8 @@ struct PendingAction
 	Kernel::EventQueue::KernelEqueueIdentity    equeue_identity {};
 	uintptr_t                                   ident            = 0;
 	uintptr_t                                   completion_token = 0;
+	int32_t                                     mtype            = 0;
+	int32_t                                     protection       = 0;
 	// Completion actions run after every other record of the buffer.
 	bool                                        on_completion    = false;
 };
@@ -734,6 +740,10 @@ static int ExecuteAction(const PendingAction& action)
 			return Kernel::EventQueue::KernelTriggerEvent(equeue_pin, ident, Kernel::EventQueue::KERNEL_EVFILT_AMPR,
 			                                                    reinterpret_cast<void*>(action.completion_token));
 		}
+		case PendingActionKind::AmmMapAsPrt: return Kernel::Amm::MapAsPrt(action.address, action.size);
+		case PendingActionKind::AmmAllocatePaForPrt:
+			return Kernel::Amm::AllocatePaForPrt(action.address, action.size, action.mtype, action.protection);
+		case PendingActionKind::AmmUnmapToPrt: return Kernel::Amm::UnmapToPrt(action.address, action.size);
 	}
 	return LibKernel::KERNEL_ERROR_EINVAL;
 }
@@ -1023,12 +1033,107 @@ static KYTY_SYSV_ABI int AmmSubmitCommandBuffer(void* cmd_obj)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
-	return SubmitCommandBuffer(cmd_obj, 0);
+	Kernel::AmprPort::Execution execution {};
+	const int                   accepted = Ampr::SubmitCommandBuffer(cmd_obj, &execution);
+	// How a failed AMM command reaches the guest is not established; stop
+	// instead of running on with a page state the title did not ask for.
+	if (accepted == OK && execution.result != OK)
+	{
+		EXIT("AMM command buffer 0x%016" PRIx64 " failed at offset 0x%x: 0x%08x", cmd, execution.error_offset,
+		     static_cast<uint32_t>(execution.result));
+	}
+	return accepted;
 }
 
 static KYTY_SYSV_ABI int AmmSubmitCommandBuffer2(void* cmd_obj, uint64_t /*arg1*/)
 {
 	return AmmSubmitCommandBuffer(cmd_obj);
+}
+
+// --- AMM address space ------------------------------------------------------
+
+// Range and protect record sizes follow a secondary implementation; the guest
+// does not parse records, it only sizes its buffers.
+constexpr uint64_t kAmmRangeRecordSize   = 0x18;
+constexpr uint64_t kAmmProtectRecordSize = 0x28;
+constexpr uint64_t kAmmPageMask          = 0x3fff;
+
+static bool IsValidAmmRange(uint64_t address, uint64_t size)
+{
+	return address != 0 && size != 0 && ((address | size) & kAmmPageMask) == 0 && address + size > address;
+}
+
+static int AppendAmmRecord(void* cmd_obj, const PendingAction& action, uint64_t record_size)
+{
+	if (cmd_obj == nullptr || !IsValidAmmRange(action.address, action.size))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	std::array<uint8_t, kAmmProtectRecordSize> record {};
+	std::memcpy(record.data() + 0x08, &action.address, sizeof(action.address));
+	std::memcpy(record.data() + 0x10, &action.size, sizeof(action.size));
+	return AppendRecord(reinterpret_cast<uint64_t>(cmd_obj), record.data(), record_size, &action);
+}
+
+static KYTY_SYSV_ABI int AmmGetVirtualAddressRanges(uint64_t* start, uint64_t* end, uint64_t* multimap_start, uint64_t* multimap_end)
+{
+	PRINT_NAME();
+	if (start == nullptr || end == nullptr || multimap_start == nullptr || multimap_end == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	Kernel::Amm::VirtualRanges ranges {};
+	const int                  result = Kernel::Amm::GetVirtualRanges(&ranges);
+	if (result != OK)
+	{
+		return result;
+	}
+	*start          = ranges.start;
+	*end            = ranges.end;
+	*multimap_start = ranges.multimap_start;
+	*multimap_end   = ranges.multimap_end;
+	return OK;
+}
+
+static KYTY_SYSV_ABI int AmmGiveDirectMemory(int64_t search_start, int64_t search_end, uint64_t size, uint64_t alignment, int usage,
+                                             int64_t* offset)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t size = 0x%016" PRIx64 " alignment = 0x%" PRIx64 " usage = %d\n", size, alignment, usage);
+	return Kernel::Amm::GiveDirectMemory(search_start, search_end, size, alignment, usage, offset);
+}
+
+static KYTY_SYSV_ABI int AmmCommandBufferMapAsPrt(void* cmd_obj, uint64_t address, uint64_t size)
+{
+	PRINT_NAME();
+	PendingAction action {};
+	action.kind    = PendingActionKind::AmmMapAsPrt;
+	action.address = address;
+	action.size    = size;
+	return AppendAmmRecord(cmd_obj, action, kAmmRangeRecordSize);
+}
+
+static KYTY_SYSV_ABI int AmmCommandBufferAllocatePaForPrt(void* cmd_obj, uint64_t address, uint64_t size, int32_t mtype,
+                                                          int32_t protection)
+{
+	PRINT_NAME();
+	PendingAction action {};
+	action.kind       = PendingActionKind::AmmAllocatePaForPrt;
+	action.address    = address;
+	action.size       = size;
+	action.mtype      = mtype;
+	action.protection = protection;
+	return AppendAmmRecord(cmd_obj, action, kAmmProtectRecordSize);
+}
+
+static KYTY_SYSV_ABI int AmmCommandBufferUnmapToPrt(void* cmd_obj, uint64_t address, uint64_t size)
+{
+	PRINT_NAME();
+	PendingAction action {};
+	action.kind    = PendingActionKind::AmmUnmapToPrt;
+	action.address = address;
+	action.size    = size;
+	return AppendAmmRecord(cmd_obj, action, kAmmRangeRecordSize);
 }
 
 static KYTY_SYSV_ABI int AmmWaitCommandBufferCompletion(void* cmd_obj)
@@ -1124,6 +1229,14 @@ LIB_DEFINE(InitAmpr_1)
 	LIB_FUNC("lwS-7y3jcBI", Ampr::AmmSubmitCommandBuffer);
 	LIB_FUNC("OJf3vCckPAM", Ampr::AmmSubmitCommandBuffer2);
 	LIB_FUNC("HXymib4T8gc", Ampr::AmmWaitCommandBufferCompletion);
+	// An AMM command buffer is an Ampr command buffer object.
+	LIB_FUNC("EDq5bqCqYpA", Ampr::CommandBufferConstructor);
+	LIB_FUNC("pvUFDOHilnE", Ampr::CommandBufferDestructor);
+	LIB_FUNC("wkQR9+xTFKY", Ampr::AmmGetVirtualAddressRanges);
+	LIB_FUNC("Q07J7XpvhrU", Ampr::AmmGiveDirectMemory);
+	LIB_FUNC("ZJCgt+aPHAU", Ampr::AmmCommandBufferMapAsPrt);
+	LIB_FUNC("d3lKWPM6odc", Ampr::AmmCommandBufferAllocatePaForPrt);
+	LIB_FUNC("3A2X6OCHtnA", Ampr::AmmCommandBufferUnmapToPrt);
 }
 
 } // namespace Kyty::Libs

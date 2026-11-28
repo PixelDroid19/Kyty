@@ -6,6 +6,69 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: BVH fetch merge and loop-enclosing selection cut drop 0x3666fa39 from 16.4 to 6.0 ms and lift the dunes cliff to 31.9-33.6 fps (2026-11-18, fixed)
+
+Intel Arc A770, Mesa 26.3.0 (`git-34ad0a45aa`) on Linux 7.3.4, `60 fps`
+present limit, `KYTY_PRINTF_DIRECTION=Silent`, `origin/main` `87bbe5570` +
+translator changes (`kShaderTranslatorVersion = 231`).
+
+- **Baseline (`87bbe5570`, `csprof-base`, warm cache, temporary Vulkan compute
+  timestamps).** In the dunes rock-cliff scene (`19.72 fps`
+  mean across `145-216 s`), compute work spanned `43.6-48.3 ms` per frame.
+  Dispatch `0x3666fa39` (`8160x1x1`, 1 call/frame) alone took `16.23-17.77 ms`
+  (`16.36 ms` mean in the in-run A/B baseline arm).
+- **Changes (general translator path, no title branches).**
+  1. `Spirv::EmitGuestLoad64Aligned` (`ShaderSpirvGuestAddress.cpp`) + BVH node
+     load rewrite (`ShaderSpirvBvh.cpp`): loads 64B-aligned BVH node words as
+     `OpLoad %v4uint ... Aligned 4` (16 dwords direct without page-cross
+     checks; 28 dwords with a single `tail_device` check at
+     `(guest & 4095) + 64 >= 4096`), branches on `exec != 0` before loading
+     arguments, splits `box16` / `box32` handling with per-child unpacks, and
+     sinks loop-invariant operands into the case arms. Backed by
+     `EXIT_IF((table.device & 15ull) != 0ull)` on GDA table allocation
+     (`GuestDeviceAddress.cpp`).
+  2. `SpirvCutSelectionLiveRanges` (`ShaderSpirvSelectionCut.cpp`): cuts live
+     ranges of loop-invariant scalar `Function` variables (must-initialized across
+     reachable predecessors via `OpStore` or `OpFunctionCall`) before and after
+     the highest-scoring loop-enclosing one-armed selection merge when
+     `device_address_used && push_constant_size > 0`, `total_fn_vars >= 60`,
+     `body_blocks >= 100` enclosing at least one `OpLoopMerge`, and at least 32
+     parked scalars exist, using a runtime zero derived from
+     `(%vsharp[0][device_address_block][0] & 15u)`.
+- **Offline cross-recipe verification and exclusions.** Global unrestricted live-range
+  cuts regress other workloads (`30/91`), and reading `NumWorkgroups.y >> 16` for the
+  runtime zero was excluded in favour of `(%vsharp[0][gda_blk][0] & 15u)`. Across
+  all 16 `PPSA21567` BVH compute shaders, `16/16` dropped peak live registers
+  (`-35` to `-71`) and `-111` `SEND`s and `14/16` dropped spills+fills (`0x3666fa39`:
+  `392:1663 -> 282:1049`, scratch `8192 -> 4096 B`, peak live `245`). Across 431
+  compute recipes from 26 titles, only one non-BVH shader (`PPSA17221`, without
+  GDA) matched the structural thresholds and is skipped by `device_address_used`.
+- **Verified.**
+  - Live Vulkan timestamps (`t231-prof`, temporary profiler removed afterwards):
+    `0x3666fa39` (`8160x1x1`) dropped from `16.23-17.77 ms` to `5.76-6.19 ms`
+    per frame; A/B arm `arm=3` pixel diff vs baseline in the same cliff frame was
+    `mean_abs <= 0.35`, `p99 = 1.00`, preserving direct and bounce lighting.
+  - Strict warm-cache run without diagnostics (`strict-t231`, `214 s`, exit `0`):
+    sustained `32.6-34.6 fps` (`33.63 fps` steady across `t=164-209 s` outside
+    synchronous manual capture frames; `31.88 fps` mean over `170-215 s`), with
+    `3/3` healthy captures (`entropy 4.70-4.72`, `stripey: false`).
+  - Gates & cross-title checks on the final source: CTest `5/5` passed
+    (`KytyUnitTest`, `KytyHostShaders.CheckedInIncludes`,
+    `KytyArchitectureBoundaryIntegration.Repository`,
+    `KytyArchiveDagIntegration.Repository`, `KytyIntegration._build`);
+    `kyty_unit_test`: `2724` passed, `11` skipped (`CoreVirtualMemory` x3,
+    `EmulatorAudio` x6, `EmulatorAudioDecoderAdmission` x1,
+    `EmulatorKernelLifetimes` x1), `0` failed, including 2 new tests in
+    `EmulatorShaderSpirvSelectionCut`. `kyty_agent capture-run` exited `0` on
+    both `PPSA21567 - ASTRO BOT` and `PPSA17221 - Minecraft`; `kyty_agent
+    playable-regression` passed `11/14` non-external gates on both (`exit=3` due
+    to absent external baseline/checkpoint JSON), and `PPSA17221` scored
+    `material_healthy: true`.
+- **Remaining gap / open items.** At ~33 fps (~30 ms/frame), closing the gap to
+  `60 fps` (`16.67 ms`) requires non-BVH GPU pass work and command-processor cost
+  reduction; in close-up dune views compute shader `0x874bd13f` (`120x68x1`)
+  reaches `10.4-12.5 ms`. Untested on AMD RADV and Windows.
+
 ## Robot platformer: progress writes to save-data memory were dropped (2026-11-16, fixed)
 
 - **Observed (live trace, late dunes route).** Every `sceSaveDataSetSaveDataMemory2` call passed a valid
@@ -694,7 +757,7 @@ once a frame in every block.
 - **`0x3666fa39` is 15.7 ms of engine time a frame here** (86 % of 52.6 ms against 74 % of 40.0 ms).
   Without it the frame no longer waits on the GPU (fence waits about 1 ms) and holds 25 fps; the
   causal test above shows the graphics command thread then sets the frame.
-- **`0x874bd13f` frees no engine time.** Leaving it out as well leaves the engine's busy time a frame
+- **`0x874bd13f` frees no engine time (t216, close-up view; amended 2026-11-19 below: about 10 ms at the crash site).** Leaving it out as well leaves the engine's busy time a frame
   at 29.6 ms in both arms and the frame rate unchanged. The about 14 ms that dispatch stamps gave it
   (bill record below) is elapsed time that overlaps other queued work, not exclusive engine time.
 - **What this bounds.** 30 fps in this scene needs both sides at once: the GPU frame under 33 ms,
@@ -2805,6 +2868,15 @@ strict 60 fps-limited runs, `4305c2080` plus a temporary translator change
     as the offline record of the dune GPU cost predicted from its latency.
     Branching per lane on EXEC, to fold the guards that remain inside
     divergent regions, is not pursued for it.
+  - Re-tested on 2026-11-20 through the driver instead of the translator:
+    Mesa 26.3 skips the 16-lane compile of a fragment program whose quick
+    register-pressure estimate exceeds its threshold, which is why the large
+    pixel programs of the fight compile at SIMD8 only. With the host
+    environment variable that lets ANV try the wider widths anyway, the fight
+    held the same frame rate, and `8ca0b9ff` took 40 us per draw against
+    36 us without it (different scenes, 41 against 107 draws per frame).
+    Cold compiles with that variable stall the boot at about 66 s. Width
+    stays excluded as a lever for this program.
 
 ## Robot platformer: constant loads as uniform buffers excluded, and a guest fault at hub start (2026-10-30)
 
@@ -6676,7 +6748,8 @@ Fence stacks over a 110 s run: 14.7 s under 32-bit `WAIT_REG_MEM` on labels whos
   (`55ce09b9`, `adbba919`); what fills the difference is not known.
 - **Open lead, parts with no live lane.** They could leave early, but the guest decides the allocation after its own
   test, so the work before that point stays. At best about 4 ms of the 34 ms per frame, and it changes the program where
-  the hub GPU hang stops. Not built.
+  the hub GPU hang stops. Not built. Superseded bound (2026-11-20): skipping every particle draw in the fight (`skipp2`)
+  saves only 2-4 ms of GPU work for the whole particle path, so this exit is worth well under that; dropped.
 - **Resolved: the "two submit modes" are one stall inside the measured window.** Submits from the command processor
   stay at 31-40 per frame in 24 of the 26 kept 14 s windows (25 with the idle-GPU rule off, 79 in the profile training
   build); what varies is the utility queue, 1 to 94 submits per frame.
@@ -7055,6 +7128,30 @@ native program spills?
   16-lane parts, so the product never takes this layout.
 - **Re-read 2026-11-12, parked.** Nothing on HEAD changes the record: `0x874bd13f` still runs native at width 32
   because a wave32 program splits only above 64 VGPRs. No new rule was built or measured.
+- **Amended 2026-11-19.** A width rule is now committed (`11f783e44`, crash-site record below): wave32 splits above 32
+  VGPRs on hosts that go down to width 8. For the five dune wave32 programs in the table above it agrees with the
+  measured sign (`0x874bd13f`, `0xe1b1315d`, `0x2bcba9a2` split; `0xfd1ee59c` stays native), so the remark that the
+  VGPR count does not predict the case no longer holds for them; it is untested beyond them. `0x874bd13f` measured -8
+  % here (end-of-pipe brackets, widths rotated inside one run) and -57 % on t246 (per-dispatch stamps, matched runs);
+  the gap is unexplained.
+- **Priced 2026-11-19, parked.** At the crash site with the rule, per-dispatch stamps give `0x874bd13f` 5.14 ms,
+  `0xbf8ee9fc` 1.88 ms and `0xe1b1315d` 0.17 ms a frame in 16-lane parts (one stamped run; `0x2bcba9a2` is below the
+  per-frame list). The one measured 16-to-8-lane change in this tree, `0x3666fa39`, fell 34 % (36.9 to 24.4 ms), so
+  8-lane wave32 parts would save at most about 2.4 ms there, more than the 1.2 ms the crash site needs for 30 fps,
+  and nothing at the second rock, where these programs are not the cost. It is an upper bound: `0x3666fa39` makes
+  no cross-part lane reads, while `0x874bd13f` in 8-lane parts adds eight. An earlier version of this bullet used the
+  second-rock figures and is superseded.
+- **No localized cause for the device loss (2026-11-19).** Translate-only dumps of `0x874bd13f` and `0x2bcba9a2` in
+  8-lane parts (four parts a guest wave, exit before dispatch) were read offline: local size 64 (two whole guest
+  waves), exchange area 304 dwords (two waves of 152), lane index `part * 8 + lane` (0 to 31), the rendezvous bank
+  toggled once per call and read with the same parity by the lane exchange, ballots merged as four bytes, and the one
+  lane-exchange call site checked sits under a wave-wide EXEC test. Subgroup-scope control barriers also appear in
+  the production 8-lane wave64 modules. `0x874bd13f` reads DPP rows through the guest-lane exchange eight times;
+  `0x2bcba9a2` never does and no production 8-lane module does, so that path is not shared by the programs in the
+  record and the record does not say which of the five lost the device. Neither module has a GDS append or consume.
+  The admission checks stay at 16 lanes for wave32 and no 8-lane dispatch was repeated. Unchecked: the seven other
+  lane-exchange call sites of `0x874bd13f`, and whether one part of a wave can skip a rendezvous (the rendezvous
+  spins up to 2^20 iterations, which fits a device lost about 2 s after the first dispatch).
 
 ## Depth targets no longer wait for deferred storage aliases (2026-11-07)
 
@@ -7524,3 +7621,1570 @@ Route outcomes on the 225 s route: both base runs reached the dunes; of the HEAD
 only the world map, one left the route for the ship crowd cinematic, one stopped at 140 s and one reached the
 dunes. The stop was a pixel program on the per-lane fragment path refused at its null export; fixed in
 `253d981a9`, where a null export emits nothing after the valid-mask bit has set which lanes stay alive.
+
+## Fixed: depth and chain ranges reused as storage views at about 87 s (2026-11-18, fixed 2026-11-19)
+
+`PPSA21567 - Astro Bot` exits with code 65 at about 87 s in some dunes-route runs on `4bf5efeb9`
+(two of six runs that day, one of them with temporary diagnostics, plus one on `3268e4c21`); the sample is too
+small for a rate. The stop is
+`unknown relation: DepthStencilBuffer - Crosses - StorageTexture` in `GpuMemoryCreate.cpp` (the relation switch's
+`default`, line 1898 at `4bf5efeb9`): a 778,752-byte storage texture is created 0x1ba0000 bytes into the depth
+plane of a live 3840x2160 D32S8 target that has three ranges (depth, stencil, HTILE). The new range lies inside the depth
+plane; the classifier reports `Crosses` against the three-range parent. The depth target is still `in_use`.
+The same run family once stopped at `!create_all_the_same` at the same point, and three
+diagnostic-build runs on 2026-11-18 stopped there again at about 86 s (`vaddr 0x53d8b0000`, size `0x658800`,
+`StorageTexture`, one parent `Crosses` and one `Equals`). The other runs pass this point, so
+it depends on timing (which object still holds the range). The existing storage-over-depth rules handle `Equals` (a
+storage view of the plane) and the recycled-range cases (`Contains`), not a view inside one plane of a live
+multi-range target. Suggested direction: classify the relation per range for multi-range parents, then decide
+whether the guest reuses a released depth range (seed from guest memory, as for sampled textures over depth
+ranges) or views live depth texels.
+
+**Fix (2026-11-19).** The twelve exit-65 runs on this route since 2026-11-18 have two shapes.
+
+- **Five stop at the relation switch.** The 416x234 linear view (8 bytes per texel) lies strictly inside the depth
+  plane, but the parent's three planes (depth, stencil, HTILE) are adjacent ranges of one object and the classifier
+  reports `Crosses` against the set. The storage-over-depth rule now also accepts a view strictly inside one plane.
+  A view of a whole plane is left to the plane rules (the `PPSA07393` stencil-plane view in
+  `docs/bringup/cross-title.md`).
+- **Seven stop at `!create_all_the_same`, every one on the same parent:** a six-level linear chain (1216x684, format
+  0x47, tile 0) of 0x87e900 bytes containing a one-level view of its format and pitch at +0x10000. The view is not a
+  level of the chain: levels 1-5 with rows padded to 256 bytes take exactly 0x226100 bytes, so level 0 sits at offset
+  0 or 0x226100. The multi-parent arena rule now links a storage parent that contains a view of its layout at another
+  base. The view seeds from guest bytes, like the other storage parents of that rule; its coherence against an
+  in-flight write of the chain was not checked.
+
+Both rules only replace the exit with a link; every relation accepted before keeps its outcome.
+
+**Verified:** two regression tests built from the logged ranges and parameters
+(`GpuMemoryLinksStorageViewInsideOneDepthPlane`, `GpuMemoryLinksArenaViewAtAnotherBaseOfAChain`) pass; with the two
+rules disabled they stop with exit 65 at the same two messages as the game. `EmulatorGraphics*`
+(807 tests), the full `kyty_unit_test` (2729 passed, 11 skipped) and the four repository gates pass. Three 150 s
+dunes runs reached the time limit: `exit65a` and `exit65b` on a first form of the fix, with a temporary print that
+did not fire, and `exit65c` on the final change. No run is known to have met either shape, so the fix is not yet
+observed in the game; the 120 and 140 s captures show the usual dunes.
+
+## Open: dunes haze and zero-filled single-texel samples (2026-11-18)
+
+`PPSA21567 - Astro Bot` 01.018, Intel Arc A770, Mesa ANV 26.3.0 (git), `4bf5efeb9` plus a local translator change,
+dunes route, 60 fps present limit, warm private caches, 175 s bounds, temporary diagnostics (not committed). It
+continues the open haze item above (a white haze over Astro in the dunes).
+
+**Excluded for the haze.**
+
+- **Fog volume aliasing.** The volumetric fog chain (inject `5d90f514`, temporal filter `e308b341` writing a
+  240x135x64 RGBA16F volume in place, integration, then the apply draw) binds its sampled and storage views to the
+  same live images. The two volumes ping-pong as the guest intends.
+- **Depth input of the apply draw.** It resolves depth-exact to the live depth target.
+- **RenderDoc.** A capture of this scene runs the A770 out of device memory, so no frame was inspected that way.
+
+**Found, not fixed: single texels on `kRenderTarget` (tile 27) are zero-filled.** `Gen5SampleMayGuestUploadTiled`
+lets tile-27 samples upload guest bytes only for BC1. Every other format without a live surface over its range
+gets a zero-filled Texture object. In the dunes, five 1x1 RGBA32F samples (format 77; one is read by a compute
+program that writes a 1x1 result a later pixel shader reads) hold `(1.0, -1.0, 0.5, 0.18)`. One 1x1 R8 (format 1)
+holds `0xff` and one 1x1 RG8 (format 14) holds `0x8080`. The R8 and RG8 are sampled by draws into a three-target
+1920-wide pass. The bytes stayed the same for the whole run. Each RGBA32F texel lies exactly under a writable 64 KiB
+storage buffer. The provenance query reports that buffer as GPU written back, and the texture as uploaded
+again afterwards. Whether that write-back covers the 16 bytes of the texel was not checked, so it is open
+whether the guest bytes are the content these samples should read. The R8 and RG8 ranges have no other GPU object over them. Element (0,0) of slice 0 sits at offset 0 in `SW_64KB_R_X` for every element
+size, so these samples can be read as linear.
+
+- **Uploading them turns the frame black.** A trial uploaded uncovered one-element 2D tile-27 samples as linear.
+  Every capture at 140, 150 and 160 s was exactly `(0,0,0)`, HUD included, while the GPU stayed about 92 % busy.
+  The frame was black with formats 1 and 14 only, and black with format 77 only. Earlier runs on the same base without the trial show the dunes. A frame of exact zeros with the HUD gone fits a NaN reaching the final blend.
+  The zero fill seems to hide a fault further down. The trial is parked and the zero fill is unchanged.
+- **Suggested direction.** Follow the format-77 chain to the first target that turns non-finite: the compute
+  program that writes the 1x1, then the pixel shader that reads it. Do this before allowing the upload again.
+- One further sample, a 1x1 RGBA16F at the start of a live 3840x2160 target, also holds non-zero guest bytes. It
+  stays zero-filled because nothing shows those bytes are the content.
+- **Excluded (2026-11-19): the buffer content of the covered texels as the haze.** A temporary build copied each
+  zero-filled one-element 2D sample that lies inside a single storage buffer from that buffer on the GPU, in
+  submission order, instead of zero-filling it. It engaged on three texels, all at offset 0 of a 64 KiB storage
+  buffer inside an in-place guest window: two RGBA32F (format 77, guest bytes `(1, -1, 0.5, 0.18)` at record time)
+  and one RGBA16F (format 71) at `0x532830000`. The frame stayed normal, not black as with the guest-byte upload, and
+  the second-rock captures at 120, 140 and 160 s matched the zero-fill baseline (grey mean and deviation 212/29,
+  204/23, 203/25 against 212/28, 204/23, 203/25; one run, plus one crash-site run whose captures look as washed as
+  before). Frame rate was unchanged (27.7 to 28.7 fps). The change is parked outside the tree; what value the GPU
+  holds there at the read was not read back.
+
+**Comment fixed.** `ResolveGen5SampleBacking` said `Unsupported` stops the run. It only logs, and the caller still
+creates a zero-filled Texture object.
+
+**Black flicker (user report), not reproduced.** With warm caches the per-second samples show a single graphics
+pipeline miss in the window (279 ms at 135 s, of which 146 ms in pipeline creation) and no cache checkpoint. An
+earlier run with a less warm cache spent 0.6-1.06 s in single misses and 399 ms in one 101 MB driver-cache
+checkpoint. Both run on the thread that records draws, so they freeze frames rather than blacken them. The link to
+the flicker is not shown.
+
+**Other exits seen that day.** One run with temporary diagnostics stopped on a guest call to address 0 (`rcx`
+`0xdeadbeef5533ccaa`). One stopped at 124 s with exit code 0, no error and no captures; its cause was not found.
+
+**Excluded: translator version 245.** It rewrote partially out-of-range scalar loads as straight-line code. In
+`vs_0x57572d59` spills rose from 93 to 103 and instructions from 4485 to 4578, and in `vs_0x4e1ef13e` spills rose
+from 52 to 57. It was not kept.
+
+**Translator version 246.** Scalar buffer loads by device address are now sized by `num_records` times the stride,
+or by bytes when the stride is 0, as the other scalar buffer path already does. This follows the RDNA2 ISA, where the
+stride of a scalar buffer load serves only the bounds check. No run showed it engaging, and the haze is unchanged with
+it. On 2026-11-19 `PPSA17221 - Minecraft` reached its world with it (the save ends on the death screen) with no
+recorded error, at 60 fps with the present limit.
+
+
+## Open: a transient of extra draws in the dunes (2026-11-19, measured)
+
+Setup: `PPSA21567 - Astro Bot`, the dunes route, A770 with ANV, 60 fps present limit, translator version 246, warm
+private caches, two runs of about 200 and 235 s. After the route ends (about 140 s), the agent pad command sends three
+jumps, and native captures are taken right after them and 5, 10 and 20 s later.
+
+- **The route does not leave the robot in one place.** With identical input it ended near the first rock in one run
+  and at the second rock in the next, and earlier runs left it at the crash site. Boot speed shifts every timed input.
+  Per-window fps from different runs therefore compares different scenes; compare draws per frame and the capture.
+- **A transient of extra draws.** Near the first rock one run held 1000 to 2300 draws per frame at 7 to 12 fps for
+  about 40 s. The count then fell smoothly to about 540, and the run held 29 fps. Two earlier runs show the same decay
+  from about 1250 to about 300 draws per frame, ending at 33 to 34 fps. During the slow phase every per-draw stage cost
+  about three times more: about 64 against 24 us per draw on the command processor, with the texture descriptor at 16
+  against 5 us and guest address population at 0.68 against 0.13 calls per draw. The command processor was busy about
+  91 % of each window. No pipeline misses were counted. The extra draws were not identified.
+- **Jumps on settled ground add no lasting draws.** At the second rock the run held 27 to 28 fps at 520 to 700 draws
+  per frame for 95 s. Three jumps left no extra draws beyond the windows that took a capture, and the dust was gone by
+  the capture 10 s later. Sand left in the air was not reproduced in either run.
+
+- **The extra draws are one particle program.** A temporary per-frame histogram by shader pair (not committed)
+  reproduced the transient in one of the four later runs that sampled from 135 s; the others may have reached it
+  earlier, since they began at 520 to 700 draws per frame and fell from there. At its peak one pair, VS checksum `360038d0f4cfb9a5` with PS
+  `2100361059f866a6`, issued 1167 of 1838 draws in a frame, each a point list of 2 vertices. It fell to 912 and 591
+  draws 100 and 200 presents later, and was absent at about 530 draws per frame once settled. The other top pairs
+  stayed the same in both phases. Hypothesis, not checked: the particles expire after a number of presented frames
+  rather than seconds, so a slower frame rate keeps them longer and they in turn keep the frame rate down.
+- **Profile of the settled phase.** User-space samples of the busiest thread (about 60 to 66 % of one core at 28 fps)
+  are flat: the AVX2 index scan 7 %, `memcmp` 6 %, `GetQueryPoolResults` 4 %, and texture preparation 2 %. At 28 fps
+  that thread is not saturated, so the settled scene is limited elsewhere. Two runs meant to profile the transient
+  did not show it: the robot reached the second rock before sampling began.
+
+- **The particle program is the geometry program `0xf4cfb9a5`.** Its vertex checksum ends in `f4cfb9a5`, the
+  geometry pass of the 2026-11-09 records above: one guest group per point draw, run on this host as SIMD8 with
+  44,571 instructions and 862 spills. A profile from 2026-11-18 timed its passes at about 54 us each, 73 calls in a
+  settled frame. A run sampled from 92 s caught the transient as the route's walking and jumps began: 1150 to 1250 draws
+  per frame at 15 fps from 118 to 142 s, with the render engine 93 % busy (deltas of the engine's busy cycles), and
+  then 600 draws per frame at 24 fps with it 95 % busy. In that run the transient was limited by the GPU; in the
+  first run the command processor was also 91 % busy. Both sides pay per pass.
+
+- **Settled passes are batched.** Temporary counters (not committed) on segment placement, one 171 s run that left the
+  robot at the crash site at 23 fps and about 380 draws per frame, without the transient. From 104 to 164 s, 46,900
+  geometry passes (about 34 per frame) went into 5,942 segments, about 8 passes per segment; 87 % of placements joined
+  an open segment. Of the new segments, 4,474 followed a recording end and 1,468 had a command recorded outside a
+  render pass as the last hazard before them (the counter kept only the last one, so a packet before that command is
+  not seen); no pass ran inline. Passes in
+  a segment overlap (2026-11-09 records), so at that rate the passes are not what holds the settled frame. How the
+  transient's passes segment was not measured.
+- **Excluded at the second rock: the particle program as cost or veil.** A temporary build skipped every draw of VS
+  `360038d0f4cfb9a5` in alternate 5 s windows; captures every 3 s. Settled, that VS draws only 8 to 11 times a frame
+  (with PS `21001960c4a8f3bb` in the histogram run), so the test covers those draws only. At the second rock, skip windows ran 28.0
+  and 27.4 fps against 28.2, 27.0 and 27.8 with the draws, and mean hue, saturation and lightness of the captures
+  matched within 0.004 between arms. Not tested with the skip: the close shots where the robot looks washed white on the
+  ground and blue in the air (crash site and first rock, 2026-11-19 captures), nor the transient.
+- **The dunes white haze shows on close shots of the robot.** At the crash site at 23 fps the robot's face is washed
+  white; near the first rock it is washed on the ground and looks normal at the top of a jump. Cause not identified;
+  the single-texel lead above is still open.
+- **The transient's passes are batched too.** In the run sampled from 92 s, render pass begins stayed at 42 to 45 a
+  frame through the transient (1150 to 1240 draws a frame), as in the settled phase (40 to 42), and dispatches rose
+  from about 89 to about 205 a frame. A segment per particle draw would have added about one begin per draw. The
+  transient's cost is therefore GPU work inside the segments and pull draws, not segment breaks.
+
+- **Crash site: the sky and cloud program `0x874bd13f` is about 10 ms of GPU time a frame (2026-11-19, t246).**
+  Temporary per-dispatch GPU stamps (not committed), one 171 s run that settled at the crash site at 23.5 fps and
+  about 370 draws per frame, render engine 97 % busy: compute 25 ms a frame, of which `0x874bd13f` (one call of
+  `120x68x1` groups of 64 invocations) 12.3 ms and `0x3666fa39` 5.6 ms. A second build skipped that one dispatch: in
+  the same scene (capture checked) at about 375 draws per frame the frame held 31 to 34 fps, engine 93 to 96 %
+  busy, and the stamped command-buffer time fell from 41.0 to 30.6 ms a frame. One pair of runs. The skip capture
+  shows what the program draws: the sky and clouds, replaced by stale blue bands. Its cost follows how much sky the
+  view shows (same grid and SPIR-V: 1.5 to 2.9 ms in the hub, 5.5 to 8 ms during the transient, 12 ms at the crash
+  site). This amends the 2026-11-14 record above that it freed no engine time (t216, close-up dunes view).
+- **Its width is set by the native wave32 rule, and SIMD32 spills on the A770.** Before `11f783e44` wave32 programs stayed native,
+  pinned to 32 lanes, up to 64 guest VGPRs. Offline on ANV the live SPIR-V at 32 lanes is 77,775 instructions with 2,819:9,569
+  spills:fills; the same SPIR-V unpinned compiles at 8 lanes to 11,309 with 14:30. A temporary arm that split every
+  wave32 program into 16-lane parts produced 42,718 instructions and 1,171:4,213 at 16 lanes for this program; an
+  8-lane wave32 split is refused by the native-wave validator (only 16 is accepted). Both runs with the 16-lane arm
+  left the robot at the second rock (27 to 28 fps at about 600 draws per frame, as without it), so its effect at
+  the crash site is not measured.
+- **Bound only: the EXEC guards.** Replacing the program's 3,701 EXEC-guard selects with their new value (not a valid
+  translation) gives 51,711 instructions and 2,388 spills at 32 lanes, 32 % fewer estimated cycles, and still spills.
+  The guards sit across 142 EXEC segments with almost none before the first EXEC change, so a sound "EXEC is full"
+  subset would recover little; parked.
+- **Excluded: 16-lane parts for wave64 programs above 64 VGPRs as a lever on this program.** Its SPIR-V is identical with
+  and without that arm (it is native wave32); the arm's run reached the hub, so nothing else about it was measured.
+- **The cloud program is not the haze.** With it skipped the crashed ship looks as washed as with it. In both crash-site
+  runs the capture at 120 s is a dark frame without a frame-rate dip; whether that is a game fade or the reported
+  black flicker is not decided.
+- **Wave32 above 32 VGPRs now splits on hosts that go down to width 8 (2026-11-19, `11f783e44`).** A 32-lane hardware
+  thread there holds 32 dwords of registers per lane, so the native wave32 budget is 32 guest VGPRs on such hosts and
+  stays 64 elsewhere. In the dunes this splits `0x874bd13f`, `0xe1b1315d`, `0x2bcba9a2` and `0xbf8ee9fc` into 16-lane
+  parts and keeps `0xfd1ee59c` native (SPIR-V compared against the arm that split every wave32 program). Stamped per
+  dispatch, `0x874bd13f` took 2.5 to 2.6 ms split against 5.8 to 5.9 ms native at the second rock (two split runs, one
+  native run, same scene) and 2.5 to 3.3 ms against 5.6 to 6.8 ms in the dunes intro of the idle route (one pair).
+  Frame rate did not move where measured: the idle route's settled view holds 34 fps in both arms (the program is not
+  in that view's per-frame list), and a clean build of the commit at the second rock held 28 fps (171 s, render engine
+  95 to 96 % busy) against 27 to 28. At the crash site a clean build of the commit held 28.8 fps (27 to 31, 46
+  samples, 376 draws per frame, engine 96 % busy, capture: the crashed ship close-up) against 23.4 fps (21 to 24, 377
+  draws per frame) in the stamped native run of the same scene; stamps do not move the frame rate at the second rock
+  (27 to 28 fps with and without). That run entered the dunes about 7 s later than the others (60 fps at about 45
+  draws per frame until 99 s, after a stall at 90 to 91 s), which shifted the wall-clock route. Its cache copy lacked
+  the split variants, which were translated at 84 to 85 s, and the stall second at 90 s shows 6 compute pipeline
+  misses, so building them probably caused the delay (not proven). A native run on the same build entered on time and
+  reached the second rock, so the pair is not from one build. `0xbf8ee9fc` has no per-dispatch number. `PPSA17221 -
+  Minecraft` reached the world with exit 0 and a clean capture; that run compiled only two fragment modules, so the
+  rule changed none of the compute programs it dispatched.
+
+- **Still pinned at 32 in the dunes, and cheap.** The rule keeps `0x939e8346`, `0xeb964a28` and `0xfd1ee59c` native;
+  they cost under 0.1 ms a frame (below the per-frame list, or 0.07 ms), so their width is not a lever. `0xfd1ee59c`
+  spills 32:155 at 32 lanes offline.
+- **Bound only: EXEC guards in the five-target pass.** Replacing the 361 EXEC-guard selects of `ps 0x6bcfb82d` with
+  their new value (not a valid translation) lowers ANV's cycle estimate of its two SIMD16 executables by 27 % (25,415
+  to 18,631) and 18 % (31,607 to 26,022). An earlier record found per-draw time falling far less than such estimates,
+  and the skip test caps this pass at about 3 ms, so a sound subset would recover well under the 2.4 ms needed;
+  parked. The BVH kernel `0x3666fa39` already compiles at 8 lanes (272:928 spills), so its width was not pursued.
+- **The transient is one geometry program.** In the one-frame windows of a stamped run that crossed the transient
+  (1,064 to 1,572 draws a frame), `0xf4cfb9a5` ran 436 to 1,155 one-group passes a frame and its stamps summed 10.6 to
+  31.7 ms, against 12 to 13 ms for all render passes. The stamps are end-of-pipe timestamps around each pass, which
+  serialize the passes, so the sum overstates their cost when they overlap.
+
+- **Second rock: no single program holds the frame.** Stamped there with the 16-lane wave32 arm (its 27 to 28 fps
+  matches the native runs): render passes 22 ms, compute 11 ms, geometry passes 4 ms a frame; the largest items are
+  the BVH kernel `0x3666fa39` (5.5 ms) and a five-target pass keyed by `ps 0x6bcfb82d` (8.7 ms over its 144 draws,
+  other programs included). Skipping every draw of `ps 0x6bcfb82d` (temporary build at native wave32 width; capture:
+  same rock, props apparently missing, not verified) gave 29 to 30 fps against 27 to 28 and render passes 18.7 ms
+  against 21.8: about 3 ms. That run had windows of low engine busy, so its frame rate is indicative only.
+
+- **Second rock at 960x540 (game patch, diagnostic only).** 32 to 33.6 fps at about 556 draws a frame and 90 % engine
+  busy, against 27 to 28 fps at 530 draws and 96 % at native resolution: pixel-bound work is about 5 to 6 ms of the
+  frame and about 28 ms does not scale with resolution.
+- **Guest compute queues 0 to 7, priced at the crash site.** With the rule, compute dispatches from those queues sum
+  about 2.2 ms a frame in end-of-pipe stamps (their command buffers about 2.6 ms) of 18 ms of compute; the BVH kernel
+  `0x3666fa39` (5.8 ms) comes from the graphics queue. Running them on a separate host compute queue could overlap at
+  most that 2.2 ms and needs depth copies on a compute queue, a recorded exclusion on this host; parked.
+- **The particle transient is not the haze.** In `hist1` the robot looks washed white both in a capture inside the
+  transient and in a settled one. At the crash site the wash varies between captures at the same frame rate, with
+  different framing, so it is not tied to one camera view. The 1x1 exposure chain (format 77, zero-filled) remains
+  the unproven lead.
+- **The haze is the volumetric atmosphere chain (2026-11-21).** Same build, same route and the same local game patch
+  set, differing only in a patch that makes the guest turn its volumetric atmosphere off: with the chain off, Astro
+  and the crashed ship at the crash site show full contrast; with it on, the same view is washed white. The white
+  comes from the fog chain, not from the exposure chain or the tone map. Patched runs are not strict runs. Per frame
+  the chain dispatches a 30x17x1 pass that writes one 240x135x64 RGBA16F volume, a 30x17x8 pass that samples the
+  other (previous-frame) volume and rewrites the first in place, and a 1:1 copy into a third volume that a later
+  draw samples. The two 3D fog volumes ping-pong each frame.
+- **Fixed (2026-11-21): the white veil was the fog apply's sampler wrapping in depth.** The full-screen fog apply
+  loads the 2D scene depth at the pixel (no sampler) and samples the 240x135x64 fog volume with sampler 0 at
+  `w = -c1 - c0/(t - c2)` of the linear depth; a pixel 1-1.5 m from the camera lands at `w` about 0.004, half a
+  slice before slice 0. Sampler state that depends on the view (CLAMP_Z, ForceUnorm) paired a sampler with the
+  views whose slot number equalled the sampler's: the depth view's slot was 0, so the sampler counted as 2D-only,
+  was created without the R coordinate and got repeat in W instead of the guest's clamp. Linear filtering then
+  blended about 27 % of slice 63 (transmittance 0.08, bright in-scatter) into every near pixel: Astro, the robots
+  and the near sand were washed white while far terrain was barely touched. Skipping only that draw restored
+  full contrast; skipping the six other draws that sample the volume did not. Sampler state now pairs through
+  the per-instruction sampler mask the resource parse records (cross-title record "Samplers paired with views
+  by slot number"). The earlier exclusion of the fog samplers' W mode covered only samplers created with the R
+  coordinate, which is how this one was missed.
+- **Measured (2026-11-21, patched run, dunes): the fog volume itself is opaque next to the camera below the
+  horizon.** Read back per slice: transmittance falls from 0.92 (slice 0) to 0.46 (slice 1) and 0.10 (slice 63), and
+  slice 1 is about 0.9 for froxels whose view ray points above the horizon and 0 for every froxel whose ray points
+  below it, with a sharp edge at the horizon. Skipping the temporal filter leaves the same numbers, so the
+  density comes from the inject pass, not from the history path. In the space intro the same volume is clear
+  (slice 0 0.995). **The inject is correct:** an interpreter of the guest's own inject program, fed the dispatch's
+  constants and buffers, reproduces the measured alpha at four froxels (an exponential height fog over the
+  camera height plus an atmosphere term), so the density next to the camera is the guest's. The full-screen
+  apply's own math also matches: from the read-back depth and its constants it predicts transmittance
+  0.91-0.93 at Astro. After the sampler fix above the captures show Astro at full contrast; the transmittance
+  itself was not re-measured.
+- **Not the cause (2026-11-21): the 3D sample-LZ index tag.** That lowering indexed the 3D descriptor array with
+  the unmasked virtual index (fixed), but the haze at the crash site is unchanged after the fix.
+- **Fixed (2026-11-22): the guest's non-tiled deferred-lighting renderer drew without direct sunlight.** A local
+  game patch selects it. With it on, the dunes showed only ambient light (near black when the guest's GI was also
+  off); with it off, the same route showed sunlit dunes and normal shadows. Its lighting draws go through fragment
+  transport, and every band of them failed with zero records: the transport parameters were pushed at offset 0,
+  over the guest vertex program's user data (cross-title record "Fragment transport parameters overlapped the
+  vertex push constants"). After the fix the patched route shows lit dunes, the robot and sun shadows, matching
+  the default renderer, at about 11 fps (10.9 at 160 s on the committed build, 60 fps limit); before the
+  capture-reservation change in the same record it ran at 3 fps, GPU-bound on the capture draw. The shade-width
+  change in the same record then brought this renderer to 25-27 fps in the dunes (GPU-bound), and the band and
+  counter changes after it to 31-33 fps in light dunes gameplay, 26-29 fps in the heavier stretch and 25-26.5 fps
+  in the intro (median 32.0, GPU-bound; cross-title record "Transport bands and counters"). With GI off only
+  (default renderer, `clean-p7`, 40-187 s, per-second samples): median 38.7 fps, 14 of 147 seconds under 30. Of
+  those, seconds 49-67 are the intro, mostly at 27.5-29.9 fps with one second (67) at 22.9 (GPU about 88 % busy, command thread about 45 %), four are
+  level-load hitches (85-86, 100, 106, 112 s) and two are one-second dips in the dunes gameplay (144 s at 25.4,
+  177 s at 27.8); the dunes otherwise hold 37-40 fps, GPU-bound. Earlier candidates for the dark image (the s66 texture mask, the
+  DREF1 shadow tap, the sun flag in s52, VCMPX writing VCC, export kill handling, G-buffer formats) were each
+  checked against this renderer only and are moot: none was the cause. Still open: Astro's cape colour differed
+  between this renderer and the default one in one capture pair; not checked after the fix.
+- **Open (2026-11-22): what keeps the intro and the heavier dunes stretch under 30 fps with the deferred-lighting
+  renderer.** Under the driver measurement the few-event lines in those windows are guest programs, not transport:
+  pixel programs `0x8e59fdb1` (about 9.4 ms over 5.4 draws a frame) and `0xa9bf243a` (7.7 ms, 21.5 draws) in the
+  window taken as the intro (its frames were not placed in time: that run wrote no captures), compute `0x0d49d0a9`
+  (3.3-3.5 ms, in both regimes), pixel program `0xf3de2cdd` (3.6-4.0 ms over about 11 draws, heavier stretch only)
+  and compute `0x393dd516` (4 ms, one window). In their SPIR-V the guest address translation function has 19
+  (`0x8e59fdb1`), 20 (`0xf3de2cdd`) and 145 (`0x0d49d0a9`) static call sites: 10, 11 and 90 loads, the rest being
+  each multi-dword load's page-cross second call. A static slice of each load's address shows that 10 of 10, 10 of
+  11 and 75 of 90 addresses depend only on scalar registers (the program's integer register variables; its vector
+  registers are the float ones): scalar descriptor loads, the same for every pixel or lane of a draw. Executed
+  counts per invocation were not measured. In both pixel programs the descriptor base comes from one scalar
+  register that the program rewrites 31 and 50 times, partly as a base register plus a constant. The compute
+  program's 16 KiB workgroup array matches the guest's LDS size register; whether its 79 workgroup barriers are the
+  guest's or the translator's was not checked against the guest program. The earlier pricing of this lookup in
+  another pixel program (record of 2026-11-19: a per-invocation memo and a one-read path each recover about 5 % of
+  that program) still stands. Scalar loads that are constant for the draw would allow resolving them on the host,
+  as the vertex binding path does; that their sources are user data and that the pages are not GPU-written before
+  the draw is not established.
+  Update (2026-11-22): in `0x8e59fdb1` all translated addresses are the program base plus constants or user data;
+  loads inside the table entry holding the program base now skip the walk (cross-title record "Program-relative
+  loads translated through a window resolved at bind"). The intro moved from about 25.9 to about 27.5 fps (one run
+  each, images correct) and is still under 30. The heavier stretch (about 750 draws per frame) was not reached for
+  more than one second in the run after the change, so it is not re-measured.
+  Update (2026-11-22): the guard elision now runs on programs with vector relative reads (cross-title record
+  "Dead-guard elision follows vector relative reads"); the hottest intro program keeps 319 of its 591 EXEC selects
+  and still compiles at SIMD8, so the intro stays at about 27-28 fps.
+  Update (2026-11-22): the two lighting pixel programs no longer go through fragment transport; native admission
+  now matches their final lane reduction (cross-title record "Lane reductions whose temporary is reused before the
+  reads"). One run on the base route: median 33.7 fps (was 27.7), the dunes scene 33.6-34.7 fps (was 26.7-27.7),
+  intro seconds 30.5-32.7; captures correct. A second run with the new translations cached: median 33.7, 14 of 123
+  seconds under 30. The steady ones are the dunes run with dust (81-85 s at 670 draws per frame, 27.8-29.7 fps, and
+  94-96 s at 810-1,170 draws, 26.7-27.6 fps, GPU-bound); host stalls at 60-62 s and 160 s are not classified.
+  Update (2026-11-22): guards under WQM of a tested quad-gathered mask are dropped (cross-title record "Own EXEC
+  bit under WQM of a quad-gathered tested mask"); two cached runs gave medians 35.6 and 33.7 fps, the dunes run
+  with dust is still 25.6-29.7 fps at 81-86 s and 21.7-27.7 at 94-95 s. The stalls seen in those runs coincide
+  with new translations of route variants.
+- **Per-lane proof for the split wave32 programs: none qualifies; parked (2026-11-19).** A temporary print ran the
+  wave-width independence proof (the one that lets split wave64 programs run one guest lane per invocation without
+  exchanges) on the 15 wave32 programs that use wave state on the dunes route. None passed: ten stop at the same
+  early instruction with an EXEC write by a plain scalar instruction, `0x874bd13f` (clouds) and `0x2bcba9a2` at an
+  operand the proof cannot keep per lane, `0xbf8ee9fc` and `0xe1b1315d` at further EXEC writes. The proof is written
+  for wave64: it refuses 32-bit SAVEEXEC and every EXEC-conditional back edge. The clouds program runs 31 loops with
+  its ballots inside them; whether they are EXEC-narrowed is unchecked (it stops at 0xa8, before any back-edge check,
+  and no guest disassembly was taken). Admitting it would need a wave32 form of the proof, plus a route from a proven
+  wave32 program to the per-lane mask emitter (the per-lane layout is built for guest wave64 only). A ceiling probe that let the 8x8 split wave32 programs skip the rendezvous wait (ballots kept
+  only their own part's bits) landed at the second rock, where `0x874bd13f` costs 0.17 to 0.20 ms in every build;
+  in its only frames before the rock (frames 3060 and 3100: 36 to 41 passes, 79 dispatches, the same view as frames
+  3100 to 3140 of the rule runs `rule32a` and `idle-rule`) it took 4.8 ms against 2.56 ms with the rendezvous. The
+  probe changed the program's work (each part saw only its own lanes in every ballot), so no ceiling was obtained. For the BVH kernel the fixed mechanics of its rendezvous were
+  priced at about 4 % of its time (record of 2026-11-14; the waits between parts were not priced), so this route is
+  not expected to give the missing 2.4 ms there either.
+- **Second rock, per-program stamps (2026-11-19, frames from 4,600, 744 to 857 draws a frame).** The five-target pass
+  (1920x1080, 121 draws; the stamp names a pass by its first draw's programs, here `ps 0x6bcfb82d`, so the time
+  covers every program in the pass) 7.2 to 7.3 ms a pass, the BVH kernel 5.7 ms, the 2048x2048 shadow passes of
+  `ps 0x0ff8a6ab` (6 passes, 280 draws) 4.7 ms, a one-target pass of `ps 0x860593d6` (120 draws) 2.4 ms, compute
+  `0xff2adfc8` 1.2 ms. The five-target pass was recorded vertex-bound (2026-10-30 record above).
+- **Bound only: guest-address lookups in the largest five-target vertex program.** The largest dumped vertex module
+  with five colour targets (195k SPIR-V words) compiles at width 8 to 21,430 instructions, 234 sends, 30 loops and
+  376:1,559 spills:fills. 24 of its loops are the in-shader guest-address lookup, inlined once per `S_LOAD_DWORDX8`
+  (12 loads, each with a second lookup when it crosses a page). Their bases are SGPR pairs copied straight from user
+  data, not the EUD pointer, so they get no dynamic scalar-load record: those records cover only EUD loads, and the
+  pointer-table collector is not run for vertex programs. With the lookup body replaced by a plain return
+  (offline, unsound), the module compiles to 17,143 instructions, 165 sends and 266:1,120 spills:fills, with
+  estimated cycles 9 % lower. The one-entry lookup cache measured on the BVH kernel gained under 2 % (record of
+  2026-10-29), and which vertex module the pass spends its time in is not matched, so this lever is not expected
+  to reach 2.4 ms; parked. Correction (2026-11-19): that module (`vs 0x8b21b61c`) is not among the vertex programs
+  that carry the pass's work (bullet below), and its figures are static compiler estimates, not measured time.
+- **The five-target pass is mostly pre-raster work (2026-11-19, `vtx5`).** A temporary build set a 1x1 scissor on
+  every draw with five colour targets (engaged: the captured frame is visibly broken). The pass still took 5.6 to
+  6.8 ms against 6.4 to 7.7 ms at matched draw counts, so about 1 ms of it is rasterization and pixel work and the
+  rest is vertex shading, primitive setup or per-draw work. Counted over the last print window of that run (20,000 five-target draws;
+  index count times instance count, not vertex invocations, raw window totals), five vertex programs carry 96 %:
+
+  | Vertex program | Pixel program | Draws | Index x instance | Share | Width-8 instructions | Cycles (static) | Spills:fills |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | `0xa2bb8f2d` | `0xd4bef057` | 6,653 | 480 M | 39 % | 1,226 | 38,976 | 0:0 |
+  | `0x4ea3083b` | `0x8ca0b9ff` | 6,368 | 231 M | 19 % | 1,880 | 49,993 | 0:0 |
+  | `0x0c2ae56d` | `0x6bcfb82d` | 404 | 222 M | 18 % | 6,951 | 179,955 | 332:232 |
+  | `0x67d7f692` | `0x6bcfb82d` | 2,425 | 135 M | 11 % | 1,811 | 49,365 | 0:0 |
+  | `0x57572d59` | `0xd4bef057` | 671 | 130 M | 10 % | 4,104 | 92,846 | 66:61 |
+
+  `0x0c2ae56d` averages about 550,000 index-instances a draw; weighted by static cycles it is the largest item,
+  but static cycles have tracked measured time poorly on this host, so no program is priced yet.
+- **Second rock, two vertex programs priced by skip windows (2026-11-19, `skarm1`).** A temporary build skipped the
+  draws of one vertex program in alternating 80-frame windows of one run (none, `0xa2bb8f2d`, none, `0x0c2ae56d`;
+  each window printed its skipped-draw count: about 3,950 and 240) with no other change. Comparing stamped frames
+  from frame 4,740 (rock 2 in the captures) whose five-target draw counts match the arm, the five-target pass stamps
+  summed 8.3 to 8.7 ms a frame unskipped (143 to 152 draws), 5.7 to 6.3 ms with `0xa2bb8f2d` skipped (96 to 98
+  draws; about 49 draws and 3.5 M indexes a frame removed) and 6.3 to 6.6 ms with `0x0c2ae56d` skipped (140 to 147
+  draws; 3 draws a frame removed, each about 550,000 indexes of one instance). Frames with fewer draws are another
+  view and were left out. So `0xa2bb8f2d` holds about 2.2 ms (0.6 ns an index) and `0x0c2ae56d` about 1.8 ms
+  (1.0 ns an index): a ratio of 1.6 an index against 4.6 in static cycles. Indexes are not vertex invocations and the
+  two meshes' vertex reuse is unknown, so two programs cannot separate a per-vertex floor from shader weight. The
+  stamps serialize the passes and the per-frame print keeps only the 12 largest pass groups (dropped groups are
+  under 0.25 ms); these are pass times, not frame-rate gains. A capture inside a `0xa2bb8f2d` skip window (frame
+  5,235) shows the rocks, sand and props of the unskipped capture at frame 4,711 (the camera moved, so a pixel diff
+  is not conclusive); what those 49 draws a frame put on screen in this view is not identified.
+- **Second rock, three more vertex programs by skip windows (2026-11-19, `skarm2`, same design: none, `0x4ea3083b`,
+  `0x67d7f692`, `0x57572d59`).** At matched draw counts the pass summed about 8.3 ms unskipped (142 to 150 draws),
+  6.2 ms with `0x4ea3083b` skipped (about 48 draws a frame removed, 36,000 index-instances a draw), 7.5 ms with
+  `0x67d7f692` skipped (18 draws, 56,000 indexes a draw) and 7.7 ms with `0x57572d59` skipped (two frames at 140 draws;
+  6 draws, 193,000 indexes a draw). With `skarm1`, the five programs cost about 44, 44 and 47 us a draw for the three
+  light ones (`0xa2bb8f2d`, `0x4ea3083b`, `0x67d7f692`, whose indexes a draw differ by 2x), 100 us for `0x57572d59`
+  (two frames only) and 600 us for `0x0c2ae56d`; the five savings sum to about 7.5 of the pass's 8.3 ms. The equal
+  cost a draw of the three light programs suggests a per-draw term, but it is not established: the one-target pass of
+  `ps 0x860593d6` (2.4 ms, 120 draws) and the shadow passes (4.7 ms, 280 draws) cost 17 to 20 us a draw. The captures
+  (frames 4,722 and 5,298) are at rock 2; in the `0x57572d59` window the robot looks missing.
+- **Second rock: the five-target pass cost is not per draw (2026-11-19, `half1`).** Same window design, halving the
+  index count (rounded down to a multiple of 12) of every draw of one vertex program: none, `0xa2bb8f2d`, none,
+  `0x4ea3083b` (about 3,900 halved draws a window each; engaged: index-instances a draw averaged 0.88 and 0.91 of
+  their `skarm2` values over the run, where one halved window in four predicts 0.875). At 141 to 150 five-target
+  draws the pass summed 8.5 ms unhalved (four frames), 7.3 ms with `0xa2bb8f2d` halved (one frame) and 7.4 to 7.7 ms
+  with `0x4ea3083b` halved (four frames): about half of the 2.2 and 2.1 ms their skips removed, so their cost scales
+  with the work of each draw (vertices, primitives and pixels together). The one-target pass of `ps 0x860593d6` held
+  111 draws and 2.33 to 2.37 ms in the same run, and its draws counted 6.4 G index-instances against 6.0 G for the
+  five-target draws over frames 4,741 to 5,364 (the latter about 0.4 G low, since it includes the halved windows).
+  Its two vertex programs, compiled alone (no pixel module was dumped for it), are `0x5c9f3e0a` (755 instructions,
+  6 loops, 16 sends at width 8; 4.5 G of the index-instances) and `0x51485353` (1,906, 19 and 42; 1.8 G), against
+  1,226, 11 and 29 for `0xa2bb8f2d`. Same index volume in 2.35 ms puts a ceiling of about 6 ms, less about 1 ms of
+  raster (`vtx5`), on what a cheaper vertex stage could recover; that ceiling includes the guest's own attribute work.
+  Vertex reuse of the meshes is unknown.
+- **Where the vertex programs' guest-address lookups come from (2026-11-19, offline).** ANV's final intermediate code
+  keeps uniform and divergent lookup loops of: `0xa2bb8f2d` 3 and 8, `0x4ea3083b` 4 and 9, `0x67d7f692` 4 and 9,
+  `0x57572d59` 3 and 20, `0x0c2ae56d` 5 and 20, and for the one-target pass `0x5c9f3e0a` 2 and 4, `0x51485353` 3 and
+  16 (each module compiled with the pixel module of its pass, or alone where none was dumped). Correction, same day:
+  most divergent loops are not lookups but the partial-range branch of by-address row loads of three or more words,
+  a non-unrolled word loop (rewriting it is excluded below); replacing the lookups with stubs offline left
+  the loop count unchanged. In `0xa2bb8f2d` the
+  divergent ones are buffer loads whose index is built from packed register bits (an 8-bit field, a bit-field
+  extract), not the vertex index, all on one buffer descriptor loaded once; such loads cannot become native vertex
+  attributes, which need a format load indexed by the vertex or instance id from the vertex-buffer table. `0x51485353`
+  keeps 16 divergent lookups and still fits, with `0x5c9f3e0a`, in the 2.35 ms one-target pass at about 3 M
+  index-instances a frame, so the divergent lookup count alone does not explain the five-target programs' cost.
+- **Pipeline statistics per render pass (2026-11-19, `PPSA21567 - Astro Bot`, A770 ANV, diagnostic build).** Vertex-shader,
+  clipping and fragment-shader invocation counts were read per pass beside the timestamps. Over 67 profiled frames of
+  one run the five-target pass fits `ms = 2.27 x M vertex invocations + 0.60 x M fragment invocations + 0.155 x passes`
+  (rms 0.26 ms). Scenes: at rock 2 the pass runs about 260 draws in 8.3-9.3 ms; the 130-140 draw blocks are the
+  rock-1 area. With the five targets scissored to one pixel the fragment count reads 0, and 2.19 M vertex invocations
+  still take 5.1-5.6 ms (fit: 5.3 ms), so that pass is bound by vertex work; in a lighter scene (0.75 M) it leaves about
+  0.6 ms the fit does not explain. The one-target pass `ps 0x860593d6` runs 1.6-2.1 M invocations at 1.05-1.35 ms per
+  million with `vs 0x51485353`, a statically larger program than `0xa2bb8f2d` (1906 against 1226 instructions, 42
+  against 29 memory messages). Correction, same day: the pass label is its first draw only, `0x5c9f3e0a` carries
+  about 71 % of that pass's index volume, and the per-program halving prices below show cost follows the program. Vertex
+  invocations per index are 0.32 in the five-target pass and 0.23 in the one-target pass. The "halving saves about
+  half" result above also halved fragments for `0x4ea3083b` (-0.17 M vertex, -1.0 M fragment invocations); for
+  `0xa2bb8f2d` the fragment count did not move.
+- **The five-target draws are not an equal-depth pass over a prepass (2026-11-19).** All 120 sampled draws of the five
+  programs test depth less-or-equal with depth writes and stencil on, and none shares an index range and vertex offset
+  with a one-target draw. Re-keyed on the index-buffer address alone (296 one-target entries recorded, engaged), no
+  five-target draw reuses a one-target index buffer either. The one-target pass still acts as a depth prepass for
+  the scene: halving `0x5c9f3e0a` raised the five-target fragment invocations from 2.7 to 5.15 M at rock 2.
+- **Excluded: doubling the vertex programs' guest-address lookups as a price probe (2026-11-19).** A second lookup
+  chained on the first through a runtime zero reached the SPIR-V (13 calls into the wrapper) but ANV compiled
+  `0xa2bb8f2d` to the identical ISA, so this probe cannot price the lookups on this driver.
+- **Per-program vertex prices at rock 2 (2026-11-19, halving arms with pipeline statistics, diagnostic build).** Halving
+  one program's index count per 80-frame window and dividing the pass-time change by the vertex-invocation change,
+  with the fragment term of the fit removed, gives in ms per million vertex invocations: `0x0c2ae56d` about 4.5 (about
+  6 in a lighter scene), `0xa2bb8f2d` 1.5-1.9, `0x51485353` 1.45-1.6, `0x5c9f3e0a` 0.5-0.8. Cost follows the program.
+- **Excluded: straight-line partial-range loads in the vertex programs (2026-11-19).** The partial branch of by-address
+  row loads of three or more words (taken only when the row's last word is past the backed bytes) was rewritten from
+  a non-unrolled word loop into one branch on word 0 plus a select per word, which is equivalent. Offline, ANV's code
+  for the five programs keeps no loops (`0x0c2ae56d` 25 to 0, spills:fills 337:234 to 308:203; `0x57572d59` fills 76 to
+  44) but grows 2-20 % in instructions with about twice the memory messages. Three runs with a private translation
+  cache: the five-target pass sits +0.59 ms (median of 12 frames) above the pipeline-statistics fit, against +0.57 ms
+  for the old code at rock 2; at 2.50 M vertex invocations both take 6.7 ms. The hot whole-range path is unchanged
+  and reshaping the cold branch does not move it. A probe that read zeros for partial rows instead also left the
+  route; a run whose native code was identical to the baseline but used the same translation-cache directory left
+  it too, so that desync and the probe's one exit 139 are unattributed, not evidence of a guest-visible change.
+  Three later runs on the default cache directory (`rst1`, `rank1`, `rank3`) also left the route, so the shared
+  cache directory is not the common factor.
+- **Excluded: merging the per-word raw loads of the vertex programs into four-word loads (2026-11-19).** Offline
+  gate only: with the whole-range path emitting one four-word typed load, ANV's code for `vs 0x0c2ae56d` still
+  issued 52 single-dword bound-buffer loads, so the driver does not vectorize them and the change was not run.
+  Stripping the EXEC selects from the same program (unsound, ceiling only) cuts its native instructions by 3 %
+  (7,026 to 6,793), too little to reach the 2.4 ms rock 2 needs.
+- **Excluded: the vertex stage is not inherently slower than compute on the A770 (2026-11-19).** A standalone
+  Vulkan test (no emulator) ran one body as a vertex shader with rasterizer discard and as a 64-wide dispatch,
+  2 M invocations each, timestamps around each stage, every invocation's store checked. A chain of dependent loads
+  takes the same time in both stages (ratio 1.0-1.2 for 4 and 64 MiB tables, 8 and 64 steps; separate submits
+  agree), and a pure-ALU body runs 2.1 times slower as a vertex shader, scaling linearly with its length. Moving
+  vertex work to a compute pre-pass would therefore gain at most that factor on ALU and nothing on memory-bound
+  work, before paying to write and re-read the outputs. Output slots cost nothing up to 4 vec4 and about 0.08-0.1
+  ns per slot per vertex above that, but they do not explain the per-program prices: the dumped programs emit 8
+  slots (`0x0c2ae56d`, about 4.5 ms per M), 4 (`0xa2bb8f2d`, 1.5-1.9), 1 (`0x51485353`, 1.5) and 1 (`0x5c9f3e0a`,
+  0.5-0.8). The five-target pass at rock 2 runs 0.91-0.98 vertex invocations per primitive; how far that exceeds
+  the unique vertices of these meshes is not measured.
+- **Excluded: host primitive restart as a vertex-reuse lever (2026-11-19, `rst1`).** Turning restart on raises
+  ANV's reuse window and lowered the title's invocations per primitive by 8-12 %, but makes indexed draws several
+  times slower on the A770. The guest enables primitive reset and Kyty ignores it; see `docs/bringup/cross-title.md`,
+  "Guest primitive reset is ignored; host restart is slow on ANV". That run ended in the known guest null-call exit
+  139 while loading `hub_crashsite_tutorial`, after reaching it later than the baseline runs.
+- **Excluded: a per-invocation cache of the last guest-address entry (2026-11-19).** The lookup kept the last
+  matched entry in private variables and returned early on a hit (translator 247, temporary). The dumped
+  `vs 0xa2bb8f2d` carries the cache (13 calls to the lookup, a different source hash) yet compiles to the same 1,226
+  instructions with identical native code; `spirv-opt -O` also drops the four cache variables while keeping all 13
+  lookups, so the cache never ran in that vertex program and its vertex-time effect is untested. The BVH kernel
+  `0x3666fa39` grew from 29,954 to 35,938 instructions and 272 to 487 spills at width 8, and its crash-site stamp
+  rose from 5.77 to 10.76 ms (`lkc2`). Reverted. One run of this series (`vtx2`) ended on the known intermittent
+  `DepthStencilBuffer - Crosses - StorageTexture` relation exit (cross-title record).
+- **Measured: skipping the shadow vertex program saves almost nothing at the second rock (2026-11-19, `rank2`).**
+  The second rock (about 730-790 draws per frame) starts near 165 s, after the route's last input at 140.5 s, and
+  the title leaves it by itself near 192 s. A temporary probe armed on 30 frames in that draw band and alternated
+  45-frame windows of control and one skip. With the scene steady (765 draws, 87 dispatches per frame, render engine
+  94-96 % busy), skipping every draw of `vs 0x5033be53` (204 per frame, the 2048x2048 shadow passes) gave 34.42 ms
+  per frame against 34.65 and 34.66 ms in the control windows on either side, 0.24 ms. In timestamps the skipped
+  draws carried about 0.16 ms per pass (0.29 ms per pass in control frames, 0.13 ms with the skip, six or twelve
+  passes per frame), about 1.0 ms per frame; the passes themselves remain. The other arms (`vs 0x8e51dd94` with its geometry, `cs 0xff2adfc8`, the compute tail)
+  fell after the scene change and are not priced. Two more runs with the same probe (`rank1`, `rank3`) left the
+  route before the second rock, so causal ranking there is blocked by route repeatability, not by the probe.
+- **Measured: in a steady scene reached off the route, skipping the small compute dispatches saved about 6 ms
+  once (2026-11-19, `rank6`; not repeated in `rank7`, below).** Five more runs with the route left it before the dunes level (two stayed in the space hub,
+  one reached a crowd cinematic); a copy of the route with every input from 79 s delayed by 30 s left it too, so
+  the variance starts before the first menu input. The probe was changed to arm on any scene whose requested draws
+  stay within 8 % for 30 frames. In a scene of about 565 draws and 83 dispatches per frame, skipping every dispatch
+  except `0x3666fa39`, `0x874bd13f`, `0xbf8ee9fc`, `0xff2adfc8` and `0x108c4737` (80 per frame skipped) gave 23.3 ms
+  per frame against 29.7-30.0 ms in the two control windows after it, with requested draws unchanged. In
+  timestamps that frame's compute fell from 9.8-9.9 to 7.5 ms and the command-buffer sum by 4.4 ms; the number of
+  render passes did not fall (63 against 58-60), so the skipped dispatches did not split passes. The small
+  dispatches cost 0.14-0.16 ms each in timestamps (`0x5d90f514` 30x17 groups, `0x5546b086` 120x68 groups), and
+  dispatch processing on the command-processor thread is about 38 us per dispatch at the second rock. Skipping
+  `0x3666fa39` alone saved under 1 ms (the no-skip windows of this run spread by 1 ms). This prices nearly all
+  compute in that scene together, including whatever later work reads its results; which of the small dispatches
+  carry the cost is not measured.
+- **Inconclusive: a command-processor delay test (2026-11-19, `rank7`).** In a steady scene of about 300 draws and
+  86 dispatches per frame, a busy wait of 4 us per draw (about 1.2 ms per frame on the command-processor thread)
+  moved the frame by +1.8 and +0.03 ms in two windows, and 20 us per dispatch (about 1.7 ms) by +0.4 and +1.6 ms
+  (the second against the control before it only), slopes of 0 to 1.5. The added delay was no larger than the
+  1 ms drift of the control windows, so the test neither places the thread on the critical path nor removes it. Skipping the same compute tail in that scene
+  saved nothing (38.1 ms against 35.4 ms after it), so the 6 ms of `rank6` is not a fixed cost of small dispatches;
+  it most likely includes draws that consume the skipped results. An on-CPU profile on the route's approach
+  (`prof1`, `cycles:u`) shows the command-processor thread flat: `memcmp` about 7 % of its samples, the index range
+  scan about 5 %, nothing else above 3 %.
+- **Measured: the route's approach scene is GPU-bound (2026-11-19, `rank7` and `prof1` samples).** From about 112 to
+  165 s (about 370 draws per frame, 34-37 ms per frame) the render engine is 96-97 % busy at 2400 MHz, and the
+  command-processor thread waits on fences 12-13 ms per frame (about 8 waits per frame, 34 submits). The same frame
+  times with the GPU profiler off (`prof1`) and on (`rank7`) put no measurable cost on the profiler. Timestamps in
+  that scene sum 32-35 ms per frame: compute 17.5-17.9 ms (`0x3666fa39` 5.8 ms, `0x874bd13f` 5.1 ms, `0xbf8ee9fc`
+  1.6 ms, `0xff2adfc8` 1.2 ms), render passes 10.5-12.7 ms and geometry 1.6-2.8 ms. With 12 ms of command-processor
+  slack per frame, 30 fps there needs GPU time, not command-processor time; both large compute programs have
+  recorded exclusions above.
+- **Measured offline: a switch between 3D and compute work on one queue costs about 7 us on the A770 (2026-11-19).**
+  A standalone Vulkan program alternated a one-triangle render pass and an 8-group dispatch: 17.3 us per pair
+  against 3.0 us with the same work grouped, about 13 us per pair with 1024x1024 targets, and no difference on the
+  RADV iGPU. At 60-80 alternations per frame that is about 1 ms, not the 6 ms above.
+
+Next: with the rule the crash site holds about 29 fps and the second rock 28, both GPU-bound at 95 to 96 % busy; 30
+fps needs about 1.2 ms more at the crash site and about 1.3 ms at the second rock (34.65 ms per frame in the
+steady scene of `rank2`; the earlier 2.4 ms used frames near the scene's entry). The largest shared item is `0x3666fa39`
+(5.5 ms); at the second rock the draws of `ps 0x6bcfb82d` cost about 3 ms in the skip test, and the whole five-target
+pass is mostly vertex work spread over five vertex programs, none priced by measurement yet.
+
+## Measured: guest address lookups in the particle pixel programs (2026-11-19)
+
+Runs `rpmix`, `psnull55`, `psmemo55`, `psdbl55`, `pstriv` and `psstate` on the dunes route, 150-175 s each, A770
+with ANV, 60 fps present limit, GPU profiler on. A diagnostic replaced one pixel module by checksum with an edited
+copy of its own SPIR-V; the figures are median nanoseconds per fragment-shader invocation of one render pass.
+
+- **The per-pass profiler names a pass by its first pixel program.** Its draws, invocations and time belong to the
+  whole pass. The 1920x1080 pass labelled `0x210016009aec9d6c` holds 12 draws of that program and 9 of
+  `0x55db270b`; the passes labelled `0x21001960c4a8f3bb` hold that program and six others. A replacement of
+  `9aec9d6c` by a pixel program that only writes a constant left the 1080p pass unchanged (0.415 against 0.400-0.411),
+  so that pass is not priced by its label.
+- **Measured: replacing `c4a8f3bb` by a constant writer** took its 960x540 pass from 6.2-6.6 ms to 0.30 ms and its
+  1080p pass from 1.3 to 0.14 ms, with the same invocation count (14.9M against 14.6-14.8M; 2.54M in both). The
+  replacement has no discard while the original ends in `OpKill`, so the end-of-program discard does not defeat the
+  early depth test; the 28 invocations per pixel at 960x540 are the title's own overdraw. Pipeline state of these
+  draws: one sample, no sample shading, depth test without depth write, blending on.
+- **Measured: the cost of the address lookups in `55db270b`.** In the 1080p pass, against 0.400-0.411 ns per
+  invocation (8.1-9.7 ms):
+  - every lookup returning the null region at once: 0.292-0.308 (5.9-7.4 ms). An upper bound only; the shader then
+    reads zeros.
+  - every lookup done twice (the second on the address plus 4, its result kept only if it were all ones, which a lookup never returns): 0.509 (10.6 ms),
+    +0.10 per invocation or about +2.3 ms per frame. The doubled module has 38 loops against 19 in the
+    driver's statistics, so the second walk was not folded away.
+  - the last entry that held a whole access remembered per invocation, checked with the same fit test before a
+    walk: 0.380 (7.8 ms), one run. Each invocation runs about 10 lookups (19 call sites, half of them the second
+    page of a load that crosses one) on 7 base addresses that the program writes into the buffer descriptor before
+    each group of loads; only 3 lookups repeat the previous base. That is consistent with the 30 % recovered;
+    whether those bases fall in different table entries was not measured.
+- **What a lookup costs on the device.** The native code (ANV, SIMD8) runs each lookup as a chain of dependent
+  memory reads: table pointer, directory header, directory pair, 0 to a few search reads, then the entry, and only
+  then the guest load, with branches between lookups. Whether the cost is that read latency or the instructions
+  (about 150 per lookup, 64-bit arithmetic emulated on this GPU) was not separated.
+- **Excluded here:** a native subgroup pin (these modules were not pinned); the EXEC guards as an instruction cost
+  (about 10 % of the instructions); per-sample shading.
+- **Measured offline: the particle programs cannot compile at SIMD16 on ANV.** With SIMD8 disabled the driver reports
+  a SIMD16 register-allocation failure for `55db270b` (112 live registers at SIMD8), `9aec9d6c` (106) and a copy of
+  `55db270b` with every lookup removed (96); a constant writer compiles at SIMD16. The width is set by live values
+  in the translated body, not by the lookups. Not priced in the game.
+- **Fixed: the SIGFPE while compiling an edited `c4a8f3bb` came from the replacement tool.** One pipeline variant
+  of `c4a8f3bb` binds its pixel resources in descriptor set 1 (the translator moves them there when the vertex program
+  owns set 0). The temporary replacement gave every variant the same set-0 module, which does not match that
+  pipeline's layout, and ANV divides by zero (`FPE_INTDIV`) while creating the pipeline from that invalid input. The
+  earlier note that it does not reproduce offline is withdrawn: offline, the original module raises the same SIGFPE at
+  the same driver address with a layout it does not match and compiles with its own. The replacement now takes the
+  original module's set; with it the doubled-walk `c4a8f3bb` compiled for 22 set-1 and 18 set-0 pipelines in a 150 s
+  run (`exit65b`), so `c4a8f3bb` can now be priced by replacement too.
+- **The table and the search loop.** A capped print on every rebuild (`gdashape`) showed about 175 entries, most of
+  them 64 MiB chunks (mean span about 58 MB), a 4 MiB directory region (`shift` 22) and 15,260 regions, of which
+  about 15,100 hold no entry start, 151 hold one and under 10 hold more. The search loop therefore runs zero or one
+  time; the cost is the chain of dependent reads, not the loop. This agrees with the earlier exclusion of a direct
+  lookup in the same program (loops 19 to 0, time flat).
+- **Measured, one run: a one-read lookup (`psfast55`).** The table got a per-region device delta for regions that no
+  entry starts inside and whose holding entry covers the region plus 128 bytes (463-778 such regions); the edited
+  `55db270b` read it after the directory header and walked only when it was zero. The 1080p pass gave 0.378, the
+  same as the remembered entry. The capped print covered only boot-time rebuilds (37-62 entries); the count of such
+  regions for the scene's 175 entries and the share of lookups that took the short path were not measured. The part
+  both cheap paths share (header read, variable 64-bit shift) is not priced.
+- **Frame time in the approach scene (110-141 s, 340-400 draws per frame) did not follow these changes.** Controls
+  `kq1`, `rank7` and `gcap2` gave 34.75-34.92 ms per frame; the doubled walk 34.98 ms although its frames with the
+  pass summed about 1 ms more GPU time; the remembered entry 36.29 ms with about 1.5 ms less. Changes of 1-2 ms in
+  one pass are inside this spread. A large reduction does reach the frame: skipping `0x874bd13f` (`skip874a`) gave
+  30.73 ms per frame. That run was built before the wave32 register-budget rule, so its controls are the runs of that
+  build (about 43 ms per frame in this window, for example `gpuprof1`), not `gcap2` (34.92 ms, built with the rule);
+  the "0.9 ms of frame per ms of GPU" quoted here before mixed the two builds and is withdrawn. Two skip runs on the
+  rule build (`skip874r`, `skip874s`, 2026-11-19) and a third whose skip started only at 122 s (`skip874g`) all
+  left the route at about 91 s, `skip874g` before its skip began, so the route loss is not caused by the skip; no
+  skip run proved the skip engaged. What the sky program still costs with the rule in this window is not measured. A
+  fourth run skipped it in alternate 6 s blocks from 118 s (`sqsky1`, the skip print fired); the game entered a
+  pause cinematic, the scene changed within the blocks, and the guest executed at address 0 about 8 s after the
+  first skipped dispatch (exit 139). That is the second skip arm here to end in a guest null call (`disc2` was the
+  first), so skipping a dispatch or draw whose output the guest may read back is not a safe pricing instrument; its
+  link to the crash is not proven. In the approach frames of `psfastdbl55` the GPU sum (34.1 ms) is close to the
+  frame (35 ms): render passes 11.0, compute 18.0 (`0x3666fa39` 5.9, `0x874bd13f` 5.1, `0xbf8ee9fc` 1.9), geometry
+  2.2 and 2.8 ms outside them, mostly pipeline barriers (about 390 memory and 220 image barriers a frame). `pstriv2` and `psfast55`
+  left the route before the window.
+- **Measured, one run: the one-read lookup takes the short path for most lookups (`psfastdbl55`).** The same edited
+  module with the remaining walk doubled gave 0.387 in the 1080p pass, against 0.378 for `psfast55` and 0.486 for the
+  doubled walk alone (`psdbl55`); the gap is inside the controls' spread (0.400-0.411), so the share is "most", not a
+  figure. The scene's rebuilds marked about 2,170 of 15,260 regions. Both cheap designs (remembered entry, one read)
+  stop near 0.38, so this lever is about 0.5 ms per pass; the null walk (0.30) also changes which addresses are read
+  and is not a reachable target. The approach window was 35 ms per frame in both `psdbl55` and `psfastdbl55`.
+- **Exit 65 from the overlap check** stopped `pstriv`, `rpmix` and `psnull55`; it was the item "depth and chain
+  ranges reused as storage views" above (about 12 of the runs since 2026-11-18 on this route), fixed on 2026-11-19.
+- **Measured, one run each: what `0x874bd13f` costs with the wave32 register-budget rule, and its width (2026-11-19).**
+  - **Price.** Skipping it in alternate 6 s blocks in the approach window (`sqsky2`, the skip engaged in every odd
+    block) took compute from 17.97 to 12.93 ms a frame. The program's own stamp fell from 4.36 to 0.55 ms. Render
+    passes moved 11.05 to 10.74 ms and `0x3666fa39` 5.89 to 5.68 ms. So the price is the program's own cost, not
+    work it causes downstream; this replaces "not measured" above.
+  - **Width.** The program has at most 64 guest VGPRs, so the rule splits it into 16-lane parts. Offline on ANV, at
+    16 lanes it estimates 79.7M cycles with 1,171:4,213 spills:fills. The same SPIR-V compiled at 8 lanes estimates
+    46.0M cycles with 50:149, and an 8-lane split of the guest wave estimates 48.5M with 50:147. The static cycle
+    model is not a frame predictor: it ranks the native 32-lane module (107.3M) worse than the 16-lane split, yet
+    the measured gain from that split (57 %) is larger than the model gives.
+  - **8-lane split, this program only.** A temporary replacement arm ran this program from an 8-lane split
+    (`sky8a`, `sky8cap`). Neither run lost the device or left the route. The stamp was 0.84 ms against 4.36 ms; the
+    GPU sum was 29.57 ms and the frame median 30.64 ms (max 33.7) against 34.84 ms for `oneskip1`. The 8-lane stamp
+    stayed near 0.82 ms while the 16-lane one rose from 2.6 to 5.3 ms through the window. That flat stamp is close
+    to the skip price, so whether the 8-lane module draws the same image is not verified.
+  - **Same view, both widths in one run (`tog6`, `tog8`).** A temporary toggle ran this program at 8 lanes in odd
+    6 s blocks and at 16 in even ones. In `tog8` the robot stood still in the dunes landing view from 108 to 156 s.
+    The 16-lane stamp was 5.0 to 5.3 ms a frame and the 8-lane one 0.78 to 0.82 ms. The GPU sum was about 33.5
+    against 30.5 ms, and the sampled frame median was 35 against 31 ms (19 one-second samples per arm). In the first
+    blocks of both runs the 16-lane stamp rose (2.5 to 3.1, 3.0 to 5.0 ms) while the 8-lane one fell (1.02 to
+    0.83 ms), so the stamp still does not follow the view. Two capture triplets taken across arm boundaries differ
+    no more across arms than within one arm (RMSE about 0.07 in both, from storm animation), and the sky at 1:1
+    shows no lane-shaped structure. That excludes gross breakage, such as the stale bands of the skip, but does not
+    show the image is the same. A dark cloud mass appears in 2 of 2 16-lane captures and 2 of 4 8-lane ones; six
+    captures cannot separate animation from a difference.
+  - **8-lane split, every wave32 program above 64 VGPRs.** This arm (`vg8a`) lost the device
+    (`vkWaitSemaphores` -4) at 94.7 s, about 2 s after the hub reached state 7. This program kept its 16-lane parts
+    under that arm. `0xbf8ee9fc` went to 8 lanes; it is the only one of the two with guest LDS, 6 workgroup
+    barriers and 1 barrier on group memory. The same toggle on `0xbf8ee9fc` alone (`togbf1`) lost the device at
+    116.8 s, 1.6 s after the hub reached state 7 and inside an 8-lane block, so that program alone is enough
+    (one run). The cause was the split-wave mask plan, fixed on translator t247 (see "Wave32 lane-mask demand" in
+    `docs/bringup/cross-title.md`). The guest sets EXEC from `vcc_hi` after a 64-bit multiply-add whose carry
+    names `vcc`. The plan read that carry as a write of both words, so the compare into `vcc_hi` stayed part-local.
+    The EXECZ branch then tested each part's own bits. A part with no active lane skipped a range that holds
+    rendezvous, and its siblings waited on it until the job timed out. At 16 lanes the same lowering only failed
+    when a whole 16-lane part was inactive. On t247 the same toggle (`togbf2`, warm cache) ran `0xbf8ee9fc` in
+    three 8-lane blocks after the hub (126, 150 and 162 s) and ended cleanly. Its stamp was 0.70-0.90 ms at 8
+    lanes against 1.6-1.9 ms at 16 (one run, 3-4 sampled frames a block).
+  - **Both programs at 8 lanes, then the rule (2026-11-19).** On t247 a toggle ran every wave32 split at 8 lanes in
+    odd 6 s blocks (`togall2`, warm cache). The sampled frame median was 31.56 ms at 8 lanes against 38.81 ms at 16,
+    the GPU sum 29-30 against 36-38 ms, and the sky stamp 0.80-0.87 against 7.2-7.4 ms. The layout now makes
+    8-lane parts the rule for a wave32 split on a host whose subgroups go down to 8 lanes
+    (`ShaderComputeWaveLayout.cpp`). With no toggle and a warm cache (`w8warm3`) the dunes ran at a 30.61 ms median
+    (32.7 fps, 46 one-second samples from 120 s; 30.2-30.6 ms in each 10 s window from 110 to 150 s), and the run
+    ended cleanly; the sky stamp was 0.85 ms in every 6 s block, so the 8-lane parts engaged. That is one run with
+    GPU profiling on, in one view; against t246 (`tog8`, 35 ms) the gain is about 4 ms. A second run without GPU
+    profiling (`w8np`) measured 29.76 ms (33.6 fps, 45 samples from 120 s; 28.9-30.6 ms in each window after 130 s). Two earlier runs did not measure it: `w8warm` lost the route on a pending tap and ended on
+    the title's command-buffer assert (`rip 0x9004a0c3e`), and `w8warm2` compiled 641 new modules in the dunes.
+    These figures cover the landing view (about 370 draws a frame). The sky costs 0.17-0.20 ms at the second rock in
+    every build, so the rule does not move that view: `w8warm3` reached it about 62 s after the hub state 7 (about
+    760 draws) and ran 36 ms a frame there, with render passes 19.2 against 11.2 ms and compute flat at 12 ms
+    (8 profiled frames). On arrival in the dunes both runs also sat at 43-53 ms for 5-10 s (`w8warm3` at 100 s,
+    `w8np` at 115-120 s). Held there without the GPU profiler (`rock2np`, from about 67 s after state 7: a wide shot of the
+    robot lying in the sand beside a half-buried controller), that view ran a 37.41 ms median (26.7 fps, 27
+    one-second samples at 756-772 draws a frame): about 4 ms short of 30 fps.
+    On the event-driven route with its inputs left running (`walk2`, no GPU profiler, captures at 36 and 44 s after
+    hub state 7 show the robot in a close follow camera crawling into the sandstorm while the driver held the stick
+    forward, every input accepted), the 5-second medians from 115 to 155 s ran 30.2-33.6 ms at 359-386 draws a frame
+    (worst one-second sample 34.9 ms, clock 2,400 MHz); arrival windows ran 32.6-45.0 ms with one-second spikes to
+    103 ms. The landing-spot figures above are this played crawl. The wide shot (757 draws) followed at about +67 s,
+    the same time as in `rock2np`, whose inputs stopped at +20 s, so it is not caused by idle input.
+    Whether the 8-lane sky draws the same image is still not shown, because the storm animates. Holding the pause
+    menu in the dunes does not freeze the frame either (`w8pause`): two captures 8 s apart in the same build differ in
+    543 of 921,600 pixels spread over the frame, and the menu darkens the sky.
+- **The vertex programs' translation overhead, timed (2026-11-19, offline and standalone).** Native code for the
+  five programs is 3.8-7.5 times their guest instruction count, but most of that excess is static: the zero-fill
+  arms of range-checked loads sit behind uniform branches and the scalar preamble runs once per 8 lanes. Timed
+  instead with the standalone vertex-shader test (2 M invocations, rasterizer discard, A770 ANV): a float FMA costs
+  about 0.0022 ms per million vertex invocations, a coherent independent load about 0.005, a dependent load about
+  0.04, plus about 0.19 fixed. Pricing each program's guest instructions that way (guest counts from the disassembly
+  logs of an older run, matched by hash; guest scalar instructions priced per lane, which inflates the floor) gives
+  a guest-only floor of 0.84-2.0 ms per million for `0xa2bb8f2d` (measured 1.5-1.9), 2.4-3.8 for `0x0c2ae56d` (4.5),
+  0.45-0.95 for `0x5c9f3e0a` (0.5-0.8) and 0.79-1.9 for `0x51485353` (1.45-1.6), from independent to dependent loads;
+  `0x4ea3083b` and the shadow programs have no measured price. The translation overhead's share is therefore
+  between about 0 and 56 % of each program's time, a ceiling of 0 to about 5 ms on the roughly 10 ms of vertex-bound
+  passes in the wide shot. The bucket is not closed, but removing the overhead that must stay (range checks, EXEC
+  handling) leaves it unlikely to deliver 4 ms alone.
+- **No compute program of the wide shot is left at 16 lanes (2026-11-19, offline).** All 78 compute modules dumped
+  in that view (`spv-w32-idle-rule`, rule build) were compiled with ANV and their statistics read: the 28 that spill
+  50 or more times all already run at 8 lanes (for example `0x3666fa39` 272:928, `0x91aaa78f` 594:1,989,
+  `0x28d8852c` 539:1,941), the narrowest width the host offers. The part-width lever that paid at the landing spot
+  has nothing left to move there.
+- **The wide shot is a cinematic; gameplay after it is command-bound (2026-11-19).** The 757-draw wide shot can
+  be skipped from the pause menu (options, down, cross), so it is a cinematic, not play. The user recorded a route
+  in pad-record mode that skips it and plays on (`astro-dunes-play-user2`); replayed from the hub events
+  (`play1`, `skipgeom1`), it reaches the same fights at 280-385 s, 35-170 ms a frame at 366-1,675 draws. With GPU
+  timestamps on (`play1`), the heaviest frames charged up to 43.8 ms to geometry passes, 42.6 ms of it to 638
+  one-group passes of `0xf4cfb9a5`; batching held (15-72 passes per output fill), so that sum counts the
+  timestamps' own serialization. Causal test without timestamps (`skipgeom1`): skipping that program's batched
+  pass in alternate 4 s blocks, keeping the fill and pull draw (prediction before the run: under 10 % gain at high
+  draw counts means an instrument artifact), gave no gain: medians 92.0 kept against 102.2 ms skipped above
+  1,200 draws a frame, 45.9 against 44.9 ms below 800. Per frame in that run, the light frames (about 750 draws,
+  37-40 ms) kept the render engine 88-93 % busy, while the heavy ones (about 1,570 draws, 92 ms) kept it 35-63 %
+  busy, with fence and register waits under 1 ms. There the command processor ran 76 ms a frame, 68 ms of it in
+  draw processing (43 us a draw against 29 us in the light frames): state setup 28.5 ms, texture descriptors
+  17.1 ms, pipeline setup 6.8 ms. By utilisation the heavy gameplay frames wait on recording more than on the GPU,
+  but the GPU still has 32-58 ms of work in them, so both sides must shrink for 30 fps there. A CPU profile of the
+  command processor over 345-385 s (`perfplay1`, flat, no call chains) put about 29 % of that thread in the
+  per-draw resource parse under `ShaderParseUsage2` (`ShaderIsDynamicScalarStorageConsumer` 6.6 %,
+  `ShaderAddDynamicSLoadMapping` 2.9 %, `ShaderFindImageSamplerDescriptor` 2.7 %) and 3.4 % in
+  `GraphicsRenderDepthSliceArray`. The same route point at about 342-345 s holds a one-second stall in both runs:
+  176-220 MB of uploads and 58-70 object creations in that second, one draw spending 828 ms in texture descriptor
+  binding in `perfplay1` (where the profiler also started at that second) and the worst frame at 145 ms in `skipgeom1`.
+  A third run (`skipdraw1`) skipped every draw of the particle geometry program `0xf4cfb9a5` on the CPU in alternate
+  4 s blocks (test-only, not a fix). In the fights those draws number about 470-640 a frame and cost about 50 us of
+  command time each against 29 us for an ordinary draw (state setup 21 against 10.7 us, texture descriptors 13 against
+  6.6 us), and they add about 55 render-pass begins a frame. Without them the fight frame drops to about 39 ms with the
+  render engine 95 % busy, so 30 fps there needs both the command cost and the GPU work cut.
+  Re-read on GPU work per frame (render busy share times frame time; added 2026-11-20, after `cpspin1` showed that
+  measure independent of command-thread time; no run yet shows it falling when known GPU work is removed): over the
+  band t 280-350 the skipped blocks lost only about 150 draws a frame (737 against 589), because most blocks
+  skipped 65-260 draws a frame. In the three blocks that skipped 300-460 a frame (t 340-360) the scene changed
+  between neighbouring blocks (GPU work 31.7, 31.3 skipped, 41.9, 34.4 skipped, 25.7 ms), so these draws and the
+  render-pass breaks they cause are not priced by this run. `skipgeom1` gave 34.5 kept against 32.6 ms skipped with
+  more draws in the skipped blocks (716 against 673). A hoist of the geometry compute out of the render pass stays
+  unpriced. The resource parse of
+  those programs (2,378-2,873 instructions) compares 65-78 dynamic scalar-load records against 57-74 buffer accesses
+  per draw. After about 350 s the skipped run diverged into a lighter scene (330-380 draws, 27-29 ms, GPU-bound).
+  Most fight seconds sit at 700-1,200 draws, at 48-51 ms a frame with 41-48 ms of command time (`perfplay1`,
+  `skipgeom1`, `smask2`), so that band is command-bound.
+- **Register filter on the dynamic storage consumer lookup (excluded, 2026-11-19).** A bitset of the destination
+  SGPRs of storage scalar-load records, tested before the record scan in `ShaderIsDynamicScalarStorageConsumer`,
+  hardly rejects anything: the queried loads read through registers that storage records do write, and only the pc
+  range tells them apart. Against `ShaderParseUsage2` self time the function went from 3.0x to 2.8x, the same drift as
+  the untouched `ShaderAddDynamicSLoadMapping` (1.34x to 1.30x) (`smask2` against `perfplay1`). Caching the relation
+  per program does not apply either. Pc, destination register and consumer range are fixed by the code, but whether a
+  record exists, and its `resource_index`, depend on the draw's descriptor words and storage table. Even at zero cost
+  this lookup and the add scan together are about 7 % of the command thread, roughly 5 ms of 85 in a heavy frame.
+- **Where the per-draw resource parse goes (2026-11-19).**
+  - **Gen5 GS-front user-data table: excluded as a lever.** Its 28-dword table repeats (2 distinct contents per 1,000
+    calls at 51-216 addresses). But the call runs with `code == nullptr`, holds 2 loads and costs about 100 calls a
+    frame, so it is not the hot parse.
+  - **The hot parse is the pixel stage.** Pixel parses with at least 40 dynamic records take 150-320 ms of command
+    time per second in the fights, roughly a fifth of the command thread. One program alone runs 2,000-10,000 calls
+    a second at 18-33 us each. All pixel parses run at about 14,500 a second, roughly one per draw, so nothing is
+    duplicated within a draw.
+  - **A memo keyed on the whole EUD cannot hit.** Its contents differ on almost every draw.
+  - **Within one program and one record skeleton, only the base word changes.** In the top program (116-dword EUD)
+    the dwords that differ between draws are 92, 96, 100, 104, 108 and 112. Each is word 0 of a storage V# loaded by
+    a scalar load (records at 92-115). User SGPRs other than the EUD pointer, the sharps and every other EUD dword
+    stay equal.
+  - **This reopens the recipe slice excluded in `docs/bringup/cp-draw-plan.md`.** That slice did not mask
+    dynamically loaded V#s, and those are exactly the words that vary here. The record covers one program before
+    about 210 s; the program with 13-19 skeletons a second and the fight after 277 s are not yet measured.
+  - **Offline check with the resource fold replay.** Six heavy pixel parses (EUDs of 28-188 dwords) replay byte
+    for byte. Each read only the EUD snapshot, as two reads. In the 188-dword capture:
+    - adding to word 0 of a dynamic storage V# changes only that buffer's `fields0`;
+    - changing word 2 changes only `fields2`;
+    - moving the EUD pointer changes only `extended.data0`;
+    - a texture word changes the deduplication instead (`resource_index` and the sampler mask).
+
+    Two consecutive capture pairs are byte-identical: the same draw parsed twice, pointer included.
+  - **Most pixel parses do not run on the command thread.** A per-thread timer on the stage input analyses
+    (temporary diagnostic, fight from 265 s) gives:
+
+    | Thread | Pixel analyses per second | us each | ms per second |
+    | --- | --- | --- | --- |
+    | Command processor | 5,556 | 21.0 | 117 |
+    | Draw front 1 | 6,584 | 13.3 | 88 |
+    | Draw front 2 | 6,704 | 13.1 | 88 |
+
+    - The draw fronts hand over about 12,300 prepared indexed draws a second.
+    - About 820 a second go stale after a host write, and 370 arrive while the fronts are idle.
+    - The rest of the command thread's 5,556, about 4,200 a second, are not prepared by the front. That is a
+      subtraction, not a count. Auto draws, indexed indirect draws and geometry-pass draws all take this path
+      (`docs/bringup/performance-architecture-plan.md`), and their split is not yet counted.
+    - The vertex analysis adds 18 ms a second on the command thread and compute dispatches 14 ms.
+  - **So shader analysis is the smaller part of the particle cost.** The command thread's analysis totals about
+    135 ms a second (pixel 117, vertex 18), roughly 7 ms of a 48 ms frame. The particle draws cost 23-32 ms a frame,
+    so most of their command time is spent after the analysis, including on draws the front prepared.
+    - A pixel template would mostly speed up the front threads.
+    - Neither the template nor more prepared draws can win more than about 5-6 ms a frame in the fight band.
+    - The earlier 150-320 ms a second "of command time" was a sum over all threads.
+  - **Where the fight's command time goes per draw.** Draw-stage timers from the performance snapshot, fight from
+    272 to 322 s, 18,400 draws a second, command processor busy 834 ms a second:
+
+    | Stage | us per draw | ms per second |
+    | --- | --- | --- |
+    | State setup (includes the shader analyses) | 12.6 | 228 |
+    | Resource binding | 13.3 | 242 |
+    | of which texture descriptors | 8.3 | 151 |
+    | of which descriptor finalize, storage descriptors | 2.1, 1.5 | 39, 27 |
+    | Pipeline setup | 2.6 | 47 |
+    | Command emission, materialization | 1.8, 1.4 | 33, 25 |
+    | Dispatches, all stages | | 92 |
+
+    Texture descriptor binding is the largest single stage, at about a seventh of the command thread.
+  - **The texture stage replay barely hits in the fight (excluded as the lever, 2026-11-19).** Temporary counters
+    in the texture stage replay, fight band t 265-322, three runs (`texreuse1`, `texside1`, `texshadow1`):
+    - Of about 16k texture binds/s, the replay hits 660-1,250/s. A hit costs 0.5-0.6 us; a miss costs about 10 us.
+    - About 3.8k binds/s are compute dispatches, which the replay never serves (4.4 us each).
+    - Most entries are never stored. Per second, 4.3-7.9k stores are refused for side work and 2.2-4.1k because a
+      texture create was not a cached reuse; about 940 are stored.
+    - The first side-work mark is mostly the array prefix-layer check (2.3-5.4k/s), then the storage alias
+      choice (1.5-2.0k/s) and the colour DCC clear consume (about 450/s). Arrays without a second layer never
+      reach the registry query, but narrowing the mark to two or more layers changed nothing: these arrays have
+      at least two layers.
+    - Shadow entries that kept refused stores show how many would have hit: about 2.1k/s behind the prefix-layer
+      mark, 1.2k/s behind the storage alias, 1.6k/s behind uncached creates and about 170/s lost to eviction.
+      The object-graph generation was unchanged for all of them; the process-wide image stamp changed every
+      time, so it cannot serve as a replay token.
+    - Serving every would-hit saves at most about 40 ms/s, about 1.7 ms per frame. Removing the whole texture
+      stage would save about 7 ms per frame (48 to about 41 ms), above the recorded GPU floor of about 39 ms.
+      Neither reaches a 33 ms frame.
+  - **Auto draws analysed on the draw front (2026-11-20).** Temporary counters on the command thread's pixel
+    stage parse, fight band t 265-322 (`pssite1`): per second, 3,628 parses for auto draws that run as a geometry
+    pass, 1,101 for other auto draws, 957 for indexed draws the front did not prepare and 53 for indirect draws.
+    Auto draws are 83 % of the parses left on the command thread, because the draw front never prepared them.
+    - Change: the draw front admits `DRAW_INDEX_AUTO` (and its `NOP` form) like an indexed draw and prepares the
+      vertex, geometry-pass and pixel inputs with the same analysis the command thread runs; the shader ids of a
+      geometry pass stay on the command thread, which writes the pass output address into its inputs.
+    - Equality: a temporary compare analysed every prepared auto draw again on the command thread and compared the
+      vertex, geometry-pass and pixel shader ids. A forced flip of one field reported exactly one mismatch
+      (`autocmp1`). With the route driven (`autocmp3`), 758,265 prepared auto draws, 105,265 of them in the fight,
+      gave no mismatch. In the fight 46 % of the auto draws were prepared.
+    - Speed, fight band t 265-322, route driven to the dunes in every run (`event 6->7` seen). `nolever1` is the
+      base commit with only the stdout line-buffer switch; `autolever2` and `autotake1` carry the change, and
+      `autotake1` also ran temporary take counters. Render busy is the share of wall time the render engine was
+      busy, from the kernel's per-client cycle counters.
+
+      | Run | fps | Draws/frame | State setup, us/draw | Draw processor, us/draw | Command thread, ms/frame | Frame p50, ms | Render busy |
+      | --- | --- | --- | --- | --- | --- | --- | --- |
+      | `nolever1` | 22.4 | 704 | 16.2 | 41.7 | 40.8 | 47.2 | 75 % |
+      | `autolever2` | 28.6 | 641 | 7.9 | 29.5 | 29.4 | 35.8 | 90 % |
+      | `autotake1` | 28.4 | 749 | 6.9 | 24.8 | 28.8 | 36.0 | 89 % |
+
+      Heavy seconds (at least 650 draws per frame, t 200-325): `nolever1` 19.4 fps (p50 52.5 ms, command thread
+      47.9 ms/frame, render busy 71 %), `autotake1` 29.2 fps (p50 35.1 ms, 27.2 ms/frame, 92 %). The base runs
+      `pssite1` (26.6 fps, 626 draws per frame) and `texreuse1` (25.9 fps, 655) carried temporary counters; per
+      draw they cost the same as `nolever1` at t 100-150 (state setup 14.7-15.1 against 14.6 us), so the gap in the
+      fight band comes from the scene each run reached, not from the counters. Across the three base runs the fight
+      ran 22.4-26.6 fps; with the change it ran 28.2-28.6 fps.
+    - What stays unprepared (`autotake1`, fight band): per second about 2,400 draws reach the command thread
+      without a record. About 1,650 arrive while the fronts are idle after a stop (the draw that restarts them),
+      and about 770 are indexed draws the fronts had not reached; about 18,700 draws per second are taken
+      prepared. The fronts stop per second on
+      `R_CONTEXT_STATE` (535), `ACQUIRE_MEM` (422), `RELEASE_MEM` (338), `EVENT_WRITE` (338) and `SET_BASE` (28).
+      Preparing those draws as well would save at most about 1-1.5 ms per frame.
+    - Indexed geometry-pass draws are not the gap (2026-11-21, `geoprep2`, temporary per-kind counters, route
+      driven to the fight). Of 2.0M draws reaching the command thread: indexed 907,801 prepared and 150,960 not;
+      indexed geometry passes only 5,451, none prepared; auto geometry passes 699,564 prepared and 100,559 not; other
+      auto draws 135,665, none prepared. Letting the indexed path take prepared geometry-pass inputs (as the auto
+      path does) prepared none of them in `geoprep1`/`geoprep2` and was reverted.
+    - Three more per-draw levers excluded (2026-11-21, `c21ad6e29`):
+      - Merging runs of `DRAW_INDEX_INDIRECT` into one multi-draw: a temporary counter (`indir1`, fight route, 200 s)
+        saw about 65 indexed indirect packets a second (2-3 a frame), none following the previous one at a constant
+        argument stride, and no `DRAW_INDIRECT`. Not measured on other titles.
+      - Moving shader input analysis and ids off the command thread: a draw taken from the draw front already skips
+        `ShaderGetInputInfoVS/PS`, usage parsing and id building; what remains on the command thread for it is the
+        descriptor walk (`BindDescriptors`), the subject of the binding-snapshot design.
+      - Remembering the last synchronization of a written storage range: a repeated writable bind already returns from
+        the same-submit object cache without a tracker call, and across submits `ChangedSince` against the object's
+        per-block `dirty_generation` is that memo; the index update left on each writable reuse is a few set
+        operations.
+    - Causal check with the change (`cpspin1`): a temporary busy wait of 6 us after every draw on the command thread,
+      on in alternate 4 s wall-clock blocks, so both arms share the scene. Seconds that cross a block edge are left
+      out.
+
+      | Band | Blocks | Seconds | fps | Draws/frame | Command thread, ms/frame | Frame p50, ms | Render busy |
+      | --- | --- | --- | --- | --- | --- | --- | --- |
+      | t 100-200 | off | 38 | 33.5 | 490 | 22.9 | 30.8 | 93 % |
+      | t 100-200 | on | 35 | 34.3 | 467 | 24.7 | 30.1 | 92 % |
+      | fight, t 265-322 | off | 21 | 23.9 | 794 | 34.2 | 43.3 | 87 % |
+      | fight, t 265-322 | on | 21 | 23.5 | 762 | 38.9 | 44.6 | 85 % |
+      | t 200-325 | off | 46 | 29.9 | 650 | 27.2 | 35.7 | 90 % |
+      | t 200-325 | on | 44 | 28.6 | 645 | 32.4 | 37.4 | 87 % |
+
+      Before the fight the added command-thread time does not move the frame. In the fight and the band after
+      t 200 the frame grows by about 0.3 ms per added millisecond (1.3 of 4.7, 1.7 of 5.2) and the render engine
+      stays at 85-90 % busy. GPU work per frame (render busy share times frame time) does not move with the
+      wait: 36.4 against 36.2 ms in the fight, 30.1 against 30.4 ms after t 200. The command thread sets at most
+      about a third of the frame at the margin (21 seconds per arm, the on blocks about 4 % lighter in draws); GPU
+      work sets the rest in these seconds, but not in seconds with many particle draws (next bullet). The same measure gives 31.5 ms (`autolever2`), 31.3 ms (`autotake1`) and 33.5 ms
+      (`nolever1`) in the fight; at the best busy share seen (93-95 %), a 33.3 ms frame holds about 31 ms of GPU
+      work. In the heavier fight the command thread itself (34.2 ms/frame at 794 draws) is also over budget.
+      This run reached a heavier fight (about 790 draws per frame) than `autotake1` (749) and ran it at
+      23.9 fps, so the fight rate still depends on how many objects the scene holds.
+    - `PPSA17221 - Minecraft` world (`mcauto1`, 12 s of world before the usual zombie death, about 5,100 draws per
+      frame): state setup 1.60 and draw processor 5.13 us/draw against 1.56-1.58 and 5.28-5.61 in `mcw8` and
+      `mcw8b`; no loss. The death-screen capture rendered normally.
+  - **Particle draws on the command thread (2026-11-20).** All runs drive the route to the dunes fight
+    (`event 6->7` seen) on the draw-front change above; every counter named here is a temporary diagnostic.
+    - Particle cost (`skipp2`): the particle vertex program (`0xf4cfb9a5`) skipped in alternate 2 s blocks. In
+      seconds with 300-720 particle draws per frame the frame goes from about 23 to about 33 fps when they are
+      skipped; the command thread saves 13-29 ms per frame and GPU work 2-4 ms. Those seconds are bound by the
+      command thread (37-45 ms per frame against 31-32 ms of GPU work). One particle draw costs 33-38 us in the
+      draw processor: resource binding 14-18, texture descriptors 11.5-14, pipeline setup 5-7, state setup 6-8,
+      emission about 4.
+    - Texture-stage replay does not reach them (`partrun1`, `partwhy1`). The geometry-pass compute stage of a
+      particle draw binds the same textures every time, but replaying it saves only about 0.6 us per draw. The
+      pixel stage binds the same textures as the previous particle draw 57-78 % of the time, yet no bind is ever
+      stored for replay, because every one does side work.
+    - Which side work (`partside1`, `parttime1`): every particle pixel bind samples a depth array view (the depth
+      slice array) and a storage alias with CPU-write merging. The texture stage costs 14.9 us per particle pixel
+      bind; 10.0 us of it is the depth slice array read, and the CPU-write merge and the prefix-layer check
+      together take 0.13 us.
+    - The slice array read (`slicearr1`, inner timers): 33,200 reads per second in the fight (up to 50,000), each
+      over 9.5 layers. Per layer the read looks up the depth images over the layer and plans the copies; 99.99 % of
+      the layers are already current, and about 20 reads per second record a copy.
+    - Change: a slice array keeps a record of its last read when every layer came from depth images: the view
+      (address, layer size, format, pitch), the submission, the GPU memory frame, the object graph generation, each
+      source image with its content stamp and depth slice, and each layer's state. A read that matches the record
+      returns the array without the walk. A read that touches guest memory, or that took the lookup over objects of
+      every type, keeps no record.
+    - Equality (`sliceread-check1`, `sliceread-ctrl2`): a temporary check mode ran the full read after each match
+      and counted matches whose read recorded work. Real key: 0 of 2.9 million and 3.5 million matches (97-98 % of
+      the fight reads matched). Positive controls in the same run: a key that keeps only the record's validity, and
+      one that also checks view and layer states but no image stamps, submission, frame or generation, each
+      reported 8,589 matches that would have skipped a copy. The image stamps alone, without submission, frame or
+      generation, reported none.
+    - Speed (`sliceread-ab1`, the record used in alternate 4 s wall-clock blocks, 21 fight seconds per arm, a
+      fight with about 3,000-3,400 particle pixel binds per second): texture stage per particle pixel bind 14.2 ->
+      6.2 us (slice array read 8.7 -> 1.1 us); command thread 44.0 -> 41.9 us per draw. The fight in this run
+      was bound by the GPU (render busy 91 %) and its fps did not move (28.5 against 28.3). In a fight second with
+      12,000 particle pixel binds the same saving is about 4 ms per frame of command-thread time; that is not yet
+      measured as fps.
+    - `PPSA17221 - Minecraft` world (`mcslice1`, 43 world seconds, about 5,300 draws per frame): state setup 1.48
+      and draw processor 4.72 us per draw against 1.56-1.60 and 5.13-5.61 before; no loss. The death screen
+      rendered normally. Unit tests (2,817) and the three repository gates pass.
+    - After the change (`slicegen1`, clean build, fight 200-322 s): seconds with 600-800 draws per frame take
+      29.1 ms per frame of command-processor time and 34.3 ms of GPU work in a 37.9 ms frame, at 91.5 % render
+      busy (`autolever2`: 31.4, 33.8 and 38.4 ms, 89 %). Two runs with different scenes, so the command-time
+      difference is not a measured saving. The render busy figure is Kyty's own share of the engine, so about
+      2-3.6 ms a frame is unattributed (idle or other clients), while fence waits take 2.6 ms a frame (64 waits a second, up to 4.5 ms each). A temporary counter of fence
+      waits by caller (`fencesite1`, fight 265-322 s) puts 20-80 ms a second of them (19-35 waits of up to 6 ms) on
+      the window thread, in the final wait of `WindowDrawBuffer` for its present blit, and 1-4 ms a second on the
+      command processor (`WaitRegMem64` through `WaitSubmission`). The command processor's own fence waits are too
+      small to explain the unattributed time; whether the window thread's wait delays the guest's next frame (flip
+      completion is published only after that wait) is not measured.
+    - Frame pacing in the fight (`fliphist1`, temporary histogram of flip-completion intervals, 265-322 s, 1,468
+      flips, 29.6 fps fight with mostly 400-600 draws a frame): intervals run 26-40 ms, with peaks at 28-30 and
+      34-36 ms that come and go between 10-second windows (200-270 s peak at 32-34 ms). Both displays run at
+      120 Hz (8.3 ms) and the peaks are not on its multiples, so presentation does not round frames to a host
+      vblank. Kyty's share of the render engine in the window is 94 % from 14 readings; the compositor's
+      counters are not readable, other readable clients use 0 %.
+    - Where the fight's GPU time goes (`gpuprof-fight2`, temporary timestamps around each pass and dispatch, 39
+      profiled frames at 265-322 s). Each stamp serializes the work it brackets, so the frame sums (command buffers
+      45.8 ms) are above the unprofiled 31-34 ms; read them as shares. Render passes 22.9 ms, compute 10.9, geometry
+      compute 8.1, barriers and fills 0.2. Largest items per frame: 1920x1080 five-target pass with pixel program
+      `0x6bcfb82d` 8.0 ms (113-221 draws); particle geometry program `0xf4cfb9a5` 6.9 ms (single-group dispatches,
+      10-245 per frame, batched into segments with no barrier between dispatches, so the per-dispatch stamps
+      inflate it; `skipp2` bounds the particles' real GPU cost at 2-4 ms); lighting compute `0x3666fa39` 5.7 ms;
+      2048x2048 shadow pass 3.7 ms (about 290 draws); 1920x1080 pass with `0x860593d6` 2.6 ms. Barrier and fill
+      time is about 0.2 ms a frame, so it is not where the unattributed engine time comes from.
+    - The unattributed engine time is not resolved by idle residency (`gtidle1`, `fullscr1`, the render tile's
+      idle residency read once a second). In the fight it reads 0.1-0.4 % while Kyty holds 89-95 % of the
+      engine, but it also reads 0.6 % in pre-fight seconds that run at 58 fps under the 60 fps limit and so
+      have slack by construction. Idle residency therefore does not register gaps at frame scale, and the rest
+      (5-23 %) mixes other clients with short idle. Readable other clients: the desktop app about 2 %, the
+      shell 0 %; the compositor is not readable. A fullscreen run (`fullscr1`) moved Kyty's share in the 400-800
+      draw seconds from 92 to 95 %, inside the spread between windowed runs (89-94 %), and nothing in the log
+      confirms that composition stopped: inconclusive.
+    - Price of the ray traversal kernel `0x3666fa39` (`skipcs1`, its dispatch skipped in alternate 4 s blocks
+      of one run from 200 s, 95-180 matched dispatches per block, the frame image wrong in skipped blocks).
+      Seconds with 200-400 draws a frame (28 per arm): GPU work 25.2 -> 20.3 ms a frame, 37.2 -> 43.9 fps,
+      command thread 19.1 -> 18.9 ms. Seconds with 600-800 draws (6 per arm): GPU 35.8 -> 30.5 ms, 25.5 -> 26.8
+      fps, command thread 29.9 -> 32.4 ms. The kernel (the first ray traversal kernel of the earlier records; the profile bullet above calls it lighting compute) costs about 5 ms a frame. In light seconds the frame
+      follows the GPU work, which is the first positive control of the GPU metric; in 600-800 draw seconds
+      the frame stays 3.4-4.9 ms above the larger of command and GPU time; with 6 seconds per arm and draws
+      and command time differing between arms, how much of the GPU saving reaches those seconds is a lead,
+      not a measure.
+    - Where the GPU waits (`gpugap2`, temporary start and end stamps on every command buffer of six
+      consecutive frames, gaps read between the first start of the third frame and the last end of the
+      fourth so that neighbouring frames' work is inside the window; 96 windows). A frame's buffers run
+      over about 2.7 frame periods, interleaved with its neighbours. Inside the window the render queue has
+      no Kyty work 11-12 % of the time in every draw range (600-800 draws: 11.9 ms of a 100.7 ms window,
+      about 4.4 ms a frame): about 5 gaps a frame of 0.2-1.7 ms (0.55 ms on average, about 2.8 ms a frame)
+      and many gaps of about 0.02 ms between buffers. Not all of it is idle: the stamped buffers are 99.2 % of
+      the submits in the same seconds (4,485 of 4,521), yet the engine-busy counter gives Kyty 0.8-2.1 ms a
+      frame more than the stamps cover, unattributed (submits range only 30-38 a frame, so a cost per submit
+      and a cost per load cannot be told apart). The engine is idle 2.2-2.5 ms a frame above 400 draws by that
+      counter, which also includes other clients (the desktop app takes about 2 %, about 0.7 ms), so at most
+      about 1.5 ms a frame is recoverable from timing alone, against about 3.5 ms that 30 fps needs there.
+    - What ends the buffer before each gap (`gapsite1`, the submitting call stack recorded per buffer).
+      Per frame: the split of recorded dispatches before a draw (the Intel draw-after-dispatch workaround)
+      about 2.2 ms; the early submit of recorded work when the queue is idle about 1.7 ms; the flush before
+      a guest wait on memory about 0.85 ms; the end of a guest ring batch about 0.5 ms. In each case the GPU
+      finishes what was submitted before the command thread has recorded the next batch.
+    - Excluded: removing the early-submit floor. With the batch floor (8 operations) and the interval floor
+      (1.5 ms) both off in alternate 4 s blocks of one run (`greedy1`, about 130 early submits per 4 s with
+      the floor, 230-260 without): 400-600 draw seconds 35.5 -> 34.1 fps (23 per arm), 600-800 25.4 -> 25.7
+      (12-15), 800-1000 25.0 -> 21.8 with command time 32.9 -> 43.3 ms (6-8). No frame-rate gain from this
+      switch; the run had the profiler off, so whether the gaps shortened was not measured, and the arm also
+      ran the idle check on every operation, which raised command time.
+    - Excluded in the fight: longer geometry segments. A temporary counter (`geoseg1`, 200-275 s, 33 fps,
+      590 draws a frame) found about 44 geometry passes a frame in about 4 segments: about 2 of one pass and
+      about 2 of 16 or more passes. About 3 segments a frame opened in a command buffer with no segment yet
+      and 1 after recording outside a render pass (the counter does not link either cause to the one-pass
+      segments). No pass went unbatched or hit the chunk limit. Passes of a segment
+      overlap (dunes record above), so joining the two one-pass segments would save at most about two pass
+      latencies, about 0.4 ms a frame.
+    - Excluded in the fight: render-pass breaks. A temporary counter (`rpbrk1`, 200-275 s, a lighter stretch
+      at 37 fps and 334 draws a frame) recorded the call stack of every render-pass end and whether the next
+      begin reopened the same framebuffer: about 56 ends a frame were followed by a begin, of which about 5
+      reopened the same framebuffer (one site about 2.9, another about 1.6); the rest moved to another
+      target, as the guest's passes require. At the 0.04 ms or less per instance of the cheapest stamped
+      pass, removing the reopens bounds the gain near 0.2 ms a frame. The heavier 600-800 draw seconds were
+      not reached in this run.
+    - The fight's five-target pass is vertex-bound at the rock-2 price (`vfsplit1`, the 11-19 pipeline-statistics
+      instrument, 86 profiled frames at 200-322 s). Fit over frames: `ms = 2.23 x M vertex invocations + 0.48 x M
+      fragment invocations + 0.146 x passes + 0.53` (rms 0.40 ms), against 2.27, 0.60 and 0.155 at rock 2. Means
+      a frame: 3.0 M vertex and 3.1 M fragment invocations, 9.2 ms, of which about 6.7 ms is vertex work by
+      the fit (stamped time, no control arm in the fight). In the same frames the shadow pass
+      (`ps 0x0ff8a6ab`) runs 4.0 M vertex invocations in 3.2 ms (0.8 ms a million) and the one-target pass
+      (`ps 0x860593d6`) 2.1 M in 2.35 ms (1.1 ms a million). The price per vertex invocation matches rock 2;
+      the program mix in the fight was not counted.
+    - What the heavy fight seconds add (same runs, profiled frames split at each run's median draw count:
+      about 400 against 700-760 draws a frame). Stamped totals: `gpuprof-fight2` 31.3 -> 44.9 ms, of which
+      geometry passes 2.2 -> 7.0, render passes 16.4 -> 23.3, compute 10.4 -> 10.8, unstamped remainder
+      2.2 -> 3.7; `vfsplit1` 32.6 -> 42.6, geometry 2.1 -> 5.6, render passes 17.5 -> 22.3. The largest
+      increments by program are the particle geometry pass `0xf4cfb9a5` (+3.5 to +4.8 ms), the 2048x2048
+      shadow pass (+2.0 to +2.35) and the five-target pass (+1.2 to +2.1). Stamps serialize what they wrap,
+      so the geometry figures are inflated where passes overlap. In the clean `slicegen1` run the command
+      thread takes 23.8 ms a frame at 400-600 draws and 28.4 at 600-800, below the 36.6 ms frame there; the
+      frame follows about 0.3 of a command-time change (`cpspin1`), so both sides count. Heavy profiled
+      frames carry 87-123 particle geometry passes against 14-16 in light ones.
+    - The fight has two regimes (`skipp2` re-read by route time). That run skipped every indexed and
+      automatic draw of vertex program `0xf4cfb9a5` in alternate 2 s blocks from 200 s; skipped draws leave
+      the draw count, so binning its seconds by draws a frame compares different scenes, and a first read
+      binned that way (no GPU change in the 600-800 bin) is withdrawn. Read block by block against the
+      neighbouring blocks:
+      - Particle bursts (271-275 s and 311-321 s, where the skip arm removes 200-600 draws a frame): base
+        18-26 fps, skip 27-33 fps; engine-busy GPU time 35.5 -> 31.1 ms a frame at 271-275 s and about
+        32.6 -> 29.7 ms at 311-321 s; command time 29-49 -> 20-25 ms. The particle work costs both sides there.
+      - Steady stretch (285-305 s, 650-790 draws a frame): the arms differ by only 40-100 draws a frame;
+        25-29 fps, GPU 33-37 ms and command time 24-30 ms in both. Too few draws are skipped there to price
+        the particles; the gap to 30 fps in this stretch is scene GPU work.
+      Runs without an engaged probe on later builds agree on the 600-800 seconds: `sg16clean1` 27.9 fps,
+      engine 95 % busy, GPU 34.0 ms, command time 26.6 ms (28 seconds); `slicegen1` 27.3 fps, 91 %, 33.6 and
+      29.1 ms (49 seconds). Above 800 draws a frame the reads split by run: `sg16clean1` 25.0 fps, 78 % busy,
+      command time 36.6 ms, GPU 31.5 ms (11 seconds), while `geoseg1` (counting probe) read 24.3 fps, 94 %,
+      31.8 and 38.5 ms (6 seconds); `slicegen1` has no such seconds. Bursts therefore need both sides, about
+      30 ms of command time and 31 ms of GPU time. The GPU clock read 2,400 MHz in every fight second of
+      `sg16clean1` and `geoseg1`; `slicegen1` dipped to 2,160 MHz.
+    - Excluded: pixel programs at 16 lanes. On the A770 the driver may build each pixel program at 8, 16 and 32
+      lanes and drops 16 when it would spill, so a spilling program like `0x6bcfb82d` runs at 8. Vulkan offers no
+      in-spec way to ask for 16: the driver's `requiredSubgroupSizeStages` covers compute, task and mesh only, and
+      Kyty correctly never requests a size for the fragment stage there. A first temporary switch that asked for
+      16 through Kyty's support check never engaged, so its runs (`sg16prof1`, `sg16clean1`) only show scene
+      variance (passes 30 % apart between runs with nothing changed). A second temporary switch built every
+      pixel pipeline twice, the twin with a required size of 16 outside the spec, and swapped them in alternate
+      4-second blocks of one run (`sg16ab3`, warm cache, 401 twins, 47 profiled frames per arm at 683-700 draws a
+      frame): render passes 15.14 -> 15.26 ms, command buffers 32.44 -> 31.77 ms, several passes 0.14-0.30 ms
+      slower. The noise between blocks with no change is about 1.4 ms (`sg16ab1`). The switch did not count how
+      many binds took a twin or confirm that a twin's kernel differed, so the run only says that forcing 16 on
+      every pixel pipeline, spills included, shows no gain; the lever is dropped because it cannot be requested
+      in spec on this driver.
+    - Remaining command-thread levers in the fight, priced (2026-11-20). Fight seconds below 29.5 fps in
+      `fps16fix` (old route driver, warm cache, no temporary profiler, 6->7 +30..229 s; GPU-bound means render
+      busy at least 90 %, rows with an invalid busy counter dropped): 79 bound by the GPU
+      (27.9 fps, render busy 95 %, 619 draws and 25.7 ms of command time a frame) and 44 bound by the command
+      thread (21.1 fps, 71 %, 1,023 draws, 45.8 ms of command time a frame against about 33.6 ms of GPU work).
+      Bringing the second kind to the GPU floor needs about 12 ms a frame, about 11 us per draw.
+      A call-graph profile of the command thread (`profcg3`, 30 s from 40 s after 6->7, 24.6 fps, 703 draws a
+      frame), samples grouped by the innermost Kyty frame, is flat: the per-draw usage parse 8.8 % (excluded
+      twice as exact memo and per-shader recipe, `docs/bringup/cross-title.md` and
+      `docs/bringup/cp-draw-plan.md`; the recipe was reopened on 2026-11-19 for the dynamically loaded V#
+      words, see "Where the per-draw resource parse goes" above, and is not built), the label write-back page compare 4.4 % (`memcmp` of pages the GPU flagged
+      written, against the snapshot), statistics 3.4 % (switching them off was not detected,
+      `docs/bringup/parallel-recording-design.md`), the end-of-pipe clock mark 3.3 % (1.7 % in the driver's
+      timestamp read), locks 5 % spread over many callers. Inside the auto-draw path (30.2 %): the pixel input
+      analysis of draws the front did not prepare 5.9 % (the front's take rate was already priced at 1-1.5 ms a
+      frame), and the pixel shader id 3.4 %, built on the command thread for every geometry-pass draw because
+      the front builds ids only without a geometry pass. The pass changes only the vertex inputs, so the front
+      could also build the pixel id there: about 0.7 us per draw. What is open and in-contract sums to about
+      2 us per draw against the 11 us needed.
+    - Per-draw decision reuse on particle draws, counted (`reuse1`, temporary counter, 187 fight seconds,
+      about 1,680 geometry-pass auto draws a second, each compared with the previous one): same vertex and
+      pixel pair 92 %, same pipeline 86 %, same framebuffer 93 %, but the pixel and the vertex user SGPRs
+      repeat in 0 % of them, so reusing the input analysis would need the excluded per-shader recipe. Not built.
+    - Built: the draw front now also builds the pixel shader id of a geometry-pass auto draw (the vertex id
+      stays on the command thread, since the pass writes the vertex inputs). Check (`psid1`, temporary,
+      the id rebuilt on the command thread and compared): 491,498 draws, 0 differences; a forged id every
+      1,000 draws gave exactly the 492 expected. Speed (`psidab1`, old and new in alternate 4 s blocks of
+      one run): seconds at 600 or more draws a frame, 48.4 +- 3.0 against 50.6 +- 2.5 us per draw of
+      command time (36.3 against 38.2 ms a frame, 23.9 against 23.8 fps, 20 seconds per arm); other seconds
+      equal. The direction matches the profile share, but the gain is inside the noise.
+    - Excluded: the present path delaying flips in the GPU-bound seconds. In the same 79 seconds the guest waits
+      0.09 ms a frame for flip completion and the present takes 0.03 ms a frame (0.30 and 0.04 ms in the
+      command-bound seconds).
+    - GPU side of the fight, priced (2026-11-20). In the GPU-bound seconds the GPU needs about 34 ms a frame, so
+      steady 30 fps would need about 2.5 ms of GPU work cut. The lighting kernel `0x3666fa39` costs 5.7-5.9 ms a
+      frame (8 lanes, 272:928 spills; leaving it out saves about 5 ms, `skipcs1`). Levers on it measured and
+      excluded or already taken: lane width (16 to 8 taken, 32 renders wrong), rendezvous, relaxed loads,
+      whole-wave masks, per-invocation cache (5.77 to 10.76 ms, reverted), first-lane node broadcast, the
+      address-table lookup (time follows the driver's spill placement, and the per-invocation memo gave no
+      frame-rate change; records of 2026-11-14). The split of recorded dispatches before a draw costs about 2.2
+      ms a frame of gaps, but halving the gap per buffer with `reemit` left the frame rate unchanged and removing
+      the early-submit floor (`greedy1`) gained nothing. Argued only, not measured: dropping LDS ordering
+      barriers (about 0.5 ms) and the compute-after-draw transition before the kernel.
+    - Excluded: one base for the four words of a raw 4-dword buffer load (2026-11-21, reverted). Driver timing
+      of light fight frames (`imeas5`, frames of 26-38 ms, 29.9 ms of GPU on average): compute 12.3 ms, the
+      lighting kernel 4.7 ms, the five-target pass (`0x6bcfb82d`) 3.3 ms, and the volume kernel `0x94df28b4`
+      (8x8x8 groups, 98,304 invocations) 1.5 ms. That kernel compiles to SIMD16 with 176 sends; 144 of them
+      come from 36 raw 4-dword loads, which the translator emits as four one-word loads, each dividing its
+      own byte offset by 4. Emitting them through the existing four-word helper (one base plus 0..3) left
+      the sends at 176 (`warm249`, compiler statistics): instructions fell from 3,559 to 2,803 and the
+      estimated cycles from 37,306 to 33,234, but the driver did not merge the words into one vector read.
+      Cause, read in the driver's vectorizer: the device enables `robustBufferAccess`, and for robust modes
+      two reads merge only if the largest possible low offset plus their distance cannot wrap 32 bits. That
+      bound comes from alignment and the address strides only: a 4-byte stride gives `0xfffffffc + 4`, which
+      wraps, so 4-byte words of unknown alignment never merge. Merging would need an alignment the guest does
+      not guarantee. No frame was measured; the change was reverted.
+    - Re-test of the recorded render-target scope exclusion ("Host render-target scaling, unpatched"):
+      `Fixed`, `RenderTargets`, 1440x810 (2026-11-21, `rt75`, `rt75b`), inconclusive. The scope plans only
+      targets of the display extent, so the main passes keep the guest's 1920x1080; no counter was read to show
+      any target scaled. Both runs left the fight route near 150 s (cause unknown: the scale, or another game
+      using about 1.3 cores and, in `rt75`, a foreign build), and their seconds were not GPU-limited (render
+      engine about 77 %), so they price no GPU lever.
+    - Host activity in the fight seconds (2026-11-21, `hs1`, `hs2`; a per-second host sampler of CPU and IO
+      pressure, `/proc/vmstat` compaction and THP counters, per-thread CPU and run delay, and other processes).
+      Every sampled second from 112 s on is the same fight scene by its per-frame signature (about 79-83
+      dispatches, 34-38 submits, 152 label waits, 56-61 render passes, as in `head248` 147-251 s); only the
+      draw count moves (about 600-950). Seconds with the kernel compaction thread at 50-99 % of a core ran at a
+      median 20.8 fps (`hs1`, 19 s) and 21.7 (`hs2`, 16 s). In `hs1` an unrelated game also ran in all of them,
+      and its seconds without compaction ran at 27.7 (62 s), so that is the `hs1` baseline; `hs2` seconds with
+      neither ran at 29.7 (23 s, including 145-151 s with the compaction thread at 48-49 %). Seconds with a
+      foreign parallel build ran at 8.8 and 9.3. In the compaction seconds the command thread kept its CPU share
+      (about 78 %) and run delay while every draw stage slowed about 1.6x and render-lock wait rose 10-20x; the
+      kernel migrated 20k-230k pages a second. Co-occurrence only: proactive compaction
+      (`vm.compaction_proactiveness` 20 on that host) was not switched off to test it. In both runs a burst
+      began within a second of a scene change (148 s, 144 s), with IO pressure and about 17k emulator page
+      faults a second; whether the emulator's own faults start it was not separated. The `head248` dips (155-157,
+      230-233 s) had no host samples and stay unattributed.
+    - Fight regimes in seconds with no other load: `hs2` 112-143 s, 430-830 draws: mostly 27.7-29.7 fps,
+      GPU-bound (render engine 98 %, fence wait 4-10 ms a frame), the same regime as `head248` 147-251 s;
+      `hs2` 172-176 s, 930-975 draws: 29.7-31.7 fps, command-bound (engine about 81 %, fence wait about 0.2 ms
+      a frame); `hs1` 245-251 s (7 s), 800-840 draws: 32.7-33.7 fps, GPU-bound (engine 96-97 %). The light
+      fight stays under 30 fps on a quiet host.
+    - Host fence waits by call site (temporary counter `fencesite`, runs `fs1`-`fs6`, reverted). About 1.5 ms a
+      frame is the presenter waiting for its own blit, off the command threads. On the command threads the
+      largest site is one compute queue's dispatches waiting for that queue's own submission five back, at
+      about 0.5-1 ms each. They come in scene-dependent bursts, up to about 100 a second (`fs1` 135-151 s and
+      204-252 s, `fs2` 103-165 s), and in the sampled bursts the render engine stayed 87-95 % busy. The return
+      is a guest-memory mutation conflict; which of its two reporters fires (a deferred alias storage or
+      guest bytes changed under a write-back-capable backing with pending uses) was not counted. Writers of
+      indirect arguments on the other compute queue are awaited on the device (about 65 a second). Whether
+      these host waits leave the GPU idle was not measured (the counter's drain check read the host's count
+      of unretired submissions, not the queue); the engine idle bounds the gain at about 0.7-1.4 ms a frame.
+    - Run `hs3` (binary from 0b6a1f477, same route, host sampler with per-process IO). The host was not quiet:
+      a foreign build ran until 157 s and desktop programs were busy around 230-251 s (the 3 fps seconds at
+      233-234). Of the 54 fight seconds from 170 s with no other load, 35 flipped 30 times, 11 29 and 7 28;
+      the 30-flip seconds had frame time p50 34 ms and p95 37 ms with about 1 ms of flip-done wait a second, so
+      the fight is not paced at 30 but GPU-bound at its edge, about 1-4 ms a frame short. Compaction bursts
+      (201-207, 228-246, 250-251 s) began without a scene change and ran the frame rate at 24-27 with the render
+      engine at 80-85 %. In those seconds `compact_daemon_wake` stayed about 0 and the reclaim thread was idle,
+      which is the proactive path (`vm.compaction_proactiveness`), not reclaim; emulator page faults (about 700
+      a second), IO (about 1 MB a second read) and Kyty allocations (about 200-240 MB a second, 120-150 creates)
+      were at their quiet level, so no emulator trigger was seen. Not tested with proactive compaction off.
+    - Fixed 05afcbc25: the first Vulkan pipeline-cache checkpoint of a session runs on the thread that missed
+      (`PipelineCache::SaveDriverCacheIfDue`, `GraphicsRenderPipeline.cpp:1440`). It serializes and writes the
+      whole blob even when one pipeline was added; at 76.5 MB on a slow cache volume it took 290 ms (`hs3` 185 s,
+      inside a 425 ms frame that also held 5 pipeline misses: 57 ms in pipeline creation, 23 ms in one SPIR-V
+      compile). The same checkpoint took 271 ms at 145 s in `head248` and 319 ms at 117 s in `hs1`. Writing the
+      same 76.5 MB took about 345 ms on that volume and 13 ms on a local one, so the write dominates there;
+      serialization and hashing on a local volume were not measured. The checkpoint now runs as one background
+      task; the cache lock covers only the driver read, and the next lookup collects the outcome for the write
+      budget and dirty state (a failed write marks the cache dirty again). Verified in run `ck1` (same route):
+      checkpoints of 78.2 MB took 335 and 375 ms in the background, and the 246 s second that held one had no
+      frame over 50 ms with a recording-thread maximum of 14 ms. The 540 ms frame at 215 s in that run is two
+      real pipeline misses (491 ms: SPIR-V source 81, compile 128, pipeline creation 278), not the checkpoint.
+      That run's fight drew about 560 draws a frame and flipped 35 a second, so its frame rate is not comparable
+      with `hs3`. `PPSA17221 - Minecraft` reached the world at 90 s with a clean capture and rewrote its cache;
+      326 graphics-state and pipeline tests and the three CTest gates passed.
+    - Fixed (record "Shader identity followed the guest's texture data" in `docs/bringup/cross-title.md`): warm
+      runs kept compiling because two guest programs split into 96 and 69 modules by texture data. After the
+      fix, run `sl8` compiled no module for them and counted no graphics pipeline miss from 150 to 248 s. Its
+      route reached the dunes branch at about 570 draws a frame, so its frame rate is not compared with `hs3`.
+    - Excluded: compute queues on the compute engine (`ccs1`, pricing probe, not a valid configuration). The
+      compute queues were moved to the compute-only family by skipping the depth copy-on-compute check for D16
+      and D32 (the record "Arc compute engine not usable for the compute queues" explains why the check closes
+      the gate). Over the fight window the compute engine ran 4.6 ms a frame (`ccs` 13 %) with no device loss,
+      against `fps16fix` (one run per arm, same route, no probe; its window holds the pause storm noted
+      below): 28.6 against 27.6 fps, render engine 83 %
+      against 87 % busy. Render plus compute engine stayed at about 96 %, so the moved work ran mostly in series
+      with the render queue instead of beside it. Against the probe runs `psid1` and `reuse1` (568-608 draws a
+      frame, matched), the render engine dropped only about 1.5-2 ms a frame, the flip wait in the command-bound
+      seconds rose from 0.1-0.2 to 2.7 ms a frame, and the seconds at 30 fps or more ran at 32.5 against
+      34.1-34.2 fps. No frame-rate gain; rendering correctness under the probe was not checked.
+    - Not priced on the GPU side: dropping LDS ordering barriers (argued about 0.5 ms) and the compute-after-draw
+      transition before the lighting kernel. In the 600-800 draw seconds leaving the kernel out (`skipcs1`)
+      saved 5.3 ms of GPU work for 25.5 -> 26.8 fps.
+    - The window "+30..229 s after the 6->7 event" is not one scene. `fps16fix` opened the pause menu 19 times
+      between 142.8 and 175.4 s (`ui_pause_simple`, the driver's pause probe); those seconds ran 1,600-1,900
+      draws a frame at 11-14 fps and dominated its command-bound class. The other runs have no such storm.
+      Earlier figures in this record that take `fps16fix` over that window (44 command-bound seconds, 936
+      draws a frame, 12 ms a frame needed) mix the pause menu into the fight.
+    - Regimes re-cut on run time 180-325 s (fight band, no pause storm; existing counters; scripts
+      `flipwait.py`, `regdiff.py` in the session scratchpad, not kept). Sub-30 command-bound seconds:
+      `fps16fix` 20 at 23.8 fps, `psid1` 33 at 21.9, `reuse1` 48 at 23.4, `psetup2` 32 at 21.1. Sub-30
+      GPU-bound seconds: 67, 35, 29 and 31. In `psid1` both classes carry the same work per frame (681 against
+      706 draws, 83 dispatches, 3.4 creates, 27 MB hashed) but the command thread runs 38.4 against 27.0 ms a
+      frame: draw processing +7.8 ms (texture descriptors +3.0, state setup +2.0), uploads +2.0, dispatches
+      +1.1, render-lock wait 0.09 -> 0.48 ms, while fence waits fall by 2.9 ms. `reuse1` gives +9.1 ms on
+      fewer draws (620 against 716), spread over state setup, dispatches and the render lock. This is the
+      pattern of the dunes record of 2026-11-15 ("Command work per draw is not constant": every stage rises in
+      the costly seconds; clock, busy SMT sibling and migrations excluded there), now seen in the fight. The
+      lever is whatever makes the same work 35-40 % slower in those seconds; it is not identified.
+    - Pipeline setup inside the window (`psetup2`, temporary timers, removed): 2.2 ms a frame in the
+      command-bound seconds; the pipeline lookup 2.1 us per indexed draw (1.0 ms a frame), the geometry pass
+      5.6 us per auto draw that records one (0.5 ms), the framebuffer lookup 0.2-0.7 us, no index scans.
+      Pipeline misses and SPIR-V compiles are 0.3-0.5 ms a frame. No single step there is a lever.
+    - Host memory compaction slows the command thread (2026-11-20, `sched1`, `host1`, `host2`; external
+      sampler of `/proc` schedstat, stat, vmstat and interrupts, no emulator change). Runqueue wait of the
+      command thread stays 5-9 ms a second in every class, so waiting for a core is excluded (only that).
+      Host kernel time rises from 0.5 to 1.2 s a second in the command-bound seconds of `sched1`. In
+      `host1` and `host2` the seconds where `kcompactd0` uses more than 100 ms a second carry 0.3-0.9
+      million TLB shootdown interrupts a second (2.4 thousand otherwise; 0.2 thousand on the idle host,
+      where compaction does not run). Pairing the two runs by seconds since the 6->7 event, on seconds
+      whose draws differ by less than 5 %: where only one run compacts, the command thread takes 28.8
+      against 23.4 ms a frame (17 pairs); where neither does, the runs differ by 0.8 ms (71 pairs). The
+      thread's kernel time and faults do not change (about 50 ms a second, 400 minor faults a second);
+      it is user time that grows. Disabling transparent huge pages for the emulator (`host2`, process
+      scoped, confirmed `THP_enabled: 0`) leaves compaction in place, so the emulator's huge pages are
+      not the trigger. Ceiling: compaction seconds were 14-26 of 140 and the rest averaged 28.5-29.2 fps,
+      so removing it alone does not reach a stable 30 on these runs. Fps comparisons on this host need
+      compaction sampled: a single pair such as `reuse1` can carry it. `host3` (vmstat each second, whole
+      run): in the 90 compaction seconds kswapd wakes compaction (`compact_daemon_wake` 2.1 against 0.4 a
+      second, `kswapd_low_wmark_hit_quickly` 6.9 against 0.4, direct-reclaim stalls 11 against 0.6), about
+      27 thousand pages migrate a second, and the shootdowns land on every CPU (27-58 thousand a second each).
+      Free memory runs 0.25-6 GB with 19 GB of page cache and 13 GB of guest memory mapped (7.6 GB
+      resident) on a 31 GB host. So it is reclaim for higher-order allocations, not proactive compaction;
+      which allocation asks for them is not named (the agent's allocation-byte and create counters do not
+      move with it, guest file reads partly do, see `vkc1`/`vkc2` below, and naming the requester needs
+      kernel tracing this host does not allow). In
+      `host3` the busiest emulator thread takes 1,765 minor faults and 128 ms of kernel time a second while
+      compaction runs, against 493 and 46 otherwise (whole run after 60 s, 75 against 176 seconds), which
+      fits its threads faulting on migrated pages; which pages migrate is not observed (the emulator holds
+      only 1.8-2.2 GB of private anonymous memory beside the 7.5-7.7 GB shared guest backing). On the `host3` path (no pause
+      probes) 24 of the 33 command-bound fight seconds coincide with compaction (command thread 39.6 ms a
+      frame at 674 draws, against 25.4 ms at 651 draws in GPU-bound seconds without it); the other 9 run
+      about 980 draws a frame. So on this host compaction accounts for most of the command-bound class; the
+      +5.4 ms of the paired estimate above is its lower figure. `host4` (same path, one cinematics probe)
+      shows that free memory is not the condition: compaction comes in bursts through the whole fight with
+      2-4 GB free, 80 of 137 fight seconds are command-bound and the fight averages 26.1 fps (93 seconds
+      below 29.5). The emulator's GPU memory stays flat through it (about 10 GB in system-memory buffer
+      objects within 100 MB, plus 9 GB of device memory and 7.9 GB of shared guest memory resident).
+      `vkc1`/`vkc2` (external `vkAllocateMemory`/`vkFreeMemory` counter preloaded, open-file and
+      free-page-order samplers; diagnostic runs, not fps runs) refine this. Vulkan allocations do not lead
+      compaction: late bursts of 48 thousand migrations a second come with no reads and at most 128 MiB
+      allocated. Emulator `read()` bytes (`rchar`, any file; the title, the shader cache and the evidence
+      share one FUSE NTFS mount, and the 10 Hz open-file sampler missed most reads, so files are not
+      named) partly do: every second above 50 MB a second is followed by a heavy compaction second within
+      8 s (1.00 in `host3` and `host4`, 0.83 in `vkc1`; circular-shift null median 0.44-0.48, 1-3 % of
+      shifts reach the observed value), but only 26-67 % of heavy seconds have such a read before them, so
+      reads are one trigger and not the only one. The 10 GB of system buffer objects is the guest memory
+      itself: 146 windows of 64 MiB exported from the shared guest backing as dma-bufs (`ImportWindow`),
+      constant at 9.9-10.1 GB from 62 s on while migrations go from 46 thousand a second to none, so the
+      windows are not the trigger. Of the 12-14 GB the host reports as cached, 9 GB is that shared memory,
+      so the reclaimable cache is 3-5 GB. Free blocks of order 9 and 10 stay at zero both while compaction
+      runs and while it does not, so their absence alone does not start it. `vkc2` took a pause detour
+      (100 s at the 60 fps limit) and then had no compaction from 130 s on; its 74 slow seconds after that
+      still ran 22.6 fps command-bound (37 s, 666 draws a frame) and 21.7 fps GPU-bound (37 s, 652
+      draws), close to `host4` command-bound seconds with compaction (21.2 fps at 616 draws). So on these
+      runs compaction is not what keeps the late fight under 30; the late fight is slow without it. Lead
+      not tested: requesting huge shared pages for the guest backing (fewer, larger folios to export and
+      migrate) changes guest memory for every title and needs an A/B under a fixed read injection.
+    - Particle draws late in a profiled run, lead only (`lateprof1`, 2026-11-20, per-pass GPU profile,
+      not a baseline; five `probe menu simple` probes like `vkc1`). From about 120 s after the 6->7 event
+      the particle geometry program `0xf4cfb9a5` went from 63-70 calls a frame (x workgroup count 128,
+      3.0-3.6 ms stamped) to 1,150 calls (x count 1, 52.3-53.5 ms stamped) and stayed there for 160 s,
+      with 1,524 draws a frame against 595 earlier and the frame held at 20.0-20.4 fps. The stamped
+      times overlap (92 ms stamped in a 50 ms frame, render engine under 90 % busy), so they are not GPU
+      cost. What the run shows is command-side: 44.7 ms of command processor a frame at 1,524 draws,
+      22.6 us a draw in the draw processor (resource binding 8.6, texture descriptors 4.6, pipeline
+      setup 3.5). Geometry passes are already joined: 6-7 segment fills a frame both at 77 and at 1,162
+      geometry calls, render-pass barriers about 0.1 ms a frame. Normal fight seconds rarely reach this
+      draw count: 15 of about 1,700 binned seconds exceed 1,400 draws. The flat 1,150 may be a full trail
+      pool; trail retirement is not examined here.
+    - Fight seconds binned by draws a frame (2026-11-20, eight unprofiled runs on the same binary and
+      pad script: `host1`-`host4`, `vkc1`, `vkc2`, `sched1`, `fps16fix`; seconds after 100 s with at least
+      five flips; render-engine busy time per flip from the DRM counters; the agent's command-processor
+      timer per flip). Binning by draws instead of time removes the path differences between runs.
+
+      | draws a frame | seconds | fps | under 29.5 | command ms/frame | render engine ms/frame | draw processor ms/frame |
+      | --- | --- | --- | --- | --- | --- | --- |
+      | 200-399 | 206 | 32.8 | 36 | 25.4 | 26.2 | 11.6 |
+      | 400-599 | 745 | 29.7 | 336 | 25.2 | 31.0 | 16.1 |
+      | 600-799 | 373 | 24.0 | 354 | 35.3 | 37.3 | 21.5 |
+      | 800-999 | 121 | 20.7 | 121 | 42.7 | 41.1 | 26.0 |
+      | 1,000-1,399 | 45 | 20.1 | 45 | 41.7 | 38.9 | 31.4 |
+
+      Every second above 600 draws is under 29.5 fps. The command column is the agent's run timer, which
+      includes its waits, and these bins mix fight seconds with other scenes and with the driver's probe
+      windows, so the table does not say that both sides exceed the frame. Fight seconds only (after the
+      6-to-7 transition, probe windows masked, host sampler joined): at 600-999 draws the command thread
+      uses 27.7-30.2 ms of CPU a frame (running 60-65 % of the time, sleeping or waiting the rest), its
+      waits are 7-9 ms, and the render engine is busy 38.2-42.9 ms of p50 frames of 42.1-47.8 ms, about
+      90 %. At 400-599 draws the thread uses 22.5 ms and the render engine 31.8 ms of a 34.6 ms p50 frame.
+      So in the slow fight seconds the render engine is the nearer limit and the command thread is not
+      saturated. Render passes are not broken per draw there: 73-76 begins a frame, continuations about
+      equal to draws. The render engine grows about 30 us for each added draw across these bins, but
+      the bins mix particle bursts with seconds that are heavy in scene draws: in `lateprof1` frames at
+      106-126 s the GPU sum rises from 30.5-33.0 ms at 401-498 draws to 40-42 ms at 744-811 draws while
+      the particle geometry stays at 27-56 calls and 2.4-3.8 ms, and `skipp2` bounds the whole particle
+      path at 3-4.4 ms of engine time.
+    - Vertex reuse of the five-target pass, lead only (`vreuse1`, temporary CPU count over the guest indexes of
+      direct indexed triangle-list draws, instances not multiplied, removed). The count slowed the run to about 2
+      fps from 140 s (exit 137), so the 217-309 s stretch is not shown to be the fight; over it, 101 M triangles of
+      `ps 0x6bcfb82d` had 0.67 unique vertices a triangle and 0.75 misses a triangle in a 128-entry FIFO (the
+      16- and 32-entry columns of the counter were not real caches of that size). Against the 0.91-0.98
+      invocations a primitive at rock 2 this suggests reuse is lost, but any gain needs reordering guest
+      indexes, which changes primitive order; no lever taken.
+    - Runs on the same binary and pad script do not take the same path: `host1` and `host2` logged 19
+      `probe menu simple` pause-menu probes each, while `sched1`, `psid1`, `psetup2` and `host3` logged one
+      `probe menu cinematics` and no simple probe (play base +0.9 to +18.6 s, not ordered with the GPU time;
+      `host3` without compaction runs 27.7 ms of render engine a frame). `host1`/`host2` spend 74 of 140
+      fight seconds GPU-bound at 33 ms of render engine a frame against 17-31 seconds and 27.8 ms in the
+      earlier runs, on fewer draws (513-530 against 574). Regime mixes are compared only between runs whose
+      driver logs match.
+    - Driver GPU timing of the fight (2026-11-21, `imeas2` batch mode and `imeas3` render-target mode of the
+      Mesa `INTEL_MEASURE` option, enabled from boot; enabling it mid-run through its control fifo crashed
+      the process in the driver, `imeas1`). Command buffers run fully serialized: their busy union equals their
+      summed time, 38-55 of them a frame. At 570 draws a frame the GPU is busy 25.3 ms and idle 4.5 ms of a
+      33.6 fps frame (command thread 23.6 ms); at 836-874 draws it is busy 36.5-38.5 ms and idle 7.6-8.6 ms at
+      22-23 fps, and the 1,044-1,320 draw stretch near the end is busy 56 ms at 14-16 fps. By event type at
+      250-300 s of `imeas3` (31.2 ms a frame): indexed draws 14.0 ms, compute 11.9 ms (one compute program
+      5.7 ms, two more 1.9 and 1.7 ms), the five-target pass 4.4 ms, draws without a pixel stage 4.8 ms, copies
+      0.27 ms and clears about 0.35 ms. Batch mode labels a buffer by its first event, so buffers that begin
+      with a copy or a clear are not copy or clear cost.
+    - Excluded: dropping vertex parameter exports when a draw has no pixel stage (`imeas4`, `imeas5`, temporary
+      code, reverted). ANV links shader stages from the fragment stage back and leaves vertex outputs in place
+      when there is none, which suggested waste in the 4.8 ms above. Over the whole route only six vertex
+      programs draw without a pixel stage; none has a parameter export instruction, and none is a geometry pull
+      stage. They declare one parameter from the export count and never write it, so their cost is position,
+      rasterization and depth. The lower time without a pixel stage in `imeas4` (2.0-2.1 ms against 4.7-5.0 ms)
+      came from a different path through the scene: the run followed `imeas2` at 568 draws and 33 fps.
+    - Driver event coverage against the engine counters (2026-11-21, `imeas3` and `imeas5` rt timing joined to
+      the agent samples by matching frames a second). In the GPU-bound fight seconds the timed events cover
+      86-88 % of wall time and the DRM render counters report 91-95 % busy, so the engine is idle about 5-8 %
+      of the time (about 2 ms a frame); the 6-7 points between the two are time outside the timed events,
+      such as command buffer starts and ends. The timed work stays at 29-33 ms a frame across draw-count bins.
+      The gaps between command buffers of 300 us or more fall inside a frame, not at its end (0.1-0.3 ms a
+      frame of them across a frame change). Their sources match `gapsite1`, so the submit-timing levers stay
+      excluded (`greedy1`).
+    - The heavy seconds are bound by the command thread (`imeas3` 180-200 s, about 1,040 draws a frame, 20
+      fps): DRM busy 54-68 % and timed work 30 ms in a 49.6 ms frame. About 10 command buffers a frame carry
+      only one 18 us fill, after a mean gap of 1.07 ms. The most common sequence (6.4 a frame) is a lone
+      draw, the gap, the fill, then a lone dispatch of the geometry program that grows with draw count. The
+      GPU waits there for the command thread to record the next particle segment, so in these seconds only
+      command-thread work moves the frame.
+    - Particle draw stages priced (`geoarm1`, 2026-11-21, existing temporary counters on vertex program
+      `0xf4cfb9a5` in count-only mode, 20 s windows after 140 s, about 975 draws a frame of which 620-665
+      particle draws, 23-26.6 fps, 32.7-39.3 ms of command time a frame). The pipeline setup stage of an auto
+      draw contains the geometry pass recording, which explains its higher per-draw figure on particle
+      draws: the pass costs 3.2-3.5 us per particle draw (2.0-2.2 ms a frame). The submits forced by a
+      dispatch before a draw run 19.4-20.7 a frame at 40-42 us each (0.8 ms a frame), idle early submits
+      0.2-0.36 ms and publications 0.7-0.8 ms a frame. Pipeline setup and command emission of all draws
+      together take 6.5-7.0 ms a frame. No stage of a particle draw is far above an ordinary draw, so a
+      repeat guard on pipeline or emission has a ceiling of a few milliseconds; the command time is the
+      ordinary per-draw cost times the particle draw count.
+    - Replaying more pixel-stage texture binds (`sidework1`-`sidework7`, `swcheck1`-`swcheck2`, `swab1`, 2026-11-21, temporary counters
+      per side-work site and replay miss reason, in-run A/B alternating every 30 s). On the 1,125-1,730 draws a frame
+      seconds the reuse is refused for about 92 % of pixel-stage binds because every gen5 2D array sampled from layer
+      0 counts as side work for the storage prefix check (4.9 us a bind, about 3.7 ms a frame). That check does copy
+      (1,627-1,773 prefix copies a run, all during boot), so a reuse needs a storage-write generation in its key.
+      With that key the same binds are refused at the next site instead: the depth slice array
+      (`GraphicsRenderDepthSliceArray`) in one scene, the storage CPU-write merge in another; both record nothing
+      while their last read holds and were made repeatable on reuse. With all three relaxed (`sidework7`, burst
+      seconds 140-178 s, 938 against 963 draws a frame) the reuse hits rose from about 500 to 20,000 a second,
+      covering the formerly refused binds; binding fell from 8.6 to 6.5 ms and command time from 42.9 to 40.4 ms a
+      frame (20.2 against 20.9 fps; the relaxed arm covers 12 s only). In the lighter 510-640 draws a frame
+      seconds the A/B arms did not match. Binds whose cached-use capture is incomplete (`uses != creates`: a
+      create that was not a cached reuse, or more than 32 creates) cost 21-24 us each and 2-3 ms a frame and are
+      not replayable; what they resolve is not yet classified. Ceiling of the lever at a 100 % hit rate: about
+      3.8 ms of a 54 ms burst frame. Equality check (`swcheck2`, 1,500 draws a frame): every reuse also ran the
+      full path and compared SGPR words, images and views, and whether the full path still found side work to
+      record; 4.49 million reuses, no difference and no skipped work, with 1,727 prefix copies in the run. The
+      positive control (one in 50 entries of another fingerprint forced through) reported 136 of 136 forced
+      reuses as different. In-run A/B alternating every 10 s (`swab1`, 170-300 s, 1,231 against 1,229 draws a
+      frame): 22.83 to 24.04 fps, binding 11.05 to 8.47 ms and command time 37.2 to 35.6 ms a frame. The
+      `PPSA17221 - Minecraft` world on the same build reached play and held 35.5 fps at 5,447 draws a frame
+      (`mc-swreuse1`; no baseline at a matching draw count).
+    - Deferred command recording excluded as a lever (`rs1`, `nh1`, `sc1`-`sc3`, `mc-sc1`, 2026-11-21, temporary
+      per-second counters around the deferred-list replay and the replay worker, in-run A/B in alternating wall-clock
+      blocks). The binds and draws the command thread encodes cost 5-11 ms a second to record when it replays them
+      itself and 8-20 ms a second on the replay worker, about 0.3 ms a frame either way, so command emission
+      (3.2 us a draw in the bursts) is not driver recording. Keeping every encoded command on the command thread
+      (`nh1`, 2,131 draws a frame, 85 and 76 seconds per arm) moved draw processing from 19.97 to 19.07 us a draw and
+      17.0 to 17.4 fps. The worker's poll read the clock on every pause (about 11 % of all profile samples were its
+      clock reads). Reading the clock every 16 pauses instead (`sc3`, light scene, about 470 draws a frame, one pair)
+      gave about 4-5 % less command time a draw; fps and the bursts are not measured with it. In
+      `PPSA17221 - Minecraft` (`mc-sc1`, 5,500 draws a frame) the two arms ran 4.67 against 4.70 us a draw.
+    - Completion write-back on the draw ring (`cg1`, call-stack profile, light scene): label completion and its
+      page compare and copy (`LabelManager::CompleteSubmission`, `GpuWritebackPageCache::CopyChangedPages`, most of
+      the `memcmp` samples) hold at least 11 % of the draw ring's samples; the agent's write-back timer gives
+      1.0-1.4 ms a frame. Mutex lock and unlock (about 7 % of the thread) are spread over the memory-object
+      lookups of each bind, with no caller above 0.4 % of all samples. Call stacks need `perf record
+      --user-callchains --call-graph dwarf` on this host; plain `-g` is refused.
+      - Priced as a separate completion thread (2026-11-21, not built). A call-stack profile of the landing
+        burst on `2b3f06360` (`burstprof2`, unpatched, 26 s at 350-805 draws a frame; the recorder lost most
+        samples and 71 % of the stacks are truncated, so shares are relative) puts
+        `CommandProcessor::PublishCompletedSubmissions` in 15.2 % of the command thread's samples. 59 % of those
+        run while the thread already waits (`WaitSubmission`, `WaitForSuspendedRuns`, the flush before a GPU
+        wait), where moving them saves no frame time, and a label wait still needs that label's write-back first.
+        The other 41 %, 6.2 % of the thread, run between packets while recording. The write-back
+        (`WriteBackObjectLocked`) holds the same `GpuMemory` mutex that every bind's range lookup
+        (`GpuMemoryGetAllocatedRangePrefix`) takes, so a second thread would contend with the recording thread.
+        About 2 ms of a 33 ms body in the command-bound fight seconds does not reach 30 fps alone. The burst's
+        own excess over the calm seconds is first-use object creation (`GpuMemory::CreateObject`, `FindFast`,
+        `TileDetile`, descriptor set indexing), not per-draw work.
+    - Fixed: `unknown relation: StorageTexture - Crosses - StorageTexture` (2026-11-21, twice). Two patched
+      replays of the dunes route on `6912ceb58` plus temporary draw-front counters (`dclass3`, `dclass4`, default
+      patch profile) exited at 111 s and 96.7 s, in the landing burst, from the single-parent relation switch in
+      `GpuMemoryCreate.cpp`. Both times the new storage texture covered `[0x53de40000, +0x3fc0000)` and crossed a
+      live storage texture with identical parameters (3840x2160, mode 27, one level) at `[0x53d410000, +0x3fc0000)`
+      (id 161, eight parents, origin `GpuAliasMaterialization`, never written by the device). Two earlier
+      replays on the same build held 185-200 s. The multi-parent path already linked a crossing storage or render
+      image (`GpuMemoryAllowsStorageTextureCrossingRecycledImage`: a view never extends past its resource, so two
+      crossing images share no texel addressing and the overlap is recycled memory); the single-parent path had
+      no such case. Fix: the single-parent path applies the same rule after the render-alias copy, so a copy
+      still wins where one applies, and the new view seeds from guest bytes. Verified: `cross1` (same route and
+      profile) held 145 s past the exit point.
+    - Draw fronts restart on a voided record (2026-11-21). Temporary per-path counters on the command thread
+      (`dclass2`, 140-200 s) priced a draw taken from a draw front at 14-16 us and a cold one at 47-60 us (offset)
+      or 47 us (auto). 35,110 draws in that window were cold only because a host write of guest memory (GDS
+      publication, wait return, write-back) had voided the records the fronts prepared ahead; the fronts kept
+      running, but every draw between the processor and their lead fell to the processor. Change: when the
+      processor takes a voided record it stops the fronts and starts them again at the current draw through the
+      existing start path, so they prepare the following draws against current memory. Measured (`restart2`, same
+      window and counters): voided takes 35,110 -> 978; in the heaviest windows (40k+ draws per 2 s) mean draw cost
+      23.6 -> 21.2 us and the cold share 0.19 -> 0.09. These counter runs used the patch profile with the
+      deferred-lighting renderer while its transported lighting draws were still dropped (fixed 2026-11-22, above),
+      so their frames carried less GPU work than a correct image; the frame rates first quoted for them are void.
+      With GI off only and the transport fixes, status samples at 120-160 s read 32-40 fps with a correct image
+      (60 fps limit, build with gated temporary diagnostics); the lever's own share was not isolated. `PPSA17221 - Minecraft` reached its world at 83.8 s with the
+      lever built in. Still open: the fronts stop on every ordering packet (about 150k stops per minute on this
+      route, RELEASE_MEM and EVENT_WRITE first), which leaves 70-100k auto draws cold.
+    - Graphics label waits on compute queue 7, passed on the device (2026-11-21, built). In the heavy seconds the
+      graphics command thread suspended on label waits whose producer was a later recording on compute queue 7,
+      not a guest CPU write. Split of 647 such waits (`lw5`, temporary per-submission timestamps), mean 5.9 ms
+      each: the compute queue parked on a graphics label 0.7 ms, compute recording 1.7 ms, the compute buffer
+      behind earlier graphics buffers on the shared device queue 0.7 ms, compute GPU time 1.9 ms, tail 0.7 ms.
+      Since every Kyty queue on this host shares one device queue, the compute-only family would remove only the
+      0.7 ms behind graphics, and running there was already excluded (`ccs1` above). Built instead: a graphics
+      wait whose producer is a plain label store (with or without write-back) of another queue is ordered on the
+      device. The next graphics submission waits for the producer's timeline, the command processor passes the
+      wait without the host waiting, and a later store of the batch still waits for the producer first. A
+      suspended wait packet that resumes runs again and finds its producer already awaited, so the recording
+      is not flushed twice. Indirect dispatch arguments written by a submission the recording awaits on the device
+      are read on the device instead of on the host. First version (`devab1`): refusing to replace a pending
+      producer of another queue blocked the same-queue consolidations (16.6 against 30.3 fps, 120 against 34
+      submits a frame), so each queue now keeps its own newest consolidated producer. In-run A/B in alternating
+      8 s blocks (`devab10`, 1,200 draws a frame, 46 against 44 s): 41.0 to 39.1 ms a frame (24.4 to 25.6 fps),
+      graphics thread suspended 124 to 59 ms a second; the pass costs about 50 us and runs about once a frame.
+      Light, GPU-bound seconds are unchanged (`devab9`). Not a 30 fps fix: at 1,300 draws a frame the command
+      thread still spends about 29.6 ms a frame processing draws. `PPSA04220 - JoJo's Bizarre Adventure: All-Star
+      Battle R` reached its first fight (behind a tutorial overlay) with 20-29 dispatches a frame and no error
+      (`fighter-devwait3`; its title screen waits for a button on both this build and a clean 2026-11-19 build).
+      At 200-300 draws a frame it ran 45.7 fps against 43.6 in a run 64 commits older (`sweep-p04220`), with one
+      host fence wait a frame on both and wait handling up from 0.02 to 0.2 ms a frame; whether the device pass
+      engaged there is not shown. `PPSA17221 - Minecraft` reached its world (`mc-devwait1`). Remaining host waits on the graphics queue's own submissions (dispatch, auto and
+      offset draws, about 1.5 ms each, equal on both arms, `devbt2`) are not addressed.
+    - Fight baseline after the shader-identity fix (`fb1`, `iperf1`, 2026-11-21, measured). Windows of 10 s aligned
+      to the hub event 6->7 show that runs of the same pad script reach different stretches: `ck1` holds about
+      570 draws a frame at 27.6 ms of render engine a frame (33-35 fps for 80 s), `hs3` about 750 draws at
+      32.7-33.5 ms (28.4-29.3 fps), `fb1` 610-660 draws at 34.3 ms. The route driver replayed each run
+      differently, so these are not one scene: in `fb1` and `hs3` the cinematic opened on its own and the driver
+      shifted the inputs by -60 and -65 s (51 and 73 recorded inputs dropped), `ck1` skipped it from a probe at
+      -22 s, and `iperf1` found no cinematic (one `probe menu simple`). The flat draw counts of `hs3` (748-766 for
+      80 s) suggest a static view. No window was checked with a capture, so the difference is not attributed to
+      the GPU or to the scene. A per-client sampler of the DRM render cycles gave every other client 1 % or less
+      of the engine during these seconds. `fb1` overlapped a foreign compiler build
+      (144-160 s and from 232 s, the build at up to 10 cores, frames at 6-23 fps), so its dips are not counted.
+      Command time per draw at matched draw bins stays in the range of the earlier runs (`iperf1` 72.8 and 47.8
+      us at about 300 and 600 draws a frame, against 78.3 and 43.5 us in `hs3` and 78.8 and 51.3 us in `ck1`;
+      the seconds mix regimes). A run with Mesa perf warnings on (`iperf1`) reports each warning site once, so it
+      gives no counts: slow depth clears for a clear value the depth compression cannot fast-clear, compression
+      disabled for an image with atomics and one with auxiliary surfaces disabled; 112 descriptor pool
+      exhaustion or fragmentation results at about 250 s. None of them is priced as a lever.
+    - A replay checked with captures (`vs1`, same binary, quiet host, captures at 6->7 +70 s and +125 s) did not
+      reach the fight because of its first capture: the driver runs inputs and captures in one ordered queue, and
+      the +70 s capture sat before the cinematic probe (due about 0.5 s after the last pre-skip input at +48.75 s),
+      so the probe started about 21 s late, found the plain pause menu six times and the route went off. Both
+      captures show the robot standing at the same spot in the dunes. That idle view holds 30.1-30.7 fps for 90 s
+      at about 510 draws a frame with the render engine 98-99 % busy (32.2-32.8 ms a frame), so it sits on the GPU
+      edge of 30 fps, not above it. The fight route's inputs run to about +357 s of its recording, so runs that
+      end near 260 s (all of `fb1`, `iperf1`, `vs1`) stop before most of it; captures belong after the skip.
+    - A full-length replay (`fight1`, 400 s, captures at 6->7 +150, +230 and +290 s, quiet host) also found no
+      cinematic: 18 probes from +49.6 to +81 s opened the plain pause menu, so the later inputs ran from a
+      different place. The captures show dunes gameplay (the robot running at +150 s, an enemy at the screen edge
+      at +290 s). In 10 s windows after 6->7: +80 to +170 s 34.5-37.8 fps at about 350 draws a frame (render
+      engine 96-99 %, 25.5-28.3 ms a frame); +180 to +230 s 25.6-30.1 fps at 640-800 draws (94-98 %, 31.9-35.2
+      ms); +240 to +270 s 11-20 fps at 700-2,200 draws with the engine 40-86 % busy (command-thread bound);
+      +280 to +300 s 26.2-27.7 fps at 560-750 draws (98-99 %, 35.6-37.2 ms). So on this binary the dunes
+      gameplay is GPU-bound below 30 fps above about 600 draws a frame and command-thread bound in the bursts.
+      Two consecutive runs (`vs1` after its capture delay, `fight1` without one) missed the cinematic that
+      `ck1` and `imeas2` found at the same probe times, so the route does not land reliably on this binary.
+      Across the last ten replays the second cinematic (guest line `Level has started: ui_pause_cinematics`
+      about 49.5 s after 6->7) appeared in three (`imeas2`, `ck1`, `sl8`), on different builds, so the miss is
+      not tied to one build. The landed `imeas2` still ran the heavy fight below 30 fps: 22-23 fps at 836-874
+      draws a frame and 14-16 fps at 1,044-1,320 draws. A stable 30 fps fight therefore needs both a lower
+      command-thread cost per draw (Astro 20-36 us against about 4.7 us on `PPSA17221 - Minecraft`) and less
+      GPU work per frame.
+    - First-use driver compiles stall the fight (`burstprof1`, 2026-11-21, measured). The route landed through
+      the passive cinematic (shift -69.6 s). After 6->7 the run spent 33.2 s in `vkCreateGraphicsPipelines` over
+      272 creates, with single creates of 0.9-2.3 s in 23 seconds; those seconds fell to 0-13 fps with the
+      pipeline stage at 150-280 ms a frame. Earlier replays on the same cache spent 0.1-5.1 s. The next replay
+      (`warm2`, same cache after `burstprof1` wrote it) spent 0.0 s over 190 creates, which points to first-use
+      compiles rather than a miss on every run. `warm2` reached the fight through another probe time, so it did
+      not revisit the same scene and does not prove that the stalled pipelines now load from the cache; a later
+      landed run on this cache has to confirm it. Between the stalls
+      `burstprof1` ran 20-28 fps at 750-920 draws a frame. `warm2` ran 32-34 fps at 566-590 draws (render engine
+      91-94 %, 27.5-29.7 ms a frame) and 23-29 fps at 587-643 draws (83-97 %, 33.8-35.9 ms), so the warm fight
+      stays GPU-bound near 30 fps above about 590 draws.
+    - Mixed depth layers are reused while their sources hold (2026-11-21, measured). A depth slice-array layer
+      whose 64 KiB blocks lie partly in depth images and partly in no image was rebuilt on every use, a CPU detile
+      of the whole layer each time. The layer now keeps the digest of its images with the dirty-page generation of
+      its guest read and is rebuilt only when either changes; the guest-ownership check of the uncovered blocks
+      still runs before the reuse test. On the cinematics branch of the route (`slg1`, `slm1`) it avoided 421 of
+      422 rebuilds. The detile was at most about 5.4 % of the command thread's sampled stacks, so no fps change is
+      claimed.
+    - Fixed: a storage view inside a depth target stopped the multi-parent path (2026-11-21). Two runs (`slm1`,
+      `slv1`) stopped on `!create_all_the_same` (GpuMemoryCreate.cpp, the final branch of the overlap policy) about
+      2 s after the world map started: a 64 KiB storage view at 0x53fbf0000 equal to a CPU-uploaded buffer and
+      inside a 1664x936 depth target, a storage chain at the depth target's base and three render targets. The
+      arena rule accepted every parent except the depth target, which the single-parent path already links as a
+      view over a depth range. The arena rule now links it the same way. A unit test with the captured parent set
+      stops on the same exit without the change. The next replay (`slv2`) reached the fight but not the world map
+      within 330 s, so the in-game check of that point is still open.
+    - A local game patch file moves the GPU-bound stretches, not the bursts (2026-11-21, measured, not a strict
+      run). Same binary and route, landed through the cinematics probe, 10 s windows after 6->7. Without a
+      patch (`slv2`): 34.5-35.1 fps at about 567 draws a frame, render engine 27.4 ms a frame. With the mods for
+      the non-tiled deferred renderer, GI probes off, delta time with its fixes, a 60 fps cap and a fixed 1080p
+      render resolution (`pat1`): 43.9-45.1 fps at the same draw count, 21.2 ms. Adding ambient occlusion,
+      screen-space reflections, screen-space shadows and volumetric atmosphere off with half-distance,
+      two-cascade sun shadows (`pat2`): 45.1-46.3 fps at about 520 draws, 19.5 ms, render engine 88-90 % busy.
+      The heavy seconds stay below 30 fps in both: 22.7-28.6 fps at 900-1,500 draws a frame with the engine
+      65-85 % busy, so they are command-thread bound and a GPU cut does not lift them. Captures show flatter,
+      darker lighting with the patch; its image is not checked against the console.
+- **Route timing on the oneskip route.** The pad script is wall-clock only. The hub cinematic starts between 75 and
+  91 s depending on boot; when it starts before the recorded skip at 88.5 s, the skip opens the pause menu in play
+  instead and the robot never reaches the dunes (`ctrlcap`, `ctrlcap2`, `tog1`, `tog2`; `ctrlcap3` is a third
+  timing). Copying the shader cache changes boot time enough to move a run between the two cases. Runs from
+  2026-11-19 drive the inputs after 60 s from the guest's hub events through `kyty_agent pad` instead. The
+  driver reads those events from the guest's stdout, so the run must line-buffer it; that switch is a temporary
+  diagnostic, not part of the runtime. The cinematic skip through the pause menu sometimes misses its "down" and
+  resumes instead (`tog7`), so the driver retries it.

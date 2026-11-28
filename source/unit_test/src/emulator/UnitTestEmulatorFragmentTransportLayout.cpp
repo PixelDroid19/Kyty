@@ -30,8 +30,8 @@ TEST(EmulatorFragmentTransportLayout, PreservesPrimitivePartialWavesAndDisjointB
 	EXPECT_EQ(layout.Bytes(Buffer::Control), 33872u);
 	EXPECT_EQ(layout.Bytes(Buffer::References), 20740u);
 	EXPECT_EQ(layout.Bytes(Buffer::WaveInput), 133120u);
-	EXPECT_EQ(layout.Bytes(Buffer::WaveOutput), 565760u);
-	EXPECT_EQ(layout.total_bytes, 900948u);
+	EXPECT_EQ(layout.Bytes(Buffer::WaveOutput), 582400u); // 65 waves x 64 lanes x 35 words
+	EXPECT_EQ(layout.total_bytes, 917588u);
 }
 
 TEST(EmulatorFragmentTransportLayout, ReservesAParameterHeaderAndOneWavePerNonemptyPrimitive)

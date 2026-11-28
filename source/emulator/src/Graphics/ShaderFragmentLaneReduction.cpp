@@ -277,6 +277,23 @@ bool OverwritesDestination(const ShaderInstruction& inst)
 	return inst.dst.type == Operand::Vgpr && (inst.dst2.type != Operand::Vgpr);
 }
 
+// A straight-line instruction that keeps EXEC, names no network register as a source and overwrites one.
+bool OverwritesNetworkOnly(const ShaderInstruction& inst, const VectorSet& network)
+{
+	if (IsBranch(inst.type) || inst.type == Type::SEndpgm || ShaderInstructionTypeStartsWith(inst.type, "SSetpc") ||
+	    ShaderInstructionTypeStartsWith(inst.type, "SSwappc") || ShaderInstructionWritesExec(inst) || !OverwritesDestination(inst))
+	{
+		return false;
+	}
+	VectorSet read;
+	for (const auto& source: inst.src) { AddRange(source, &read); }
+	for (const auto& address: inst.mimg_address) { AddRange(address, &read); }
+	AddRange(inst.dst2, &read);
+	VectorSet written;
+	AddRange(inst.dst, &written);
+	return (read & network).none() && (written & network).any();
+}
+
 using ScalarSet = std::bitset<LaneFlow::kWords>;
 
 // What one path knows of the network registers. A live register still holds a value the host never
@@ -479,7 +496,8 @@ bool IndexOfPc(const ShaderCode& code, int64_t pc, uint32_t* index)
 
 // Every path from `start` ends each network register, or leaves it residual and never lets a stale lane
 // compute with it.
-bool NetworkDead(const ShaderCode& code, const ShaderFragmentMaskFlow& masks, uint32_t start, const VectorSet& network)
+bool NetworkDead(const ShaderCode& code, const ShaderFragmentMaskFlow& masks, uint32_t start, const VectorSet& network,
+                 const std::vector<ShaderLaneReduction::Read>& reads)
 {
 	const auto&                                 instructions = code.GetInstructions();
 	std::vector<std::optional<PathState>>       seen(instructions.Size());
@@ -501,7 +519,8 @@ bool NetworkDead(const ShaderCode& code, const ShaderFragmentMaskFlow& masks, ui
 			}
 			known = state;
 			const auto& inst = instructions.At(index);
-			if (!Visit(inst, masks.exec_full[index], MaskWidth {masks.guest_wave_size == 32u}, &state)) { return false; }
+			const bool  read = std::any_of(reads.begin(), reads.end(), [index](const auto& r) { return r.index == index; });
+			if (!read && !Visit(inst, masks.exec_full[index], MaskWidth {masks.guest_wave_size == 32u}, &state)) { return false; }
 			if (inst.type == Type::SEndpgm) { break; }
 			if (ShaderInstructionTypeStartsWith(inst.type, "SSetpc") || ShaderInstructionTypeStartsWith(inst.type, "SSwappc")) { return false; }
 			if (!IsBranch(inst.type))
@@ -529,7 +548,8 @@ bool ProveReduction(const ShaderCode& code, const ShaderFragmentMaskFlow& masks,
 	VectorSet live;
 	live.set(static_cast<size_t>(reduction->seed));
 	for (const uint32_t step: reduction->steps) { live.set(static_cast<size_t>(instructions.At(step).dst.register_id)); }
-	return NetworkDead(code, masks, reduction->reads.back().index + 1u, live);
+	// From the restore on, so that an overwrite before the reads ends or leaves residual its register like any other.
+	return NetworkDead(code, masks, reduction->restore + 1u, live, reduction->reads);
 }
 
 } // namespace
@@ -594,7 +614,15 @@ bool ShaderProveLaneReductionNetwork(const ShaderCode& code, uint32_t guest_wave
 			reduction->reads.push_back({cursor, lanes});
 			continue;
 		}
-		if (!Independent(inst, live)) { break; }
+		if (Independent(inst, live)) { continue; }
+		// An overwrite that reads no network register leaves the others as they were; its own register is no
+		// longer the network's.
+		if (!OverwritesNetworkOnly(inst, live)) { break; }
+		for (int reg = inst.dst.register_id; reg < inst.dst.register_id + std::max(inst.dst.size, 1) && reg < kVgprs; ++reg)
+		{
+			live.reset(static_cast<size_t>(reg));
+			network.erase(reg);
+		}
 	}
 	reduction->seed_index = seed_index;
 	reduction->restore    = restore;

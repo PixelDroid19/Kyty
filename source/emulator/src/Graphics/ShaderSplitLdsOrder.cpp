@@ -6,7 +6,9 @@
 #include "ShaderMaskAnalysis.h"
 #include "ShaderStorageAnalysis.h"
 
+#include <algorithm>
 #include <array>
+#include <numeric>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -18,7 +20,7 @@ using Type = ShaderInstructionType;
 // The 24-bit multiplies and the 32-bit adds of an address stay exact below it.
 constexpr int64_t kExactLimit = 1 << 24;
 // Past this many accesses every one keeps its own order: the pairing is quadratic.
-constexpr size_t kMaxAccesses = 64;
+constexpr size_t kMaxAccesses = 512;
 // A guest wave whose lanes all exist: no host lane runs outside the thread group.
 constexpr uint32_t kWaveLanes = 64;
 
@@ -44,11 +46,26 @@ struct Access
 	int64_t high   = 0;
 	int64_t stride = 0;
 	int64_t bytes  = 0;
+	// Without a range: every lane's address is a multiple of `slot`, and the access touches `bytes` at it + offset.
+	int64_t slot   = 0;
+	int64_t offset = 0;
 };
+
+// Two lanes' slot addresses are equal or at least the common slot apart: fields that are disjoint and fit in
+// one common slot never meet.
+bool SlotsApart(const Access& a, const Access& b)
+{
+	const int64_t slot        = std::gcd(a.slot, b.slot);
+	const int64_t low         = std::min(a.offset, b.offset);
+	const int64_t high        = std::max(a.offset + a.bytes, b.offset + b.bytes);
+	const bool    fields_part = a.offset + a.bytes <= b.offset || b.offset + b.bytes <= a.offset;
+	return fields_part && high - low <= slot;
+}
 
 bool MayConflict(const Access& a, const Access& b)
 {
 	if (!a.write && !b.write) { return false; }
+	if (a.slot != 0 && b.slot != 0) { return !SlotsApart(a, b); }
 	if (!a.ranged || !b.ranged) { return true; }
 	if (a.high <= b.low || b.high <= a.low) { return false; }
 	const bool own_slot = a.stride != 0 && a.stride == b.stride && a.low == b.low && a.bytes <= a.stride && b.bytes <= b.stride;
@@ -157,9 +174,11 @@ bool EndsBlock(Type type)
 
 // What each VGPR holds in every lane for the whole program: its value when the entry block ends, kept only
 // when nothing writes the register after it. The entry block runs every lane while EXEC is the entry mask or
-// was set to all lanes.
-Vgprs ProgramWideValues(const ShaderCode& code, const std::vector<bool>& is_target, const uint32_t threads[3], int thread_ids)
+// was set to all lanes. `ready` is the first instruction that sees that value: one past its last entry-block write.
+Vgprs ProgramWideValues(const ShaderCode& code, const std::vector<bool>& is_target, const uint32_t threads[3], int thread_ids,
+                        std::array<uint32_t, LaneFlow::kVgprs>* ready)
 {
+	ready->fill(0);
 	const auto& instructions = code.GetInstructions();
 	Vgprs       values {};
 	// A loop back to the entry would run its block again on other inputs.
@@ -179,7 +198,9 @@ Vgprs ProgramWideValues(const ShaderCode& code, const std::vector<bool>& is_targ
 		const auto value = every_lane && inst.dst.size == 1 ? Evaluate(inst, values, threads) : Affine {};
 		for (unsigned vgpr = 0; vgpr < static_cast<unsigned>(LaneFlow::kVgprs); vgpr++)
 		{
-			if (WritesVgpr(inst, vgpr)) { values[vgpr] = inst.dst2.type == ShaderOperandType::Unknown ? value : Affine {}; }
+			if (!WritesVgpr(inst, vgpr)) { continue; }
+			values[vgpr]   = inst.dst2.type == ShaderOperandType::Unknown ? value : Affine {};
+			(*ready)[vgpr] = index + 1;
 		}
 	}
 	for (; index < instructions.Size(); index++)
@@ -208,6 +229,30 @@ Affine BlockConstant(const ShaderCode& code, const std::vector<bool>& is_target,
 		}
 	}
 	return {};
+}
+
+// A value every lane's `vgpr` is a multiple of, set by a V_MUL_U32_U24 or V_LSHLREV_B32 by a constant in the
+// same straight-line block under the EXEC the access runs with; 0 when none is known. A 24-bit factor up to 256
+// cannot wrap 32 bits, so it divides the product; a larger one only keeps its power of two.
+int64_t BlockSlot(const ShaderCode& code, const std::vector<bool>& is_target, uint32_t access, unsigned vgpr)
+{
+	const auto& instructions = code.GetInstructions();
+	const auto  constant     = [](const ShaderOperand& operand)
+	{ return operand.type == ShaderOperandType::IntegerInlineConstant || operand.type == ShaderOperandType::LiteralConstant; };
+	for (uint32_t at = access; at > 0 && !is_target[at];)
+	{
+		const auto& inst = instructions.At(--at);
+		if (EndsBlock(inst.type) || WritesExec(inst)) { break; }
+		if (!WritesVgpr(inst, vgpr)) { continue; }
+		const bool plain = inst.src_num == 2 && inst.dst.size == 1 && inst.dst2.type == ShaderOperandType::Unknown && !inst.vop_sdwa &&
+		                   inst.vop3_omod == 0u && IsPlain(inst.dst) && IsPlain(inst.src[0]) && IsPlain(inst.src[1]);
+		if (!plain) { return 0; }
+		if (inst.type == Type::VLshlrevB32 && constant(inst.src[0])) { return int64_t {1} << (inst.src[0].constant.u & 31u); }
+		if (inst.type != Type::VMulU32U24 || constant(inst.src[0]) == constant(inst.src[1])) { return 0; }
+		const int64_t factor = (constant(inst.src[0]) ? inst.src[0] : inst.src[1]).constant.u & 0xffffffu;
+		return factor <= 256 ? factor : factor & -factor;
+	}
+	return 0;
 }
 
 // Dwords a one-range access covers at ADDR + ds_offset; 0 for the two-offset and unsupported forms.
@@ -252,9 +297,10 @@ void SetRange(const ShaderInstruction& inst, const Affine& address, const uint32
 
 std::vector<Access> FindAccesses(const ShaderCode& code, const std::vector<bool>& is_target, const uint32_t threads[3], int thread_ids)
 {
-	const auto&         instructions = code.GetInstructions();
-	const auto          values       = ProgramWideValues(code, is_target, threads, thread_ids);
-	std::vector<Access> accesses;
+	const auto&                            instructions = code.GetInstructions();
+	std::array<uint32_t, LaneFlow::kVgprs> ready {};
+	const auto                             values = ProgramWideValues(code, is_target, threads, thread_ids, &ready);
+	std::vector<Access>                    accesses;
 	for (uint32_t index = 0; index < instructions.Size(); index++)
 	{
 		const auto& inst = instructions.At(index);
@@ -265,8 +311,15 @@ std::vector<Access> FindAccesses(const ShaderCode& code, const std::vector<bool>
 		if (RangeDwords(inst) != 0)
 		{
 			const auto vgpr    = static_cast<unsigned>(inst.src[0].register_id);
-			const auto address = values[vgpr].known ? values[vgpr] : BlockConstant(code, is_target, index, vgpr);
+			// An entry-block access before the register's last entry-block write reads an earlier value.
+			const bool wide    = values[vgpr].known && ready[vgpr] <= index;
+			const auto address = wide ? values[vgpr] : BlockConstant(code, is_target, index, vgpr);
 			SetRange(inst, address, threads, &access);
+			if (!access.ranged)
+			{
+				access.slot   = BlockSlot(code, is_target, index, vgpr);
+				access.offset = inst.ds_offset;
+			}
 		}
 		accesses.push_back(access);
 	}

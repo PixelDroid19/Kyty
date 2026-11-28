@@ -58,7 +58,8 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 // Every table read is bounded by the entry count independently of the loop
 // condition: a compiler may issue a load before the exit test, and a device
 // whose unmapped addresses fault rather than read a scratch page loses itself
-// on one stray read.
+// on one stray read. No entry starts below the directory base, so an address
+// under it (a null or small pointer) misses without searching the last region.
 String8 Spirv::GuestDeviceAddressFunction() const
 {
 	static const char* text = R"(
@@ -68,7 +69,7 @@ String8 Spirv::GuestDeviceAddressFunction() const
 %gda_entry = OpLabel
 %gda_lo_v = OpVariable %_ptr_Function_uint_gda Function
 %gda_hi_v = OpVariable %_ptr_Function_uint_gda Function
-%gda_tlo_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %int_0
+<program window>%gda_tlo_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %int_0
 %gda_thi_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %int_1
 %gda_cnt_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %int_2
 %gda_tlo = OpLoad %uint %gda_tlo_p
@@ -95,6 +96,12 @@ String8 Spirv::GuestDeviceAddressFunction() const
 %gda_dbase_hi64 = OpUConvert %ulong %gda_dbase_hi
 %gda_dbase_his = OpShiftLeftLogical %ulong %gda_dbase_hi64 %uint_32
 %gda_dbase = OpBitwiseOr %ulong %gda_dbase_his %gda_dbase_lo64
+%gda_dbelow = OpULessThan %bool %gda_addr %gda_dbase
+OpSelectionMerge %gda_search None
+OpBranchConditional %gda_dbelow %gda_none %gda_search
+%gda_none = OpLabel
+OpReturnValue %gda_table
+%gda_search = OpLabel
 %gda_drel = OpISub %ulong %gda_addr %gda_dbase
 %gda_dregion = OpShiftRightLogical %ulong %gda_drel %gda_dshift
 %gda_dlast64 = OpUConvert %ulong %gda_dlast
@@ -186,7 +193,45 @@ OpFunctionEnd
 	};
 	static_assert(kMaxLoadBytes <= kGuestDeviceAddressDirectoryHeaderOffset && kGuestDeviceAddressDirectoryHeaderOffset + 16u <= kGuestDeviceAddressNullBytes,
 	              "a miss must read zeros below the directory header");
+	// An access inside the program-base window (GuestDeviceAddressWindow,
+	// resolved at bind against this table) translates without a table read;
+	// the window holds only bytes the walk translates the same way.
+	static const char* program_window = R"(%gda_pb_lo_p = OpAccessChain %<ptr> %vsharp %int_0 %<program block> %int_0
+%gda_pb_hi_p = OpAccessChain %<ptr> %vsharp %int_0 %<program block> %int_1
+%gda_pd_lo_p = OpAccessChain %<ptr> %vsharp %int_0 %<program block> %int_2
+%gda_pd_hi_p = OpAccessChain %<ptr> %vsharp %int_0 %<program block> %<int 3>
+%gda_pw_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %<int 3>
+%gda_pb_lo = OpLoad %uint %gda_pb_lo_p
+%gda_pb_hi = OpLoad %uint %gda_pb_hi_p
+%gda_pd_lo = OpLoad %uint %gda_pd_lo_p
+%gda_pd_hi = OpLoad %uint %gda_pd_hi_p
+%gda_pw = OpLoad %uint %gda_pw_p
+%gda_pb_lo64 = OpUConvert %ulong %gda_pb_lo
+%gda_pb_hi64 = OpUConvert %ulong %gda_pb_hi
+%gda_pb_his = OpShiftLeftLogical %ulong %gda_pb_hi64 %uint_32
+%gda_pbase = OpBitwiseOr %ulong %gda_pb_his %gda_pb_lo64
+%gda_pd_lo64 = OpUConvert %ulong %gda_pd_lo
+%gda_pd_hi64 = OpUConvert %ulong %gda_pd_hi
+%gda_pd_his = OpShiftLeftLogical %ulong %gda_pd_hi64 %uint_32
+%gda_pdev = OpBitwiseOr %ulong %gda_pd_his %gda_pd_lo64
+%gda_pw64 = OpUConvert %ulong %gda_pw
+%gda_prel = OpISub %ulong %gda_addr %gda_pbase
+%gda_pin = OpULessThan %bool %gda_prel %gda_pw64
+%gda_proom = OpISub %ulong %gda_pw64 %gda_prel
+%gda_pfit = OpUGreaterThanEqual %bool %gda_proom %gda_bytes
+%gda_phit = OpLogicalAnd %bool %gda_pin %gda_pfit
+%gda_pdevice = OpIAdd %ulong %gda_pdev %gda_prel
+OpSelectionMerge %gda_walk None
+OpBranchConditional %gda_phit %gda_program %gda_walk
+%gda_program = OpLabel
+OpReturnValue %gda_pdevice
+%gda_walk = OpLabel
+)";
+	const bool program_base = m_bind->program_base_used;
 	return String8(text)
+	    .ReplaceStr("<program window>", program_base ? program_window : "")
+	    .ReplaceStr("<program block>", program_base ? GetConstantInt(static_cast<int>(m_bind->program_base_offset_dw / 4u)) : String8())
+	    .ReplaceStr("<int 3>", program_base ? GetConstantInt(3) : String8())
 	    .ReplaceStr("<header>", String8::FromPrintf("%u", kGuestDeviceAddressDirectoryHeaderOffset))
 	    .ReplaceStr("<load64 mbase m 0>", load64("mbase", "m", 0))
 	    .ReplaceStr("<load64 base e 0>", load64("base", "e", 0))
@@ -300,6 +345,62 @@ bool Spirv::EmitGuestLoad(const String8& lo, const String8& hi, int dwords, cons
 		{
 			*output += String8::FromPrintf("%%%s_d%d = OpPhi %%uint %%%s_w%d %%%s_vector_load %%%s_s%d %%%s_word_load\n", p, word, p, word, p,
 			                               p, word, p);
+		}
+	}
+	return true;
+}
+
+bool Spirv::EmitGuestLoad64Aligned(const String8& lo, const String8& hi, int dwords, const String8& prefix, String8* output) const
+{
+	if (!UsesGuestDeviceAddress() || output == nullptr || dwords <= 0 || dwords > 32 || (dwords % 4) != 0)
+	{
+		return false;
+	}
+	const auto* p = prefix.c_str();
+	*output += String8::FromPrintf("%%%s_lo64 = OpUConvert %%ulong %%%s\n"
+	                               "%%%s_hi64 = OpUConvert %%ulong %%%s\n"
+	                               "%%%s_hi_shift = OpShiftLeftLogical %%ulong %%%s_hi64 %%uint_32\n"
+	                               "%%%s_guest = OpBitwiseOr %%ulong %%%s_hi_shift %%%s_lo64\n"
+	                               "%%%s_device = OpFunctionCall %%ulong %%guest_device_address %%%s_guest %%gda_u64_4\n",
+	                               p, lo.c_str(), p, hi.c_str(), p, p, p, p, p, p, p);
+
+	// Caller guarantees 64-byte guest alignment: words 0..15 cannot cross a 4 KiB
+	// page, and words 16..dwords-1 cross at most once as a contiguous tail.
+	if (dwords > 16)
+	{
+		*output += String8::FromPrintf(
+		    "%%%s_page_offset = OpBitwiseAnd %%ulong %%%s_guest %%gda_u64_page_mask\n"
+		    "%%%s_tail_start_off = OpIAdd %%ulong %%%s_page_offset %%gda_u64_64\n"
+		    "%%%s_crosses = OpUGreaterThanEqual %%bool %%%s_tail_start_off %%gda_u64_page\n"
+		    "%%%s_next_guest = OpIAdd %%ulong %%%s_guest %%gda_u64_64\n"
+		    "OpSelectionMerge %%%s_split_end None\n"
+		    "OpBranchConditional %%%s_crosses %%%s_split_load %%%s_split_skip\n"
+		    "%%%s_split_load = OpLabel\n"
+		    "%%%s_next_device_raw = OpFunctionCall %%ulong %%guest_device_address %%%s_next_guest %%gda_u64_4\n"
+		    "OpBranch %%%s_split_end\n"
+		    "%%%s_split_skip = OpLabel\n"
+		    "%%%s_tail_normal = OpIAdd %%ulong %%%s_device %%gda_u64_64\n"
+		    "OpBranch %%%s_split_end\n"
+		    "%%%s_split_end = OpLabel\n"
+		    "%%%s_tail_device = OpPhi %%ulong %%%s_next_device_raw %%%s_split_load %%%s_tail_normal %%%s_split_skip\n",
+		    p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p);
+	}
+
+	// Emit vec4 loads directly with 4-byte alignment so no scalar fallback branch
+	// or per-word OpPhi array is kept live across adjacent BVH paths.
+	const int vectors = dwords / 4;
+	for (int v = 0; v < vectors; v++)
+	{
+		const char* base     = (v < 4) ? "device" : "tail_device";
+		const int   byte_off = (v % 4) * 16;
+		*output += String8::FromPrintf("%%%s_v%d_a = OpIAdd %%ulong %%%s_%s %%gda_u64_%d\n"
+		                               "%%%s_v%d_p = OpConvertUToPtr %%_ptr_PhysicalStorageBuffer_v4uint %%%s_v%d_a\n"
+		                               "%%%s_v%d = OpLoad %%v4uint %%%s_v%d_p Aligned 4\n",
+		                               p, v, p, base, byte_off, p, v, p, v, p, v, p, v);
+		for (int c = 0; c < 4; c++)
+		{
+			const int word = v * 4 + c;
+			*output += String8::FromPrintf("%%%s_d%d = OpCompositeExtract %%uint %%%s_v%d %d\n", p, word, p, v, c);
 		}
 	}
 	return true;

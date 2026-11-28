@@ -119,7 +119,8 @@ String8 Spirv::FragmentLocalVariables() const
 		return {};
 	}
 	String8 source = "%fragment_alive = OpVariable %_ptr_Function_uint Function\n"
-	                 "%fragment_mask = OpVariable %_ptr_Function_uint Function\n";
+	                 "%fragment_mask = OpVariable %_ptr_Function_uint Function\n"
+	                 "%fragment_depth = OpVariable %_ptr_Function_float Function\n";
 	for (uint32_t component = 0; component < 32u; ++component)
 	{
 		source += String8::FromPrintf("%%fragment_color_%u = OpVariable %%_ptr_Function_float Function\n", component);
@@ -245,7 +246,7 @@ String8 Spirv::FragmentProlog() const
 		source += String8::FromPrintf("%%%s_float = OpBitcast %%float %%%s\nOpStore %%v%u %%%s_float\n", value.c_str(), value.c_str(), reg,
 		                              value.c_str());
 	}
-	source += "OpStore %fragment_alive %uint_0\nOpStore %fragment_mask %uint_0\n";
+	source += "OpStore %fragment_alive %uint_0\nOpStore %fragment_mask %uint_0\nOpStore %fragment_depth %float_0_000000\n";
 	for (uint32_t component = 0; component < 32u; ++component)
 	{
 		source += String8::FromPrintf("OpStore %%fragment_color_%u %%float_0_000000\n", component);
@@ -261,8 +262,8 @@ String8 Spirv::FragmentEpilog(uint32_t index) const
 	}
 	const auto tag = String8::FromPrintf("fragment_out_%u", index);
 	String8    source = String8::FromPrintf("%%%s_lane = OpIAdd %%uint %%fragment_wave_base %%fragment_lane\n"
-	                                        "%%%s_base = OpIMul %%uint %%%s_lane %%uint_34\n",
-	                                        tag.c_str(), tag.c_str(), tag.c_str());
+	                                        "%%%s_base = OpIMul %%uint %%%s_lane %%%s\n",
+	                                        tag.c_str(), tag.c_str(), tag.c_str(), GetConstantUint(kOutputWords).c_str());
 	for (uint32_t word = 0; word < kOutputWords; ++word)
 	{
 		const auto id = String8::FromPrintf("%s_%u", tag.c_str(), word);
@@ -272,6 +273,10 @@ String8 Spirv::FragmentEpilog(uint32_t index) const
 		if (word < 2u)
 		{
 			source += String8::FromPrintf("%%%s = OpLoad %%uint %%fragment_%s\n", id.c_str(), word == 0u ? "alive" : "mask");
+		} else if (word == kOutputWords - 1u)
+		{
+			source += String8::FromPrintf("%%%s_float = OpLoad %%float %%fragment_depth\n%%%s = OpBitcast %%uint %%%s_float\n", id.c_str(),
+			                              id.c_str(), id.c_str());
 		} else
 		{
 			source += String8::FromPrintf("%%%s_float = OpLoad %%float %%fragment_color_%u\n"
@@ -329,6 +334,22 @@ bool Spirv::EmitFragmentExport(const ShaderInstruction& instruction, uint32_t in
 	// A null export carries no payload: VM above already decided which lanes stay alive.
 	if (ShaderIsNullMrtDoneFormat(instruction.format) || instruction.format == ShaderInstructionFormat::NullVmDone)
 	{
+		return true;
+	}
+	if (instruction.format == ShaderInstructionFormat::PixelZVsrc0Vm || instruction.format == ShaderInstructionFormat::PixelZVsrc0VmDone)
+	{
+		// The program-wide FragDepth proof already requires a depth write on every exit that keeps a lane alive.
+		String8 load;
+		if (!operand_load_uint(this, instruction.src[0], tag + "_depth_raw", String8(), &load))
+		{
+			return false;
+		}
+		*output += load + String8::FromPrintf("\n%%%s_depth_value = OpBitcast %%float %%%s_depth_raw\n"
+		                                      "%%%s_depth_old = OpLoad %%float %%fragment_depth\n"
+		                                      "%%%s_depth = OpSelect %%float %%%s_write %%%s_depth_value %%%s_depth_old\n"
+		                                      "OpStore %%fragment_depth %%%s_depth\n",
+		                                      tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(),
+		                                      tag.c_str());
 		return true;
 	}
 	const uint32_t target = Target(instruction);

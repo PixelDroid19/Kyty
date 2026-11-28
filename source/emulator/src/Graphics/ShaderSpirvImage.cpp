@@ -864,7 +864,7 @@ ShaderStorageImagePlan ShaderPlanStorageImages(const ShaderCode& code, const Sha
 		const auto& inst = code.GetInstructions().At(index);
 		if (ShaderIsImageAtomic(inst.type) && !ShaderImageAtomicResourceSupported(code, index, *bind))
 		{
-			return reject("image atomic requires a proven 2D R32_UINT writable descriptor", -1, 0u, inst.pc);
+			return reject("image atomic requires a proven 1D or 2D R32_UINT writable descriptor", -1, 0u, inst.pc);
 		}
 		if (inst.type == ShaderInstructionType::ImageStoreMip && (has_array || has_volume))
 		{
@@ -3020,7 +3020,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)
 		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* volume_text = R"(
-         %t24_<index> = OpLoad %uint %<src1_value0>
+     %t24_raw_<index> = OpLoad %uint %<src1_value0>
+         %t24_<index> = OpBitwiseAnd %uint %t24_raw_<index> %uint_0x1fffffff
          %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageS3D %textures3D_S %t24_<index>
          %t27_<index> = OpLoad %ImageS3D %t26_<index>
          %t33_<index> = OpLoad %uint %<src2_value0>
@@ -3845,7 +3846,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageGather4_Vdata4Vaddr3StSsMimgDmask)
 	}
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (bind_info == nullptr)
+	// IMAGE_GATHER4_L reads a user LOD level, and a Vulkan gather reads only the base level.
+	if (bind_info == nullptr || inst.mimg_explicit_lod)
 	{
 		return false;
 	}
@@ -4906,7 +4908,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 	}
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	// const auto& bind_params = spirv->GetBindParams();
+	const uint8_t dmask   = inst.format == ShaderInstructionFormat::Vdata4Vaddr4StDmaskF ? 0xfu : inst.mimg_dmask;
 
 	if (bind_info != nullptr && bind_info->textures2D.textures2d_storage_num > 0)
 	{
@@ -4930,10 +4932,29 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 		}
 		const bool uint_images = view.unsigned_integer;
 
-		auto dst_value0 = operand_variable_to_str(inst.dst, 0);
-		auto dst_value1 = operand_variable_to_str(inst.dst, 1);
-		auto dst_value2 = operand_variable_to_str(inst.dst, 2);
-		auto dst_value3 = operand_variable_to_str(inst.dst, 3);
+		// Enabled components take consecutive data VGPRs and disabled ones are written as zero, as plain stores do.
+		const auto zero_component = spirv->GetConstantFloat(0.0f);
+		if (zero_component.StartsWith("unknown_"))
+		{
+			return false;
+		}
+		String8 component_loads;
+		int     source_component = 0;
+		for (uint32_t component = 0; component < 4; component++)
+		{
+			if ((dmask & (1u << component)) == 0)
+			{
+				component_loads += String8::FromPrintf("         %%t%u_<index> = OpCopyObject %%float %%%s\n", 84u + component,
+				                                       zero_component.c_str());
+				continue;
+			}
+			const auto source = operand_variable_to_str(inst.dst, source_component++);
+			if (source.type != SpirvType::Float)
+			{
+				return false;
+			}
+			component_loads += String8::FromPrintf("         %%t%u_<index> = OpLoad %%float %%%s\n", 84u + component, source.value.c_str());
+		}
 
 		auto src0_value0 = mimg_address_to_str(inst, 0);
 		auto src0_value1 = mimg_address_to_str(inst, 1);
@@ -4941,10 +4962,6 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 
 		auto src1_value2 = operand_variable_to_str(inst.src[1], 2);
 
-		if (dst_value0.type != SpirvType::Float)
-		{
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n");
-		}
 		if (src0_value0.type != SpirvType::Float)
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n");
@@ -4980,11 +4997,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
          %t711_<index> = OpBitcast %uint %t701_<index>
          %t160_<index> = OpFunctionCall %v2uint %mipmap %t711_<index> %t146_<index> %t151_<index>
          %t73_<index> = OpCompositeConstruct %v2uint %t69_<index> %t71_<index>
-         %t84_<index> = OpLoad %float %<dst_value0>
-         %t85_<index> = OpLoad %float %<dst_value1>
-         %t86_<index> = OpLoad %float %<dst_value2>
-         %t87_<index> = OpLoad %float %<dst_value3>
-         %t172_<index> = OpIAdd %v2uint %t160_<index> %t73_<index>
+<component_loads>         %t172_<index> = OpIAdd %v2uint %t160_<index> %t73_<index>
          %image_store_mip_float_<index> = OpCompositeConstruct %v4float<channel_values>
          %t88_<index> = <texel_conversion> %<image_vector> %image_store_mip_float_<index>
          %image_store_mip_exec_<index> = OpLoad %uint %exec_lo
@@ -5000,6 +5013,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 		                   .ReplaceStr("ImageL", view.image_type)
 		                   .ReplaceStr("textures2D_L", view.variable)
 		                   .ReplaceStr("<channel_values>", channel_values)
+		                   .ReplaceStr("<component_loads>", component_loads)
 		                   .ReplaceStr("<texel_conversion>", uint_images ? "OpBitcast" : "OpCopyObject")
 		                   .ReplaceStr("<image_vector>", uint_images ? "v4uint" : "v4float")
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
@@ -5007,11 +5021,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value)
 		                   .ReplaceStr("<src0_value1>", src0_value1.value)
 		                   .ReplaceStr("<src0_value2>", src0_value2.value)
-		                   .ReplaceStr("<src1_value2>", src1_value2.value)
-		                   .ReplaceStr("<dst_value0>", dst_value0.value)
-		                   .ReplaceStr("<dst_value1>", dst_value1.value)
-		                   .ReplaceStr("<dst_value2>", dst_value2.value)
-		                   .ReplaceStr("<dst_value3>", dst_value3.value);
+		                   .ReplaceStr("<src1_value2>", src1_value2.value);
 
 		return true;
 	}

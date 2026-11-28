@@ -220,10 +220,9 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 
 	if (!operand_is_constant(inst.src[0])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[0]) condition ignored (continuing)\n"); }
 	// Native mode decides EXECZ and EXECNZ on the packed EXEC pair: the mask
-	// adapter (ResolveMaskAccesses) replaces the per-lane vote with lo | hi.
+	// adapter (ResolveMaskAccesses) replaces the per-lane vote with lo | hi,
+	// which is already wave/quad-uniform including in helper lanes.
 	const char* branch_param[2] = {param[0], param[1]};
-	const bool exec_branch = inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz;
-	const bool vcc_branch  = inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz;
 	if ((inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz) &&
 	    ShaderVccBranchIsWaveUniform(code, index))
 	{
@@ -231,17 +230,6 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		                      ? "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpIEqual %bool %cc_u_<index> %uint_0"
 		                      : "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpINotEqual %bool %cc_u_<index> %uint_0";
 		branch_param[1] = "";
-	}
-	String8 quad_uniform_vote;
-	if (spirv->GetCode().GetType() == ShaderType::Pixel && (exec_branch || vcc_branch) &&
-	    String8(branch_param[0]).ContainsStr("OpGroupNonUniformAny"))
-	{
-		// Helpers may sit out non-quad collectives and read an undefined vote. Hand them the vote of a real
-		// fragment of their quad, so every quad takes this branch as one: an implicit-derivative fetch inside
-		// the region then sees its whole quad, whose masked lanes keep the register values the hardware reads.
-		quad_uniform_vote = String8(branch_param[0]).ReplaceStr("%cc_any_<index> = ", "%cc_vote_<index> = ") + "\n" +
-		                    spirv->NativeQuadUniform("cc_vote_<index>", "bool", "cc_any_<index>");
-		branch_param[0] = quad_uniform_vote.c_str();
 	}
 
 	// TODO(): analyze control flow graph

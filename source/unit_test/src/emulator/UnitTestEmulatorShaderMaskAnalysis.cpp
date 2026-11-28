@@ -203,6 +203,22 @@ TEST(EmulatorShaderMaskAnalysis, ExecBranchAfterSaveexecNeedsWholeCompare)
 	EXPECT_TRUE(ShaderLaneMaskPlanOf(ParseShader(no_branch)).local[0]);
 }
 
+TEST(EmulatorShaderMaskAnalysis, Wave32LowMaskWriteKeepsHighWordDemanded)
+{
+	// v_cmp -> s5, v_cmp -> s[4:5], s_mov_b32 exec_lo, s5, s_cbranch_execz: a wave32 compare to s[4:5]
+	// writes only s4, so the branch still needs the first compare's whole mask.
+	constexpr uint32_t v_cmp_lt_u32_s5      = (0xd4u << 24u) | (0xc1u << 16u) | 5u;
+	constexpr uint32_t s_mov_b32_exec_lo_s5 = (0x17du << 23u) | (126u << 16u) | (0x03u << 8u) | 5u;
+	const uint32_t     shader[] = {v_cmp_lt_u32_s5, kCmpSources, kCmpLtU32S4, kCmpSources, s_mov_b32_exec_lo_s5, kSCbranchExeczNext, kEndpgm};
+	const auto         code     = ParseShader(shader);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 5u);
+	EXPECT_TRUE(ShaderLaneMaskPlanOf(code).local[0]);
+	const auto wave32 = ShaderLaneMaskPlanOf(code, false, true).local;
+	EXPECT_FALSE(wave32[0]);
+	EXPECT_TRUE(wave32[1]);
+}
+
 TEST(EmulatorShaderMaskAnalysis, ReadfirstlaneNeedsWholeCompareExec)
 {
 	constexpr uint32_t v_mov_b32_v2_v0 = (0x3fu << 25u) | (2u << 17u) | (1u << 9u) | 256u;

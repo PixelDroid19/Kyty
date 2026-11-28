@@ -449,7 +449,10 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::D2A3: s = operand_array_to_str(inst.dst2, 3); break;
 			case ShaderInstructionFormat::D2A4: s = operand_array_to_str(inst.dst2, 4); break;
 			case ShaderInstructionFormat::S0A2:
-				s = inst.mimg_address_num > 0 ? operand_to_str(inst.src[0]) : operand_array_to_str(inst.src[0], 2);
+				// NSA lists its addresses separately; a 1D atomic supplies X alone.
+				s = inst.mimg_address_num > 0 || (ShaderIsImageAtomic(inst.type) && inst.mimg_dimension == 0u)
+				        ? operand_to_str(inst.src[0])
+				        : operand_array_to_str(inst.src[0], 2);
 				break;
 			case ShaderInstructionFormat::S0A3: s = operand_array_to_str(inst.src[0], 3); break;
 			case ShaderInstructionFormat::S0A4: s = operand_array_to_str(inst.src[0], 4); break;

@@ -882,6 +882,7 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 	Initialize();
 	const Program  xor3(Emit(Parse(Ternary(0x178u), stage), 0u, false, false, true).c_str());
 	const Program  alignbit(Emit(Parse(Ternary(0x14eu), stage), 0u, false, false, true).c_str());
+	const Program  alignbyte(Emit(Parse(Ternary(0x14fu), stage), 0u, false, false, true).c_str());
 	const Program  perm(Emit(Parse(Ternary(0x344u), stage), 0u, false, false, true).c_str());
 	const Program  mad_i24(Emit(Parse(Ternary(0x142u), stage), 0u, false, false, true).c_str());
 	const Program  mad_u16(Emit(Parse(Ternary(0x373u), stage), 0u, false, false, true).c_str());
@@ -911,6 +912,7 @@ uint32_t SignExtend(uint32_t value, uint32_t bits)
 			{
 				const uint64_t pair = (uint64_t {a} << 32u) | b;
 				Equal(Evaluate(alignbit, a, b, shift), static_cast<uint32_t>(pair >> (shift & 31u)), "v_alignbit_b32");
+				Equal(Evaluate(alignbyte, a, b, shift), static_cast<uint32_t>(pair >> (8u * (shift & 3u))), "v_alignbyte_b32");
 			}
 			for (uint32_t select = 0; select < 256u; select++)
 			{
@@ -1799,7 +1801,9 @@ void IsNan(uint32_t actual, const char* label)
 		Equal(Evaluate(halve, kOne, kOne), kHalf, "div:2 halves");
 		Equal(Evaluate(halve, 0x01000000u, kOne), 0x00800000u, "div:2 reaches the smallest normal");
 		Equal(Evaluate(halve, 0x00800000u, kOne), 0u, "div:2 of the smallest normal flushes to +0");
-		Equal(Evaluate(halve, 0x80800000u, kOne), 0u, "div:2 underflow of a negative result flushes to +0");
+		Equal(Evaluate(halve, 0x80800000u, kOne), kNegZero, "div:2 underflow of a negative result keeps its sign");
+		Equal(Evaluate(halve, 0x80ffffffu, kOne), kNegZero, "div:2 underflow of the largest such result keeps its sign");
+		Equal(Evaluate(halve, 0x80400000u, kOne), 0u, "div:2 flushes a negative denormal result to +0");
 		Equal(Evaluate(FloatModeProgram(mul2, 0xc0u, true, true), kOneAndHalf, kOne), kOneAndHalf, "IEEE mode ignores OMOD");
 		Equal(Evaluate(FloatModeProgram(mul2, 0xf0u, false, true), kOneAndHalf, kOne), kOneAndHalf,
 		      "enabled f32 output denormals ignore OMOD");

@@ -41,6 +41,7 @@
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
+#include "Emulator/Graphics/PipelineCacheStore.h"
 #include "Emulator/Graphics/RenderResolutionPlanner.h"
 #include "Emulator/Graphics/SampleLocations.h"
 #include "Emulator/Graphics/Shader.h"
@@ -53,6 +54,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -136,9 +138,13 @@ struct PipelineStaticParameters
 	bool                       separate_alpha_blend[8] = {};
 	bool                       blend_enable[8]         = {};
 	bool                       blend_bypass[8]         = {};
-	bool                       dx_clip_space           = false;
-	bool                       depth_clip_enable       = true;
-	bool                       depth_clamp_enable      = false;
+	bool                       dx_clip_space            = false;
+	bool                       depth_clip_enable        = true;
+	bool                       depth_clamp_enable       = false;
+	bool                       vs_program_window_covers = false;
+	bool                       ps_program_window_covers = false;
+	// The rect stage derives each rect's fourth corner; the input topology is a triangle list.
+	bool                       expand_rects             = false;
 
 	bool operator==(const PipelineStaticParameters& other) const;
 };
@@ -289,9 +295,10 @@ public:
 
 	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
 	                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
-	                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
+	                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology, bool expand_rects,
 	                               const VulkanSampleLocationState& sample_locations, ShaderId* prepared_vs_id = nullptr,
-	                               ShaderId* prepared_ps_id = nullptr);
+	                               ShaderId* prepared_ps_id = nullptr,
+	                               const GuestDeviceAddressTable* device_address_table = nullptr);
 	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, const ShaderComputeInputInfo* input_info,
 	                               const HW::ComputeShaderInfo* cs_regs,
 	                               const HW::ShaderRegisters* sh_regs);
@@ -330,8 +337,16 @@ private:
 	[[nodiscard]] uint32_t  FindAvailableSlot();
 	void                    AttachPipelineLease(CommandBuffer* recording_buffer, Pipeline& pipeline);
 
+	struct DriverCacheCheckpoint
+	{
+		PipelineCacheStoreSaveResult result         = PipelineCacheStoreSaveResult::Failed;
+		size_t                       attempted_size = 0;
+		uint64_t                     elapsed_ns     = 0;
+	};
+
 	void DeletePipelineInternal(uint32_t id);
 	void SaveDriverCacheIfDue();
+	void FinishDriverCacheCheckpoint(const DriverCacheCheckpoint& checkpoint);
 
 	void DumpToFile(Core::File* f, const Pipeline& p);
 	void DumpPipeline(const char* action, uint32_t id);
@@ -345,6 +360,8 @@ private:
 	bool                                  m_driver_cache_dirty                  = false;
 	size_t                                m_driver_cache_bytes_attempted        = 0;
 	bool                                  m_driver_cache_write_budget_exhausted = false;
+	// At most one checkpoint runs off the recording thread; the next lookup collects its outcome.
+	std::future<DriverCacheCheckpoint>    m_driver_cache_checkpoint;
 };
 
 struct VulkanDescriptorSet
@@ -1711,9 +1728,11 @@ struct CubeDrawDepthCoverage
 	return 1u << static_cast<uint32_t>(shape);
 }
 
-// Shapes of the read-only views paired with a sampler slot; every read-only
-// view when none pairs with it.
-[[nodiscard]] inline uint32_t BindSamplerViewShapes(const ShaderTextureResources& textures, int sampler_slot)
+// Shapes of the read-only views the shader's image instructions sample with
+// this sampler; every read-only view when none pairs with it (a sampler loaded
+// through a descriptor table). Texture and sampler slots are separate user-data
+// offsets, so equal slot numbers do not pair a view with a sampler.
+[[nodiscard]] inline uint32_t BindSamplerViewShapes(const ShaderTextureResources& textures, int sampler_index)
 {
 	uint32_t paired = 0;
 	uint32_t all    = 0;
@@ -1726,7 +1745,7 @@ struct CubeDrawDepthCoverage
 		}
 		const uint32_t bit = SamplerViewShapeBit(ShaderResolvedSampledTextureShape(descriptor));
 		all |= bit;
-		if (descriptor.slot == sampler_slot)
+		if ((descriptor.sampler_indices_mask & (1u << static_cast<uint32_t>(sampler_index))) != 0u)
 		{
 			paired |= bit;
 		}
@@ -1734,16 +1753,16 @@ struct CubeDrawDepthCoverage
 	return paired != 0u ? paired : all;
 }
 
-[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_slot)
+[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_index)
 {
-	return (BindSamplerViewShapes(textures, sampler_slot) & ~SamplerViewShapeBit(ShaderGen5SampledTextureShape::TwoDimensional)) == 0u;
+	return (BindSamplerViewShapes(textures, sampler_index) & ~SamplerViewShapeBit(ShaderGen5SampledTextureShape::TwoDimensional)) == 0u;
 }
 
 // The W address mode (S# CLAMP_Z) wraps the R coordinate of 3D views only: 2D
 // views have none, and array and cube views select a layer or face without it.
-[[nodiscard]] inline bool BindSamplerUsesRCoordinate(const ShaderTextureResources& textures, int sampler_slot)
+[[nodiscard]] inline bool BindSamplerUsesRCoordinate(const ShaderTextureResources& textures, int sampler_index)
 {
-	return (BindSamplerViewShapes(textures, sampler_slot) & SamplerViewShapeBit(ShaderGen5SampledTextureShape::ThreeDimensional)) != 0u;
+	return (BindSamplerViewShapes(textures, sampler_index) & SamplerViewShapeBit(ShaderGen5SampledTextureShape::ThreeDimensional)) != 0u;
 }
 
 // Draw-local context for an opt-in, bounded material-binding diagnostic.
@@ -1840,6 +1859,7 @@ struct PrimitiveDrawPlan
 	uint32_t            chunk_count   = 0;
 	bool                chunked       = false;
 	bool                requires_rect = false;
+	bool                expand_rects  = false;
 };
 
 extern RenderContext*           g_render_ctx;
@@ -1998,7 +2018,8 @@ bool PublishComputeColorBlockHeads(CommandBuffer* buffer, const ComputeBlockHead
 [[nodiscard]] bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
 // Copies the filled storage object into the guest device-address view in queue
 // order, so later device-address consumers on this queue need no CPU write-back.
-[[nodiscard]] bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+[[nodiscard]] bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill,
+                                                                 bool already_ordered = false);
 // Before a device-address read on `buffer`'s queue: copies every pending storage
 // result written only on that queue into the guest device-address view in queue
 // order. Returns true with a dependency to wait for when a pending result does not

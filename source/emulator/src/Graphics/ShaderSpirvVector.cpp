@@ -1,4 +1,5 @@
 #include "ShaderSpirvInternal.h"
+#include "ShaderParseInternal.h"
 
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvF16.h"
@@ -1159,7 +1160,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_F32_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -1210,7 +1211,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_I32_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -1261,7 +1262,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U32_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -1714,7 +1715,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -1726,8 +1727,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1)
 }
 
 // The tail that stores lane bit %t3_<index>. A v_cmpx writes EXEC only; the others write VCC, VCC_HI or an SGPR pair
-// with the high word cleared.
-static bool CompareMaskStore(const ShaderInstruction& inst, String8* store)
+// with the high word cleared; a wave32 compare writes the low word only and the adjacent scalar word keeps its value.
+static bool CompareMaskStore(const ShaderInstruction& inst, bool wave32, String8* store)
 {
 	if (ShaderInstructionTypeStartsWith(inst.type, "VCmpx"))
 	{
@@ -1740,7 +1741,7 @@ static bool CompareMaskStore(const ShaderInstruction& inst, String8* store)
 	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
 	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
 	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || wave32 ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*store = String8("OpStore %<dst0> %t3_<index>\n").ReplaceStr("<dst0>", dst_value0.value) + clear_high;
 	return true;
 }
@@ -1759,7 +1760,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_XXX_SmaskVsrc0Vsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	String8 store;
-	if (!CompareMaskStore(inst, &store)) { return false; }
+	if (!CompareMaskStore(inst, spirv->NativeWave32(), &store)) { return false; }
 
 	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
@@ -2605,7 +2606,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpI16_XXX_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -2653,7 +2654,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpU16_XXX_SmaskVsrc0Vsrc1)
           OpStore %<dst0> %t3_<index>
           <clear_high>
 )";
-	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
+	const auto clear_high = single_vcc_hi || spirv->NativeWave32() ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<clear_high>", clear_high)
@@ -2896,7 +2897,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF16_Special_SmaskVsrc0Vsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	String8 store;
-	if (!CompareMaskStore(inst, &store)) { return false; }
+	if (!CompareMaskStore(inst, spirv->NativeWave32(), &store)) { return false; }
 
 	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
@@ -2940,7 +2941,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpF64_Special_SmaskVsrc0Vsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	String8 store;
-	if (!CompareMaskStore(inst, &store)) { return false; }
+	if (!CompareMaskStore(inst, spirv->NativeWave32(), &store)) { return false; }
 
 	if (!operand_load_f64_word(spirv, inst.src[0], "t0_lo_<index>", index_str, &load0lo, 0))
 	{
@@ -4310,7 +4311,7 @@ constexpr int kMovrelUnitM0    = 108;
 // Bound on the M0 values one relative access may resolve to.
 constexpr uint32_t kMovrelValueSetMax = 32;
 
-static bool MovrelOperandWritesUnit(const ShaderOperand& op, int unit)
+bool ScalarOperandWritesUnit(const ShaderOperand& op, int unit)
 {
 	const int size = op.size > 0 ? op.size : 1;
 	switch (op.type)
@@ -4355,7 +4356,7 @@ static bool MovrelIsBranchTarget(const ShaderCode& code, uint32_t pc)
 // The instruction that runs immediately before |index| on every path: the
 // fallthrough predecessor, or the only forward branch into a label that cannot
 // be reached by falling through.
-static bool MovrelUniquePredecessor(const ShaderCode& code, uint32_t index, uint32_t* prev)
+bool ScalarUniquePredecessor(const ShaderCode& code, uint32_t index, uint32_t* prev)
 {
 	const auto& insts = code.GetInstructions();
 	const auto  pc    = insts.At(index).pc;
@@ -4537,7 +4538,7 @@ static bool MovrelUnitValueSet(const ShaderCode& code, uint32_t index, int unit,
 	}
 	uint32_t i    = index;
 	uint32_t next = index;
-	for (; MovrelUniquePredecessor(code, next, &i); next = i)
+	for (; ScalarUniquePredecessor(code, next, &i); next = i)
 	{
 		if (MovrelGuardValueSet(code, i, next, unit, values))
 		{
@@ -4548,11 +4549,11 @@ static bool MovrelUnitValueSet(const ShaderCode& code, uint32_t index, int unit,
 		{
 			return false;
 		}
-		if (MovrelOperandWritesUnit(inst.dst2, unit))
+		if (ScalarOperandWritesUnit(inst.dst2, unit))
 		{
 			return false;
 		}
-		if (!MovrelOperandWritesUnit(inst.dst, unit))
+		if (!ScalarOperandWritesUnit(inst.dst, unit))
 		{
 			continue;
 		}
@@ -4616,15 +4617,15 @@ static uint32_t MovrelUnitAlignment(const ShaderCode& code, uint32_t index, int 
 	}
 	uint32_t i    = index;
 	uint32_t next = index;
-	for (; MovrelUniquePredecessor(code, next, &i); next = i)
+	for (; ScalarUniquePredecessor(code, next, &i); next = i)
 	{
 		const auto& inst = code.GetInstructions().At(i);
 		if (inst.type == ShaderInstructionType::SSwappcB64 || inst.type == ShaderInstructionType::SSetpcB64 ||
-		    MovrelOperandWritesUnit(inst.dst2, unit))
+		    ScalarOperandWritesUnit(inst.dst2, unit))
 		{
 			return 0u;
 		}
-		if (MovrelOperandWritesUnit(inst.dst, unit))
+		if (ScalarOperandWritesUnit(inst.dst, unit))
 		{
 			return MovrelDefinitionAlignment(code, i, depth + 1);
 		}
@@ -4643,7 +4644,7 @@ static uint32_t MovrelLaneAlignment(const ShaderCode& code, uint32_t index, int 
 {
 	uint32_t i    = index;
 	uint32_t next = index;
-	for (; MovrelUniquePredecessor(code, next, &i); next = i)
+	for (; ScalarUniquePredecessor(code, next, &i); next = i)
 	{
 		const auto& inst = code.GetInstructions().At(i);
 		if (MovrelOperandWritesVgpr(inst.dst, vgpr))
@@ -4734,6 +4735,19 @@ static Vector<int> MovrelCandidateRegisters(const ShaderCode& code, int base)
 	return regs;
 }
 
+static Vector<int> MovrelOffsetRegisters(const Vector<int>& regs, int base, const Vector<uint32_t>& offsets)
+{
+	Vector<int> reachable;
+	for (const auto reg: regs)
+	{
+		if (offsets.Contains(static_cast<uint32_t>(reg - base)))
+		{
+			reachable.Add(reg);
+		}
+	}
+	return reachable;
+}
+
 // Named VGPRs a runtime-M0 relative access at |index| can reach from |base|:
 // every candidate, narrowed to the M0 values the reaching definition allows.
 static Vector<int> MovrelReachableRegisters(const ShaderCode& code, uint32_t index, int base)
@@ -4744,15 +4758,20 @@ static Vector<int> MovrelReachableRegisters(const ShaderCode& code, uint32_t ind
 	{
 		return MovrelAlignedRegisters(regs, base, MovrelUnitAlignment(code, index, kMovrelUnitM0, 0));
 	}
-	Vector<int> reachable;
-	for (const auto reg: regs)
+	return MovrelOffsetRegisters(regs, base, offsets);
+}
+
+// Named VGPRs a lowered waterfall move at |index| can reach from |base|: the candidates at the offsets its lane index
+// can hold, or those the index's alignment allows when its values are unknown.
+static Vector<int> MovrelLaneReachableRegisters(const ShaderCode& code, uint32_t index, int base, int lane_index)
+{
+	auto             regs = MovrelCandidateRegisters(code, base);
+	Vector<uint32_t> offsets;
+	if (!ShaderLaneValuesOnEntry(code, index, lane_index, &offsets))
 	{
-		if (offsets.Contains(static_cast<uint32_t>(reg - base)))
-		{
-			reachable.Add(reg);
-		}
+		return MovrelAlignedRegisters(regs, base, MovrelLaneAlignment(code, index, lane_index));
 	}
-	return reachable;
+	return MovrelOffsetRegisters(regs, base, offsets);
 }
 
 // dst = VGPR[base + offset] lowered to a select chain over |candidates|; any other offset reads zero.
@@ -4832,6 +4851,28 @@ static bool MovrelOperandBounds(const ShaderOperand& operand, uint32_t m0, uint6
 	return true;
 }
 
+Vector<int> ShaderMovrelReadVgprs(const ShaderCode& code, uint32_t index)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	const int   base = inst.src[0].register_id;
+	if (inst.type == ShaderInstructionType::VMovrelsB32 && inst.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1)
+	{
+		return MovrelLaneReachableRegisters(code, index, base, inst.src[1].register_id);
+	}
+	uint32_t m0  = 0;
+	uint64_t rel = 0;
+	if (MovrelProvenLiteralM0(code, index, &m0))
+	{
+		Vector<int> resolved;
+		if (MovrelOperandBounds(inst.src[0], m0, &rel))
+		{
+			resolved.Add(static_cast<int>(rel));
+		}
+		return resolved;
+	}
+	return MovrelReachableRegisters(code, index, base);
+}
+
 static bool EmitMovrelMove(int index, ShaderOperand dst, ShaderOperand src, String8* dst_source, Spirv* spirv)
 {
 	String8 index_str = String8::FromPrintf("%u", index);
@@ -4894,8 +4935,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovrelsB32_SVdstSVsrc0)
 		                                             "%%rel_m0_%u = OpBitcast %%uint %%rel_lane_%u\n",
 		                                             index, inst.src[1].register_id, index, index);
 		return EmitMovrelsDynamic(static_cast<int>(index), inst.dst, inst.src[0].register_id, offset_load,
-		                          MovrelAlignedRegisters(MovrelCandidateRegisters(code, inst.src[0].register_id), inst.src[0].register_id,
-		                                                 MovrelLaneAlignment(code, index, inst.src[1].register_id)),
+		                          MovrelLaneReachableRegisters(code, index, inst.src[0].register_id, inst.src[1].register_id),
 		                          dst_source, spirv);
 	}
 	if (MovrelProvenLiteralM0(code, index, &m0))
@@ -4944,8 +4984,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovreldB32_SVdstSVsrc0)
 		                                             "%%rel_m0_%u = OpBitcast %%uint %%rel_lane_%u\n",
 		                                             index, inst.src[1].register_id, index, index);
 		return EmitMovreldDynamic(index, inst.dst.register_id, offset_load, src_load, "%rel_src_" + index_str,
-		                          MovrelAlignedRegisters(MovrelCandidateRegisters(code, inst.dst.register_id), inst.dst.register_id,
-		                                                 MovrelLaneAlignment(code, index, inst.src[1].register_id)),
+		                          MovrelLaneReachableRegisters(code, index, inst.dst.register_id, inst.src[1].register_id),
 		                          dst_source);
 	}
 	if (MovrelProvenLiteralM0(code, index, &m0))

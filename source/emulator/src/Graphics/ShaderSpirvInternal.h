@@ -137,6 +137,9 @@ public:
 	// Built by GenerateSource.
 	[[nodiscard]] const ShaderControlFlowGraph& GetControlFlow() const { return m_control_flow; }
 	[[nodiscard]] bool UsesNativeComputeWave() const;
+	// Wave-width-independent compute program with no cross-lane or barrier ops:
+	// masks live as per-lane {0, 0xffffffff} values instead of subgroup ballots.
+	[[nodiscard]] bool UsesLanePrivateMasks() const;
 	// Split wave64 (ShaderSpirvSplitWave.cpp): two or four host subgroups per guest wave on the native per-lane path.
 	[[nodiscard]] bool UsesSplitComputeWave() const;
 	// Split compute wave: a mask producer whose result each lane reads only
@@ -146,6 +149,8 @@ public:
 	// Split compute wave: pointwise mask algebra that gathers its own result
 	// from the lane-local masks it combines.
 	[[nodiscard]] bool IsLaneMaskGather(uint32_t index) const;
+	// Lane-local fragment program: every mask is gathered over this invocation's quad only.
+	[[nodiscard]] bool GathersMasksInQuad() const;
 	// Split compute wave: the run of V_READLANE instructions that shares one exchange with the one at index, head
 	// first; nullptr when it exchanges alone.
 	[[nodiscard]] const std::vector<uint32_t>* SplitReadGroup(uint32_t index) const;
@@ -201,6 +206,10 @@ public:
 	[[nodiscard]] const ShaderFragmentMaskFlow& FragmentMaskFlow() const;
 	// A pixel program's EXEC write at index leaves every host invocation live: the proof says EXEC is full before the next instruction.
 	[[nodiscard]] bool ExecFullAfter(uint32_t index) const;
+	// True when all guest lanes in each dispatched compute wave start live without masking.
+	[[nodiscard]] bool HasWholeComputeWavesAtEntry() const;
+	// True when instruction `index` writes only VGPRs whose inactive lanes can never be observed.
+	[[nodiscard]] bool SkipDestinationExecGuard(uint32_t index) const;
 	// A fused vertex program run by the graphics pipeline: every lane of a host subgroup is a live vertex.
 	[[nodiscard]] bool HasFusedVertexLanes() const { return m_vs_input_info != nullptr && m_vs_input_info->gs_prolog && !UsesGeometryCompute(); }
 	// ds_*_addtid_b32: a per-lane LDS slot at M0[15:0] + offset + TID*4.
@@ -234,6 +243,10 @@ public:
 	// Writes the metadata of each assembled V# the instruction consumes into its
 	// descriptor SGPRs (see ShaderAssembledDescriptor).
 	[[nodiscard]] String8 MaterializeAssembledDescriptors(const ShaderInstruction& inst) const;
+	// Keeps the record index of each heap read and writes the metadata of the
+	// texture its record binds into its T# SGPRs (see ShaderHeapTexture).
+	[[nodiscard]] String8 MaterializeHeapTextures(const ShaderInstruction& inst) const;
+	[[nodiscard]] String8 HeapRecordVariables() const;
 	[[nodiscard]] String8 EmitMetadataStore(int row, int field, const String8& reg) const;
 	[[nodiscard]] String8 EmitThreadLimitLoad(uint32_t axis, const String8& id) const;
 	[[nodiscard]] bool    UsesGuestDeviceAddress() const;
@@ -242,6 +255,7 @@ public:
 	[[nodiscard]] String8 GuestDeviceAddressTypes(bool ulong_declared) const;
 	[[nodiscard]] String8 GuestDeviceAddressFunction() const;
 	[[nodiscard]] bool    EmitGuestLoad(const String8& lo, const String8& hi, int dwords, const String8& prefix, String8* output) const;
+	[[nodiscard]] bool    EmitGuestLoad64Aligned(const String8& lo, const String8& hi, int dwords, const String8& prefix, String8* output) const;
 	[[nodiscard]] String8 WrapVertexScalarBufferProbe(const ShaderInstruction& inst, uint32_t index,
 	                                                 uint32_t site, const String8& original);
 	[[nodiscard]] String8 EmitNativeThreadLimitExec() const;
@@ -330,6 +344,8 @@ public:
 
 	void                                        SetCsInputInfo(const ShaderComputeInputInfo* input_info) { m_cs_input_info = input_info; }
 	[[nodiscard]] const ShaderComputeInputInfo* GetCsInputInfo() const { return m_cs_input_info; }
+	// The native-equivalent layout precedes these instructions with a workgroup barrier.
+	[[nodiscard]] bool HasLdsOrderBarriers() const { return m_cs_input_info != nullptr && !m_cs_input_info->lds_order_barriers.empty(); }
 
 	void                                      SetPsInputInfo(const ShaderPixelInputInfo* input_info) { m_ps_input_info = input_info; }
 	[[nodiscard]] const ShaderPixelInputInfo* GetPsInputInfo() const { return m_ps_input_info; }
@@ -575,6 +591,8 @@ private:
 	mutable ShaderFragmentMaskFlow m_fragment_mask_flow;
 	mutable bool                  m_vertex_exec_full_ready = false;
 	mutable std::vector<bool>     m_vertex_exec_full;
+	mutable bool                  m_dead_vgpr_guards_ready = false;
+	mutable std::vector<bool>     m_dead_vgpr_guards;
 	mutable bool                  m_lane_mask_plan_ready = false;
 	mutable ShaderLaneMaskPlan    m_lane_mask_plan;
 	mutable bool                  m_split_lds_order_ready = false;
@@ -663,6 +681,27 @@ bool UsesNativeLaneExchange(const ShaderCode& code);
 // M0-relative moves lower to a named register only when M0 is a proven literal
 // in the same basic block. Returns the literal through m0 on success.
 bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0);
+// VGPRs the lowering of the M0-relative read at `index` (V_MOVRELS, V_MOVRELSD)
+// loads: the resolved register for a proven-literal M0, else every register
+// its select chain may pick.
+Vector<int> ShaderMovrelReadVgprs(const ShaderCode& code, uint32_t index);
+// Scalar dword units: s0..s105, then 106 = vcc_lo, 107 = vcc_hi, 108 = m0.
+// True when writing `op` changes `unit`.
+bool ScalarOperandWritesUnit(const ShaderOperand& op, int unit);
+// The instruction that runs immediately before `index` on every path: the
+// fallthrough predecessor, or the only forward branch into a label that cannot
+// be reached by falling through.
+bool ScalarUniquePredecessor(const ShaderCode& code, uint32_t index, uint32_t* prev);
+// An S_BUFFER_LOAD whose descriptor is built on every path by
+// s_getpc_b64 s[b:b+1]; s_add_u32 s[b], K, s[b]; s_addc_u32 s[b+1], 0, s[b+1]
+// and a literal s_mov_b32 s[b+2], N. The base lies `offset` bytes past the
+// program base, low two bits cleared as SMEM addresses it; N is `records`.
+struct ProgramRelativeScalarDescriptor
+{
+	uint32_t offset  = 0;
+	uint32_t records = 0;
+};
+bool ShaderProgramRelativeScalarDescriptor(const ShaderCode& code, uint32_t index, ProgramRelativeScalarDescriptor* out);
 // Gen5 BUFFER_LOAD_FORMAT and BUFFER_STORE_FORMAT lower through shared
 // functions that decode or encode the V#'s format; `bound_buffers` adds the
 // storage-buffer element reader and, for stores, the element writer.

@@ -677,6 +677,22 @@ int KYTY_SYSV_ABI GetSkuFlag(SkuFlag* sku_flag)
 	return OK;
 }
 
+// Like the SKU flag: a full install is not a game trial.
+int KYTY_SYSV_ABI GetGameTrialsFlag(GameTrialsFlag* flag)
+{
+	if (!g_entitlement_initialized.load(std::memory_order_acquire))
+	{
+		return ERROR_NOT_INITIALIZED;
+	}
+	if (flag == nullptr)
+	{
+		return ERROR_PARAMETER;
+	}
+
+	*flag = GameTrialsFlag::Off;
+	return OK;
+}
+
 static void WriteEntitlementInfo(const Loader::AddcontEntry& entry, AddcontEntitlementInfo* info)
 {
 	std::memset(info, 0, sizeof(*info));
@@ -758,6 +774,7 @@ LIB_DEFINE(InitNpEntitlementAccess_1)
 {
 	LIB_FUNC("jO8DM8oyego", Initialize);
 	LIB_FUNC("lPDO62PpJIA", GetSkuFlag);
+	LIB_FUNC("y7JD1gfwyfA", GetGameTrialsFlag);
 	// sceNpEntitlementAccessGetAddcontEntitlementInfo
 	LIB_FUNC("xddD23+8TfQ", GetAddcontEntitlementInfo);
 	LIB_FUNC("TFyU+KFBv54", GetAddcontEntitlementInfoList);
@@ -833,6 +850,29 @@ static KYTY_SYSV_ABI int GetUserIdByAccountId(uint64_t account_id, int32_t* user
 	return kNpErrorSignedOut;
 }
 
+// No premium (PlayStation Plus) event reaches an offline account, so the
+// callback is held only between Register and Unregister and never called. The
+// codes for a null callback or an unbalanced pair are not established, so they
+// stop the run.
+static std::atomic_bool g_premium_callback_registered = false;
+
+static int KYTY_SYSV_ABI NpRegisterPremiumEventCallback(void* callback, void* userdata)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t callback = 0x%016" PRIx64 " userdata = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(callback),
+	               reinterpret_cast<uint64_t>(userdata));
+	EXIT_IF(callback == nullptr);
+	EXIT_IF(g_premium_callback_registered.exchange(true));
+	return OK;
+}
+
+static int KYTY_SYSV_ABI NpUnregisterPremiumEventCallback()
+{
+	PRINT_NAME();
+	EXIT_IF(!g_premium_callback_registered.exchange(false));
+	return OK;
+}
+
 // The one NpManager export list: account queries here, sign-in state and
 // requests in Network.cpp.
 LIB_DEFINE(InitNpManager_1)
@@ -847,6 +887,8 @@ LIB_DEFINE(InitNpManager_1)
 	LIB_FUNC("qQJfO8HAiaY", Network::NpManager::NpRegisterStateCallback);
 	LIB_FUNC("uFJpaKNBAj4", Network::NpManager::NpRegisterGamePresenceCallback);
 	LIB_FUNC("GImICnh+boA", Network::NpManager::NpRegisterPlusEventCallback);
+	LIB_FUNC("+yqjab2fUJA", NpRegisterPremiumEventCallback);
+	LIB_FUNC("-Rjp3-YViXc", NpUnregisterPremiumEventCallback);
 	LIB_FUNC("hw5KNqAAels", Network::NpManager::NpRegisterNpReachabilityStateCallback);
 	LIB_FUNC("p-o74CnoNzY", Network::NpManager::NpGetNpId);
 	LIB_FUNC("XDncXQIJUSk", Network::NpManager::NpGetOnlineId);

@@ -39,8 +39,6 @@
 #include <chrono>
 #include <cinttypes>
 #include <condition_variable>
-#include <cstdio>
-#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -925,6 +923,63 @@ bool CommandProcessor::SubmitForDeviceWait(SubmissionId submission, VkSemaphore*
 	return m_buffer[slot]->GetTimeline(&device, timeline, value);
 }
 
+// A label store pending on this queue is ordered before everything recorded after it. One pending
+// on another queue is ordered on the device: the next submission of this queue waits for the
+// producer's timeline. Either way the CP passes the wait without the host waiting for the GPU,
+// and a later store of this batch retires the producer first (RetireBeforeStore).
+bool CommandProcessor::ConsolidateWaitProducer(const SubmissionDependency& dependency)
+{
+	const bool same_queue = OwnsSubmissionQueue(dependency.producer);
+	const auto effects    = static_cast<uint8_t>(dependency.effects);
+	if (m_queue != GraphicContext::QUEUE_GFX || !GraphicsWaitRegMemCanConsolidateProducer(effects))
+	{
+		return false;
+	}
+	bool awaited = same_queue;
+	if (!same_queue)
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		awaited = m_buffer[m_current_buffer]->AwaitsSubmissionOnDevice(dependency.producer);
+	}
+	if (!awaited)
+	{
+		// Work recorded before the wait is submitted first so that it does not wait too. A
+		// resumed wait packet runs again and finds its producer already awaited.
+		BufferFlushForGpuWait();
+		(void)AwaitOnDevice(dependency.producer);
+	}
+	if ((effects & 2u) != 0u)
+	{
+		GpuMemoryDeferPendingStorageAliases();
+	}
+	MemoryBarrier();
+	m_consolidated_plain_wait = true;
+	// A newer producer of a queue covers its older ones.
+	for (auto& producer: m_consolidated_producers)
+	{
+		if (producer.queue == dependency.producer.queue)
+		{
+			producer.sequence = std::max(producer.sequence, dependency.producer.sequence);
+			return true;
+		}
+	}
+	m_consolidated_producers.push_back(dependency.producer);
+	return true;
+}
+
+bool CommandProcessor::PassSuspendedWaitOnDevice(const SuspendedRun& suspended)
+{
+	if (m_queue != GraphicContext::QUEUE_GFX)
+	{
+		return false;
+	}
+	SubmissionDependency dependency;
+	return FindSuspendedWaitProducer(suspended.address, suspended.size, suspended.reference, suspended.mask, &dependency) ==
+	           GpuSubmissionResult::Success &&
+	       !OwnsSubmissionQueue(dependency.producer) && ConsolidateWaitProducer(dependency);
+}
+
 bool CommandProcessor::AwaitOnDevice(SubmissionId submission)
 {
 	if (OwnsSubmissionQueue(submission))
@@ -1249,18 +1304,8 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	// recorded after it, and it is published when its fence completes either
 	// way. A full barrier keeps its memory effects visible without splitting
 	// the submission.
-	const auto effects                = static_cast<uint8_t>(dependency.effects);
-	const bool producer_on_this_queue = producer == GpuSubmissionResult::Success && OwnsSubmissionQueue(dependency.producer);
-	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_on_this_queue, effects))
+	if (producer == GpuSubmissionResult::Success && ConsolidateWaitProducer(dependency))
 	{
-		if ((effects & 2u) != 0u)
-		{
-			GpuMemoryDeferPendingStorageAliases();
-		}
-		MemoryBarrier();
-		m_consolidated_plain_wait = true;
-		m_consolidated_producer   = dependency.producer;
 		return;
 	}
 	BufferFlushForGpuWait();
@@ -1337,18 +1382,8 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	// recorded after it, and it is published when its fence completes either
 	// way. A full barrier keeps its memory effects visible without splitting
 	// the submission.
-	const auto effects                = static_cast<uint8_t>(dependency.effects);
-	const bool producer_on_this_queue = producer == GpuSubmissionResult::Success && OwnsSubmissionQueue(dependency.producer);
-	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_on_this_queue, effects))
+	if (producer == GpuSubmissionResult::Success && ConsolidateWaitProducer(dependency))
 	{
-		if ((effects & 2u) != 0u)
-		{
-			GpuMemoryDeferPendingStorageAliases();
-		}
-		MemoryBarrier();
-		m_consolidated_plain_wait = true;
-		m_consolidated_producer   = dependency.producer;
 		return;
 	}
 	BufferFlushForGpuWait();
@@ -1490,7 +1525,11 @@ void CommandProcessor::RetireBeforeStore(uint64_t dst, uint32_t size_bytes)
 {
 	if (m_consolidated_plain_wait)
 	{
-		WaitProducer(m_consolidated_producer);
+		for (const auto& producer: m_consolidated_producers)
+		{
+			WaitProducer(producer);
+		}
+		m_consolidated_producers.clear();
 		m_consolidated_plain_wait = false;
 	}
 	if (size_bytes != 4u && size_bytes != 8u)
@@ -1926,6 +1965,15 @@ static void WaitForSuspendedRuns(CommandProcessor* cp, CommandProcessor::Suspend
 		// produce the watched label.
 		cp->RunLock();
 		(void)cp->PumpCompletedSubmissions();
+		for (auto* suspended: {first, second})
+		{
+			if (suspended != nullptr && cp->PassSuspendedWaitOnDevice(*suspended))
+			{
+				suspended->passed_on_device = true;
+				cp->RunUnlock();
+				return;
+			}
+		}
 		cp->RunUnlock();
 		Core::Thread::SleepMicro(SUSPENDED_WAIT_POLL_MICROS);
 	}
@@ -2091,19 +2139,22 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				{
 					return false;
 				}
+				// The words are a snapshot of the submitted buffer.
+				const uint32_t* guest = stream->command.source_data;
 				if (stream->blocked)
 				{
-					if (!SuspendedRunReady(stream->suspended))
+					if (!stream->suspended.passed_on_device && !SuspendedRunReady(stream->suspended))
 					{
 						return false;
 					}
 					stream->command.data   = stream->suspended.data;
 					stream->command.num_dw = stream->suspended.num_dw;
+					guest                  = stream->suspended.guest_data;
 					stream->suspended      = {};
 					stream->blocked        = false;
 				}
 
-				cp->Run(stream->command.data, stream->command.num_dw, stream->command.source_data);
+				cp->Run(stream->command.data, stream->command.num_dw, stream->command.source_data, guest);
 				stream->command.source_data = nullptr;
 
 				if (cp->TakeSuspendedRun(&stream->suspended))
@@ -2134,16 +2185,23 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				// may be the awaited value; the suspended batch keeps waiting for
 				// the command processor to consume its stream.
 				const bool host_producer = !SuspendedRunsHaveGpuProducer(cp, constant_wait, draw_wait);
+				// The guest releases a REWIND only after its submit returns; the
+				// packets after it are read from guest memory once released.
+				const bool rewind = (constant_wait != nullptr && constant_wait->rewind) || (draw_wait != nullptr && draw_wait->rewind);
 				if (host_producer)
 				{
 					const auto* wait = constant_wait != nullptr ? constant_wait : draw_wait;
-					if (buf.returns_before_decode)
+					if (buf.returns_before_decode && !rewind)
 					{
 						EXIT("Batch that returned before its decode suspended on a wait no submitted work produces: address=0x%016" PRIx64
 						     " size=%" PRIu32 "\n",
 						     reinterpret_cast<uint64_t>(wait->address), static_cast<uint32_t>(wait->size));
 					}
 					ring->SetDecodeReleased(&buf, true);
+					if (rewind && buf.decode_completion != nullptr)
+					{
+						buf.decode_completion->Signal();
+					}
 				}
 				WaitForSuspendedRuns(cp, constant_wait, draw_wait);
 				if (host_producer)
@@ -2285,10 +2343,12 @@ void ComputeRing::ThreadRun(void* data)
 
 			uint32_t*       run_data        = buffer;
 			const uint32_t* run_source_data = buffer;
+			// A wrapped run is assembled from two parts of the ring.
+			const uint32_t* run_guest_data  = buffer == ring->m_internal_buffer ? nullptr : buffer;
 			uint32_t        run_num_dw      = num_dw;
 			for (;;)
 			{
-				cp->Run(run_data, run_num_dw, run_source_data);
+				cp->Run(run_data, run_num_dw, run_source_data, run_guest_data);
 
 				CommandProcessor::SuspendedRun suspended;
 				if (!cp->TakeSuspendedRun(&suspended))
@@ -2302,6 +2362,7 @@ void ComputeRing::ThreadRun(void* data)
 				run_data   = suspended.data;
 				run_num_dw = suspended.num_dw;
 				run_source_data = nullptr;
+				run_guest_data  = suspended.guest_data;
 			}
 
 			run_submission = cp->BufferFlush();
@@ -2471,11 +2532,12 @@ static bool Pm4KeepsGeometrySegment(uint32_t op)
 	}
 }
 
-void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data)
+void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data, const uint32_t* guest_data)
 {
 	KYTY_PROFILER_BLOCK("CommandProcessor::Run");
 	const uint32_t* const previous_run_begin = m_active_run_begin;
 	const uint32_t* const previous_run_end   = m_active_run_end;
+	const uint32_t* const previous_run_guest = m_active_run_guest;
 	// Indirect buffers run nested inside the enclosing run, which already counts their time.
 	std::optional<ScopedDebugStatsTimer> run_timer;
 	if (previous_run_begin == nullptr)
@@ -2484,6 +2546,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 	}
 	m_active_run_begin                       = data;
 	m_active_run_end                         = data != nullptr ? data + num_dw : nullptr;
+	m_active_run_guest                       = guest_data;
 	// Work submitted or resumed may read guest writes ordered before it; every exit
 	// ends the stretch of packets that change no guest memory.
 	struct OrderingPointScope
@@ -2680,6 +2743,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			// Commands before it were submitted by WaitRegMem32/64.
 			m_suspended_run.data            = cmd - 1;
 			m_suspended_run.num_dw          = remaining_including_header;
+			m_suspended_run.guest_data      = guest_data != nullptr ? guest_data + (cmd - 1 - data) : nullptr;
 			m_suspended_run.blocked_since_ns = SuspendedWaitNowNs();
 			m_suspended_run_valid           = true;
 			m_suspend_run_requested         = false;
@@ -2695,6 +2759,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 	StopDrawFronts();
 	m_active_run_begin = previous_run_begin;
 	m_active_run_end   = previous_run_end;
+	m_active_run_guest = previous_run_guest;
 }
 
 bool CommandProcessor::TakeSuspendedRun(SuspendedRun* run)
@@ -2789,7 +2854,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 {
 	if (m_draw_front_shadow)
 	{
-		m_draw_front->Prepare(m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
+		m_draw_front->Prepare(GraphicsRenderPrepareIndexedDrawInputs, m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
 		return;
 	}
 	SubmitRecordedDispatchesBeforeDraw();
@@ -2835,7 +2900,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 {
 	if (m_draw_front_shadow)
 	{
-		m_draw_front->Prepare(m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
+		m_draw_front->Prepare(GraphicsRenderPrepareIndexedDrawInputs, m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
 		return;
 	}
 	SubmitRecordedDispatchesBeforeDraw();
@@ -2927,6 +2992,7 @@ PreparedDrawInputs* CommandProcessor::TakePreparedDrawInputs()
 	{
 		// Every front learns where the processor is; at most one prepared this draw.
 		PreparedDrawInputs* prepared = nullptr;
+		bool                stale    = false;
 		for (auto* front: m_draw_fronts)
 		{
 			if (auto* inputs = front->Take(m_packet, m_num_instances); inputs != nullptr)
@@ -2935,8 +3001,16 @@ PreparedDrawInputs* CommandProcessor::TakePreparedDrawInputs()
 				EXIT_IF(prepared != nullptr);
 				prepared = inputs;
 			}
+			stale = stale || front->TookStale();
 		}
-		return prepared;
+		if (prepared != nullptr || !stale)
+		{
+			return prepared;
+		}
+		// A host write voided the draws the fronts prepared ahead of this one. Replaying again from
+		// here prepares the next draws against current memory instead of leaving all of them to this
+		// processor.
+		StopDrawFronts();
 	}
 	// The replay is idle. It continues from this draw with the registers this processor holds.
 	m_draw_front_claimed.store(m_packet);
@@ -3226,12 +3300,17 @@ bool CommandProcessor::RecordDispatch(uint32_t thread_group_x, uint32_t thread_g
 			processor_writeback_complete = true;
 			continue;
 		}
-		// Waiting can submit another processor's recording buffer and publish
-		// its resources; neither processor nor render recording locks may be held.
-		g_gpu->WaitSubmission(pending);
 		EXIT_IF(result != ComputeDispatchResult::SubmissionCompletionRequired &&
 		        result != ComputeDispatchResult::ReaderCompletionRequired);
 		++attempt;
+		// A writer on another queue is ordered on the device first, as for a draw.
+		if (result == ComputeDispatchResult::SubmissionCompletionRequired && AwaitOnDevice(pending))
+		{
+			continue;
+		}
+		// Waiting can submit another processor's recording buffer and publish
+		// its resources; neither processor nor render recording locks may be held.
+		g_gpu->WaitSubmission(pending);
 	}
 	EXIT("device-address dispatch preparation did not stabilize: queue=%u sequence=%" PRIu64 "\n",
 	     pending.queue.Value(), pending.sequence);
@@ -3316,9 +3395,15 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 
 void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier)
 {
+	if (m_draw_front_shadow)
+	{
+		m_draw_front->Prepare(GraphicsRenderPrepareAutoDrawInputs, m_ctx, m_ucfg, &m_sh_ctx, index_count, m_num_instances);
+		return;
+	}
 	SubmitRecordedDispatchesBeforeDraw();
 	ResolveNumInstancesLatch();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
+	PreparedDrawInputs*         prepared = TakePreparedDrawInputs();
 	uint64_t submit_id = 0;
 	uint32_t instance_count = 1;
 	{
@@ -3364,9 +3449,11 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifie
 	{
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		// A retry records against registers a wait may have changed, so it analyses them again.
 		GraphicsRenderDrawIndexAuto(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, draw_modifier,
-		                            instance_count, 0, 0, pending);
+		                            instance_count, 0, 0, pending, std::exchange(prepared, nullptr));
 	});
+	ReleaseDrawFronts();
 	SubmitRecordedWorkIfGpuIdle();
 }
 
@@ -3675,13 +3762,13 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	}
 }
 
-void CommandProcessor::MemoryBarrier()
+void CommandProcessor::MemoryBarrier(uint8_t producers)
 {
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
-	GraphicsRenderMemoryBarrier(m_buffer[m_current_buffer]);
+	GraphicsRenderMemoryBarrier(m_buffer[m_current_buffer], producers);
 }
 
 void CommandProcessor::RenderTextureBarrier(uint64_t vaddr, uint64_t size)
@@ -3724,24 +3811,24 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index, u
 	} else if (event_type == 0x0000002a && event_index == 0x00000000)
 	{
 		// DB_CACHE_FLUSH_AND_INV
-		MemoryBarrier();
+		MemoryBarrier(CommandBuffer::BarrierProducerGraphics);
 	} else if (event_type == 0x0000002c && (event_index == 0x00000000 || event_index == 0x00000007))
 	{
 		// FLUSH_AND_INV_DB_META — index 7 was already accepted; post-Play also
 		// emits index 0 on EVENT_WRITE.
-		MemoryBarrier();
+		MemoryBarrier(CommandBuffer::BarrierProducerGraphics);
 	} else if (event_type == 0x0000002e && (event_index == 0x00000000 || event_index == 0x00000007))
 	{
 		// FLUSH_AND_INV_CB_META — observed post-Play EVENT_WRITE (index 0).
 		// Ensure color-target metadata/data are coherent for later samples.
-		MemoryBarrier();
+		MemoryBarrier(CommandBuffer::BarrierProducerGraphics);
 	} else if ((event_type == 0x00000010) && event_index == 0x00000000)
 	{
 		// PsPartialFlush
 	} else if (event_type == 0x00000007 && event_index == 0x00000000)
 	{
-		// CS_PARTIAL_FLUSH — wait for outstanding compute work. Treat as a barrier.
-		MemoryBarrier();
+		// CS_PARTIAL_FLUSH — wait for outstanding compute work.
+		MemoryBarrier(CommandBuffer::BarrierProducerCompute);
 	} else if (event_type == 0x00000039 && event_index == 0x00000001)
 	{
 		// Until host occlusion queries are implemented, publish an always-visible

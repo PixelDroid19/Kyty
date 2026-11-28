@@ -46,8 +46,8 @@
 #include <array>
 #include <cinttypes>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -481,7 +481,7 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	return true;
 }
 
-bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill, bool already_ordered)
 {
 	// The fill rewrites every byte of the bound range, so the whole storage
 	// object is the guest result; a wider object could hold older pending writes.
@@ -504,7 +504,8 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 		DiscardInPlaceFills(fill.address, fill.size);
 	}
 	if (!(fill_copy && GuestDeviceAddressRecordFill(ctx, cmd, words[0], fill.address, fill.size)) &&
-	    !GuestDeviceAddressRecordPublication(ctx, cmd, *identity.buffer, fill.address, fill.size))
+	    !GuestDeviceAddressRecordPublication(ctx, cmd, *identity.buffer, fill.address, fill.size, buffer->SupportsGraphics(),
+	                                         already_ordered))
 	{
 		return false;
 	}
@@ -525,12 +526,18 @@ bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUnifor
 	{
 		return false;
 	}
-	auto*           cmd = buffer->RecordOutsideRenderPass();
+	auto*                      cmd    = buffer->RecordOutsideRenderPass();
+	const bool                 gfx    = buffer->SupportsGraphics();
+	const VkPipelineStageFlags rw_shader_stages =
+	    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
+	    (gfx ? (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT) : 0u);
+	const VkPipelineStageFlags consumer_stages =
+	    rw_shader_stages | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | (gfx ? VK_PIPELINE_STAGE_VERTEX_INPUT_BIT : 0u);
 	VkMemoryBarrier barrier {};
 	barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+	vkCmdPipelineBarrier(cmd, rw_shader_stages, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 	if (!(identity.buffer->guest_in_place && RepeatsInPlaceFill(buffer->GetQueueIndex(), identity, fill.address, fill.size, words[0])))
 	{
 		vkCmdFillBuffer(cmd, identity.buffer->buffer, identity.buffer->guest_offset, fill.size, words[0]);
@@ -538,9 +545,10 @@ bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUnifor
 	// Flag every page as the dispatch's stores would, for the write-back.
 	vkCmdFillBuffer(cmd, identity.buffer->write_mask->buffer, 0, VK_WHOLE_SIZE, 1u);
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
-	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
-	                     &barrier, 0, nullptr, 0, nullptr);
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT |
+	                        VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
+	                        (gfx ? (VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT) : 0u);
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, consumer_stages, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 	return true;
 }
 
@@ -563,8 +571,9 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 			// The publication copies the result over guest memory.
 			DiscardInPlaceFills(publication.vaddr, publication.size);
 		}
-		const bool recorded = GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
-		                                                          *publication.identity.buffer, publication.vaddr, publication.size);
+		const bool recorded = GuestDeviceAddressRecordPublication(
+		    g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(), *publication.identity.buffer, publication.vaddr,
+		    publication.size, buffer->SupportsGraphics(), false);
 		if (recorded && publication.identity.buffer->guest_in_place)
 		{
 			GpuMemoryMarkInPlaceStorageOrdered(publication.identity, consumer);
@@ -576,10 +585,12 @@ bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* de
 		}
 		// The device may not write the result over guest memory: readers on this queue
 		// observe it through an overlay until its write-back.
-		if (!recorded && GuestDeviceAddressRecordOverlay(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(), recording,
-		                                                 publication))
+		if (!recorded)
 		{
-			continue;
+			if (GuestDeviceAddressRecordOverlay(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(), recording, publication))
+			{
+				continue;
+			}
 		}
 		*dependency = publication.dependency;
 		return true;
@@ -937,6 +948,27 @@ static DepthLayerBlockCopies PlanDepthLayerFromImages(const DepthStencilVulkanIm
 	return plan;
 }
 
+static bool DepthSliceArrayReadHolds(const DepthSliceArray& slice_array, uint64_t addr, uint64_t slice_size, uint32_t fmt, uint32_t pitch,
+                                     bool plain_guest_depth, const SubmissionId& submission, uint64_t graph_generation, uint64_t frame)
+{
+	const auto& read = slice_array.last_read;
+	if (!read.valid || read.addr != addr || read.slice_size != slice_size || read.fmt != fmt || read.pitch != pitch ||
+	    read.plain_guest_depth != plain_guest_depth || read.submission != submission || read.graph_generation != graph_generation ||
+	    read.frame != frame || read.layer_stamps.size() != slice_array.layers.size())
+	{
+		return false;
+	}
+	for (size_t layer = 0; layer < read.layer_stamps.size(); layer++)
+	{
+		if (read.layer_stamps[layer] != slice_array.layers[layer].stamp)
+		{
+			return false;
+		}
+	}
+	return std::all_of(read.sources.begin(), read.sources.end(), [](const DepthSliceArrayRead::Source& source)
+	                   { return source.image->content_stamp == source.content_stamp && source.image->depth_slice == source.depth_slice; });
+}
+
 VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVulkanImage* first, uint64_t addr, uint64_t slice_size,
                                            uint32_t width, uint32_t height, uint32_t layers, uint32_t fmt, uint32_t pitch,
                                            bool plain_guest_depth)
@@ -948,6 +980,20 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 	{
 		EXIT("a draw samples the depth slices its own layered pass renders: addr=0x%012" PRIx64 " layers=%u\n", addr, layers);
 	}
+	const uint64_t graph_generation = GpuMemoryObjectGraphGeneration();
+	const uint64_t frame            = GpuMemoryCurrentFrame();
+	SubmissionId   submission;
+	const bool     has_submission = buffer->GetSubmissionId(&submission);
+	auto&          last_read      = slice_array->last_read;
+	if (has_submission &&
+	    DepthSliceArrayReadHolds(*slice_array, addr, slice_size, fmt, pitch, plain_guest_depth, submission, graph_generation, frame))
+	{
+		return array;
+	}
+	last_read.valid = false;
+	last_read.sources.clear();
+	// A layer read from guest memory depends on page state the read does not cover.
+	bool            from_images = has_submission;
 	VkCommandBuffer vk_buffer = nullptr;
 	const auto      record    = [&]()
 	{
@@ -982,8 +1028,9 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 			auto images = FindDepthStencil(buffer, slice_addr, slice_size, false);
 			if (images.IsEmpty() && plain_guest_depth)
 			{
-				SubmissionId submission;
-				EXIT_IF(!buffer->GetSubmissionId(&submission));
+				// This lookup records uses of objects of every type, which the read record does not cover.
+				from_images = false;
+				EXIT_IF(!has_submission);
 				const auto objects = GpuMemoryFindIntersectingObjectsForSubmission(submission, slice_addr, slice_size);
 				bool depth_only = !objects.IsEmpty();
 				for (const auto& object: objects)
@@ -1005,30 +1052,54 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 					EXIT("depth array layer %u at 0x%012" PRIx64 " lies in another depth image but the view is not plain 64 KiB depth\n",
 					     layer, slice_addr);
 				}
-				const auto plan =
-				    PlanDepthLayerFromImages(array, layer, slice_addr, slice_size, pitch, State::Gen5DepthSampleBytesPerElement(fmt), images,
-				                             state.stamp);
-				if (state.stamp == plan.digest)
+				const uint32_t bytes = State::Gen5DepthSampleBytesPerElement(fmt);
+				auto plan = PlanDepthLayerFromImages(array, layer, slice_addr, slice_size, pitch, bytes, images, state.stamp);
+				// The layer lookup takes images inside or around the layer; one that crosses the layer's edge also wrote
+				// the blocks it overlaps, so the images over the blocks left to guest memory join the sources.
+				bool crossing = false;
+				for (const auto& [begin, end]: plan.guest_blocks)
+				{
+					for (auto* image: FindDepthStencil(buffer, begin, end - begin, false))
+					{
+						if (images.IndexValid(images.Find(image))) { continue; }
+						images.Add(image);
+						crossing = true;
+					}
+				}
+				if (crossing)
+				{
+					plan = PlanDepthLayerFromImages(array, layer, slice_addr, slice_size, pitch, bytes, images, state.stamp);
+				}
+				from_images = from_images && plan.guest_blocks.empty();
+				for (const auto& [source, regions]: plan.sources)
+				{
+					last_read.sources.push_back({source, source->content_stamp, source->depth_slice});
+				}
+				// The blocks outside every image hold guest memory, so only they must be guest-owned.
+				for (const auto& [begin, end]: plan.guest_blocks)
+				{
+					const auto source = GuestDepthLayerSource(begin, end - begin);
+					if (source != GpuMemoryDepthD16Source::Guest)
+					{
+						EXIT("depth array layer %u at 0x%012" PRIx64 " lies partly outside depth images and blocks 0x%012" PRIx64
+						     "-0x%012" PRIx64 " have no guest bytes: source=%u\n",
+						     layer, slice_addr, begin, end, static_cast<uint32_t>(source));
+					}
+				}
+				// The digest covers the images; blocks outside them also need the guest bytes unchanged since the read.
+				if (state.stamp == plan.digest &&
+				    (plan.guest_blocks.empty() || GpuDirtyPageTracker::Instance().ReadObservationIsStable(
+				                                      slice_addr, slice_size, GpuDirtyReadObservation {state.guest_generation, true})))
 				{
 					continue;
 				}
 				record();
+				bool guest_read_stable = true;
 				if (!plan.guest_blocks.empty())
 				{
-					// The blocks outside every image hold guest memory, so only they must be guest-owned: upload the layer's
-					// guest bytes, then copy the images' blocks over them. The digest does not cover guest bytes, so the
-					// layer is rebuilt on each use.
-					for (const auto& [begin, end]: plan.guest_blocks)
-					{
-						const auto source = GuestDepthLayerSource(begin, end - begin);
-						if (source != GpuMemoryDepthD16Source::Guest)
-						{
-							EXIT("depth array layer %u at 0x%012" PRIx64 " lies partly outside depth images and blocks 0x%012" PRIx64
-							     "-0x%012" PRIx64 " have no guest bytes: source=%u\n",
-							     layer, slice_addr, begin, end, static_cast<uint32_t>(source));
-						}
-					}
+					// Upload the layer's guest bytes, then copy the images' blocks over them.
 					UploadGuestDepthLayer(buffer, vk_buffer, slice_array, layer, slice_addr, slice_size, fmt, pitch);
+					guest_read_stable = state.stamp == kSliceArrayGuestLayer;
 					VkMemoryBarrier barrier {};
 					barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 					barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1043,9 +1114,10 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 						copy_from(source, regions.data(), static_cast<uint32_t>(regions.size()));
 					}
 				}
-				state.stamp = plan.guest_blocks.empty() ? plan.digest : 0u;
+				state.stamp = guest_read_stable ? plan.digest : 0u;
 				continue;
 			}
+			from_images       = false;
 			const auto source = plain_guest_depth ? GuestDepthLayerSource(slice_addr, slice_size) : GpuMemoryDepthD16Source::Unsupported;
 			if (source != GpuMemoryDepthD16Source::Guest)
 			{
@@ -1069,6 +1141,7 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 			     slice_addr, static_cast<uint32_t>(slice->format), static_cast<uint32_t>(array->format), slice->extent.width,
 			     slice->extent.height, array->extent.width, array->extent.height, static_cast<uint32_t>(slice->samples));
 		}
+		last_read.sources.push_back({slice, slice->content_stamp, slice->depth_slice});
 		if (state.stamp == slice->content_stamp)
 		{
 			continue;
@@ -1084,6 +1157,23 @@ VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVu
 	if (vk_buffer != nullptr)
 	{
 		TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	}
+	if (from_images)
+	{
+		last_read.addr              = addr;
+		last_read.slice_size        = slice_size;
+		last_read.fmt               = fmt;
+		last_read.pitch             = pitch;
+		last_read.plain_guest_depth = plain_guest_depth;
+		last_read.submission        = submission;
+		last_read.graph_generation  = graph_generation;
+		last_read.frame             = frame;
+		last_read.layer_stamps.clear();
+		for (const auto& state: slice_array->layers)
+		{
+			last_read.layer_stamps.push_back(state.stamp);
+		}
+		last_read.valid = true;
 	}
 	return array;
 }
@@ -1513,14 +1603,14 @@ static bool ConsumeDepthMetaClear(uint64_t submit_id, const RenderDepthInfo& dep
 	return event != nullptr;
 }
 
-void GraphicsRenderMemoryBarrier(CommandBuffer* buffer)
+void GraphicsRenderMemoryBarrier(CommandBuffer* buffer, uint8_t producers)
 {
 	EXIT_IF(buffer == nullptr);
 	EXIT_IF(buffer->IsInvalid());
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	buffer->FullMemoryBarrier();
+	buffer->MemoryBarrier(producers);
 }
 
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* image)
@@ -1557,7 +1647,8 @@ void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* imag
 		const VkPipelineStageFlags dst_stage = VulkanQueueBarrierScope(
 		    buffer, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		    &image_memory_barrier.dstAccessMask);
-		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+		auto*          vk_cmd = buffer->RecordOutsideRenderPassSync();
+		vkCmdPipelineBarrier(vk_cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 
 		image->layout = image_memory_barrier.newLayout;
 	}
@@ -1599,7 +1690,7 @@ void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, VulkanImage* image
 		constexpr VkPipelineStageFlags stages    = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 		const VkPipelineStageFlags     src_stage = VulkanQueueBarrierScope(buffer, stages, &image_memory_barrier.srcAccessMask);
 		const VkPipelineStageFlags     dst_stage = VulkanQueueBarrierScope(buffer, stages, &image_memory_barrier.dstAccessMask);
-		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPassSync(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 
 		image->layout = image_memory_barrier.newLayout;
 	}
@@ -1664,7 +1755,7 @@ void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image
 
 	const VkPipelineStageFlags dst_stage =
 	    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-	vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), VulkanQueueBarrierScope(buffer, src_stage, &image_memory_barrier.srcAccessMask),
+	vkCmdPipelineBarrier(buffer->RecordOutsideRenderPassSync(), VulkanQueueBarrierScope(buffer, src_stage, &image_memory_barrier.srcAccessMask),
 	                     VulkanQueueBarrierScope(buffer, dst_stage, &image_memory_barrier.dstAccessMask), 0, 0, nullptr, 0, nullptr, 1,
 	                     &image_memory_barrier);
 	image->layout = image_memory_barrier.newLayout;

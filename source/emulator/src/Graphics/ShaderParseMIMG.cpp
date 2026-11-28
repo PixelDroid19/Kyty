@@ -67,10 +67,16 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	EXIT_NOT_IMPLEMENTED(tff == 1);
 	EXIT_NOT_IMPLEMENTED(lwe == 1);
 	const auto image_atomic = MimgImageAtomicType(opcode);
-	// GLC on an atomic selects the pre-op return (RDNA2 8.1.10); load and store cache policy is not admitted.
-	EXIT_NOT_IMPLEMENTED(glc == 1 && !(next_gen && image_atomic != ShaderInstructionType::Unknown));
+	// GLC on an atomic selects the pre-op return; on a load or store it is the globally coherent policy (RDNA2 8.1.10).
+	const bool load_or_store = opcode == 0x00u || opcode == 0x01u || opcode == 0x08u || opcode == 0x09u;
+	EXIT_NOT_IMPLEMENTED(glc == 1 && !(next_gen && (load_or_store || image_atomic != ShaderInstructionType::Unknown)));
 	EXIT_NOT_IMPLEMENTED(slc == 1);
-	EXIT_NOT_IMPLEMENTED(unrm == 1);
+	// Loads, stores and atomics address integer texels, and the ISA requires UNRM on stores and atomics; a sampled
+	// address would need the unnormalized lowering.
+	if (unrm == 1 && !(load_or_store || image_atomic != ShaderInstructionType::Unknown))
+	{
+		EXIT("unsupported MIMG UNRM: opcode=0x%02" PRIx32 " pc=0x%08" PRIx32 "\n", opcode, pc);
+	}
 	// EXIT_NOT_IMPLEMENTED(dmask != 0xf && dmask != 0x7);
 	// Stores, loads and the plain samples have a packed layout; another D16 operation must not silently take the dword one.
 	const bool d16_admitted = opcode == 0x00u || opcode == 0x01u || opcode == 0x08u || opcode == 0x20u || opcode == 0x24u ||
@@ -103,6 +109,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	inst.src[1]         = operand_parse(srsrc * 4);
 	if (!samplerless) { inst.src[2] = operand_parse(ssamp * 4); }
 	inst.mimg_dimension = static_cast<uint8_t>(dim);
+	inst.mimg_coherent  = glc != 0 && load_or_store;
 
 	if (nsa != 0)
 	{
@@ -175,6 +182,11 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			{
 				inst.format   = ShaderInstructionFormat::Vdata4Vaddr4StDmaskF;
 				inst.dst.size = 4;
+			} else if (dmask != 0)
+			{
+				inst.format     = ShaderInstructionFormat::VdataVaddr4StDmask;
+				inst.mimg_dmask = static_cast<uint8_t>(dmask);
+				inst.dst.size   = __builtin_popcount(dmask);
 			}
 			break;
 		case 0x0A: KYTY_NI("image_store_pck"); break;
@@ -205,11 +217,12 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x18:
 		case 0x19:
 		case 0x1A:
-			EXIT_NOT_IMPLEMENTED(!next_gen || dim != 1u || dmask != 1u || nsa > 1u || (buffer[1] & 0x80000000u) != 0);
+			// DIM 1D (0) supplies X only, 2D (1) supplies X and Y; a 1D resource is a one-row 2D image.
+			EXIT_NOT_IMPLEMENTED(!next_gen || dim > 1u || dmask != 1u || nsa > dim || (buffer[1] & 0x80000000u) != 0);
 			inst.type                  = image_atomic;
 			inst.format                = ShaderInstructionFormat::Vdata1Vaddr2StVsrc2Dmask1;
 			inst.dst.size              = 1;
-			inst.src[0].size           = nsa != 0u ? 1 : 2;
+			inst.src[0].size           = nsa != 0u || dim == 0u ? 1 : 2;
 			inst.src[1].size           = 8;
 			inst.src[2]                = inst.dst;
 			inst.src_num               = 3;
@@ -225,6 +238,15 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x1D: KYTY_NI("image_atomic_fcmpswap"); break;
 		case 0x1E: KYTY_NI("image_atomic_fmin"); break;
 		case 0x1F: KYTY_NI("image_atomic_fmax"); break;
+		case 0xA0:
+			// image_sample_a: image_sample with opcode bit 7 set. Its operands are
+			// image_sample's: the first shader seen with it passes the two
+			// interpolated UV VGPRs of a 2D sample and no further operand or dword.
+			// What the bit changes is not established; it is set only on samples
+			// with implicit derivatives, so the risk is LOD or anisotropy selection.
+			// It samples as image_sample.
+			EXIT_NOT_IMPLEMENTED(!next_gen);
+			[[fallthrough]];
 		case 0x20:
 			inst.type        = ShaderInstructionType::ImageSample;
 			inst.src[0].size = 3;
@@ -542,7 +564,25 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x3F: KYTY_NI("image_sample_c_lz_o"); break;
 		case 0x40: KYTY_NI("image_gather4"); break;
 		case 0x41: KYTY_NI("image_gather4_cl"); break;
-		case 0x44: KYTY_NI("image_gather4_l"); break;
+		case 0x44:
+		case 0x54:
+			// RDNA2 ISA table 43: (x, y, lod), with the slice or face before the lod on arrays and cubes;
+			// image_gather4_l_o puts the offset dword first. No format holds the 5 dwords of an offset array.
+			EXIT_NOT_IMPLEMENTED(dmask == 0 || (opcode == 0x54u && dim != 1u));
+			{
+				inst.type              = ShaderInstructionType::ImageGather4;
+				inst.mimg_explicit_lod = true;
+				inst.mimg_offset       = opcode == 0x54u;
+				const int addresses    = (dim == 1u ? 3 : 4) + (inst.mimg_offset ? 1 : 0);
+				inst.src[0].size       = addresses;
+				inst.src[1].size       = 8;
+				inst.src[2].size       = 4;
+				inst.src_num           = 3;
+				inst.dst.size          = 4;
+				inst.format = addresses == 3 ? ShaderInstructionFormat::Vdata4Vaddr3StSsMimgDmask : ShaderInstructionFormat::VdataVaddr4StSsMimgDmask;
+			}
+			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
+			break;
 		case 0x45: KYTY_NI("image_gather4_b"); break;
 		case 0x46: KYTY_NI("image_gather4_b_cl"); break;
 		case 0x47:
@@ -582,7 +622,6 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			break;
 		case 0x50: KYTY_NI("image_gather4_o"); break;
 		case 0x51: KYTY_NI("image_gather4_cl_o"); break;
-		case 0x54: KYTY_NI("image_gather4_l_o"); break;
 		case 0x55: KYTY_NI("image_gather4_b_o"); break;
 		case 0x56: KYTY_NI("image_gather4_b_cl_o"); break;
 		case 0x58: KYTY_NI("image_gather4_c_o"); break;
@@ -615,7 +654,6 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x6F: KYTY_NI("image_sample_c_cd_cl_o"); break;
 		case 0x7E: KYTY_NI("image_rsrc256"); break;
 		case 0x7F: KYTY_NI("image_sampler"); break;
-		case 0xA0: KYTY_NI("image_sample_a"); break;
 		case 0xA1: KYTY_NI("image_sample_cl_a"); break;
 		case 0xA5: KYTY_NI("image_sample_b_a"); break;
 		case 0xA6: KYTY_NI("image_sample_b_cl_a"); break;

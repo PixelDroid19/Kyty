@@ -88,6 +88,16 @@ bool Spirv::EmitNativeMaskBit(const ShaderOperand& mask, const String8& result, 
 	}
 	const auto lo = operand_numeric_variable_to_str(mask, mask.size == 1 ? -1 : 0);
 	if (lo.type != SpirvType::Uint) { return false; }
+	if (UsesLanePrivateMasks())
+	{
+		*output += String8(R"(
+%<r>_lo = OpLoad %uint %<lo>
+%<r> = OpBitwiseAnd %uint %<r>_lo %uint_1
+)")
+		               .ReplaceStr("<lo>", lo.value)
+		               .ReplaceStr("<r>", result);
+		return true;
+	}
 	const bool pair = mask.size == 2 && !NativeWave32();
 	const auto hi = pair ? operand_numeric_variable_to_str(mask, 1) : SpirvValue {};
 	if (pair && hi.type != SpirvType::Uint) { return false; }
@@ -117,6 +127,19 @@ String8 Spirv::NativeExecAllLanes()
 
 String8 Spirv::NativeExecRefresh(const String8& tag) const
 {
+	if (UsesLanePrivateMasks())
+	{
+		return String8(R"(
+%mask_exec_<tag>_lo = OpLoad %uint %exec_lo
+%mask_exec_<tag> = OpBitwiseAnd %uint %mask_exec_<tag>_lo %uint_1
+OpStore %exec_lane_lo %mask_exec_<tag>
+OpStore %exec_lane_hi %uint_0
+%mask_exec_empty_<tag> = OpIEqual %bool %mask_exec_<tag>_lo %uint_0
+%mask_exec_z_<tag> = OpSelect %uint %mask_exec_empty_<tag> %uint_1 %uint_0
+OpStore %execz %mask_exec_z_<tag>
+)")
+		    .ReplaceStr("<tag>", tag);
+	}
 	ShaderOperand exec {};
 	exec.type = ShaderOperandType::ExecLo;
 	exec.size = 2;
@@ -161,6 +184,14 @@ String8 Spirv::NativeQuadUniform(const String8& value, const String8& type, cons
 )").ReplaceStr("<v>", value).ReplaceStr("<type>", type).ReplaceStr("<r>", result);
 }
 
+// A lane-local program observes a mask only as its own bit or as "any lane" of a branch: the proof
+// accepts a lane that skips, so one quad's lanes are the whole answer and the wave reduction is not needed.
+bool Spirv::GathersMasksInQuad() const
+{
+	const auto proof = m_ps_input_info != nullptr ? m_ps_input_info->native_wave.proof : ShaderNativeWaveProof::Unclassified;
+	return !UsesFragmentCompute() && (proof == ShaderNativeWaveProof::LaneLocal || proof == ShaderNativeWaveProof::QuadLocal);
+}
+
 String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result) const
 {
 	if (UsesSplitComputeWave())
@@ -191,10 +222,7 @@ String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result)
 %<r>_high_part = OpSelect %uint %<r>_upper %<r>_quad %uint_0
 <wave>
 )").ReplaceStr("<p>", predicate).ReplaceStr("<r>", result);
-	// A lane-local program observes a mask only as its own bit or as "any lane" of a branch: the proof
-	// accepts a lane that skips, so one quad's lanes are the whole answer and the wave reduction is not needed.
-	const auto proof = m_ps_input_info != nullptr ? m_ps_input_info->native_wave.proof : ShaderNativeWaveProof::Unclassified;
-	if (!UsesFragmentCompute() && (proof == ShaderNativeWaveProof::LaneLocal || proof == ShaderNativeWaveProof::QuadLocal))
+	if (GathersMasksInQuad())
 	{
 		return gather.ReplaceStr("<wave>", "%" + result + " = OpCompositeConstruct %v4uint %" + result + "_low_part %" + result +
 		                                       "_high_part %uint_0 %uint_0");
@@ -304,8 +332,11 @@ String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index
 	{
 		// Only implicit EXEC loads have these names. Numeric loads and EXECZ
 		// use packed_exec_* until this adapter finishes.
-		result = ReplaceMaskToken(result, "OpLoad %uint %exec_lo", "OpLoad %uint %exec_lane_lo");
-		result = ReplaceMaskToken(result, "OpLoad %uint %exec_hi", "OpLoad %uint %exec_lane_hi");
+		const bool skip_exec_guard = SkipDestinationExecGuard(index);
+		result = ReplaceMaskToken(result, "OpLoad %uint %exec_lo",
+		                          skip_exec_guard ? "OpCopyObject %uint %uint_1" : "OpLoad %uint %exec_lane_lo");
+		result = ReplaceMaskToken(result, "OpLoad %uint %exec_hi",
+		                          skip_exec_guard ? "OpCopyObject %uint %uint_0" : "OpLoad %uint %exec_lane_hi");
 	}
 	if (inst.type == ShaderInstructionType::VCndmaskB32)
 	{
@@ -345,36 +376,68 @@ String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index
 			const auto value_begin = begin + store.size() - 1;
 			const auto end         = text.find_first_of(" \t\r\n", value_begin);
 			const auto value       = String8(text.substr(value_begin, end - value_begin).c_str());
-			// The collective stays outside software-EXEC control flow. Capture
-			// incoming EXEC before the first store, including EXEC destinations.
-			const auto* group = SplitBallotGroup(index);
-			const auto  vote  = String8(R"(
+			if (UsesLanePrivateMasks())
+			{
+				const auto all_ones = GetConstantUint(0xffffffffu);
+				const auto vote     = SkipDestinationExecGuard(index)
+				                          ? String8("\n%mask_out_active_<tag> = OpINotEqual %bool <value> %uint_0\n")
+				                          : String8(R"(
 %mask_out_exec_<tag> = OpLoad %uint %exec_lane_lo
 %mask_out_live_<tag> = OpINotEqual %bool %mask_out_exec_<tag> %uint_0
 %mask_out_pred_<tag> = OpINotEqual %bool <value> %uint_0
 %mask_out_active_<tag> = OpLogicalAnd %bool %mask_out_live_<tag> %mask_out_pred_<tag>
 )");
-			const auto  stores = group != nullptr ? GroupedMaskVote(*group, index, SplitWavePartLanes(), tag)
-			                                      : String8(R"(<ballot>
+				const auto stores = String8(R"(%mask_out_word_<tag> = OpSelect %uint %mask_out_active_<tag> %<all_ones> %uint_0
+OpStore %<lo> %mask_out_word_<tag>
+<store_hi>
+)");
+				const auto packed =
+				    (vote + stores)
+				        .ReplaceStr("<all_ones>", all_ones)
+				        .ReplaceStr("<store_hi>", !hi.value.IsEmpty() && !NativeWave32() ? "OpStore %<hi> %mask_out_word_<tag>" : "")
+				        .ReplaceStr("<lo>", lo.value)
+				        .ReplaceStr("<hi>", hi.value)
+				        .ReplaceStr("<value>", value)
+				        .ReplaceStr("<tag>", tag);
+				text.replace(begin, end - begin, packed.c_str());
+				result = String8(text.c_str());
+				if (!hi.value.IsEmpty())
+				{
+					result = ReplaceMaskToken(result, "OpStore %" + hi.value + " %uint_0", "");
+				}
+			} else
+			{
+				// The collective stays outside software-EXEC control flow. Capture
+				// incoming EXEC before the first store, including EXEC destinations.
+				const auto* group = SplitBallotGroup(index);
+				const auto  vote  = String8(R"(
+%mask_out_exec_<tag> = OpLoad %uint %exec_lane_lo
+%mask_out_live_<tag> = OpINotEqual %bool %mask_out_exec_<tag> %uint_0
+%mask_out_pred_<tag> = OpINotEqual %bool <value> %uint_0
+%mask_out_active_<tag> = OpLogicalAnd %bool %mask_out_live_<tag> %mask_out_pred_<tag>
+)");
+				const auto  stores = group != nullptr ? GroupedMaskVote(*group, index, SplitWavePartLanes(), tag)
+				                                      : String8(R"(<ballot>
 %mask_out_lo_<tag> = OpCompositeExtract %uint %mask_out_ballot_<tag> 0
 %mask_out_hi_<tag> = OpCompositeExtract %uint %mask_out_ballot_<tag> 1
 OpStore %<lo> %mask_out_lo_<tag>
 <store_hi>
 )");
-			const auto packed =
-			    (vote + stores)
-			        .ReplaceStr("<ballot>", IsLaneLocalMaskResult(index) ? NativeOwnBitMask("mask_out_active_" + tag, "mask_out_ballot_" + tag)
-			                                                             : NativeMaskBallot("mask_out_active_" + tag, "mask_out_ballot_" + tag))
-			        .ReplaceStr("<store_hi>", !hi.value.IsEmpty() && !NativeWave32() ? "OpStore %<hi> %mask_out_hi_<tag>" : "")
-			        .ReplaceStr("<lo>", lo.value)
-			        .ReplaceStr("<hi>", hi.value)
-			        .ReplaceStr("<value>", value)
-			        .ReplaceStr("<tag>", tag);
-			text.replace(begin, end - begin, packed.c_str());
-			result = String8(text.c_str());
-			if (!hi.value.IsEmpty())
-			{
-				result = ReplaceMaskToken(result, "OpStore %" + hi.value + " %uint_0", "");
+				const auto packed =
+				    (vote + stores)
+				        .ReplaceStr("<ballot>", IsLaneLocalMaskResult(index) ? NativeOwnBitMask("mask_out_active_" + tag, "mask_out_ballot_" + tag)
+				                                                             : NativeMaskBallot("mask_out_active_" + tag, "mask_out_ballot_" + tag))
+				        .ReplaceStr("<store_hi>", !hi.value.IsEmpty() && !NativeWave32() ? "OpStore %<hi> %mask_out_hi_<tag>" : "")
+				        .ReplaceStr("<lo>", lo.value)
+				        .ReplaceStr("<hi>", hi.value)
+				        .ReplaceStr("<value>", value)
+				        .ReplaceStr("<tag>", tag);
+				text.replace(begin, end - begin, packed.c_str());
+				result = String8(text.c_str());
+				if (!hi.value.IsEmpty())
+				{
+					result = ReplaceMaskToken(result, "OpStore %" + hi.value + " %uint_0", "");
+				}
 			}
 		} else
 		{
@@ -387,19 +450,27 @@ OpStore %<lo> %mask_out_lo_<tag>
 	const bool vcc_branch  = inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz;
 	if (exec_branch || vcc_branch)
 	{
-		const String8 mask_name = exec_branch ? "exec" : "vcc";
-		const auto    load      = "OpLoad %uint %" + mask_name + "_lo";
-		const auto    pre       = String8("%branch_mask_lo_<tag> = OpLoad %uint %<mask>_lo\n"
-		                                  "%branch_mask_hi_<tag> = OpLoad %uint %<mask>_hi\n")
-		                              .ReplaceStr("<mask>", mask_name)
-		                              .ReplaceStr("<tag>", tag);
-		result = pre + result.ReplaceStr(load, String8("OpBitwiseOr %uint %branch_mask_lo_<tag> <high>")
-		                                           .ReplaceStr("<high>", NativeWave32() ? "%uint_0" : "%branch_mask_hi_<tag>")
-		                                           .ReplaceStr("<tag>", tag));
-		// Packed masks are wave-uniform, including in helpers. Re-voting the
-		// already uniform decision could make a helper branch on an undefined
-		// subgroup result and leave its real quad peers behind.
-		result = ReplaceMaskToken(result, "OpGroupNonUniformAny %bool %uint_3 %cc_lane_b_" + tag, "OpCopyObject %bool %cc_lane_b_" + tag);
+		if (UsesLanePrivateMasks())
+		{
+			result = ReplaceMaskToken(result, "OpGroupNonUniformAny %bool %uint_3 %cc_lane_b_" + tag,
+			                          "OpCopyObject %bool %cc_lane_b_" + tag);
+		} else
+		{
+			const String8 mask_name = exec_branch ? "exec" : "vcc";
+			const auto    load      = "OpLoad %uint %" + mask_name + "_lo";
+			const auto    pre       = String8("%branch_mask_lo_<tag> = OpLoad %uint %<mask>_lo\n"
+			                                  "%branch_mask_hi_<tag> = OpLoad %uint %<mask>_hi\n")
+			                              .ReplaceStr("<mask>", mask_name)
+			                              .ReplaceStr("<tag>", tag);
+			result = pre + result.ReplaceStr(load, String8("OpBitwiseOr %uint %branch_mask_lo_<tag> <high>")
+			                                           .ReplaceStr("<high>", NativeWave32() ? "%uint_0" : "%branch_mask_hi_<tag>")
+			                                           .ReplaceStr("<tag>", tag));
+			// Packed masks are wave-uniform, including in helpers. Re-voting the
+			// already uniform decision could make a helper branch on an undefined
+			// subgroup result and leave its real quad peers behind.
+			result = ReplaceMaskToken(result, "OpGroupNonUniformAny %bool %uint_3 %cc_lane_b_" + tag,
+			                          "OpCopyObject %bool %cc_lane_b_" + tag);
+		}
 	}
 	if (cmpx || result.ContainsStr("OpStore %exec_lo ") || result.ContainsStr("OpStore %exec_hi "))
 	{

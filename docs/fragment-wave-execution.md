@@ -464,6 +464,12 @@ is not analyzed. The native transport strategy remains unselected.
 
 ### Selection and renderer hook points (2026-10-01)
 
+Superseded since: pipeline creation calls `FragmentTransportRequire`, which
+first tries native admission (`ShaderAnalyzeNativeWave`, including the
+partial-wave proof for whole-wave lane reductions); a program goes through
+transport only when no native proof and host subgroup mapping fit. The text
+below records the state of 2026-10-01.
+
 `FragmentTransportAdmission` selects the strategy only for pixel programs with
 a DPP row control or PERMLANE and names the first host capability it lacks
 (geometry shader, fragment quad operations, device addresses, enabled linear

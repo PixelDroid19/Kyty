@@ -660,6 +660,7 @@ enum class ShaderInstructionType : uint32_t
 	VPkMinU16,
 	VXor3B32,
 	VAlignbitB32,
+	VAlignbyteB32,
 	VPermB32,
 	VMadI32I24,
 	VMadU32U16,
@@ -1137,6 +1138,8 @@ struct ShaderInstruction
 	bool mimg_offset = false;
 	// Image atomics replace VDATA with the pre-operation value only for GLC=1.
 	bool mimg_return_old_value = false;
+	// GLC=1 on an image load or store: a globally coherent access, whose reads miss the L0 cache (RDNA2 8.1.10).
+	bool mimg_coherent = false;
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;
@@ -1277,6 +1280,9 @@ public:
 	void                   SetVsEmbedded(bool embedded) { this->m_vs_embedded = embedded; }
 	[[nodiscard]] uint32_t GetVsEmbeddedId() const { return m_vs_embedded_id; }
 	void                   SetVsEmbeddedId(uint32_t embedded_id) { m_vs_embedded_id = embedded_id; }
+	// A lowered wave32 mask idiom (ShaderLowerWaterfallMoves) holds only while the guest runs the program as wave32.
+	[[nodiscard]] bool     UsesWave32Masks() const { return m_wave32_masks; }
+	void                   SetWave32Masks() { m_wave32_masks = true; }
 	[[nodiscard]] bool     IsPsEmbedded() const { return m_ps_embedded; }
 	void                   SetPsEmbedded(bool embedded) { this->m_ps_embedded = embedded; }
 	[[nodiscard]] uint32_t GetPsEmbeddedId() const { return m_ps_embedded_id; }
@@ -1330,6 +1336,7 @@ private:
 	uint32_t                  m_ps_embedded_id = 0;
 	bool                      m_vs_embedded    = false;
 	bool                      m_ps_embedded    = false;
+	bool                      m_wave32_masks   = false;
 };
 
 // Returns true when a scalar VCC branch can be evaluated once per invocation
@@ -1958,12 +1965,28 @@ struct ShaderCopiedImageDescriptor
 	int      sampler_index = -1;
 };
 
-// An S# the shader assembles from constants (an inline sampler): the image
+// An S# whose words are fixed for the draw: constants the shader assembles (an
+// inline sampler) or the sampler-table record user data selects. The image
 // read at consumer_pc samples through sampler resource sampler_index.
 struct ShaderConstantSampler
 {
 	uint32_t consumer_pc   = 0;
 	int      sampler_index = -1;
+};
+
+// A T# an image read takes from a bindless heap, for one record of the loop
+// that indexes the heap: the load at load_pc read it when the record index the
+// S_MUL_I32 at slot_pc scales (slot_index) was record, and the read at
+// consumer_pc then samples texture_index. Without a loop slot_pc is UINT32_MAX
+// and the read has the one record 0.
+struct ShaderHeapTexture
+{
+	uint32_t      consumer_pc   = 0;
+	uint32_t      load_pc       = 0;
+	uint32_t      slot_pc       = UINT32_MAX;
+	ShaderOperand slot_index    = {};
+	uint32_t      record        = 0;
+	int           texture_index = -1;
 };
 
 enum class ShaderTextureUsage
@@ -2132,6 +2155,8 @@ void               ShaderSetStorageAddressReads(bool supported);
 [[nodiscard]] bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type);
 // The image read's T# is an all-zero resource recorded by the usage parse.
 [[nodiscard]] bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst);
+// An image store through an all-zero T# loaded from memory, which the ISA defines as unbound: the store is discarded.
+[[nodiscard]] bool ShaderImageStoreTargetsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst);
 void ShaderAddZeroImageResource(ShaderZeroImageResources* resources, int register_id);
 void ShaderAddLoadedZeroImageResource(ShaderZeroImageResources* resources, int register_id, uint32_t load_pc, uint32_t last_pc);
 void ShaderAddZeroDescriptorLoad(ShaderZeroDescriptorLoads* loads, uint32_t pc, int first_register, int dwords);
@@ -2309,9 +2334,12 @@ struct ShaderBindResources
 	bool                       vsharp_uniform_buffer = false;
 	int                        vsharp_binding_index  = -1;
 	// Address values are per-dispatch data, never part of shader identity.
-	bool                       program_base_used      = false;
-	uint32_t                   program_base_offset_dw = 0;
-	uint64_t                   program_base           = 0;
+	bool                       program_base_used             = false;
+	uint32_t                   program_base_offset_dw        = 0;
+	uint64_t                   program_base                  = 0;
+	// Minimum program-base window bytes covering every program-relative scalar
+	// table load in this stage (0 when none). Runtime check, not shader identity.
+	uint64_t                   program_window_required_bytes = 0;
 	// Guest-memory device addressing: a metadata block {table_lo, table_hi,
 	// entries, 0} filled at bind time (see GuestDeviceAddress.h).
 	bool     device_address_used      = false;
@@ -2351,6 +2379,7 @@ struct ShaderBindResources
 	Vector<uint32_t> slot_only_consumers;
 	Vector<ShaderCopiedImageDescriptor> copied_image_descriptors;
 	Vector<ShaderConstantSampler>       constant_samplers;
+	Vector<ShaderHeapTexture>           heap_textures;
 };
 
 [[nodiscard]] int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
@@ -2360,6 +2389,8 @@ struct ShaderBindResources
 // IMAGE_ATOMIC_ADD and IMAGE_ATOMIC_SWAP: 32-bit read-modify-writes of one storage image texel.
 [[nodiscard]] bool ShaderIsImageAtomic(ShaderInstructionType type);
 [[nodiscard]] bool ShaderHasImageAtomic(const ShaderCode& code);
+// True when a pixel program exports depth (target Z) on any path.
+[[nodiscard]] bool ShaderHasPixelDepthExport(const ShaderCode& code);
 [[nodiscard]] bool ShaderImageAtomicSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderImageAtomicResourceSupported(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind);
 // 16, 32 or 64 for a v_cmp(x)_class form, 0 otherwise.
@@ -2648,6 +2679,12 @@ struct ShaderComputeInputInfo
 	// instructions observe wave state. Generated subgroup operations by
 	// themselves do not establish guest sensitivity.
 	bool                    native_wave_sensitive = false;
+	// Proven wave-width-independent compute program with no cross-lane or
+	// barrier instructions: every lane keeps its own mask state without
+	// subgroup ballots, and EXEC/VCC branches lower to per-lane control flow.
+	bool                    lane_private_masks    = false;
+	// See ShaderComputeWaveAnalysisResult::lds_order_barriers; empty unless the native-equivalent layout needs them.
+	std::vector<uint32_t>   lds_order_barriers;
 	uint32_t                required_subgroup_size = 0;
 	// See ShaderComputeWaveDispatchPlan::native_equivalent_layout.
 	bool                    native_equivalent_valid = false;
@@ -2732,6 +2769,7 @@ struct ShaderImmutablePixelAnalysis
 	ShaderPixelInterpolationUse interpolation;
 	bool uses_native_wave_state = false;
 	bool has_getpc = false;
+	uint64_t program_window_required_bytes = 0;
 	bool has_global_memory_load = false;
 	// Buffer, typed buffer and scalar loads, in instruction order: the only
 	// instructions whose per-draw descriptor checks can require the guest
@@ -2740,6 +2778,9 @@ struct ShaderImmutablePixelAnalysis
 };
 
 [[nodiscard]] ShaderPixelColorExports ShaderSummarizePixelColorExports(const ShaderCode& code);
+// Minimum program-base window size in bytes that covers every in-bounds
+// program-relative scalar buffer load of `code` (0 when none).
+[[nodiscard]] uint64_t ShaderProgramWindowRequiredBytes(const ShaderCode& code);
 
 struct ShaderPixelInputInfo
 {
@@ -2796,11 +2837,14 @@ struct ShaderPixelInputInfo
 		return (system_input_enable & system_input_address & (1u << 13u)) != 0;
 	}
 };
-// The shader input information of one indexed draw, prepared ahead of its recording.
+// The shader input information of one direct draw, prepared ahead of its recording.
 struct PreparedDrawInputs
 {
-	ShaderVertexInputInfo vs;
-	ShaderPixelInputInfo  ps {};
+	// For a geometry pass, `vs` is the host vertex stage that draws the pass output and
+	// `geometry_front` the input of the pass itself; otherwise `geometry_front` is null.
+	ShaderVertexInputInfo                  vs;
+	std::unique_ptr<ShaderVertexInputInfo> geometry_front;
+	ShaderPixelInputInfo                   ps {};
 	// The shader ids of `vs` and `ps` as prepared. The recording sets the two pixel fields copied
 	// below after it takes the inputs, so it reuses the ids only while both keep these values.
 	ShaderId               vs_id;
@@ -2836,6 +2880,7 @@ struct ShaderPixelInterpolator
 [[nodiscard]] uint32_t ShaderPixelSystemInputRegister(const ShaderPixelInputInfo& info, uint32_t field);
 void ShaderResolveCustomInterpolation(const ShaderPixelInterpolationUse& use, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info);
 [[nodiscard]] Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& info, bool forward_primitive_id);
+[[nodiscard]] Vector<uint32_t> ShaderCompileRectGeometry(uint32_t parameter_count, uint32_t flat_parameters);
 
 struct ShaderSharp
 {

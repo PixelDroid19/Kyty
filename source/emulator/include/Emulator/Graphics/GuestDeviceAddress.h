@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 struct VkBuffer_T;
@@ -75,7 +76,15 @@ struct GuestDeviceAddressTable
 {
 	uint64_t address     = 0;
 	uint32_t entry_count = 0;
+	// The entries the device table holds, for translations resolved at bind.
+	std::shared_ptr<const std::vector<GuestDeviceAddressEntry>> entries;
 };
+
+// The run of bytes from `guest` that `table` translates contiguously: every
+// access of `bytes` at offset `o` with o + bytes <= *window_bytes translates to
+// *device + o, as the device lookup does. *window_bytes is 0 when no entry
+// holds `guest`, and saturates at the largest 32-bit count.
+void GuestDeviceAddressWindow(const GuestDeviceAddressTable& table, uint64_t guest, uint64_t* device, uint32_t* window_bytes);
 
 enum class GuestDeviceAddressPrepareResult: uint8_t
 {
@@ -104,7 +113,7 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physica
 
 // Marks a point after which guest memory may hold pages the GPU must see: a
 // command-processor run begins or ends, or a packet other than a register write
-// or an indexed draw completed, or the emulator wrote guest memory back. The
+// or a direct draw completed, or the emulator wrote guest memory back. The
 // physical population is queried again only after such a point or an announced
 // host write (GpuDirtyPageTracker::HostWriteEpoch), so a page first touched by
 // the guest is imported by the first preparation after the guest orders it.
@@ -173,7 +182,8 @@ void               GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const G
 // the guest's physical memory qualify: a snapshot chunk could be refreshed
 // from stale guest bytes before the CPU write-back.
 [[nodiscard]] bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source,
-                                                       uint64_t vaddr, uint64_t size);
+                                                       uint64_t vaddr, uint64_t size, bool supports_graphics = true,
+                                                       bool already_ordered = false);
 
 // For a result GuestDeviceAddressRecordPublication refuses (a device write over part
 // of a cache line), records into `cmd` a copy of the storage object into a

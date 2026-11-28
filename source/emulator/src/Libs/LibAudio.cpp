@@ -51,6 +51,10 @@ LIB_DEFINE(InitAudio_1_AudioOut2)
 	LIB_FUNC("IaZXJ9M79uo", AudioOut2::AudioOut2UserDestroy);          // UserDestroy
 	LIB_FUNC("DImz2Ft9E2g", AudioOut2::AudioOut2GetSpeakerInfo);       // GetSpeakerInfo
 	LIB_FUNC("TViD1EZXkNI", AudioOut2::AudioOut2Set3DLatency);         // Set3DLatency
+	LIB_FUNC("4dq2rblWlg0", AudioOut2::AudioOut2ContextSetAttributes); // ContextSetAttributes
+	LIB_FUNC("G1YOKDJYX2Y", AudioOut2::AudioOut2GetSpeakerArrayMemorySize);
+	LIB_FUNC("+k91hoTuoA8", AudioOut2::AudioOut2SpeakerArrayCreate);
+	LIB_FUNC("erCWQR5eKiQ", AudioOut2::AudioOut2SpeakerArrayDestroy);
 }
 
 } // namespace LibAudioOut2
@@ -99,6 +103,7 @@ LIB_DEFINE(InitAudio_1_Voice)
 	LIB_FUNC("oV9GAdJ23Gw", Voice::VoiceConnectIPortToOPort);
 	LIB_FUNC("cQ6DGsQEjV4", Voice::VoiceReadFromOPort);
 	LIB_FUNC("CrLqDwWLoXM", Voice::VoiceGetPortInfo);
+	LIB_FUNC("cJLufzou6bc", Voice::VoiceGetBitRate);
 }
 
 } // namespace LibVoice

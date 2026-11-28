@@ -103,6 +103,7 @@ struct Table
 	VkBuffer       buffer  = nullptr;
 	uint64_t       device  = 0;
 	uint32_t       entries = 0;
+	std::shared_ptr<const std::vector<GuestDeviceAddressEntry>> host_entries;
 };
 
 using TableEntry = GuestDeviceAddressEntry;
@@ -1384,7 +1385,9 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 	std::memset(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes + entry_bytes + directory_bytes, 0, sizeof(TableEntry));
 	vkUnmapMemory(ctx->device, table.memory);
 	table.device  = BufferDeviceAddress(ctx->device, table.buffer);
-	table.entries = static_cast<uint32_t>(entries.size());
+	EXIT_IF((table.device & 15ull) != 0ull);
+	table.entries      = static_cast<uint32_t>(entries.size());
+	table.host_entries = std::make_shared<const std::vector<TableEntry>>(entries);
 	if (registry->table.buffer != nullptr)
 	{
 		registry->retired.push_back(registry->table);
@@ -1395,6 +1398,33 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 }
 
 } // namespace
+
+void GuestDeviceAddressWindow(const GuestDeviceAddressTable& table, uint64_t guest, uint64_t* device, uint32_t* window_bytes)
+{
+	EXIT_IF(device == nullptr || window_bytes == nullptr);
+	*device       = 0;
+	*window_bytes = 0;
+	if (table.entries == nullptr)
+	{
+		return;
+	}
+	const auto& entries = *table.entries;
+	const auto  after   = std::upper_bound(entries.begin(), entries.end(), guest,
+	                                       [](uint64_t address, const GuestDeviceAddressEntry& entry) { return address < entry.guest; });
+	if (after == entries.begin())
+	{
+		return;
+	}
+	const auto&    entry  = *std::prev(after);
+	const uint64_t offset = guest - entry.guest;
+	const uint64_t limit  = std::min(entry.size, entry.span);
+	if (offset >= limit)
+	{
+		return;
+	}
+	*device       = entry.device + offset;
+	*window_bytes = static_cast<uint32_t>(std::min<uint64_t>(limit - offset, std::numeric_limits<uint32_t>::max()));
+}
 
 GuestDeviceAddressDirectory GuestDeviceAddressBuildDirectory(const uint64_t* sorted_bases, uint32_t count)
 {
@@ -1570,6 +1600,7 @@ static bool OverlapsRegisteredRange(uint64_t vaddr, uint64_t size)
 	return it != registry.ranges.end() && it->first < vaddr + size;
 }
 
+
 bool GuestDeviceAddressOverlapsRegisteredRange(uint64_t vaddr, uint64_t size)
 {
 	return OverlapsRegisteredRange(vaddr, size);
@@ -1692,6 +1723,25 @@ bool GuestDeviceAddressResolveDrawInput(const GraphicContext* ctx, uint64_t vadd
 	return true;
 }
 
+static VkPipelineStageFlags PublicationRwStages(bool supports_graphics)
+{
+	return VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
+	       (supports_graphics ? (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT) : 0u);
+}
+
+static VkPipelineStageFlags PublicationConsumerStages(bool supports_graphics)
+{
+	return PublicationRwStages(supports_graphics) | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+	       (supports_graphics ? VK_PIPELINE_STAGE_VERTEX_INPUT_BIT : 0u);
+}
+
+static VkAccessFlags PublicationConsumerAccess(bool supports_graphics)
+{
+	return VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT |
+	       VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
+	       (supports_graphics ? (VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT) : 0u);
+}
+
 // Earlier device-address reads of the range and the producer's writes
 // complete before the transfer.
 static void RecordPublicationBarrierBefore(VkCommandBuffer_T* cmd)
@@ -1704,15 +1754,25 @@ static void RecordPublicationBarrierBefore(VkCommandBuffer_T* cmd)
 	                     nullptr);
 }
 
-// Every later command observes the transfer.
+// Every later device command observes the transfer; host visibility of coherent
+// staging/in-place buffers is guaranteed on submission fence completion.
 static void RecordPublicationBarrierAfter(VkCommandBuffer_T* cmd)
 {
 	VkMemoryBarrier after {};
 	after.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
-	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
-	                     &after, 0, nullptr, 0, nullptr);
+	after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+}
+
+static void RecordDeviceWritePublicationBarrier(VkCommandBuffer_T* cmd, bool supports_graphics)
+{
+	VkMemoryBarrier barrier {};
+	barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = PublicationConsumerAccess(supports_graphics);
+	vkCmdPipelineBarrier(cmd, PublicationRwStages(supports_graphics), PublicationConsumerStages(supports_graphics), 0, 1, &barrier, 0,
+	                     nullptr, 0, nullptr);
 }
 
 
@@ -1827,7 +1887,7 @@ void GuestDeviceAddressReleaseInPlace(GraphicContext* ctx, const GuestInPlaceWin
 }
 
 bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source, uint64_t vaddr,
-                                         uint64_t size)
+                                         uint64_t size, bool supports_graphics, bool already_ordered)
 {
 	if (ctx == nullptr || cmd == nullptr || source.buffer == nullptr || size == 0 || vaddr > UINT64_MAX - size ||
 	    !ctx->guest_device_address_supported)
@@ -1840,8 +1900,10 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 		// The device wrote these bytes where the consumer reads them.
 		std::lock_guard<std::mutex> lock(registry.mutex);
 		DropOverlaysOverlapping(&registry, vaddr, size);
-		RecordPublicationBarrierBefore(cmd);
-		RecordPublicationBarrierAfter(cmd);
+		if (!already_ordered)
+		{
+			RecordDeviceWritePublicationBarrier(cmd, supports_graphics);
+		}
 		return true;
 	}
 	if (!DeviceMayWriteGuestRange(vaddr, size))
@@ -2301,6 +2363,7 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 	registry->scanned_host_write = host_write;
 	table->address               = registry->table.device;
 	table->entry_count           = registry->table.entries;
+	table->entries               = registry->table.host_entries;
 	return GuestDeviceAddressPrepareResult::Ready;
 }
 

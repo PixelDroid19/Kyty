@@ -451,46 +451,53 @@ int ShaderFindImageStorageTextureDescriptor(const ShaderCode& code, uint32_t ind
 
 // Every binding field the copy flow and the direct image lookups read; equal
 // layouts give equal ShaderAnalyzeImageCopyReads results for one code.
-std::vector<int32_t> ShaderImageCopyLayout(const ShaderBindResources& bind, int user_data_register_base)
+void ShaderImageCopyLayoutInto(const ShaderBindResources& bind, int user_data_register_base, std::vector<int32_t>* layout)
 {
-	std::vector<int32_t> layout;
-	layout.reserve(8u + 4u * static_cast<size_t>(std::max(bind.textures2D.textures_num, 0)) +
-	               3u * static_cast<size_t>(std::max(bind.samplers.samplers_num, 0)) +
-	               2u * static_cast<size_t>(std::max(bind.gds_pointers.pointers_num, 0)) +
-	               2u * static_cast<size_t>(std::max(bind.direct_sgprs.sgprs_num, 0)) + 7u * bind.dynamic_sloads.records.Size());
-	layout.insert(layout.end(), {user_data_register_base,      bind.textures2D.textures_num,
-	                             bind.samplers.samplers_num,   bind.gds_pointers.pointers_num,
-	                             bind.direct_sgprs.sgprs_num,  bind.extended.used ? 1 : 0,
-	                             bind.extended.start_register, static_cast<int32_t>(bind.extended.eud_size_dw)});
+	EXIT_IF(layout == nullptr);
+	layout->clear();
+	layout->reserve(8u + 4u * static_cast<size_t>(std::max(bind.textures2D.textures_num, 0)) +
+	                3u * static_cast<size_t>(std::max(bind.samplers.samplers_num, 0)) +
+	                2u * static_cast<size_t>(std::max(bind.gds_pointers.pointers_num, 0)) +
+	                2u * static_cast<size_t>(std::max(bind.direct_sgprs.sgprs_num, 0)) + 7u * bind.dynamic_sloads.records.Size());
+	layout->insert(layout->end(), {user_data_register_base,      bind.textures2D.textures_num,
+	                               bind.samplers.samplers_num,   bind.gds_pointers.pointers_num,
+	                               bind.direct_sgprs.sgprs_num,  bind.extended.used ? 1 : 0,
+	                               bind.extended.start_register, static_cast<int32_t>(bind.extended.eud_size_dw)});
 	if (!ValidBind(bind, user_data_register_base))
 	{
-		return layout;
+		return;
 	}
 	for (int descriptor = 0; descriptor < bind.textures2D.textures_num; ++descriptor)
 	{
 		const auto& texture = bind.textures2D.desc[descriptor];
-		layout.insert(layout.end(), {texture.start_register, static_cast<int32_t>(texture.usage), texture.extended ? 1 : 0,
-		                             texture.dynamic_sload ? 1 : 0});
+		layout->insert(layout->end(), {texture.start_register, static_cast<int32_t>(texture.usage), texture.extended ? 1 : 0,
+		                               texture.dynamic_sload ? 1 : 0});
 	}
 	for (int sampler = 0; sampler < bind.samplers.samplers_num; ++sampler)
 	{
-		layout.insert(layout.end(), {bind.samplers.start_register[sampler], bind.samplers.extended[sampler] ? 1 : 0,
-		                             bind.samplers.dynamic_sload[sampler] ? 1 : 0});
+		layout->insert(layout->end(), {bind.samplers.start_register[sampler], bind.samplers.extended[sampler] ? 1 : 0,
+		                               bind.samplers.dynamic_sload[sampler] ? 1 : 0});
 	}
 	for (int pointer = 0; pointer < bind.gds_pointers.pointers_num; ++pointer)
 	{
-		layout.insert(layout.end(), {bind.gds_pointers.start_register[pointer], bind.gds_pointers.extended[pointer] ? 1 : 0});
+		layout->insert(layout->end(), {bind.gds_pointers.start_register[pointer], bind.gds_pointers.extended[pointer] ? 1 : 0});
 	}
 	for (int scalar = 0; scalar < bind.direct_sgprs.sgprs_num; ++scalar)
 	{
-		layout.insert(layout.end(), {bind.direct_sgprs.start_register[scalar], bind.direct_sgprs.absolute_register[scalar] ? 1 : 0});
+		layout->insert(layout->end(), {bind.direct_sgprs.start_register[scalar], bind.direct_sgprs.absolute_register[scalar] ? 1 : 0});
 	}
 	for (const auto& record: bind.dynamic_sloads.records)
 	{
-		layout.insert(layout.end(), {static_cast<int32_t>(record.kind), record.resource_index, record.destination_register,
-		                             static_cast<int32_t>(record.instruction_pc), record.dword_count, record.resource_field_offset,
-		                             static_cast<int32_t>(record.last_consumer_pc)});
+		layout->insert(layout->end(), {static_cast<int32_t>(record.kind), record.resource_index, record.destination_register,
+		                               static_cast<int32_t>(record.instruction_pc), record.dword_count, record.resource_field_offset,
+		                               static_cast<int32_t>(record.last_consumer_pc)});
 	}
+}
+
+std::vector<int32_t> ShaderImageCopyLayout(const ShaderBindResources& bind, int user_data_register_base)
+{
+	std::vector<int32_t> layout;
+	ShaderImageCopyLayoutInto(bind, user_data_register_base, &layout);
 	return layout;
 }
 
@@ -539,8 +546,20 @@ void ShaderCollectCopiedImageDescriptors(const ShaderCode& code, ShaderBindResou
 {
 	EXIT_IF(bind == nullptr);
 	bind->copied_image_descriptors.Clear();
-	const auto reads = memo != nullptr ? memo->ImageCopyReads(code, *bind, user_data_register_base)
-	                                   : ShaderAnalyzeImageCopyReads(code, *bind, user_data_register_base);
+	if (memo != nullptr && !memo->InstructionIndices(code).has_image_reads)
+	{
+		return;
+	}
+	std::shared_ptr<const std::vector<ShaderImageCopyRead>> memo_reads;
+	std::vector<ShaderImageCopyRead>                        direct_reads;
+	if (memo != nullptr)
+	{
+		memo_reads = memo->ImageCopyReads(code, *bind, user_data_register_base);
+	} else
+	{
+		direct_reads = ShaderAnalyzeImageCopyReads(code, *bind, user_data_register_base);
+	}
+	const auto& reads = memo_reads != nullptr ? *memo_reads : direct_reads;
 	for (const auto& read: reads)
 	{
 		// Usage selection compares descriptor words, which change between draws.

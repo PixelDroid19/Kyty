@@ -66,6 +66,25 @@ dunes with correct captures at 160, 185 and 210 s.
 - VOP3 opcodes `0x183` and `0x195` decode a two-dword source and share
   the existing F64-to-I32 and F64-to-U32 conversions.
 
+## Follow-up: OMOD div:2 underflow keeps its sign (2026-11-21)
+
+- **Observed.** `OUTPUT_MODIFIER_HALVE` flushed every result that halving
+  pushes below the normal range to +0. Native RDNA2 results (IEEE mode off,
+  f32 denormals flushed, round to nearest) keep the sign of that zero:
+  `-2^-126` (`0x80800000`) and `0x80ffffff` with `div:2` give `0x80000000`.
+  A -0 or denormal result still becomes +0 (ISA 6.2: "-0 is flushed to +0"),
+  and `mul:2`/`mul:4` rows match the existing lowering.
+- **Change.** The underflow branch returns the result's sign bit instead of
+  +0. The fixture case that expected +0 for `0x80800000` now expects -0 and
+  adds `0x80ffffff` and a negative denormal. Translator version 248,
+  geometry translator version 101.
+- **Verified.** With a forged +0 expectation the pixel and compute variants
+  of `FloatModeClampOutputModifierAndMinMaxContracts` fail on the GPU
+  (`got 0x80000000`); CTest 108/108 (1 skipped).
+  Strict 60 fps-limited route run at `c21ad6e29` on Intel Arc A770 (private
+  cache): `PPSA21567 - Astro Bot` played the fight route for 260 s, exit 0,
+  light fight at about 700 draws a frame and 28-30 fps.
+
 ## Open
 
 - `V_SIN/V_COS_F32` periodicity for mid-range inputs (for example 1000.25

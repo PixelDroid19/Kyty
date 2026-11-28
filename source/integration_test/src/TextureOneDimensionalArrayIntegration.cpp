@@ -225,6 +225,26 @@ ShaderComputeInputInfo MakeInput(const Case& test_case)
 	return input;
 }
 
+// Position of the last character of the generated initial EXEC setup in main:
+// the ballot refresh of a partial wave or the all-lanes stores of a whole wave.
+size_t FindInitialExecSetupEnd(const std::string& text, size_t main_start)
+{
+	if (main_start == std::string::npos)
+	{
+		return std::string::npos;
+	}
+	for (const char* anchor: {"OpStore %execz %mask_exec_z_initial",
+	                          "OpStore %exec_lane_lo %uint_1\nOpStore %exec_lane_hi %uint_0\nOpStore %execz %uint_0"})
+	{
+		const size_t position = text.find(anchor, main_start);
+		if (position != std::string::npos)
+		{
+			return position + std::string(anchor).size() - 1u;
+		}
+	}
+	return std::string::npos;
+}
+
 bool Insert(std::string* text, const std::string& anchor, const std::string& insertion, bool after)
 {
 	const size_t position = text->find(anchor);
@@ -273,7 +293,7 @@ std::string BuildProbeSource(const Case& test_case, const ShaderComputeInputInfo
 	               Insert(&text, "OpEntryPoint GLCompute %main \"main\"", " %probe_buffer", true) &&
 	               Insert(&text, ";Variables\n%gl_LocalInvocationID", "%probe_buffer = OpVariable %probe_block_ptr StorageBuffer\n", false);
 	const size_t main_start = text.find("%main       = OpFunction %void None %function_void");
-	const size_t exec_init  = main_start == std::string::npos ? std::string::npos : text.find("OpStore %execz %mask_exec_z_initial", main_start);
+	const size_t exec_init  = FindInitialExecSetupEnd(text, main_start);
 	const size_t seed_at    = exec_init == std::string::npos ? std::string::npos : text.find('\n', exec_init);
 	if (!spliced || seed_at == std::string::npos) { Fail(std::string(test_case.name) + ": generated source lacks a probe anchor"); }
 	text.insert(seed_at + 1u, seeds);

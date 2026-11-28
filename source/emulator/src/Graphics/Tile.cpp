@@ -1640,6 +1640,12 @@ uint64_t TileGetStandard4KBVolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint
 	return StandardVolumeOffset(x, y, z, pitch_elems, height, bytes_per_element, 4096u);
 }
 
+uint64_t TileGetStandardVolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems, uint32_t height,
+                                     uint32_t bytes_per_element, uint32_t block_bytes)
+{
+	return StandardVolumeOffset(x, y, z, pitch_elems, height, bytes_per_element, block_bytes);
+}
+
 void TileConvertStandardVolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
                                        uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t block_bytes)
 {

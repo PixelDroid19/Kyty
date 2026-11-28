@@ -1771,6 +1771,37 @@ TEST(EmulatorGuestDeviceAddress, DirectoryRegionHoldsTheEntryOfEveryAddress)
 	EXPECT_EQ(empty.words, (std::vector<uint32_t> {0u, 0u}));
 }
 
+// A window holds only accesses the device lookup translates to the same
+// address: those that start in the guest size and end in the imported span.
+TEST(EmulatorGuestDeviceAddress, WindowHoldsOnlyAccessesTheLookupTranslates)
+{
+	GuestDeviceAddressTable table;
+	table.entries = std::make_shared<const std::vector<GuestDeviceAddressEntry>>(std::vector<GuestDeviceAddressEntry> {
+	    {0x10000, 0x3000, 0xa0000, 0x2000}, {0x20000, 0x1000, 0xb0000, 0x1000}, {0x100000000ull, 0x200000000ull, 0x1000000000ull, 0x200000000ull}});
+	uint64_t device = 1;
+	uint32_t bytes  = 1;
+	GuestDeviceAddressWindow(table, 0x10800, &device, &bytes);
+	EXPECT_EQ(device, 0xa0800u);
+	ASSERT_EQ(bytes, 0x1800u);
+	for (const uint64_t offset: {0ull, 0x17fcull, 0x1700ull})
+	{
+		const uint64_t access = std::min<uint64_t>(bytes - offset, 128u);
+		EXPECT_TRUE(GuestDeviceAddressAccessFits(0x3000, 0x2000, 0x800 + offset, access)) << std::hex << offset;
+	}
+	EXPECT_FALSE(GuestDeviceAddressAccessFits(0x3000, 0x2000, 0x800 + bytes, 4));
+	for (const uint64_t outside: {0xf000ull, 0x12800ull, 0x13000ull, 0x18000ull, 0x21000ull})
+	{
+		GuestDeviceAddressWindow(table, outside, &device, &bytes);
+		EXPECT_EQ(bytes, 0u) << std::hex << outside;
+		EXPECT_EQ(device, 0u) << std::hex << outside;
+	}
+	GuestDeviceAddressWindow(table, 0x100000010ull, &device, &bytes);
+	EXPECT_EQ(device, 0x1000000010ull);
+	EXPECT_EQ(bytes, 0xffffffffu);
+	GuestDeviceAddressWindow(GuestDeviceAddressTable {}, 0x10800, &device, &bytes);
+	EXPECT_EQ(bytes, 0u);
+}
+
 // Every guest byte an overlay covers translates into the overlay; every other
 // byte keeps its chunk's translation and the bytes imported after it.
 TEST(EmulatorGuestDeviceAddress, OverlaysReplaceTheBytesTheyCoverInTheTable)

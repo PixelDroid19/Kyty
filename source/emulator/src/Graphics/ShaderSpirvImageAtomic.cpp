@@ -38,13 +38,18 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageAtomic)
 	ShaderStorageImageView view;
 	if (descriptor < 0 || !ResolveStorageImageView(code, index, *bind, 0, &view)) { return false; }
 	const auto binding = spirv->GetConstantUint(static_cast<uint32_t>(descriptor));
+	// DIM 1D supplies X only and addresses row 0 of the one-row image.
+	const bool one_dimensional = instruction.mimg_dimension == 0u;
 	const auto x = mimg_address_to_str(instruction, 0);
-	const auto y = mimg_address_to_str(instruction, 1);
+	const auto y = one_dimensional ? x : mimg_address_to_str(instruction, 1);
 	const auto value = operand_variable_to_str(instruction.src[2]);
 	if (binding.StartsWith("unknown_") || x.type != SpirvType::Float || y.type != SpirvType::Float || value.type != SpirvType::Float)
 	{
 		return false;
 	}
+	const char* y_source = one_dimensional ? "%image_atomic_y_<index> = OpCopyObject %uint %uint_0\n"
+	                                       : "%image_atomic_y_f_<index> = OpLoad %float %<y>\n"
+	                                         "%image_atomic_y_<index> = OpBitcast %uint %image_atomic_y_f_<index>\n";
 	String8 store;
 	if (instruction.mimg_return_old_value)
 	{
@@ -57,10 +62,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageAtomic)
 %image_atomic_resource_<index> = OpAccessChain %_ptr_UniformConstant_ImageLU %textures2D_LU %<binding>
 %image_atomic_image_<index> = OpLoad %ImageLU %image_atomic_resource_<index>
 %image_atomic_x_f_<index> = OpLoad %float %<x>
-%image_atomic_y_f_<index> = OpLoad %float %<y>
 %image_atomic_x_<index> = OpBitcast %uint %image_atomic_x_f_<index>
-%image_atomic_y_<index> = OpBitcast %uint %image_atomic_y_f_<index>
-%image_atomic_coord_<index> = OpCompositeConstruct %v2uint %image_atomic_x_<index> %image_atomic_y_<index>
+<y_source>%image_atomic_coord_<index> = OpCompositeConstruct %v2uint %image_atomic_x_<index> %image_atomic_y_<index>
 %image_atomic_extent_<index> = OpImageQuerySize %v2uint %image_atomic_image_<index>
 %image_atomic_width_<index> = OpCompositeExtract %uint %image_atomic_extent_<index> 0
 %image_atomic_height_<index> = OpCompositeExtract %uint %image_atomic_extent_<index> 1
@@ -81,7 +84,8 @@ OpBranchConditional %image_atomic_enabled_<index> %image_atomic_update_<index> %
 %image_atomic_merge_<index> = OpLabel
 )";
 	const char* atomic = ImageAtomicOp(instruction.type);
-	*dst_source += String8(text).ReplaceStr("ImageLU", view.image_type)
+	*dst_source += String8(text).ReplaceStr("<y_source>", y_source)
+	                          .ReplaceStr("ImageLU", view.image_type)
 	                          .ReplaceStr("textures2D_LU", view.variable)
 	                          .ReplaceStr("<store>", store)
 	                          .ReplaceStr("<atomic>", atomic)

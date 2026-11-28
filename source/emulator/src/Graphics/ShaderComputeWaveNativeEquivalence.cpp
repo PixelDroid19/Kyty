@@ -697,11 +697,42 @@ bool AccessesSharedLds(ShaderInstructionType type)
 	       type != ShaderInstructionType::DsReadAddtidB32;
 }
 
+// An instruction outside every branch's span is passed exactly once by every invocation whatever its EXEC: a
+// forward branch skips the instructions strictly between it and its target, a back edge repeats the ones
+// from its target through itself, and an earlier S_ENDPGM ends some invocations before it.
+std::vector<bool> ExecutedOncePerInvocation(const Vector<ShaderInstruction>& instructions, const std::vector<int64_t>& target_index)
+{
+	const auto        count = static_cast<uint32_t>(instructions.Size());
+	std::vector<bool> once(count, true);
+	for (uint32_t index = 0; index < count; ++index)
+	{
+		if (instructions.At(index).type == ShaderInstructionType::SEndpgm)
+		{
+			std::fill(once.begin() + index + 1, once.end(), false);
+			break;
+		}
+	}
+	for (uint32_t index = 0; index < count; ++index)
+	{
+		const auto target = target_index[index];
+		if (target < 0)
+		{
+			continue;
+		}
+		const auto first = target > static_cast<int64_t>(index) ? static_cast<int64_t>(index) + 1 : target;
+		const auto last  = target > static_cast<int64_t>(index) ? target : static_cast<int64_t>(index) + 1;
+		std::fill(once.begin() + first, once.begin() + last, false);
+	}
+	return once;
+}
+
 // The LDS accesses of one guest wave complete in program order for all its lanes. One
 // invocation per lane keeps that order only across S_BARRIER, so an LDS read reachable
 // from an LDS write without a barrier between them may miss another lane's write.
+// Returns the index of the first such read; a host barrier orders like S_BARRIER.
 std::optional<uint32_t> FindLdsReadAfterUnorderedWrite(const Vector<ShaderInstruction>&          instructions,
-                                                       const std::vector<std::vector<uint32_t>>& successors)
+                                                       const std::vector<std::vector<uint32_t>>& successors,
+                                                       const std::vector<bool>&                  host_barrier)
 {
 	const auto        count = static_cast<uint32_t>(instructions.Size());
 	std::vector<bool> pending(count, false);
@@ -715,9 +746,13 @@ std::optional<uint32_t> FindLdsReadAfterUnorderedWrite(const Vector<ShaderInstru
 		const auto type = instructions.At(index).type;
 		const bool lds  = AccessesSharedLds(type);
 		const auto name = magic_enum::enum_name(type);
+		if (host_barrier[index])
+		{
+			pending[index] = false;
+		}
 		if (lds && pending[index] && !NameStartsWith(name, "DsWrite"))
 		{
-			return instructions.At(index).pc;
+			return index;
 		}
 		const bool out = type != ShaderInstructionType::SBarrier && (pending[index] || (lds && !NameStartsWith(name, "DsRead")));
 		for (auto successor: successors[index])
@@ -1018,11 +1053,31 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 			return Failure(instruction.pc, "a scalar value written inside a lane-conditional region is live at its join");
 		}
 	}
-	if (const auto read = FindLdsReadAfterUnorderedWrite(instructions, successors))
+	std::vector<bool> host_barrier(count, false);
+	const auto        once = ExecutedOncePerInvocation(instructions, target_index);
+	while (const auto read = FindLdsReadAfterUnorderedWrite(instructions, successors, host_barrier))
 	{
-		return Failure(*read, "LDS read may miss another lane's write with no S_BARRIER between them");
+		// The latest point every invocation passes exactly once before the read separates it from writes
+		// that precede that point. A barrier already there, or none at all, leaves the read unordered.
+		auto point = static_cast<int64_t>(*read);
+		while (point >= 0 && !once[static_cast<size_t>(point)])
+		{
+			--point;
+		}
+		if (point < 0 || host_barrier[static_cast<size_t>(point)])
+		{
+			return Failure(instructions.At(*read).pc, "LDS read may miss another lane's write with no S_BARRIER between them");
+		}
+		host_barrier[static_cast<size_t>(point)] = true;
 	}
 	ShaderComputeWaveAnalysisResult result {true, 0, {}};
+	for (uint32_t index = 0; index < count; ++index)
+	{
+		if (host_barrier[index])
+		{
+			result.lds_order_barriers.push_back(index);
+		}
+	}
 	result.reads_quad_lanes = std::any_of(decoded.begin(), decoded.end(), [](const auto& entry) { return entry.reads_quad; });
 	return result;
 }

@@ -270,6 +270,8 @@ void GpuMemory::VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vec
 	current_info.object.obj      = new_object;
 	current_info.mem             = new_memory;
 	current_info.submission_uses = {};
+	// Lookups that remember backings must find the new one.
+	m_object_graph_generation.fetch_add(1, std::memory_order_release);
 	g_storage_scan_generation.fetch_add(1, std::memory_order_acq_rel);
 	EXIT_IF(current_info.backing_generation == UINT64_MAX);
 	current_info.backing_generation++;
@@ -1646,6 +1648,24 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			                                             m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies()));
 		};
 
+		const auto view_inside_one_plane = [&](const Object& h)
+		{
+			if (vaddr_num != 1)
+			{
+				return false;
+			}
+			for (int i = 0; i < h.block.vaddr_num; i++)
+			{
+				// A view of a whole plane is a storage view of that plane, which other rules decide.
+				const bool whole_plane = vaddr[0] == h.block.vaddr[i] && size[0] == h.block.size[i];
+				if (!whole_plane && vaddr[0] >= h.block.vaddr[i] && vaddr[0] + size[0] <= h.block.vaddr[i] + h.block.size[i])
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+
 		if (others.Size() == 1)
 		{
 			const auto& obj = others.At(0);
@@ -1700,8 +1720,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			                                         &render_alias_copies))
 			{
 				// This image aliases 64 KiB blocks of a GPU-owned render target (part
-				// of it, all of it, or all of a smaller one). Keep its live pixels
-				// before compute writes.
+				// of it, all of it, or all of a smaller one) or its whole mip chain.
+				// Keep its live pixels before compute writes.
 				overlap                = true;
 				render_alias_parent_id = obj.object_id;
 			} else if (o.object.type == GpuMemoryObjectType::RenderTexture && info.type == GpuMemoryObjectType::StorageTexture &&
@@ -1725,6 +1745,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// range (captured: RT 2432x1368 Contains a 240x135 fmt-64
 				// storage image). Formats differ, so no alias copy can seed it;
 				// link both views and keep the render target live.
+				overlap = true;
+			} else if (GpuMemoryAllowsStorageTextureCrossingRecycledImage(o.object.type, obj.relation, info.type))
+			{
+				// Neither crossing image is a view of the other, so the overlap is recycled memory
+				// (captured: a 3840x2160 storage view shifted 0xa30000 bytes over the same view). Link it;
+				// the new view seeds from guest bytes, as when it also crosses other parents.
 				overlap = true;
 			} else if (GpuMemoryAllowsOverwrittenStorageTextureParent(
 			               o.object.type, obj.relation, info.type,
@@ -1893,6 +1919,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					}
 					default:
 					{
+						// A view inside one plane of a multi-range depth target classifies as Crosses against the
+						// whole set; link it as a view inside that plane (captured: a linear 416x234 8-byte view
+						// inside the depth plane of a 3840x2160 D32S8 target).
+						if (obj.relation == OverlapType::Crosses && view_inside_one_plane(h) &&
+						    GpuMemoryAllowsStorageTextureOverDepthRange(o.object.type, OverlapType::Contains, info.type))
+						{
+							overlap = true;
+							break;
+						}
 						auto msg = String::FromPrintf("unknown relation: %s - %s - %s\n", Core::EnumName(o.object.type).C_Str(),
 						                              Core::EnumName(obj.relation).C_Str(), Core::EnumName(info.type).C_Str());
 						EXIT("%s\n%s\n", create_dbg_exit(msg, vaddr, size, vaddr_num, others, info.type).C_Str(),
@@ -2113,6 +2148,27 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// 3456x1944 and 3584-pitch views and of a CPU-uploaded buffer). A sampled texture whose content guest
 			// memory holds caches guest bytes too (captured: a 3840x2160 view over 39 targets and storage views and
 			// a CPU-uploaded 640-wide texture with no device write).
+			// A view of the same layout at another base inside a storage chain addresses other texels when the
+			// mip-level rules above did not claim it (captured: a one-level 1216x684 linear view 64 KiB into a
+			// six-level chain of its format, whose level 0 sits at offset 0 or 0x226100). The view seeds from guest
+			// bytes, like the other storage parents of this rule.
+			// A view inside a depth target is linked as the single-parent path links it (captured: a 64 KiB view
+			// 0x290000 bytes into a 1664x936 depth target, equal to a CPU-uploaded buffer, inside render targets).
+			const auto arena_view_at_other_base = [](const Object& h, const OverlappedBlock& obj, uint64_t view_vaddr)
+			{
+				return h.info.object.type == GpuMemoryObjectType::StorageTexture && obj.relation == OverlapType::Contains &&
+				       h.block.vaddr[0] != view_vaddr;
+			};
+			// A parent the storage alias rule above links, under its conditions, can share the arena with the crossing
+			// views (captured: a 0x280000 view equal to a sampled texture of its own layout and to a CPU-uploaded buffer,
+			// crossing two storage views, one materialized from a surface).
+			const auto arena_published_alias = [&](const ObjectInfo& o, const OverlappedBlock& obj)
+			{
+				return GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type) &&
+				       o.content_origin != GpuMemoryContentOrigin::GpuAliasMaterialization &&
+				       !GpuMemoryHasPendingWritableWriteBack(o.in_use, o.read_only, o.write_back_func != nullptr,
+				                                             m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies()));
+			};
 			bool multi_arena_storage_texture = info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
 			for (const auto& obj: others)
 			{
@@ -2125,6 +2181,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				const bool  compare_layout = obj.relation != OverlapType::Contains;
 				multi_arena_storage_texture =
 				    (GpuMemoryAllowsStorageTextureContainedInRenderTarget(o.object.type, obj.relation, info.type) ||
+				     GpuMemoryAllowsStorageTextureOverDepthRange(o.object.type, obj.relation, info.type) ||
 				     links_cpu_texture(h, obj) ||
 				     ((obj.relation == OverlapType::Crosses || obj.relation == OverlapType::IsContainedWithin) &&
 				      (o.object.type == GpuMemoryObjectType::StorageTexture || o.object.type == GpuMemoryObjectType::RenderTexture ||
@@ -2135,6 +2192,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				     (o.object.type == GpuMemoryObjectType::StorageTexture &&
 				      (StorageTextureRedescribesRange(o.params, info.params, compare_layout) ||
 				       o.params[StorageTextureObject::PARAM_PITCH] != info.params[StorageTextureObject::PARAM_PITCH])) ||
+				     arena_view_at_other_base(h, obj, vaddr[0]) || arena_published_alias(o, obj) ||
 				     (o.object.type == GpuMemoryObjectType::Texture && (holds_surface_pixels(o) || o.device_write_time != 0u) &&
 				      StorageTextureRedescribesRange(o.params, info.params, compare_layout)) ||
 				     (o.object.type == GpuMemoryObjectType::RenderTexture &&

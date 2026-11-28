@@ -1,4 +1,5 @@
 #include "ShaderSpirvInternal.h"
+#include "ShaderDeadVgprMask.h"
 #include "Emulator/Graphics/ShaderVertexExecFlow.h"
 
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
@@ -29,7 +30,7 @@ bool NativeComputeWaveInputIsValid(const ShaderComputeInputInfo* input)
 	{
 		return false;
 	}
-	if (split ? (layout.guest_wave_size != kGuestWaveSize && (layout.guest_wave_size != kNativeSubgroupSize || layout.native_subgroup_size != 16u)) || (layout.native_subgroup_size != 8u && layout.native_subgroup_size != 16u && layout.native_subgroup_size != 32u) ||
+	if (split ? (layout.guest_wave_size != kGuestWaveSize && (layout.guest_wave_size != kNativeSubgroupSize || (layout.native_subgroup_size != 8u && layout.native_subgroup_size != 16u))) || (layout.native_subgroup_size != 8u && layout.native_subgroup_size != 16u && layout.native_subgroup_size != 32u) ||
 	                layout.waves == 0u
 	          : layout.strategy != ShaderComputeWaveStrategy::Native || layout.guest_wave_size != kNativeSubgroupSize ||
 	                (layout.native_subgroup_size != 0u && layout.native_subgroup_size != kNativeSubgroupSize) || layout.waves != 0u)
@@ -99,6 +100,12 @@ bool Spirv::UsesNativeComputeWave() const
 	       (m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->native_wave_sensitive &&
 	        m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Native &&
 	        m_cs_input_info->wave_layout.guest_wave_size == kNativeSubgroupSize);
+}
+
+bool Spirv::UsesLanePrivateMasks() const
+{
+	return m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lane_private_masks &&
+	       !UsesNativeComputeWave() && !UsesGeometryCompute();
 }
 
 bool Spirv::NativeComputeWaveLayoutIsValid() const
@@ -200,6 +207,59 @@ bool Spirv::ExecFullAfter(uint32_t index) const
 	}
 	const auto& flow = FragmentMaskFlow();
 	return flow.lane_local && index + 1u < flow.exec_full.size() && flow.exec_full[index + 1u];
+}
+
+bool Spirv::HasWholeComputeWavesAtEntry() const
+{
+	return UsesNativeComputeWave() && !UsesGeometryCompute() && m_cs_input_info != nullptr &&
+	       !(m_bind != nullptr && m_bind->thread_limits_used) &&
+	       (m_cs_input_info->wave_layout.guest_local[0] * m_cs_input_info->wave_layout.guest_local[1] *
+	        m_cs_input_info->wave_layout.guest_local[2]) %
+	               m_cs_input_info->wave_layout.guest_wave_size ==
+	           0u;
+}
+
+bool Spirv::SkipDestinationExecGuard(uint32_t index) const
+{
+	if (UsesFragmentCompute()) { return false; }
+	if (!m_dead_vgpr_guards_ready)
+	{
+		m_dead_vgpr_guards_ready = true;
+		std::vector<bool> exec_full;
+		std::vector<bool> quad_mask_gather;
+		bool              entry_exec_full = false;
+		if (HasFusedVertexLanes())
+		{
+			if (!m_vertex_exec_full_ready)
+			{
+				m_vertex_exec_full_ready = true;
+				m_vertex_exec_full       = ShaderAnalyzeVertexExecFull(m_code, NativeWave32());
+			}
+			exec_full = m_vertex_exec_full;
+		} else if (HasWholeComputeWavesAtEntry() ||
+		           (m_code.GetType() == ShaderType::Compute && !UsesNativeComputeWave() && !UsesGeometryCompute() &&
+		            !(m_bind != nullptr && m_bind->thread_limits_used)))
+		{
+			entry_exec_full = true;
+		} else if (m_code.GetType() == ShaderType::Pixel && !UsesFragmentCompute() &&
+		           !(m_bind != nullptr && m_bind->thread_limits_used))
+		{
+			entry_exec_full = true;
+			if (m_ps_input_info != nullptr && m_ps_input_info->native_wave.refusal_reason == nullptr &&
+			    FragmentMaskFlow().lane_local)
+			{
+				exec_full = FragmentMaskFlow().exec_full;
+			}
+			if (m_ps_input_info != nullptr && m_ps_input_info->native_wave.refusal_reason == nullptr && GathersMasksInQuad())
+			{
+				quad_mask_gather.resize(m_code.GetInstructions().Size());
+				for (uint32_t i = 0; i < quad_mask_gather.size(); ++i) { quad_mask_gather[i] = IsLaneMaskGather(i); }
+			}
+		}
+		m_dead_vgpr_guards =
+		    ShaderAnalyzeDeadVgprDstGuards(m_code, exec_full, entry_exec_full, UsesLanePrivateMasks(), quad_mask_gather);
+	}
+	return index < m_dead_vgpr_guards.size() && m_dead_vgpr_guards[index];
 }
 
 const ShaderLaneReductions& Spirv::LaneReductions() const

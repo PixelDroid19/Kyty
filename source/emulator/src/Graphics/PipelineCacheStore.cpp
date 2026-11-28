@@ -204,16 +204,24 @@ PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineC
 		return PipelineCacheStoreSaveResult::Unchanged;
 	}
 
-	size_t size   = 0;
-	auto   result = vkGetPipelineCacheData(device, cache, &size, nullptr);
-	if (result != VK_SUCCESS || size < sizeof(PipelineCacheHeaderV1) || size > PipelineCacheStoreMaxBytes())
+	std::vector<uint8_t> data;
 	{
-		return PipelineCacheStoreSaveResult::Failed;
+		// Only the driver read excludes pipeline creation; hashing and the file write run unlocked.
+		std::unique_lock cache_access(PipelineCacheAccess());
+		size_t           size   = 0;
+		auto             result = vkGetPipelineCacheData(device, cache, &size, nullptr);
+		if (result != VK_SUCCESS || size < sizeof(PipelineCacheHeaderV1) || size > PipelineCacheStoreMaxBytes())
+		{
+			return PipelineCacheStoreSaveResult::Failed;
+		}
+		data.resize(size);
+		result = vkGetPipelineCacheData(device, cache, &size, data.data());
+		if (result != VK_SUCCESS || size != data.size())
+		{
+			return PipelineCacheStoreSaveResult::Failed;
+		}
 	}
-
-	std::vector<uint8_t> data(size);
-	result = vkGetPipelineCacheData(device, cache, &size, data.data());
-	if (result != VK_SUCCESS || size != data.size() || !PipelineCacheDataMatchesDevice(data.data(), data.size(), properties))
+	if (!PipelineCacheDataMatchesDevice(data.data(), data.size(), properties))
 	{
 		return PipelineCacheStoreSaveResult::Failed;
 	}

@@ -26,6 +26,8 @@ constexpr uint32_t kSplitNarrowestLanes = 8u;
 // dwords of registers per lane; a guest allocating more spills there, and its
 // cost outweighs the extra rendezvous of twice as many 8-lane parts.
 constexpr uint32_t kSplitNarrowVgprs = 64u;
+// A 32-lane hardware thread on such a host holds half of that per lane.
+constexpr uint32_t kNativeWave32Vgprs = kSplitNarrowVgprs / 2u;
 constexpr uint32_t kLdsDwordBytes    = 4u;
 
 [[nodiscard]] bool MultiplyU32(uint32_t a, uint32_t b, uint32_t* product) noexcept
@@ -85,9 +87,10 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 		return ShaderComputeWaveLayoutStatus::UnsupportedDispatchMode;
 	}
 	// Wave32 fits one host subgroup; it splits only for the allocation that
-	// spills at that width, on a host with exact width 16.
-	const bool wave32 = (mode & kWave32Enable) != 0;
-	if (wave32 && request.vgprs <= kSplitNarrowVgprs)
+	// spills at that width, on a host with exact width 8 or 16.
+	const bool     wave32        = (mode & kWave32Enable) != 0;
+	const uint32_t wave32_budget = capabilities.min_subgroup_size <= kSplitNarrowestLanes ? kNativeWave32Vgprs : kSplitNarrowVgprs;
+	if (wave32 && request.vgprs <= wave32_budget)
 	{
 		return ShaderComputeWaveLayoutStatus::UnsupportedWidth;
 	}
@@ -96,7 +99,10 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	// values preserve the dispatch grid and do not alter this layout decision.
 
 	const uint32_t guest_wave_size = wave32 ? kNativeSubgroupSize : kGuestWaveSize;
-	const uint32_t part_lanes      = wave32 ? kSplitNarrowLanes : ShaderSplitWavePartLanes(capabilities, request.vgprs);
+	// A 16-lane part holds 64 dwords per lane on a host that goes down to 8 lanes, and the guest's registers
+	// plus the split's own state outgrow that: a measured wave32 program spilled 1,171 times there and 50 at 8.
+	const uint32_t wave32_lanes    = capabilities.min_subgroup_size <= kSplitNarrowestLanes ? kSplitNarrowestLanes : kSplitNarrowLanes;
+	const uint32_t part_lanes      = wave32 ? wave32_lanes : ShaderSplitWavePartLanes(capabilities, request.vgprs);
 	if (!capabilities.size_control_enabled || !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
 	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > part_lanes ||
 	    capabilities.max_subgroup_size < part_lanes)

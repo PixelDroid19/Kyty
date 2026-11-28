@@ -802,7 +802,7 @@ static uint32_t RunCondIndirectBuffer(CommandProcessor* cp, uint32_t cmd_id, con
 	}
 
 	GraphicsDbgDumpDcb("ci", ib_dw, ib);
-	cp->Run(ib, ib_dw, ib);
+	cp->Run(ib, ib_dw, ib, ib);
 	return 13u;
 }
 
@@ -829,11 +829,53 @@ KYTY_CP_OP_PARSER(cp_op_indirect_buffer)
 
 	GraphicsDbgDumpDcb("ci", indirect_num_dw, indirect_buffer);
 
-	cp->Run(indirect_buffer, indirect_num_dw, indirect_buffer);
+	cp->Run(indirect_buffer, indirect_num_dw, indirect_buffer, indirect_buffer);
 
 	// A chained buffer replaces the rest of the current one.
 	const bool chain = (buffer[2] & (1u << 20u)) != 0u;
 	return chain ? available_dw : 3u;
+}
+
+// REWIND: the command processor stops at the packet until the guest sets its
+// VALID bit (31), then fetches the packets after it again, so it sees what the
+// guest patched in the meantime (sceAgcRewindPatchSetRewindState releases it).
+KYTY_CP_OP_PARSER(cp_op_rewind)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	if (cmd_id != KYTY_PM4(2, Pm4::IT_REWIND, 0u))
+	{
+		EXIT("invalid REWIND header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 1u);
+	constexpr uint32_t kValid = 0x80000000u;
+	// Bit 24 (offload or queue select) has no established effect.
+	if ((buffer[0] & ~kValid) != 0u)
+	{
+		EXIT("unsupported REWIND body: 0x%08" PRIx32 "\n", buffer[0]);
+	}
+	const uint32_t* guest = cp->GetActiveRunGuest();
+	if (guest == nullptr)
+	{
+		EXIT("REWIND in a command stream without a guest origin\n");
+	}
+	const uint32_t* body = guest + (buffer - cp->GetActiveRunBegin());
+
+	// WAIT_REG_MEM equal (function 3) on VALID; an unset bit suspends the run and
+	// replays this packet once the guest sets it.
+	cp->WaitRegMem32(3u, body, kValid, kValid, 0u);
+	if (cp->IsSuspendRunRequested())
+	{
+		cp->MarkSuspendedWaitRewind();
+		return 1u;
+	}
+	if (body == buffer)
+	{
+		return 1u;
+	}
+	// The run is a snapshot taken before the release: continue in guest memory.
+	cp->Run(const_cast<uint32_t*>(body + 1), available_dw - 1u, nullptr, body + 1);
+	return available_dw;
 }
 
 KYTY_CP_OP_PARSER(cp_op_indirect_buffer_end)

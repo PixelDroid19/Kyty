@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
+#include <vector>
 
 UT_BEGIN(EmulatorComputeWaveNativeEquivalence);
 
@@ -152,9 +153,53 @@ static constexpr uint32_t kLdsRead     = 0xd8d80000u; // ds_read_b32 v2, v0
 static constexpr uint32_t kLdsReadOps  = 0x02000000u;
 static constexpr uint32_t kBarrier     = 0xbf8a0000u; // s_barrier
 
-TEST(EmulatorComputeWaveNativeEquivalence, RejectsLdsReadAfterUnbarrieredWrite)
+// Exit 0 when the analysis admits the program and precedes exactly <barriers> (instruction indices)
+// with a host workgroup barrier.
+static void ExpectLdsOrderBarriers(std::initializer_list<uint32_t> words, std::initializer_list<uint32_t> barriers)
 {
-	ExpectUnorderedLds({kLdsWrite, kLdsWriteOps, kLdsRead, kLdsReadOps, kEnd}, 8);
+	ASSERT_EXIT(
+	    {
+		    InitializeShaderConfig();
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    if (!ShaderTryParseBounded(words.begin(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &code))
+		    {
+			    std::_Exit(2);
+		    }
+		    const auto result = ShaderAnalyzeComputeWaveNativeEquivalence(code);
+		    std::_Exit(result.supported && result.lds_order_barriers == std::vector<uint32_t>(barriers) ? 0 : 3);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+static constexpr uint32_t kExeczSkip2    = 0xbf880002u; // s_cbranch_execz +2 dwords
+static constexpr uint32_t kExeczSkip4    = 0xbf880004u; // s_cbranch_execz +4 dwords
+static constexpr uint32_t kSccBackToZero = 0xbf84fffbu; // s_cbranch_scc0 back to pc 0 from pc 0x10
+
+// One guest wave orders a straight-line write before a read for all its lanes; every invocation reaches
+// the read once, so a host barrier there gives the same order.
+TEST(EmulatorComputeWaveNativeEquivalence, OrdersAStraightLineLdsReadWithAHostBarrier)
+{
+	ExpectLdsOrderBarriers({kLdsWrite, kLdsWriteOps, kLdsRead, kLdsReadOps, kEnd}, {1u});
+}
+
+// Lanes write under a narrowed EXEC, the region joins, and every lane reads: the barrier goes after the join.
+TEST(EmulatorComputeWaveNativeEquivalence, OrdersAnLdsReadAfterTheJoinOfAConditionalWrite)
+{
+	ExpectLdsOrderBarriers({kCmpNeVcc, kSaveexecVcc, kExeczSkip2, kLdsWrite, kLdsWriteOps, kRestoreExec, kLdsRead, kLdsReadOps, kEnd},
+	                       {5u});
+}
+
+// No point between a write and a read inside one loop is passed once by every invocation.
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsAnLdsReadAfterAWriteInTheSameLoop)
+{
+	ExpectUnorderedLds({kLdsWrite, kLdsWriteOps, kLdsRead, kLdsReadOps, kSccBackToZero, kEnd}, 8);
+}
+
+// A write and a read inside one EXEC region have no once-passed point between them.
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsAnLdsReadAfterAWriteInTheSameConditionalRegion)
+{
+	ExpectUnorderedLds({kCmpNeVcc, kSaveexecVcc, kExeczSkip4, kLdsWrite, kLdsWriteOps, kLdsRead, kLdsReadOps, kRestoreExec, kEnd}, 0x14);
 }
 
 TEST(EmulatorComputeWaveNativeEquivalence, OrdersLdsReadAfterBarrier)

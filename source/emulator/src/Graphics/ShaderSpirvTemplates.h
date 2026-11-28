@@ -14,7 +14,6 @@ extern const char FUNC_FETCH_3[];
 extern const char FUNC_FETCH_2[];
 extern const char FUNC_FETCH_1[];
 extern const char FUNC_ABS_DIFF[];
-extern const char FUNC_WQM[];
 extern const char FUNC_ADDC[];
 extern const char FUNC_LSHL_ADD[];
 extern const char FUNC_MIPMAP[];
