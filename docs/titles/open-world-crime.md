@@ -491,10 +491,17 @@ every record.
       the program translated past the store. It then
       missed `image_get_resinfo` at 0x58c, and stopped on a dispatch where
       the same slot holds a real volume (below).
-  - **Volume layout `SW_4KB_S` with a mip chain (open):** `unsupported Gen5
-    volume layout: format=1 32x32x32 levels=6 tile=5 type=10`, at the slot
-    of `9be22ee5`. Kyty lays out a volume mip chain only for `SW_64KB_S` with
-    4-byte elements.
+  - **Volume layout `SW_4KB_S` with a mip chain (implemented, not yet
+    reached in a run):** `unsupported Gen5 volume layout: format=1 32x32x32
+    levels=6 tile=5 type=10`, at the slot of `9be22ee5`. Kyty laid out a
+    volume mip chain only for `SW_64KB_S` with 4-byte elements.
+    - Change: 4 KiB thick chains for 1-byte elements, from the published GFX10
+      address library: 16×16×16 blocks, at most 5 tail levels, the tail halves
+      the height, smallest level first in each block-depth slab. Other element
+      sizes stay refused until a title shows them.
+    - Unit test: `Standard4KVolumeMipChainUsesTheThickTail` (the in-block bit
+      order and the 32³ six-level offsets: tail at 0, mip 1 at 4096, mip 0 at
+      8192, 49152 bytes).
   - **`image_gather4_l` (0x44) and `image_gather4_l_o` (0x54), with NSA
     addresses,** now parse as a gather with an explicit LOD. The emitter
     refuses them, because a Vulkan gather reads only the base level. One
@@ -528,6 +535,11 @@ every record.
       and `KernelMapDirectMemory` (`Kernel/Memory.cpp:3378`) reports that as
       a physical-range error. Direction: report the reservation refusal with
       its own code.
+  - **First stop of a clean run (2026-11-28, `e4fe96772`, fresh shader
+    cache, no diagnostics):** device lost at 90 s (`vkWaitForFences`
+    `result=-4`, queue 8); an earlier run of the same binary family lost the
+    device at 77 s. No emitter was missing before it, so the GPU hang
+    (`c7982181`, above) is the first blocker on the strict path.
   - **A run with every missing emitter skipped** (a temporary diagnostic,
     localization only) reached 106 s. It stopped on a guest write to
     address 0. Its programs were wrong, so the fault is not attributed.
