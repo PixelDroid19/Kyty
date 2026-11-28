@@ -2139,6 +2139,8 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				{
 					return false;
 				}
+				// The words are a snapshot of the submitted buffer.
+				const uint32_t* guest = stream->command.source_data;
 				if (stream->blocked)
 				{
 					if (!stream->suspended.passed_on_device && !SuspendedRunReady(stream->suspended))
@@ -2147,11 +2149,12 @@ void GraphicsRing::ThreadBatchRun(void* data)
 					}
 					stream->command.data   = stream->suspended.data;
 					stream->command.num_dw = stream->suspended.num_dw;
+					guest                  = stream->suspended.guest_data;
 					stream->suspended      = {};
 					stream->blocked        = false;
 				}
 
-				cp->Run(stream->command.data, stream->command.num_dw, stream->command.source_data);
+				cp->Run(stream->command.data, stream->command.num_dw, stream->command.source_data, guest);
 				stream->command.source_data = nullptr;
 
 				if (cp->TakeSuspendedRun(&stream->suspended))
@@ -2182,16 +2185,23 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				// may be the awaited value; the suspended batch keeps waiting for
 				// the command processor to consume its stream.
 				const bool host_producer = !SuspendedRunsHaveGpuProducer(cp, constant_wait, draw_wait);
+				// The guest releases a REWIND only after its submit returns; the
+				// packets after it are read from guest memory once released.
+				const bool rewind = (constant_wait != nullptr && constant_wait->rewind) || (draw_wait != nullptr && draw_wait->rewind);
 				if (host_producer)
 				{
 					const auto* wait = constant_wait != nullptr ? constant_wait : draw_wait;
-					if (buf.returns_before_decode)
+					if (buf.returns_before_decode && !rewind)
 					{
 						EXIT("Batch that returned before its decode suspended on a wait no submitted work produces: address=0x%016" PRIx64
 						     " size=%" PRIu32 "\n",
 						     reinterpret_cast<uint64_t>(wait->address), static_cast<uint32_t>(wait->size));
 					}
 					ring->SetDecodeReleased(&buf, true);
+					if (rewind && buf.decode_completion != nullptr)
+					{
+						buf.decode_completion->Signal();
+					}
 				}
 				WaitForSuspendedRuns(cp, constant_wait, draw_wait);
 				if (host_producer)
@@ -2333,10 +2343,12 @@ void ComputeRing::ThreadRun(void* data)
 
 			uint32_t*       run_data        = buffer;
 			const uint32_t* run_source_data = buffer;
+			// A wrapped run is assembled from two parts of the ring.
+			const uint32_t* run_guest_data  = buffer == ring->m_internal_buffer ? nullptr : buffer;
 			uint32_t        run_num_dw      = num_dw;
 			for (;;)
 			{
-				cp->Run(run_data, run_num_dw, run_source_data);
+				cp->Run(run_data, run_num_dw, run_source_data, run_guest_data);
 
 				CommandProcessor::SuspendedRun suspended;
 				if (!cp->TakeSuspendedRun(&suspended))
@@ -2350,6 +2362,7 @@ void ComputeRing::ThreadRun(void* data)
 				run_data   = suspended.data;
 				run_num_dw = suspended.num_dw;
 				run_source_data = nullptr;
+				run_guest_data  = suspended.guest_data;
 			}
 
 			run_submission = cp->BufferFlush();
@@ -2519,11 +2532,12 @@ static bool Pm4KeepsGeometrySegment(uint32_t op)
 	}
 }
 
-void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data)
+void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data, const uint32_t* guest_data)
 {
 	KYTY_PROFILER_BLOCK("CommandProcessor::Run");
 	const uint32_t* const previous_run_begin = m_active_run_begin;
 	const uint32_t* const previous_run_end   = m_active_run_end;
+	const uint32_t* const previous_run_guest = m_active_run_guest;
 	// Indirect buffers run nested inside the enclosing run, which already counts their time.
 	std::optional<ScopedDebugStatsTimer> run_timer;
 	if (previous_run_begin == nullptr)
@@ -2532,6 +2546,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 	}
 	m_active_run_begin                       = data;
 	m_active_run_end                         = data != nullptr ? data + num_dw : nullptr;
+	m_active_run_guest                       = guest_data;
 	// Work submitted or resumed may read guest writes ordered before it; every exit
 	// ends the stretch of packets that change no guest memory.
 	struct OrderingPointScope
@@ -2728,6 +2743,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			// Commands before it were submitted by WaitRegMem32/64.
 			m_suspended_run.data            = cmd - 1;
 			m_suspended_run.num_dw          = remaining_including_header;
+			m_suspended_run.guest_data      = guest_data != nullptr ? guest_data + (cmd - 1 - data) : nullptr;
 			m_suspended_run.blocked_since_ns = SuspendedWaitNowNs();
 			m_suspended_run_valid           = true;
 			m_suspend_run_requested         = false;
@@ -2743,6 +2759,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 	StopDrawFronts();
 	m_active_run_begin = previous_run_begin;
 	m_active_run_end   = previous_run_end;
+	m_active_run_guest = previous_run_guest;
 }
 
 bool CommandProcessor::TakeSuspendedRun(SuspendedRun* run)

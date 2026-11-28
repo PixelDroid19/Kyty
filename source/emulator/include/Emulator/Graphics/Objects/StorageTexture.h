@@ -126,6 +126,7 @@ struct StorageTextureRenderAliasCopy
 	uint32_t destination_y = 0;
 	uint32_t width         = 0;
 	uint32_t height        = 0;
+	uint32_t level         = 0;
 };
 
 [[nodiscard]] bool StorageTexturePlanRenderAlias(const uint64_t* render_params, uint64_t render_address,

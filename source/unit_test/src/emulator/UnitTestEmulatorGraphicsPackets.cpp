@@ -4539,6 +4539,15 @@ TEST(EmulatorGraphicsPackets, SeparatesSmoothAndFlatViewsOfOnePixelParameter)
 	}
 }
 
+TEST(EmulatorGraphicsPackets, AssemblesRectGeometryForEveryParameterCount)
+{
+	for (uint32_t parameters: {0u, 1u, 32u})
+	{
+		EXPECT_FALSE(ShaderCompileRectGeometry(parameters, 0u).IsEmpty());
+		EXPECT_FALSE(ShaderCompileRectGeometry(parameters, 0x5u).IsEmpty());
+	}
+}
+
 TEST(EmulatorGraphicsPackets, EncodesGen5WaitRegMem64Packet)
 {
 	struct AlignasCommandBuffer
@@ -7734,6 +7743,53 @@ TEST(EmulatorGraphicsPackets, Gen5LiveBufferAtomicUsesResolvedStorageSlot)
 
 	const auto binary = ShaderRecompileVS(code, &input);
 	EXPECT_FALSE(binary.IsEmpty());
+}
+
+// Every buffer atomic reaches its dword through the uint view of the storage
+// buffers, so a shader whose only atomic is any of them declares that view.
+TEST(EmulatorGraphicsPackets, Gen5BufferAtomicsDeclareTheUintStorageView)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	for (const auto type: {ShaderInstructionType::BufferAtomicAdd, ShaderInstructionType::BufferAtomicSub, ShaderInstructionType::BufferAtomicSmin,
+	                       ShaderInstructionType::BufferAtomicUmin, ShaderInstructionType::BufferAtomicSmax, ShaderInstructionType::BufferAtomicUmax,
+	                       ShaderInstructionType::BufferAtomicAnd, ShaderInstructionType::BufferAtomicOr, ShaderInstructionType::BufferAtomicXor,
+	                       ShaderInstructionType::BufferAtomicSwap})
+	{
+		ShaderInstruction atomic {};
+		atomic.type              = type;
+		atomic.format            = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+		atomic.dst               = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+		atomic.src[0]            = {.type = ShaderOperandType::Vgpr, .register_id = 1, .size = 1};
+		atomic.src[1]            = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 4};
+		atomic.src[2].type       = ShaderOperandType::IntegerInlineConstant;
+		atomic.src[2].constant.u = 0;
+		atomic.src_num           = 3;
+		atomic.buffer_idxen      = true;
+		atomic.buffer_flags      = 0;
+		ShaderCode code;
+		code.SetType(ShaderType::Vertex);
+		code.GetInstructions().Add(atomic);
+
+		ShaderVertexInputInfo input {};
+		input.fetch_embedded                          = true;
+		input.buffers_num                             = 1;
+		input.buffers[0].storage_slot                 = 0;
+		input.bind.storage_buffers.buffers_num        = 1;
+		input.bind.storage_buffers.start_register[0]  = 0;
+		input.bind.storage_buffers.usages[0]          = ShaderStorageUsage::ReadWrite;
+		input.bind.push_constant_size                 = 16;
+
+		const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+		ASSERT_NE(source.FindIndex("OpAccessChain %_ptr_StorageBuffer_uint %buf_uint"), Core::STRING8_INVALID_INDEX)
+		    << static_cast<int>(type);
+		EXPECT_NE(source.FindIndex("%buf_uint = OpVariable"), Core::STRING8_INVALID_INDEX) << static_cast<int>(type);
+	}
 }
 
 // Gen5 SMEM: s_buffer_load_dwordx8 s[32:39], s[8:11], 0; s_nop; s_endpgm

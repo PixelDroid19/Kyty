@@ -143,6 +143,8 @@ struct PipelineStaticParameters
 	bool                       depth_clamp_enable       = false;
 	bool                       vs_program_window_covers = false;
 	bool                       ps_program_window_covers = false;
+	// The rect stage derives each rect's fourth corner; the input topology is a triangle list.
+	bool                       expand_rects             = false;
 
 	bool operator==(const PipelineStaticParameters& other) const;
 };
@@ -293,7 +295,7 @@ public:
 
 	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
 	                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
-	                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
+	                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology, bool expand_rects,
 	                               const VulkanSampleLocationState& sample_locations, ShaderId* prepared_vs_id = nullptr,
 	                               ShaderId* prepared_ps_id = nullptr,
 	                               const GuestDeviceAddressTable* device_address_table = nullptr);
@@ -1857,6 +1859,7 @@ struct PrimitiveDrawPlan
 	uint32_t            chunk_count   = 0;
 	bool                chunked       = false;
 	bool                requires_rect = false;
+	bool                expand_rects  = false;
 };
 
 extern RenderContext*           g_render_ctx;

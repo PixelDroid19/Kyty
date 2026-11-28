@@ -1088,12 +1088,13 @@ TEST(EmulatorGraphicsResources, VolumeAdmissionNeverTurnsRejectedTilingIntoLinea
 					const bool admitted = Gen5GetVolumeTextureLayout(format, 8u, 16u, depth, 8u, levels, tile, &layout);
 					// SW mode 0 (linear) is a byte-for-byte layout and SW modes 5 and 9 the SW_4KB_S and
 					// SW_64KB_S volume patterns of every element size. SW mode 27 is a thin volume whose
-					// slices are 2D-array layers, mip chain included, and SW mode 9 chains the levels of a
-					// 4-byte volume in 16-slice slabs. Any other tile mode, or a mip chain in another mode,
-					// must stay rejected instead of being read as linear.
+					// slices are 2D-array layers, mip chain included. SW mode 9 chains the levels of a
+					// 4-byte volume and SW mode 5 those of a 1-byte volume, in slabs of one block's depth.
+					// Any other tile mode, or a mip chain in another mode or element size, must stay
+					// rejected instead of being read as linear.
 					Gen5TextureArrayLayout slices {};
 					const bool thin  = tile == 27u && Gen5GetTextureArrayLayout(format, 8u, 16u, 8u, levels, 27u, depth, &slices);
-					const bool chain = levels == 2u && tile == 9u && format == 56u;
+					const bool chain = levels == 2u && ((tile == 9u && format == 56u) || (tile == 5u && format == 1u));
 					EXPECT_EQ(admitted, thin || chain || (levels == 1u && (tile == 0u || tile == 5u || tile == 9u)));
 					if (!admitted)
 					{
@@ -1102,10 +1103,13 @@ TEST(EmulatorGraphicsResources, VolumeAdmissionNeverTurnsRejectedTilingIntoLinea
 						EXPECT_FALSE(Gen5ValidateTextureVolumeUpload(layout, UINT64_MAX));
 					} else if (chain)
 					{
-						// Both levels fit the tail of one 64 KiB block per 16 slices.
+						// SW mode 9: both levels fit the tail of one 64 KiB block per 16 slices. SW mode 5:
+						// level 0 is 16 high, over the 16x8 tail, so each 16-slice slab holds the tail block
+						// and one block of level 0.
+						const uint32_t bytes = tile == 9u ? 4u : 1u;
 						EXPECT_TRUE(layout.mip_chain);
-						EXPECT_EQ(layout.tiled.size, 65536u);
-						EXPECT_EQ(layout.linear_size, (8u * 16u * depth + 4u * 8u * std::max(1u, depth / 2u)) * 4u);
+						EXPECT_EQ(layout.tiled.size, tile == 9u ? 65536u : 8192u);
+						EXPECT_EQ(layout.linear_size, (8u * 16u * depth + 4u * 8u * std::max(1u, depth / 2u)) * bytes);
 					} else if (tile == 5u || tile == 9u)
 					{
 						// 4 KiB blocks: 16x16x16 (1 B), 8x16x16 (2 B), 8x16x8 (4 B), 8x8x8 (8 B), 4x8x8 (16 B).
@@ -1162,6 +1166,39 @@ TEST(EmulatorGraphicsResources, StandardVolumeMipChainSlabsHoldEveryLevel)
 	// 2- and 8-byte chains move their tail origins and stay refused.
 	EXPECT_FALSE(Gen5GetVolumeTextureLayout(7u, 128u, 128u, 128u, 128u, 8u, 9u, &layout));
 	EXPECT_FALSE(Gen5GetVolumeTextureLayout(71u, 128u, 128u, 128u, 128u, 8u, 9u, &layout));
+}
+
+TEST(EmulatorGraphicsResources, Standard4KVolumeMipChainUsesTheThickTail)
+{
+	// A 32^3 R8 SW_4KB_S volume with 6 levels (captured descriptor shape). The 1-byte 4 KiB block is 16x16x16,
+	// in-block bits X0 X1 Z0 Y0 Z1 Y1 X2 Z2 Y2 X3 Z3 Y3. The tail is 16x8 and holds levels 2..5 at the slab's
+	// start; level 1 follows it, then level 0 as 2x2 blocks, and the chain repeats per 16-slice slab.
+	// One (x, y, z) per address bit, lowest bit first.
+	const uint32_t unit[12][3] = {{1u, 0u, 0u}, {2u, 0u, 0u}, {0u, 0u, 1u}, {0u, 1u, 0u}, {0u, 0u, 2u}, {0u, 2u, 0u},
+	                              {4u, 0u, 0u}, {0u, 0u, 4u}, {0u, 4u, 0u}, {8u, 0u, 0u}, {0u, 0u, 8u}, {0u, 8u, 0u}};
+	for (uint32_t bit = 0; bit < 12u; ++bit)
+	{
+		EXPECT_EQ(TileGetStandardVolumeOffset(unit[bit][0], unit[bit][1], unit[bit][2], 16u, 16u, 1u, 4096u), uint64_t {1u} << bit)
+		    << "bit=" << bit;
+	}
+	Gen5TextureVolumeLayout layout {};
+	ASSERT_TRUE(Gen5GetVolumeTextureLayout(1u, 32u, 32u, 32u, 32u, 6u, 5u, &layout));
+	ASSERT_TRUE(layout.mip_chain);
+	EXPECT_EQ(layout.bytes_per_element, 1u);
+	EXPECT_EQ(layout.block_depth, 16u);
+	EXPECT_EQ(layout.slab_bytes, 24576u);
+	EXPECT_EQ(layout.tiled.size, 49152u);
+	EXPECT_EQ(layout.level[1].slab_offset, 4096u);
+	EXPECT_EQ(layout.level[0].slab_offset, 8192u);
+	const uint32_t tail[4][2] = {{0u, 8u}, {8u, 4u}, {8u, 0u}, {0u, 4u}};
+	for (uint32_t index = 0; index < 4u; ++index)
+	{
+		EXPECT_EQ(layout.level[2u + index].slab_offset, 0u);
+		EXPECT_EQ(layout.level[2u + index].tail_x, tail[index][0]);
+		EXPECT_EQ(layout.level[2u + index].tail_y, tail[index][1]);
+	}
+	EXPECT_TRUE(Gen5ValidateTextureVolumeUpload(layout, 49152u));
+	EXPECT_FALSE(Gen5ValidateTextureVolumeUpload(layout, 49152u - 1u));
 }
 
 TEST(EmulatorGraphicsResources, StandardVolumeMipChainDetilesEachLevelFromItsSlab)

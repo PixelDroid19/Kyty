@@ -101,23 +101,27 @@ uint32_t GatherTailBits(uint32_t offset, uint32_t first_bit)
 	return value;
 }
 
-// A SW_64KB_S volume with a mip chain (see Gen5TextureVolumeLayout). Only 4-byte elements: their 64 KiB block is
-// 32x32x16 and their 256-byte block 4x4x4, the case whose tail origins the title confirms.
-bool ThickMipChainLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t depth, uint32_t levels,
+// A SW_4KB_S or SW_64KB_S volume with a mip chain (see Gen5TextureVolumeLayout). Thick tails hold at most 5
+// levels in a 4 KiB block and 10 in a 64 KiB one, and the tail is half the block's height (4 KiB) or width
+// (64 KiB). Only the element sizes with evidence: 1 byte in 4 KiB blocks and 4 bytes in 64 KiB blocks, whose
+// 256-byte 3D blocks are 8x4x8 and 4x4x4. A title confirms the 64 KiB tail origins.
+bool ThickMipChainLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t depth, uint32_t levels, uint32_t block_bytes,
                          Gen5TextureVolumeLayout* layout)
 {
-	constexpr uint32_t kBlockBytes      = 65536u;
-	constexpr uint32_t kMaxTailLevels   = 10u; // 64 KiB thick blocks
-	constexpr uint32_t kTail256Width    = 4u;  // 256-byte 3D block of 4-byte elements
-	constexpr uint32_t kTail256Height   = 4u;
-	if (ShaderGen5TextureIsBlockCompressed(format) || ShaderGen5TextureBytesPerElement(format) != 4u ||
-	    levels > layout->level.size())
+	const bool     small_block = block_bytes == 4096u;
+	const uint32_t bytes       = ShaderGen5TextureBytesPerElement(format);
+	if (ShaderGen5TextureIsBlockCompressed(format) || bytes != (small_block ? 1u : 4u) || levels > layout->level.size())
 	{
 		return false;
 	}
+	const uint32_t max_tail_levels = small_block ? 5u : 10u;
+	const uint32_t tail256_width   = small_block ? 8u : 4u;
+	const uint32_t tail256_height  = 4u;
 	uint32_t block_width = 0, block_height = 0, block_depth = 0;
-	if (!TileGetStandardVolumeBlock(4u, kBlockBytes, &block_width, &block_height, &block_depth)) { return false; }
-	// A level joins the tail when it fits half a block's width and the tail has room for it and every smaller level.
+	if (!TileGetStandardVolumeBlock(bytes, block_bytes, &block_width, &block_height, &block_depth)) { return false; }
+	const uint32_t tail_width  = small_block ? block_width : block_width / 2u;
+	const uint32_t tail_height = small_block ? block_height / 2u : block_height;
+	// A level joins the tail when it fits the tail and the tail has room for it and every smaller level.
 	uint32_t first_tail = levels;
 	for (uint32_t index = 0; index < levels; ++index)
 	{
@@ -125,29 +129,29 @@ bool ThickMipChainLayout(uint32_t format, uint32_t width, uint32_t height, uint3
 		level.width  = std::max(1u, width >> index);
 		level.height = std::max(1u, height >> index);
 		level.depth  = std::max(1u, depth >> index);
-		if (first_tail == levels && level.width <= block_width / 2u && level.height <= block_height && levels - index <= kMaxTailLevels)
+		if (first_tail == levels && level.width <= tail_width && level.height <= tail_height && levels - index <= max_tail_levels)
 		{
 			first_tail = index;
 		}
 	}
-	uint64_t slab_offset = first_tail < levels ? kBlockBytes : 0u;
+	uint64_t slab_offset = first_tail < levels ? block_bytes : 0u;
 	for (uint32_t index = first_tail; index-- > 0u;)
 	{
 		auto& level         = layout->level[index];
 		level.pitch         = (level.width + block_width - 1u) / block_width * block_width;
 		level.padded_height = (level.height + block_height - 1u) / block_height * block_height;
 		level.slab_offset   = slab_offset;
-		slab_offset += static_cast<uint64_t>(level.pitch) * level.padded_height * block_depth * 4u;
+		slab_offset += static_cast<uint64_t>(level.pitch) * level.padded_height * block_depth * bytes;
 	}
 	for (uint32_t index = first_tail; index < levels; ++index)
 	{
 		auto&          level  = layout->level[index];
-		const uint32_t m      = kMaxTailLevels - 1u - (index - first_tail);
+		const uint32_t m      = max_tail_levels - 1u - (index - first_tail);
 		const uint32_t offset = m > 6u ? 16u << m : m << 8u;
 		level.pitch           = block_width;
 		level.padded_height   = block_height;
-		level.tail_x          = GatherTailBits(offset, 9u) * kTail256Width;
-		level.tail_y          = GatherTailBits(offset, 8u) * kTail256Height;
+		level.tail_x          = GatherTailBits(offset, 9u) * tail256_width;
+		level.tail_y          = GatherTailBits(offset, 8u) * tail256_height;
 		if (level.tail_x + level.width > block_width || level.tail_y + level.height > block_height) { return false; }
 	}
 	const uint64_t slabs = (depth + block_depth - 1u) / block_depth;
@@ -158,13 +162,13 @@ bool ThickMipChainLayout(uint32_t format, uint32_t width, uint32_t height, uint3
 	{
 		auto& level         = layout->level[index];
 		level.linear_offset = linear;
-		linear += static_cast<uint64_t>(level.width) * level.height * level.depth * 4u;
+		linear += static_cast<uint64_t>(level.width) * level.height * level.depth * bytes;
 	}
-	layout->tiled             = {static_cast<uint32_t>(total), kBlockBytes};
+	layout->tiled             = {static_cast<uint32_t>(total), block_bytes};
 	layout->linear_size       = linear;
-	layout->bytes_per_element = 4u;
+	layout->bytes_per_element = bytes;
 	layout->pitch             = layout->level[0].width;
-	layout->block_bytes       = kBlockBytes;
+	layout->block_bytes       = block_bytes;
 	layout->block_depth       = block_depth;
 	layout->slab_bytes        = slab_offset;
 	layout->levels            = levels;
@@ -181,11 +185,12 @@ void DetileVolumeLevel(uint8_t* destination, const uint8_t* source, const Gen5Te
 		const uint64_t slab = static_cast<uint64_t>(z / layout.block_depth) * layout.slab_bytes + level.slab_offset;
 		for (uint32_t y = 0; y < level.height; ++y)
 		{
-			for (uint32_t x = 0; x < level.width; ++x, out += 4u)
+			for (uint32_t x = 0; x < level.width; ++x, out += layout.bytes_per_element)
 			{
-				const uint64_t tiled = slab + TileGetStandardVolumeOffset(x + level.tail_x, y + level.tail_y, z % layout.block_depth,
-				                                                          level.pitch, level.padded_height, 4u, layout.block_bytes);
-				std::memcpy(destination + out, source + tiled, 4u);
+				const uint64_t tiled =
+				    slab + TileGetStandardVolumeOffset(x + level.tail_x, y + level.tail_y, z % layout.block_depth, level.pitch,
+				                                       level.padded_height, layout.bytes_per_element, layout.block_bytes);
+				std::memcpy(destination + out, source + tiled, layout.bytes_per_element);
 			}
 		}
 	}
@@ -206,17 +211,21 @@ bool Gen5GetVolumeTextureLayout(uint32_t format, uint32_t width, uint32_t height
 	if (layout == nullptr) { return false; }
 	*layout = {};
 	if (width == 0u || height == 0u || depth == 0u || pitch < width || levels == 0u ||
-	    (levels != 1u && tile != kSwModeRender64K && tile != kSwModeStandard64K))
+	    (levels != 1u && tile != kSwModeRender64K && tile != kSwModeStandard64K && tile != kSwModeStandard4K))
 	{
 		return false;
 	}
 	Gen5TextureVolumeLayout result {};
 	bool                    supported = false;
-	if (tile == kSwModeStandard4K) { supported = StandardLayout(format, width, height, depth, 4096u, &result); }
+	if (tile == kSwModeStandard4K)
+	{
+		supported = levels == 1u ? StandardLayout(format, width, height, depth, 4096u, &result)
+		                         : ThickMipChainLayout(format, width, height, depth, levels, 4096u, &result);
+	}
 	if (tile == kSwModeStandard64K)
 	{
 		supported = levels == 1u ? StandardLayout(format, width, height, depth, 65536u, &result)
-		                         : ThickMipChainLayout(format, width, height, depth, levels, &result);
+		                         : ThickMipChainLayout(format, width, height, depth, levels, 65536u, &result);
 	}
 	if (tile == kSwModeRender64K) { supported = ThinRenderTargetLayout(format, width, height, depth, pitch, levels, &result); }
 	if (tile == kSwModeLinear)

@@ -146,6 +146,8 @@ KYTY_SYSV_ABI int  VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status)
 KYTY_SYSV_ABI int VideoOutIsFlipPending(int handle);
 KYTY_SYSV_ABI int VideoOutGetVblankStatus(int handle, VideoOutVblankStatus* status);
 KYTY_SYSV_ABI int VideoOutSetWindowModeMargins(int handle, int top, int bottom);
+// Blend space of the system compositor's layers; Kyty presents one layer.
+KYTY_SYSV_ABI int VideoOutSetGlobalBlendSpace(int handle, uint32_t space, uint32_t option);
 struct VideoOutLatencyControl;
 KYTY_SYSV_ABI int VideoOutAllowOutputResolutionWqhdDetection(int handle);
 KYTY_SYSV_ABI int VideoOutLatencyControlWaitBeforeInput(int handle, const VideoOutLatencyControl* control, uint32_t* timeout_usec);

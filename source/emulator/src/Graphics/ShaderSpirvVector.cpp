@@ -1,4 +1,5 @@
 #include "ShaderSpirvInternal.h"
+#include "ShaderParseInternal.h"
 
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvF16.h"
@@ -4734,6 +4735,19 @@ static Vector<int> MovrelCandidateRegisters(const ShaderCode& code, int base)
 	return regs;
 }
 
+static Vector<int> MovrelOffsetRegisters(const Vector<int>& regs, int base, const Vector<uint32_t>& offsets)
+{
+	Vector<int> reachable;
+	for (const auto reg: regs)
+	{
+		if (offsets.Contains(static_cast<uint32_t>(reg - base)))
+		{
+			reachable.Add(reg);
+		}
+	}
+	return reachable;
+}
+
 // Named VGPRs a runtime-M0 relative access at |index| can reach from |base|:
 // every candidate, narrowed to the M0 values the reaching definition allows.
 static Vector<int> MovrelReachableRegisters(const ShaderCode& code, uint32_t index, int base)
@@ -4744,15 +4758,20 @@ static Vector<int> MovrelReachableRegisters(const ShaderCode& code, uint32_t ind
 	{
 		return MovrelAlignedRegisters(regs, base, MovrelUnitAlignment(code, index, kMovrelUnitM0, 0));
 	}
-	Vector<int> reachable;
-	for (const auto reg: regs)
+	return MovrelOffsetRegisters(regs, base, offsets);
+}
+
+// Named VGPRs a lowered waterfall move at |index| can reach from |base|: the candidates at the offsets its lane index
+// can hold, or those the index's alignment allows when its values are unknown.
+static Vector<int> MovrelLaneReachableRegisters(const ShaderCode& code, uint32_t index, int base, int lane_index)
+{
+	auto             regs = MovrelCandidateRegisters(code, base);
+	Vector<uint32_t> offsets;
+	if (!ShaderLaneValuesOnEntry(code, index, lane_index, &offsets))
 	{
-		if (offsets.Contains(static_cast<uint32_t>(reg - base)))
-		{
-			reachable.Add(reg);
-		}
+		return MovrelAlignedRegisters(regs, base, MovrelLaneAlignment(code, index, lane_index));
 	}
-	return reachable;
+	return MovrelOffsetRegisters(regs, base, offsets);
 }
 
 // dst = VGPR[base + offset] lowered to a select chain over |candidates|; any other offset reads zero.
@@ -4838,8 +4857,7 @@ Vector<int> ShaderMovrelReadVgprs(const ShaderCode& code, uint32_t index)
 	const int   base = inst.src[0].register_id;
 	if (inst.type == ShaderInstructionType::VMovrelsB32 && inst.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1)
 	{
-		return MovrelAlignedRegisters(MovrelCandidateRegisters(code, base), base,
-		                              MovrelLaneAlignment(code, index, inst.src[1].register_id));
+		return MovrelLaneReachableRegisters(code, index, base, inst.src[1].register_id);
 	}
 	uint32_t m0  = 0;
 	uint64_t rel = 0;
@@ -4917,8 +4935,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovrelsB32_SVdstSVsrc0)
 		                                             "%%rel_m0_%u = OpBitcast %%uint %%rel_lane_%u\n",
 		                                             index, inst.src[1].register_id, index, index);
 		return EmitMovrelsDynamic(static_cast<int>(index), inst.dst, inst.src[0].register_id, offset_load,
-		                          MovrelAlignedRegisters(MovrelCandidateRegisters(code, inst.src[0].register_id), inst.src[0].register_id,
-		                                                 MovrelLaneAlignment(code, index, inst.src[1].register_id)),
+		                          MovrelLaneReachableRegisters(code, index, inst.src[0].register_id, inst.src[1].register_id),
 		                          dst_source, spirv);
 	}
 	if (MovrelProvenLiteralM0(code, index, &m0))
@@ -4967,8 +4984,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovreldB32_SVdstSVsrc0)
 		                                             "%%rel_m0_%u = OpBitcast %%uint %%rel_lane_%u\n",
 		                                             index, inst.src[1].register_id, index, index);
 		return EmitMovreldDynamic(index, inst.dst.register_id, offset_load, src_load, "%rel_src_" + index_str,
-		                          MovrelAlignedRegisters(MovrelCandidateRegisters(code, inst.dst.register_id), inst.dst.register_id,
-		                                                 MovrelLaneAlignment(code, index, inst.src[1].register_id)),
+		                          MovrelLaneReachableRegisters(code, index, inst.dst.register_id, inst.src[1].register_id),
 		                          dst_source);
 	}
 	if (MovrelProvenLiteralM0(code, index, &m0))

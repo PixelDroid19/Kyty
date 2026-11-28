@@ -204,6 +204,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs);
 KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs);
 KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs);
 KYTY_CP_OP_PARSER(cp_op_nop);
+KYTY_CP_OP_PARSER(cp_op_rewind);
 KYTY_CP_OP_PARSER(cp_op_num_instances);
 KYTY_CP_OP_PARSER(cp_op_set_predication);
 KYTY_CP_OP_PARSER(cp_op_one_reg_write);
@@ -383,6 +384,8 @@ public:
 	{
 		uint32_t*   data             = nullptr;
 		uint32_t    num_dw           = 0;
+		// Where data lives in guest memory; null when its words have no single guest origin.
+		const uint32_t* guest_data   = nullptr;
 		const void* address          = nullptr;
 		uint64_t    reference        = 0;
 		uint64_t    mask             = 0;
@@ -391,6 +394,8 @@ public:
 		uint64_t    blocked_since_ns = 0;
 		// Ordered on the device behind a producer of another queue (PassSuspendedWaitOnDevice).
 		bool passed_on_device = false;
+		// A REWIND, which the guest releases after its submit returns.
+		bool rewind = false;
 	};
 
 	[[nodiscard]] bool PassSuspendedWaitOnDevice(const SuspendedRun& suspended);
@@ -403,9 +408,14 @@ public:
 	void RetireBeforeStore(uint64_t dst, uint32_t size_bytes);
 	[[nodiscard]] bool DeferImmediateStore(uint64_t dst, uint32_t value);
 
-	void Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data);
+	// guest_data: where data lives in guest memory (data itself for a live run,
+	// the copied buffer for a snapshot), or null when it has no single origin.
+	void Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data, const uint32_t* guest_data);
 	[[nodiscard]] bool TakeSuspendedRun(SuspendedRun* run);
+	[[nodiscard]] bool IsSuspendRunRequested() const { return m_suspend_run_requested; }
+	void               MarkSuspendedWaitRewind() { m_suspended_run.rewind = true; }
 	[[nodiscard]] const uint32_t* GetActiveRunBegin() const { return m_active_run_begin; }
+	[[nodiscard]] const uint32_t* GetActiveRunGuest() const { return m_active_run_guest; }
 	[[nodiscard]] const uint32_t* GetActiveRunEnd() const { return m_active_run_end; }
 
 	[[nodiscard]] const FlipInfo& GetFlip() const { return m_flip; }
@@ -531,6 +541,7 @@ private:
 	uint32_t m_last_pm4_dw                 = 0;
 	const uint32_t* m_active_run_begin     = nullptr;
 	const uint32_t* m_active_run_end       = nullptr;
+	const uint32_t* m_active_run_guest     = nullptr;
 	// The header of the packet this processor is at.
 	const uint32_t* m_packet               = nullptr;
 	// Prepare the inputs of the indexed draws that follow; their shadow processors only replay registers.

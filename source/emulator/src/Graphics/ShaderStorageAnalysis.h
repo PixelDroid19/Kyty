@@ -66,6 +66,9 @@ struct ShaderDynamicSLoadUse
 	ShaderGen5SampledTextureShape sampled_shape = ShaderGen5SampledTextureShape::TwoDimensional;
 	uint32_t                    last_consumer_pc   = 0;
 	bool                        raw_vmem_oob_guarded = false;
+	bool                        raw_smem_use        = false;
+	bool                        raw_only            = false;
+	bool                        dword_loads_only    = false;
 	bool                        sampled_shape_known = false;
 	// Every read consumer fetches texels without a sampler, so a storage view can serve it.
 	bool                        storage_readable   = false;
@@ -133,6 +136,65 @@ struct ShaderConstantSamplerRead
 };
 
 [[nodiscard]] std::vector<ShaderConstantSamplerRead> ShaderFindConstantSamplerReads(const ShaderCode& code);
+
+// An image read whose S# is the 16-byte record S_BUFFER_LOAD_DWORDX4 reads,
+// on every path to it, through a V# a descriptor table load writes, at a byte
+// offset S_LSHL_B32 makes from one SGPR: a sampler table user data indexes.
+struct ShaderTableSamplerRead
+{
+	uint32_t instruction  = 0;
+	uint32_t record_load  = 0;
+	uint32_t table_load   = 0;
+	int      vsharp_dword = 0; // first V# dword in the table load's destination
+	uint32_t offset_shift = 0; // the S_LSHL_B32 that makes the record offset
+};
+
+[[nodiscard]] std::vector<ShaderTableSamplerRead> ShaderFindTableSamplerReads(const ShaderCode& code);
+
+// One value on the chain that gives a heap descriptor read its offset.
+enum class ShaderScalarChainOp : uint8_t
+{
+	Constant,    // value
+	UserData,    // dwords from SGPR value on, which must hold their entry value at instruction at
+	ShiftLeft,   // source << value
+	RecordIndex, // the record index times the stride value
+	Load,        // dwords at the source pointer plus imm bytes
+	BufferLoad,  // dwords of the source V# at offset plus imm bytes, inside the V# range
+};
+
+struct ShaderScalarChainNode
+{
+	ShaderScalarChainOp op     = ShaderScalarChainOp::Constant;
+	uint32_t            value  = 0;
+	uint32_t            at     = 0;
+	int                 source = -1;
+	int                 offset = -1;
+	int32_t             imm    = 0;
+	int                 dwords = 1;
+};
+
+// An image read whose T# or S# one S_BUFFER_LOAD_DWORDX8 or X4 writes on every
+// path to it, at an offset the shader computes from user data and guest memory:
+// a descriptor heap read. With a slot, the offset depends on the index the
+// S_MUL_I32 at slot multiplies by a record stride, and the read takes one
+// descriptor per record of the V# the domain node reads with that offset.
+struct ShaderHeapDescriptorRead
+{
+	uint32_t                           instruction = 0;
+	uint32_t                           load        = 0;
+	bool                               sampler     = false;
+	uint32_t                           slot        = UINT32_MAX;
+	int                                domain      = -1;
+	std::vector<ShaderScalarChainNode> nodes; // nodes.back() is the descriptor load
+};
+
+[[nodiscard]] std::vector<ShaderHeapDescriptorRead> ShaderFindHeapDescriptorReads(const ShaderCode& code);
+// The words node writes for one draw and one record index; false when a user-data
+// register no longer holds its entry value, a read leaves its V# range or the
+// guest memory is unreadable.
+[[nodiscard]] bool ShaderEvalScalarChain(const std::vector<ShaderScalarChainNode>& nodes, int node, uint32_t record,
+                                         const HW::UserSgprInfo& user_sgpr, uint16_t srt_size_dw, int user_data_register_base,
+                                         const std::vector<std::bitset<106>>& entry_values, uint32_t* words);
 
 // Results of the resource analyses that depend only on the program code and a
 // start register or binding layout. Each memo belongs to one immutable code object and is shared
@@ -252,6 +314,8 @@ public:
 	[[nodiscard]] const ShaderInstructionIndices&           InstructionIndices(const ShaderCode& code) const;
 	[[nodiscard]] const std::vector<ShaderNestedTableLoad>& NestedTableLoads(const ShaderCode& code) const;
 	[[nodiscard]] const std::vector<ShaderConstantSamplerRead>& ConstantSamplerReads(const ShaderCode& code) const;
+	[[nodiscard]] const std::vector<ShaderTableSamplerRead>&    TableSamplerReads(const ShaderCode& code) const;
+	[[nodiscard]] const std::vector<ShaderHeapDescriptorRead>&  HeapDescriptorReads(const ShaderCode& code) const;
 	[[nodiscard]] const std::vector<ShaderPointerTableLoadEntry>& PointerTableLoads(const ShaderCode& code) const;
 	// Descriptor blocks of the pointer-table load at index; empty when a part
 	// of it has no consumer it alone defines.
@@ -281,6 +345,10 @@ private:
 	mutable std::vector<ShaderNestedTableLoad>                      m_nested_table_loads;
 	mutable std::once_flag                                          m_constant_sampler_reads_once;
 	mutable std::vector<ShaderConstantSamplerRead>                  m_constant_sampler_reads;
+	mutable std::once_flag                                          m_table_sampler_reads_once;
+	mutable std::vector<ShaderTableSamplerRead>                     m_table_sampler_reads;
+	mutable std::once_flag                                          m_heap_descriptor_reads_once;
+	mutable std::vector<ShaderHeapDescriptorRead>                   m_heap_descriptor_reads;
 	mutable std::once_flag                                          m_pointer_table_loads_once;
 	mutable std::vector<ShaderPointerTableLoadEntry>                m_pointer_table_loads;
 	mutable std::shared_ptr<const ShaderControlFlowGraph>           m_cfg;
@@ -348,7 +416,8 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
                                          const ShaderCodeResourceMemo* memo);
 // Records the buffer instructions whose bound V# register was redefined on
 // every path before them (bind->redefined_descriptor_consumers, or without
-// record_consumers bind->slot_only_consumers).
+// record_consumers bind->slot_only_consumers), and those reading a V# the
+// program wrote on every path over registers that name no binding.
 void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
                                              const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo = nullptr,
                                              bool record_consumers = true);
@@ -366,6 +435,15 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 // Binds each S# the shader assembles from constants right before its image read.
 void ShaderCollectConstantSamplers(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info,
                                    int user_data_register_base, const ShaderCodeResourceMemo* memo);
+// Binds each S# an image read takes from a sampler table (ShaderTableSamplerRead)
+// at the record the draw's user data selects.
+void ShaderCollectTableSamplers(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info, const HW::UserSgprInfo& user_sgpr,
+                                uint16_t srt_size_dw, int user_data_register_base, const ShaderScalarFlow& scalar_flow,
+                                const ShaderCodeResourceMemo* memo);
+// Binds the descriptors each heap descriptor read (ShaderHeapDescriptorRead) can take for this draw.
+void ShaderCollectHeapDescriptors(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info,
+                                  const HW::UserSgprInfo& user_sgpr, uint16_t srt_size_dw, int user_data_register_base,
+                                  const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo);
 
 // Draw-independent analysis of the program code.
 std::vector<ShaderGsUserDataDescriptorLoad> ShaderFindGsUserDataDescriptorLoads(const ShaderCode& code);

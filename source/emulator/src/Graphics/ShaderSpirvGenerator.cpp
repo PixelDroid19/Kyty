@@ -638,8 +638,11 @@ static bool spirv_uses_dpp_row(const ShaderCode& code)
 // Gen5 format stores merge partial dwords with atomics, through %buf_uint too.
 static bool spirv_uses_buffer_atomics(const ShaderCode& code)
 {
-	return (Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd,
-	                                            ShaderInstructionType::BufferAtomicUmax})) ||
+	return (Config::IsNextGen() &&
+	        code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd, ShaderInstructionType::BufferAtomicSub, ShaderInstructionType::BufferAtomicSmin,
+	                       ShaderInstructionType::BufferAtomicUmin, ShaderInstructionType::BufferAtomicSmax, ShaderInstructionType::BufferAtomicUmax,
+	                       ShaderInstructionType::BufferAtomicAnd, ShaderInstructionType::BufferAtomicOr, ShaderInstructionType::BufferAtomicXor,
+	                       ShaderInstructionType::BufferAtomicSwap})) ||
 	       SpirvUsesGen5BufferFormatStores(code);
 }
 
@@ -1479,12 +1482,18 @@ void Spirv::WriteAnnotations()
 		}
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
-			// Every view aliases the one storage binding.
+			// Every view aliases the one storage binding, so one globally coherent guest access makes them all coherent.
+			bool coherent = false;
+			for (const auto& inst: m_code.GetInstructions())
+			{
+				coherent = coherent || inst.mimg_coherent;
+			}
 			for (const auto& view: ShaderStorageImageViews(m_code, m_bind))
 			{
 				m_source += String8(textures_annotations_l).ReplaceStr("textures2D_L", view.variable)
 				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 				                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_storage_index));
+				if (coherent) { m_source += String8("       OpDecorate %") + view.variable + " Coherent\n"; }
 			}
 		}
 		if (m_bind->samplers.samplers_num > 0)
@@ -2224,6 +2233,7 @@ void Spirv::WriteLocalVariables()
 	{
 		m_source += String8::FromPrintf("%%join_skip_%04" PRIx32 " = OpVariable %%_ptr_Function_bool Function %%false\n", skip.branch);
 	}
+	m_source += HeapRecordVariables();
 
 	for (const auto& c: m_variables)
 	{
@@ -3214,6 +3224,9 @@ void Spirv::WriteInstructions()
 		} else if (m_bind != nullptr && ShaderImageReadsZeroResource(*m_bind, inst))
 		{
 			ok = EmitZeroImageRead(inst, this, &dst);
+		} else if (m_bind != nullptr && ShaderImageStoreTargetsZeroResource(*m_bind, inst))
+		{
+			ok = true;
 		} else if (m_bind != nullptr && ShaderScalarLoadIsZero(*m_bind, inst))
 		{
 			ok = EmitZeroScalarLoad(inst, this, &dst);

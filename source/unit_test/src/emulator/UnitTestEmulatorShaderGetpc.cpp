@@ -975,6 +975,48 @@ TEST(EmulatorShaderGetpc, RedefinedBoundDescriptorReadsRuntimeDescriptor)
 	EXPECT_TRUE(ShaderVectorBufferUsesRuntimeDescriptor(bind, instructions.At(3)));
 }
 
+// Captured vertex front: S_LOAD a V# over its own user-data pointer, then read
+// constants through it. Only the consumer of the loaded V# reads a runtime
+// descriptor; one through user data the program never wrote is left alone.
+TEST(EmulatorShaderGetpc, ConsumerOfAProgramBuiltDescriptorReadsRuntimeDescriptor)
+{
+	const auto scalar_load = [](uint32_t pc, int descriptor)
+	{
+		ShaderInstruction inst {};
+		inst.pc      = pc;
+		inst.type    = ShaderInstructionType::SBufferLoadDword;
+		inst.dst     = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 1};
+		inst.src_num = 2;
+		inst.src[0]  = {.type = ShaderOperandType::Sgpr, .register_id = descriptor, .size = 4};
+		inst.src[1]  = {.type = ShaderOperandType::LiteralConstant, .size = 1};
+		return inst;
+	};
+	ShaderInstruction table_load {};
+	table_load.pc      = 0;
+	table_load.type    = ShaderInstructionType::SLoadDwordx4;
+	table_load.dst     = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+	table_load.src_num = 2;
+	table_load.src[0]  = {.type = ShaderOperandType::Sgpr, .register_id = 10, .size = 2};
+	table_load.src[1]  = {.type = ShaderOperandType::LiteralConstant, .size = 1};
+	ShaderInstruction end {};
+	end.pc   = 16;
+	end.type = ShaderInstructionType::SEndpgm;
+
+	ShaderCode code;
+	code.GetInstructions().Add(table_load);
+	code.GetInstructions().Add(scalar_load(8, 8));
+	code.GetInstructions().Add(scalar_load(12, 12));
+	code.GetInstructions().Add(end);
+
+	ShaderBindResources bind {};
+	ShaderCollectRedefinedBufferDescriptors(code, &bind, 8, *ShaderScalarFlowOf(code));
+
+	ASSERT_EQ(bind.redefined_descriptor_consumers.Size(), 1u);
+	EXPECT_EQ(bind.redefined_descriptor_consumers.At(0), 8u);
+	EXPECT_TRUE(ShaderBufferConsumerRedefinesDescriptor(bind, code.GetInstructions().At(1)));
+	EXPECT_FALSE(ShaderBufferConsumerRedefinesDescriptor(bind, code.GetInstructions().At(2)));
+}
+
 // A stage without runtime V# lowering (the vertex front) keeps a reloaded
 // consumer on the slot path. That is sound only when every path reloads the
 // register; a path that keeps the bound row refuses the buffer instead.

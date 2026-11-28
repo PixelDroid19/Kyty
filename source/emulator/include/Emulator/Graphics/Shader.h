@@ -1138,6 +1138,8 @@ struct ShaderInstruction
 	bool mimg_offset = false;
 	// Image atomics replace VDATA with the pre-operation value only for GLC=1.
 	bool mimg_return_old_value = false;
+	// GLC=1 on an image load or store: a globally coherent access, whose reads miss the L0 cache (RDNA2 8.1.10).
+	bool mimg_coherent = false;
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;
@@ -1963,12 +1965,28 @@ struct ShaderCopiedImageDescriptor
 	int      sampler_index = -1;
 };
 
-// An S# the shader assembles from constants (an inline sampler): the image
+// An S# whose words are fixed for the draw: constants the shader assembles (an
+// inline sampler) or the sampler-table record user data selects. The image
 // read at consumer_pc samples through sampler resource sampler_index.
 struct ShaderConstantSampler
 {
 	uint32_t consumer_pc   = 0;
 	int      sampler_index = -1;
+};
+
+// A T# an image read takes from a bindless heap, for one record of the loop
+// that indexes the heap: the load at load_pc read it when the record index the
+// S_MUL_I32 at slot_pc scales (slot_index) was record, and the read at
+// consumer_pc then samples texture_index. Without a loop slot_pc is UINT32_MAX
+// and the read has the one record 0.
+struct ShaderHeapTexture
+{
+	uint32_t      consumer_pc   = 0;
+	uint32_t      load_pc       = 0;
+	uint32_t      slot_pc       = UINT32_MAX;
+	ShaderOperand slot_index    = {};
+	uint32_t      record        = 0;
+	int           texture_index = -1;
 };
 
 enum class ShaderTextureUsage
@@ -2137,6 +2155,8 @@ void               ShaderSetStorageAddressReads(bool supported);
 [[nodiscard]] bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type);
 // The image read's T# is an all-zero resource recorded by the usage parse.
 [[nodiscard]] bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst);
+// An image store through an all-zero T# loaded from memory, which the ISA defines as unbound: the store is discarded.
+[[nodiscard]] bool ShaderImageStoreTargetsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst);
 void ShaderAddZeroImageResource(ShaderZeroImageResources* resources, int register_id);
 void ShaderAddLoadedZeroImageResource(ShaderZeroImageResources* resources, int register_id, uint32_t load_pc, uint32_t last_pc);
 void ShaderAddZeroDescriptorLoad(ShaderZeroDescriptorLoads* loads, uint32_t pc, int first_register, int dwords);
@@ -2359,6 +2379,7 @@ struct ShaderBindResources
 	Vector<uint32_t> slot_only_consumers;
 	Vector<ShaderCopiedImageDescriptor> copied_image_descriptors;
 	Vector<ShaderConstantSampler>       constant_samplers;
+	Vector<ShaderHeapTexture>           heap_textures;
 };
 
 [[nodiscard]] int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
@@ -2859,6 +2880,7 @@ struct ShaderPixelInterpolator
 [[nodiscard]] uint32_t ShaderPixelSystemInputRegister(const ShaderPixelInputInfo& info, uint32_t field);
 void ShaderResolveCustomInterpolation(const ShaderPixelInterpolationUse& use, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info);
 [[nodiscard]] Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& info, bool forward_primitive_id);
+[[nodiscard]] Vector<uint32_t> ShaderCompileRectGeometry(uint32_t parameter_count, uint32_t flat_parameters);
 
 struct ShaderSharp
 {

@@ -486,4 +486,26 @@ TEST(EmulatorComputeModes, GraphicsFp16OverflowMetadataSelectsTheStageAndKeysBot
 	EXPECT_FALSE(PixelInputFromRegisters(regs).fp16_overflow_known);
 }
 
+// A storage view's level selects data, not code: only whether it holds a single
+// level changes the translated module (storage resinfo admission).
+TEST(EmulatorComputeModes, StorageTextureIdentityKeysASingleLevelViewNotWhichLevel)
+{
+	const ComputeMetadata metadata;
+	const auto            regs  = metadata.Registers();
+	auto                  input = InputFromRegisters(regs);
+	const ScopedGeneration generation(true);
+	input.bind.textures2D.textures_num  = 1;
+	input.bind.textures2D.desc[0].usage = ShaderTextureUsage::ReadWrite;
+	const auto view = [&](uint32_t base, uint32_t last, uint32_t max_mip) {
+		auto& fields = input.bind.textures2D.desc[0].texture.fields;
+		fields[3]    = (base << 12u) | (last << 16u);
+		fields[5]    = max_mip << 4u;
+		return ShaderGetIdCS(&regs, &input);
+	};
+	const auto level0 = view(0u, 0u, 11u);
+	EXPECT_EQ(view(5u, 5u, 11u), level0);
+	EXPECT_EQ(view(3u, 3u, 9u), level0);
+	EXPECT_NE(view(0u, 3u, 11u), level0);
+}
+
 UT_END();

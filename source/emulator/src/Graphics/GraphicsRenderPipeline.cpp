@@ -265,6 +265,39 @@ static VkBlendFactor get_blend_factor(uint32_t factor)
 	return VK_BLEND_FACTOR_ZERO;
 }
 
+// An alpha-only target (HW::kColorExportOrderOneChannelAlpha) stores W, which the guest
+// blends with its alpha equation; the host blends the channel with its colour equation.
+// Each factor takes its alpha-equation value: destination alpha is the stored channel (a
+// host format without alpha reads 1), and colour factors read alpha.
+static uint8_t AlphaChannelBlendFactor(uint8_t factor)
+{
+	switch (factor)
+	{
+		case /* DestAlpha */ 0x06: return /* DestColor */ 0x08;
+		case /* OneMinusDestAlpha */ 0x07: return /* OneMinusDestColor */ 0x09;
+		case /* SrcAlphaSaturate */ 0x0a: return /* One */ 0x01;
+		case /* ConstantColor */ 0x0d: return /* ConstantAlpha */ 0x13;
+		case /* OneMinusConstantColor */ 0x0e: return /* OneMinusConstantAlpha */ 0x14;
+		case /* Src1Color */ 0x0f: return /* Src1Alpha */ 0x11;
+		case /* InverseSrc1Color */ 0x10: return /* InverseSrc1Alpha */ 0x12;
+		default: return factor;
+	}
+}
+
+static HW::BlendControl AlphaOnlyTargetBlend(const HW::BlendControl& guest)
+{
+	HW::BlendControl host = guest;
+	if (guest.separate_alpha_blend)
+	{
+		host.color_srcblend  = guest.alpha_srcblend;
+		host.color_comb_fcn  = guest.alpha_comb_fcn;
+		host.color_destblend = guest.alpha_destblend;
+	}
+	host.color_srcblend  = AlphaChannelBlendFactor(host.color_srcblend);
+	host.color_destblend = AlphaChannelBlendFactor(host.color_destblend);
+	return host;
+}
+
 struct BlendFactors
 {
 	VkBlendFactor src;
@@ -1733,12 +1766,49 @@ private:
 	Core::Mutex& m_mutex;
 };
 
+// The rect stage forwards the position and the vertex parameters only, and takes the single
+// geometry slot. Without it the rect is drawn as its first triangle, which is reported.
+bool RectGeometryAvailable(const GraphicContext& gctx, const ShaderVertexInputInfo& vs, const ShaderPixelInputInfo& ps,
+                           uint32_t parameter_count)
+{
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(gctx.physical_device, &properties);
+	const auto&    limits     = properties.limits;
+	const uint32_t components = parameter_count * 4u + 4u;
+	const char*    missing    = nullptr;
+	if (!gctx.geometry_shader_supported) { missing = "no geometry shader support"; }
+	else if (vs.position1_usage != ShaderVertexPosition1Usage::Unknown) { missing = "a layer or clip distance export"; }
+	else if (ps.custom_interpolation.Enabled()) { missing = "the interpolation stage takes the geometry slot"; }
+	else if (components > limits.maxGeometryOutputComponents || components * 4u > limits.maxGeometryTotalOutputComponents ||
+	         limits.maxGeometryOutputVertices < 4u || components > limits.maxGeometryInputComponents)
+	{
+		missing = "geometry limits";
+	}
+	if (missing == nullptr) { return true; }
+	KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rect list drawn as its first triangle: %s (parameters=%u)\n", missing,
+	               parameter_count);
+	return false;
+}
+
+// Vertex parameters the pixel stage reads flat; the rect stage keeps their provoking value.
+uint32_t RectFlatParameters(const ShaderPixelInputInfo& ps)
+{
+	uint32_t flat = 0;
+	for (uint32_t input = 0; input < ps.input_num; ++input)
+	{
+		ShaderPixelInterpolator decoded {};
+		if (!ShaderPixelInputActive(ps, input) || !ShaderDecodePixelInterpolator(ps.interpolator_settings[input], &decoded)) { continue; }
+		if (decoded.source == ShaderPixelInterpolatorSource::Parameter && decoded.flat) { flat |= 1u << decoded.location; }
+	}
+	return flat;
+}
+
 } // namespace
 
 VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color,
                                               RenderDepthInfo* depth,
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
-                                              const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
+                                              const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology, bool expand_rects,
                                               const VulkanSampleLocationState& sample_locations, ShaderId* prepared_vs_id,
                                               ShaderId* prepared_ps_id, const GuestDeviceAddressTable* device_address_table)
 {
@@ -1873,6 +1943,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	p.dynamic_params->scissor_ltrb[2] = framebuffer_scissor.right;
 	p.dynamic_params->scissor_ltrb[3] = framebuffer_scissor.bottom;
 	p.static_params->topology                 = topology;
+	p.static_params->expand_rects             = expand_rects;
 	p.static_params->rasterization_samples    = resolve_render_attachment_sample_count(*color, *depth);
 	p.static_params->sample_locations         = sample_locations;
 	if (p.static_params->sample_locations.sample_count != p.static_params->rasterization_samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.static_params->sample_locations.sample_count != p.static_params->rasterization_samples condition ignored (continuing)\n"); }
@@ -1928,15 +1999,21 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			const bool uint16_mrt_output = ps_input_info->target_output_mode[rt] == 7u &&
 			                               ps_input_info->target_output_number[rt] == 4u &&
 			                               ps_input_info->target_output_order[rt] == 0u;
-			const auto& blend               = ctx->GetBlendControl(rt);
+			const uint8_t output_order   = ps_input_info->target_output_order[rt];
+			const auto    blend          = output_order == HW::kColorExportOrderOneChannelAlpha ? AlphaOnlyTargetBlend(ctx->GetBlendControl(rt))
+			                                                                                    : ctx->GetBlendControl(rt);
 			p.static_params->color_mask[rt] = uint16_mrt_output
 			                                      ? State::ResolveColorWriteAgainstUint16Export(export_admitted_mask, export_enable)
 			                                      : export_admitted_mask;
-			if (ps_input_info->target_output_order[rt] == HW::kColorExportOrderTwoChannelAlt)
+			// The guest mask names export components; the attachment's second, respectively only, channel holds W.
+			const uint8_t mask = p.static_params->color_mask[rt];
+			if (output_order == HW::kColorExportOrderTwoChannelAlt)
 			{
-				// The guest mask names export components; the attachment's second channel holds W.
-				const uint8_t mask              = p.static_params->color_mask[rt];
 				p.static_params->color_mask[rt] = static_cast<uint8_t>((mask & 1u) | ((mask >> 2u) & 2u));
+			}
+			if (output_order == HW::kColorExportOrderOneChannelAlpha)
+			{
+				p.static_params->color_mask[rt] = static_cast<uint8_t>((mask >> 3u) & 1u);
 			}
 			p.static_params->color_srcblend[rt]       = blend.color_srcblend;
 			p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
@@ -2084,6 +2161,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		                                                        framebuffer->extent);
 		if (requirement.required)
 		{
+			if (p.static_params->expand_rects)
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rect list drawn as its first triangle: fragment transport\n");
+			}
 			ShaderTranslationCacheResult transport_geometry;
 			if (ps_input_info->custom_interpolation.Enabled())
 			{
@@ -2144,6 +2225,18 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info, false); });
 		DebugStatsRecordShaderTranslationCache(geometry_translation.hit, geometry_translation.evicted);
 		EXIT_IF(geometry_translation.binary.IsEmpty());
+	} else if (p.static_params->expand_rects)
+	{
+		const uint32_t parameters = SpirvResolveVertexParameterCount(ShaderParseVS(&vs_regs, &sh_regs, vs_input_info), vs_input_info);
+		if (RectGeometryAvailable(*gctx, *vs_input_info, *ps_input_info, parameters))
+		{
+			const uint32_t flat = RectFlatParameters(*ps_input_info);
+			geometry_translation = translation_cache->GetOrCompile(
+			    ShaderModuleKey::Create(vs_id, ShaderModuleStage::RectGeometry, optimization, next_gen, false, flat),
+			    [&] { return ShaderCompileRectGeometry(parameters, flat); });
+			DebugStatsRecordShaderTranslationCache(geometry_translation.hit, geometry_translation.evicted);
+			EXIT_IF(geometry_translation.binary.IsEmpty());
+		}
 	}
 
 	const uint32_t slot = FindAvailableSlot();

@@ -1720,8 +1720,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			                                         &render_alias_copies))
 			{
 				// This image aliases 64 KiB blocks of a GPU-owned render target (part
-				// of it, all of it, or all of a smaller one). Keep its live pixels
-				// before compute writes.
+				// of it, all of it, or all of a smaller one) or its whole mip chain.
+				// Keep its live pixels before compute writes.
 				overlap                = true;
 				render_alias_parent_id = obj.object_id;
 			} else if (o.object.type == GpuMemoryObjectType::RenderTexture && info.type == GpuMemoryObjectType::StorageTexture &&

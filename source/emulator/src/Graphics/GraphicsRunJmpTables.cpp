@@ -1079,6 +1079,13 @@ void graphics_init_jmp_tables()
 	}
 
 	g_hw_uc_func[Pm4::VGT_PRIMITIVE_TYPE] = hw_uc_set_primitive_type;
+	// A burst past GE_INDX_OFFSET would reach registers without a direct handler.
+	g_hw_uc_func[Pm4::GE_INDX_OFFSET] = [](KYTY_HW_UC_PARSER_ARGS)
+	{
+		EXIT_IF(((cmd_id >> 16u) & 0x3fffu) != 1u);
+		cp->GetUcfg()->SetIndexOffset(buffer[0]);
+		return 1u;
+	};
 	for (uint32_t reg: {Pm4::GE_CNTL, Pm4::GE_USER_VGPR_EN})
 	{
 		g_hw_uc_func[reg] = [](KYTY_HW_UC_PARSER_ARGS)
@@ -1134,6 +1141,7 @@ void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_DMA_DATA]                = cp_op_dma_data;
 	g_cp_op_func[Pm4::IT_ONE_REG_WRITE]           = cp_op_one_reg_write;
 	g_cp_op_func[Pm4::IT_ACQUIRE_MEM]             = cp_op_acquire_mem;
+	g_cp_op_func[Pm4::IT_REWIND]                  = cp_op_rewind;
 	g_cp_op_func[Pm4::IT_SET_CONTEXT_REG]         = cp_op_set_context_reg;
 	g_cp_op_func[Pm4::IT_SET_SH_REG]              = cp_op_set_shader_reg;
 	g_cp_op_func[Pm4::IT_DISPATCH_DIRECT]         = cp_op_dispatch_direct;

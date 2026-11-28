@@ -6,6 +6,7 @@
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Log.h"
 
+#include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/ShaderScalarLiveness.h"
 #include "ShaderControlFlowGraph.h"
 #include "ShaderStorageAnalysis.h"
@@ -17,6 +18,7 @@
 #include <climits>
 #include <memory>
 #include <mutex>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -70,6 +72,14 @@ int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const
 		if (copied.consumer_pc == inst.pc && copied.texture_index >= 0)
 		{
 			return copied.texture_index;
+		}
+	}
+	// Every record of a heap read binds a texture of one class; the first stands for all.
+	for (const auto& heap: bind.heap_textures)
+	{
+		if (heap.consumer_pc == inst.pc)
+		{
+			return heap.texture_index;
 		}
 	}
 	return -1;
@@ -139,9 +149,19 @@ void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindRes
 		const auto& inst          = code.GetInstructions().At(instruction);
 		const int texture_index = ShaderFindImageSampledTextureDescriptor(inst, *bind, user_data_register_base);
 		const int sampler_index = ShaderFindImageSamplerDescriptor(inst, *bind, user_data_register_base);
-		if (texture_index >= 0 && sampler_index >= 0 && sampler_index < 16)
+		if (texture_index < 0 || sampler_index < 0 || sampler_index >= 16)
 		{
-			bind->textures2D.desc[texture_index].sampler_indices_mask |= static_cast<uint16_t>(1u << sampler_index);
+			continue;
+		}
+		const auto sampler_bit = static_cast<uint16_t>(1u << sampler_index);
+		bind->textures2D.desc[texture_index].sampler_indices_mask |= sampler_bit;
+		// A heap read samples the texture of whichever record it reached.
+		for (const auto& heap: bind->heap_textures)
+		{
+			if (heap.consumer_pc == inst.pc)
+			{
+				bind->textures2D.desc[heap.texture_index].sampler_indices_mask |= sampler_bit;
+			}
 		}
 	}
 }
@@ -741,7 +761,10 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 	}
 	// A loaded descriptor of buffer type binds no image; its reads return zero
 	// like a user-data one (see CollectZeroImageResources).
-	if (usage == ShaderTextureUsage::ReadOnly && !ShaderGen5TextureTypeIsImage(resource.Type()))
+	// The ISA defines an all-zero resource as unbound: its stores are discarded.
+	const bool unbound_store = usage == ShaderTextureUsage::ReadWrite &&
+	                           std::all_of(std::begin(resource.fields), std::end(resource.fields), [](uint32_t word) { return word == 0; });
+	if ((usage == ShaderTextureUsage::ReadOnly && !ShaderGen5TextureTypeIsImage(resource.Type())) || unbound_store)
 	{
 		ShaderAddLoadedZeroImageResource(&bind->zero_image_resources, sload.dst.register_id, sload.pc, last_consumer_pc);
 		ShaderAddZeroDescriptorLoad(&bind->zero_descriptor_loads, sload.pc, sload.dst.register_id, 8);
@@ -1111,8 +1134,11 @@ static bool ShaderDynamicSLoadMatchesConsumer(const ShaderInstruction& inst, con
 					return false;
 				}
 			}
-			use->kind          = ShaderDynamicSLoadResourceKind::StorageBuffer;
-			use->texture_usage = ShaderTextureUsage::Unknown;
+			use->kind             = ShaderDynamicSLoadResourceKind::StorageBuffer;
+			use->texture_usage    = ShaderTextureUsage::Unknown;
+			use->raw_smem_use     = true;
+			use->raw_only         = true;
+			use->dword_loads_only = true;
 			return true;
 		}
 		if (ShaderInstructionUsesVectorBufferDescriptor(inst.type) && inst.src_num >= 2 &&
@@ -1125,11 +1151,21 @@ static bool ShaderDynamicSLoadMatchesConsumer(const ShaderInstruction& inst, con
 					return false;
 				}
 			}
+			const bool is_dword_load =
+			    inst.type == ShaderInstructionType::BufferLoadDword || inst.type == ShaderInstructionType::BufferLoadDwordx2 ||
+			    inst.type == ShaderInstructionType::BufferLoadDwordx3 || inst.type == ShaderInstructionType::BufferLoadDwordx4;
+			const bool is_raw =
+			    is_dword_load || inst.type == ShaderInstructionType::BufferLoadUbyte ||
+			    inst.type == ShaderInstructionType::BufferStoreDword || inst.type == ShaderInstructionType::BufferStoreDwordx2 ||
+			    inst.type == ShaderInstructionType::BufferStoreDwordx3 || inst.type == ShaderInstructionType::BufferStoreDwordx4 ||
+			    ShaderInstructionTypeStartsWith(inst.type, "BufferAtomic");
 			use->kind                   = ShaderDynamicSLoadResourceKind::StorageBuffer;
 			use->storage_usage = ShaderInstructionWritesVectorBufferDescriptor(inst.type) ? ShaderStorageUsage::ReadWrite
 			                                                                              : ShaderStorageUsage::ReadOnly;
 			use->texture_usage          = ShaderTextureUsage::Unknown;
 			use->raw_vmem_oob_guarded = true;
+			use->raw_only             = is_raw;
+			use->dword_loads_only     = is_dword_load;
 			return true;
 		}
 		if (ShaderInstructionUsesImageSampler(inst.type) && inst.src_num >= 3 && inst.src[2].type == ShaderOperandType::Sgpr &&
@@ -1255,6 +1291,9 @@ static bool ShaderMergeDynamicSLoadUse(ShaderDynamicSLoadUse* use, const ShaderD
 	}
 	use->last_consumer_pc     = std::max(use->last_consumer_pc, consumer_pc);
 	use->raw_vmem_oob_guarded = use->raw_vmem_oob_guarded || next_use.raw_vmem_oob_guarded;
+	use->raw_smem_use         = use->raw_smem_use || next_use.raw_smem_use;
+	use->raw_only             = (!use->found || use->raw_only) && next_use.raw_only;
+	use->dword_loads_only     = (!use->found || use->dword_loads_only) && next_use.dword_loads_only;
 	use->storage_readable     = (!use->found || use->storage_readable) && next_use.storage_readable;
 	use->found                = true;
 	return true;
@@ -2324,6 +2363,12 @@ static bool ShaderConstantSgprWrite(const ShaderInstruction& inst, uint32_t* val
 		*value = ((uint32_t {1} << (inst.src[0].constant.u & 31u)) - 1u) << (inst.src[1].constant.u & 31u);
 		return true;
 	}
+	if (inst.type == ShaderInstructionType::SLshlB32 && inst.src_num == 2 && constant(inst.src[0]) && constant(inst.src[1]))
+	{
+		// RDNA2 ISA: D.u = S0.u << S1.u[4:0].
+		*value = inst.src[0].constant.u << (inst.src[1].constant.u & 31u);
+		return true;
+	}
 	return false;
 }
 
@@ -2493,6 +2538,41 @@ const std::vector<ShaderConstantSamplerRead>& ShaderCodeResourceMemo::ConstantSa
 	return m_constant_sampler_reads;
 }
 
+// Binds an S# whose words are fixed for the draw to the image read inst, reusing
+// an equal sampler: the words are not in user data, so they bind like a loaded
+// S#, from the recorded fields.
+static void ShaderBindFixedSampler(ShaderBindResources* bind, ShaderParsedUsage* info, const ShaderInstruction& inst,
+                                   const ShaderSamplerResource& resource, int user_data_register_base)
+{
+	const auto operation     = ShaderInstructionSamplerOperation(inst.type);
+	int        sampler_index = -1;
+	for (int index = 0; index < bind->samplers.samplers_num; ++index)
+	{
+		if (bind->samplers.dynamic_sload[index] && ShaderSamplerResourcesEqual(bind->samplers.samplers[index], resource) &&
+		    bind->samplers.operations[index] == operation)
+		{
+			sampler_index = index;
+			break;
+		}
+	}
+	if (sampler_index < 0)
+	{
+		if (bind->samplers.samplers_num >= ShaderSamplerResources::RES_MAX)
+		{
+			EXIT("shader sampler resource capacity exceeded by a fixed sampler: pc=0x%08" PRIx32 "\n", inst.pc);
+		}
+		sampler_index                                = bind->samplers.samplers_num++;
+		bind->samplers.samplers[sampler_index]       = resource;
+		bind->samplers.operations[sampler_index]     = operation;
+		bind->samplers.slots[sampler_index]          = -1;
+		bind->samplers.start_register[sampler_index] = inst.src[2].register_id - user_data_register_base;
+		bind->samplers.extended[sampler_index]       = false;
+		bind->samplers.dynamic_sload[sampler_index]  = true;
+		info->samplers++;
+	}
+	bind->constant_samplers.Add(ShaderConstantSampler {inst.pc, sampler_index});
+}
+
 void ShaderCollectConstantSamplers(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info,
                                    int user_data_register_base, const ShaderCodeResourceMemo* memo)
 {
@@ -2508,35 +2588,7 @@ void ShaderCollectConstantSamplers(const ShaderCode& code, ShaderBindResources* 
 		{
 			continue;
 		}
-		const auto operation     = ShaderInstructionSamplerOperation(inst.type);
-		int        sampler_index = -1;
-		for (int index = 0; index < bind->samplers.samplers_num; ++index)
-		{
-			if (bind->samplers.dynamic_sload[index] && ShaderSamplerResourcesEqual(bind->samplers.samplers[index], resource) &&
-			    bind->samplers.operations[index] == operation)
-			{
-				sampler_index = index;
-				break;
-			}
-		}
-		if (sampler_index < 0)
-		{
-			if (bind->samplers.samplers_num >= ShaderSamplerResources::RES_MAX)
-			{
-				EXIT("shader sampler resource capacity exceeded by a constant sampler: pc=0x%08" PRIx32 "\n", inst.pc);
-			}
-			// The words live in the program, not in user data: bind them like a
-			// loaded S#, from the recorded fields.
-			sampler_index                                = bind->samplers.samplers_num++;
-			bind->samplers.samplers[sampler_index]       = resource;
-			bind->samplers.operations[sampler_index]     = operation;
-			bind->samplers.slots[sampler_index]          = -1;
-			bind->samplers.start_register[sampler_index] = inst.src[2].register_id - user_data_register_base;
-			bind->samplers.extended[sampler_index]       = false;
-			bind->samplers.dynamic_sload[sampler_index]  = true;
-			info->samplers++;
-		}
-		bind->constant_samplers.Add(ShaderConstantSampler {inst.pc, sampler_index});
+		ShaderBindFixedSampler(bind, info, inst, resource, user_data_register_base);
 	}
 }
 
@@ -2548,9 +2600,16 @@ static bool ShaderInstructionWritesLoadBase(const ShaderInstruction& inst, const
 	{
 		return ShaderInstructionWritesSgprRange(inst, base.register_id, base.size);
 	}
-	const auto is_vcc = [](const ShaderOperand& operand)
-	{ return operand.type == ShaderOperandType::VccLo || operand.type == ShaderOperandType::VccHi; };
-	return is_vcc(inst.dst) || is_vcc(inst.dst2);
+	// The VCC halves are separate registers; a VccLo operand of two dwords is both.
+	const auto halves = [](const ShaderOperand& operand) -> uint32_t
+	{
+		if (operand.type == ShaderOperandType::VccLo)
+		{
+			return operand.size >= 2 ? 3u : 1u;
+		}
+		return operand.type == ShaderOperandType::VccHi ? 2u : 0u;
+	};
+	return (halves(base) & (halves(inst.dst) | halves(inst.dst2))) != 0u;
 }
 
 constexpr uint8_t kShaderReachLoad  = 1u;
@@ -2647,17 +2706,23 @@ static ShaderDynamicSLoadUse ShaderFindReachingSLoadUse(const ShaderCode& code, 
 	return ShaderResolveTextureSizeQueries(use);
 }
 
-// Keeps the T# and S# blocks of a GS user-data load, and V# blocks when
-// keep_buffers is set, analysed as loads of their own; the other words stay
-// plain guest data.
+enum class ShaderGsUserDataBufferPolicy
+{
+	None,
+	ReadOnlyDword,
+	All,
+};
+
+// Keeps the T# and S# blocks of a GS user-data load, and V# blocks permitted by
+// buffer_policy, analysed as loads of their own; the other words stay plain guest data.
 static void ShaderPartitionGsUserDataLoad(const ShaderCode& code, const ShaderControlFlowGraph& cfg, uint32_t index,
                                           const ShaderInstruction& sload, int table_offset_dw, int first_dword, int dwords,
-                                          bool keep_buffers, std::vector<ShaderGsUserDataDescriptorLoad>* loads)
+                                          ShaderGsUserDataBufferPolicy buffer_policy, std::vector<ShaderGsUserDataDescriptorLoad>* loads)
 {
 	if (dwords == 16)
 	{
-		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword, 8, keep_buffers, loads);
-		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword + 8, 8, keep_buffers, loads);
+		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword, 8, buffer_policy, loads);
+		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword + 8, 8, buffer_policy, loads);
 		return;
 	}
 	ShaderInstruction block = sload;
@@ -2665,7 +2730,19 @@ static void ShaderPartitionGsUserDataLoad(const ShaderCode& code, const ShaderCo
 	block.dst.register_id   = sload.dst.register_id + first_dword;
 	block.dst.size          = dwords;
 	const auto use          = ShaderFindReachingSLoadUse(code, cfg, index, block);
-	const bool kept_kind    = use.kind != ShaderDynamicSLoadResourceKind::StorageBuffer || (keep_buffers && dwords == 4);
+	bool       keep_buffer  = false;
+	if (dwords == 4)
+	{
+		if (buffer_policy == ShaderGsUserDataBufferPolicy::All)
+		{
+			keep_buffer = true;
+		} else if (buffer_policy == ShaderGsUserDataBufferPolicy::ReadOnlyDword)
+		{
+			keep_buffer = use.storage_usage == ShaderStorageUsage::ReadOnly && use.raw_only && use.dword_loads_only &&
+			              (use.raw_vmem_oob_guarded || use.raw_smem_use);
+		}
+	}
+	const bool kept_kind = use.kind != ShaderDynamicSLoadResourceKind::StorageBuffer || keep_buffer;
 	if (use.valid && use.found && kept_kind)
 	{
 		loads->push_back({block, table_offset_dw + first_dword, use});
@@ -2673,8 +2750,8 @@ static void ShaderPartitionGsUserDataLoad(const ShaderCode& code, const ShaderCo
 	}
 	if (dwords == 8)
 	{
-		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword, 4, keep_buffers, loads);
-		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword + 4, 4, keep_buffers, loads);
+		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword, 4, buffer_policy, loads);
+		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword + 4, 4, buffer_policy, loads);
 	}
 }
 
@@ -2700,7 +2777,8 @@ std::vector<ShaderGsUserDataDescriptorLoad> ShaderFindGsUserDataDescriptorLoads(
 		{
 			continue;
 		}
-		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, offset_dw, 0, dword_count, false, &loads);
+		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, offset_dw, 0, dword_count,
+		                              ShaderGsUserDataBufferPolicy::ReadOnlyDword, &loads);
 	}
 	return loads;
 }
@@ -2873,9 +2951,10 @@ static const ShaderOperand* ShaderVectorBufferDescriptor(const ShaderInstruction
 	return &inst.src[1];
 }
 
-// The only write of an SGPR that reaches the instruction at index on every
-// path, or UINT32_MAX.
-static uint32_t ShaderUniqueReachingSgprWrite(const ShaderCode& code, const ShaderControlFlowGraph& cfg, uint32_t index, int reg)
+// The only write of an SGPR range or of VCC that reaches the instruction at
+// index on every path, or UINT32_MAX.
+static uint32_t ShaderUniqueReachingWrite(const ShaderCode& code, const ShaderControlFlowGraph& cfg, uint32_t index,
+                                          const ShaderOperand& range)
 {
 	const auto&    instructions = code.GetInstructions();
 	const uint32_t block        = cfg.BlockAt(instructions.At(index).pc);
@@ -2883,10 +2962,6 @@ static uint32_t ShaderUniqueReachingSgprWrite(const ShaderCode& code, const Shad
 	{
 		return UINT32_MAX;
 	}
-	ShaderOperand range;
-	range.type        = ShaderOperandType::Sgpr;
-	range.register_id = reg;
-	range.size        = 1;
 	for (uint32_t candidate = 0; candidate < instructions.Size(); ++candidate)
 	{
 		if (!ShaderInstructionWritesLoadBase(instructions.At(candidate), range))
@@ -2904,6 +2979,15 @@ static uint32_t ShaderUniqueReachingSgprWrite(const ShaderCode& code, const Shad
 		}
 	}
 	return UINT32_MAX;
+}
+
+static uint32_t ShaderUniqueReachingSgprWrite(const ShaderCode& code, const ShaderControlFlowGraph& cfg, uint32_t index, int reg)
+{
+	ShaderOperand range;
+	range.type        = ShaderOperandType::Sgpr;
+	range.register_id = reg;
+	range.size        = 1;
+	return ShaderUniqueReachingWrite(code, cfg, index, range);
 }
 
 bool ShaderCodeResourceMemo::SgprWrittenOnEveryPath(const ShaderCode& code, uint32_t index, int reg) const
@@ -2929,6 +3013,632 @@ bool ShaderCodeResourceMemo::SgprWrittenOnEveryPath(const ShaderCode& code, uint
 		m_cfg = cfg;
 	}
 	return m_written_on_every_path.emplace(std::make_pair(index, reg), written).first->second;
+}
+
+// The one instruction whose write of every SGPR in [first, first + count)
+// reaches index on every path, or UINT32_MAX.
+static uint32_t ShaderUniqueReachingRangeWrite(const ShaderCode& code, const ShaderControlFlowGraph& cfg, uint32_t index, int first,
+                                               int count)
+{
+	uint32_t writer = UINT32_MAX;
+	for (int reg = first; reg < first + count; ++reg)
+	{
+		const uint32_t write = ShaderUniqueReachingSgprWrite(code, cfg, index, reg);
+		if (write == UINT32_MAX || (reg != first && write != writer))
+		{
+			return UINT32_MAX;
+		}
+		writer = write;
+	}
+	return writer;
+}
+
+static bool ShaderIsScalarOffsetRegister(const ShaderOperand& operand)
+{
+	return (operand.type == ShaderOperandType::Sgpr && operand.size == 1) || operand.type == ShaderOperandType::VccLo;
+}
+
+static bool ShaderTableSamplerOffsetShift(const ShaderInstruction& shift, const ShaderOperand& offset)
+{
+	return shift.type == ShaderInstructionType::SLshlB32 && shift.src_num == 2 && shift.dst.type == offset.type &&
+	       (offset.type != ShaderOperandType::Sgpr || (shift.dst.register_id == offset.register_id && shift.dst.size == 1)) &&
+	       shift.src[0].type == ShaderOperandType::Sgpr && shift.src[0].size == 1 && ShaderOperandIsPlainConstant(shift.src[1]) &&
+	       shift.src[1].constant.u < 32u;
+}
+
+std::vector<ShaderTableSamplerRead> ShaderFindTableSamplerReads(const ShaderCode& code)
+{
+	std::vector<ShaderTableSamplerRead> reads;
+	const auto&                         instructions = code.GetInstructions();
+	const auto                          indices      = ShaderIndexInstructions(code);
+	if (indices.image_samplers.empty())
+	{
+		return reads;
+	}
+	const auto cfg = ShaderBuildControlFlowGraph(code);
+	for (const uint32_t index: indices.image_samplers)
+	{
+		const auto& inst = instructions.At(index);
+		if (inst.src_num < 3 || inst.src[2].type != ShaderOperandType::Sgpr || inst.src[2].size != 4)
+		{
+			continue;
+		}
+		const uint32_t record_load = ShaderUniqueReachingRangeWrite(code, cfg, index, inst.src[2].register_id, 4);
+		if (record_load == UINT32_MAX)
+		{
+			continue;
+		}
+		const auto& load = instructions.At(record_load);
+		if (load.type != ShaderInstructionType::SBufferLoadDwordx4 || load.dst.type != ShaderOperandType::Sgpr ||
+		    load.dst.register_id != inst.src[2].register_id || load.src_num < 2 || load.src[0].type != ShaderOperandType::Sgpr ||
+		    load.src[0].size != 4 || !ShaderIsScalarOffsetRegister(load.src[1]))
+		{
+			continue;
+		}
+		const uint32_t table_load = ShaderUniqueReachingRangeWrite(code, cfg, record_load, load.src[0].register_id, 4);
+		const uint32_t shift      = ShaderUniqueReachingWrite(code, cfg, record_load, load.src[1]);
+		if (table_load == UINT32_MAX || shift == UINT32_MAX || !ShaderTableSamplerOffsetShift(instructions.At(shift), load.src[1]))
+		{
+			continue;
+		}
+		const auto& vsharp       = instructions.At(table_load);
+		const int   vsharp_dword = load.src[0].register_id - vsharp.dst.register_id;
+		int         offset_dw    = 0;
+		if (ShaderTableSLoadDwords(vsharp) == 0 || vsharp_dword < 0 || vsharp_dword + 4 > vsharp.dst.size ||
+		    !ShaderGetSmemConstantDwordOffset(vsharp, &offset_dw) || offset_dw < 0)
+		{
+			continue;
+		}
+		reads.push_back(ShaderTableSamplerRead {index, record_load, table_load, vsharp_dword, shift});
+	}
+	return reads;
+}
+
+const std::vector<ShaderTableSamplerRead>& ShaderCodeResourceMemo::TableSamplerReads(const ShaderCode& code) const
+{
+	std::call_once(m_table_sampler_reads_once, [&] { m_table_sampler_reads = ShaderFindTableSamplerReads(code); });
+	return m_table_sampler_reads;
+}
+
+// The S# record a table sampler read takes for this draw. The record offset is
+// OFFSET + SOFFSET in bytes, dword-aligned, and must lie inside the V#.
+static ShaderSamplerResource ShaderReadTableSampler(const ShaderCode& code, const ShaderTableSamplerRead& read,
+                                                    const HW::UserSgprInfo& user_sgpr, int user_data_register_base)
+{
+	const auto& instructions = code.GetInstructions();
+	const auto& table_load   = instructions.At(read.table_load);
+	const auto& record_load  = instructions.At(read.record_load);
+	const auto& shift        = instructions.At(read.offset_shift);
+	int         offset_dw    = 0;
+	EXIT_IF(!ShaderGetSmemConstantDwordOffset(table_load, &offset_dw));
+	const int      pointer = table_load.src[0].register_id - user_data_register_base;
+	const uint64_t table   = ((static_cast<uint64_t>(user_sgpr.value[pointer + 1]) & 0xffffu) << 32u) | user_sgpr.value[pointer];
+	const uint64_t vsharp_address =
+	    table + (static_cast<uint64_t>(offset_dw) + static_cast<uint64_t>(read.vsharp_dword)) * sizeof(uint32_t);
+	ShaderBufferResource vsharp {};
+	if (!ShaderSnapshotGuestDescriptorTable(vsharp_address, 4, vsharp.fields))
+	{
+		EXIT("unreadable sampler-table V#: pc=0x%08" PRIx32 " address=0x%016" PRIx64 "\n", table_load.pc, vsharp_address);
+	}
+	const uint32_t index  = user_sgpr.value[shift.src[0].register_id - user_data_register_base];
+	const int64_t  offset = static_cast<int64_t>(index << shift.src[1].constant.u) + record_load.smem_imm_offset;
+	const uint64_t bytes  = ShaderBufferByteSize(vsharp.Stride(), vsharp.NumRecords());
+	if (offset < 0 || static_cast<uint64_t>(offset) + sizeof(ShaderSamplerResource::fields) > bytes)
+	{
+		EXIT("sampler-table record outside its V#: pc=0x%08" PRIx32 " offset=%" PRId64 " bytes=%" PRIu64 "\n", record_load.pc, offset,
+		     bytes);
+	}
+	const uint64_t        address = (vsharp.Base48() + static_cast<uint64_t>(offset)) & ~uint64_t {3};
+	ShaderSamplerResource resource {};
+	if (!ShaderSnapshotGuestDescriptorTable(address, 4, resource.fields))
+	{
+		EXIT("unreadable sampler-table record: pc=0x%08" PRIx32 " address=0x%016" PRIx64 "\n", record_load.pc, address);
+	}
+	return resource;
+}
+
+void ShaderCollectTableSamplers(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info, const HW::UserSgprInfo& user_sgpr,
+                                uint16_t srt_size_dw, int user_data_register_base, const ShaderScalarFlow& scalar_flow,
+                                const ShaderCodeResourceMemo* memo)
+{
+	EXIT_IF(bind == nullptr || info == nullptr);
+	const auto  direct       = memo == nullptr ? ShaderFindTableSamplerReads(code) : std::vector<ShaderTableSamplerRead> {};
+	const auto& reads        = memo != nullptr ? memo->TableSamplerReads(code) : direct;
+	const auto& entry_values = scalar_flow.holding_entry_value;
+	const auto& instructions = code.GetInstructions();
+	for (const auto& read: reads)
+	{
+		const auto& inst        = instructions.At(read.instruction);
+		const auto& shift       = instructions.At(read.offset_shift);
+		const int   index_sgpr  = shift.src[0].register_id - user_data_register_base;
+		const bool  entry_known = read.table_load < entry_values.size() && read.offset_shift < entry_values.size();
+		// The pointer and the index must be the draw's user data where they are read.
+		if (!entry_known || ShaderFindImageSamplerDescriptor(inst, *bind, user_data_register_base) >= 0 ||
+		    !ShaderLoadsThroughSrtPointer(instructions.At(read.table_load), entry_values[read.table_load], srt_size_dw,
+		                                  user_data_register_base, *bind) ||
+		    index_sgpr < 0 || index_sgpr >= static_cast<int>(srt_size_dw) || index_sgpr >= HW::UserSgprInfo::SGPRS_MAX ||
+		    !entry_values[read.offset_shift].test(static_cast<size_t>(shift.src[0].register_id)))
+		{
+			continue;
+		}
+		ShaderBindFixedSampler(bind, info, inst, ShaderReadTableSampler(code, read, user_sgpr, user_data_register_base),
+		                       user_data_register_base);
+	}
+}
+
+// Descriptor heap reads (ShaderHeapDescriptorRead).
+
+constexpr int      kShaderScalarChainDepth = 12;
+constexpr uint32_t kShaderHeapRecordsMax   = 32;
+
+// The dword of dst that holds the one-dword operand, or -1.
+static int ShaderDestinationWord(const ShaderOperand& dst, const ShaderOperand& operand)
+{
+	if (dst.type == ShaderOperandType::Sgpr)
+	{
+		const int word = operand.register_id - dst.register_id;
+		return operand.type == ShaderOperandType::Sgpr && word >= 0 && word < dst.size ? word : -1;
+	}
+	if (dst.type == operand.type && (dst.type == ShaderOperandType::VccLo || dst.type == ShaderOperandType::VccHi))
+	{
+		return 0;
+	}
+	return dst.type == ShaderOperandType::VccLo && dst.size == 2 && operand.type == ShaderOperandType::VccHi ? 1 : -1;
+}
+
+// Dwords an S_LOAD or S_BUFFER_LOAD writes, or 0; buffer tells which of the two it is.
+static int ShaderScalarMemoryLoadDwords(ShaderInstructionType type, bool* buffer)
+{
+	*buffer = false;
+	switch (type)
+	{
+		case ShaderInstructionType::SLoadDword: return 1;
+		case ShaderInstructionType::SLoadDwordx2: return 2;
+		case ShaderInstructionType::SLoadDwordx4: return 4;
+		case ShaderInstructionType::SLoadDwordx8: return 8;
+		case ShaderInstructionType::SLoadDwordx16: return 16;
+		default: break;
+	}
+	*buffer = true;
+	switch (type)
+	{
+		case ShaderInstructionType::SBufferLoadDword: return 1;
+		case ShaderInstructionType::SBufferLoadDwordx2: return 2;
+		case ShaderInstructionType::SBufferLoadDwordx4: return 4;
+		case ShaderInstructionType::SBufferLoadDwordx8: return 8;
+		case ShaderInstructionType::SBufferLoadDwordx16: return 16;
+		default: return 0;
+	}
+}
+
+static bool ShaderIsOneDwordScalarRegister(const ShaderOperand& operand)
+{
+	return operand.size == 1 && (operand.type == ShaderOperandType::Sgpr || operand.type == ShaderOperandType::VccLo ||
+	                             operand.type == ShaderOperandType::VccHi);
+}
+
+// Follows a scalar value back through the only write reaching each read of it,
+// into the nodes ShaderEvalScalarChain evaluates for a draw.
+class ShaderScalarChainBuilder
+{
+public:
+	ShaderScalarChainBuilder(const ShaderCode& code, const ShaderControlFlowGraph& cfg): m_code(code), m_cfg(cfg) {}
+
+	// Dwords [word, word + count) of what the S_LOAD or S_BUFFER_LOAD at index writes.
+	int MemoryLoad(uint32_t index, int word, int count, int depth)
+	{
+		const auto& inst   = m_code.GetInstructions().At(index);
+		bool        buffer = false;
+		const int   dwords = ShaderScalarMemoryLoadDwords(inst.type, &buffer);
+		if (depth > kShaderScalarChainDepth || dwords == 0 || inst.dst.size != dwords || word < 0 || word + count > dwords ||
+		    inst.src_num < 2 || inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].size != (buffer ? 4 : 2))
+		{
+			return -1;
+		}
+		if (!buffer)
+		{
+			int       offset_dw = 0;
+			const int pointer   = Words(index, inst.src[0].register_id, 2, depth + 1);
+			if (pointer < 0 || !ShaderGetSmemConstantDwordOffset(inst, &offset_dw))
+			{
+				return -1;
+			}
+			return Add({.op = ShaderScalarChainOp::Load, .source = pointer, .imm = (offset_dw + word) * 4, .dwords = count});
+		}
+		const int vsharp = Words(index, inst.src[0].register_id, 4, depth + 1);
+		const int offset = BufferOffset(index, inst.src[1], depth + 1);
+		if (vsharp < 0 || offset < 0)
+		{
+			return -1;
+		}
+		const int node = Add({.op     = ShaderScalarChainOp::BufferLoad,
+		                      .source = vsharp,
+		                      .offset = offset,
+		                      .imm    = inst.smem_imm_offset + word * 4,
+		                      .dwords = count});
+		if (nodes[offset].op == ShaderScalarChainOp::RecordIndex && domain < 0)
+		{
+			domain = node;
+		}
+		return node;
+	}
+
+	std::vector<ShaderScalarChainNode> nodes;
+	uint32_t                           slot   = UINT32_MAX;
+	int                                domain = -1;
+
+private:
+	int Add(const ShaderScalarChainNode& node)
+	{
+		nodes.push_back(node);
+		return static_cast<int>(nodes.size()) - 1;
+	}
+
+	// The value of a one-dword operand where the instruction at index reads it.
+	int Value(uint32_t index, const ShaderOperand& operand, int depth)
+	{
+		if (ShaderOperandIsPlainConstant(operand))
+		{
+			return Add({.op = ShaderScalarChainOp::Constant, .value = operand.constant.u});
+		}
+		if (depth > kShaderScalarChainDepth || !ShaderIsOneDwordScalarRegister(operand))
+		{
+			return -1;
+		}
+		const uint32_t writer = ShaderUniqueReachingWrite(m_code, m_cfg, index, operand);
+		if (writer == UINT32_MAX)
+		{
+			return operand.type == ShaderOperandType::Sgpr
+			           ? Add({.op = ShaderScalarChainOp::UserData, .value = static_cast<uint32_t>(operand.register_id), .at = index})
+			           : -1;
+		}
+		const auto& inst = m_code.GetInstructions().At(writer);
+		const int   word = ShaderDestinationWord(inst.dst, operand);
+		if (word < 0)
+		{
+			return -1;
+		}
+		if (inst.type == ShaderInstructionType::SMovB32 && inst.src_num == 1)
+		{
+			return Value(writer, inst.src[0], depth + 1);
+		}
+		if (inst.type == ShaderInstructionType::SLshlB32 && inst.src_num == 2 && ShaderOperandIsPlainConstant(inst.src[1]) &&
+		    inst.src[1].constant.u < 32u)
+		{
+			const int source = Value(writer, inst.src[0], depth + 1);
+			return source < 0 ? -1 : Add({.op = ShaderScalarChainOp::ShiftLeft, .value = inst.src[1].constant.u, .source = source});
+		}
+		return MemoryLoad(writer, word, 1, depth + 1);
+	}
+
+	// SGPRs [first, first + count) where the instruction at index reads them.
+	int Words(uint32_t index, int first, int count, int depth)
+	{
+		if (depth > kShaderScalarChainDepth || first < 0 || first + count > kShaderScalarLivenessSgprs)
+		{
+			return -1;
+		}
+		const uint32_t writer = ShaderUniqueReachingRangeWrite(m_code, m_cfg, index, first, count);
+		if (writer == UINT32_MAX)
+		{
+			return Add({.op = ShaderScalarChainOp::UserData, .value = static_cast<uint32_t>(first), .at = index, .dwords = count});
+		}
+		const auto& inst = m_code.GetInstructions().At(writer);
+		return inst.dst.type == ShaderOperandType::Sgpr ? MemoryLoad(writer, first - inst.dst.register_id, count, depth + 1) : -1;
+	}
+
+	// The SOFFSET of an S_BUFFER_LOAD. An S_MUL_I32 of an SGPR by a constant
+	// stride makes it the record index the read walks; one read walks one index.
+	int BufferOffset(uint32_t index, const ShaderOperand& operand, int depth)
+	{
+		const uint32_t writer =
+		    ShaderIsOneDwordScalarRegister(operand) ? ShaderUniqueReachingWrite(m_code, m_cfg, index, operand) : UINT32_MAX;
+		if (writer == UINT32_MAX || m_code.GetInstructions().At(writer).type != ShaderInstructionType::SMulI32)
+		{
+			return Value(index, operand, depth);
+		}
+		const auto& mul    = m_code.GetInstructions().At(writer);
+		const int   stride = mul.src_num != 2 ? -1 : (ShaderOperandIsPlainConstant(mul.src[1]) ? 1 : (ShaderOperandIsPlainConstant(mul.src[0]) ? 0 : -1));
+		if (stride < 0 || mul.src[stride].constant.u == 0 || !ShaderIsOneDwordScalarRegister(mul.src[1 - stride]) ||
+		    ShaderDestinationWord(mul.dst, operand) != 0 || (slot != UINT32_MAX && slot != writer))
+		{
+			return -1;
+		}
+		slot = writer;
+		return Add({.op = ShaderScalarChainOp::RecordIndex, .value = mul.src[stride].constant.u});
+	}
+
+	const ShaderCode&             m_code;
+	const ShaderControlFlowGraph& m_cfg;
+};
+
+bool ShaderEvalScalarChain(const std::vector<ShaderScalarChainNode>& nodes, int node, uint32_t record, const HW::UserSgprInfo& user_sgpr,
+                           uint16_t srt_size_dw, int user_data_register_base, const std::vector<std::bitset<106>>& entry_values,
+                           uint32_t* words)
+{
+	EXIT_IF(node < 0 || node >= static_cast<int>(nodes.size()) || words == nullptr);
+	const auto& n    = nodes[node];
+	const auto  eval = [&](int child, uint32_t* out)
+	{ return ShaderEvalScalarChain(nodes, child, record, user_sgpr, srt_size_dw, user_data_register_base, entry_values, out); };
+	switch (n.op)
+	{
+		case ShaderScalarChainOp::Constant: words[0] = n.value; return true;
+		case ShaderScalarChainOp::RecordIndex: words[0] = record * n.value; return true;
+		case ShaderScalarChainOp::ShiftLeft:
+			if (!eval(n.source, words))
+			{
+				return false;
+			}
+			words[0] <<= n.value;
+			return true;
+		case ShaderScalarChainOp::UserData:
+			for (int word = 0; word < n.dwords; ++word)
+			{
+				const int reg  = static_cast<int>(n.value) + word;
+				const int user = reg - user_data_register_base;
+				if (n.at >= entry_values.size() || reg >= kShaderScalarLivenessSgprs || !entry_values[n.at].test(static_cast<size_t>(reg)) ||
+				    user < 0 || user >= static_cast<int>(srt_size_dw) || user >= HW::UserSgprInfo::SGPRS_MAX)
+				{
+					return false;
+				}
+				words[word] = user_sgpr.value[user];
+			}
+			return true;
+		case ShaderScalarChainOp::Load:
+		{
+			uint32_t pointer[2] = {};
+			if (!eval(n.source, pointer))
+			{
+				return false;
+			}
+			const uint64_t base = ((static_cast<uint64_t>(pointer[1]) & 0xffffu) << 32u) | pointer[0];
+			return ShaderSnapshotGuestDescriptorTable((base + static_cast<int64_t>(n.imm)) & ~uint64_t {3}, n.dwords, words);
+		}
+		case ShaderScalarChainOp::BufferLoad:
+		{
+			// Out of range the load writes nothing (the register keeps its value): no value for this draw.
+			ShaderBufferResource vsharp {};
+			uint32_t             offset = 0;
+			if (!eval(n.source, vsharp.fields) || !eval(n.offset, &offset))
+			{
+				return false;
+			}
+			const int64_t  start = static_cast<int64_t>(offset) + n.imm;
+			const uint64_t bytes = ShaderBufferByteSize(vsharp.Stride(), vsharp.NumRecords());
+			if (start < 0 || static_cast<uint64_t>(start) + static_cast<uint64_t>(n.dwords) * sizeof(uint32_t) > bytes)
+			{
+				return false;
+			}
+			return ShaderSnapshotGuestDescriptorTable((vsharp.Base48() + static_cast<uint64_t>(start)) & ~uint64_t {3}, n.dwords, words);
+		}
+	}
+	return false;
+}
+
+static void ShaderAddHeapDescriptorRead(const ShaderCode& code, const ShaderControlFlowGraph& cfg, uint32_t index, bool sampler,
+                                        std::vector<ShaderHeapDescriptorRead>* reads)
+{
+	const auto& inst   = code.GetInstructions().At(index);
+	const int   src    = sampler ? 2 : 1;
+	const int   dwords = sampler ? 4 : 8;
+	if (inst.src_num <= src || inst.src[src].type != ShaderOperandType::Sgpr || inst.src[src].size != dwords)
+	{
+		return;
+	}
+	const uint32_t load = ShaderUniqueReachingRangeWrite(code, cfg, index, inst.src[src].register_id, dwords);
+	if (load == UINT32_MAX)
+	{
+		return;
+	}
+	const auto& sload = code.GetInstructions().At(load);
+	const auto  type  = sampler ? ShaderInstructionType::SBufferLoadDwordx4 : ShaderInstructionType::SBufferLoadDwordx8;
+	if (sload.type != type || sload.dst.type != ShaderOperandType::Sgpr || sload.dst.register_id != inst.src[src].register_id)
+	{
+		return;
+	}
+	ShaderScalarChainBuilder builder(code, cfg);
+	if (builder.MemoryLoad(load, 0, dwords, 0) < 0)
+	{
+		return;
+	}
+	reads->push_back(ShaderHeapDescriptorRead {index, load, sampler, builder.slot, builder.domain, std::move(builder.nodes)});
+}
+
+std::vector<ShaderHeapDescriptorRead> ShaderFindHeapDescriptorReads(const ShaderCode& code)
+{
+	std::vector<ShaderHeapDescriptorRead> reads;
+	const auto&                           instructions = code.GetInstructions();
+	if (!ShaderIndexInstructions(code).has_image_reads)
+	{
+		return reads;
+	}
+	const auto cfg = ShaderBuildControlFlowGraph(code);
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto type = instructions.At(index).type;
+		if (!ShaderInstructionReadsImageResource(type))
+		{
+			continue;
+		}
+		ShaderAddHeapDescriptorRead(code, cfg, index, false, &reads);
+		if (ShaderInstructionUsesImageSampler(type))
+		{
+			ShaderAddHeapDescriptorRead(code, cfg, index, true, &reads);
+		}
+	}
+	return reads;
+}
+
+const std::vector<ShaderHeapDescriptorRead>& ShaderCodeResourceMemo::HeapDescriptorReads(const ShaderCode& code) const
+{
+	std::call_once(m_heap_descriptor_reads_once, [&] { m_heap_descriptor_reads = ShaderFindHeapDescriptorReads(code); });
+	return m_heap_descriptor_reads;
+}
+
+// Records a heap read walks for this draw: the indexes whose stride multiple
+// keeps its domain load inside the V#; 1 without a slot, 0 when unknown.
+static uint32_t ShaderHeapRecordCount(const ShaderHeapDescriptorRead& read, const HW::UserSgprInfo& user_sgpr, uint16_t srt_size_dw,
+                                      int user_data_register_base, const std::vector<std::bitset<106>>& entry_values)
+{
+	if (read.slot == UINT32_MAX)
+	{
+		return 1;
+	}
+	const auto&          load = read.nodes[read.domain];
+	ShaderBufferResource vsharp {};
+	if (!ShaderEvalScalarChain(read.nodes, load.source, 0, user_sgpr, srt_size_dw, user_data_register_base, entry_values, vsharp.fields))
+	{
+		return 0;
+	}
+	const uint64_t bytes  = ShaderBufferByteSize(vsharp.Stride(), vsharp.NumRecords());
+	const uint64_t stride = read.nodes[load.offset].value;
+	const int64_t  first  = static_cast<int64_t>(load.imm) + static_cast<int64_t>(load.dwords) * 4;
+	if (load.imm < 0 || bytes < static_cast<uint64_t>(first))
+	{
+		return 0;
+	}
+	return static_cast<uint32_t>(std::min<uint64_t>((bytes - static_cast<uint64_t>(first)) / stride + 1u, UINT32_MAX));
+}
+
+// The S# of a heap read: the emitter bakes sampler state, so every record the
+// read can reach must load the same words; false otherwise.
+static bool ShaderHeapSampler(const ShaderHeapDescriptorRead& read, uint32_t count, const HW::UserSgprInfo& user_sgpr,
+                              uint16_t srt_size_dw, int user_data_register_base, const std::vector<std::bitset<106>>& entry_values,
+                              ShaderSamplerResource* sampler)
+{
+	const int root = static_cast<int>(read.nodes.size()) - 1;
+	for (uint32_t record = 0; record < count; ++record)
+	{
+		std::array<uint32_t, 8> words {};
+		if (!ShaderEvalScalarChain(read.nodes, root, record, user_sgpr, srt_size_dw, user_data_register_base, entry_values, words.data()))
+		{
+			return false;
+		}
+		ShaderSamplerResource resource {};
+		std::copy_n(words.begin(), 4, resource.fields);
+		if (record > 0 && !ShaderSamplerResourcesEqual(resource, *sampler))
+		{
+			return false;
+		}
+		*sampler = resource;
+	}
+	return true;
+}
+
+static State::ImageSampleOperation ShaderHeapSampleOperation(const ShaderInstruction& inst)
+{
+	return ShaderInstructionUsesImageSampler(inst.type) ? ShaderInstructionSamplerOperation(inst.type) : State::ImageSampleOperation::Regular;
+}
+
+// The T#s of a heap read, one per record. The image emitter bakes the shape,
+// numeric class and sample operation of the one descriptor it resolves, so
+// every record must agree with record 0 on them; false otherwise, or when a
+// record holds no image.
+static bool ShaderHeapTextures(const ShaderInstruction& inst, const ShaderHeapDescriptorRead& read, uint32_t count,
+                               const HW::UserSgprInfo& user_sgpr, uint16_t srt_size_dw, int user_data_register_base,
+                               const std::vector<std::bitset<106>>& entry_values, std::vector<ShaderTextureResource>* textures)
+{
+	ShaderGen5SampledTextureShape instruction_shape {};
+	const bool shape_known   = ShaderGen5SampledTextureShapeForMimgDimension(inst.mimg_dimension, &instruction_shape);
+	const auto texture_class = [&](const ShaderTextureResource& texture)
+	{
+		return std::tuple(shape_known ? instruction_shape : ShaderGen5SampledTextureShapeForType(texture.Type()),
+		                  ShaderTextureSampleOperation(texture, ShaderHeapSampleOperation(inst)),
+		                  VulkanGen5ImageNumericType(texture.Format()));
+	};
+	const int root = static_cast<int>(read.nodes.size()) - 1;
+	for (uint32_t record = 0; record < count; ++record)
+	{
+		ShaderTextureResource texture {};
+		if (!ShaderEvalScalarChain(read.nodes, root, record, user_sgpr, srt_size_dw, user_data_register_base, entry_values, texture.fields) ||
+		    !ShaderGen5TextureTypeIsImage(texture.Type()) ||
+		    (shape_known && !ShaderGen5InstructionShapeAppliesToType(texture.Type(), instruction_shape)) ||
+		    (record > 0 && texture_class(texture) != texture_class(textures->front())))
+		{
+			return false;
+		}
+		textures->push_back(texture);
+	}
+	return true;
+}
+
+// One texture per record, never shared between records that load the same
+// words: the module then depends on the record count, not on the draw's data.
+static void ShaderBindHeapTextures(const ShaderCode& code, const ShaderHeapDescriptorRead& read,
+                                   const std::vector<ShaderTextureResource>& textures, ShaderBindResources* bind, ShaderParsedUsage* info,
+                                   const HW::UserSgprInfo& user_sgpr)
+{
+	const auto&       instructions = code.GetInstructions();
+	const auto&       inst         = instructions.At(read.instruction);
+	ShaderHeapTexture heap {.consumer_pc = inst.pc, .load_pc = instructions.At(read.load).pc};
+	if (read.slot != UINT32_MAX)
+	{
+		// The record index is the S_MUL_I32 source that is not the stride.
+		const auto& mul = instructions.At(read.slot);
+		heap.slot_pc    = mul.pc;
+		heap.slot_index = ShaderOperandIsPlainConstant(mul.src[1]) ? mul.src[0] : mul.src[1];
+	}
+	ShaderGen5SampledTextureShape shape {};
+	const bool                    shape_known = ShaderGen5SampledTextureShapeForMimgDimension(inst.mimg_dimension, &shape);
+	for (uint32_t record = 0; record < textures.size(); ++record)
+	{
+		const int index = bind->textures2D.textures_num;
+		ShaderGetTextureBuffer(&bind->textures2D, nullptr, 16, 0, ShaderTextureUsage::ReadOnly, user_sgpr, textures[record].fields);
+		bind->textures2D.desc[index].sample_operation = ShaderTextureSampleOperation(textures[record], ShaderHeapSampleOperation(inst));
+		bind->textures2D.desc[index].dynamic_sload    = true;
+		if (shape_known)
+		{
+			ShaderSetSampledTextureInstructionShape(&bind->textures2D, index, shape);
+		}
+		info->textures2D_readonly++;
+		heap.record        = record;
+		heap.texture_index = index;
+		bind->heap_textures.Add(heap);
+	}
+}
+
+void ShaderCollectHeapDescriptors(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info,
+                                  const HW::UserSgprInfo& user_sgpr, uint16_t srt_size_dw, int user_data_register_base,
+                                  const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo)
+{
+	EXIT_IF(bind == nullptr || info == nullptr);
+	bind->heap_textures.Clear();
+	const auto  direct       = memo == nullptr ? ShaderFindHeapDescriptorReads(code) : std::vector<ShaderHeapDescriptorRead> {};
+	const auto& reads        = memo != nullptr ? memo->HeapDescriptorReads(code) : direct;
+	const auto& instructions = code.GetInstructions();
+	const auto& entry_values = scalar_flow.holding_entry_value;
+	for (const auto& read: reads)
+	{
+		const auto& inst = instructions.At(read.instruction);
+		if ((read.sampler ? ShaderFindImageSamplerDescriptor(inst, *bind, user_data_register_base)
+		                  : ShaderFindImageSampledTextureDescriptor(inst, *bind, user_data_register_base)) >= 0)
+		{
+			continue;
+		}
+		const uint32_t                     count = ShaderHeapRecordCount(read, user_sgpr, srt_size_dw, user_data_register_base, entry_values);
+		ShaderSamplerResource              sampler {};
+		std::vector<ShaderTextureResource> textures;
+		const bool                         bound =
+		    count > 0 && count <= kShaderHeapRecordsMax &&
+		    (read.sampler ? ShaderHeapSampler(read, count, user_sgpr, srt_size_dw, user_data_register_base, entry_values, &sampler)
+		                  : ShaderHeapTextures(inst, read, count, user_sgpr, srt_size_dw, user_data_register_base, entry_values, &textures) &&
+		                        bind->textures2D.textures_num + static_cast<int>(count) <= ShaderTextureResources::RES_MAX);
+		if (!bound)
+		{
+			// The image emitter then stops on the unresolved descriptor.
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+			               "WARNING: heap descriptor read not bound: crc=%08" PRIx32 " pc=0x%08" PRIx32 " sampler=%d records=%u\n",
+			               code.GetCrc32(), inst.pc, read.sampler ? 1 : 0, count);
+			continue;
+		}
+		if (read.sampler)
+		{
+			ShaderBindFixedSampler(bind, info, inst, sampler, user_data_register_base);
+		} else
+		{
+			ShaderBindHeapTextures(code, read, textures, bind, info, user_sgpr);
+		}
+	}
 }
 
 // Follows each V# dword of a buffer consumer back, through the only write
@@ -3050,7 +3760,7 @@ std::vector<ShaderNestedTableLoad> ShaderFindNestedTableLoads(const ShaderCode& 
 			continue;
 		}
 		ShaderPartitionGsUserDataLoad(code, cfg, candidate.index, instructions.At(candidate.index), candidate.offset_dw, 0,
-		                              candidate.dwords, true, &load.loads);
+		                              candidate.dwords, ShaderGsUserDataBufferPolicy::All, &load.loads);
 		if (!load.loads.empty())
 		{
 			nested.push_back(std::move(load));
@@ -3087,8 +3797,15 @@ void ShaderBindGsUserDataDescriptors(const ShaderCode& code, const std::vector<S
 	{
 		table_dwords = std::max(table_dwords, static_cast<uint32_t>(load.offset_dw + load.block.dst.size));
 	}
-	std::vector<uint32_t> table(table_dwords);
-	if (table_address == 0 || !ShaderSnapshotGuestDescriptorTable(table_address, table_dwords, &table))
+	std::array<uint32_t, 64> stack_table {};
+	std::vector<uint32_t>    heap_table;
+	uint32_t*                table_words = stack_table.data();
+	if (table_dwords > stack_table.size())
+	{
+		heap_table.resize(table_dwords);
+		table_words = heap_table.data();
+	}
+	if (table_address == 0 || !ShaderSnapshotGuestDescriptorTable(table_address, table_dwords, table_words))
 	{
 		EXIT("unreadable GS user-data table: address=0x%016" PRIx64 " dwords=%u\n", table_address, table_dwords);
 	}
@@ -3097,14 +3814,73 @@ void ShaderBindGsUserDataDescriptors(const ShaderCode& code, const std::vector<S
 	{
 		for (const auto& load: loads)
 		{
-			if (ShaderDescriptorLoadInPass(load.use, pass) &&
-			    !ShaderAddDynamicScalarResource(code, bind, info, load.block, load.offset_dw, load.use, user_sgpr, table.data(),
+			if (!ShaderDescriptorLoadInPass(load.use, pass))
+			{
+				continue;
+			}
+			const bool is_storage       = load.use.kind == ShaderDynamicSLoadResourceKind::StorageBuffer;
+			const int  prev_buffers_num = bind->storage_buffers.buffers_num;
+			if (!ShaderAddDynamicScalarResource(code, bind, info, load.block, load.offset_dw, load.use, user_sgpr, table_words,
 			                                    code.GetInstructions().Size(), memo))
 			{
+				if (is_storage)
+				{
+					// Leave overflow storage descriptors on the runtime guest-address path.
+					continue;
+				}
 				EXIT("unable to materialize GS user-data descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u textures=%d "
 				     "samplers=%d\n",
 				     load.block.pc, load.offset_dw, load.block.dst.size, static_cast<unsigned>(load.use.kind),
 				     bind->textures2D.textures_num, bind->samplers.samplers_num);
+			}
+			if (!is_storage)
+			{
+				continue;
+			}
+			int storage_index = -1;
+			for (uint32_t mapping = bind->dynamic_sloads.records.Size(); mapping-- > first_record;)
+			{
+				const auto& rec = bind->dynamic_sloads.records.At(mapping);
+				if (rec.kind == ShaderDynamicSLoadResourceKind::StorageBuffer && rec.instruction_pc == load.block.pc &&
+				    rec.offset_dw == load.offset_dw)
+				{
+					storage_index = rec.resource_index;
+					break;
+				}
+			}
+			if (storage_index < 0 || storage_index >= bind->storage_buffers.buffers_num)
+			{
+				continue;
+			}
+			auto& s = bind->storage_buffers;
+			if (bind->storage_buffers.buffers_num != prev_buffers_num && storage_index == prev_buffers_num)
+			{
+				s.accesses[storage_index]                = ShaderStorageAccess::Raw;
+				s.unknown_reasons[storage_index]         = ShaderStorageUnknownReason::None;
+				s.code_available[storage_index]          = true;
+				s.exact_matches[storage_index]           = true;
+				s.decoded_unknown[storage_index]         = false;
+				s.indirect_descriptor_use[storage_index] = false;
+				s.raw_vmem_oob_guarded[storage_index]    = load.use.raw_vmem_oob_guarded;
+				s.raw_smem_use[storage_index]            = load.use.raw_smem_use;
+				s.raw_smem_dynamic_offset[storage_index] = load.use.raw_smem_use;
+				s.raw_tbuffer_use[storage_index]         = false;
+				s.dword_loads_only[storage_index]        = load.use.dword_loads_only;
+				s.format_loads_only[storage_index]       = false;
+			} else
+			{
+				if (s.accesses[storage_index] == ShaderStorageAccess::Unknown)
+				{
+					s.accesses[storage_index] = ShaderStorageAccess::Raw;
+				} else if (s.accesses[storage_index] == ShaderStorageAccess::Typed)
+				{
+					s.accesses[storage_index] = ShaderStorageAccess::Mixed;
+				}
+				s.raw_vmem_oob_guarded[storage_index]    = s.raw_vmem_oob_guarded[storage_index] || load.use.raw_vmem_oob_guarded;
+				s.raw_smem_use[storage_index]            = s.raw_smem_use[storage_index] || load.use.raw_smem_use;
+				s.raw_smem_dynamic_offset[storage_index] = s.raw_smem_dynamic_offset[storage_index] || load.use.raw_smem_use;
+				s.dword_loads_only[storage_index]        = s.dword_loads_only[storage_index] && load.use.dword_loads_only;
+				s.format_loads_only[storage_index]       = false;
 			}
 		}
 	}
@@ -3333,8 +4109,19 @@ void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindR
 		// The binding replaces the base dword with the descriptor slot; only a
 		// base still holding it addresses the bound buffer.
 		const int base = scalar ? inst.src[0].register_id : vector->register_id;
-		if (base < 0 || base >= kShaderScalarLivenessSgprs || !ShaderBufferRegisterNamesBinding(*bind, inst, user_data_register_base))
+		if (base < 0 || base >= kShaderScalarLivenessSgprs)
 		{
+			continue;
+		}
+		if (!ShaderBufferRegisterNamesBinding(*bind, inst, user_data_register_base))
+		{
+			// A V# the program wrote on every path, over registers that name no binding, is a descriptor it built.
+			if (record_consumers && !holding[index].test(static_cast<size_t>(base)) &&
+			    (memo != nullptr ? memo->SgprWrittenOnEveryPath(code, index, base)
+			                     : ShaderUniqueReachingSgprWrite(code, ShaderBuildControlFlowGraph(code), index, base) != UINT32_MAX))
+			{
+				bind->redefined_descriptor_consumers.Add(inst.pc);
+			}
 			continue;
 		}
 		if (!holding[index].test(static_cast<size_t>(base)) && record_consumers)

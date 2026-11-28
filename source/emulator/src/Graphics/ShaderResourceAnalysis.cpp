@@ -21,6 +21,10 @@ int ShaderStorageBufferBoundIndex(const ShaderBindResources& bind, const ShaderO
 	const int api_register = resource.register_id - user_data_register_base;
 	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
 	{
+		if (bind.storage_buffers.dynamic_sload[i])
+		{
+			continue;
+		}
 		const int start = bind.storage_buffers.start_register[i];
 		if (start >= 0 && start == api_register)
 		{
@@ -297,14 +301,19 @@ bool ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format)
 
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component)
 {
-	if (channel_order > HW::kColorExportOrderTwoChannelAlt) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: channel_order > 4 condition ignored (continuing)\n"); }
+	if (channel_order > HW::kColorExportOrderOneChannelAlpha) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: channel_order > 5 condition ignored (continuing)\n"); }
 	if (output_component > 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: output_component > 3 condition ignored (continuing)\n"); }
 
 	// The attachment VkFormat and image view own physical component order.
 	// Shader exports remain logical RGBA; applying COMP_SWAP here as well would
 	// swap the same components twice in render-to-texture feedback passes.
-	// Only the two-channel ALT swap has no host format: its second channel holds W.
+	// Only the two-channel ALT and one-channel ALT_REV swaps have no host format:
+	// their second, respectively only, channel holds W.
 	if (channel_order == HW::kColorExportOrderTwoChannelAlt && output_component == 1u)
+	{
+		return 3u;
+	}
+	if (channel_order == HW::kColorExportOrderOneChannelAlpha && output_component == 0u)
 	{
 		return 3u;
 	}

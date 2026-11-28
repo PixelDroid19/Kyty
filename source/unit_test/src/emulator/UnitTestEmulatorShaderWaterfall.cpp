@@ -1097,6 +1097,93 @@ static bool QuadMaskBodyUnguarded(const QuadMaskProgram& program, const std::vec
 	return program.body < unguarded.size() && unguarded[program.body];
 }
 
+static ShaderOperand Literal(uint32_t value)
+{
+	ShaderOperand op {};
+	op.type       = ShaderOperandType::IntegerInlineConstant;
+	op.constant.u = value;
+	op.size       = 1;
+	return op;
+}
+
+static ShaderInstruction VectorOp(uint32_t pc, ShaderInstructionType type, uint32_t dst, std::initializer_list<ShaderOperand> sources)
+{
+	ShaderInstruction inst {};
+	inst.pc     = pc;
+	inst.type   = type;
+	inst.format = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+	inst.dst    = Vgpr(dst);
+	for (const auto& source: sources) { inst.src[inst.src_num++] = source; }
+	return inst;
+}
+
+static ShaderInstruction NarrowExec(uint32_t pc)
+{
+	ShaderInstruction inst {};
+	inst.pc      = pc;
+	inst.type    = ShaderInstructionType::VCmpxEqU32;
+	inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	inst.dst     = ExecPair();
+	inst.src[0]  = Sgpr(kScalarRegister);
+	inst.src[1]  = Vgpr(9u);
+	inst.src_num = 2;
+	return inst;
+}
+
+static ShaderInstruction ExecFrom(uint32_t pc, uint32_t source)
+{
+	ShaderInstruction inst {};
+	inst.pc      = pc;
+	inst.type    = ShaderInstructionType::SMovB64;
+	inst.format  = ShaderInstructionFormat::Sdst2Ssrc02;
+	inst.dst     = ExecPair();
+	inst.src[0]  = Sgpr(source, 2u);
+	inst.src_num = 1;
+	return inst;
+}
+
+static ShaderInstruction RelativeStore(uint32_t pc, uint32_t base, uint32_t source)
+{
+	ShaderInstruction inst {};
+	inst.pc      = pc;
+	inst.type    = ShaderInstructionType::VMovreldB32;
+	inst.format  = ShaderInstructionFormat::SVdstSVsrc0;
+	inst.dst     = Vgpr(base);
+	inst.src[0]  = Vgpr(source);
+	inst.src_num = 1;
+	return inst;
+}
+
+// The guest compiler's shape: a 2-bit lane index, and three destination-relative moves with the REST update
+// scheduled after the first.
+static ShaderCode InterleavedStoreLoop(uint32_t first_base)
+{
+	ShaderCode code;
+	auto&      insts = code.GetInstructions();
+	insts.Add(VectorOp(0u, ShaderInstructionType::VBfeU32, kIndexRegister, {Vgpr(1u), Literal(4u), Literal(2u)}));
+	insts.Add(RestFromExec(8u, kRestRegister));
+	WaterfallFixture loop {};
+	loop.head_pc = 12u;
+	AppendWaterfallBody(&loop);
+	for (uint32_t i = 0; i < loop.code.GetInstructions().Size() && loop.code.GetInstructions().At(i).pc < loop.move_pc; ++i)
+	{
+		insts.Add(loop.code.GetInstructions().At(i));
+	}
+	auto andn2 = *AtPc(loop.code, loop.andn2_pc);
+	andn2.pc   = loop.move_pc + 4u;
+	insts.Add(RelativeStore(loop.move_pc, first_base, 30u));
+	insts.Add(andn2);
+	insts.Add(RelativeStore(loop.move_pc + 8u, 3u, 31u));
+	insts.Add(RelativeStore(loop.move_pc + 12u, 4u, 32u));
+	insts.Add(ExecFrom(loop.move_pc + 16u, kRestRegister));
+	const auto branch = BranchTo(loop.move_pc + 20u, loop.head_pc, ShaderInstructionType::SCbranchScc1);
+	insts.Add(branch);
+	code.GetLabels().Add(ShaderLabel(branch));
+	code.GetIndirectLabels().Add(ShaderLabel(branch.pc + 4u, branch.pc));
+	insts.Add(EndProgram(branch.pc + 4u));
+	return code;
+}
+
 } // namespace
 
 // With quad-gathered masks, S_WQM of a mask that an SCC branch proved nonzero sets this invocation's EXEC bit,
@@ -1113,6 +1200,64 @@ TEST(EmulatorShaderWaterfall, QuadMaskWqmOfTestedPairDropsTheGuard)
 		const auto broken = BuildQuadMaskProgram(brk);
 		EXPECT_FALSE(QuadMaskBodyUnguarded(broken, broken.gather)) << static_cast<int>(brk);
 	}
+}
+
+TEST(EmulatorShaderWaterfall, LowersStoresAroundTheRestUpdateWhenTheIndexValuesMissTheIndex)
+{
+	// v2 + {0..3} never reaches the index register v7.
+	auto code = InterleavedStoreLoop(2u);
+	ShaderLowerWaterfallMoves(&code);
+	EXPECT_FALSE(HasType(code, ShaderInstructionType::VReadfirstlaneB32));
+	EXPECT_FALSE(HasType(code, ShaderInstructionType::SCbranchScc1));
+	EXPECT_TRUE(HasType(code, ShaderInstructionType::SAndn2B64));
+	int lowered = 0;
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.type != ShaderInstructionType::VMovreldB32) { continue; }
+		EXPECT_EQ(inst.src_num, 2);
+		EXPECT_EQ(inst.src[1].register_id, static_cast<int>(kIndexRegister));
+		++lowered;
+	}
+	EXPECT_EQ(lowered, 3);
+}
+
+TEST(EmulatorShaderWaterfall, RefusesStoresAfterOneWhoseIndexValuesReachTheIndex)
+{
+	// v5 + 2 is the index register v7, so the later stores could see an index the first one wrote.
+	auto       code  = InterleavedStoreLoop(5u);
+	const auto count = code.GetInstructions().Size();
+	ShaderLowerWaterfallMoves(&code);
+	EXPECT_EQ(code.GetInstructions().Size(), count);
+	EXPECT_TRUE(HasType(code, ShaderInstructionType::VReadfirstlaneB32));
+}
+
+TEST(EmulatorShaderWaterfall, LaneIndexValuesHoldOnlyWhereTheirDefinitionRanAndNoRelativeWriteReaches)
+{
+	const auto bfe = [](uint32_t pc) { return VectorOp(pc, ShaderInstructionType::VBfeU32, kIndexRegister, {Vgpr(1u), Literal(0u), Literal(2u)}); };
+	const auto use = [](uint32_t pc) { return VectorOp(pc, ShaderInstructionType::VMovB32, 8u, {Vgpr(kIndexRegister)}); };
+	Vector<uint32_t> values;
+
+	// Defined under EXEC, used under a narrower EXEC: every active lane ran the definition.
+	ShaderCode narrowed;
+	for (const auto& inst: {RestFromExec(0u, kRestRegister), bfe(4u), NarrowExec(8u), use(12u)}) { narrowed.GetInstructions().Add(inst); }
+	ASSERT_TRUE(ShaderLaneValuesOnEntry(narrowed, 3u, static_cast<int>(kIndexRegister), &values));
+	EXPECT_EQ(values.Size(), 4u);
+	for (uint32_t value = 0; value < 4u; ++value) { EXPECT_TRUE(values.Contains(value)) << value; }
+
+	// Defined under a narrowed EXEC, then EXEC restored: a lane that skipped the definition is active again.
+	ShaderCode widened;
+	for (const auto& inst: {RestFromExec(0u, kRestRegister), NarrowExec(4u), bfe(8u), ExecFrom(12u, kRestRegister), use(16u)})
+	{
+		widened.GetInstructions().Add(inst);
+	}
+	EXPECT_TRUE(ShaderLaneValuesOnEntry(widened, 3u, static_cast<int>(kIndexRegister), &values));
+	EXPECT_FALSE(ShaderLaneValuesOnEntry(widened, 4u, static_cast<int>(kIndexRegister), &values));
+
+	// An M0-relative store from a lower base may write any VGPR above it.
+	ShaderCode stored;
+	for (const auto& inst: {bfe(0u), RelativeStore(8u, 2u, 30u), use(12u)}) { stored.GetInstructions().Add(inst); }
+	EXPECT_TRUE(ShaderLaneValuesOnEntry(stored, 1u, static_cast<int>(kIndexRegister), &values));
+	EXPECT_FALSE(ShaderLaneValuesOnEntry(stored, 2u, static_cast<int>(kIndexRegister), &values));
 }
 
 UT_END();

@@ -3231,7 +3231,9 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 			// BUFFER_STORE_FORMAT encodes 32-bit elements only, so a written typed V# keeps the 32-bit rule.
 			const bool format_loads = storage_buffers.accesses[i] == ShaderStorageAccess::Typed && storage_buffers.format_loads_only[i] &&
 			                          ShaderGen5FormatLoadDescriptorSupported(r);
-			if (!format_loads && !ShaderGen5StorageDescriptorSupported(r, storage_buffers.accesses[i]))
+			const bool raw_zero_stride_by_address =
+			    storage_buffers.by_address[i] && storage_buffers.accesses[i] == ShaderStorageAccess::Raw && r.Stride() == 0u;
+			if (!format_loads && !raw_zero_stride_by_address && !ShaderGen5StorageDescriptorSupported(r, storage_buffers.accesses[i]))
 			{
 				Emulator::Agent::Lifecycle::StorageFrontierContext context {};
 				context.binding         = DescribeStorageBinding(storage_buffers, i);

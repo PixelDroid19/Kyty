@@ -2261,6 +2261,47 @@ TEST(EmulatorTileDetile, Standard4KBBc1WorldAlbedoMipChainMatchesGuestSize)
 	EXPECT_EQ(covered, k_levels);
 }
 
+TEST(EmulatorTileDetile, BlockViewOfCompressedChainSharesTheChainLayout)
+{
+	// A 16-byte-element view of a BC7 chain is a quarter of its size but keeps the
+	// chain's level count, so its last levels lie past its own 1x1 element level.
+	using GetLayout = bool (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, Gen5TextureMipLayout*);
+	constexpr uint32_t k_block_view = 75u; // 32_32_32_32_UINT
+	constexpr uint32_t k_bc7        = 181u;
+	for (const auto get_layout: {static_cast<GetLayout>(Gen5GetStandard4KBTextureMipLayout),
+	                             static_cast<GetLayout>(Gen5GetStandard256BTextureMipLayout)})
+	{
+		for (const uint32_t texels: {256u, 2048u})
+		{
+			uint32_t levels = 1u;
+			for (uint32_t extent = texels; extent > 1u; extent >>= 1u)
+			{
+				levels++;
+			}
+			Gen5TextureMipLayout chain {};
+			Gen5TextureMipLayout view {};
+			ASSERT_TRUE(get_layout(k_bc7, texels, texels, texels, levels, &chain));
+			ASSERT_TRUE(get_layout(k_block_view, texels / 4u, texels / 4u, texels / 4u, levels, &view));
+			EXPECT_EQ(view.tiled.size, chain.tiled.size);
+			EXPECT_EQ(view.first_tail_level, chain.first_tail_level);
+			EXPECT_EQ(view.linear_size, chain.linear_size);
+			for (uint32_t level = 0; level < levels; ++level)
+			{
+				const auto& a = view.level[level];
+				const auto& b = chain.level[level];
+				EXPECT_EQ(a.element_width, b.element_width) << "level " << level;
+				EXPECT_EQ(a.element_height, b.element_height) << "level " << level;
+				EXPECT_EQ(a.tiled_offset, b.tiled_offset) << "level " << level;
+				EXPECT_EQ(a.tiled_size, b.tiled_size) << "level " << level;
+				EXPECT_EQ(a.tail_x, b.tail_x) << "level " << level;
+				EXPECT_EQ(a.tail_y, b.tail_y) << "level " << level;
+				EXPECT_EQ(a.in_mip_tail, b.in_mip_tail) << "level " << level;
+				EXPECT_EQ(a.linear_offset, b.linear_offset) << "level " << level;
+			}
+		}
+	}
+}
+
 TEST(EmulatorTileDetile, Standard256BMipChainStoresSmallestLevelFirstWithoutTail)
 {
 	// 4-byte elements use 8x8-element 256-byte blocks; every level pads to whole

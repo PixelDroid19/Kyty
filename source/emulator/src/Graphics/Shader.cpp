@@ -2745,17 +2745,45 @@ namespace {
 
 std::atomic<bool> g_storage_address_reads {false};
 
-// A read-only V# from user data whose every consumer is a raw dword load the
-// translator can issue from a device address; anything the slot path or the
-// SGPR words carry beyond that keeps the slot.
-bool ShaderStorageBufferReadsByAddress(const ShaderStorageResources& storage, int i)
+// A read-only V# whose every consumer is a raw dword load the translator can
+// issue from a device address; anything the slot path or the SGPR words carry
+// beyond that keeps the slot. Dynamic V# loads qualify only when every mapping
+// for the slot is a guest-load vector buffer (e.g. GS user-data tables).
+bool ShaderStorageBufferReadsByAddress(const ShaderBindResources& bind, int i)
 {
+	const auto& storage = bind.storage_buffers;
+	bool        dynamic_guest_vector = false;
+	if (storage.sources[i] == ShaderStorageBindingSource::DynamicScalarLoad || storage.dynamic_sload[i])
+	{
+		if (storage.sources[i] != ShaderStorageBindingSource::DynamicScalarLoad || !storage.dynamic_sload[i])
+		{
+			return false;
+		}
+		bool any_record = false;
+		for (const auto& record: bind.dynamic_sloads.records)
+		{
+			if (record.kind == ShaderDynamicSLoadResourceKind::StorageBuffer && record.resource_index == i)
+			{
+				if (!record.guest_load)
+				{
+					return false;
+				}
+				any_record = true;
+			}
+		}
+		if (!any_record)
+		{
+			return false;
+		}
+		dynamic_guest_vector = true;
+	}
 	return Config::IsNextGen() && g_storage_address_reads.load(std::memory_order_relaxed) && storage.dword_loads_only[i] &&
-	       storage.start_register[i] >= 0 && storage.sources[i] != ShaderStorageBindingSource::DynamicScalarLoad &&
+	       storage.start_register[i] >= 0 &&
+	       (dynamic_guest_vector || storage.sources[i] != ShaderStorageBindingSource::DynamicScalarLoad) &&
 	       storage.accesses[i] == ShaderStorageAccess::Raw && ShaderStorageUsageIsReadOnly(storage.usages[i]) &&
 	       storage.exact_matches[i] && !storage.decoded_unknown[i] && !storage.indirect_descriptor_use[i] &&
-	       !storage.dynamic_sload[i] && !storage.unread_stream[i] && !storage.extended[i] && !storage.raw_tbuffer_use[i] &&
-	       !storage.row_redefined[i];
+	       (dynamic_guest_vector || !storage.dynamic_sload[i]) && !storage.unread_stream[i] && !storage.extended[i] &&
+	       !storage.raw_tbuffer_use[i] && !storage.row_redefined[i];
 }
 
 } // namespace
@@ -2830,7 +2858,7 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	for (int i = 0; i < bind->storage_buffers.buffers_num; i++)
 	{
 		bind->storage_buffers.by_address[i] =
-		    bind->descriptor_flow_proven && ShaderStorageBufferReadsByAddress(bind->storage_buffers, i);
+		    bind->descriptor_flow_proven && ShaderStorageBufferReadsByAddress(*bind, i);
 		bind->storage_address_used          = bind->storage_address_used || bind->storage_buffers.by_address[i];
 	}
 	KYTY_PROFILER_FUNCTION();
@@ -3840,6 +3868,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		ShaderCollectPointerTableResources(*code, bind, user_sgpr, info, user_data->srt_size_dw, user_data_register_base, *code_flow,
 		                                   code_memo);
 		ShaderCollectConstantSamplers(*code, bind, info, user_data_register_base, code_memo);
+		ShaderCollectTableSamplers(*code, bind, info, user_sgpr, user_data->srt_size_dw, user_data_register_base, *code_flow,
+		                           code_memo);
+		ShaderCollectHeapDescriptors(*code, bind, info, user_sgpr, user_data->srt_size_dw, user_data_register_base, *code_flow,
+		                             code_memo);
 	}
 
 	// Gen5 metadata is advisory: some shaders address an S# descriptor directly
@@ -4638,6 +4670,25 @@ bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type)
 		case ShaderInstructionType::ImageSampleD: return true;
 		default: return false;
 	}
+}
+
+bool ShaderImageStoreTargetsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst)
+{
+	if ((inst.type != ShaderInstructionType::ImageStore && inst.type != ShaderInstructionType::ImageStoreMip) || inst.src_num < 2 ||
+	    inst.src[1].type != ShaderOperandType::Sgpr)
+	{
+		return false;
+	}
+	// Only a loaded descriptor is recorded for a store (ShaderAddDynamicTextureResource).
+	const auto& zero = bind.zero_image_resources;
+	for (int i = 0; i < zero.images_num; ++i)
+	{
+		if (zero.loaded[i] && zero.start_register[i] == inst.src[1].register_id && inst.pc > zero.load_pc[i] && inst.pc <= zero.last_pc[i])
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst)
@@ -6210,6 +6261,19 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 		ids->Add(record.consumer_pc);
 		ids->Add(static_cast<uint32_t>(record.sampler_index));
 	}
+	// Hashed only when present, so binds without heap reads keep their ids.
+	if (bind.heap_textures.Size() > 0)
+	{
+		ids->Add(bind.heap_textures.Size());
+		for (const auto& heap: bind.heap_textures)
+		{
+			ids->Add(heap.consumer_pc);
+			ids->Add(heap.load_pc);
+			ids->Add(heap.slot_pc);
+			ids->Add(heap.record);
+			ids->Add(static_cast<uint32_t>(heap.texture_index));
+		}
+	}
 
 	ids->Add(bind.redefined_descriptor_consumers.Size());
 	for (const auto pc: bind.redefined_descriptor_consumers)
@@ -6275,11 +6339,10 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 		ids->Add(r.Type());
 		ids->Add(storage || !Config::IsNextGen() ? r.Format()
 		                                         : 0x10000u | static_cast<uint32_t>(VulkanGen5ImageNumericType(r.Format())));
-		// Storage resinfo admission depends on the resource's mip view.
-		// A module admitted for one mip must not bypass that check on reuse.
-		ids->Add(storage ? r.BaseLevel() : 0u);
-		ids->Add(storage ? r.LastLevel() : 0u);
-		ids->Add(storage ? r.MaxMip() : 0u);
+		// Storage resinfo is admitted only for a view of a single level. Which
+		// level that is selects data, not code, so a pass that writes one level
+		// per draw must share one module.
+		ids->Add(storage && r.BaseLevel() == r.LastLevel() ? 1u : 0u);
 		// Image stores apply a channel selection the storage view cannot express.
 		ids->Add(storage && ShaderStorageTextureSwizzleInShader(r) ? r.DstSelXYZW() : 0u);
 		// ids->Add(r.Depth());

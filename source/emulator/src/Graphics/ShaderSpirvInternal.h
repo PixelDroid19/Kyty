@@ -243,6 +243,10 @@ public:
 	// Writes the metadata of each assembled V# the instruction consumes into its
 	// descriptor SGPRs (see ShaderAssembledDescriptor).
 	[[nodiscard]] String8 MaterializeAssembledDescriptors(const ShaderInstruction& inst) const;
+	// Keeps the record index of each heap read and writes the metadata of the
+	// texture its record binds into its T# SGPRs (see ShaderHeapTexture).
+	[[nodiscard]] String8 MaterializeHeapTextures(const ShaderInstruction& inst) const;
+	[[nodiscard]] String8 HeapRecordVariables() const;
 	[[nodiscard]] String8 EmitMetadataStore(int row, int field, const String8& reg) const;
 	[[nodiscard]] String8 EmitThreadLimitLoad(uint32_t axis, const String8& id) const;
 	[[nodiscard]] bool    UsesGuestDeviceAddress() const;

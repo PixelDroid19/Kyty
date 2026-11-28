@@ -517,6 +517,7 @@ private:
 	[[nodiscard]] int HeapAt(uint64_t address) const;
 	void              HeapsIntersecting(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, std::vector<int>* out) const;
 	void              RebuildHeapIndex();
+	[[nodiscard]] bool InsertDisjointHeapSpan(int heap_id);
 	void              ForgetHeapStorageObjects(int removed_heap_id);
 	// (heap id, object id) of each in-use writable StorageBuffer overlapping a range
 	// whose writes are not published to the guest device-address view on `consumer`.

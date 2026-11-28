@@ -1600,6 +1600,7 @@ static bool OverlapsRegisteredRange(uint64_t vaddr, uint64_t size)
 	return it != registry.ranges.end() && it->first < vaddr + size;
 }
 
+
 bool GuestDeviceAddressOverlapsRegisteredRange(uint64_t vaddr, uint64_t size)
 {
 	return OverlapsRegisteredRange(vaddr, size);

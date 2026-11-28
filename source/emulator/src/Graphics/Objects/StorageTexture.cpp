@@ -379,9 +379,9 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	}
 
 	// Gen5 storage images use the same 2D tile contracts as sampled textures:
-	// 0/8 linear, 5 Standard4KB, 9 Standard64KB, 13 TextureTiled (legacy),
+	// 0/8 linear, 1 Standard256B, 5 Standard4KB, 9 Standard64KB, 13 TextureTiled (legacy),
 	// 27 kRenderTarget SW64k. Reject anything outside that set with values.
-	if (tile != 0 && tile != 5 && tile != 8 && tile != 9 && tile != 13 && tile != 27)
+	if (tile != 0 && tile != 1 && tile != 5 && tile != 8 && tile != 9 && tile != 13 && tile != 27)
 	{
 		EXIT("unsupported storage texture tile: tile=%" PRIu64 " format=%" PRIu64 " dfmt=%" PRIu64 " nfmt=%" PRIu64 " width=%" PRIu64
 		     " height=%" PRIu64 " pitch=%" PRIu64 " levels=%" PRIu64 " type=%" PRIu64 " size=%" PRIu64 "\n",
@@ -458,7 +458,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		                         levels, neo);
 		UtilFillImage(ctx, vk_obj, temp_buf, *size, regions, static_cast<uint64_t>(vk_layout));
 		delete[] temp_buf;
-	} else if (tile == 5)
+	} else if (tile == 5 || tile == 1)
 	{
 		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
 		if (bytes_per_element == 0u || (levels != 1u && !mip_backing))
@@ -471,7 +471,9 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: linear_bytes == 0u || linear_bytes > *size condition ignored (continuing)\n");
 		}
 		auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
-		TileConvertStandard4KBToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), width, height, pitch, bytes_per_element);
+		// Standard4KB (5) and Standard256B (1) share the element arithmetic.
+		const auto detile = tile == 1 ? TileConvertStandard256BToLinear : TileConvertStandard4KBToLinear;
+		detile(temp_buf, reinterpret_cast<void*>(*vaddr), width, height, pitch, bytes_per_element);
 		regions[0].offset = 0;
 		regions[0].pitch  = pitch;
 		regions[0].width  = width;
@@ -1014,8 +1016,8 @@ bool StorageTextureUsesMipBacking(const uint64_t* params, bool gen5)
 		return gen5 && (tile == 5u || tile == 9u || tile == 27u);
 	}
 	const bool depth_chain  = fmt == 22u && tile == 24u;
-	// Gen5 colour tilings: linear (0), Standard4KB (5), Standard64KB (9) and render target (27).
-	const bool colour_chain = gen5 && (tile == 0u || tile == 5u || tile == 9u || tile == 27u);
+	// Gen5 colour tilings: linear (0), Standard256B (1), Standard4KB (5), Standard64KB (9) and render target (27).
+	const bool colour_chain = gen5 && (tile == 0u || tile == 1u || tile == 5u || tile == 9u || tile == 27u);
 	return depth_chain || colour_chain;
 }
 
@@ -1239,7 +1241,6 @@ static uint32_t RenderAliasBytesPerElement(const uint64_t* render_params, const 
 	    render_params[RenderTextureObject::PARAM_ARRAY_LAYERS] != 1u ||
 	    render_params[RenderTextureObject::PARAM_NEO] != storage_params[StorageTextureObject::PARAM_NEO] ||
 	    storage_params[StorageTextureObject::PARAM_TILE] != 27u ||
-	    storage_params[StorageTextureObject::PARAM_LEVELS] != 1u ||
 	    storage_params[StorageTextureObject::PARAM_DEPTH] != 1u ||
 	    storage_params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u ||
 	    storage_params[StorageTextureObject::PARAM_SKIP_SEED] != 0u ||
@@ -1320,6 +1321,30 @@ static void AppendRenderAliasCopy(Vector<StorageTextureRenderAliasCopy>* plan, c
 	plan->Add(copy);
 }
 
+// A storage chain with the layout of a render target's whole mip chain holds the same texels at every
+// level (captured: a 12-level 2048x2048 RGBA8 target whose level 5 a compute pass stores as R32).
+static bool PlanRenderChainAlias(const uint64_t* render_params, uint64_t render_address, uint64_t render_size,
+                                 const uint64_t* storage_params, uint64_t storage_address, uint64_t storage_size,
+                                 Vector<StorageTextureRenderAliasCopy>* copies)
+{
+	const auto levels = static_cast<uint32_t>(render_params[RenderTextureObject::PARAM_MIP_LEVELS]);
+	const auto width  = static_cast<uint32_t>(render_params[RenderTextureObject::PARAM_WIDTH]);
+	const auto height = static_cast<uint32_t>(render_params[RenderTextureObject::PARAM_HEIGHT]);
+	if (levels <= 1u || render_params[RenderTextureObject::PARAM_VOLUME] != 0u || render_address != storage_address ||
+	    render_size != storage_size ||
+	    storage_params[StorageTextureObject::PARAM_WIDTH_HEIGHT] != ((static_cast<uint64_t>(width) << 32u) | height) ||
+	    storage_params[StorageTextureObject::PARAM_PITCH] != render_params[RenderTextureObject::PARAM_PITCH] ||
+	    StorageTextureMipBackingLevels(storage_params, GuestIsGen5()) != levels)
+	{
+		return false;
+	}
+	for (uint32_t level = 0; level < levels; level++)
+	{
+		copies->Add({0u, 0u, 0u, 0u, std::max(width >> level, 1u), std::max(height >> level, 1u), level});
+	}
+	return true;
+}
+
 bool StorageTexturePlanRenderAlias(const uint64_t* render_params, uint64_t render_address, uint64_t render_size,
                                    const uint64_t* storage_params, uint64_t storage_address, uint64_t storage_size,
                                    Vector<StorageTextureRenderAliasCopy>* copies)
@@ -1333,6 +1358,10 @@ bool StorageTexturePlanRenderAlias(const uint64_t* render_params, uint64_t rende
 	if (bytes_per_element == 0u)
 	{
 		return false;
+	}
+	if (storage_params[StorageTextureObject::PARAM_LEVELS] != 1u)
+	{
+		return PlanRenderChainAlias(render_params, render_address, render_size, storage_params, storage_address, storage_size, copies);
 	}
 	const uint64_t block_bytes = 65536u;
 	const uint64_t block_width = TileGet64KBBlockWidth(bytes_per_element);
@@ -1757,6 +1786,8 @@ void StorageTextureCopyRenderAlias(CommandBuffer* buffer, VulkanImage* source, V
 	{
 		ImageImageCopy region {};
 		region.src_image = source;
+		region.src_level = copy.level;
+		region.dst_level = copy.level;
 		region.src_x = static_cast<int>(copy.source_x);
 		region.src_y = static_cast<int>(copy.source_y);
 		region.dst_x = static_cast<int>(copy.destination_x);

@@ -111,7 +111,8 @@ bool PlainInstructionMetadata(const ShaderInstruction& instruction)
 	if (instruction.sopp_opcode != 0xffu || instruction.vop3_op_sel != 0u || instruction.vop3_omod != 0u ||
 	    instruction.vop3p_op_sel_hi != 0xffu || instruction.vop_sdwa || instruction.vop_sdwa_ctrl != 0u ||
 	    instruction.mimg_address_num != 0 || instruction.mimg_dmask != 0u || instruction.mimg_dimension != 0u ||
-	    instruction.mimg_explicit_lod || instruction.mimg_offset || instruction.mimg_return_old_value || instruction.smem_imm_offset != 0 ||
+	    instruction.mimg_explicit_lod || instruction.mimg_offset || instruction.mimg_return_old_value || instruction.mimg_coherent ||
+	    instruction.smem_imm_offset != 0 ||
 	    instruction.smem_flags != 0xffu || instruction.flat_offset != 0 || instruction.buffer_imm_offset != 0u ||
 	    instruction.buffer_idxen || instruction.buffer_offen || instruction.buffer_return_old_value || instruction.buffer_flags != 0xffu ||
 	    instruction.mtbuf_format != 0xffu || instruction.mtbuf_components != 0u || instruction.mtbuf_format_is_gen5 ||
@@ -452,7 +453,7 @@ bool ImageSampleCdGradients(const ShaderCode& code, uint32_t instruction_index, 
 	    instruction.mimg_dimension != 1u || instruction.src_num != 3 || instruction.mimg_address_num < 0 ||
 	    (instruction.mimg_address_num != 0 && instruction.mimg_address_num != 9 && instruction.mimg_address_num != 13) ||
 	    instruction.mimg_dmask == 0u || (instruction.mimg_dmask & 0xf0u) != 0u ||
-	    instruction.mimg_explicit_lod || instruction.mimg_offset || instruction.mimg_return_old_value ||
+	    instruction.mimg_explicit_lod || instruction.mimg_offset || instruction.mimg_return_old_value || instruction.mimg_coherent ||
 	    (instruction.mimg_address_num == 0 ? !PlainVgpr(instruction.src[0], 6) : !PlainVgpr(instruction.src[0], 1)) ||
 	    !PlainRegister(instruction.src[1], Operand::Sgpr, 8) ||
 	    !PlainRegister(instruction.src[2], Operand::Sgpr, 4) || !EmptyOperand(instruction.src[3]) ||

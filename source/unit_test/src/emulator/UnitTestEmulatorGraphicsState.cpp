@@ -30,6 +30,7 @@
 #include "Emulator/Graphics/Objects/StorageBuffer.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderProgramSnapshot.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VertexBuffer.h"
@@ -3933,6 +3934,28 @@ TEST(EmulatorGraphicsState, TwoChannelAltSwapExportsWIntoSecondChannel)
 	EXPECT_EQ(ResolveRenderTextureFormat(0x5u, 0x4u, 0x1u).format, RenderTextureFormat::R16G16Uint);
 }
 
+TEST(EmulatorGraphicsState, OneChannelAltRevSwapExportsWIntoTheChannel)
+{
+	// SWAP_ALT_REV on 8/16/32 stores export W in the only channel (an alpha-only target).
+	for (uint32_t cb_format: {0x1u, 0x2u, 0x4u})
+	{
+		HW::Context ctx;
+		HW::ColorInfo info;
+		info.format        = cb_format;
+		info.channel_order = 3u;
+		ctx.SetColorInfo(1, info);
+		EXPECT_EQ(ShaderColorExportSourceComponent(ctx.GetShaderRegisters().target_output_order[1], 0), 3u);
+	}
+	// The same swap on a four-channel format stays a host format order.
+	HW::Context ctx;
+	HW::ColorInfo info;
+	info.format        = 0xau;
+	info.channel_order = 3u;
+	ctx.SetColorInfo(0, info);
+	EXPECT_EQ(ShaderColorExportSourceComponent(ctx.GetShaderRegisters().target_output_order[0], 0), 0u);
+	EXPECT_EQ(ResolveRenderTextureFormat(0x1u, 0x0u, 0x3u).format, RenderTextureFormat::R8Unorm);
+}
+
 TEST(EmulatorGraphicsState, ResolvesObservedTwoChannelFloatRenderTarget)
 {
 	const auto format = ResolveRenderTextureFormat(0x5u, 0x7u, 0x0u);
@@ -6532,8 +6555,8 @@ TEST(EmulatorGraphicsState, StorageTextureUsesMipBackingForDepthAndGen5ColourCha
 	const StorageTextureObject depth(0u, 0u, 22u, 480u, 270u, 512u, 6u, 8u, 24u, false, identity, 9u, 1u);
 	EXPECT_TRUE(StorageTextureUsesMipBacking(depth.params, false)) << "depth chains do not depend on the generation";
 	EXPECT_TRUE(StorageTextureUsesMipBacking(depth.params, true));
-	// Gen5 colour chains, whichever tiling: linear (0), Standard4KB (5), Standard64KB (9), render target (27).
-	for (const uint32_t tile: {0u, 5u, 9u, 27u})
+	// Gen5 colour chains, whichever tiling: linear (0), Standard256B (1), Standard4KB (5), Standard64KB (9), render target (27).
+	for (const uint32_t tile: {0u, 1u, 5u, 9u, 27u})
 	{
 		const StorageTextureObject colour(0u, 0u, 71u, 1920u, 1080u, 1920u, 1u, 6u, tile, true, identity, 9u, 1u);
 		EXPECT_TRUE(StorageTextureUsesMipBacking(colour.params, true)) << "tile " << tile;
@@ -8995,6 +9018,99 @@ TEST(EmulatorGraphicsState, ClassifiesOneDimensionalArrayDynamicDescriptorByInst
 	EXPECT_EQ(descriptor.texture.Type(), 12u);
 	EXPECT_EQ(ShaderResolvedSampledTextureShape(descriptor), ShaderGen5SampledTextureShape::TwoDimensionalArray);
 	EXPECT_EQ(ShaderGen5HostSampledTextureType(descriptor.texture.Type(), ShaderResolvedSampledTextureShape(descriptor)), 13u);
+}
+
+TEST(EmulatorGraphicsState, DiscardsStoresThroughLoadedAllZeroDescriptor)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// s_load_dwordx8 s[4:11], s[0:1], 128; image_store v[0:3], v[8:10], s[4:11] dmask 0xf.
+	ShaderInstruction texture_load {};
+	texture_load.pc                = 0x8;
+	texture_load.type              = ShaderInstructionType::SLoadDwordx8;
+	texture_load.format            = ShaderInstructionFormat::Sdst8SbaseSoffset;
+	texture_load.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 8};
+	texture_load.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+	texture_load.src[1].type       = ShaderOperandType::IntegerInlineConstant;
+	texture_load.src[1].constant.u = 128u;
+	texture_load.src_num           = 2;
+
+	ShaderInstruction store {};
+	store.pc             = 0x10;
+	store.type           = ShaderInstructionType::ImageStore;
+	store.format         = ShaderInstructionFormat::VdataVaddr3StDmask;
+	store.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	store.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 8, .size = 3};
+	store.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 8};
+	store.src_num        = 2;
+	store.mimg_dimension = 1;
+	store.mimg_dmask     = 15;
+
+	ShaderInstruction end {};
+	end.pc     = 0x18;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(texture_load);
+	code.GetInstructions().Add(store);
+	code.GetInstructions().Add(end);
+
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 16; ++i)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	const uint64_t eud_ptr =
+	    Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(eud_ptr, 0u);
+	user_sgpr.value[0] = static_cast<uint32_t>(eud_ptr);
+	user_sgpr.value[1] = static_cast<uint32_t>(eud_ptr >> 32u);
+
+	uint16_t direct_offsets[6];
+	for (auto& offset: direct_offsets)
+	{
+		offset = 0xffffu;
+	}
+	direct_offsets[5] = 0;
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 6;
+	user_data.eud_size_dw            = 48;
+
+	const auto parse = [&](const uint32_t* eud, ShaderComputeInputInfo* input)
+	{
+		ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud, 64 * sizeof(uint32_t)));
+		ShaderParsedUsage usage {};
+		ShaderParseUsage2(&user_data, &usage, &input->bind, user_sgpr, 16, &code);
+	};
+
+	// All eight T# words zero: nothing is bound, the load writes zero and the store emits no write.
+	alignas(16) uint32_t zero_eud[64] = {};
+	ShaderComputeInputInfo zero_input {};
+	zero_input.threads_num[0] = 64u;
+	zero_input.threads_num[1] = zero_input.threads_num[2] = 1u;
+	parse(zero_eud, &zero_input);
+	EXPECT_EQ(zero_input.bind.textures2D.textures_num, 0);
+	EXPECT_EQ(zero_input.bind.zero_descriptor_loads.loads_num, 1);
+	EXPECT_TRUE(ShaderImageStoreTargetsZeroResource(zero_input.bind, store));
+	ShaderCalcBindingIndices(&zero_input.bind);
+	EXPECT_FALSE(SpirvGenerateSource(code, nullptr, nullptr, &zero_input).ContainsStr("OpImageWrite"));
+
+	// A 2D image T# in the same words stays a bound store.
+	alignas(16) uint32_t image_eud[64] = {};
+	image_eud[33]                      = 22u << 20u;
+	image_eud[35]                      = 9u << 28u;
+	ShaderComputeInputInfo image_input {};
+	parse(image_eud, &image_input);
+	EXPECT_EQ(image_input.bind.textures2D.textures_num, 1);
+	EXPECT_FALSE(ShaderImageStoreTargetsZeroResource(image_input.bind, store));
+	EXPECT_TRUE(Core::VirtualMemory::Free(eud_ptr));
 }
 
 TEST(EmulatorGraphicsState, MovesSampledBankCountWhenInstructionShapeResolves)

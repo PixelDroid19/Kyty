@@ -2856,6 +2856,7 @@ static bool GraphicsMapPrimInputToOutput(uint32_t input, uint32_t* output)
 		case 4:
 		case 5:
 		case 6:
+		case 9: // patch: a hull shader's own output wins when one is bound
 		case 12:
 		case 13:
 		case 19:
@@ -2940,9 +2941,9 @@ int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegiste
 		     gs_stages, hs_stages, static_cast<unsigned>(hs != nullptr));
 	}
 	uint32_t mapped_output = 0;
-	if (!GraphicsMapPrimInputToOutput(prim_type, &mapped_output) && !(prim_type == 9u && hs != nullptr))
+	if (!GraphicsMapPrimInputToOutput(prim_type, &mapped_output))
 	{
-		// PATCH requires an HS owner; NONE and reserved/unknown inputs have no mapping.
+		// NONE and reserved/unknown inputs have no mapping.
 		EXIT("GraphicsCreatePrimState: unsupported input primitive=%u has_hs=%u", prim_type,
 		     static_cast<unsigned>(hs != nullptr));
 	}

@@ -76,8 +76,25 @@ static bool buffer_reads_by_address(const Spirv* spirv, const ShaderInstruction&
 {
 	const auto* bind   = spirv->GetBindInfo();
 	const auto* vertex = spirv->GetVsInputInfo();
+	if (bind == nullptr || !bind->storage_address_used)
+	{
+		return false;
+	}
+	if (inst.src_num > resource_operand && inst.src[resource_operand].type == ShaderOperandType::Sgpr)
+	{
+		for (const auto& record: bind->dynamic_sloads.records)
+		{
+			if (record.kind == ShaderDynamicSLoadResourceKind::StorageBuffer &&
+			    record.destination_register == inst.src[resource_operand].register_id && inst.pc > record.instruction_pc &&
+			    inst.pc <= record.last_consumer_pc)
+			{
+				return record.resource_index >= 0 && record.resource_index < bind->storage_buffers.buffers_num &&
+				       bind->storage_buffers.by_address[record.resource_index];
+			}
+		}
+	}
 	// A consumer whose register no longer holds the bound V# reads its own V#.
-	if (bind == nullptr || !bind->storage_address_used || ShaderBufferConsumerRedefinesDescriptor(*bind, inst) ||
+	if (ShaderBufferConsumerRedefinesDescriptor(*bind, inst) ||
 	    std::find(bind->slot_only_consumers.begin(), bind->slot_only_consumers.end(), inst.pc) != bind->slot_only_consumers.end() ||
 	    ShaderIsDynamicVectorStorageConsumer(*bind, inst) || ShaderIsDynamicScalarStorageConsumer(*bind, inst))
 	{
@@ -468,9 +485,12 @@ static bool emit_address_words(Spirv* spirv, const ShaderInstruction& inst, cons
 	const auto u1   = spirv->GetConstantUint(1u);
 	const auto u2   = spirv->GetConstantUint(2u);
 	const auto u4   = spirv->GetConstantUint(4u);
+	const auto u8   = spirv->GetConstantUint(8u);
+	const auto u12  = spirv->GetConstantUint(12u);
 	if (dwords == 0u || dwords > 16u || all == "unknown_uint_constant" || zero == "unknown_float_constant" ||
 	    zero == "unknown_uint_constant" || u0 == "unknown_uint_constant" || u1 == "unknown_uint_constant" ||
-	    u2 == "unknown_uint_constant" || u4 == "unknown_uint_constant")
+	    u2 == "unknown_uint_constant" || u4 == "unknown_uint_constant" || u8 == "unknown_uint_constant" ||
+	    u12 == "unknown_uint_constant")
 	{
 		return false;
 	}
@@ -520,9 +540,67 @@ OpStore %<dst> %<t>_v<w>
 	{
 		part += String8::FromPrintf("OpStore %%%s %%%s\n", dsts[word].value.c_str(), zero.c_str());
 	}
-	if (dwords == 2u)
+	if (dwords >= 2u && dwords <= 4u)
 	{
-		// In the partial branch word 1 is guaranteed out of bounds; only word 0 can be backed.
+		// In the partial branch at most dwords - 1 leading words fit (4 <= bytes - off < dwords * 4).
+		// Emit a straight-line cascade instead of a loop so drivers avoid loop setup and extra spills.
+		String8 tail;
+		if (dwords == 3u)
+		{
+			tail = String8(R"(%<t>_prem = OpISub %uint <bytes> <off>
+%<t>_pin1 = OpUGreaterThanEqual %bool %<t>_prem %<u8>
+OpSelectionMerge %<t>_pm1 None
+OpBranchConditional %<t>_pin1 %<t>_pl1 %<t>_pm1
+%<t>_pl1 = OpLabel
+%<t>_pa1 = OpIAdd %ulong %<t>_addr %gda_u64_4
+%<t>_pp1 = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %<t>_pa1
+%<t>_pw1 = OpLoad %uint %<t>_pp1 Aligned 4
+%<t>_pv1 = OpBitcast %<type> %<t>_pw1
+OpStore %<dst1> %<t>_pv1
+OpBranch %<t>_pm1
+%<t>_pm1 = OpLabel
+)")
+			           .ReplaceStr("<t>", tag)
+			           .ReplaceStr("<bytes>", bytes)
+			           .ReplaceStr("<off>", off)
+			           .ReplaceStr("<u8>", u8)
+			           .ReplaceStr("<type>", value_type)
+			           .ReplaceStr("<dst1>", dsts[1].value);
+		} else if (dwords == 4u)
+		{
+			tail = String8(R"(%<t>_prem = OpISub %uint <bytes> <off>
+%<t>_pin1 = OpUGreaterThanEqual %bool %<t>_prem %<u8>
+OpSelectionMerge %<t>_pm1 None
+OpBranchConditional %<t>_pin1 %<t>_pl1 %<t>_pm1
+%<t>_pl1 = OpLabel
+%<t>_pa1 = OpIAdd %ulong %<t>_addr %gda_u64_4
+%<t>_pp1 = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %<t>_pa1
+%<t>_pw1 = OpLoad %uint %<t>_pp1 Aligned 4
+%<t>_pv1 = OpBitcast %<type> %<t>_pw1
+OpStore %<dst1> %<t>_pv1
+%<t>_pin2 = OpUGreaterThanEqual %bool %<t>_prem %<u12>
+OpSelectionMerge %<t>_pm2 None
+OpBranchConditional %<t>_pin2 %<t>_pl2 %<t>_pm2
+%<t>_pl2 = OpLabel
+%<t>_pa2 = OpIAdd %ulong %<t>_addr %gda_u64_8
+%<t>_pp2 = OpConvertUToPtr %_ptr_PhysicalStorageBuffer_uint %<t>_pa2
+%<t>_pw2 = OpLoad %uint %<t>_pp2 Aligned 4
+%<t>_pv2 = OpBitcast %<type> %<t>_pw2
+OpStore %<dst2> %<t>_pv2
+OpBranch %<t>_pm2
+%<t>_pm2 = OpLabel
+OpBranch %<t>_pm1
+%<t>_pm1 = OpLabel
+)")
+			           .ReplaceStr("<t>", tag)
+			           .ReplaceStr("<bytes>", bytes)
+			           .ReplaceStr("<off>", off)
+			           .ReplaceStr("<u8>", u8)
+			           .ReplaceStr("<u12>", u12)
+			           .ReplaceStr("<type>", value_type)
+			           .ReplaceStr("<dst1>", dsts[1].value)
+			           .ReplaceStr("<dst2>", dsts[2].value);
+		}
 		part += String8(R"(%<t>_room0 = OpUGreaterThanEqual %bool <bytes> %<u4>
 %<t>_last0 = OpISub %uint <bytes> %<u4>
 %<t>_fits0 = OpULessThanEqual %bool <off> %<t>_last0
@@ -534,7 +612,7 @@ OpBranchConditional %<t>_in0 %<t>_pload0 %<t>_pmerge0
 %<t>_pw0 = OpLoad %uint %<t>_pp0 Aligned 4
 %<t>_pv0 = OpBitcast %<type> %<t>_pw0
 OpStore %<dst0> %<t>_pv0
-OpBranch %<t>_pmerge0
+<tail>OpBranch %<t>_pmerge0
 %<t>_pmerge0 = OpLabel
 )")
 		            .ReplaceStr("<t>", tag)
@@ -542,8 +620,9 @@ OpBranch %<t>_pmerge0
 		            .ReplaceStr("<off>", off)
 		            .ReplaceStr("<u4>", u4)
 		            .ReplaceStr("<type>", value_type)
-		            .ReplaceStr("<dst0>", dsts[0].value);
-	} else if (dwords >= 3u)
+		            .ReplaceStr("<dst0>", dsts[0].value)
+		            .ReplaceStr("<tail>", tail);
+	} else if (dwords > 4u)
 	{
 		// Keep partial-OOB handling in a non-unrolled loop (one load instead of dwords unrolled branches).
 		// Because the whole-range check failed, backed leading words satisfy 1 <= ((bytes - off) >> 2) < dwords.
@@ -4038,7 +4117,7 @@ static bool EmitGuestScalarBufferLoad(const ShaderCode& code, Spirv* spirv, cons
 
 // S_BUFFER_LOAD through a by-address row (ShaderStorageResources::by_address):
 // SOFFSET + OFFSET (RDNA2 ISA, SMEM) from the device address in words 0-1.
-// The extent is word 2 in units of the stride (bytes when the stride is 0), as for the other scalar buffer path.
+// WriteStorageAddressRow writes the backed byte count directly into word 2.
 static bool EmitAddressScalarBufferLoad(Spirv* spirv, const ShaderInstruction& inst, uint32_t index, uint32_t components,
                                         String8* dst_source)
 {
@@ -4052,13 +4131,8 @@ static bool EmitAddressScalarBufferLoad(Spirv* spirv, const ShaderInstruction& i
 	const auto align4  = spirv->GetConstantUint(0xfffffffcu);
 	const auto shift32 = spirv->GetConstantUint(32u);
 	const auto shift16 = spirv->GetConstantUint(16u);
-	const auto mask14  = spirv->GetConstantUint(0x3fffu);
-	const auto u0      = spirv->GetConstantUint(0u);
-	const auto u1      = spirv->GetConstantUint(1u);
-	const auto u32max  = spirv->GetConstantUint(0xffffffffu);
 	if (imm == "unknown_uint_constant" || mask16 == "unknown_uint_constant" || align4 == "unknown_uint_constant" ||
-	    shift32 == "unknown_uint_constant" || shift16 == "unknown_uint_constant" || mask14 == "unknown_uint_constant" ||
-	    u0 == "unknown_uint_constant" || u1 == "unknown_uint_constant" || u32max == "unknown_uint_constant")
+	    shift32 == "unknown_uint_constant" || shift16 == "unknown_uint_constant")
 	{
 		return false;
 	}
@@ -4073,19 +4147,7 @@ static bool EmitAddressScalarBufferLoad(Spirv* spirv, const ShaderInstruction& i
 %<t>_off = OpBitwiseAnd %uint %<t>_offset %<align4>
 %<t>_d0 = OpLoad %uint %<d0>
 %<t>_d1 = OpLoad %uint %<d1>
-%<t>_records = OpLoad %uint %<d2>
-%<t>_stride_raw = OpShiftRightLogical %uint %<t>_d1 %<shift16>
-%<t>_stride = OpBitwiseAnd %uint %<t>_stride_raw %<mask14>
-%<t>_raw = OpIEqual %bool %<t>_stride %<u0>
-%<t>_scale = OpSelect %uint %<t>_raw %<u1> %<t>_stride
-%<t>_scale64 = OpUConvert %ulong %<t>_scale
-%<t>_records64 = OpUConvert %ulong %<t>_records
-%<t>_bytes64 = OpIMul %ulong %<t>_scale64 %<t>_records64
-%<t>_bytes_hi64 = OpShiftRightLogical %ulong %<t>_bytes64 %<shift32>
-%<t>_bytes_hi = OpUConvert %uint %<t>_bytes_hi64
-%<t>_bytes_fit = OpIEqual %bool %<t>_bytes_hi %<u0>
-%<t>_bytes_lo = OpUConvert %uint %<t>_bytes64
-%<t>_bytes = OpSelect %uint %<t>_bytes_fit %<t>_bytes_lo %<u32max>
+%<t>_bytes = OpLoad %uint %<d2>
 %<t>_hi = OpBitwiseAnd %uint %<t>_d1 %<mask16>
 %<t>_lo64 = OpUConvert %ulong %<t>_d0
 %<t>_hi64 = OpUConvert %ulong %<t>_hi
@@ -4100,10 +4162,6 @@ static bool EmitAddressScalarBufferLoad(Spirv* spirv, const ShaderInstruction& i
 	              .ReplaceStr("<mask16>", mask16)
 	              .ReplaceStr("<shift32>", shift32)
 	              .ReplaceStr("<shift16>", shift16)
-	              .ReplaceStr("<mask14>", mask14)
-	              .ReplaceStr("<u0>", u0)
-	              .ReplaceStr("<u1>", u1)
-	              .ReplaceStr("<u32max>", u32max)
 	              .ReplaceStr("<d0>", operand_variable_to_str(inst.src[0], 0).value)
 	              .ReplaceStr("<d1>", operand_variable_to_str(inst.src[0], 1).value)
 	              .ReplaceStr("<d2>", operand_variable_to_str(inst.src[0], 2).value);
@@ -4121,11 +4179,18 @@ static bool ScalarBufferUsesGuestAddress(const Spirv* spirv, const ShaderInstruc
 {
 	const auto* bind           = spirv->GetBindInfo();
 	const auto* vertex         = spirv->GetVsInputInfo();
-	const int   user_data_base = vertex != nullptr && vertex->gs_prolog ? 8 : 0;
+	const bool  vertex_front   = vertex != nullptr && vertex->gs_prolog;
+	const int   user_data_base = vertex_front ? 8 : 0;
 	const bool  stage          = spirv->GetPsInputInfo() != nullptr || spirv->UsesGeometryCompute() ||
 	                    spirv->GetCode().GetType() == ShaderType::Compute;
-	return Config::IsNextGen() && stage && bind != nullptr &&
-	       ShaderScalarBufferUsesRuntimeDescriptor(*bind, inst, user_data_base);
+	if (!Config::IsNextGen() || bind == nullptr || !ShaderScalarBufferUsesRuntimeDescriptor(*bind, inst, user_data_base))
+	{
+		return false;
+	}
+	// A vertex front's SGPRs below its user data hold system values at entry: a
+	// V# there, or one that replaced a bound descriptor, was built by the shader.
+	return stage || (vertex_front && (inst.src[0].register_id + 4 <= user_data_base ||
+	                                  ShaderBufferConsumerRedefinesDescriptor(*bind, inst)));
 }
 
 static bool RecompileZeroSBufferLoad(const ShaderInstruction& inst, uint32_t components, const ShaderBindResources* bind_info,
@@ -4746,6 +4811,114 @@ static bool recompile_sload_from_fetch_attrib(uint32_t index, const ShaderInstru
 	return true;
 }
 
+// Whether entry is the first heap texture with its loop (by_load false) or its
+// load (by_load true), which declares and writes that record index.
+static bool ShaderHeapFirstRecordEntry(const ShaderBindResources& bind, uint32_t entry, bool by_load)
+{
+	const auto& heap = bind.heap_textures.At(entry);
+	for (uint32_t prior = 0; prior < entry; ++prior)
+	{
+		const auto& other = bind.heap_textures.At(prior);
+		if (other.slot_pc != UINT32_MAX && (by_load ? other.load_pc == heap.load_pc : other.slot_pc == heap.slot_pc))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+String8 Spirv::HeapRecordVariables() const
+{
+	String8 source;
+	for (uint32_t entry = 0; m_bind != nullptr && entry < m_bind->heap_textures.Size(); ++entry)
+	{
+		const auto& heap = m_bind->heap_textures.At(entry);
+		if (heap.slot_pc == UINT32_MAX)
+		{
+			continue;
+		}
+		if (ShaderHeapFirstRecordEntry(*m_bind, entry, false))
+		{
+			source += String8::FromPrintf("%%heap_slot_%u = OpVariable %%_ptr_Function_uint Function\n", heap.slot_pc);
+		}
+		if (ShaderHeapFirstRecordEntry(*m_bind, entry, true))
+		{
+			source += String8::FromPrintf("%%heap_record_%u = OpVariable %%_ptr_Function_uint Function\n", heap.load_pc);
+		}
+	}
+	return source;
+}
+
+// The loop's S_MUL_I32 keeps the record index it scales, a heap load keeps the
+// one it read with (a later iteration may rescale it before the image read),
+// and the image read selects the metadata of that record's texture. Every
+// record inside the light V# binds one, so the loaded words survive only for a
+// record past it, which the guest loop does not reach.
+String8 Spirv::MaterializeHeapTextures(const ShaderInstruction& inst) const
+{
+	String8                  source;
+	const ShaderHeapTexture* first = nullptr;
+	for (uint32_t entry = 0; entry < m_bind->heap_textures.Size(); ++entry)
+	{
+		const auto& heap = m_bind->heap_textures.At(entry);
+		if (heap.slot_pc == inst.pc && ShaderHeapFirstRecordEntry(*m_bind, entry, false))
+		{
+			const auto index = operand_variable_to_str(heap.slot_index);
+			source += String8::FromPrintf("%%heap_slot_value_%u = OpLoad %%uint %%%s\nOpStore %%heap_slot_%u %%heap_slot_value_%u\n", inst.pc,
+			                              index.value.c_str(), inst.pc, inst.pc);
+		}
+		if (heap.slot_pc != UINT32_MAX && heap.load_pc == inst.pc && ShaderHeapFirstRecordEntry(*m_bind, entry, true))
+		{
+			source += String8::FromPrintf("%%heap_record_value_%u = OpLoad %%uint %%heap_slot_%u\nOpStore %%heap_record_%u %%heap_record_value_%u\n",
+			                              inst.pc, heap.slot_pc, inst.pc, inst.pc);
+		}
+		first = first == nullptr && heap.consumer_pc == inst.pc ? &heap : first;
+	}
+	if (first == nullptr)
+	{
+		return source;
+	}
+	const bool select = first->slot_pc != UINT32_MAX;
+	if (select)
+	{
+		source += String8::FromPrintf("%%heap_k_%u = OpLoad %%uint %%heap_record_%u\n", inst.pc, first->load_pc);
+	}
+	for (const auto& heap: m_bind->heap_textures)
+	{
+		if (select && heap.consumer_pc == inst.pc)
+		{
+			source += String8::FromPrintf("%%heap_hit_%u_%u = OpIEqual %%bool %%heap_k_%u %%%s\n", inst.pc, heap.record, inst.pc,
+			                              GetConstantUint(heap.record).c_str());
+		}
+	}
+	for (int word = 0; word < 8; ++word)
+	{
+		const auto variable = operand_variable_to_str(inst.src[1], word);
+		auto       value    = String8::FromPrintf("heap_raw_%u_%d", inst.pc, word);
+		if (select)
+		{
+			source += String8::FromPrintf("%%%s = OpLoad %%uint %%%s\n", value.c_str(), variable.value.c_str());
+		}
+		for (const auto& heap: m_bind->heap_textures)
+		{
+			if (heap.consumer_pc != inst.pc)
+			{
+				continue;
+			}
+			const int  row = m_bind->storage_buffers.buffers_num + heap.texture_index * 2 + word / 4;
+			const auto id  = String8::FromPrintf("heap_tsharp_%u_%u_%d", inst.pc, heap.record, word);
+			source += EmitMetadataLoad(row, word % 4, id);
+			const auto selected = String8::FromPrintf("heap_sel_%u_%u_%d", inst.pc, heap.record, word);
+			source += select ? String8::FromPrintf("%%%s = OpSelect %%uint %%heap_hit_%u_%u %%%s %%%s\n", selected.c_str(), inst.pc, heap.record,
+			                                       id.c_str(), value.c_str())
+			                 : String8();
+			value = select ? selected : id;
+		}
+		source += String8::FromPrintf("OpStore %%%s %%%s\n", variable.value.c_str(), value.c_str());
+	}
+	return source;
+}
+
 String8 Spirv::MaterializeAssembledDescriptors(const ShaderInstruction& inst) const
 {
 	String8 source;
@@ -4787,7 +4960,7 @@ String8 Spirv::MaterializeAssembledDescriptors(const ShaderInstruction& inst) co
 			source += String8::FromPrintf("OpStore %%%s %%%s\n", variable.value.c_str(), id.c_str());
 		}
 	}
-	return source;
+	return source + MaterializeHeapTextures(inst);
 }
 
 // fetch_buffer_reg SLoads feed DetectFetch buffer-descriptor tracking; destinations
@@ -4820,24 +4993,50 @@ static bool recompile_sload_guest(uint32_t index, const ShaderInstruction& inst,
 		return false;
 	}
 	const auto i      = String8::FromPrintf("sg_%u", index);
-	const auto base0  = operand_variable_to_str(inst.src[0], 0);
-	const auto base1  = operand_variable_to_str(inst.src[0], 1);
-	String8    offset = String8::FromPrintf("%%%s_off = OpCopyObject %%uint %%%s\n", i.c_str(), spirv->GetConstantUint(0u).c_str());
-	if (operand_is_constant(inst.src[1]))
+	uint32_t   bound_words_mask = 0u;
+	if (dword_count > 0 && dword_count <= 16)
 	{
-		offset = String8::FromPrintf("%%%s_off = OpCopyObject %%uint %%%s\n", i.c_str(), spirv->GetConstantUint(inst.src[1].constant.u).c_str());
-	} else if (inst.src[1].type == ShaderOperandType::Sgpr || inst.src[1].type == ShaderOperandType::VccLo ||
-	           inst.src[1].type == ShaderOperandType::VccHi || inst.src[1].type == ShaderOperandType::M0)
-	{
-		offset = String8::FromPrintf("%%%s_off = OpLoad %%uint %%%s\n", i.c_str(), operand_variable_to_str(inst.src[1]).value.c_str());
-	} else
-	{
-		return false;
+		for (const auto& record: bind->dynamic_sloads.records)
+		{
+			if (record.instruction_pc != inst.pc || !record.guest_load)
+			{
+				continue;
+			}
+			const int rel = record.destination_register - inst.dst.register_id;
+			for (int word = 0; word < record.dword_count; ++word)
+			{
+				const int pos = rel + word;
+				if (pos >= 0 && pos < dword_count)
+				{
+					bound_words_mask |= (1u << static_cast<uint32_t>(pos));
+				}
+			}
+		}
 	}
-	String8 source = offset;
-	source += String8::FromPrintf("%%%s_imm = OpIAdd %%uint %%%s_off %%%s\n", i.c_str(), i.c_str(),
-	                              spirv->GetConstantUint(static_cast<uint32_t>(inst.smem_imm_offset)).c_str());
-	source += String8(R"(
+	const bool all_words_bound =
+	    dword_count > 0 && dword_count <= 16 && bound_words_mask == ((1u << static_cast<uint32_t>(dword_count)) - 1u);
+
+	String8 source;
+	if (!all_words_bound)
+	{
+		const auto base0  = operand_variable_to_str(inst.src[0], 0);
+		const auto base1  = operand_variable_to_str(inst.src[0], 1);
+		String8    offset = String8::FromPrintf("%%%s_off = OpCopyObject %%uint %%%s\n", i.c_str(), spirv->GetConstantUint(0u).c_str());
+		if (operand_is_constant(inst.src[1]))
+		{
+			offset = String8::FromPrintf("%%%s_off = OpCopyObject %%uint %%%s\n", i.c_str(), spirv->GetConstantUint(inst.src[1].constant.u).c_str());
+		} else if (inst.src[1].type == ShaderOperandType::Sgpr || inst.src[1].type == ShaderOperandType::VccLo ||
+		           inst.src[1].type == ShaderOperandType::VccHi || inst.src[1].type == ShaderOperandType::M0)
+		{
+			offset = String8::FromPrintf("%%%s_off = OpLoad %%uint %%%s\n", i.c_str(), operand_variable_to_str(inst.src[1]).value.c_str());
+		} else
+		{
+			return false;
+		}
+		source = offset;
+		source += String8::FromPrintf("%%%s_imm = OpIAdd %%uint %%%s_off %%%s\n", i.c_str(), i.c_str(),
+		                              spirv->GetConstantUint(static_cast<uint32_t>(inst.smem_imm_offset)).c_str());
+		source += String8(R"(
 %<i>_blo = OpLoad %uint %<b0>
 %<i>_braw = OpLoad %uint %<b1>
 %<i>_bhi = OpBitwiseAnd %uint %<i>_braw %<mask48>
@@ -4847,19 +5046,24 @@ static bool recompile_sload_guest(uint32_t index, const ShaderInstruction& inst,
 %<i>_hi = OpIAdd %uint %<i>_bhi %<i>_carry
 %<i>_lo = OpBitwiseAnd %uint %<i>_sum %<align>
 )")
-	              .ReplaceStr("<i>", i)
-	              .ReplaceStr("<b0>", base0.value)
-	              .ReplaceStr("<b1>", base1.value)
-	              .ReplaceStr("<mask48>", spirv->GetConstantUint(0xffffu))
-	              .ReplaceStr("<align>", spirv->GetConstantUint(0xfffffffcu));
-	if (!spirv->EmitGuestLoad(i + "_lo", i + "_hi", dword_count, i, &source))
-	{
-		return false;
-	}
-	for (int word = 0; word < dword_count; word++)
-	{
-		const auto dst = dword_count == 1 ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, word);
-		source += String8::FromPrintf("               OpStore %%%s %%%s_d%d\n", dst.value.c_str(), i.c_str(), word);
+		              .ReplaceStr("<i>", i)
+		              .ReplaceStr("<b0>", base0.value)
+		              .ReplaceStr("<b1>", base1.value)
+		              .ReplaceStr("<mask48>", spirv->GetConstantUint(0xffffu))
+		              .ReplaceStr("<align>", spirv->GetConstantUint(0xfffffffcu));
+		if (!spirv->EmitGuestLoad(i + "_lo", i + "_hi", dword_count, i, &source))
+		{
+			return false;
+		}
+		for (int word = 0; word < dword_count; word++)
+		{
+			if ((bound_words_mask & (1u << static_cast<uint32_t>(word))) != 0u)
+			{
+				continue;
+			}
+			const auto dst = dword_count == 1 ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, word);
+			source += String8::FromPrintf("               OpStore %%%s %%%s_d%d\n", dst.value.c_str(), i.c_str(), word);
+		}
 	}
 	// A descriptor bound from this load is consumed through its binding, whose base dword is
 	// the descriptor slot; the raw guest base would index the descriptor array out of range.

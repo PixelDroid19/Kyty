@@ -1132,17 +1132,18 @@ bool GraphicsResolvePrimitiveDrawPlan(uint32_t primitive_type, uint32_t guest_co
 		case 6: resolved.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
 		case 7:
 		case 17:
-			resolved.topology      = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
 			resolved.requires_rect = !indexed;
+			// A procedural rect draws its fourth corner as vertex id 3.
 			if (!indexed && guest_count == 3 && vertex_buffers_num == 0)
 			{
+				resolved.topology   = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
 				resolved.draw_count = 4;
+				break;
 			}
-			// RectList normally arrives as a procedural three-vertex draw, but
-			// titles may bind vertex buffers while retaining the same primitive
-			// type.  Vulkan has no RectList topology, so preserve the submitted
-			// vertex count and render it as a regular triangle strip when the
-			// fourth corner cannot be synthesized safely.
+			// Every other rect list is three vertices per rect; the rect stage
+			// derives each fourth corner from the shaded vertices.
+			resolved.topology     = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+			resolved.expand_rects = true;
 			break;
 		case 19:
 			resolved.topology    = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
@@ -2268,7 +2269,7 @@ static void RecordIndexedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Con
 	const bool prepared_ids = prepared != nullptr && ps_input_info.host_to_guest_scale == prepared->ids_host_to_guest_scale &&
 	                          ps_input_info.dual_source_blend == prepared->ids_dual_source_blend;
 	auto*      pipeline     = g_render_ctx->GetPipelineCache()->CreatePipeline(
-	    buffer, framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx, &ps_input_info, primitive_plan.topology,
+	    buffer, framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx, &ps_input_info, primitive_plan.topology, primitive_plan.expand_rects,
 	    sample_locations, prepared_ids ? &prepared->vs_id : nullptr, prepared_ids ? &prepared->ps_id : nullptr, &device_address_table);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
 	// Later geometry passes may read what this draw writes.
@@ -3851,7 +3852,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	const bool prepared_ids = prepared != nullptr && ps_input_info.host_to_guest_scale == prepared->ids_host_to_guest_scale &&
 	                          ps_input_info.dual_source_blend == prepared->ids_dual_source_blend;
 	auto*      pipeline     = g_render_ctx->GetPipelineCache()->CreatePipeline(
-	    buffer, framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx, &ps_input_info, primitive_plan.topology,
+	    buffer, framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx, &ps_input_info, primitive_plan.topology, primitive_plan.expand_rects,
 	    sample_locations, prepared_ids && !geometry_pass ? &prepared->vs_id : nullptr, prepared_ids ? &prepared->ps_id : nullptr,
 	    &device_address_table);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));

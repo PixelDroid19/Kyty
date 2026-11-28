@@ -154,7 +154,7 @@ bool CommonControls(const ShaderInstruction& inst)
 {
 	if (inst.vop3_op_sel != 0u || inst.vop3_omod != 0u || inst.vop3p_op_sel_hi != 0xffu || inst.vop_sdwa ||
 	    inst.vop_sdwa_ctrl != 0u || inst.mimg_address_num != 0 || inst.mimg_dmask != 0u || inst.mimg_dimension != 0u ||
-	    inst.mimg_explicit_lod || inst.mimg_return_old_value || inst.smem_imm_offset != 0 || inst.smem_flags != 0xffu ||
+	    inst.mimg_explicit_lod || inst.mimg_return_old_value || inst.mimg_coherent || inst.smem_imm_offset != 0 || inst.smem_flags != 0xffu ||
 	    inst.buffer_imm_offset != 0u || inst.buffer_idxen || inst.buffer_offen || inst.buffer_return_old_value ||
 	    inst.buffer_flags != 0xffu || inst.mtbuf_format != 0xffu || inst.mtbuf_components != 0u || inst.mtbuf_format_is_gen5 ||
 	    inst.ds_offset != 0u || inst.ds_encoding_control != 0u || inst.ds_encoding_registers != 0u || !Empty(inst.dst2))

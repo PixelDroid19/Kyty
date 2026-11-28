@@ -212,6 +212,7 @@ void WriteInstruction(DocumentWriter& w, const ShaderInstruction& inst)
 	w.Bool(inst.mimg_explicit_lod);
 	w.Bool(inst.mimg_offset);
 	w.Bool(inst.mimg_return_old_value);
+	w.Bool(inst.mimg_coherent);
 	w.Int(inst.smem_imm_offset);
 	w.Int(inst.flat_offset);
 	w.Int(inst.smem_flags);
@@ -745,6 +746,7 @@ bool ReadInstruction(StrictReader& r, ShaderInstruction* inst)
 	    !ReadElement(r, &inst->mimg_d16, 0, 1) ||
 	    !ReadElement(r, &inst->mimg_dimension, 0, 255) || !ReadElement(r, &inst->mimg_explicit_lod, 0, 1) ||
 	    !ReadElement(r, &inst->mimg_offset, 0, 1) || !ReadElement(r, &inst->mimg_return_old_value, 0, 1) ||
+	    !ReadElement(r, &inst->mimg_coherent, 0, 1) ||
 	    !ReadElement(r, &inst->smem_imm_offset, INT32_MIN, INT32_MAX) || !ReadElement(r, &inst->flat_offset, INT16_MIN, INT16_MAX) ||
 	    !ReadElement(r, &inst->smem_flags, 0, 255) || !ReadElement(r, &inst->buffer_imm_offset, 0, 0xffff) ||
 	    !ReadElement(r, &inst->buffer_idxen, 0, 1) || !ReadElement(r, &inst->buffer_offen, 0, 1) ||

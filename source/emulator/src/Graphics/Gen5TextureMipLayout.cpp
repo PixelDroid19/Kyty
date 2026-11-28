@@ -163,16 +163,6 @@ constexpr MipTailLocation k_depth_64kb_mip_tail[2][12] = {
 	}
 	const bool has_distinct_pitch = (base_element_pitch != base_element_width);
 
-	uint32_t maximum_levels = 1u;
-	for (uint32_t dimension = (width > height ? width : height); dimension > 1u; dimension >>= 1u)
-	{
-		maximum_levels++;
-	}
-	if (levels > maximum_levels)
-	{
-		return false;
-	}
-
 	Gen5TextureMipLayout result {};
 	result.bytes_per_element     = bytes_per_element;
 	result.texels_per_element_x = texels_per_element;
@@ -327,16 +317,11 @@ bool Gen5GetStandard256BTextureMipLayout(uint32_t format, uint32_t width, uint32
 	{
 		return false;
 	}
-	uint32_t maximum_levels = 1u;
-	for (uint32_t dimension = std::max(width, height); dimension > 1u; dimension >>= 1u)
-	{
-		maximum_levels++;
-	}
 	const uint32_t texels_per_element  = (ShaderGen5TextureIsBlockCompressed(format) ? 4u : 1u);
 	uint32_t       base_element_width  = 0;
 	uint32_t       base_element_height = 0;
 	uint32_t       base_element_pitch  = 0;
-	if (levels > maximum_levels || !ceil_div(width, texels_per_element, &base_element_width) ||
+	if (!ceil_div(width, texels_per_element, &base_element_width) ||
 	    !ceil_div(height, texels_per_element, &base_element_height) || !ceil_div(pitch, texels_per_element, &base_element_pitch))
 	{
 		return false;
