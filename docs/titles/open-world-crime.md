@@ -538,8 +538,9 @@ every record.
   - **First stop of a clean run (2026-11-28, `e4fe96772`, fresh shader
     cache, no diagnostics):** device lost at 90 s (`vkWaitForFences`
     `result=-4`, queue 8); an earlier run of the same binary family lost the
-    device at 77 s. No emitter was missing before it, so the GPU hang
-    (`c7982181`, above) is the first blocker on the strict path.
+    device at 77 s. No emitter was missing before it. The loss matches the
+    `c7982181` hang above, which skipping that dispatch localized; this run
+    did not re-localize it.
   - **A run with every missing emitter skipped** (a temporary diagnostic,
     localization only) reached 106 s. It stopped on a guest write to
     address 0. Its programs were wrong, so the fault is not attributed.
