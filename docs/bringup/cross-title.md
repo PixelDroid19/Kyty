@@ -4794,8 +4794,8 @@ checked against the code; none is hit by a title in the current strict runs.
   shader's entry user SGPRs and all eight dwords are zero
   (`zero_image_resources`, part of the module key). The emitter stores zero
   in each DMASK component of such a read; the image destination guard
-  applies EXEC as for any image result. Gather, resinfo, stores and atomics
-  through a zero T# keep refusing.
+  applies EXEC as for any image result. Gather, resinfo and atomics through
+  a zero T# keep refusing; stores are below.
 - Stores (2026-11-28): an image store through a T# loaded from memory whose
   eight words are all zero is discarded, and the load writes zero. A buffer
   type does not qualify for a store. Record: `PPSA38500 - Grand Theft Auto

@@ -737,6 +737,20 @@ The latest regression sweeps below are the frontier a strict run must not
 fall below. Per-title state is in the files listed under "Where records
 live".
 
+### Strict boot matrix after the open-world bring-up push (2026-11-28)
+
+- **Setup.** `perf/bvh-liveness` at `a1926b57b` (translator 265), Intel Arc
+  A770, Mesa ANV, `kyty_agent games-matrix --mode strict`, one title at a
+  time, 90 s total deadline, 20 s stability window, 60 fps present limit,
+  no input route.
+- **Result.** All ten reached `interactive` with child exit 0 and 900-1200
+  presents: the card game, the bug platformer, the racing title, the
+  fishing title, the roguelike platformer, the watercolour platformer, the
+  well platformer, the preschool title, the sandbox title and the robot
+  platformer.
+- **Not covered.** No scripted route survives on this host, so gameplay
+  scenes and the robot platformer's dunes frame rate were not re-measured.
+
 ### Regression sweep for the 2026-10-19/20 role-playing changes (2026-10-20)
 
 - **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict bounded runs with the
