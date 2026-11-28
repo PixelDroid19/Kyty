@@ -3,6 +3,9 @@
 
 #include "Emulator/Common.h"
 
+#include <cstdint>
+#include <cstring>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Loader::Jit {
@@ -220,6 +223,73 @@ struct TlsCachedCall
 	    /*11*/ 0x59,                                                 // pop    rcx      /* MISS */
 	    /*12*/ 0xe9, 0x00, 0x00, 0x00, 0x00,                         // jmp    <miss handler>
 	};
+};
+
+// Patched guest "mov <reg>, fs:[0]" sites for a register other than rax call
+// one of these thunks, placed in the TLS handler slot at Offset(reg). The thread
+// pointer comes from the rax handler; rax and the flags keep their values.
+struct TlsRegisterLoad
+{
+	void SetRegister(uint32_t reg)
+	{
+		code[0x06] = (reg >= 8 ? 0x49 : 0x48);
+		code[0x08] = static_cast<uint8_t>(0xc0u | (reg & 7u));
+	}
+
+	void SetRaxHandler(const void* handler)
+	{
+		auto func_addr = reinterpret_cast<int64_t>(handler);
+		auto rip_addr  = reinterpret_cast<int64_t>(&code[0x06]);
+		auto offset64  = func_addr - rip_addr;
+		auto offset32  = static_cast<uint32_t>(static_cast<uint64_t>(offset64) & 0xffffffffu);
+
+		*reinterpret_cast<uint32_t*>(&code[0x02]) = offset32;
+	}
+
+	static constexpr uint64_t GetSize() { return 0x10; }
+	static constexpr uint64_t Offset(uint32_t reg) { return 0x200 + reg * GetSize(); }
+
+	uint8_t code[0x0b] = {
+	    /*00*/ 0x50,                         // push   rax
+	    /*01*/ 0xe8, 0x00, 0x00, 0x00, 0x00, // call   <rax handler>
+	    /*06*/ 0x48, 0x89, 0xc0,             // mov    <reg>,rax
+	    /*09*/ 0x58,                         // pop    rax
+	    /*0a*/ 0xc3,                         // ret
+	};
+};
+
+// A patched guest "mov <reg>, fs:[0]" for a register other than rax jumps to
+// its own one of these, which calls the register thunk below the 128-byte red
+// zone: a leaf function may keep data under rsp across the load. lea leaves the
+// flags alone.
+struct TlsRegisterTrampoline
+{
+	// False when the target is out of rel32 reach.
+	[[nodiscard]] bool SetThunk(const void* thunk) { return SetRel32(0x06, 0x0a, thunk); }
+	[[nodiscard]] bool SetReturn(const void* next) { return SetRel32(0x13, 0x17, next); }
+
+	static constexpr uint64_t GetSize() { return 0x18; }
+
+	uint8_t code[0x18] = {
+	    /*00*/ 0x48, 0x8d, 0x64, 0x24, 0x80,                   // lea    rsp,[rsp-0x80]
+	    /*05*/ 0xe8, 0x00, 0x00, 0x00, 0x00,                   // call   <register thunk>
+	    /*0a*/ 0x48, 0x8d, 0xa4, 0x24, 0x80, 0x00, 0x00, 0x00, // lea    rsp,[rsp+0x80]
+	    /*12*/ 0xe9, 0x00, 0x00, 0x00, 0x00,                   // jmp    <after the load>
+	    /*17*/ 0xcc,                                           // int3
+	};
+
+private:
+	bool SetRel32(uint32_t field, uint32_t next_instruction, const void* target)
+	{
+		const auto offset64 = reinterpret_cast<int64_t>(target) - reinterpret_cast<int64_t>(&code[next_instruction]);
+		if (offset64 < INT32_MIN || offset64 > INT32_MAX)
+		{
+			return false;
+		}
+		const auto offset32 = static_cast<int32_t>(offset64);
+		std::memcpy(&code[field], &offset32, sizeof(offset32));
+		return true;
+	}
 };
 
 #pragma pack()

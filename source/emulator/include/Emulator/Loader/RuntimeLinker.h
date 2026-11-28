@@ -55,6 +55,8 @@ struct ThreadLocalStorage
 	uint64_t init_size     = 0;
 	uint64_t image_size    = 0;
 	uint64_t handler_vaddr = 0;
+	// TlsRegisterTrampoline array of the patched non-rax loads.
+	uint64_t trampolines_vaddr = 0;
 	uint64_t module_id     = 0;
 	uint64_t static_offset = 0;
 	// Late-loaded shared module whose PT_TLS arrived after threads already
@@ -369,7 +371,10 @@ uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size);
 // into a call to Kyty's per-thread guest TLS handler. Returns the number of
 // load sites rewritten. Pure buffer transform for unit tests; callers own page
 // permissions and instruction-cache flushing.
-uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handler_vaddr);
+// Non-rax fs:[0] loads in code; each needs one TlsRegisterTrampoline.
+uint64_t LoaderCountTlsRegisterLoads(const uint8_t* code, uint64_t size);
+uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handler_vaddr, uint64_t trampolines_vaddr,
+                                   uint64_t trampoline_count);
 
 // Calculate x86-64 TLS relocation payloads in guest terms. DTPMOD64 writes the
 // stable guest TLS module id; DTPOFF64 writes the module-local TLS offset; and
@@ -401,6 +406,11 @@ void LoaderRunProgramInitializers(uint64_t base_vaddr, const DynamicInfo& info);
 // CALL (E8 rel32) whose absolute target equals target_vaddr. Used to recognize
 // CRT _start that invokes DT_INIT (_init) itself.
 bool LoaderCodeContainsDirectCallTo(const uint8_t* code, uint64_t size, uint64_t code_vaddr, uint64_t target_vaddr);
+
+// The guest process command line, the same vector the entry receives: argv[0]
+// is the program name and argv[argc] is a null pointer.
+int          LoaderGuestArgc();
+const char** LoaderGuestArgv();
 
 } // namespace Kyty::Loader
 

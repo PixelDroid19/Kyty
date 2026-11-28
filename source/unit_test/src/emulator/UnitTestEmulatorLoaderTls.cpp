@@ -122,7 +122,7 @@ TEST(EmulatorLoaderTls, PatchesUnprefixedFsBaseLoad)
 	    0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
 	    0xcc,
 	};
-	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(code.data(), code.size(), 0x100000), 1u);
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(code.data(), code.size(), 0x100000, 0, 0), 1u);
 	EXPECT_EQ(code[0], 0x90u);
 	EXPECT_EQ(code[1], 0xe8u);
 	EXPECT_EQ(code[6], 0x48u);
@@ -140,7 +140,7 @@ TEST(EmulatorLoaderTls, PatchesPrefixedFsBaseLoadFromInstructionStart)
 	    0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00,
 	    0xcc,
 	};
-	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(code.data(), code.size(), 0x100000), 1u);
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(code.data(), code.size(), 0x100000, 0, 0), 1u);
 	EXPECT_EQ(code[0], 0x90u);
 	EXPECT_EQ(code[1], 0xe8u);
 	EXPECT_EQ(code[6], 0x48u);
@@ -157,9 +157,100 @@ TEST(EmulatorLoaderTls, DoesNotPatchInvalidFsBaseLoadWindows)
 {
 	uint8_t short_code[8] = {0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00};
 	uint8_t valid_code[9] = {0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00};
-	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(short_code, sizeof(short_code), 0x100000), 0u);
-	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(valid_code, sizeof(valid_code), 0), 0u);
-	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(nullptr, 16, 0x100000), 0u);
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(short_code, sizeof(short_code), 0x100000, 0, 0), 0u);
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(valid_code, sizeof(valid_code), 0, 0, 0), 0u);
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(nullptr, 16, 0x100000, 0, 0), 0u);
+}
+
+TEST(EmulatorLoaderTls, PatchesFsBaseLoadsIntoOtherRegistersBelowTheRedZone)
+{
+	using Kyty::Loader::Jit::TlsRegisterLoad;
+	using Kyty::Loader::Jit::TlsRegisterTrampoline;
+
+	// mov rbx, fs:[0]; mov r12, fs:[0]; mov rsp, fs:[0]
+	std::vector<uint8_t> code = {
+	    0x64, 0x48, 0x8b, 0x1c, 0x25, 0x00, 0x00, 0x00, 0x00,
+	    0x64, 0x4c, 0x8b, 0x24, 0x25, 0x00, 0x00, 0x00, 0x00,
+	    0x64, 0x48, 0x8b, 0x24, 0x25, 0x00, 0x00, 0x00, 0x00,
+	};
+	const std::vector<uint8_t> rsp_load(code.begin() + 18, code.end());
+	// Thunks, trampolines and code share one buffer so every rel32 reaches.
+	std::vector<uint8_t> memory(0x1000);
+	uint8_t*             handler     = memory.data();
+	auto*                trampolines = reinterpret_cast<TlsRegisterTrampoline*>(memory.data() + 0x400);
+	EXPECT_EQ(Kyty::Loader::LoaderCountTlsRegisterLoads(code.data(), code.size()), 2u);
+	std::memcpy(memory.data() + 0x800, code.data(), code.size());
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(memory.data() + 0x800, code.size(), reinterpret_cast<uint64_t>(handler),
+	                                    reinterpret_cast<uint64_t>(trampolines), 2),
+	          2u);
+	std::memcpy(code.data(), memory.data() + 0x800, code.size());
+
+	auto rel32_target = [](const uint8_t* instruction)
+	{
+		int32_t rel = 0;
+		std::memcpy(&rel, instruction + 1, sizeof(rel));
+		return instruction + 5 + rel;
+	};
+	const uint8_t lea_down[] = {0x48, 0x8d, 0x64, 0x24, 0x80};
+	const uint8_t lea_up[]   = {0x48, 0x8d, 0xa4, 0x24, 0x80, 0x00, 0x00, 0x00};
+	const uint32_t registers[] = {3, 12};
+	for (size_t k = 0; k < 2; k++)
+	{
+		const uint8_t* site       = memory.data() + 0x800 + k * 9;
+		const uint8_t* trampoline = trampolines[k].code;
+		// The site jumps, so it writes nothing below the guest rsp.
+		EXPECT_EQ(site[0], 0xe9u);
+		EXPECT_EQ(rel32_target(site), trampoline);
+		for (size_t n = 5; n < 9; n++)
+		{
+			EXPECT_EQ(site[n], 0x90u);
+		}
+		// rsp drops past the 128-byte red zone before the thunk call and is restored before the jump back.
+		EXPECT_TRUE(std::equal(std::begin(lea_down), std::end(lea_down), trampoline));
+		EXPECT_EQ(trampoline[5], 0xe8u);
+		EXPECT_EQ(rel32_target(trampoline + 5), handler + TlsRegisterLoad::Offset(registers[k]));
+		EXPECT_TRUE(std::equal(std::begin(lea_up), std::end(lea_up), trampoline + 0x0a));
+		EXPECT_EQ(trampoline[0x12], 0xe9u);
+		EXPECT_EQ(rel32_target(trampoline + 0x12), site + 9);
+	}
+	EXPECT_TRUE(std::equal(rsp_load.begin(), rsp_load.end(), code.begin() + 18));
+}
+
+TEST(EmulatorLoaderTls, KeepsABranchDisplacementBeforeARaxFsBaseLoad)
+{
+	// je +0x66; mov rax, fs:[0]
+	std::vector<uint8_t> code = {0x74, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00};
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(code.data(), code.size(), 0x100000, 0, 0), 1u);
+	EXPECT_EQ(code[0], 0x74u);
+	EXPECT_EQ(code[1], 0x66u);
+	EXPECT_EQ(code[2], 0xe8u);
+}
+
+TEST(EmulatorLoaderTls, ConsumesTheFourByteGotCallPadding)
+{
+	std::vector<uint8_t> code = {0x66, 0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0xcc};
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(code.data(), code.size(), 0x100000, 0, 0), 1u);
+	EXPECT_EQ(code[0], 0xe8u);
+	for (size_t n = 9; n < 13; n++)
+	{
+		EXPECT_EQ(code[n], 0x90u);
+	}
+	EXPECT_EQ(code[13], 0xccu);
+}
+
+TEST(EmulatorLoaderTls, KeepsTheByteBeforeAnotherRegistersFsBaseLoad)
+{
+	// jae +0x66; mov rsi, fs:[0] -- the 0x66 is the branch displacement, not a prefix.
+	const uint8_t        load[] = {0x73, 0x66, 0x64, 0x48, 0x8b, 0x34, 0x25, 0x00, 0x00, 0x00, 0x00};
+	std::vector<uint8_t> memory(0x1000);
+	uint8_t*             code = memory.data() + 0x800;
+	std::memcpy(code, load, sizeof(load));
+	EXPECT_EQ(LoaderPatchTlsFsBaseLoads(code, sizeof(load), reinterpret_cast<uint64_t>(memory.data()),
+	                                    reinterpret_cast<uint64_t>(memory.data() + 0x400), 1),
+	          1u);
+	EXPECT_EQ(code[0], 0x73u);
+	EXPECT_EQ(code[1], 0x66u);
+	EXPECT_EQ(code[2], 0xe9u);
 }
 
 TEST(EmulatorLoaderTls, CalculatesGuestTlsRelocationValues)
@@ -292,6 +383,66 @@ TEST(EmulatorLoaderTls, CachedCallReturnsThreadPointerOrTakesMissPath)
 
 	g_test_guest_thread_pointer = 0;
 	EXPECT_EQ(CallTlsStub(stub).rax, 0x5afec411u);
+
+	munmap(page, 0x1000);
+}
+
+TEST(EmulatorLoaderTls, PatchedR12LoadKeepsRedZoneRaxAndFlags)
+{
+	using Kyty::Loader::Jit::TlsRegisterLoad;
+
+	void* page = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	ASSERT_NE(page, MAP_FAILED);
+	auto* bytes = static_cast<uint8_t*>(page);
+
+	// rax handler at the slot start: movabs rax, <thread pointer>; ret.
+	const uint8_t  rax_handler[11] = {0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xc3};
+	const uint64_t thread_pointer  = 0x7f00feedf00dULL;
+	std::memcpy(bytes, rax_handler, sizeof(rax_handler));
+	std::memcpy(bytes + 2, &thread_pointer, sizeof(thread_pointer));
+
+	auto* load = new (bytes + TlsRegisterLoad::Offset(12)) TlsRegisterLoad;
+	load->SetRegister(12);
+	load->SetRaxHandler(bytes);
+
+	// A leaf guest site keeping data at both ends of its red zone across the load:
+	//   mov qword [rsp-8], 0x11223344; mov qword [rsp-0x80], 0x01020304
+	//   mov r12, fs:[0]
+	//   mov rdx, [rsp-8]; mov rsi, [rsp-0x80]; ret
+	const uint8_t site[] = {
+	    0x48, 0xc7, 0x44, 0x24, 0xf8, 0x44, 0x33, 0x22, 0x11,
+	    0x48, 0xc7, 0x44, 0x24, 0x80, 0x04, 0x03, 0x02, 0x01,
+	    0x64, 0x4c, 0x8b, 0x24, 0x25, 0x00, 0x00, 0x00, 0x00,
+	    0x48, 0x8b, 0x54, 0x24, 0xf8,
+	    0x48, 0x8b, 0x74, 0x24, 0x80,
+	    0xc3,
+	};
+	std::memcpy(bytes + 0x800, site, sizeof(site));
+	ASSERT_EQ(LoaderPatchTlsFsBaseLoads(bytes + 0x800, sizeof(site), reinterpret_cast<uint64_t>(bytes),
+	                                    reinterpret_cast<uint64_t>(bytes + 0x900), 1),
+	          1u);
+
+	uint64_t rax   = 0x1234;
+	uint64_t r12   = 0;
+	uint64_t near  = 0;
+	uint64_t far   = 0;
+	uint8_t  carry = 0;
+	asm volatile("mov %%rsp, %%rbx\n\t"
+	             "lea -128(%%rsp), %%rsp\n\t"
+	             "and $-16, %%rsp\n\t"
+	             "stc\n\t"
+	             "call *%[site]\n\t"
+	             "setc %[carry]\n\t"
+	             "mov %%r12, %[r12]\n\t"
+	             "mov %%rbx, %%rsp\n\t"
+	             : "+a"(rax), [carry] "=q"(carry), [r12] "=r"(r12), "=d"(near), "=S"(far)
+	             : [site] "r"(bytes + 0x800)
+	             : "rbx", "r12", "memory", "cc");
+	EXPECT_EQ(r12, thread_pointer);
+	EXPECT_EQ(near, 0x11223344u);
+	EXPECT_EQ(far, 0x01020304u);
+	EXPECT_EQ(rax, 0x1234u);
+	EXPECT_EQ(carry, 1u);
 
 	munmap(page, 0x1000);
 }

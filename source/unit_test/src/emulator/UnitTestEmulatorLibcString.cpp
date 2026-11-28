@@ -243,6 +243,37 @@ TEST(EmulatorLibcString, ResolvedSscanfStoresGuestDestinationsInFormatOrder)
 	EXPECT_EQ(consumed, static_cast<int>(sizeof(input) - 1));
 }
 
+// The guest wchar_t is 16 bits: two %lc destinations side by side keep their
+// neighbours, and %n counts guest units past a non-ASCII one.
+TEST(EmulatorLibcString, ResolvedSwscanfStoresSixteenBitCharactersAndCountsGuestUnits)
+{
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+
+	using Swscanf             = int(KYTY_SYSV_ABI*)(const uint16_t*, const uint16_t*, ...);
+	const auto swscanf_export = ResolveLibcExport<Swscanf>(&symbols, "swscanf");
+	ASSERT_NE(swscanf_export, nullptr);
+
+	const uint16_t input[]  = {0x00e9, u'4', u'2', u'~', u'r', 0};
+	const uint16_t format[] = {u'%', u'l', u'c', u'%', u'd', u'%', u'l', u'c', u'%', u'n', 0};
+	struct
+	{
+		uint16_t before;
+		uint16_t second;
+		uint16_t first;
+		uint16_t after;
+	} chars {0xbeef, 0xbeef, 0xbeef, 0xbeef};
+	int number   = -1;
+	int consumed = -1;
+	EXPECT_EQ(swscanf_export(input, format, &chars.first, &number, &chars.second, &consumed), 3);
+	EXPECT_EQ(chars.first, 0x00e9);
+	EXPECT_EQ(number, 42);
+	EXPECT_EQ(chars.second, u'~');
+	EXPECT_EQ(consumed, 4);
+	EXPECT_EQ(chars.before, 0xbeef);
+	EXPECT_EQ(chars.after, 0xbeef);
+}
+
 TEST(EmulatorLibcString, StdioReadsPrepareProtectedGuestDestinations)
 {
 	using namespace Kyty::Libs::LibC;

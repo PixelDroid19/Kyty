@@ -343,7 +343,46 @@ static const std::vector<std::string>& GuestExtraArgs()
 	return args;
 }
 
-using atexit_func_t          = KYTY_SYSV_ABI void (*)();
+struct GuestCommandLine
+{
+	int         argc = 0;
+	const char* argv[kGuestArgvMax] {};
+};
+
+// Built once, so the entry frame and getargc/getargv report the same vector.
+// The slot after the last argument stays null.
+static GuestCommandLine& GuestArguments()
+{
+	static GuestCommandLine line = []()
+	{
+		GuestCommandLine built {};
+		built.argv[built.argc++] = "KytyEmu";
+		for (const auto& guest_arg: GuestExtraArgs())
+		{
+			if (built.argc >= kGuestArgvMax - 1)
+			{
+				KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "guest argv truncated at %d entries" DEFAULT "\n", kGuestArgvMax - 1);
+				break;
+			}
+			built.argv[built.argc++] = guest_arg.c_str();
+			KYTY_LOG_DEBUG("guest argv[%d] = %s\n", built.argc - 1, guest_arg.c_str());
+		}
+		return built;
+	}();
+	return line;
+}
+
+int LoaderGuestArgc()
+{
+	return GuestArguments().argc;
+}
+
+const char** LoaderGuestArgv()
+{
+	return GuestArguments().argv;
+}
+
+using atexit_func_t         = KYTY_SYSV_ABI void (*)();
 using entry_func_t           = KYTY_SYSV_ABI void (*)(EntryParams* params, atexit_func_t atexit_func);
 using module_ini_fini_func_t = KYTY_SYSV_ABI int (*)(size_t args, const void* argp, module_func_t func);
 
@@ -1242,26 +1281,28 @@ uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size)
 	return rewritten;
 }
 
-uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handler_vaddr)
+// Calls visit(offset, reg, instruction_size) for every
+//   [66 ...] mov <reg>, qword ptr fs:[0x00]   (64 REX.W[R] 8B /r 25 00000000)
+// except rsp loads, in order; instruction_size counts the prefixes.
+template <class Visit>
+static void ScanTlsFsBaseLoads(const uint8_t* code, uint64_t size, Visit&& visit)
 {
-	if (code == nullptr || size < Jit::Call9::GetSize() || handler_vaddr == 0)
+	constexpr uint64_t tls_pattern_size    = 9;
+	constexpr uint64_t max_data16_prefixes = 4;
+
+	// Destination register of a fs:[0] load at `p`, or -1 when `p` is no such load.
+	auto fs_base_load_register = [](const uint8_t* p) -> int
 	{
-		return 0;
-	}
+		const bool rex_ok   = p[1] == 0x48 || p[1] == 0x4c;
+		const bool modrm_ok = (p[3] & 0xc7u) == 0x04;
+		if (p[0] != 0x64 || !rex_ok || p[2] != 0x8b || !modrm_ok || p[4] != 0x25 || p[5] != 0 || p[6] != 0 || p[7] != 0 || p[8] != 0)
+		{
+			return -1;
+		}
+		return static_cast<int>(((p[3] >> 3u) & 7u) | (p[1] == 0x4c ? 8u : 0u));
+	};
 
-	// Replace:
-	//   [66 ...] mov rax, qword ptr fs:[0x00]
-	// with:
-	//   call <handler>
-	//   mov rax,rax
-	//   nop
-	const uint8_t tls_pattern[9] = {0x64, 0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00};
-	constexpr uint64_t max_data16_prefixes = 3;
-
-	EXIT_IF(Jit::Call9::GetSize() != sizeof(tls_pattern));
-
-	uint64_t patched = 0;
-	for (uint64_t i = 0; i + Jit::Call9::GetSize() <= size; i++)
+	for (uint64_t i = 0; i + tls_pattern_size <= size; i++)
 	{
 		uint64_t prefix_count = 0;
 		while (i + prefix_count < size && code[i + prefix_count] == 0x66)
@@ -1274,21 +1315,89 @@ uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handle
 			continue;
 		}
 
-		const uint64_t instruction_size = prefix_count + sizeof(tls_pattern);
-		if (i + instruction_size > size || std::memcmp(code + i + prefix_count, tls_pattern, sizeof(tls_pattern)) != 0)
+		const uint64_t instruction_size = prefix_count + tls_pattern_size;
+		if (i + instruction_size > size)
+		{
+			continue;
+		}
+		const int reg = fs_base_load_register(code + i + prefix_count);
+		if (reg < 0 || reg == 4)
+		{
+			continue;
+		}
+		// Linkers pad only the rax form of a relaxed local-dynamic sequence, with
+		// exactly three data16 bytes (call form) or four (GOT call form). Any other
+		// 0x66 run ends the previous instruction (a branch displacement, for one),
+		// so the load is patched from its own start.
+		const bool linker_padding = reg == 0 && (prefix_count == 3 || prefix_count == 4);
+		if (prefix_count != 0 && !linker_padding)
 		{
 			continue;
 		}
 
-		auto* call = new (code + i) Jit::Call9;
-		call->SetFunc(handler_vaddr);
-		for (uint64_t n = Jit::Call9::GetSize(); n < instruction_size; n++)
-		{
-			code[i + n] = 0x90;
-		}
-		patched++;
+		visit(i, static_cast<uint32_t>(reg), instruction_size);
 		i += instruction_size - 1;
 	}
+}
+
+uint64_t LoaderCountTlsRegisterLoads(const uint8_t* code, uint64_t size)
+{
+	if (code == nullptr)
+	{
+		return 0;
+	}
+	uint64_t count = 0;
+	ScanTlsFsBaseLoads(code, size, [&](uint64_t /*offset*/, uint32_t reg, uint64_t /*instruction_size*/) { count += reg != 0 ? 1 : 0; });
+	return count;
+}
+
+uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handler_vaddr, uint64_t trampolines_vaddr,
+                                   uint64_t trampoline_count)
+{
+	if (code == nullptr || size < Jit::Call9::GetSize() || handler_vaddr == 0)
+	{
+		return 0;
+	}
+
+	// Replace the load with, for rax:
+	//   call <handler>
+	//   mov rax,rax
+	//   nop
+	// and for any other register, with its own trampoline (TlsRegisterTrampoline):
+	//   jmp <trampoline>
+	//   nop x4
+	// The rax form still writes the return address and the handler's saved rcx
+	// below the guest rsp.
+	auto*    trampolines = reinterpret_cast<Jit::TlsRegisterTrampoline*>(trampolines_vaddr);
+	uint64_t used        = 0;
+	uint64_t patched     = 0;
+	ScanTlsFsBaseLoads(code, size,
+	                   [&](uint64_t i, uint32_t reg, uint64_t instruction_size)
+	                   {
+		                   uint8_t* load = code + i;
+		                   if (reg == 0)
+		                   {
+			                   auto* call = new (load) Jit::Call9;
+			                   call->SetFunc(handler_vaddr);
+		                   } else
+		                   {
+			                   EXIT_IF(trampolines == nullptr || used >= trampoline_count);
+			                   auto* trampoline = new (&trampolines[used++]) Jit::TlsRegisterTrampoline;
+			                   EXIT_IF(!trampoline->SetThunk(reinterpret_cast<void*>(handler_vaddr + Jit::TlsRegisterLoad::Offset(reg))));
+			                   EXIT_IF(!trampoline->SetReturn(load + instruction_size));
+			                   const auto offset64 = reinterpret_cast<int64_t>(trampoline) - reinterpret_cast<int64_t>(load + 5);
+			                   EXIT_IF(offset64 < INT32_MIN || offset64 > INT32_MAX);
+			                   const auto offset32 = static_cast<int32_t>(offset64);
+			                   load[0]             = 0xe9;
+			                   std::memcpy(load + 1, &offset32, sizeof(offset32));
+			                   std::memset(load + 5, 0x90, Jit::Call9::GetSize() - 5);
+		                   }
+		                   for (uint64_t n = Jit::Call9::GetSize(); n < instruction_size; n++)
+		                   {
+			                   load[n] = 0x90;
+		                   }
+		                   patched++;
+	                   });
 	return patched;
 }
 
@@ -1397,7 +1506,25 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size)
 
 	if (!program->elf->IsShared() && program->tls.handler_vaddr != 0)
 	{
-		const uint64_t tls_sites = LoaderPatchTlsFsBaseLoads(reinterpret_cast<uint8_t*>(address), size, program->tls.handler_vaddr);
+		auto*          code           = reinterpret_cast<uint8_t*>(address);
+		const uint64_t register_sites = LoaderCountTlsRegisterLoads(code, size);
+		const uint64_t trampolines_size = register_sites * Jit::TlsRegisterTrampoline::GetSize();
+		if (register_sites != 0)
+		{
+			// Placed next to the module so every jump and call reaches it with rel32.
+			EXIT_IF(program->tls.trampolines_vaddr != 0);
+			program->tls.trampolines_vaddr =
+			    Core::VirtualMemory::Alloc(g_desired_base_addr, trampolines_size, Core::VirtualMemory::Mode::ExecuteReadWrite);
+			EXIT_IF(program->tls.trampolines_vaddr == 0);
+			g_desired_base_addr += CODE_BASE_INCR * (1 + trampolines_size / CODE_BASE_INCR);
+		}
+		const uint64_t tls_sites =
+		    LoaderPatchTlsFsBaseLoads(code, size, program->tls.handler_vaddr, program->tls.trampolines_vaddr, register_sites);
+		if (register_sites != 0)
+		{
+			Core::VirtualMemory::Protect(program->tls.trampolines_vaddr, trampolines_size, Core::VirtualMemory::Mode::Execute);
+			Core::VirtualMemory::FlushInstructionCache(program->tls.trampolines_vaddr, trampolines_size);
+		}
 		if (tls_sites != 0)
 		{
 			KYTY_LOG_DEBUG("Patch tls at segment 0x%016" PRIx64 ": %" PRIu64 " site(s)\n", address, tls_sites);
@@ -1867,18 +1994,9 @@ void RuntimeLinker::Execute()
 	{
 		auto* p = reinterpret_cast<EntryParams*>((reinterpret_cast<uintptr_t>(main_stack_top) - 0x100u) & ~static_cast<uintptr_t>(0xf));
 		std::memset(p, 0, sizeof(EntryParams));
-		p->argc    = 1;
-		p->argv[0] = "KytyEmu";
-		for (const auto& guest_arg: GuestExtraArgs())
-		{
-			if (p->argc >= kGuestArgvMax - 1)
-			{
-				KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "guest argv truncated at %d entries" DEFAULT "\n", kGuestArgvMax - 1);
-				break;
-			}
-			p->argv[p->argc++] = guest_arg.c_str();
-			KYTY_LOG_DEBUG("guest argv[%d] = %s\n", p->argc - 1, guest_arg.c_str());
-		}
+		const auto& line = GuestArguments();
+		p->argc          = line.argc;
+		std::memcpy(p->argv, line.argv, sizeof(p->argv));
 		KYTY_LOG_DEBUG("stack_addr = %" PRIx64 "\n", reinterpret_cast<uint64_t>(p));
 
 		Core::mem_guest_thread_enter();
@@ -2998,6 +3116,11 @@ void RuntimeLinker::DeleteProgram(Program* p)
 		Core::VirtualMemory::Free(p->custom_call_plt_vaddr);
 	}
 
+	if (p->tls.trampolines_vaddr != 0)
+	{
+		Core::VirtualMemory::Free(p->tls.trampolines_vaddr);
+	}
+
 	delete p->elf;
 	delete p->dynamic_info;
 	delete p->exception_handler;
@@ -3441,7 +3564,15 @@ void RuntimeLinker::SetupTlsHandler(Program* program)
 	cached->SetCacheOffset(static_cast<int32_t>(g_tls_guest_thread_pointer_offset));
 	cached->SetMissHandler(reinterpret_cast<void*>(safe_call_vaddr));
 #endif
-	EXIT_IF(safe_call_vaddr + sizeof(Jit::SafeCall) > program->tls.handler_vaddr + Jit::SafeCall::GetSize());
+	EXIT_IF(safe_call_vaddr + sizeof(Jit::SafeCall) > program->tls.handler_vaddr + Jit::TlsRegisterLoad::Offset(0));
+	EXIT_IF(Jit::TlsRegisterLoad::Offset(16) > Jit::SafeCall::GetSize());
+
+	for (uint32_t reg = 1; reg < 16; reg++)
+	{
+		auto* load = new (reinterpret_cast<void*>(program->tls.handler_vaddr + Jit::TlsRegisterLoad::Offset(reg))) Jit::TlsRegisterLoad;
+		load->SetRegister(reg);
+		load->SetRaxHandler(reinterpret_cast<void*>(program->tls.handler_vaddr));
+	}
 
 	auto* code = new (reinterpret_cast<void*>(safe_call_vaddr)) Jit::SafeCall;
 

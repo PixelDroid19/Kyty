@@ -80,6 +80,7 @@ extern "C" {
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
 int __isoc99_vsscanf(const char* s, const char* format, __gnuc_va_list args) __THROW;
 int __isoc99_vfscanf(FILE* stream, const char* format, __gnuc_va_list args);
+int __isoc99_vswscanf(const wchar_t* s, const wchar_t* format, __gnuc_va_list args) __THROW;
 #endif
 [[noreturn]] void         __cxa_throw(void* thrown_exception, const std::type_info* tinfo, void (*dest)(void*));
 void*                     __cxa_begin_catch(void* exception_object);
@@ -467,6 +468,16 @@ static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
 {
 	static thread_local char* save = nullptr;
 	return ::strtok_r(str, delim, &save);
+}
+// Gen5 libc_v1 strtok_r — NID enqPGLfmVNU (POSIX, caller-owned save pointer).
+static KYTY_SYSV_ABI char* c_strtok_r(char* str, const char* delim, char** save)
+{
+	return ::strtok_r(str, delim, save);
+}
+// Gen5 libc_v1 strcat_s — NID K+gcnFFJKVc (C11 Annex K): strncat_s without a count limit.
+static KYTY_SYSV_ABI int c_strcat_s(char* dst, size_t dst_size, const char* src)
+{
+	return c_strncat_s(dst, dst_size, src, static_cast<size_t>(-1));
 }
 
 // C++ operator new/delete, same ownership as libc malloc.
@@ -1117,6 +1128,207 @@ static KYTY_SYSV_ABI int c_sscanf_s(VA_ARGS)
 	const char* s   = VaArg_ptr<const char>(&ctx.va_list);
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
 	return ForwardScan(fmt, &ctx.va_list, [s](const char* host_fmt, va_list args) { return c_vsscanf_classic(s, host_fmt, args); });
+}
+
+// swscanf runs on the host's wide scanner. The guest wchar_t is 16 bits and the
+// host's may be wider, so the input and the format widen one unit at a time,
+// with no surrogate pairing, and %n counts guest units. Where the host wchar_t
+// is wider, %lc, %ls and %l[ scan into host scratch that is narrowed back to
+// the guest destination once the result shows the conversion was assigned.
+struct WideScanDestination
+{
+	void*                guest = nullptr;
+	std::vector<wchar_t> scratch;
+	bool                 string  = false;
+	bool                 counted = true; // %n is assigned but not counted in the result
+};
+
+struct WideScanCall
+{
+	std::wstring                     input;
+	std::wstring                     format;
+	std::vector<WideScanDestination> destinations;
+};
+
+static std::wstring WidenGuestUnits(const uint16_t* s)
+{
+	std::wstring out;
+	for (; *s != 0; s++)
+	{
+		out.push_back(static_cast<wchar_t>(*s));
+	}
+	return out;
+}
+
+static bool IsWideScanUnit(uint16_t unit, const char* set)
+{
+	return unit != 0 && unit < 0x80 && std::strchr(set, static_cast<char>(unit)) != nullptr;
+}
+
+// Copies a scanset, which may itself start with ']' or "^]". Returns the position of its ']'.
+static const uint16_t* CopyWideScanset(const uint16_t* p, std::wstring* out)
+{
+	out->push_back(static_cast<wchar_t>(*p++));
+	if (*p == u'^')
+	{
+		out->push_back(static_cast<wchar_t>(*p++));
+	}
+	if (*p == u']')
+	{
+		out->push_back(static_cast<wchar_t>(*p++));
+	}
+	while (*p != 0 && *p != u']')
+	{
+		out->push_back(static_cast<wchar_t>(*p++));
+	}
+	if (*p == 0)
+	{
+		EXIT("swscanf: unterminated scanset\n");
+	}
+	out->push_back(static_cast<wchar_t>(*p));
+	return p;
+}
+
+// Translates one conversion after its '%' and takes its destination. Returns the position of its last unit.
+static const uint16_t* PrepareWideScanConversion(const uint16_t* p, VaList* guest, WideScanCall* call)
+{
+	const bool stored = (*p != u'*');
+	if (!stored)
+	{
+		call->format.push_back(static_cast<wchar_t>(*p++));
+	}
+	size_t width = 0;
+	for (; *p >= u'0' && *p <= u'9'; p++)
+	{
+		call->format.push_back(static_cast<wchar_t>(*p));
+		width = width * 10u + static_cast<size_t>(*p - u'0');
+	}
+	const uint16_t* length = p;
+	while (IsWideScanUnit(*p, "hljztLq"))
+	{
+		p++;
+	}
+	const uint16_t conversion = *p;
+	if (!IsWideScanUnit(conversion, "diouxXaAeEfFgGsScC[pn"))
+	{
+		EXIT("swscanf: unsupported conversion unit 0x%04x\n", conversion);
+	}
+	const bool long_length = (p - length == 1 && *length == u'l');
+	const bool wide        = (long_length && IsWideScanUnit(conversion, "cs[")) || conversion == u'C' || conversion == u'S';
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// The guest is LP64 and Windows is LLP64: a guest long is the host's long long.
+	if (long_length && IsWideScanUnit(conversion, "diouxXn"))
+	{
+		call->format.append(L"l");
+	}
+#endif
+	for (const uint16_t* unit = length; unit != p; unit++)
+	{
+		call->format.push_back(static_cast<wchar_t>(*unit));
+	}
+	if (conversion == u'[')
+	{
+		p = CopyWideScanset(p, &call->format);
+	} else
+	{
+		call->format.push_back(static_cast<wchar_t>(conversion));
+	}
+	if (!stored)
+	{
+		return p;
+	}
+	WideScanDestination destination;
+	destination.guest   = VaArg_ptr<void>(guest);
+	destination.counted = (conversion != u'n');
+	destination.string  = (conversion != u'c' && conversion != u'C');
+	if (wide && sizeof(wchar_t) != sizeof(uint16_t))
+	{
+		// A conversion cannot take more units than the input holds.
+		const size_t limit = (width == 0 || width > call->input.size()) ? call->input.size() : width;
+		destination.scratch.resize(destination.string ? limit + 1 : (width == 0 ? 1 : width));
+	}
+	call->destinations.push_back(std::move(destination));
+	return p;
+}
+
+static void PrepareWideScanCall(const uint16_t* format, VaList* guest, WideScanCall* call)
+{
+	for (const uint16_t* p = format; *p != 0; p++)
+	{
+		call->format.push_back(static_cast<wchar_t>(*p));
+		if (*p != u'%')
+		{
+			continue;
+		}
+		if (p[1] == u'%')
+		{
+			call->format.push_back(static_cast<wchar_t>(*++p));
+			continue;
+		}
+		p = PrepareWideScanConversion(p + 1, guest, call);
+	}
+}
+
+static int RunWideScan(const WideScanCall& call)
+{
+	std::vector<void*> slots;
+	for (const auto& destination: call.destinations)
+	{
+		slots.push_back(destination.scratch.empty() ? destination.guest : const_cast<wchar_t*>(destination.scratch.data()));
+	}
+	slots.push_back(nullptr);
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	return ::vswscanf(call.input.c_str(), call.format.c_str(), reinterpret_cast<va_list>(slots.data()));
+#else
+	// Every argument comes from the overflow area: the register save areas read as used.
+	VaList host {48u, 176u, slots.data(), nullptr};
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+	return __isoc99_vswscanf(call.input.c_str(), call.format.c_str(), *reinterpret_cast<va_list*>(&host));
+#else
+	return ::vswscanf(call.input.c_str(), call.format.c_str(), *reinterpret_cast<va_list*>(&host));
+#endif
+#endif
+}
+
+// The result counts the assigned conversions, which are the first ones in format order.
+static void NarrowWideScanDestinations(const WideScanCall& call, int result)
+{
+	int assigned = 0;
+	for (const auto& destination: call.destinations)
+	{
+		if (!destination.counted)
+		{
+			continue;
+		}
+		if (assigned++ >= result)
+		{
+			return;
+		}
+		auto* out = static_cast<uint16_t*>(destination.guest);
+		for (size_t i = 0; i < destination.scratch.size(); i++)
+		{
+			out[i] = static_cast<uint16_t>(destination.scratch[i]);
+			if (destination.string && destination.scratch[i] == 0)
+			{
+				break;
+			}
+		}
+	}
+}
+
+// Gen5 libc swscanf — NID HNnWdT43ues: wide input, wide format, destinations.
+static KYTY_SYSV_ABI int c_swscanf(VA_ARGS)
+{
+	VA_CONTEXT(ctx);
+	const auto* s   = VaArg_ptr<const uint16_t>(&ctx.va_list);
+	const auto* fmt = VaArg_ptr<const uint16_t>(&ctx.va_list);
+	EXIT_IF(s == nullptr || fmt == nullptr);
+	WideScanCall call;
+	call.input = WidenGuestUnits(s);
+	PrepareWideScanCall(fmt, &ctx.va_list, &call);
+	const int result = RunWideScan(call);
+	NarrowWideScanDestinations(call, result);
+	return result;
 }
 
 // Gen5 clock — NID QZP6I9ZZxpE. Observed as seed input XOR rdtscp.
@@ -4815,6 +5027,25 @@ static KYTY_SYSV_ABI float c_remainderf(float x, float y)
 	return std::remainderf(x, y);
 }
 
+// Gen5 libc_v1 erff — NID RePA3bDBJqo.
+static KYTY_SYSV_ABI float c_erff(float x)
+{
+	return std::erf(x);
+}
+
+// Gen5 libc_v1 nextafterf — NID 3m2ro+Di+Ck.
+static KYTY_SYSV_ABI float c_nextafterf(float from, float to)
+{
+	return std::nextafter(from, to);
+}
+
+// Gen5 libc_v1 nexttowardf — NID QaTrhMKUT18. Callers store the direction with fstpt (%rsp): the SysV x87
+// long double class.
+static KYTY_SYSV_ABI float c_nexttowardf(float from, long double to)
+{
+	return std::nexttoward(from, to);
+}
+
 // Gen5 libc_v1 _Thrd_detach — NID L7f7zYwBvZA. POSIX thrd semantics: returns
 // the errno-style result of pthread_detach (0 success).
 static KYTY_SYSV_ABI int c_thrd_detach(Kernel::Pthread thread)
@@ -5946,6 +6177,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("8Q60JLJ6Rv4", LibC::c_getc);
 	LIB_FUNC("pNtJdE3x49E", LibC::c_wcscmp);
 	LIB_FUNC("1Pk0qZQGeWo", LibC::c_sscanf);
+	LIB_FUNC("HNnWdT43ues", LibC::c_swscanf);
 	LIB_FUNC("npLpPTaSuHg", LibC::c_fscanf);
 	LIB_FUNC("24m4Z4bUaoY", LibC::c_sscanf_s);
 	LIB_FUNC("jbz9I9vkqkk", LibC::c_vsprintf);
@@ -5962,7 +6194,12 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC_ALIASES(LibC::c_strtoul, "QxmSHBCuKTk", "zlfEH8FmyUA"); // strtoul, _Stoul
 	LIB_FUNC("VOBg+iNwB-4", LibC::c_strtoll);
 	// Gen5 libc_v1 strtoull — 5OqszGpy7Mg after TLS context factory.
-	LIB_FUNC("5OqszGpy7Mg", LibC::c_strtoull);
+	LIB_FUNC_ALIASES(LibC::c_strtoull, "5OqszGpy7Mg", "q+9E0X3aWpU"); // strtoull, _Stoull
+	LIB_FUNC("enqPGLfmVNU", LibC::c_strtok_r);
+	LIB_FUNC("K+gcnFFJKVc", LibC::c_strcat_s);
+	LIB_FUNC("RePA3bDBJqo", LibC::c_erff);
+	LIB_FUNC("3m2ro+Di+Ck", LibC::c_nextafterf);
+	LIB_FUNC("QaTrhMKUT18", LibC::c_nexttowardf);
 	LIB_FUNC("SRI6S9B+-a4", LibC::c_atof);
 	LIB_FUNC("AEJdIVZTEmo", LibC::c_qsort);
 	LIB_FUNC("NesIgTmfF0Q", LibC::c_bsearch);

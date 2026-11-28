@@ -95,6 +95,54 @@ static int KYTY_SYSV_ABI Cancel()
 	return OK;
 }
 
+// Speech request header; 0x40 bytes are filled by callers, the rest is not
+// read here.
+struct SpeakParameters
+{
+	uint64_t text;   // UTF-16 text
+	uint32_t length; // in UTF-16 units
+	uint32_t flags;
+	uint64_t opaque;
+};
+
+// Accepted requests finish at once: no speech is synthesized, so the status
+// stays idle and no audio plays.
+static int KYTY_SYSV_ABI Speak(const SpeakParameters* parameters)
+{
+	PRINT_NAME();
+
+	if (!g_initialized.load(std::memory_order_acquire) || !g_open.load(std::memory_order_acquire))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	SpeakParameters copied {};
+	if (parameters == nullptr ||
+	    !Core::VirtualMemory::CopyFromGuest(&copied, reinterpret_cast<uint64_t>(parameters), sizeof(copied)) ||
+	    (copied.text == 0 && copied.length != 0))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	KYTY_LOG_LIMIT(Log::Level::Warn, 4, "TextToSpeech2: speech is not synthesized (%u UTF-16 units, flags 0x%x)\n", copied.length,
+	               copied.flags);
+	return OK;
+}
+
+// Ends the session Open started; the caller terminates the library next.
+static int KYTY_SYSV_ABI Close()
+{
+	PRINT_NAME();
+
+	if (!g_initialized.load(std::memory_order_acquire) || !g_open.exchange(false, std::memory_order_acq_rel))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	g_open_configuration.store(0, std::memory_order_release);
+	return OK;
+}
+
 } // namespace TextToSpeech2
 
 LIB_DEFINE(InitTextToSpeech2_1)
@@ -104,6 +152,8 @@ LIB_DEFINE(InitTextToSpeech2_1)
 	LIB_FUNC("X0HZNbSiqyg", TextToSpeech2::Open);
 	LIB_FUNC("2jiIxUmcsGo", TextToSpeech2::Cancel);
 	LIB_FUNC("08JSg9p6bgQ", TextToSpeech2::GetSpeechStatus);
+	LIB_FUNC("8ntsRd07EQA", TextToSpeech2::Speak);
+	LIB_FUNC("t4e879M-cSw", TextToSpeech2::Close);
 }
 
 } // namespace Kyty::Libs

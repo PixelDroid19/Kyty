@@ -102,6 +102,14 @@ int KYTY_SYSV_ABI Initialize(const void* init_parameters, void* boot_parameters)
 
 int KYTY_SYSV_ABI GetSkuFlag(SkuFlag* sku_flag);
 
+// Off (0) marks an application that is not a Game Trials application; On is 1.
+enum class GameTrialsFlag: uint32_t
+{
+	Off = 0,
+};
+
+int KYTY_SYSV_ABI GetGameTrialsFlag(GameTrialsFlag* flag);
+
 // sceNpEntitlementAccessGetAddcontEntitlementInfo (NID xddD23+8TfQ).
 // SysV: rdi=serviceLabel, rsi=label*, rdx=info*.
 int KYTY_SYSV_ABI GetAddcontEntitlementInfo(ServiceLabel service_label, const UnifiedEntitlementLabel* entitlement_label,
