@@ -1497,6 +1497,11 @@ TEST(EmulatorKernelMemory, DecodesGen5MprotectProtectionFamily)
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
 	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::ReadWrite);
 
+	// GPU-only read-write: the host still needs CPU access for the GPU emulation.
+	ASSERT_TRUE(KernelDecodeMprotectProt(0x30, &mode, &gpu));
+	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
+	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::ReadWrite);
+
 	ASSERT_TRUE(KernelDecodeMprotectProt(0xF3, &mode, &gpu));
 	EXPECT_EQ(mode, Core::VirtualMemory::Mode::ReadWrite);
 	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::ReadWrite);

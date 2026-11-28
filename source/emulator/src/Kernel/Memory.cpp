@@ -3994,6 +3994,9 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, KernelG
 			*gpu_mode = KernelGpuMappingAccessMode::Write;
 			return true;
 		case 0xC2:
+		// GPU read-write with no CPU access. The host keeps CPU access because
+		// the GPU emulation reads and writes the range through the guest address.
+		case 0x30:
 		case 0x32:
 		case 0x33:
 		case 0xF2:
