@@ -166,6 +166,10 @@ public:
 	static constexpr uint32_t kAtrac9MaxSampleRate        = 192000;
 	static constexpr uint32_t kAtrac9MaxSuperframeBytes   = 8192;
 	static constexpr uint32_t kAtrac9MaxSuperframeSamples = 1024;
+	// MPEG audio Layer III: 1152 samples per MPEG-1 frame, 576 per MPEG-2 and
+	// MPEG-2.5 frame; the largest frame is 1441 bytes (320 kbit/s at 32 kHz).
+	static constexpr uint32_t kMp3MaxFrameSamples = 1152;
+	static constexpr size_t   kMp3MaxFrameBytes   = 1441;
 
 	static std::unique_ptr<ElementaryAudioDecoder> Open(AudioCodec codec, const uint8_t* extradata, size_t extradata_size,
 	                                                    uint32_t block_align, uint32_t channels, uint32_t sample_rate,
@@ -178,14 +182,17 @@ public:
 	// Opens a raw mono or stereo Opus stream at 48 kHz with FFmpeg's standard
 	// channel mapping. No extradata or AJM configuration is passed to FFmpeg.
 	static std::unique_ptr<ElementaryAudioDecoder> OpenOpus(uint32_t channels, uint32_t sample_rate, std::string* error = nullptr);
+	// Opens a mono or stereo MPEG audio Layer III stream; the caller takes the
+	// format from the first frame header and passes whole frames in order.
+	static std::unique_ptr<ElementaryAudioDecoder> OpenMp3(uint32_t channels, uint32_t sample_rate, std::string* error = nullptr);
 
 	~ElementaryAudioDecoder();
 
 	ElementaryAudioDecoder(const ElementaryAudioDecoder&)            = delete;
 	ElementaryAudioDecoder& operator=(const ElementaryAudioDecoder&) = delete;
 
-	// Decodes one ATRAC9 superframe or one Opus packet. Opus packets must contain
-	// 1 to kOpusMaxPacketBytes bytes. Interleaved samples replace the contents of
+	// Decodes one ATRAC9 superframe, one Opus packet or one MP3 frame. Opus packets must contain
+	// 1 to kOpusMaxPacketBytes bytes, MP3 frames 1 to kMp3MaxFrameBytes. Interleaved samples replace the contents of
 	// interleaved; a packet may produce no samples while the decoder is delayed.
 	bool Decode(const uint8_t* packet, size_t size, std::vector<float>* interleaved);
 	// Drops the overlap state so that the next packet starts a new stream.

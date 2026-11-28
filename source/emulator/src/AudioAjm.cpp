@@ -47,6 +47,9 @@ constexpr int32_t  AJM_ERROR_WRONG_REVISION_FLAG      = static_cast<int32_t>(0x8
 constexpr int32_t  AJM_ERROR_MALFORMED_BATCH          = static_cast<int32_t>(0x80930011u);
 constexpr uint32_t AJM_MAX_CODEC_TYPE                 = 25;
 constexpr int64_t  AJM_GEN5_INITIALIZATION_FLAGS      = INT64_C(0x300000000);
+// A Gen5 title passes 4 and traps when the call fails, so the console accepts
+// it; what the value selects is not established.
+constexpr int64_t  AJM_GEN5_INITIALIZATION_FLAGS_LOW  = INT64_C(0x4);
 constexpr uint32_t AJM_MAX_INSTANCE_SLOT              = 0x2fff;
 constexpr uint32_t AJM_INSTANCE_SLOT_MASK             = 0x3fff;
 constexpr uint64_t AJM_FLAG_RUN_GET_CODEC_INFO        = 1ull << 11u;
@@ -271,6 +274,12 @@ const char* AjmDataOperationName(AjmDataOperation operation)
 [[noreturn]] void RejectUnsupportedAjmDataOperation(AjmDataOperation operation)
 {
 	EXIT("AJM %s operation is not implemented\n", AjmDataOperationName(operation));
+	std::abort();
+}
+
+[[noreturn]] void RejectUnsupportedAjmInitialize(const AjmInstanceState& instance)
+{
+	EXIT("AJM initialize is not implemented for codec %u with instance flags 0x%" PRIx64 "\n", instance.codec, instance.flags);
 	std::abort();
 }
 
@@ -1027,6 +1036,13 @@ bool IsAjmResampleProfileAdmitted(const AjmResampleState& running, const AjmGapl
 	}
 }
 
+// Opus instance flags observed feeding split decoding length-prefixed packet records: revision 2 with resampling
+// (0x1002) and revisions 1 and 2 without it (0x1, 0x2). All pass the same 12-byte configuration.
+bool AjmOpusSplitProfile(uint64_t flags)
+{
+	return flags == 0x1002u || flags == 0x1u || flags == 0x2u;
+}
+
 // Every instance observed setting a resample profile has flag 0x1000; the low bits are the revision.
 bool AjmInstanceResamples(const AjmInstanceState& instance)
 {
@@ -1380,6 +1396,92 @@ private:
 
 // The whole superframes a job consumes pass through the instance's resampler, which at the neutral profile copies every
 // source frame. The decode result's cumulative counter reports the source frames admitted to the resampler.
+// An MPEG audio Layer III frame header (ISO/IEC 11172-3, ISO/IEC 13818-3 and the MPEG-2.5 extension).
+struct AjmMp3Frame
+{
+	uint32_t bytes       = 0;
+	uint32_t samples     = 0;
+	uint32_t channels    = 0;
+	uint32_t sample_rate = 0;
+};
+
+// Free-format, reserved and other-layer headers are refused.
+bool ParseAjmMp3FrameHeader(const uint8_t* data, size_t size, AjmMp3Frame* frame)
+{
+	static constexpr uint32_t kMpeg1Kbps[15]  = {0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320};
+	static constexpr uint32_t kMpeg2Kbps[15]  = {0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160};
+	static constexpr uint32_t kMpeg1Rates[3] = {44100, 48000, 32000};
+	if (size < 4u)
+	{
+		return false;
+	}
+	const uint32_t header  = (static_cast<uint32_t>(data[0]) << 24u) | (static_cast<uint32_t>(data[1]) << 16u) |
+	                        (static_cast<uint32_t>(data[2]) << 8u) | data[3];
+	const uint32_t version = (header >> 19u) & 3u; // 0: MPEG-2.5, 1: reserved, 2: MPEG-2, 3: MPEG-1
+	const uint32_t layer   = (header >> 17u) & 3u; // 1: Layer III
+	const uint32_t bitrate = (header >> 12u) & 15u;
+	const uint32_t rate    = (header >> 10u) & 3u;
+	if ((header >> 21u) != 0x7ffu || version == 1u || layer != 1u || bitrate == 0u || bitrate == 15u || rate == 3u)
+	{
+		return false;
+	}
+	const bool mpeg1   = version == 3u;
+	frame->sample_rate = kMpeg1Rates[rate] >> (mpeg1 ? 0u : version == 2u ? 1u : 2u);
+	frame->samples     = mpeg1 ? 1152u : 576u;
+	frame->bytes       = (mpeg1 ? 144000u : 72000u) * (mpeg1 ? kMpeg1Kbps : kMpeg2Kbps)[bitrate] / frame->sample_rate + ((header >> 9u) & 1u);
+	frame->channels    = ((header >> 6u) & 3u) == 3u ? 1u : 2u;
+	return true;
+}
+
+// A decode job's input must be whole frames of one format, the instance's once it has one, whose S16 PCM fits the output.
+bool PlanAjmMp3Decode(const std::vector<uint8_t>& input, uint64_t output_size, AjmMp3Frame* format)
+{
+	uint64_t output_bytes = 0;
+	for (size_t offset = 0; offset < input.size();)
+	{
+		AjmMp3Frame frame;
+		if (!ParseAjmMp3FrameHeader(input.data() + offset, input.size() - offset, &frame) || frame.bytes > input.size() - offset ||
+		    (format->channels != 0u && (frame.channels != format->channels || frame.sample_rate != format->sample_rate)))
+		{
+			return false;
+		}
+		*format = frame;
+		output_bytes += static_cast<uint64_t>(frame.samples) * frame.channels * sizeof(int16_t);
+		offset += frame.bytes;
+	}
+	return output_bytes <= output_size;
+}
+
+// Decodes every frame of a planned job; the cumulative counter reports decoded samples per channel.
+bool ProcessAjmMp3Decode(AjmInstanceState* instance, const std::vector<uint8_t>& input, std::vector<uint8_t>* output,
+                         AjmDecodeResultPrefix* result)
+{
+	std::vector<float> samples;
+	uint64_t           decoded = 0;
+	for (size_t offset = 0; offset < input.size();)
+	{
+		AjmMp3Frame frame;
+		if (instance->decoder == nullptr || !ParseAjmMp3FrameHeader(input.data() + offset, input.size() - offset, &frame) ||
+		    frame.bytes > input.size() - offset || frame.channels != instance->channels ||
+		    !instance->decoder->Decode(input.data() + offset, frame.bytes, &samples) ||
+		    samples.size() != static_cast<size_t>(frame.samples) * frame.channels || !AjmAppendPcm16Samples(samples, 0, samples.size(), output))
+		{
+			return false;
+		}
+		decoded += frame.samples;
+		offset += frame.bytes;
+	}
+	if (input.size() > INT32_MAX || output->size() > INT32_MAX || decoded > UINT64_MAX - instance->delivered_samples)
+	{
+		return false;
+	}
+	instance->delivered_samples += decoded;
+	result->input_bytes_consumed  = static_cast<int32_t>(input.size());
+	result->output_bytes_produced = static_cast<int32_t>(output->size());
+	result->delivered_samples     = instance->delivered_samples;
+	return true;
+}
+
 bool ProcessAjmAtrac9Decode(AjmInstanceState* instance, const AjmBatch2DataJob& job, const std::vector<uint8_t>& input_data,
                             std::vector<uint8_t>* output, AjmDecodeResultPrefix* result)
 {
@@ -1429,7 +1531,7 @@ bool AjmGaplessStatesMatch(const AjmGaplessDecodeState& a, const AjmGaplessDecod
 bool ProcessAjmOpusSplitDecode(AjmInstanceState* instance, const AjmPreparedBatchJob& prepared, std::vector<uint8_t>* output,
                                AjmDecodeResultPrefix* result)
 {
-	if (instance == nullptr || instance->codec != 24 || instance->flags != 0x1002u || instance->decoder == nullptr || output == nullptr ||
+	if (instance == nullptr || instance->codec != 24 || !AjmOpusSplitProfile(instance->flags) || instance->decoder == nullptr || output == nullptr ||
 	    result == nullptr || instance->channels == 0 || instance->channels > AJM_OPUS_SPLIT_MAX_CHANNELS || instance->sample_rate != 48000 ||
 	    prepared.queued == nullptr || prepared.input_data.size() != prepared.queued->input_size ||
 	    prepared.opus_plan.packet_count > prepared.opus_packets.size())
@@ -1593,7 +1695,8 @@ int KYTY_SYSV_ABI AjmInitialize(int64_t reserved, uint32_t* context)
 {
 	PRINT_NAME();
 
-	if (context == nullptr || (reserved != 0 && reserved != AJM_GEN5_INITIALIZATION_FLAGS))
+	if (context == nullptr ||
+	    (reserved != 0 && reserved != AJM_GEN5_INITIALIZATION_FLAGS && reserved != AJM_GEN5_INITIALIZATION_FLAGS_LOW))
 	{
 		return AJM_ERROR_INVALID_PARAMETER;
 	}
@@ -2526,10 +2629,10 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 					}
 				} else if (instance_state->codec == 24)
 				{
-					if (instance_state->flags != 0x1002u)
+					if (!AjmOpusSplitProfile(instance_state->flags))
 					{
 						lock.unlock();
-						RejectUnsupportedAjmDataOperation(AjmDataOperation::Initialize);
+						RejectUnsupportedAjmInitialize(*instance_state);
 					}
 					const uint32_t channels    = AjmReadLittleEndianU32(job.config.data());
 					const uint32_t sample_rate = AjmReadLittleEndianU32(job.config.data() + 4);
@@ -2549,7 +2652,7 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 				} else
 				{
 					lock.unlock();
-					RejectUnsupportedAjmDataOperation(AjmDataOperation::Initialize);
+					RejectUnsupportedAjmInitialize(*instance_state);
 				}
 				++staged_decoder_count;
 				if (!active)
@@ -2638,6 +2741,59 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 				{
 					return AJM_ERROR_INVALID_PARAMETER;
 				}
+			} else if (instance_state->codec == 0)
+			{
+				// MP3 decodes from its frame headers: the first decode opens the decoder, no Initialize job precedes it.
+				if (job.operation != AjmDataOperation::Decode || resample_states[job.instance].profile_required ||
+				    gapless_states[job.instance].configured || job.output_size > Core::VirtualMemory::GuestMappingSnapshot::kMaxBytes)
+				{
+					lock.unlock();
+					RejectUnsupportedAjmDataOperation(job.operation);
+				}
+				// Instance flags: the maximum channel count in bits 0-6 and the PCM encoding in bits 7-9, 0 being S16.
+				if (((instance_state->flags >> 7u) & 7u) != 0u)
+				{
+					lock.unlock();
+					RejectUnsupportedAjmDataOperation(job.operation);
+				}
+				if (!PrepareAjmContiguousDecode(job, &write_plans, &prepared) ||
+				    (job.result_address != 0 &&
+				     !AddAjmPreflightOutputRange(&write_plans, job.result_address, sizeof(AjmDecodeResultPrefix), &prepared.result_plan)))
+				{
+					return AJM_ERROR_INVALID_PARAMETER;
+				}
+				AjmMp3Frame format {};
+				if (auto format_it = decoder_formats.find(job.instance); format_it != decoder_formats.end())
+				{
+					format.channels    = format_it->second.channels;
+					format.sample_rate = format_it->second.sample_rate;
+				}
+				if (!PlanAjmMp3Decode(prepared.input_data, job.output_size, &format) || format.channels > (instance_state->flags & 0x7fu))
+				{
+					lock.unlock();
+					RejectMalformedAjmData("MP3 input is not whole Layer III frames of one format that fit the output");
+				}
+				if (!active && format.channels != 0u)
+				{
+					if (g_ajm_live_decoder_count >= AJM_MAX_LIVE_DECODERS ||
+					    staged_decoder_count >= AJM_MAX_LIVE_DECODERS - g_ajm_live_decoder_count)
+					{
+						return AJM_ERROR_OUT_OF_RESOURCES;
+					}
+					prepared.decoder = AjmDecoder::OpenMp3(format.channels, format.sample_rate);
+					if (prepared.decoder == nullptr)
+					{
+						lock.unlock();
+						RejectMalformedAjmData("MP3 decoder is unavailable");
+					}
+					++staged_decoder_count;
+					if (++active_decoder_count > AJM_MAX_LIVE_DECODERS)
+					{
+						return AJM_ERROR_OUT_OF_RESOURCES;
+					}
+					active                        = true;
+					decoder_formats[job.instance] = {0u, format.channels, format.sample_rate, 0u};
+				}
 			} else
 			{
 				auto format_it = decoder_formats.find(job.instance);
@@ -2692,7 +2848,7 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 					resample_states[job.instance].reset_window = false;
 				} else
 				{
-					if (format.codec != 24 || instance_state->flags != 0x1002u || resample_states[job.instance].profile_required)
+					if (format.codec != 24 || !AjmOpusSplitProfile(instance_state->flags) || resample_states[job.instance].profile_required)
 					{
 						lock.unlock();
 						RejectUnsupportedAjmDataOperation(AjmDataOperation::DecodeSplit);
@@ -2827,6 +2983,25 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 			const AjmResampleInfoPrefix info {0, 0, AjmReportedResampleRatio(instance->resample),
 			                                  static_cast<int32_t>(instance->resample.held_frames)};
 			AddAjmStagedWrite(&staged_writes, prepared.result_plan, &info, sizeof(info));
+		} else if (instance->codec == 0)
+		{
+			if (prepared.decoder != nullptr)
+			{
+				++g_ajm_live_decoder_count;
+				instance->channels    = prepared.decoder->Channels();
+				instance->sample_rate = prepared.decoder->SampleRate();
+				instance->decoder     = std::move(prepared.decoder);
+			}
+			std::vector<uint8_t>  pcm;
+			AjmDecodeResultPrefix result {};
+			if (!ProcessAjmMp3Decode(instance, prepared.input_data, &pcm, &result) ||
+			    (prepared.output_plan != SIZE_MAX && pcm.size() > write_plans[prepared.output_plan].size))
+			{
+				lock.unlock();
+				RejectMalformedAjmData("MP3 frame could not be decoded");
+			}
+			AddAjmStagedWrite(&staged_writes, prepared.output_plan, pcm.data(), pcm.size());
+			AddAjmStagedWrite(&staged_writes, prepared.result_plan, &result, sizeof(result));
 		} else if (job.operation == AjmDataOperation::Decode || instance->codec == 1)
 		{
 			std::vector<uint8_t>  pcm;

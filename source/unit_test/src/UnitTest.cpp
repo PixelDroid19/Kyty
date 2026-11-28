@@ -81,6 +81,7 @@ UT_LINK(EmulatorLibcCxxLocale);
 UT_LINK(EmulatorSaveData);
 UT_LINK(EmulatorAudio);
 UT_LINK(EmulatorAudioNgs2Reverb);
+UT_LINK(EmulatorAcm);
 UT_LINK(EmulatorAudioDecoderAdmission);
 UT_LINK(EmulatorMediaLifetimes);
 UT_LINK(EmulatorPipelineLifetime);

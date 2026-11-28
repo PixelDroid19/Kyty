@@ -1517,6 +1517,7 @@ struct ElementaryAudioDecoder::State
 {
 	std::string error;
 	bool        is_opus                 = false;
+	bool        is_mp3                  = false;
 	uint32_t    channels                = 0;
 	uint32_t    sample_rate             = 0;
 	uint32_t    block_align             = 0;
@@ -1718,6 +1719,63 @@ std::unique_ptr<ElementaryAudioDecoder> ElementaryAudioDecoder::OpenOpus(uint32_
 	state->channels                = static_cast<uint32_t>(actual_channels);
 	state->sample_rate             = static_cast<uint32_t>(actual_sample_rate);
 	state->max_samples_per_channel = kOpusMaxPacketSamples;
+	return decoder;
+#endif
+}
+
+std::unique_ptr<ElementaryAudioDecoder> ElementaryAudioDecoder::OpenMp3(uint32_t channels, uint32_t sample_rate, std::string* error)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)channels;
+	(void)sample_rate;
+	if (error != nullptr)
+	{
+		*error = "FFmpeg is not available";
+	}
+	return nullptr;
+#else
+	auto fail = [error](const char* message) -> std::unique_ptr<ElementaryAudioDecoder>
+	{
+		if (error != nullptr)
+		{
+			*error = message;
+		}
+		return nullptr;
+	};
+	if ((channels != 1 && channels != 2) || sample_rate == 0)
+	{
+		return fail("MP3 requires a mono or stereo stream with a sample rate");
+	}
+	// The floating-point decoder, so every codec reaches the shared planar float path.
+	const AVCodec* av_codec = avcodec_find_decoder_by_name("mp3float");
+	if (av_codec == nullptr)
+	{
+		return fail("MP3 decoder is unavailable");
+	}
+
+	std::unique_ptr<ElementaryAudioDecoder> decoder(new ElementaryAudioDecoder());
+	auto*                                   state = decoder->state_.get();
+	state->context                                = avcodec_alloc_context3(av_codec);
+	state->packet                                 = av_packet_alloc();
+	state->frame                                  = av_frame_alloc();
+	if (state->context == nullptr || state->packet == nullptr || state->frame == nullptr)
+	{
+		return fail("allocate MP3 decoder");
+	}
+	state->context->sample_rate = static_cast<int>(sample_rate);
+	av_channel_layout_default(&state->context->ch_layout, static_cast<int>(channels));
+	if (avcodec_open2(state->context, av_codec, nullptr) < 0)
+	{
+		return fail("open MP3 decoder");
+	}
+	if (state->context->sample_fmt != AV_SAMPLE_FMT_FLTP)
+	{
+		return fail("MP3 decoder output is not planar float");
+	}
+	state->is_mp3                  = true;
+	state->channels                = channels;
+	state->sample_rate             = sample_rate;
+	state->max_samples_per_channel = kMp3MaxFrameSamples;
 	return decoder;
 #endif
 }
@@ -1941,13 +1999,19 @@ bool ElementaryAudioDecoder::Decode(const uint8_t* packet, size_t size, std::vec
 		state->error = "audio packet or output is null";
 		return false;
 	}
-	if ((!state->is_opus && size != state->block_align) || (state->is_opus && (size == 0 || size > kOpusMaxPacketBytes)))
+	if (state->is_mp3 && (size == 0 || size > kMp3MaxFrameBytes))
+	{
+		state->error = "MP3 frame must be 1 to 1441 bytes";
+		return false;
+	}
+	if (!state->is_mp3 &&
+	    ((!state->is_opus && size != state->block_align) || (state->is_opus && (size == 0 || size > kOpusMaxPacketBytes))))
 	{
 		state->error = state->is_opus ? "Opus packet must be 1 to 65535 bytes" : "ATRAC9 packet must be exactly one superframe";
 		return false;
 	}
 	interleaved->clear();
-	if (!state->is_opus)
+	if (!state->is_opus && !state->is_mp3)
 	{
 		return DecodeAtrac9Superframe(state, packet, size, interleaved);
 	}
@@ -1984,7 +2048,7 @@ bool ElementaryAudioDecoder::Decode(const uint8_t* packet, size_t size, std::vec
 
 void ElementaryAudioDecoder::Reset()
 {
-	if (!state_->is_opus)
+	if (!state_->is_opus && !state_->is_mp3)
 	{
 		RestartAtrac9(state_.get());
 		return;

@@ -36,7 +36,7 @@ const std::vector<Domain>& Domains()
 	    {"kyty_graphics", {"src/Graphics/*.cpp", "src/Graphics/Objects/*.cpp", "src/Hle/*.cpp"}},
 	    {"kyty_hle",
 		 {"src/Libs/*.cpp", "src/Network.cpp", "src/NetworkHttpUri.cpp", "src/Audio.cpp", "src/Audio3d.cpp", "src/AudioPropagation.cpp",
-		  "src/AudioAjm.cpp", "src/AudioAvPlayer.cpp", "src/AudioHost.cpp", "src/AudioNgs2.cpp", "src/AudioNgs2Reverb.cpp",
+		  "src/AudioAcm.cpp", "src/AudioAjm.cpp", "src/AudioAvPlayer.cpp", "src/AudioHost.cpp", "src/AudioNgs2.cpp", "src/AudioNgs2Reverb.cpp",
 		  "src/AudioNgs2Sampler.cpp", "src/Dialog.cpp", "src/Controller.cpp"}},
 	    {"kyty_audio_video_backend", {"src/AudioVideoBackend.cpp"}},
 	    {"kyty_audio_pcm", {"src/AudioPcm.cpp"}},
